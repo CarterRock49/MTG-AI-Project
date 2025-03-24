@@ -1,0 +1,71 @@
+# Virtual environment
+magic_env/
+venv/
+env/
+.env/
+.venv/
+ENV/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Project specific
+models/
+logs/
+tensorboard_logs/
+*.log
+*.pt
+*.pth
+checkpoint/
+
+# Model weights and binary files
+*.bin
+*.h5
+*.onnx
+*.mlmodel
+
+# Data files
+*.csv
+*.json
+*.db
+*.sqlite
+*.sqlite3
+
+# Other
+.env
+.envrc
+*.pem
+*.key
+*.p8
+*.p12
+
+# Local Optuna database
+*.db
+sqlite:///
+
+# Backup files
+*~
+*.bak
