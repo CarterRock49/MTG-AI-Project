@@ -6,6 +6,9 @@ This project implements a reinforcement learning agent that learns to play Magic
 
 MTG-RL simulates the core mechanics of Magic: The Gathering and uses deep reinforcement learning to train an agent that can make strategic decisions during gameplay. The agent learns card evaluation, combat decisions, resource management, and long-term planning.
 
+## Project Architecture
+
+```mermaid
 graph TD
     A[Main System] --> B[Neural Network Architecture]
     B --> C[Feature Extractors]
@@ -14,6 +17,7 @@ graph TD
     B <--> F[Optuna Tuning]
     B <--> G[Callbacks]
     E --> H[Model Evaluation]
+```
 
 ## Other Parts
 
