@@ -6,32 +6,18 @@ This project implements a reinforcement learning agent that learns to play Magic
 
 MTG-RL simulates the core mechanics of Magic: The Gathering and uses deep reinforcement learning to train an agent that can make strategic decisions during gameplay. The agent learns card evaluation, combat decisions, resource management, and long-term planning.
 
-┌─────────────────────────┐
-│       Main System       │
-└───────────┬─────────────┘
-            │
-┌───────────▼─────────────┐
-│   Neural Network Arch   │◄───┐
-│                         │    │
-│ ┌─────────────────────┐ │    │
-│ │ Feature Extractors  │ │    │
-│ └─────────────────────┘ │    │
-│ ┌─────────────────────┐ │    │
-│ │ Policy Networks     │ │    │  ┌─────────────────┐
-│ └─────────────────────┘ │    ├──┤  Optuna Tuning  │
-└───────────┬─────────────┘    │  └─────────────────┘
-            │                  │
-┌───────────▼─────────────┐    │  ┌─────────────────┐
-│     Training Loop       │◄───┼──┤   Callbacks     │
-└───────────┬─────────────┘    │  └─────────────────┘
-            │                  │
-┌───────────▼─────────────┐    │
-│    Model Evaluation     │────┘
-└─────────────────────────┘
+graph TD
+    A[Main System] --> B[Neural Network Architecture]
+    B --> C[Feature Extractors]
+    B --> D[Policy Networks]
+    B --> E[Training Loop]
+    B <--> F[Optuna Tuning]
+    B <--> G[Callbacks]
+    E --> H[Model Evaluation]
 
 ## Other Parts
 
--DeckStat_Viewer is from a far earlier version and doesn't work
+- DeckStat_Viewer is from a far earlier version and doesn't work
 
 ## TODO
 
