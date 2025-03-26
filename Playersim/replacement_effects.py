@@ -746,53 +746,37 @@ class ReplacementEffectSystem:
         return True
         
     def _register_if_would_instead_effect(self, card_id, player, oracle_text):
-        """Register 'if...would...instead' replacement effects with improved text parsing."""
+        """Register standard 'if...would...instead' effects."""
         source_card = self.game_state._safe_get_card(card_id)
         source_name = source_card.name if source_card and hasattr(source_card, 'name') else f"Card {card_id}"
         registered_effects = []
-        
-        # Normalize text for better pattern matching
-        normalized_text = oracle_text.lower()
-        normalized_text = re.sub(r'\([^)]*\)', '', normalized_text)  # Remove reminder text in parentheses
-        normalized_text = re.sub(r'\s+', ' ', normalized_text)  # Normalize whitespace
-        
-        # Extract replacement clauses with improved regex
-        replacement_clauses = self._extract_replacement_clauses(normalized_text)
-        
-        for clause_data in replacement_clauses:
-            clause = clause_data['clause']
+
+        # Normalize text and extract clauses
+        normalized_text = re.sub(r'\([^)]*\)', '', oracle_text.lower()).strip()
+        clauses = self._extract_replacement_clauses(normalized_text)
+
+        for clause_data in clauses:
             event_type = clause_data['event_type']
-            subject = clause_data['subject']
-            condition = clause_data['condition']
-            replacement = clause_data['replacement']
-            
+            if event_type == 'UNKNOWN': continue # Skip if we couldn't map action
+
             # Create condition and replacement functions
-            condition_func = self._create_enhanced_condition_function(event_type, subject, condition, player)
-            replacement_func = self._create_enhanced_replacement_function(event_type, replacement, player, source_name)
-            
-            # Determine duration
-            duration = 'permanent'
-            if "until end of turn" in normalized_text:
-                duration = 'end_of_turn'
-            elif "this turn" in normalized_text and not "whenever" in normalized_text:
-                duration = 'end_of_turn'
-            elif "until your next turn" in normalized_text:
-                duration = 'until_my_next_turn'
-            
-            # Register the effect
+            condition_func = self._create_enhanced_condition_function(event_type, clause_data['subject'], clause_data['condition'], player)
+            replacement_func = self._create_enhanced_replacement_function(event_type, clause_data['replacement'], player, source_name)
+
+            duration = self._determine_duration(normalized_text)
+
             effect_id = self.register_effect({
                 'source_id': card_id,
                 'event_type': event_type,
                 'condition': condition_func,
                 'replacement': replacement_func,
                 'duration': duration,
-                'controller_id': player,
-                'description': f"{source_name}: {subject} {replacement}"
+                'controller_id': player, # Store who controls the effect source
+                'description': f"{source_name}: {clause_data['clause']}"
             })
-            
             registered_effects.append(effect_id)
-            logging.debug(f"Registered {event_type} replacement: {subject} {replacement}")
-        
+            logging.debug(f"Registered {event_type} replacement from {source_name}: {clause_data['clause']}")
+
         return registered_effects
 
     def _find_clause_end(self, text):
@@ -1295,64 +1279,60 @@ class ReplacementEffectSystem:
         return lambda ctx: ctx
 
     def _register_etb_with_effect(self, card_id, player, oracle_text):
-        """Register 'enters the battlefield with' replacement effects."""
-        # Look for counter patterns
-        counter_match = re.search(r'enters the battlefield with (\w+) (\+1/\+1|charge|loyalty) counters?', oracle_text)
+        """Register 'enters the battlefield with' effects (e.g., counters)."""
+        source_card = self.game_state._safe_get_card(card_id)
+        source_name = source_card.name if source_card and hasattr(source_card, 'name') else f"Card {card_id}"
+
+        # Check for counters
+        counter_match = re.search(r'enters the battlefield with (\w+|\d+)\s+([\+\-\d/]+)\s+counters?', oracle_text.lower())
         if counter_match:
-            count_word = counter_match.group(1)
-            counter_type = counter_match.group(2)
-            
-            # Convert word to number
-            count = 1
-            if count_word.isdigit():
-                count = int(count_word)
-            elif count_word == "a" or count_word == "an":
-                count = 1
-            elif count_word == "two":
-                count = 2
-            elif count_word == "three":
-                count = 3
-            elif count_word == "four":
-                count = 4
-            
-            # Register a replacement effect for this card entering with counters
-            source_card = self.game_state._safe_get_card(card_id)
-            source_name = source_card.name if source_card and hasattr(source_card, 'name') else f"Card {card_id}"
-            
-            def etb_with_counters_condition(context):
-                entering_card_id = context.get('card_id')
-                # Only apply to this specific card
-                return entering_card_id == card_id
-            
-            def etb_with_counters_replacement(context):
-                # Get the card and add counters (without actually modifying the context)
-                entering_card_id = context.get('card_id')
-                controller = context.get('controller')
-                
-                if hasattr(self.game_state, 'add_counter'):
-                    # This will be called after the card is on the battlefield
-                    def add_counters_later():
-                        self.game_state.add_counter(entering_card_id, counter_type, count)
-                        
-                    # Schedule this to run after the current event resolves
-                    if not hasattr(self.game_state, 'delayed_triggers'):
-                        self.game_state.delayed_triggers = []
-                    self.game_state.delayed_triggers.append(add_counters_later)
-                
-                # Return unmodified context since we're not changing the event itself
-                return context
-            
-            self.register_effect({
-                'source_id': card_id,
-                'event_type': 'ENTERS_BATTLEFIELD',
-                'condition': etb_with_counters_condition,
-                'replacement': etb_with_counters_replacement,
-                'duration': 'permanent',
-                'controller_id': player,
-                'description': f"{source_name} enters with {count} {counter_type} counters"
+            count_word, counter_type = counter_match.groups()
+            count = self._word_to_number(count_word)
+            counter_type = counter_type.replace('/','_').upper() # Normalize like +1_+1
+
+            def condition(ctx):
+                return ctx.get('card_id') == card_id
+
+            def replacement(ctx):
+                 logging.debug(f"Applying ETB counters from {source_name} to {card_id}: {count} {counter_type}")
+                 # Add counters info to the context, Layer system or ETB handler will use it
+                 ctx['enter_counters'] = ctx.get('enter_counters', [])
+                 ctx['enter_counters'].append({'type': counter_type, 'count': count})
+                 return ctx
+
+            effect_id = self.register_effect({
+                'source_id': card_id, 'event_type': 'ENTERS_BATTLEFIELD',
+                'condition': condition, 'replacement': replacement,
+                'duration': 'permanent', 'controller_id': player,
+                'description': f"{source_name} ETB with counters"
             })
-            
-            logging.debug(f"Registered 'enters with counters' effect for {source_name}")
+            logging.debug(f"Registered ETB counter effect for {source_name}")
+            return effect_id
+
+        # Check for ETB tapped
+        if "enters the battlefield tapped" in oracle_text.lower():
+            def condition(ctx): return ctx.get('card_id') == card_id
+            def replacement(ctx):
+                 logging.debug(f"Applying ETB tapped from {source_name} to {card_id}")
+                 ctx['enters_tapped'] = True
+                 return ctx
+
+            effect_id = self.register_effect({
+                'source_id': card_id, 'event_type': 'ENTERS_BATTLEFIELD',
+                'condition': condition, 'replacement': replacement,
+                'duration': 'permanent', 'controller_id': player,
+                'description': f"{source_name} ETB tapped"
+            })
+            logging.debug(f"Registered ETB tapped effect for {source_name}")
+            return effect_id
+
+        return None
+    
+    # Helper for word to number
+    def _word_to_number(self, word):
+        mapping = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+        if word.isdigit(): return int(word)
+        return mapping.get(word.lower(), 1)
 
     def _register_redirect_damage_effect(self, card_id, player, oracle_text):
         """Register a damage redirection effect."""
@@ -1656,166 +1636,157 @@ class ReplacementEffectSystem:
         logging.debug(f"Registered phase skip effect for {source_name}")
         return effect_id
 
+
     def _register_damage_prevention(self, card_id, player, oracle_text):
-        """Register damage prevention effects."""
+        """Register static damage prevention effects."""
         source_card = self.game_state._safe_get_card(card_id)
         source_name = source_card.name if source_card and hasattr(source_card, 'name') else f"Card {card_id}"
-        
-        # Look for prevention patterns
-        prevent_all = "prevent all damage" in oracle_text
-        prevent_combat = "prevent all combat damage" in oracle_text
-        prevent_noncombat = "prevent all noncombat damage" in oracle_text
-        
+
+        prevent_amount = -1 # -1 means prevent all
+        prevent_all = "prevent all damage" in oracle_text.lower()
+        prevent_combat = "prevent all combat damage" in oracle_text.lower()
+        prevent_noncombat = "prevent all noncombat damage" in oracle_text.lower()
+        prevent_next = "prevent the next" in oracle_text.lower()
+
+        if prevent_next:
+             amount_match = re.search(r'prevent the next (\d+|x)', oracle_text.lower())
+             if amount_match:
+                  amount_str = amount_match.group(1)
+                  prevent_amount = int(amount_str) if amount_str.isdigit() else 1 # Placeholder for X
+                  # TODO: Handle X based on context
+
         # Target restrictions
-        to_you = "to you" in oracle_text
-        to_creatures = "to creatures" in oracle_text
-        you_control = "you control" in oracle_text
-        
-        def damage_condition(context):
-            # Get details from the damage event
-            target_id = context.get('target_id')
-            target_is_player = context.get('target_is_player', False)
-            is_combat_damage = context.get('is_combat_damage', False)
-            damage_amount = context.get('damage_amount', 0)
-            
-            # Check if this damage should be prevented
-            if prevent_all:
-                pass  # No additional check needed
-            elif prevent_combat and not is_combat_damage:
-                return False
-            elif prevent_noncombat and is_combat_damage:
-                return False
-                
-            # Check target restrictions
-            if to_you:
-                return target_is_player and target_id == player
-            elif to_creatures and not target_is_player:
-                creature_card = self.game_state._safe_get_card(target_id)
-                is_creature = creature_card and hasattr(creature_card, 'card_types') and 'creature' in creature_card.card_types
-                
-                if not is_creature:
-                    return False
-                    
-                if you_control:
-                    # Check if creature is controlled by the effect's controller
-                    for card_id in player.get('battlefield', []):
-                        if card_id == target_id:
-                            return True
-                    return False
-            
-            return True
-        
-        def damage_replacement(context):
-            # Simply reduce damage to 0
-            modified_context = dict(context)
-            modified_context['damage_amount'] = 0
-            
-            # Log the prevention
-            target_id = context.get('target_id')
-            target_name = "Unknown"
-            if context.get('target_is_player', False):
-                target_name = "Player"
-            else:
-                target_card = self.game_state._safe_get_card(target_id)
-                if target_card and hasattr(target_card, 'name'):
-                    target_name = target_card.name
-                    
-            damage_amount = context.get('damage_amount', 0)
-            logging.debug(f"Prevented {damage_amount} damage to {target_name} with {source_name}")
-            
-            return modified_context
-        
-        duration = 'permanent'
-        if "until end of turn" in oracle_text:
-            duration = 'end_of_turn'
-        elif "until your next turn" in oracle_text:
-            duration = 'until_my_next_turn'
-        
-        self.register_effect({
-            'source_id': card_id,
-            'event_type': 'DAMAGE',
-            'condition': damage_condition,
-            'replacement': damage_replacement,
-            'duration': duration,
-            'controller_id': player,
-            'description': f"{source_name} damage prevention effect"
+        to_target = None
+        if "would be dealt to you" in oracle_text.lower(): to_target = "player_self"
+        elif "would be dealt to creatures you control" in oracle_text.lower(): to_target = "creatures_self"
+        elif "would be dealt to target creature or player" in oracle_text.lower(): to_target = "any_target" # Simplified
+        elif "would be dealt to any target" in oracle_text.lower(): to_target = "any_target"
+        elif "would be dealt to target creature" in oracle_text.lower(): to_target = "creature"
+        elif "would be dealt to permanents you control" in oracle_text.lower(): to_target = "permanents_self"
+
+
+        def condition(ctx):
+            # Check event type and context
+            damage = ctx.get('damage_amount', 0)
+            if damage <= 0: return False
+            is_combat = ctx.get('is_combat_damage', False)
+
+            if prevent_combat and not is_combat: return False
+            if prevent_noncombat and is_combat: return False
+
+            # Check target
+            if to_target:
+                 target_id = ctx.get('target_id')
+                 target_is_player = ctx.get('target_is_player', False)
+                 target_controller = self.game_state._find_card_controller(target_id) if not target_is_player else (self.game_state.p1 if target_id == "p1" else self.game_state.p2)
+
+                 if to_target == "player_self" and (not target_is_player or target_controller != player): return False
+                 if to_target == "creatures_self" and (target_is_player or target_controller != player): return False
+                 # Add more target checks
+                 if to_target == "any_target": pass # Allow any target
+
+            return True # Passed checks
+
+        def replacement(ctx):
+            original_damage = ctx.get('damage_amount', 0)
+            amount_to_prevent = original_damage if prevent_amount == -1 else min(original_damage, prevent_amount)
+            ctx['damage_amount'] = max(0, original_damage - amount_to_prevent)
+            logging.debug(f"{source_name} preventing {amount_to_prevent} damage. Remaining: {ctx['damage_amount']}")
+            ctx['damage_prevented'] = amount_to_prevent
+            # Handle "prevent next" by potentially removing effect after one use
+            if prevent_next and amount_to_prevent > 0:
+                # Need to reference effect_id which isn't easily available here
+                # Flag context instead?
+                ctx['used_one_shot_prevention'] = effect_id # Pass ID to check later
+            return ctx
+
+        duration = self._determine_duration(oracle_text.lower())
+        effect_id = self.register_effect({
+            'source_id': card_id, 'event_type': 'DAMAGE',
+            'condition': condition, 'replacement': replacement,
+            'duration': duration, 'controller_id': player,
+            'description': f"{source_name} damage prevention"
         })
-        
         logging.debug(f"Registered damage prevention effect for {source_name}")
+        return effect_id
+    
+        # Helper for duration
+    def _determine_duration(self, oracle_text_lower):
+        if "until end of turn" in oracle_text_lower or "this turn" in oracle_text_lower: return 'end_of_turn'
+        if "until your next turn" in oracle_text_lower: return 'until_my_next_turn'
+        return 'permanent'
+
 
     def _register_lifelink_effect(self, card_id, player):
-        """Register the lifelink replacement effect."""
+        """Register lifelink (as a damage replacement that adds a side effect)."""
+        # Note: Lifelink is now often considered a static ability modifying damage,
+        # but implementing as a replacement ensures it triggers correctly.
         source_card = self.game_state._safe_get_card(card_id)
         source_name = source_card.name if source_card and hasattr(source_card, 'name') else f"Card {card_id}"
-        
-        def lifelink_condition(context):
-            # Only apply for damage dealt by this creature
-            source_id = context.get('source_id')
-            return source_id == card_id and context.get('damage_amount', 0) > 0
-        
-        def lifelink_replacement(context):
-            # Get the damage amount
-            damage_amount = context.get('damage_amount', 0)
-            
-            # Original context is unchanged, but we trigger a life gain
-            if hasattr(player, 'life'):
-                player['life'] += damage_amount
-                logging.debug(f"Lifelink: {source_name} caused player to gain {damage_amount} life")
-            
-            # Return unmodified context (lifelink doesn't replace the damage)
-            return context
-        
-        self.register_effect({
-            'source_id': card_id,
-            'event_type': 'DAMAGE',
-            'condition': lifelink_condition,
-            'replacement': lifelink_replacement,
-            'duration': 'until_source_leaves',
+
+        def condition(ctx):
+            # Only applies when *this creature* deals damage
+            return ctx.get('source_id') == card_id and ctx.get('damage_amount', 0) > 0
+
+        def replacement(ctx):
+            damage_dealt = ctx.get('damage_amount', 0)
+            # Create a life gain side effect (doesn't replace the damage itself)
+            if damage_dealt > 0:
+                def gain_life_later():
+                     # Verify controller still exists and hasn't lost
+                     if player and player.get("life", 0) > 0:
+                          player['life'] += damage_dealt
+                          logging.debug(f"Lifelink: {source_name} gained {damage_dealt} life.")
+                          # Trigger "gain life" events
+                          self.game_state.trigger_ability(card_id, "LIFE_GAINED", {"amount": damage_dealt, "controller": player})
+
+                # Schedule the life gain after damage event fully resolves
+                if not hasattr(self.game_state, 'delayed_triggers'): self.game_state.delayed_triggers = []
+                self.game_state.delayed_triggers.append(gain_life_later)
+            return ctx # Don't modify the damage event itself
+
+        effect_id = self.register_effect({
+            'source_id': card_id, 'event_type': 'DAMAGE',
+            'condition': condition, 'replacement': replacement,
+            'duration': 'until_source_leaves', # Lifelink is tied to the card being on battlefield
             'controller_id': player,
-            'description': f"{source_name} lifelink effect"
+            'description': f"{source_name} Lifelink"
         })
-        
-        logging.debug(f"Registered lifelink effect for {source_name}")
+        logging.debug(f"Registered Lifelink effect for {source_name}")
+        return effect_id
+
 
     def _register_deathtouch_effect(self, card_id, player):
-        """Register the deathtouch replacement effect."""
+        """Register deathtouch (as a damage replacement that adds a flag)."""
         source_card = self.game_state._safe_get_card(card_id)
         source_name = source_card.name if source_card and hasattr(source_card, 'name') else f"Card {card_id}"
-        
-        def deathtouch_condition(context):
-            # Only apply for damage dealt by this creature to another creature
-            source_id = context.get('source_id')
-            target_is_player = context.get('target_is_player', False)
-            return source_id == card_id and not target_is_player and context.get('damage_amount', 0) > 0
-        
-        def deathtouch_replacement(context):
-            # Get the target creature
-            target_id = context.get('target_id')
-            target_card = self.game_state._safe_get_card(target_id)
-            target_name = target_card.name if target_card and hasattr(target_card, 'name') else f"Card {target_id}"
-            
-            # Mark damage as deathtouch damage (for state-based actions)
+
+        def condition(ctx):
+            # Applies when this creature deals *any* damage > 0 to another creature
+            return (ctx.get('source_id') == card_id and
+                    ctx.get('damage_amount', 0) > 0 and
+                    not ctx.get('target_is_player', False) and
+                    ctx.get('target_id') is not None)
+
+        def replacement(ctx):
+            target_id = ctx.get('target_id')
             target_controller = self.game_state._find_card_controller(target_id)
             if target_controller:
-                if not hasattr(target_controller, 'deathtouch_damage'):
-                    target_controller['deathtouch_damage'] = {}
-                target_controller['deathtouch_damage'][target_id] = context.get('damage_amount', 0)
-                logging.debug(f"Deathtouch: {source_name} dealt deathtouch damage to {target_name}")
-            
-            # Return unmodified context (deathtouch doesn't change the damage amount)
-            return context
-        
-        self.register_effect({
-            'source_id': card_id,
-            'event_type': 'DAMAGE',
-            'condition': deathtouch_condition,
-            'replacement': deathtouch_replacement,
+                 if not hasattr(target_controller, 'deathtouch_damage'): target_controller['deathtouch_damage'] = {}
+                 # Mark that *any* amount of damage from this source is deathtouch
+                 target_controller['deathtouch_damage'][target_id] = True # Mark as lethal
+                 logging.debug(f"Deathtouch: {source_name} marked damage to {target_id} as deathtouch.")
+            return ctx # Don't modify the damage amount
+
+        effect_id = self.register_effect({
+            'source_id': card_id, 'event_type': 'DAMAGE',
+            'condition': condition, 'replacement': replacement,
             'duration': 'until_source_leaves',
             'controller_id': player,
-            'description': f"{source_name} deathtouch effect"
+            'description': f"{source_name} Deathtouch"
         })
-        
-        logging.debug(f"Registered deathtouch effect for {source_name}")
+        logging.debug(f"Registered Deathtouch effect for {source_name}")
+        return effect_id
         
         # Scan battlefield for cards with continuous effects
     def register_common_effects(self):
@@ -2012,68 +1983,51 @@ class ReplacementEffectSystem:
         # Default to generic replacement
         return 'GENERIC_REPLACEMENT'
         
+    # Cleanup method
     def cleanup_expired_effects(self):
         """Remove effects that have expired."""
         current_turn = self.game_state.turn
-        current_phase = self.game_state.phase
-        
-        effects_to_remove = []
-        
+        # Need to know active player to handle 'until_my_next_turn'
+        active_player = self.game_state._get_active_player()
+        active_player_is_p1 = (active_player == self.game_state.p1)
+
+        expired_ids = []
         for effect in self.active_effects:
-            duration = effect.get('duration', 'permanent')
             effect_id = effect.get('effect_id')
-            
-            if duration == 'permanent':
-                # Permanent effects don't expire
-                continue
-                
-            elif duration == 'end_of_turn' and effect.get('start_turn', 0) < current_turn:
-                effects_to_remove.append(effect_id)
-                
-            elif duration == 'end_of_combat' and (
-                effect.get('start_turn', 0) < current_turn or 
-                (effect.get('start_turn', 0) == current_turn and 
-                current_phase > self.game_state.PHASE_END_COMBAT)):
-                effects_to_remove.append(effect_id)
-                
-            elif duration == 'next_turn' and effect.get('start_turn', 0) < current_turn - 1:
-                effects_to_remove.append(effect_id)
-                
+            duration = effect.get('duration', 'permanent')
+            start_turn = effect.get('start_turn', 0)
+
+            is_expired = False
+            if duration == 'end_of_turn' and start_turn < current_turn: is_expired = True
+            elif duration == 'next_turn' and start_turn < current_turn - 1: is_expired = True
             elif duration == 'until_my_next_turn':
-                # Check if it's now the controller's turn
-                active_player = self.game_state._get_active_player()
-                is_active_p1 = (active_player == self.game_state.p1)
-                
-                # If we've gone around to the controller's turn again
-                if (is_active_p1 == effect.get('controller_is_p1', False) and 
-                    effect.get('start_turn', 0) < current_turn):
-                    effects_to_remove.append(effect_id)
-                    
+                 effect_controller_is_p1 = effect.get('controller_is_p1')
+                 # Expired if it's now the controller's turn again AND it's not the same turn it started
+                 if effect_controller_is_p1 == active_player_is_p1 and start_turn < current_turn:
+                      is_expired = True
             elif duration == 'until_source_leaves':
-                # Check if source card is still on the battlefield
-                source_id = effect.get('source_id')
-                source_on_battlefield = False
-                
-                for player in [self.game_state.p1, self.game_state.p2]:
-                    if source_id in player.get('battlefield', []):
-                        source_on_battlefield = True
-                        break
-                        
-                if not source_on_battlefield:
-                    effects_to_remove.append(effect_id)
-                    
-            elif duration == 'conditional':
-                # For conditional duration, check the condition function
-                if 'duration_condition' in effect and callable(effect['duration_condition']):
-                    try:
-                        if not effect['duration_condition']():
-                            effects_to_remove.append(effect_id)
-                    except Exception as e:
-                        logging.error(f"Error in duration condition for effect {effect_id}: {str(e)}")
-                        # If the condition function fails, we should probably remove the effect
-                        effects_to_remove.append(effect_id)
-        
+                 source_id = effect.get('source_id')
+                 source_location = self.game_state.find_card_location(source_id)
+                 if not source_location or source_location[1] != 'battlefield':
+                      is_expired = True
+            elif duration == 'conditional' and callable(effect.get('duration_condition')):
+                try:
+                    if not effect['duration_condition'](): is_expired = True
+                except Exception as e:
+                    logging.error(f"Error in duration condition for effect {effect_id}: {e}"); is_expired = True # Remove on error
+
+            if is_expired:
+                expired_ids.append(effect_id)
+
         # Remove expired effects
-        for effect_id in effects_to_remove:
+        for effect_id in expired_ids:
             self.remove_effect(effect_id)
             logging.debug(f"Removed expired replacement effect {effect_id}")
+
+    def remove_effects_by_source(self, source_id_to_remove):
+        """Remove all replacement effects originating from a specific source."""
+        effects_to_remove = [e['effect_id'] for e in self.active_effects if e.get('source_id') == source_id_to_remove]
+        if effects_to_remove:
+             logging.debug(f"Removing {len(effects_to_remove)} replacement effects from source {source_id_to_remove}")
+             for effect_id in effects_to_remove:
+                 self.remove_effect(effect_id)

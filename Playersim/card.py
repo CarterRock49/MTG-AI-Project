@@ -48,7 +48,7 @@ class Card:
         self.name = card_data.get("name", f"Unknown Card {id(self)}")
         self.mana_cost = card_data.get("mana_cost", "")
         self.type_line = card_data.get("type_line", "unknown").lower()
-
+        self.card_id = None # Initialize as None
         # Handle both 'faces' (internal format) and 'card_faces' (Scryfall API format)
         self.faces = card_data.get("faces", None) or card_data.get("card_faces", None)
         if self.faces:
@@ -102,6 +102,39 @@ class Card:
         # Planeswalker attributes (if applicable)
         if 'planeswalker' in self.card_types:
             self._init_planeswalker(card_data)
+            
+    def reset_state_on_zone_change(self):
+         """Reset temporary states when card leaves battlefield (e.g., flip, morph)."""
+         # Reset morph/manifest state
+         if hasattr(self, 'face_down') and self.face_down:
+             gs = self.game_state # Need access to game state
+             # Restore original state if possible
+             original_info = None
+             if self.card_id in getattr(gs, 'morphed_cards', {}):
+                 original_info = gs.morphed_cards[self.card_id]['original']
+                 del gs.morphed_cards[self.card_id]
+             elif self.card_id in getattr(gs, 'manifested_cards', {}):
+                 original_info = gs.manifested_cards[self.card_id]['original']
+                 del gs.manifested_cards[self.card_id]
+
+             if original_info:
+                 temp_card = Card(original_info) # Create temp instance to read from
+                 self.name = getattr(temp_card, 'name', self.name)
+                 self.power = getattr(temp_card, 'power', self.power)
+                 # ... restore other properties ...
+                 self.face_down = False
+                 logging.debug(f"Resetting face-down state for {self.name} leaving battlefield.")
+
+         # Reset Class level? Usually Class state persists, check rules.
+         # if hasattr(self, 'is_class') and self.is_class: self.current_level = 1
+
+         # Reset flip state? Usually flip cards don't un-flip easily. Check specific card rules.
+
+         # Reset counters (already happens if GS clears card.counters on move)
+         # Ensure counters are cleared if needed
+         self.counters = {}
+
+         # Reset temporary attachments? Should be handled by GS attachment logic.
             
     def parse_type_line(self, type_line):
         """

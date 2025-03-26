@@ -1,5 +1,6 @@
 import logging
 import re
+import random
 from .enhanced_mana_system import EnhancedManaSystem
 from .card import Card
 from .ability_utils import text_to_number, safe_int, resolve_simple_targeting, EffectFactory
@@ -10,6 +11,7 @@ class Ability:
     def __init__(self, card_id, effect_text=""):
         self.card_id = card_id
         self.effect_text = effect_text
+        self.source_card = None # Add a reference to the card object i
         
     def can_trigger(self, event, context):
         """Check if this ability should trigger"""
@@ -142,7 +144,9 @@ class ActivatedAbility(Ability):
 
     def resolve_with_targets(self, game_state, controller, targets=None):
         """Resolve this ability with specific targets."""
-        return self._resolve_ability_effect(game_state, controller, targets)
+        # Subclasses might need to override this if they have special target handling
+        # Default implementation just calls the standard resolve logic
+        return self._resolve_ability_implementation(game_state, controller, targets)
 
     def can_activate(self, game_state, controller):
         """Check if this ability can be activated using EnhancedManaSystem."""
@@ -2190,13 +2194,12 @@ class MillEffect(AbilityEffect):
             target_player["library_empty_warning"] = True
             
         return mill_count > 0
-
 class ExileEffect(AbilityEffect):
     """Effect that exiles permanents or cards from zones."""
     def __init__(self, target_type="permanent", zone="battlefield"):
         """
         Initialize exile effect.
-        
+
         Args:
             target_type: Type of target ('creature', 'artifact', 'permanent', 'graveyard')
             zone: Zone to exile from ('battlefield', 'graveyard', 'hand')
@@ -2204,14 +2207,14 @@ class ExileEffect(AbilityEffect):
         super().__init__(f"Exile target {target_type}")
         self.target_type = target_type
         self.zone = zone
-        
-    def apply(self, game_state, source_id, controller, targets=None):
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
         """Apply exile effect with target handling."""
         exiled = False
-        
+
         if not targets:
             return False
-            
+
         # Get the appropriate target list based on target type and zone
         target_ids = []
         if self.zone == "battlefield":
@@ -2225,28 +2228,28 @@ class ExileEffect(AbilityEffect):
             target_ids = targets["graveyard"]
         elif self.zone == "hand" and "hand" in targets:
             target_ids = targets["hand"]
-        
+
         # Process each target
         for target_id in target_ids:
             # Find target owner
             target_owner = None
             for player in [game_state.p1, game_state.p2]:
-                if target_id in player[self.zone]:
+                if self.zone in player and target_id in player[self.zone]:
                     target_owner = player
                     break
-            
+
             if not target_owner:
                 continue
-                
+
             target = game_state._safe_get_card(target_id)
             if not target:
                 continue
-            
-            # Exile the card
-            game_state.move_card(target_id, target_owner, self.zone, target_owner, "exile")
-            logging.debug(f"Exiled {target.name} from {self.zone}")
-            exiled = True
-            
+
+            # Exile the card using move_card for triggers/replacements
+            if game_state.move_card(target_id, target_owner, self.zone, target_owner, "exile", cause="exile_effect", context={"source_id": source_id}):
+                logging.debug(f"Exiled {target.name} from {self.zone}")
+                exiled = True
+
         return exiled
 
 class ReturnToHandEffect(AbilityEffect):
@@ -2254,7 +2257,7 @@ class ReturnToHandEffect(AbilityEffect):
     def __init__(self, target_type="permanent", zone="battlefield"):
         """
         Initialize return to hand effect.
-        
+
         Args:
             target_type: Type of target ('creature', 'artifact', 'permanent')
             zone: Zone to return from ('battlefield', 'graveyard')
@@ -2262,14 +2265,14 @@ class ReturnToHandEffect(AbilityEffect):
         super().__init__(f"Return target {target_type} to its owner's hand")
         self.target_type = target_type
         self.zone = zone
-        
-    def apply(self, game_state, source_id, controller, targets=None):
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
         """Apply return to hand effect with target handling."""
         returned = False
-        
+
         if not targets:
             return False
-            
+
         # Get the appropriate target list
         target_ids = []
         if self.zone == "battlefield":
@@ -2281,28 +2284,38 @@ class ReturnToHandEffect(AbilityEffect):
                 target_ids = targets["permanents"]
         elif self.zone == "graveyard" and "graveyard" in targets:
             target_ids = targets["graveyard"]
-        
+
         # Process each target
         for target_id in target_ids:
             # Find target owner
             target_owner = None
             for player in [game_state.p1, game_state.p2]:
-                if target_id in player[self.zone]:
-                    target_owner = player
-                    break
-            
+                # Check all zones a card might be in
+                for check_zone in ["battlefield", "graveyard", "exile", "hand", "library"]:
+                    if check_zone in player and target_id in player[check_zone]:
+                         # If the target zone is specified, check if the card is there
+                        if self.zone == check_zone:
+                            target_owner = player
+                            break
+                         # If zone is 'any' or matches, store owner and check if zone is correct
+                        elif self.zone == "any":
+                             target_owner = player
+                             break
+                if target_owner: break
+
             if not target_owner:
+                logging.warning(f"Cannot return {target_id}: owner not found or not in specified zone '{self.zone}'")
                 continue
-                
+
             target = game_state._safe_get_card(target_id)
             if not target:
                 continue
-            
-            # Return to hand
-            game_state.move_card(target_id, target_owner, self.zone, target_owner, "hand")
-            logging.debug(f"Returned {target.name} to hand from {self.zone}")
-            returned = True
-            
+
+            # Return to hand using move_card
+            if game_state.move_card(target_id, target_owner, self.zone, target_owner, "hand", cause="return_to_hand", context={"source_id": source_id}):
+                logging.debug(f"Returned {target.name} to hand from {self.zone}")
+                returned = True
+
         return returned
 
 class CopySpellEffect(AbilityEffect):
@@ -2445,11 +2458,11 @@ class SearchLibraryEffect(AbilityEffect):
         super().__init__(f"Search for {search_type}")
         self.search_type = search_type
         self.target = target
-        
-    def apply(self, game_state, source_id, controller, targets=None):
+
+    def _apply_effect(self, game_state, source_id, controller, targets=None):
         # Simplified implementation for automation
         logging.debug(f"Searching library for {self.search_type}")
-        
+
         # Determine whose library to search
         target_player = controller
         if self.target == "opponent":
@@ -2457,43 +2470,51 @@ class SearchLibraryEffect(AbilityEffect):
         elif self.target == "target_player" and targets and "players" in targets and targets["players"]:
             player_id = targets["players"][0]
             target_player = game_state.p1 if player_id == "p1" else game_state.p2
-            
-        # Find a matching card in the library
+
+        # Find a matching card in the library using GameState method
         found_card_id = None
-        for card_id in target_player["library"]:
-            card = game_state._safe_get_card(card_id)
-            if not card:
-                continue
-                
-            # Check if card matches search criteria
-            if self.search_type == "any":
-                found_card_id = card_id
-                break
-            elif self.search_type == "basic land":
-                if (hasattr(card, 'type_line') and "Basic Land" in card.type_line) or \
-                   (hasattr(card, 'card_types') and 'land' in card.card_types and \
-                    hasattr(card, 'subtypes') and any(t in ['plains', 'island', 'swamp', 'mountain', 'forest'] for t in card.subtypes)):
-                    found_card_id = card_id
-                    break
-            elif self.search_type == "creature":
-                if hasattr(card, 'card_types') and 'creature' in card.card_types:
-                    found_card_id = card_id
-                    break
-                    
+        if hasattr(game_state, 'search_library_and_choose'):
+             # Pass AI context if available for smarter choices
+             ai_context = {"goal": "ramp" if self.search_type == "basic land" else "threat" if self.search_type == "creature" else "answer"}
+             found_card_id = game_state.search_library_and_choose(target_player, self.search_type, ai_choice_context=ai_context)
+        else:
+            # Basic fallback
+            for card_id in target_player["library"]:
+                 card = game_state._safe_get_card(card_id)
+                 if self._card_matches_criteria(card, self.search_type): # Requires helper _card_matches_criteria
+                     found_card_id = card_id
+                     break
+
         if found_card_id:
-            # Move the card to hand (simplified behavior)
-            game_state.move_card(found_card_id, target_player, "library", target_player, "hand")
+            # Move the card to hand (default behavior)
+            # Note: GameState search_library method should handle move and shuffle
             found_card = game_state._safe_get_card(found_card_id)
-            logging.debug(f"Found and moved {found_card.name if found_card else found_card_id} to hand")
-            
-            # Shuffle the library
-            import random
-            random.shuffle(target_player["library"])
-            logging.debug(f"Shuffled library")
+            logging.debug(f"Search found: '{found_card.name}' matching '{self.search_type}'")
             return True
         else:
-            logging.debug(f"No matching card found for {self.search_type}")
-            return False
+            logging.debug(f"Search failed for '{self.search_type}'.")
+            # Still need to shuffle even if search fails
+            if hasattr(game_state, 'shuffle_library'):
+                 game_state.shuffle_library(target_player)
+            else:
+                 random.shuffle(target_player["library"])
+                 logging.debug(f"Shuffled library after failed search.")
+            return False # Search itself succeeded, but nothing found
+
+    # Add helper method if not already present in GameState/AbilityUtils
+    def _card_matches_criteria(self, card, criteria):
+        """Basic check if card matches simple criteria."""
+        if not card: return False
+        types = getattr(card, 'card_types', [])
+        subtypes = getattr(card, 'subtypes', [])
+        type_line = getattr(card, 'type_line', '').lower()
+
+        if criteria == "any": return True
+        if criteria == "basic land" and 'basic' in type_line and 'land' in type_line: return True
+        if criteria == "land" and 'land' in type_line: return True
+        if criteria in types: return True
+        if criteria in subtypes: return True
+        return False
 
 class TapEffect(AbilityEffect):
     """Effect that taps a permanent."""
@@ -2501,12 +2522,12 @@ class TapEffect(AbilityEffect):
         super().__init__(f"Tap target {target_type}")
         self.target_type = target_type
         self.requires_target = True
-        
-    def apply(self, game_state, source_id, controller, targets=None):
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
         """Apply tap effect with target handling."""
         if not targets:
             return False
-            
+
         target_ids = []
         if self.target_type == "creature" and "creatures" in targets:
             target_ids = targets["creatures"]
@@ -2516,31 +2537,26 @@ class TapEffect(AbilityEffect):
             target_ids = targets["lands"]
         elif self.target_type == "permanent" and "permanents" in targets:
             target_ids = targets["permanents"]
-        
+
         if not target_ids:
             return False
-            
+
         tapped = False
         for target_id in target_ids:
             # Find target controller
             target_controller = None
             for player in [game_state.p1, game_state.p2]:
-                if target_id in player["battlefield"]:
+                if "battlefield" in player and target_id in player["battlefield"]:
                     target_controller = player
                     break
-            
+
             if not target_controller:
                 continue
-                
-            # Tap the permanent
-            if "tapped_permanents" not in target_controller:
-                target_controller["tapped_permanents"] = set()
-            
-            target_controller["tapped_permanents"].add(target_id)
-            target_card = game_state._safe_get_card(target_id)
-            logging.debug(f"Tapped {target_card.name if target_card else target_id}")
-            tapped = True
-            
+
+            # Use game_state's tap_permanent method for consistency
+            if game_state.tap_permanent(target_id, target_controller):
+                tapped = True
+
         return tapped
 
 class UntapEffect(AbilityEffect):
@@ -2549,12 +2565,12 @@ class UntapEffect(AbilityEffect):
         super().__init__(f"Untap target {target_type}")
         self.target_type = target_type
         self.requires_target = True
-        
-    def apply(self, game_state, source_id, controller, targets=None):
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
         """Apply untap effect with target handling."""
         if not targets:
             return False
-            
+
         target_ids = []
         if self.target_type == "creature" and "creatures" in targets:
             target_ids = targets["creatures"]
@@ -2564,29 +2580,26 @@ class UntapEffect(AbilityEffect):
             target_ids = targets["lands"]
         elif self.target_type == "permanent" and "permanents" in targets:
             target_ids = targets["permanents"]
-        
+
         if not target_ids:
             return False
-            
+
         untapped = False
         for target_id in target_ids:
             # Find target controller
             target_controller = None
             for player in [game_state.p1, game_state.p2]:
-                if target_id in player["battlefield"]:
+                if "battlefield" in player and target_id in player["battlefield"]:
                     target_controller = player
                     break
-            
+
             if not target_controller:
                 continue
-                
-            # Untap the permanent
-            if "tapped_permanents" in target_controller and target_id in target_controller["tapped_permanents"]:
-                target_controller["tapped_permanents"].remove(target_id)
-                target_card = game_state._safe_get_card(target_id)
-                logging.debug(f"Untapped {target_card.name if target_card else target_id}")
+
+            # Use game_state's untap_permanent method for consistency
+            if game_state.untap_permanent(target_id, target_controller):
                 untapped = True
-            
+
         return untapped
 
 class ScryEffect(AbilityEffect):

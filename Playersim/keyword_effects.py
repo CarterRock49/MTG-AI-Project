@@ -3622,15 +3622,8 @@ class KeywordEffects:
         return True
 
     def _apply_changeling(self, card_id, event_type, context=None):
-        """
-        Changeling ability: Counts as all creature types
-        """
-        gs = self.game_state
-        
-        if event_type == "CHECK_CREATURE_TYPE":
-            # Always returns True for any creature type check
-            return True
-        
+        # Modifies subtype checks. The logic needs to be in places where subtypes are checked.
+        # This handler just confirms the keyword exists.
         return True
 
     def _apply_cipher(self, card_id, event_type, context=None):
@@ -3968,78 +3961,9 @@ class KeywordEffects:
 
 
     def _apply_flying(self, card_id, event_type, context=None):
-        """Apply flying ability effects with improved handling of flying vs reach interactions"""
-        gs = self.game_state
-        
-        if event_type == "BLOCKING":
-            if context and "attacker_id" in context and "blocker_id" in context:
-                attacker_id = context["attacker_id"]
-                blocker_id = context["blocker_id"]
-                
-                attacker = gs._safe_get_card(attacker_id)
-                blocker = gs._safe_get_card(blocker_id)
-                
-                if not attacker or not blocker:
-                    return True
-                
-                # Check if attacker has flying
-                attacker_has_flying = False
-                if hasattr(attacker, 'keywords') and len(attacker.keywords) > 0:
-                    attacker_has_flying = attacker.keywords[0] == 1  # Flying is at index 0
-                elif hasattr(attacker, 'oracle_text') and "flying" in attacker.oracle_text.lower():
-                    attacker_has_flying = True
-                
-                # If attacker has flying, check if blocker has flying or reach
-                if attacker_has_flying:
-                    blocker_has_flying = False
-                    blocker_has_reach = False
-                    
-                    if hasattr(blocker, 'keywords') and len(blocker.keywords) > 0:
-                        blocker_has_flying = blocker.keywords[0] == 1  # Flying is at index 0
-                        if len(blocker.keywords) > 8:  # Reach is at index 8 in the keywords array
-                            blocker_has_reach = blocker.keywords[8] == 1
-                    elif hasattr(blocker, 'oracle_text'):
-                        blocker_text = blocker.oracle_text.lower()
-                        blocker_has_flying = "flying" in blocker_text
-                        blocker_has_reach = "reach" in blocker_text
-                    
-                    # Creatures with flying can only be blocked by creatures with flying or reach
-                    if not blocker_has_flying and not blocker_has_reach:
-                        return False  # Cannot block
-                
-                    # Check for the inverse - if blocker has flying but attacker doesn't
-                    blocker_has_flying = False
-                    if hasattr(blocker, 'keywords') and len(blocker.keywords) > 0:
-                        blocker_has_flying = blocker.keywords[0] == 1
-                    elif hasattr(blocker, 'oracle_text') and "flying" in blocker.oracle_text.lower():
-                        blocker_has_flying = True
-                        
-                    # Flying creatures can always block non-flying attackers
-                    if blocker_has_flying and not attacker_has_flying:
-                        return True  # Can block
-                            
-            return True  # Default to allowing block if context is incomplete
-        
-        # Handling flying for non-blocking events
-        elif event_type == "EVASION_CHECK":
-            # This event could be used for things like "can only be blocked by creatures with flying"
-            if context and "card_id" in context:
-                target_id = context["card_id"]
-                target = gs._safe_get_card(target_id)
-                
-                if not target:
-                    return True
-                    
-                # Check if the card has flying
-                has_flying = False
-                if hasattr(target, 'keywords') and len(target.keywords) > 0:
-                    has_flying = target.keywords[0] == 1
-                elif hasattr(target, 'oracle_text') and "flying" in target.oracle_text.lower():
-                    has_flying = True
-                    
-                return has_flying
-        
-        return True  # Default for other events
+        # Handled by Combat Resolver's _check_block_restrictions
+        return True
+
 
     def _apply_foretell(self, card_id, event_type, context=None):
         """Apply foretell ability effects"""
@@ -4092,29 +4016,7 @@ class KeywordEffects:
         return True
 
     def _apply_affinity(self, card_id, event_type, context=None):
-        """Apply affinity ability effects (Reduces cost based on permanents)"""
-        if event_type == "CAST_SPELL" and context:
-            # Get the card
-            card = self.game_state._safe_get_card(card_id)
-            if not card or not hasattr(card, 'oracle_text'):
-                return True
-            
-            # Parse affinity type
-            oracle_text = card.oracle_text.lower()
-            if "affinity for artifacts" in oracle_text:
-                # Count artifacts controller has
-                controller = context.get("controller")
-                if controller:
-                    artifacts_count = sum(1 for cid in controller["battlefield"] 
-                                        if self.game_state._safe_get_card(cid) and 
-                                        hasattr(self.game_state._safe_get_card(cid), 'card_types') and 
-                                        'artifact' in self.game_state._safe_get_card(cid).card_types)
-                    
-                    # Reduce generic mana cost
-                    if "mana_cost" in context:
-                        context["mana_cost"]["generic"] = max(0, context["mana_cost"]["generic"] - artifacts_count)
-                        logging.debug(f"Affinity for artifacts reduced cost by {artifacts_count}")
-        
+        # Handled in Mana System during cost calculation.
         return True
 
     def _apply_annihilator(self, card_id, event_type, context=None):
@@ -4452,50 +4354,10 @@ class KeywordEffects:
         
         return True
 
-    def _apply_flashback(self, card_id, event_type, context=None):
-        """Apply flashback ability effects (Cast from graveyard then exile)"""
-        gs = self.game_state
-        
-        if event_type == "CAST_SPELL" and context and context.get("flashback"):
-            card = gs._safe_get_card(card_id)
-            if not card or not hasattr(card, 'oracle_text'):
-                return True
-            
-            controller = context.get("controller")
-            if not controller or card_id not in controller["graveyard"]:
-                return True
-            
-            # Parse flashback cost
-            match = re.search(r"flashback [^\(]([^\)]+)", card.oracle_text.lower())
-            flashback_cost = match.group(1) if match else None
-            
-            if flashback_cost and "mana_cost" in context and hasattr(gs, 'mana_system'):
-                # Replace regular cost with flashback cost
-                context["mana_cost"] = gs.mana_system.parse_mana_cost(flashback_cost)
-                
-                # Move from graveyard to stack - handled by game_state during casting
-                controller["graveyard"].remove(card_id)
-                
-                # Mark for exile after resolution
-                if not hasattr(gs, 'flashback_cards'):
-                    gs.flashback_cards = set()
-                
-                gs.flashback_cards.add(card_id)
-                logging.debug(f"Flashback: Casting {card.name} from graveyard")
-                
-        elif event_type == "SPELL_RESOLVES" and hasattr(gs, 'flashback_cards') and card_id in gs.flashback_cards:
-            # Let game_state handle exile on resolution
-            controller = context.get("controller")
-            if controller:
-                # Mark to prevent going to graveyard
-                context["skip_default_movement"] = True
-                
-                # Move to exile
-                controller["exile"].append(card_id)
-                gs.flashback_cards.remove(card_id)
-                logging.debug(f"Flashback: Exiled {gs._safe_get_card(card_id).name} after resolution")
-        
+    def _apply_flash(self, card_id, event_type, context=None):
+        # Allows casting at instant speed - handled by Action Handler's validation
         return True
+
 
     def _apply_kicker(self, card_id, event_type, context=None):
         """Apply kicker ability effects (Optional additional cost for effect)"""
@@ -6036,171 +5898,31 @@ class KeywordEffects:
         return True
     
     def _apply_trample(self, card_id, event_type, context=None):
-        """Apply trample ability effects"""
-        if event_type == "COMBAT_DAMAGE" and context:
-            context["has_trample"] = True
-            return True
+        # Handled by Combat Resolver's _process_attacker_damage
         return True
     
     def _apply_hexproof(self, card_id, event_type, context=None):
-        """Apply hexproof ability effects with enhanced logic."""
-        if event_type == "TARGETING" and context:
-            source_controller = context.get("source_controller")
-            target_controller = None
-            
-            # Find the controller of the card with hexproof
-            for player in [self.game_state.p1, self.game_state.p2]:
-                if card_id in player["battlefield"]:
-                    target_controller = player
-                    break
-            
-            # If targeting is from opponent, prevent it
-            if source_controller and target_controller and source_controller != target_controller:
-                source_card = self.game_state._safe_get_card(context.get("source_id"))
-                source_name = source_card.name if source_card and hasattr(source_card, "name") else "Unknown"
-                target_card = self.game_state._safe_get_card(card_id)
-                target_name = target_card.name if target_card and hasattr(target_card, "name") else "Unknown"
-                
-                logging.debug(f"Hexproof: {target_name} cannot be targeted by opponent's {source_name}")
-                return False  # Prevent targeting
-        
+        # Handled by Targeting System's _is_valid_..._target methods
         return True
         
     def _apply_lifelink(self, card_id, event_type, context=None):
-        """Apply lifelink ability effects with improved context handling."""
-        gs = self.game_state
-        
-        if event_type == "DEALS_DAMAGE" and context:
-            # Find the controller
-            controller = None
-            for player in [gs.p1, gs.p2]:
-                if card_id in player["battlefield"]:
-                    controller = player
-                    break
-            
-            if controller and "damage_amount" in context:
-                damage = context["damage_amount"]
-                if damage > 0:
-                    # Gain life equal to damage dealt
-                    controller["life"] += damage
-                    
-                    # Track life gain for triggers
-                    if not hasattr(gs, 'life_gained_this_turn'):
-                        gs.life_gained_this_turn = {}
-                    
-                    # Use player name as key instead of dictionary
-                    player_key = "p1" if controller == gs.p1 else "p2"
-                    gs.life_gained_this_turn[player_key] = gs.life_gained_this_turn.get(player_key, 0) + damage
-                    
-                    card = gs._safe_get_card(card_id)
-                    logging.debug(f"Lifelink: {card.name if card else 'Unknown'} caused {damage} life gain")
-                    
-                    # Trigger "whenever you gain life" abilities
-                    for permanent_id in controller["battlefield"]:
-                        permanent = gs._safe_get_card(permanent_id)
-                        if permanent and hasattr(permanent, 'oracle_text') and "whenever you gain life" in permanent.oracle_text.lower():
-                            gs.trigger_ability(permanent_id, "GAIN_LIFE", {
-                                "amount": damage,
-                                "source_id": card_id,
-                                "controller": controller
-                            })
-                    
-                    return True
-        
+        # Handled by Combat Resolver's damage application and ReplacementEffectSystem
         return True
     
     def _apply_deathtouch(self, card_id, event_type, context=None):
-        """Apply deathtouch ability effects with enhanced logic."""
-        gs = self.game_state
-        
-        if event_type == "DEALS_DAMAGE" and context:
-            # Check if this is damage to a creature
-            target_id = context.get("target_id")
-            target_is_player = context.get("target_is_player", False)
-            damage_amount = context.get("damage_amount", 0)
-            
-            if not target_is_player and target_id and damage_amount > 0:
-                target_card = gs._safe_get_card(target_id)
-                if not target_card:
-                    return True
-                
-                # Find target controller
-                target_controller = None
-                for player in [gs.p1, gs.p2]:
-                    if target_id in player["battlefield"]:
-                        target_controller = player
-                        break
-                
-                if target_controller:
-                    # Mark target for destruction if it's not indestructible
-                    if hasattr(target_card, 'oracle_text') and "indestructible" not in target_card.oracle_text.lower():
-                        # Track deathtouch damage for state-based actions
-                        if not hasattr(target_controller, "deathtouch_damage"):
-                            target_controller["deathtouch_damage"] = {}
-                        
-                        target_controller["deathtouch_damage"][target_id] = damage_amount
-                        
-                        source_card = gs._safe_get_card(card_id)
-                        source_name = source_card.name if source_card and hasattr(source_card, "name") else "Unknown"
-                        target_name = target_card.name if hasattr(target_card, "name") else "Unknown"
-                        
-                        logging.debug(f"Deathtouch: {source_name} marked {target_name} for destruction")
-        
-        elif event_type == "CLEANUP_STEP":
-            # Reset deathtouch damage tracking at cleanup step
-            for player in [gs.p1, gs.p2]:
-                if hasattr(player, "deathtouch_damage"):
-                    player["deathtouch_damage"] = {}
-        
+        # Handled by Combat Resolver's damage application and ReplacementEffectSystem
         return True
     
     def _apply_first_strike(self, card_id, event_type, context=None):
-        """Apply first strike ability effects"""
-        gs = self.game_state
-        
-        if event_type == "COMBAT_DAMAGE":
-            # First strike damage happens in a separate phase before regular damage
-            if gs.phase == gs.PHASE_FIRST_STRIKE_DAMAGE:
-                # Apply damage for first strike creatures only
-                if context:
-                    context["process_first_strike"] = True
-                    return True
-            elif gs.phase == gs.PHASE_COMBAT_DAMAGE:
-                # Normal damage phase - first strike still deals damage
-                if context:
-                    context["has_first_strike"] = True
-                    return True
+        # Handled by Combat Resolver's resolve_combat method
         return True
 
     def _apply_double_strike(self, card_id, event_type, context=None):
-        """Apply double strike ability effects"""
-        gs = self.game_state
-        
-        # Double strike deals damage in both first strike and regular damage steps
-        if event_type == "COMBAT_DAMAGE":
-            if gs.phase == gs.PHASE_FIRST_STRIKE_DAMAGE:
-                # First strike damage phase
-                if context:
-                    context["process_first_strike"] = True
-                    context["has_double_strike"] = True
-                    return True
-            elif gs.phase == gs.PHASE_COMBAT_DAMAGE:
-                # Regular damage phase - double strike deals damage again
-                if context:
-                    context["has_double_strike"] = True
-                    return True
+        # Handled by Combat Resolver's resolve_combat method
         return True
     
     def _apply_vigilance(self, card_id, event_type, context=None):
-        """Apply vigilance ability effects"""
-        gs = self.game_state
-        if event_type == "ATTACKS":
-            # Creatures with vigilance don't tap when attacking
-            for player in [gs.p1, gs.p2]:
-                if card_id in player["battlefield"] and card_id in player["tapped_permanents"]:
-                    player["tapped_permanents"].remove(card_id)
-                    logging.debug(f"Vigilance: {gs._safe_get_card(card_id).name} remains untapped")
-            return True
+        # Prevents tapping when attacking - handled by ATTACKS handler/resolution
         return True
     
     def _apply_flash(self, card_id, event_type, context=None):
@@ -6209,56 +5931,23 @@ class KeywordEffects:
         return True
     
     def _apply_haste(self, card_id, event_type, context=None):
-        """Apply haste ability effects"""
-        gs = self.game_state
-        if event_type == "ENTERS_BATTLEFIELD":
-            # Creatures with haste don't have summoning sickness
-            for player in [gs.p1, gs.p2]:
-                if card_id in player["battlefield"] and card_id in player["entered_battlefield_this_turn"]:
-                    player["entered_battlefield_this_turn"].discard(card_id)
-                    logging.debug(f"Haste: {gs._safe_get_card(card_id).name} can attack this turn")
-            return True
+        # Removes summoning sickness - handled by Action Handler's validation
         return True
     
     def _apply_menace(self, card_id, event_type, context=None):
-        """Apply menace ability effects"""
-        if event_type == "BLOCKING" and context:
-            blockers = context.get("blockers", [])
-            if len(blockers) < 2:
-                logging.debug(f"Menace: {self.game_state._safe_get_card(card_id).name} must be blocked by at least two creatures")
-                return False  # Not enough blockers
+        # Handled by Combat Resolver's _check_block_restrictions
         return True
     
     def _apply_reach(self, card_id, event_type, context=None):
-        """Apply reach ability effects (can block creatures with flying)"""
-        # This is handled in the flying implementation
+        # Allows blocking fliers - handled by Combat Resolver's _check_block_restrictions
         return True
     
     def _apply_defender(self, card_id, event_type, context=None):
-        """Apply defender ability effects"""
-        if event_type == "ATTACKS":
-            card = self.game_state._safe_get_card(card_id)
-            if card and hasattr(card, 'oracle_text') and "defender" in card.oracle_text.lower():
-                logging.debug(f"Defender: {card.name} cannot attack")
-                return False  # Creatures with defender can't attack
+        # Prevents attacking - handled by Action Handler's validation
         return True
     
     def _apply_indestructible(self, card_id, event_type, context=None):
-        """Apply indestructible ability effects with enhanced logic."""
-        gs = self.game_state
-        
-        if event_type == "DESTROY":
-            logging.debug(f"Indestructible: {gs._safe_get_card(card_id).name} cannot be destroyed")
-            return False  # Prevent destruction
-        
-        elif event_type == "DEALS_DAMAGE" and context and context.get("lethal", False):
-            logging.debug(f"Indestructible: {gs._safe_get_card(card_id).name} survives lethal damage")
-            return False  # Prevent destruction from lethal damage
-        
-        # Register with state-based effects system
-        if hasattr(gs, 'state_based_effects'):
-            gs.state_based_effects.add_indestructible(card_id)
-        
+        # Handled by State Based Actions check and DestroyEffect
         return True    
     
     def _apply_boast(self, card_id, event_type, context=None):
@@ -6723,6 +6412,43 @@ class KeywordEffects:
             logging.debug(f"Awaken: Turned {target_land.name} into a {awaken_value}/{awaken_value} creature with {awaken_value} +1/+1 counters")
             
         return True
+    
+    def _apply_battle(self, card_id, event_type, context=None):
+        # Handled by Battle card logic in GameState/Card
+        return True
+
+    def _apply_saga(self, card_id, event_type, context=None):
+        # Handled by Saga card logic in GameState/Card
+        return True
+
+    def _apply_adventure(self, card_id, event_type, context=None):
+        # Handled by Adventure card logic in GameState/Card/ActionHandler
+        return True
+
+    def _apply_mdfc(self, card_id, event_type, context=None):
+        # Handled by MDFC logic in GameState/Card/ActionHandler
+        return True
+
+    def _apply_room_door_state(self, card_id, event_type, context=None):
+        # Handled by Room card logic in GameState/Card/ActionHandler
+        return True
+
+    def _apply_class_level(self, card_id, event_type, context=None):
+        # Handled by Class card logic in GameState/Card/ActionHandler
+        return True
+        
+    def _apply_spree(self, card_id, event_type, context=None):
+        """Apply effects for the spree keyword."""
+        # Spree is an alternative casting mode, handled during spell casting/resolution.
+        # The _apply_spree method here might check if the conditions for Spree are met,
+        # or handle triggers related to Spree spells being cast.
+        gs = self.game_state
+        if event_type == "CAST_SPELL" and context and context.get("is_spree", False):
+             card = gs._safe_get_card(card_id)
+             logging.debug(f"Applying Spree effects for {card.name if card else 'Unknown'}")
+             # Actual effect resolution happens based on chosen modes in _resolve_spree_spell
+             return True
+        return True # Return true if event doesn't match
 
     def _apply_battle_cry(self, card_id, event_type, context=None):
         """Apply battle cry ability effects (other attacking creatures get +1/+0)"""
@@ -7064,217 +6790,35 @@ class KeywordEffects:
                 
         return True
 
+
     def _apply_protection(self, card_id, event_type, context=None):
-        """Apply protection ability effects with comprehensive handling."""
-        gs = self.game_state
-        card = gs._safe_get_card(card_id)
-        
-        if not card or not hasattr(card, 'oracle_text'):
-            return True
-            
-        oracle_text = card.oracle_text.lower()
-        protected_from = []
-        
-        # Extract the protection qualities
-        if "protection from " in oracle_text:
-            import re
-            match = re.search(r"protection from ([^\.]*)", oracle_text)
-            if match:
-                protection_text = match.group(1).lower()
-                
-                # Check for color protection
-                if "white" in protection_text:
-                    protected_from.append("white")
-                if "blue" in protection_text:
-                    protected_from.append("blue")
-                if "black" in protection_text:
-                    protected_from.append("black")
-                if "red" in protection_text:
-                    protected_from.append("red")
-                if "green" in protection_text:
-                    protected_from.append("green")
-                if "all colors" in protection_text:
-                    protected_from.extend(["white", "blue", "black", "red", "green"])
-                
-                # Check for type protection
-                if "creatures" in protection_text:
-                    protected_from.append("creature")
-                if "artifacts" in protection_text:
-                    protected_from.append("artifact")
-                if "enchantments" in protection_text:
-                    protected_from.append("enchantment")
-        
-        # No protection qualities found
-        if not protected_from:
-            return True
-        
-        # Handle different protection aspects based on event type
-        if event_type == "TARGETING" and context:
-            # Protection from targeting
-            source_id = context.get("source_id")
-            source = gs._safe_get_card(source_id)
-            
-            if source:
-                # Check color protection
-                source_colors = []
-                if hasattr(source, 'colors'):
-                    if source.colors[0]: source_colors.append("white")
-                    if source.colors[1]: source_colors.append("blue")
-                    if source.colors[2]: source_colors.append("black")
-                    if source.colors[3]: source_colors.append("red")
-                    if source.colors[4]: source_colors.append("green")
-                
-                # Check type protection
-                source_types = getattr(source, 'card_types', [])
-                
-                # If the source matches any protected quality, prevent targeting
-                if any(color in protected_from for color in source_colors) or \
-                any(card_type in protected_from for card_type in source_types):
-                    return False  # Cannot be targeted
-        
-        elif event_type == "DEALS_DAMAGE" and context:
-            # Protection from damage
-            source_id = context.get("source_id")
-            source = gs._safe_get_card(source_id)
-            
-            if source:
-                # Check color protection
-                source_colors = []
-                if hasattr(source, 'colors'):
-                    if source.colors[0]: source_colors.append("white")
-                    if source.colors[1]: source_colors.append("blue")
-                    if source.colors[2]: source_colors.append("black")
-                    if source.colors[3]: source_colors.append("red")
-                    if source.colors[4]: source_colors.append("green")
-                
-                # Check type protection
-                source_types = getattr(source, 'card_types', [])
-                
-                # If the source matches any protected quality, prevent damage
-                if any(color in protected_from for color in source_colors) or \
-                any(card_type in protected_from for card_type in source_types):
-                    context["damage_prevented"] = True
-                    context["damage_amount"] = 0
-                    return False  # Damage prevented
-        
-        elif event_type == "BLOCKING" and context:
-            # Protection from blocking/being blocked
-            other_id = None
-            is_attacker = False
-            
-            if context.get("attacker_id") == card_id:
-                other_id = context.get("blocker_id")
-                is_attacker = True
-            elif context.get("blocker_id") == card_id:
-                other_id = context.get("attacker_id")
-                is_attacker = False
-            
-            if other_id:
-                other_card = gs._safe_get_card(other_id)
-                if other_card:
-                    # Check color protection
-                    other_colors = []
-                    if hasattr(other_card, 'colors'):
-                        if other_card.colors[0]: other_colors.append("white")
-                        if other_card.colors[1]: other_colors.append("blue")
-                        if other_card.colors[2]: other_colors.append("black")
-                        if other_card.colors[3]: other_colors.append("red")
-                        if other_card.colors[4]: other_colors.append("green")
-                    
-                    # Check type protection
-                    other_types = getattr(other_card, 'card_types', [])
-                    
-                    # If the other card matches any protected quality, prevent blocking/being blocked
-                    if any(color in protected_from for color in other_colors) or \
-                    any(card_type in protected_from for card_type in other_types):
-                        return False  # Cannot block/be blocked
-        
-        elif event_type == "ENCHANT_OR_EQUIP" and context:
-            # Protection from enchantments/equipment
-            source_id = context.get("source_id")
-            source = gs._safe_get_card(source_id)
-            
-            if source:
-                # Check color protection
-                source_colors = []
-                if hasattr(source, 'colors'):
-                    if source.colors[0]: source_colors.append("white")
-                    if source.colors[1]: source_colors.append("blue")
-                    if source.colors[2]: source_colors.append("black")
-                    if source.colors[3]: source_colors.append("red")
-                    if source.colors[4]: source_colors.append("green")
-                
-                # Check type protection
-                source_types = getattr(source, 'card_types', [])
-                
-                # If the source matches any protected quality, prevent enchanting/equipping
-                if any(color in protected_from for color in source_colors) or \
-                any(card_type in protected_from for card_type in source_types):
-                    return False  # Cannot enchant/equip
-        
+        # Handled by Targeting System and Combat Resolver
         return True
     
     def _apply_ward(self, card_id, event_type, context=None):
-        """Apply ward ability effects"""
-        if event_type == "TARGETING" and context:
-            # Ward triggers when targeted by opponent's spells/abilities
-            source_controller = context.get("source_controller")
-            card_controller = context.get("card_controller")
-            
-            if source_controller != card_controller:
-                # In a real implementation, this would force the opponent to pay
-                # a cost (mana or life) or have their spell countered
-                # For now, we'll simulate the effect with a probability
-                import random
-                
-                # 70% chance that targeting fails (simulating opponent not paying the cost)
-                if random.random() < 0.7:
-                    return False  # Targeting fails
-        
+        # Handled by Targeting System (requires opponent payment or counter)
         return True
 
+
     def _apply_afterlife(self, card_id, event_type, context=None):
-        """Apply afterlife ability effects (creates Spirit tokens when creature dies)"""
         gs = self.game_state
-        
-        if event_type == "DIES" and context:
+        if event_type == "DIES":
             card = gs._safe_get_card(card_id)
-            if not card or not hasattr(card, 'oracle_text'):
-                return True
-                
-            # Parse afterlife value
+            if not card or not hasattr(card, 'oracle_text'): return True
             match = re.search(r"afterlife (\d+)", card.oracle_text.lower())
-            if not match:
-                return True
-                
-            afterlife_value = int(match.group(1))
-            
-            # Find controller
-            controller = None
-            for player in [gs.p1, gs.p2]:
-                if card_id in player["graveyard"]:
-                    controller = player
-                    break
-                    
-            if controller:
-                # Create Spirit tokens with flying using game_state's method
-                for _ in range(afterlife_value):
-                    token_data = {
-                        "name": "Spirit Token",
-                        "type_line": "creature — spirit",
-                        "card_types": ["creature"],
-                        "subtypes": ["spirit"],
-                        "power": 1,
-                        "toughness": 1,
-                        "oracle_text": "Flying",
-                        "keywords": [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]  # Flying is index 0
-                    }
-                    
-                    gs.create_token(controller, token_data)
-                    logging.debug(f"Afterlife {afterlife_value}: Created a 1/1 Spirit token with flying")
-                    
-            return True
-            
+            if match:
+                 count = int(match.group(1))
+                 controller = gs.get_card_controller(card_id) # Should be controller before death
+                 if controller:
+                     # Trigger token creation (happens *after* SBAs resolve normally)
+                     # We can add it as a delayed trigger
+                     def create_spirit_tokens():
+                         for _ in range(count):
+                              token_data = {"name": "Spirit", "type_line": "Token Creature - Spirit", "power": 1, "toughness": 1, "colors": [1,0,0,0,0], "keywords": [1,0,0,0,0,0,0,0,0,0,0]} # White, Flying
+                              gs.create_token(controller, token_data)
+                         logging.debug(f"Afterlife: Created {count} Spirit tokens after {card.name} died.")
+                     if not hasattr(gs, 'delayed_triggers'): gs.delayed_triggers = []
+                     gs.delayed_triggers.append(create_spirit_tokens)
         return True
 
     def _apply_dash(self, card_id, event_type, context=None):
@@ -7545,313 +7089,84 @@ class KeywordEffects:
         return True
     
     def _apply_prowess(self, card_id, event_type, context=None):
-        """Apply prowess ability effects"""
         gs = self.game_state
-        
         if event_type == "CAST_NONCREATURE_SPELL":
-            # Find the controller
-            controller = None
-            for player in [gs.p1, gs.p2]:
-                if card_id in player["battlefield"]:
-                    controller = player
-                    break
-            
-            if controller:
-                # Add temporary +1/+1 until end of turn
-                # This would need a proper implementation for temporary buffs
-                if not hasattr(controller, "temp_buffs"):
-                    controller["temp_buffs"] = {}
-                
-                if card_id not in controller["temp_buffs"]:
-                    controller["temp_buffs"][card_id] = {"power": 0, "toughness": 0}
-                    
-                controller["temp_buffs"][card_id]["power"] += 1
-                controller["temp_buffs"][card_id]["toughness"] += 1
-                
-                return True
-        
+            controller = context.get("controller")
+            # Check if the creature with prowess is controlled by the caster
+            owner = None
+            for p in [gs.p1, gs.p2]:
+                 if card_id in p["battlefield"]: owner = p; break
+            if owner == controller:
+                 if hasattr(gs, 'add_temp_buff'):
+                      gs.add_temp_buff(card_id, {"power": 1, "toughness": 1, "until_end_of_turn": True})
+                      logging.debug(f"Prowess: {gs._safe_get_card(card_id).name} gets +1/+1.")
         return True
     
     def _apply_scry(self, card_id, event_type, context=None):
-        """Apply scry ability effects (look at top cards, put some on bottom)"""
-        gs = self.game_state
-        
-        if event_type == "CAST_SPELL" and context:
-            card = gs._safe_get_card(card_id)
-            if not card or not hasattr(card, 'oracle_text'):
-                return True
-            
-            # Let the game state handle scry resolution
-            # This will be parsed in resolve_spell_effects
-            return True
-    
-    def _apply_cascade(self, card_id, event_type, context=None):
-        """Apply cascade ability effects"""
-        # Cascade is a cast trigger, not a persistent keyword
-        if event_type == "CAST_SPELL" and context:
-            # In a real implementation, this would reveal cards until a lower cost
-            # spell is found, cast it for free, and put the rest on the bottom
-            # For simplicity, we'll just implement a version that draws a card
-            gs = self.game_state
-            controller = context.get("controller")
-            
-            if controller:
-                gs._draw_phase(controller)
-                return True
-        
+        # Usually triggered by spell resolution - handled in resolve_spell_effects
         return True
+
+    def _apply_cascade(self, card_id, event_type, context=None):
+        # Triggered on cast - handled in handle_cast_trigger
+        return True
+
     
     def _apply_unblockable(self, card_id, event_type, context=None):
-        """Apply unblockable ability effects"""
-        if event_type == "BLOCKING" and context:
-            return False  # Cannot be blocked
-        
+        # Handled by Combat Resolver's _check_block_restrictions
         return True
-    
+
     def _apply_shroud(self, card_id, event_type, context=None):
-        """Apply shroud ability effects"""
-        if event_type == "TARGETING":
-            # Cannot be targeted by spells or abilities
-            return False
-        
+        # Handled by Targeting System
         return True
-    
+
     def _apply_regenerate(self, card_id, event_type, context=None):
-        """Apply regenerate ability effects"""
-        if event_type == "DESTROY":
-            # Instead of being destroyed, tap it and remove damage
-            gs = self.game_state
-            
-            for player in [gs.p1, gs.p2]:
-                if card_id in player["battlefield"]:
-                    player["tapped_permanents"].add(card_id)
-                    if card_id in player["damage_counters"]:
-                        del player["damage_counters"][card_id]
-                    return False  # Prevent destruction
-        
+        # Replaces destruction - handled in State Based Actions / Replacement Effects
         return True
-    
+
     def _apply_persist(self, card_id, event_type, context=None):
-        """Apply persist ability effects"""
-        gs = self.game_state
-        
-        if event_type == "DIES" and context:
-            controller = context.get("controller")
-            if not controller:
-                for player in [gs.p1, gs.p2]:
-                    if card_id in player["graveyard"]:
-                        controller = player
-                        break
-            
-            if controller:
-                card = gs._safe_get_card(card_id)
-                if card and not hasattr(card, "counters"):
-                    card.counters = {}
-                
-                # Check if card didn't have a -1/-1 counter
-                if not card.counters.get("-1/-1", 0) > 0:
-                    # Return to battlefield with a -1/-1 counter
-                    gs.move_card(card_id, controller, "graveyard", controller, "battlefield")
-                    card.counters["-1/-1"] = 1
-                    
-                    # Apply counter effect
-                    card.power -= 1
-                    card.toughness -= 1
-                    
-                    return True
-        
+        # Triggered on death - handled in DIES trigger processing
         return True
     
     def _apply_undying(self, card_id, event_type, context=None):
-        """Apply undying ability effects"""
-        gs = self.game_state
-        
-        if event_type == "DIES" and context:
-            controller = context.get("controller")
-            if not controller:
-                for player in [gs.p1, gs.p2]:
-                    if card_id in player["graveyard"]:
-                        controller = player
-                        break
-            
-            if controller:
-                card = gs._safe_get_card(card_id)
-                if card and not hasattr(card, "counters"):
-                    card.counters = {}
-                
-                # Check if card didn't have a +1/+1 counter
-                if not card.counters.get("+1/+1", 0) > 0:
-                    # Return to battlefield with a +1/+1 counter
-                    gs.move_card(card_id, controller, "graveyard", controller, "battlefield")
-                    card.counters["+1/+1"] = 1
-                    
-                    # Apply counter effect
-                    card.power += 1
-                    card.toughness += 1
-                    
-                    return True
-        
+        # Triggered on death - handled in DIES trigger processing
         return True
     
     def _apply_riot(self, card_id, event_type, context=None):
-        """Apply riot ability effects"""
         gs = self.game_state
-        
         if event_type == "ENTERS_BATTLEFIELD":
             card = gs._safe_get_card(card_id)
-            if not card:
-                return True
-                
-            # For simplicity, always choose the +1/+1 counter option
-            if not hasattr(card, "counters"):
-                card.counters = {}
-                
-            card.counters["+1/+1"] = card.counters.get("+1/+1", 0) + 1
-            card.power += 1
-            card.toughness += 1
-            
-            return True
-        
+            if not card: return True
+            controller = gs.get_card_controller(card_id)
+            if not controller: return True
+
+            # AI Choice: Haste or +1/+1 counter? Simple: Choose haste if creature has high power already.
+            choose_haste = getattr(card, 'power', 0) >= 3
+            if choose_haste:
+                 if hasattr(gs, 'give_haste_until_eot'): gs.give_haste_until_eot(card_id)
+                 logging.debug(f"Riot: {card.name} chose haste.")
+            else:
+                 if hasattr(gs, 'add_counter'): gs.add_counter(card_id, "+1/+1", 1)
+                 logging.debug(f"Riot: {card.name} chose a +1/+1 counter.")
         return True
     
+
     def _apply_enrage(self, card_id, event_type, context=None):
-        """Apply enrage ability effects"""
-        gs = self.game_state
-        
-        if event_type == "DEALS_DAMAGE" and context:
-            is_damaged = context.get("is_damaged", False)
-            
-            if is_damaged:
-                card = gs._safe_get_card(card_id)
-                if not card or not hasattr(card, "oracle_text"):
-                    return True
-                
-                # Parse the enrage ability
-                enrage_text = card.oracle_text.lower()
-                if "enrage" in enrage_text and "draw a card" in enrage_text:
-                    # Find controller
-                    controller = None
-                    for player in [gs.p1, gs.p2]:
-                        if card_id in player["battlefield"]:
-                            controller = player
-                            break
-                    
-                    if controller:
-                        gs._draw_phase(controller)
-                        return True
-        
+        # Triggered when damaged - handled in damage application / triggers
         return True
-    
+
     def _apply_afflict(self, card_id, event_type, context=None):
-        """Apply afflict ability effects"""
-        gs = self.game_state
-        
-        if event_type == "BLOCKED" and context:
-            # Parse the afflict value
-            card = gs._safe_get_card(card_id)
-            if not card or not hasattr(card, "oracle_text"):
-                return True
-                
-             
-            match = re.search(r"afflict (\d+)", card.oracle_text.lower())
-            if match:
-                afflict_value = int(match.group(1))
-                
-                # Find the defender player
-                defender = context.get("defender")
-                if not defender:
-                    for player in [gs.p1, gs.p2]:
-                        if any(blocker_id in player["battlefield"] for blocker_id in context.get("blockers", [])):
-                            defender = player
-                            break
-                
-                if defender:
-                    defender["life"] -= afflict_value
-                    return True
-        
+        # Triggered when blocked - handled in block assignment / combat triggers
         return True
     
     def _apply_exalted(self, card_id, event_type, context=None):
-        """Apply exalted ability effects"""
-        gs = self.game_state
-        
-        if event_type == "ATTACK_WITH_ONE":
-            # Exalted triggers when exactly one creature attacks
-            if context and context.get("attacker_id"):
-                attacker_id = context.get("attacker_id")
-                
-                # Find controller of the exalted card
-                exalted_controller = None
-                for player in [gs.p1, gs.p2]:
-                    if card_id in player["battlefield"]:
-                        exalted_controller = player
-                        break
-                
-                if exalted_controller:
-                    # Find attacker card
-                    attacker_card = gs._safe_get_card(attacker_id)
-                    if attacker_card:
-                        # Apply +1/+1 until end of turn
-                        if not hasattr(exalted_controller, "temp_buffs"):
-                            exalted_controller["temp_buffs"] = {}
-                        
-                        if attacker_id not in exalted_controller["temp_buffs"]:
-                            exalted_controller["temp_buffs"][attacker_id] = {"power": 0, "toughness": 0}
-                            
-                        exalted_controller["temp_buffs"][attacker_id]["power"] += 1
-                        exalted_controller["temp_buffs"][attacker_id]["toughness"] += 1
-                        
-                        return True
-        
+        # Triggered when a creature attacks alone - handled in Declare Attackers / Combat Triggers
         return True
-    
+
     def _apply_mentor(self, card_id, event_type, context=None):
-        """Apply mentor ability effects"""
-        gs = self.game_state
-        
-        if event_type == "ATTACKS":
-            # Mentor triggers when the creature attacks
-            # Find a creature with less power attacking alongside
-            controller = None
-            for player in [gs.p1, gs.p2]:
-                if card_id in player["battlefield"]:
-                    controller = player
-                    break
-            
-            if controller:
-                mentor_card = gs._safe_get_card(card_id)
-                if not mentor_card:
-                    return True
-                    
-                mentor_power = mentor_card.power
-                
-                # Find valid targets (attacking creatures with less power)
-                valid_targets = []
-                for attacker_id in gs.current_attackers:
-                    if attacker_id != card_id:
-                        attacker_card = gs._safe_get_card(attacker_id)
-                        if attacker_card and attacker_card.power < mentor_power:
-                            valid_targets.append(attacker_id)
-                
-                if valid_targets:
-                    # Pick the strongest valid target
-                    target_id = max(valid_targets, key=lambda cid: gs._safe_get_card(cid).power)
-                    target_card = gs._safe_get_card(target_id)
-                    
-                    # Add a +1/+1 counter
-                    if not hasattr(target_card, "counters"):
-                        target_card.counters = {}
-                        
-                    target_card.counters["+1/+1"] = target_card.counters.get("+1/+1", 0) + 1
-                    target_card.power += 1
-                    target_card.toughness += 1
-                    
-                    return True
-        
+        # Triggered when attacking - handled in Declare Attackers / Combat Triggers
         return True
     
+
     def _apply_convoke(self, card_id, event_type, context=None):
-        """Apply convoke ability effects"""
-        # Convoke is a casting cost reduction, not a permanent ability
-        # This would be handled during the casting process, not here
-        return True    
+        # Casting cost modification - handled in Mana System / Casting
+        return True

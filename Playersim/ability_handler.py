@@ -1734,181 +1734,266 @@ class TargetingSystem:
         """
         return self.resolve_targeting(spell_id, controller)
     
+    def _is_valid_target(self, source_id, target_id, caster, target_info, requirement):
+        """Unified check for any target type."""
+        gs = self.game_state
+        target_type = requirement.get("type")
+        target_obj, target_owner, target_zone = target_info # Expect target_info=(obj, owner, zone)
+
+        if not target_obj: return False
+
+        # 1. Zone Check
+        req_zone = requirement.get("zone")
+        if req_zone and target_zone != req_zone: return False
+        if not req_zone and target_zone not in ["battlefield", "stack", "player"]: # Default targetable zones
+            # Check if the type allows targeting outside default zones
+            if target_type == "card" and target_zone not in ["graveyard", "exile", "library"]: return False
+            # Other types usually target battlefield/stack/players unless zone specified
+            elif target_type != "card": return False
+
+
+        # 2. Type Check
+        actual_types = set()
+        if isinstance(target_obj, dict) and target_id in ["p1", "p2"]: # Player target
+            actual_types.add("player")
+            # Also check owner relationship for player targets
+            if requirement.get("opponent_only") and target_obj == caster: return False
+            if requirement.get("controller_is_caster") and target_obj != caster: return False # Target self only
+        elif isinstance(target_obj, Card): # Card object
+            actual_types.update(getattr(target_obj, 'card_types', []))
+            actual_types.update(getattr(target_obj, 'subtypes', []))
+        elif isinstance(target_obj, tuple): # Stack item (Ability/Trigger)
+             item_type = target_obj[0]
+             if item_type == "ABILITY": actual_types.add("ability")
+             elif item_type == "TRIGGER": actual_types.add("ability"); actual_types.add("triggered") # Allow target triggered ability
+
+        # Check against required type
+        valid_type = False
+        if target_type == "target": valid_type = True # Generic "target" - skip specific type check initially
+        elif target_type == "any": # Creature, Player, Planeswalker
+             valid_type = any(t in actual_types for t in ["creature", "player", "planeswalker"])
+        elif target_type == "card" and isinstance(target_obj, Card): valid_type = True # Targeting a card in specific zone
+        elif target_type in actual_types: valid_type = True
+        elif target_type == "permanent" and any(t in actual_types for t in ["creature", "artifact", "enchantment", "land", "planeswalker"]): valid_type = True
+        elif target_type == "spell" and target_zone == "stack" and isinstance(target_obj, Card): valid_type = True # Targeting spell on stack
+
+        if not valid_type: return False
+
+
+        # 3. Protection / Hexproof / Shroud / Ward (Only for permanents, players, spells)
+        if target_zone in ["battlefield", "stack", "player"]:
+             source_card = gs._safe_get_card(source_id)
+             if isinstance(target_obj, dict) and target_id in ["p1","p2"]: # Player
+                  # TODO: Add player protection checks (e.g., Leyline of Sanctity)
+                  pass
+             elif isinstance(target_obj, Card): # Permanent or Spell
+                 # Protection
+                 if self._has_protection_from(target_obj, source_card, target_owner, caster): return False
+                 # Hexproof (if targeted by opponent)
+                 if caster != target_owner and self._has_hexproof(target_obj): return False
+                 # Shroud (if targeted by anyone)
+                 if self._has_shroud(target_obj): return False
+                 # Ward (Check handled separately - involves paying cost)
+
+
+        # 4. Specific Requirement Checks (applies mostly to battlefield permanents)
+        if target_zone == "battlefield" and isinstance(target_obj, Card):
+            # Owner/Controller
+            if requirement.get("controller_is_caster") and target_owner != caster: return False
+            if requirement.get("controller_is_opponent") and target_owner == caster: return False
+
+            # Exclusions
+            if requirement.get("exclude_land") and 'land' in actual_types: return False
+            if requirement.get("exclude_creature") and 'creature' in actual_types: return False
+            if requirement.get("exclude_color") and self._has_color(target_obj, requirement["exclude_color"]): return False
+
+            # Inclusions
+            if requirement.get("must_be_artifact") and 'artifact' not in actual_types: return False
+            if requirement.get("must_be_aura") and 'aura' not in actual_types: return False
+            if requirement.get("must_be_basic") and 'basic' not in getattr(target_obj,'type_line',''): return False
+            if requirement.get("must_be_nonbasic") and 'basic' in getattr(target_obj,'type_line',''): return False
+
+            # State
+            if requirement.get("must_be_tapped") and target_id not in target_owner.get("tapped_permanents", set()): return False
+            if requirement.get("must_be_untapped") and target_id in target_owner.get("tapped_permanents", set()): return False
+            if requirement.get("must_be_attacking") and target_id not in getattr(gs, 'current_attackers', []): return False
+            # Note: Blocking state needs better tracking than just the current assignments dict
+            # if requirement.get("must_be_blocking") and not is_blocking(target_id): return False
+            if requirement.get("must_be_face_down") and not getattr(target_obj, 'face_down', False): return False
+
+            # Color Restriction
+            colors_req = requirement.get("color_restriction", [])
+            if colors_req:
+                if not any(self._has_color(target_obj, color) for color in colors_req): return False
+                if "multicolored" in colors_req and sum(getattr(target_obj,'colors',[0]*5)) <= 1: return False
+                if "colorless" in colors_req and sum(getattr(target_obj,'colors',[0]*5)) > 0: return False
+
+            # Stat Restrictions
+            if "power_restriction" in requirement:
+                pr = requirement["power_restriction"]
+                power = getattr(target_obj, 'power', None)
+                if power is None: return False
+                if pr["comparison"] == "greater" and not power >= pr["value"]: return False
+                if pr["comparison"] == "less" and not power <= pr["value"]: return False
+                if pr["comparison"] == "exactly" and not power == pr["value"]: return False
+            if "toughness_restriction" in requirement:
+                tr = requirement["toughness_restriction"]
+                toughness = getattr(target_obj, 'toughness', None)
+                if toughness is None: return False
+                if tr["comparison"] == "greater" and not toughness >= tr["value"]: return False
+                if tr["comparison"] == "less" and not toughness <= tr["value"]: return False
+                if tr["comparison"] == "exactly" and not toughness == tr["value"]: return False
+            if "mana value_restriction" in requirement:
+                cmcr = requirement["mana value_restriction"]
+                cmc = getattr(target_obj, 'cmc', None)
+                if cmc is None: return False
+                if cmcr["comparison"] == "greater" and not cmc >= cmcr["value"]: return False
+                if cmcr["comparison"] == "less" and not cmc <= cmcr["value"]: return False
+                if cmcr["comparison"] == "exactly" and not cmc == cmcr["value"]: return False
+
+            # Subtype Restriction
+            if "subtype_restriction" in requirement:
+                if requirement["subtype_restriction"] not in actual_types: return False
+
+        # 5. Spell/Ability Specific Checks
+        if target_zone == "stack":
+             source_card = gs._safe_get_card(source_id)
+             if isinstance(target_obj, Card): # Spell target
+                 # Can't be countered? (Only if source is a counter)
+                 if "counter target spell" in getattr(source_card, 'oracle_text', '').lower():
+                     if "can't be countered" in getattr(target_obj, 'oracle_text', '').lower(): return False
+                 # Spell Type
+                 st_req = requirement.get("spell_type_restriction")
+                 if st_req == "instant" and 'instant' not in actual_types: return False
+                 if st_req == "sorcery" and 'sorcery' not in actual_types: return False
+                 if st_req == "creature" and 'creature' not in actual_types: return False
+                 if st_req == "noncreature" and 'creature' in actual_types: return False
+             elif isinstance(target_obj, tuple): # Ability target
+                 ab_req = requirement.get("ability_type_restriction")
+                 item_type = target_obj[0]
+                 if ab_req == "activated" and item_type != "ABILITY": return False
+                 if ab_req == "triggered" and item_type != "TRIGGER": return False
+
+
+        return True # All checks passed
+    
+    def _has_color(self, card, color_name):
+        """Check if a card has a specific color."""
+        if not card or not hasattr(card, 'colors') or len(getattr(card,'colors',[])) != 5: return False
+        color_index_map = {'white': 0, 'blue': 1, 'black': 2, 'red': 3, 'green': 4}
+        if color_name not in color_index_map: return False
+        return card.colors[color_index_map[color_name]] == 1
+    
     def _parse_targeting_requirements(self, oracle_text):
-        """Parse targeting requirements from oracle text."""
+        """Parse targeting requirements from oracle text with comprehensive rules."""
         requirements = []
+        oracle_text = oracle_text.lower()
         
-        # Using regex to find all targeting patterns
-        import re
-        
-        # Check for "target creature"
-        creature_patterns = [
-            (r"target creature( [^\.;]+)?", {}),
-            (r"target creature you control", {"controller_is_caster": True}),
-            (r"target creature you don't control", {"controller_is_opponent": True}),
-            (r"target creature an opponent controls", {"controller_is_opponent": True}),
-            (r"target attacking creature", {"must_be_attacking": True}),
-            (r"target blocking creature", {"must_be_blocking": True}),
-            (r"target tapped creature", {"must_be_tapped": True}),
-            (r"target untapped creature", {"must_be_untapped": True}),
-            (r"target creature with power (\d+) or greater", 
-             lambda m: {"power_restriction": {"comparison": "greater", "value": int(m.group(1))}}),
-            (r"target creature with power (\d+) or less", 
-             lambda m: {"power_restriction": {"comparison": "less", "value": int(m.group(1))}}),
-            (r"target creature with toughness (\d+) or greater", 
-             lambda m: {"toughness_restriction": {"comparison": "greater", "value": int(m.group(1))}}),
-            (r"target creature with toughness (\d+) or less", 
-             lambda m: {"toughness_restriction": {"comparison": "less", "value": int(m.group(1))}}),
-            (r"target (white|blue|black|red|green) creature", 
-             lambda m: {"color_restriction": m.group(1)})
-        ]
-        
-        for pattern, restriction in creature_patterns:
-            matches = re.finditer(pattern, oracle_text)
-            for match in matches:
-                req = {"type": "creature"}
-                
-                # Apply restrictions
-                if callable(restriction):
-                    req.update(restriction(match))
-                else:
-                    req.update(restriction)
-                
-                requirements.append(req)
-        
-        # Check for "target player/opponent"
-        player_patterns = [
-            (r"target player", {}),
-            (r"target opponent", {"opponent_only": True}),
-            (r"you", {"controller_only": True})
-        ]
-        
-        for pattern, restriction in player_patterns:
-            if re.search(pattern, oracle_text):
-                req = {"type": "player"}
-                req.update(restriction)
-                requirements.append(req)
-        
-        # Check for "target permanent"
-        permanent_patterns = [
-            (r"target permanent", {}),
-            (r"target permanent you control", {"controller_is_caster": True}),
-            (r"target permanent you don't control", {"controller_is_opponent": True}),
-            (r"target permanent an opponent controls", {"controller_is_opponent": True}),
-            (r"target nonland permanent", {"exclude_land": True}),
-            (r"target (white|blue|black|red|green) permanent", 
-             lambda m: {"color_restriction": m.group(1)})
-        ]
-        
-        for pattern, restriction in permanent_patterns:
-            matches = re.finditer(pattern, oracle_text)
-            for match in matches:
-                req = {"type": "permanent"}
-                
-                # Apply restrictions
-                if callable(restriction):
-                    req.update(restriction(match))
-                else:
-                    req.update(restriction)
-                
-                requirements.append(req)
-        
-        # Check for "target artifact"
-        artifact_patterns = [
-            (r"target artifact", {}),
-            (r"target artifact you control", {"controller_is_caster": True}),
-            (r"target artifact you don't control", {"controller_is_opponent": True}),
-            (r"target artifact creature", {"must_be_creature": True})
-        ]
-        
-        for pattern, restriction in artifact_patterns:
-            if re.search(pattern, oracle_text):
-                req = {"type": "artifact"}
-                req.update(restriction)
-                requirements.append(req)
-        
-        # Check for "target enchantment"
-        enchantment_patterns = [
-            (r"target enchantment", {}),
-            (r"target enchantment you control", {"controller_is_caster": True}),
-            (r"target enchantment an opponent controls", {"controller_is_opponent": True}),
-            (r"target aura", {"must_be_aura": True})
-        ]
-        
-        for pattern, restriction in enchantment_patterns:
-            if re.search(pattern, oracle_text):
-                req = {"type": "enchantment"}
-                req.update(restriction)
-                requirements.append(req)
-        
-        # Check for "target land"
-        land_patterns = [
-            (r"target land", {}),
-            (r"target basic land", {"must_be_basic": True}),
-            (r"target nonbasic land", {"must_be_nonbasic": True}),
-            (r"target land you control", {"controller_is_caster": True}),
-            (r"target land an opponent controls", {"controller_is_opponent": True})
-        ]
-        
-        for pattern, restriction in land_patterns:
-            if re.search(pattern, oracle_text):
-                req = {"type": "land"}
-                req.update(restriction)
-                requirements.append(req)
-        
-        # Check for "target spell"
-        spell_patterns = [
-            (r"target spell", {}),
-            (r"counter target spell", {}),
-            (r"target instant( or sorcery)? spell", {"spell_type_restriction": "instant_or_sorcery"}),
-            (r"target creature spell", {"spell_type_restriction": "creature"})
-        ]
-        
-        for pattern, restriction in spell_patterns:
-            if re.search(pattern, oracle_text):
-                req = {"type": "spell"}
-                req.update(restriction)
-                requirements.append(req)
-        
-        # Check for "target planeswalker"
-        if re.search(r"target planeswalker", oracle_text):
-            requirements.append({"type": "planeswalker"})
-        
-        # Check for graveyard targeting
-        graveyard_patterns = [
-            (r"target card (in|from) (a|your|an opponent's) graveyard", 
-             lambda m: {"owner_is_caster": m.group(2) == "your", 
-                        "owner_is_opponent": m.group(2) == "an opponent's"}),
-            (r"target creature card (in|from) (a|your|an opponent's) graveyard", 
-             lambda m: {"card_type_restriction": "creature", 
-                        "owner_is_caster": m.group(2) == "your",
-                        "owner_is_opponent": m.group(2) == "an opponent's"})
-        ]
-        
-        for pattern, restriction_func in graveyard_patterns:
-            matches = re.finditer(pattern, oracle_text)
-            for match in matches:
-                req = {"type": "graveyard"}
-                req.update(restriction_func(match))
-                requirements.append(req)
-        
-        # Check for exile targeting
-        exile_patterns = [
-            (r"target card (in|from) exile", {}),
-            (r"target face-?down card (in|from) exile", {"must_be_face_down": True})
-        ]
-        
-        for pattern, restriction in exile_patterns:
-            if re.search(pattern, oracle_text):
-                req = {"type": "exile"}
-                req.update(restriction)
-                requirements.append(req)
-                
-        # Return at least one requirement if none found
-        if not requirements:
-            # Default to targeting anything
-            requirements.append({"type": "other"})
-            
+        # Pattern to find "target X" phrases, excluding nested clauses
+        # Matches "target [adjectives] type [restrictions]"
+        target_pattern = r"target\s+((?:(?:[a-z\-]+)\s+)*?)?([a-z]+)\s*((?:(?:with|of|that)\s+[^,\.;\(]+?|you control|an opponent controls|you don\'t control)*)"
+
+        matches = re.finditer(target_pattern, oracle_text)
+
+        for match in matches:
+            req = {"type": match.group(2).strip()} # Basic type (creature, player, etc.)
+            adjectives = match.group(1).strip().split() if match.group(1) else []
+            restrictions = match.group(3).strip()
+
+            # ---- Map Type ----
+            type_map = {
+                "creature": "creature", "player": "player", "opponent": "player", "permanent": "permanent",
+                "spell": "spell", "ability": "ability", "land": "land", "artifact": "artifact",
+                "enchantment": "enchantment", "planeswalker": "planeswalker", "card": "card", # General card (often in GY/Exile)
+                "instant": "spell", "sorcery": "spell", "aura": "enchantment",
+                # Add more specific types if needed
+            }
+            req["type"] = type_map.get(req["type"], req["type"]) # Normalize type
+
+            # ---- Process Adjectives & Restrictions ----
+            # Owner/Controller
+            if "you control" in restrictions: req["controller_is_caster"] = True
+            elif "an opponent controls" in restrictions or "you don't control" in restrictions: req["controller_is_opponent"] = True
+            elif "target opponent" in oracle_text: req["opponent_only"] = True # Different phrasing
+
+            # State/Status
+            if "tapped" in adjectives: req["must_be_tapped"] = True
+            if "untapped" in adjectives: req["must_be_untapped"] = True
+            if "attacking" in adjectives: req["must_be_attacking"] = True
+            if "blocking" in adjectives: req["must_be_blocking"] = True
+            if "face-down" in adjectives or "face down" in restrictions: req["must_be_face_down"] = True
+
+            # Card Type / Supertype / Subtype Restrictions
+            if "nonland" in adjectives: req["exclude_land"] = True
+            if "noncreature" in adjectives: req["exclude_creature"] = True
+            if "nonblack" in adjectives: req["exclude_color"] = 'black'
+            # ... add more non-X types
+
+            if "basic" in adjectives and req["type"] == "land": req["must_be_basic"] = True
+            if "nonbasic" in adjectives and req["type"] == "land": req["must_be_nonbasic"] = True
+
+            if "artifact creature" in match.group(0): req["must_be_artifact_creature"] = True
+            elif "artifact" in adjectives and req["type"]=="creature": req["must_be_artifact"] = True # Adj before type
+            elif "artifact" in adjectives and req["type"]=="permanent": req["must_be_artifact"] = True
+
+            if "aura" in adjectives and req["type"]=="enchantment": req["must_be_aura"] = True # Check Aura specifically
+
+            # Color Restrictions (from adjectives or restrictions)
+            colors = {"white", "blue", "black", "red", "green", "colorless", "multicolored"}
+            found_colors = colors.intersection(set(adjectives)) or colors.intersection(set(restrictions.split()))
+            if found_colors: req["color_restriction"] = list(found_colors)
+
+            # Power/Toughness/CMC Restrictions (from restrictions)
+            pt_cmc_pattern = r"(?:with|of)\s+(power|toughness|mana value)\s+(\d+)\s+(or greater|or less|exactly)"
+            pt_match = re.search(pt_cmc_pattern, restrictions)
+            if pt_match:
+                 stat, value, comparison = pt_match.groups()
+                 req[f"{stat}_restriction"] = {"comparison": comparison.replace("or ","").strip(), "value": int(value)}
+
+            # Zone restrictions (usually implied by context, but check)
+            if "in a graveyard" in restrictions: req["zone"] = "graveyard"; req["type"]="card" # Override type
+            elif "in exile" in restrictions: req["zone"] = "exile"; req["type"]="card"
+            elif "on the stack" in restrictions: req["zone"] = "stack" # Type should be spell/ability
+
+            # Spell/Ability type restrictions
+            if req["type"] == "spell":
+                 if "instant" in adjectives: req["spell_type_restriction"] = "instant"
+                 elif "sorcery" in adjectives: req["spell_type_restriction"] = "sorcery"
+                 elif "creature" in adjectives: req["spell_type_restriction"] = "creature"
+                 elif "noncreature" in adjectives: req["spell_type_restriction"] = "noncreature"
+                 # ... add others
+            elif req["type"] == "ability":
+                if "activated" in adjectives: req["ability_type_restriction"] = "activated"
+                elif "triggered" in adjectives: req["ability_type_restriction"] = "triggered"
+
+            # Specific subtypes
+            # Look for "target Goblin creature", "target Island land" etc.
+            subtype_match = re.search(r"target\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:creature|land|artifact|etc)", match.group(0))
+            if subtype_match:
+                potential_subtype = subtype_match.group(1).strip()
+                # TODO: Check if potential_subtype is a known subtype for the target type
+                req["subtype_restriction"] = potential_subtype
+
+            requirements.append(req)
+
+        # Special cases not matching the main pattern
+        if "any target" in oracle_text:
+             requirements.append({"type": "any"}) # Any target includes creatures, players, planeswalkers
+
+        if not requirements and "target" in oracle_text:
+             # Fallback if "target" exists but pattern failed
+             requirements.append({"type": "target"})
+
+        # Refine types based on restrictions
+        for req in requirements:
+            if req.get("must_be_artifact_creature"): req["type"] = "creature"; req["must_be_artifact"]=True
+            if req.get("must_be_aura"): req["type"] = "enchantment"
+            if req.get("type") == "opponent": req["type"] = "player"; req["opponent_only"] = True
+            if req.get("type") == "card": # Refine card targets
+                if req.get("zone") == "graveyard": pass # Okay
+                elif req.get("zone") == "exile": pass # Okay
+                else: req["zone"] = "graveyard" # Default to GY if zone unspecified for 'card'
+
         return requirements
     
     def _is_valid_creature_target(self, source_id, target_id, caster, target_owner, requirements):

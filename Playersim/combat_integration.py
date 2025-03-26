@@ -3,31 +3,20 @@ from .combat_actions import CombatActionHandler
 
 def integrate_combat_actions(game_state):
     """
-    Integrate the CombatActionHandler with the game state.
-    
-    This function provides a centralized way to ensure the CombatActionHandler 
-    is properly set up and accessible.
-
-    Args:
-        game_state: The game state object
-    
-    Returns:
-        CombatActionHandler: The created and integrated combat action handler
+    Integrate the CombatActionHandler with the game state. Ensures a single instance.
     """
-    # Only create a new handler if one doesn't already exist
-    if not hasattr(game_state, 'combat_action_handler'):
-        combat_action_handler = CombatActionHandler(game_state)
-        game_state.combat_action_handler = combat_action_handler
+    if not hasattr(game_state, 'combat_action_handler') or game_state.combat_action_handler is None:
+        logging.debug("Creating and integrating CombatActionHandler")
+        game_state.combat_action_handler = CombatActionHandler(game_state)
     else:
-        combat_action_handler = game_state.combat_action_handler
+        # Optionally re-link if needed, but usually just return existing
+        pass
 
-    # Optionally link with combat resolver if available
+    # Ensure resolver linkage if resolver exists
     if hasattr(game_state, 'combat_resolver'):
-        game_state.combat_resolver.action_handler = combat_action_handler
+        game_state.combat_resolver.action_handler = game_state.combat_action_handler
 
-    logging.debug("Combat action handler integrated with game state")
-
-    return game_state.combat_action_handler
+    return game_state.combat_action_handler # Return the instance from game_state
 
 
 def apply_combat_action(game_state, action_type, param=None):

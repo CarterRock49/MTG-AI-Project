@@ -815,861 +815,312 @@ class AlphaZeroMTGEnv(gym.Env):
         logging.warning(f"Unknown phase {current_phase} in force_phase_transition, defaulting to MAIN_POSTCOMBAT")
         return gs.PHASE_MAIN_POSTCOMBAT
     
-    def step(self, action_idx):
+    def step(self, action_idx, context=None):
         """
-        Execute the action and get the next observation, reward and done status.
-        
+        Execute the action and run the game engine until control returns to the agent,
+        or the game ends. Returns the next observation, reward, done status, and info.
+
         Args:
-            action_idx: Index of the action to execute
-                    
+            action_idx: Index of the action selected by the agent.
+            context: Optional dictionary with additional context for complex actions.
+
         Returns:
             tuple: (observation, reward, done, truncated, info)
         """
+        gs = self.game_state
+        if context is None: context = {}
+        # Ensure initial action mask is available if needed
+        if not hasattr(self, 'current_valid_actions'):
+             self.current_valid_actions = self.action_mask()
+        info = {"action_mask": self.current_valid_actions.astype(bool)} # Start info dict
+
         try:
-            from Playersim.debug import DEBUG_ACTION_STEPS, log_exception
-            
-            info = {}
-            gs = self.game_state
-            current_turn = gs.turn  # Store the current turn
-            current_phase = gs.phase  # Store the current phase
-            
-            # Store previous life totals to track changes
-            prev_player_life = getattr(self, 'prev_player_life', None)
-            prev_opponent_life = getattr(self, 'prev_opponent_life', None)
-            
-            # Get current player and opponent references
-            me = gs.p1 if gs.agent_is_p1 else gs.p2
-            opp = gs.p2 if gs.agent_is_p1 else gs.p1
-            
-            pre_action_pattern = None
-            
-            # Extract strategy pattern before action
-            if hasattr(self, 'strategy_memory'):
-                try:
-                    pre_action_pattern = self.strategy_memory.extract_strategy_pattern(gs)
-                    logging.debug(f"Pre-action strategy pattern: {pre_action_pattern}")
-                except Exception as e:
-                    log_exception(e, "Error extracting pre-action strategy pattern")
-            
-            if DEBUG_ACTION_STEPS:
-                logging.debug(f"== STEP START: Action {action_idx} at TURN {current_turn}: Phase {current_phase} ==")
-                logging.debug(f"P1 Life = {gs.p1['life']}, P2 Life = {gs.p2['life']}")
-            
-            # Check for phase progress to avoid getting stuck
-            self._check_phase_progress()
-            
-            # AUTOMATIC PHASE HANDLING SECTION
-            # UNTAP PHASE: if the environment is in the untap phase, process it automatically.
-            if gs.phase == gs.PHASE_UNTAP:
-                try:
-                    # Track current turn before automatic phase handling
-                    pre_phase_turn = gs.turn
-                    
-                    current_player = gs.p1 if gs.agent_is_p1 else gs.p2
-                    gs._untap_phase(current_player)
-                    # Transition automatically to the draw phase
-                    gs.phase = gs.PHASE_DRAW
-                    
-                    # Check if turn has changed during automatic phase handling
-                    if gs.turn != pre_phase_turn:
-                        logging.warning(f"Turn changed during automatic UNTAP phase handling: {pre_phase_turn} -> {gs.turn}")
-                    
-                    try:
-                        self.current_valid_actions = self.action_handler.generate_valid_actions()
-                    except Exception as e:
-                        log_exception(e, f"Error generating valid actions during UNTAP phase")
-                        # Fallback to basic actions
-                        self.current_valid_actions = np.zeros(480, dtype=bool)
-                        self.current_valid_actions[2] = True  # Enable DRAW_NEXT
-                    
-                    obs = self._get_obs()
-                    info["action_mask"] = self.current_valid_actions.astype(bool)
-                    logging.debug("Automatic untap phase executed; transitioning to DRAW phase.")
-                    logging.debug(f"Post-untap state: Mana pool: {current_player['mana_pool']}, Hand count: {len(current_player['hand'])}, Battlefield count: {len(current_player['battlefield'])}")
-                    # Return a zero reward step
-                    return obs, 0.0, False, False, info
-                except Exception as e:
-                    log_exception(e, "Error in automatic UNTAP phase processing")
-                    # Continue with normal step logic instead of failing
-            
-            # BEGINNING_OF_COMBAT PHASE: transition automatically
-            elif gs.phase == gs.PHASE_BEGINNING_OF_COMBAT:
-                try:
-                    # Track current turn before automatic phase handling
-                    pre_phase_turn = gs.turn
-                    
-                    # Automatic advancement
-                    gs.phase = gs.PHASE_BEGIN_COMBAT
-                    
-                    # Check if turn has changed during automatic phase handling
-                    if gs.turn != pre_phase_turn:
-                        logging.warning(f"Turn changed during automatic BEGINNING_OF_COMBAT phase handling: {pre_phase_turn} -> {gs.turn}")
-                    
-                    try:
-                        self.current_valid_actions = self.action_handler.generate_valid_actions()
-                    except Exception as e:
-                        log_exception(e, "Error generating valid actions during BEGINNING_OF_COMBAT phase")
-                        # Fallback to basic actions
-                        self.current_valid_actions = np.zeros(480, dtype=bool)
-                        self.current_valid_actions[8] = True  # Enable BEGIN_COMBAT_END
-                    
-                    obs = self._get_obs()
-                    info["action_mask"] = self.current_valid_actions.astype(bool)
-                    logging.debug("Automatic phase transition to BEGIN_COMBAT")
-                    return obs, 0.0, False, False, info
-                except Exception as e:
-                    log_exception(e, "Error in automatic BEGINNING_OF_COMBAT phase processing")
-                    # Continue with normal logic
-            
-            # END_OF_COMBAT PHASE: transition automatically
-            elif gs.phase == gs.PHASE_END_OF_COMBAT:
-                try:
-                    # Track current turn before automatic phase handling
-                    pre_phase_turn = gs.turn
-                    
-                    # Automatic advancement  
-                    gs.phase = gs.PHASE_END_COMBAT
-                    
-                    # Check if turn has changed during automatic phase handling
-                    if gs.turn != pre_phase_turn:
-                        logging.warning(f"Turn changed during automatic END_OF_COMBAT phase handling: {pre_phase_turn} -> {gs.turn}")
-                    
-                    try:
-                        self.current_valid_actions = self.action_handler.generate_valid_actions()
-                    except Exception as e:
-                        log_exception(e, "Error generating valid actions during END_OF_COMBAT phase")
-                        # Fallback to basic actions
-                        self.current_valid_actions = np.zeros(480, dtype=bool)
-                        self.current_valid_actions[9] = True  # Enable END_COMBAT
-                    
-                    obs = self._get_obs()
-                    info["action_mask"] = self.current_valid_actions.astype(bool)
-                    logging.debug("Automatic phase transition to END_COMBAT")
-                    return obs, 0.0, False, False, info
-                except Exception as e:
-                    log_exception(e, "Error in automatic END_OF_COMBAT phase processing")
-                    # Continue with normal logic
-            
-            # CLEANUP PHASE: transition automatically
-            elif gs.phase == gs.PHASE_CLEANUP:
-                try:
-                    # Track current turn before automatic phase handling
-                    pre_phase_turn = gs.turn
-                    
-                    # Process cleanup effects
-                    current_player = gs.p1 if gs.agent_is_p1 else gs.p2
-                    gs._end_phase(current_player)
-                    
-                    # Discard to hand size
-                    if len(current_player["hand"]) > 7:
-                        discard_count = len(current_player["hand"]) - 7
-                        logging.debug(f"Cleanup: Discarding {discard_count} cards to hand size")
-                        
-                        # Use card evaluator for better discard decisions if available
-                        if hasattr(self, 'card_evaluator'):
-                            # Sort cards by discard value (lower is better to discard)
-                            discard_values = [(i, self.card_evaluator.evaluate_card(card_id, "discard")) 
-                                            for i, card_id in enumerate(current_player["hand"])]
-                            discard_values.sort(key=lambda x: x[1])
-                            
-                            # Discard the worst cards
-                            for i in range(discard_count):
-                                if i < len(discard_values):
-                                    idx_to_discard = discard_values[i][0]
-                                    discard_id = current_player["hand"].pop(idx_to_discard)
-                                    current_player["graveyard"].append(discard_id)
-                                    card = gs._safe_get_card(discard_id)
-                                    logging.debug(f"Discarded {card.name if card else discard_id}")
-                        else:
-                            # Simple discard logic as before
-                            for _ in range(discard_count):
-                                min_value = float('inf')
-                                worst_card_idx = 0
-                                for i, card_id in enumerate(current_player["hand"]):
-                                    card = gs._safe_get_card(card_id)
-                                    if card and hasattr(card, 'cmc'):
-                                        value = card.cmc  # Simple heuristic - higher cost cards are kept
-                                        if value < min_value:
-                                            min_value = value
-                                            worst_card_idx = i
-                                if current_player["hand"]:
-                                    discard_id = current_player["hand"].pop(worst_card_idx)
-                                    current_player["graveyard"].append(discard_id)
-                    
-                    # Remove damage from all permanents
-                    for player in [gs.p1, gs.p2]:
-                        player["damage_counters"] = {}
-                    
-                    # Remove "until end of turn" effects
-                    for player in [gs.p1, gs.p2]:
-                        if hasattr(player, "temp_buffs"):
-                            player["temp_buffs"] = {k: v for k, v in player["temp_buffs"].items() 
-                                                if not v.get("until_end_of_turn", False)}
-                    
-                    # Advance to next turn
-                    prev_turn = gs.turn
-                    gs.phase = gs.PHASE_UNTAP
-                    gs.turn += 1
-                    gs.combat_damage_dealt = False  # Reset for new turn
-                    
-                    # Check for unusual turn jump
-                    if gs.turn != prev_turn + 1:
-                        logging.warning(f"Unusual turn advancement detected in CLEANUP: {prev_turn} -> {gs.turn}")
-                    else:
-                        logging.info(f"=== ADVANCING FROM TURN {prev_turn} TO TURN {gs.turn} ===")
-                    
-                    try:
-                        self.current_valid_actions = self.action_handler.generate_valid_actions()
-                    except Exception as e:
-                        log_exception(e, "Error generating valid actions during CLEANUP phase")
-                        # Fallback to basic actions
-                        self.current_valid_actions = np.zeros(480, dtype=bool)
-                        self.current_valid_actions[1] = True  # Enable UNTAP_NEXT
-                    
-                    obs = self._get_obs()
-                    info["action_mask"] = self.current_valid_actions.astype(bool)
-                    logging.debug(f"Automatic CLEANUP phase executed; advancing to Turn {gs.turn}.")
-                    return obs, 0.0, False, False, info
-                except Exception as e:
-                    log_exception(e, "Error in automatic CLEANUP phase processing")
-                    # Continue with normal logic
-            
-            # Combat damage phase transitions
-            elif gs.phase == gs.PHASE_COMBAT_DAMAGE and gs.combat_damage_dealt:
-                try:
-                    # Track current turn before automatic phase handling
-                    pre_phase_turn = gs.turn
-                    
-                    # Automatically advance to end of combat after damage is dealt
-                    gs.phase = gs.PHASE_END_OF_COMBAT
-                    
-                    # Check if turn has changed during automatic phase handling
-                    if gs.turn != pre_phase_turn:
-                        logging.warning(f"Turn changed during automatic COMBAT_DAMAGE phase handling: {pre_phase_turn} -> {gs.turn}")
-                    
-                    try:
-                        self.current_valid_actions = self.action_handler.generate_valid_actions()
-                    except Exception as e:
-                        log_exception(e, "Error generating valid actions during COMBAT_DAMAGE phase")
-                        # Fallback to basic actions
-                        self.current_valid_actions = np.zeros(480, dtype=bool)
-                        self.current_valid_actions[10] = True  # Enable END_OF_COMBAT action
-                    
-                    obs = self._get_obs()
-                    info["action_mask"] = self.current_valid_actions.astype(bool)
-                    logging.debug("Automatic transition to END_OF_COMBAT after damage dealt")
-                    return obs, 0.0, False, False, info
-                except Exception as e:
-                    log_exception(e, "Error in automatic COMBAT_DAMAGE phase processing")
-                    # Continue with normal logic
-            
-            # FIRST_STRIKE_DAMAGE PHASE: handle automatically if present
-            elif gs.phase == gs.PHASE_FIRST_STRIKE_DAMAGE:
-                try:
-                    # Track current turn before automatic phase handling
-                    pre_phase_turn = gs.turn
-                    
-                    # Process first strike damage using enhanced combat resolver if available
-                    if hasattr(self, 'combat_resolver') and hasattr(self.combat_resolver, 'resolve_first_strike_damage'):
-                        self.combat_resolver.resolve_first_strike_damage()
-                    
-                    # Advance to regular damage phase
-                    gs.phase = gs.PHASE_COMBAT_DAMAGE
-                    
-                    # Check if turn has changed during automatic phase handling
-                    if gs.turn != pre_phase_turn:
-                        logging.warning(f"Turn changed during automatic FIRST_STRIKE_DAMAGE phase handling: {pre_phase_turn} -> {gs.turn}")
-                    
-                    try:
-                        self.current_valid_actions = self.action_handler.generate_valid_actions()
-                    except Exception as e:
-                        log_exception(e, "Error generating valid actions during FIRST_STRIKE_DAMAGE phase")
-                        # Fallback to basic actions
-                        self.current_valid_actions = np.zeros(480, dtype=bool)
-                        self.current_valid_actions[4] = True  # Enable COMBAT_DAMAGE
-                    
-                    obs = self._get_obs()
-                    info["action_mask"] = self.current_valid_actions.astype(bool)
-                    logging.debug("Automatic first strike damage processed; transitioning to regular COMBAT_DAMAGE")
-                    return obs, 0.0, False, False, info
-                except Exception as e:
-                    log_exception(e, "Error in automatic FIRST_STRIKE_DAMAGE phase processing")
-                    # Continue with normal logic
-            
-            # After attackers are declared but before blockers phase
-            if gs.phase == gs.PHASE_DECLARE_ATTACKERS and len(gs.current_attackers) > 0:
-                # Find optimal blocks for AI opponent
-                try:
-                    if hasattr(self, 'combat_resolver') and hasattr(self.combat_resolver, 'evaluate_potential_blocks'):
-                        # Use the enhanced combat evaluation
-                        block_assignments = {}
-                        
-                        for attacker_id in gs.current_attackers:
-                            potential_blockers = [cid for cid in opp["battlefield"] 
-                                                if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'card_types') and 
-                                                'creature' in gs._safe_get_card(cid).card_types]
-                            
-                            # Get potential blocks for this attacker
-                            block_options = self.combat_resolver.evaluate_potential_blocks(attacker_id, potential_blockers)
-                            
-                            # Choose the best option with value above threshold
-                            if block_options and block_options[0]['value'] > 0:
-                                block_assignments[attacker_id] = block_options[0]['blocker_ids']
-                        
-                        gs.current_block_assignments = block_assignments
-                        logging.debug(f"AI computed optimal blocks: {block_assignments}")
-                    else:
-                        # Use the original function
-                        optimal_blocks = self.action_handler.find_optimal_blocks()
-                        gs.current_block_assignments = optimal_blocks
-                        logging.debug(f"AI computed basic blocks: {optimal_blocks}")
-                except Exception as e:
-                    log_exception(e, "Error computing optimal blocks")
-                    # Continue without blocking if there's an error
-            
-            # Apply layer effects if needed
-            if hasattr(gs, 'layer_system') and gs.layer_system:
-                try:
-                    gs.layer_system.apply_all_effects()
-                except Exception as e:
-                    log_exception(e, "Error applying layer effects")
-            
-            # NORMAL ACTION PROCESSING
+            # --- Initial State & Setup ---
             self.current_step += 1
-            logging.debug(f"Processing action index: {action_idx}")
-            
-            # Get action info with error handling
-            try:
-                action_type, param = self.action_handler.get_action_info(action_idx)
-                logging.debug(f"Attempting action: {action_type} ({action_idx}) with param {param}")
-            except Exception as e:
-                log_exception(e, f"Error getting action info for action {action_idx}")
-                # Default to safe values
-                action_type, param = "INVALID", None
-            
-            # Check action validity
-            if action_idx >= len(self.current_valid_actions) or not self.current_valid_actions[action_idx]:
-                logging.debug(f"Invalid action index {action_idx} selected; applying penalty.")
-                reward = -0.05  # Small penalty for invalid action
-                done = False
+            step_reward = 0.0
+            done = False
+            truncated = False
+            pre_action_pattern = None
+
+            # --- Action Validation ---
+            if not (0 <= action_idx < self.ACTION_SPACE_SIZE):
+                logging.error(f"Action index {action_idx} is out of bounds (0-{self.ACTION_SPACE_SIZE-1}).")
+                raise IndexError(f"Action index {action_idx} is out of bounds.")
+
+            current_valid_actions = self.action_mask() # Refresh mask just before check
+            if not current_valid_actions[action_idx]:
+                logging.warning(f"Step {self.current_step}: Invalid action {action_idx} selected (Mask False). Reason: {self.action_reasons.get(action_idx, 'Not valid')}. Available: {np.where(current_valid_actions)[0]}")
                 self.invalid_action_count += 1
                 self.episode_invalid_actions += 1
-                
+                step_reward = -0.1 # Standard penalty for mask failure
+
                 if self.invalid_action_count >= self.invalid_action_limit:
+                    logging.error(f"Exceeded invalid action limit ({self.invalid_action_count}). Terminating episode.")
+                    done, truncated, step_reward = True, True, -2.0 # Truncated due to limit
+                else:
+                    # State didn't change, return current obs
+                    obs = self._get_obs_safe() # Use safe get obs
+                    info["invalid_action"] = True
+                    info["action_mask"] = current_valid_actions.astype(bool) # Return the current valid mask
+                    # Update action/reward history even for invalid mask selection
+                    self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
+                    self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = step_reward
+                    return obs, step_reward, done, truncated, info
+
+            self.invalid_action_count = 0 # Reset counter
+
+            # --- Get Action Info & Pre-State ---
+            action_type, param = self.get_action_info(action_idx)
+            if DEBUG_ACTION_STEPS: logging.info(f"Step {self.current_step}: Player {gs.priority_player['name']} trying {action_type}({param}) Context: {context}")
+            self.current_episode_actions.append(action_idx) # Record valid action attempt
+
+            me = gs.p1 if gs.agent_is_p1 else gs.p2
+            opp = gs.p2 if gs.agent_is_p1 else gs.p1
+            prev_state = {
+                "my_life": me["life"], "opp_life": opp["life"],
+                "my_hand": len(me["hand"]), "opp_hand": len(opp["hand"]),
+                "my_board": len(me["battlefield"]), "opp_board": len(opp["battlefield"]),
+                "my_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) for cid in me["battlefield"] if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
+                "opp_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) for cid in opp["battlefield"] if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
+            }
+            if hasattr(gs, 'strategy_memory') and gs.strategy_memory:
+                 pre_action_pattern = gs.strategy_memory.extract_strategy_pattern(gs)
+
+            # --- Execute Agent's Action ---
+            action_reward = 0.0
+            action_executed = False
+            # Make sure handler map exists
+            if not hasattr(self.action_handler, 'action_handlers'):
+                raise AttributeError("ActionHandler is missing the 'action_handlers' dictionary.")
+            handler_func = self.action_handler.action_handlers.get(action_type)
+
+            if handler_func:
+                try:
+                    # Pass context, handle various return types
+                    result = handler_func(param=param, context=context, action_type=action_type)
+                    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], bool): action_reward, action_executed = result
+                    elif isinstance(result, bool): action_reward, action_executed = (0.05, True) if result else (-0.1, False)
+                    elif isinstance(result, (int, float)): action_reward, action_executed = float(result), True
+                    else: action_reward, action_executed = 0.0, True
+                    if action_reward is None: action_reward = 0.0
+
+                except TypeError as te: # Fallback if handler doesn't take extra kwargs
+                     if "unexpected keyword argument" in str(te):
+                         try:
+                              result = handler_func(param) # Call without extra kwargs
+                              if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], bool): action_reward, action_executed = result
+                              elif isinstance(result, bool): action_reward, action_executed = (0.05, True) if result else (-0.1, False)
+                              elif isinstance(result, (int, float)): action_reward, action_executed = float(result), True
+                              else: action_reward, action_executed = 0.0, True
+                              if action_reward is None: action_reward = 0.0
+                         except Exception as handler_e: log_exception(handler_e, f"Error executing handler {action_type} (fallback call)"); action_reward, action_executed = -0.2, False
+                     else: log_exception(te, f"TypeError executing handler {action_type}"); action_reward, action_executed = -0.2, False
+                except Exception as handler_e: log_exception(handler_e, f"Error executing handler {action_type}"); action_reward, action_executed = -0.2, False
+            else: logging.warning(f"No handler implemented for action type: {action_type}"); action_reward, action_executed = -0.05, False
+
+            step_reward += action_reward
+            info["action_reward"] = action_reward # Record action-specific reward
+
+            # Handle execution failure immediately
+            if not action_executed:
+                logging.warning(f"Action {action_type}({param}) failed during execution.")
+                self.invalid_action_count += 1
+                self.episode_invalid_actions += 1
+                step_reward = -0.15 # Execution failure penalty
+                if self.invalid_action_count >= self.invalid_action_limit:
+                    logging.error(f"Exceeded invalid action limit ({self.invalid_action_count}) after execution failure. Terminating episode.")
+                    done, truncated, step_reward = True, True, -2.0
+                # State might have partially changed, so get current obs
+                obs = self._get_obs_safe()
+                info["action_mask"] = self.action_mask().astype(bool) # Regenerate mask
+                info["execution_failed"] = True
+                self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
+                self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = step_reward
+                return obs, step_reward, done, truncated, info
+
+            # --- Main Game Loop (Post-Action Processing) ---
+            # This loop continues until the AGENT gets priority OR the game ends.
+            # -----------------------------------------------
+            max_loops = 50 # Safety limit
+            loop_count = 0
+            while loop_count < max_loops:
+                loop_count += 1
+                state_changed_this_loop = False # Tracks if SBAs, triggers, or stack resolution caused changes
+
+                # 1. State-Based Actions (SBAs) - Repeat until stable
+                # ----------------------------------------------------
+                sbas_applied = True
+                while sbas_applied:
+                    sbas_applied = gs.check_state_based_actions()
+                    if sbas_applied: state_changed_this_loop = True
+
+                # 2. Check Game End from SBAs
+                # ---------------------------
+                if (me["life"] <= 0 or opp["life"] <= 0 or
+                    getattr(me, "attempted_draw_from_empty", False) or getattr(opp, "attempted_draw_from_empty", False) or
+                    me.get("poison_counters", 0) >= 10 or opp.get("poison_counters", 0) >= 10 or
+                    getattr(me, "lost_game", False) or getattr(opp, "lost_game", False)): # Check explicit loss flags
                     done = True
-                    reward -= 1.0  # Extra penalty for too many invalid actions
-                    logging.debug(f"Too many invalid actions ({self.invalid_action_count}) - ending episode")
-                
-                obs = self._get_obs()
-                
-                try:
-                    self.current_valid_actions = self.action_handler.generate_valid_actions()
-                except Exception as e:
-                    log_exception(e, f"Error generating valid actions after invalid action {action_idx}")
-                    # Keep using current valid actions or enable a safe fallback
-                    if not np.any(self.current_valid_actions):
-                        self.current_valid_actions = np.zeros(480, dtype=bool)
-                        self.current_valid_actions[0] = True  # Enable at least END_TURN
-                
-                info["action_mask"] = self.current_valid_actions.astype(bool)
-                truncated = self.current_step >= self.max_episode_steps
-                
-                # Update action and reward memory
-                self.last_n_actions = np.roll(self.last_n_actions, 1)
-                self.last_n_actions[0] = action_idx
-                self.last_n_rewards = np.roll(self.last_n_rewards, 1)
-                self.last_n_rewards[0] = reward
-                
-                if DEBUG_ACTION_STEPS:
-                    logging.debug(f"== STEP END (Invalid): reward={reward}, done={done} ==")
-                        
-                return obs, reward, done, truncated, info
-            
-            # Valid action processing
-            self.invalid_action_count = 0
-            logging.debug(f"Executing action: {action_type} ({action_idx}) with param {param}")
-            
-            # Record this action
-            self.current_episode_actions.append(action_idx)
-            
-            # Process specific action types
-            # END_COMBAT action
-            if action_type == "END_COMBAT":
-                try:
-                    logging.debug("Processing END_COMBAT action")
-                    
-                    # Store current phase for logging
-                    current_phase = gs.phase
-                    
-                    # Check if we're in the right phase
-                    if current_phase not in [gs.PHASE_END_COMBAT, gs.PHASE_END_OF_COMBAT]:
-                        logging.warning(f"END_COMBAT action called from unexpected phase: {current_phase}")
-                        
-                        # Force transition to appropriate phase
-                        gs.phase = gs.PHASE_MAIN_POSTCOMBAT
+                    # Final reward calculation happens later before returning
+                    logging.debug(f"Game ended due to SBAs in loop {loop_count}.")
+                    break # Exit main loop
+
+                # 3. Process Triggered Abilities (Put on Stack)
+                # ---------------------------------------------
+                if hasattr(gs, '_process_triggered_abilities'):
+                    triggers_added = gs._process_triggered_abilities()
+                    if triggers_added:
+                        state_changed_this_loop = True
+                        gs.priority_player = gs._get_active_player() # Priority goes to AP after triggers
+                        gs.priority_pass_count = 0
+                        logging.debug(f"Triggers added to stack, priority to {gs.priority_player['name']}")
+
+                # 4. Check for Priority & Stack Resolution
+                # ----------------------------------------
+                current_priority_holder = gs.priority_player
+                agent_player = gs.p1 if gs.agent_is_p1 else gs.p2
+
+                # 4a. Check if Agent Regains Priority
+                if current_priority_holder == agent_player:
+                    temp_mask = self.action_mask() # What can agent do now?
+                    # If agent has meaningful actions (more than just Pass/Concede) OR
+                    # if the stack is NOT empty (agent might want to respond/pass)
+                    if np.sum(temp_mask) > 2 or gs.stack:
+                        logging.debug(f"Agent ({agent_player['name']}) regains priority in phase {gs.phase}. Returning control.")
+                        break # Return control to the agent
                     else:
-                        # Normal transition
-                        gs.phase = gs.PHASE_MAIN_POSTCOMBAT
-                    
-                    # Clean up combat state
-                    gs.current_attackers = []
-                    gs.current_block_assignments = {}
-                    gs.combat_damage_dealt = False
-                    
-                    # Log phase transition
-                    logging.debug(f"Combat ended: Transitioned from {current_phase} to {gs.phase}")
-                    
-                    # Apply small reward for proper progression
-                    reward = 0.05  # Slight positive reward for normal phase progression
-                    
-                    # Generate new valid actions for post-combat main phase
-                    try:
-                        self.current_valid_actions = self.action_handler.generate_valid_actions()
-                    except Exception as e:
-                        logging.error(f"Error generating valid actions after END_COMBAT: {str(e)}")
-                        # Fallback to basic actions
-                        self.current_valid_actions = np.zeros(480, dtype=bool)
-                        self.current_valid_actions[10] = True  # Enable MAIN_POSTCOMBAT action
-                    
-                    # Get updated observation
-                    obs = self._get_obs()
-                    info["action_mask"] = self.current_valid_actions.astype(bool)
-                    
-                    # Update strategy memory
-                    if hasattr(self, 'strategy_memory') and pre_action_pattern is not None:
-                        try:
-                            self.strategy_memory.update_strategy(pre_action_pattern, reward)
-                        except Exception as e:
-                            log_exception(e, "Error updating strategy memory")
-                    
-                    return obs, reward, False, False, info
-                except Exception as e:
-                    log_exception(e, "Error in END_COMBAT action processing")
-                    # Continue with normal step logic
-            
-            # Handle DECLARE_BLOCKERS phase transition to damage phase
-            elif gs.phase == gs.PHASE_DECLARE_BLOCKERS and action_type == "DECLARE_BLOCKER_DONE":
-                try:
-                    logging.debug("Blockers declared, advancing to combat damage")
-                    
-                    # Check for first strike creatures
-                    has_first_strike = False
-                    
-                    # Check attackers for first strike
-                    for card_id in gs.current_attackers:
-                        card = gs._safe_get_card(card_id)
-                        if card and hasattr(card, 'oracle_text') and 'first strike' in card.oracle_text.lower():
-                            has_first_strike = True
-                            break
-                    
-                    # Check blockers for first strike if not found in attackers
-                    if not has_first_strike:
-                        for blocker_list in gs.current_block_assignments.values():
-                            for blocker_id in blocker_list:
-                                card = gs._safe_get_card(blocker_id)
-                                if card and hasattr(card, 'oracle_text') and 'first strike' in card.oracle_text.lower():
-                                    has_first_strike = True
-                                    break
-                            if has_first_strike:
-                                break
-                    
-                    # If any creature has first strike, we go to first strike damage
-                    if has_first_strike:
-                        gs.phase = gs.PHASE_FIRST_STRIKE_DAMAGE
-                        logging.debug("First strike detected, advancing to FIRST_STRIKE_DAMAGE phase")
-                    else:
-                        # Otherwise straight to regular combat damage
-                        gs.phase = gs.PHASE_COMBAT_DAMAGE
-                        logging.debug("No first strike, advancing to COMBAT_DAMAGE phase")
-                    
-                    # Generate new valid actions
-                    self.current_valid_actions = self.action_handler.generate_valid_actions()
-                    
-                    # Apply small reward for proper progression
-                    reward = 0.05  # Slight positive reward for normal phase progression
-                    
-                    obs = self._get_obs()
-                    info["action_mask"] = self.current_valid_actions.astype(bool)
-                    
-                    # Update strategy memory
-                    if hasattr(self, 'strategy_memory') and pre_action_pattern is not None:
-                        try:
-                            self.strategy_memory.update_strategy(pre_action_pattern, reward)
-                        except Exception as e:
-                            log_exception(e, "Error updating strategy memory")
-                    
-                    return obs, reward, False, False, info
-                except Exception as e:
-                    log_exception(e, "Error advancing from blockers to damage: {str(e)}")
-                    import traceback
-                    logging.error(traceback.format_exc())
-                    # Continue with normal step logic
-            
-            # Apply the action
-            try:
-                reward, done = self.action_handler.apply_action(action_type, param)
-            except Exception as e:
-                log_exception(e, f"Error applying action {action_type} with param {param}")
-                reward = -0.1
-                done = False
-            
-            # Apply replacement effects if available
-            if hasattr(gs, 'replacement_effects') and gs.replacement_effects:
-                try:
-                    event_context = {
-                        "action_type": action_type,
-                        "card_id": param,
-                        "controller": me
-                    }
-                    gs.replacement_effects.apply_replacements("ACTION", event_context)
-                except Exception as e:
-                    log_exception(e, "Error applying replacement effects")
-            
-            # Update strategy memory with action result
-            if hasattr(self, 'strategy_memory'):
-                try:
-                    # Extract post-action pattern
-                    post_action_pattern = self.strategy_memory.extract_strategy_pattern(gs)
-                    
-                    # Update strategy memory with the game's reward
-                    if pre_action_pattern is not None:
-                        self.strategy_memory.update_strategy(pre_action_pattern, reward)
-                    
-                    # Record the action sequence
-                    if hasattr(self, 'current_episode_actions'):
-                        self.strategy_memory.record_action_sequence(self.current_episode_actions, reward)
-                    
-                    # Periodic memory management
-                    if random.random() < 0.1:  # 10% chance to save and prune memory
-                        try:
-                            self.strategy_memory.save_memory_async()
-                            self.strategy_memory.prune_memory()
-                        except Exception as e:
-                            logging.warning(f"Non-critical memory management error: {e}")
-                    
-                    logging.debug(f"Strategy memory updated with reward: {reward}")
-                except Exception as e:
-                    logging.error(f"Error updating strategy memory: {str(e)}")
-                    import traceback
-                    logging.error(traceback.format_exc())
-            
-            # Layer system cleanup
-            if hasattr(gs, 'layer_system') and gs.layer_system:
-                try:
-                    gs.layer_system.cleanup_expired_effects()
-                except Exception as e:
-                    log_exception(e, "Error cleaning up layer effects")
-            
-            # Replacement effects cleanup
-            if hasattr(gs, 'replacement_effects') and gs.replacement_effects:
-                try:
-                    gs.replacement_effects.cleanup_expired_effects()
-                except Exception as e:
-                    log_exception(e, "Error cleaning up replacement effects")
-            
-            # Check if turn has changed
-            if gs.turn != current_turn:
-                turn_diff = gs.turn - current_turn
-                if turn_diff > 1:
-                    logging.warning(f"Detected unexpected turn jump from {current_turn} to {gs.turn}. This may indicate a bug.")
-                logging.info(f"== ADVANCING TO TURN {gs.turn} ==")
-                
-                # Add this: Adapt strategy at the beginning of new turns
-                if hasattr(gs, 'strategic_planner'):
-                    try:
-                        strategy_params = gs.strategic_planner.adapt_strategy()
-                        logging.debug(f"Adapted strategy for turn {gs.turn}: {strategy_params}")
-                    except Exception as e:
-                        logging.error(f"Error adapting strategy: {e}")
-            
-            if not done:
-                # Only add board reward when a new turn has begun or phase has changed substantially
-                if gs.turn != current_turn or (current_phase != gs.phase and 
-                                            (current_phase in [gs.PHASE_MAIN_PRECOMBAT, gs.PHASE_MAIN_POSTCOMBAT] or 
-                                            gs.phase in [gs.PHASE_MAIN_PRECOMBAT, gs.PHASE_MAIN_POSTCOMBAT])):
-                    try:
-                        # Use enhanced board state evaluation if available
-                        if hasattr(self, 'strategic_planner') and hasattr(self.strategic_planner, 'analyze_game_state'):
-                            # Update analysis
-                            analysis = self.strategic_planner.analyze_game_state()
-                            position_score = analysis["position"]["score"]
-                            
-                            # Convert position score to reward
-                            board_reward = position_score * 0.3
-                            
-                            # Apply strategy adjustments
-                            strategy_params = self.strategic_planner.adapt_strategy()
-                            adjusted_reward = board_reward * (1 + 0.2 * strategy_params["aggression"])
-                            
-                            reward += adjusted_reward
-                            logging.debug(f"Added strategic board state reward: {adjusted_reward:.4f}")
+                        # Agent has priority, stack empty, only Pass/Concede valid. Auto-pass to progress game.
+                        logging.debug(f"Agent ({agent_player['name']}) auto-passing priority (stack empty, only pass/concede).")
+                        gs._pass_priority() # This advances priority pass count
+                        state_changed_this_loop = True # State (priority count) changed
+                        # Loop continues to check if this pass resolves stack/advances phase
+                        continue
+
+                # 4b. Agent doesn't have priority - Simulate Opponent/Other Agent Pass
+                else:
+                    # Simple simulation: opponent always passes immediately if they gain priority
+                    # (unless implementing a more complex opponent model)
+                    logging.debug(f"Non-agent player ({current_priority_holder['name']}) holds priority. Auto-passing.")
+                    gs._pass_priority() # This advances priority pass count
+                    state_changed_this_loop = True # Priority shifted
+                    # Loop continues to check if this pass resolves stack/advances phase
+                    continue # Re-evaluate state after opponent pass
+
+                # 4c. Stack Resolution (If both players passed)
+                if gs.priority_pass_count >= 2:
+                    if gs.stack:
+                        if not gs.split_second_active:
+                            logging.debug("Both players passed. Resolving top of stack.")
+                            if not gs.resolve_top_of_stack():
+                                 logging.error("Stack resolution failed! Terminating episode.")
+                                 done = True; truncated = True; step_reward = -3.0 # Severe penalty
+                                 break # Exit loop
+                            state_changed_this_loop = True # Resolving stack changes state
+                            # SBAs/Triggers will be checked at the start of the next loop iteration
+                            gs.priority_player = gs._get_active_player() # Priority back to AP after resolution
+                            gs.priority_pass_count = 0
                         else:
-                            # Fall back to original board state reward
-                            board_reward = self._calculate_board_state_reward()
-                            reward += board_reward
-                            logging.debug(f"Added basic board state reward: {board_reward:.4f}")
-                    except Exception as e:
-                        log_exception(e, "Error calculating board state reward")
-            
-            self.episode_rewards.append(reward)
-            
-            # Check for game end conditions with additional safeguards
-            if gs.turn > self.max_turns:
-                done = True
-                logging.info(f"GAME OVER: Turn limit reached ({gs.turn} > {self.max_turns}) - P1 Life: {gs.p1['life']}, P2 Life: {gs.p2['life']}")
-                
-                # Determine winner by life total
-                if me["life"] > opp["life"]:
-                    reward += 3.0  # Big reward for winning
-                    logging.info("Game ended due to turn limit - Player won by higher life total")
-                    
-                    # Set win/loss flags for state-based actions
-                    if gs.agent_is_p1:
-                        gs.p1["won_game"] = True
-                        gs.p2["lost_game"] = True
-                    else:
-                        gs.p2["won_game"] = True
-                        gs.p1["lost_game"] = True
-                        
-                    # Record game statistics
-                    if self.has_stats_tracker:
-                        is_p1_winner = gs.agent_is_p1
-                        logging.info("Recording game statistics") 
-                        self.record_game_result(is_p1_winner, gs.turn, me["life"])
-                    
-                elif me["life"] < opp["life"]:
-                    reward -= 1.0  # Penalty for losing
-                    logging.info("Game ended due to turn limit - Player lost by lower life total")
-                    
-                    # Set win/loss flags for state-based actions
-                    if gs.agent_is_p1:
-                        gs.p1["lost_game"] = True
-                        gs.p2["won_game"] = True
-                    else:
-                        gs.p2["lost_game"] = True
-                        gs.p1["won_game"] = True
-                        
-                    # Record game statistics
-                    if self.has_stats_tracker:
-                        is_p1_winner = not gs.agent_is_p1
-                        logging.info("Recording game statistics") 
-                        self.record_game_result(is_p1_winner, gs.turn, opp["life"])
-                    
-                else:
-                    reward += 0.25  # Small reward for draw
-                    logging.info("Game ended due to turn limit - Game ended in a draw")
-                    
-                    # Set draw flags
-                    gs.p1["game_draw"] = True
-                    gs.p2["game_draw"] = True
-                        
-                    # Record game statistics for draw
-                    if self.has_stats_tracker:
-                        logging.info("Recording game statistics") 
-                        self.record_game_result(None, gs.turn, me["life"], is_draw=True)
-            
-            # Life-based game ending conditions
-            if me["life"] <= 0:
-                done = True
-                reward -= 5.0  # Bigger penalty for losing by life total
-                
-                # Set win/loss flags for state-based actions
-                if gs.agent_is_p1:
-                    gs.p1["lost_game"] = True
-                    gs.p2["won_game"] = True
-                else:
-                    gs.p2["lost_game"] = True
-                    gs.p1["won_game"] = True
-                    
-                logging.debug("Player lost - life total reduced to zero or below")
-                
-                # Record game statistics
-                if self.has_stats_tracker:
-                    is_p1_winner = not gs.agent_is_p1
-                    logging.info("Recording game statistics") 
-                    self.record_game_result(is_p1_winner, gs.turn, opp["life"])
-                
-                # Log final game state
-                my_creatures = [cid for cid in me["battlefield"] 
-                            if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'card_types') 
-                            and 'creature' in gs._safe_get_card(cid).card_types]
-                opp_creatures = [cid for cid in opp["battlefield"] 
-                            if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'card_types') 
-                            and 'creature' in gs._safe_get_card(cid).card_types]
-                logging.info(f"GAME OVER: Player lost with {me['life']} life vs opponent's {opp['life']} life")
-                logging.info(f"GAME STATS: Turn {gs.turn}, Player creatures: {len(my_creatures)}, Opponent creatures: {len(opp_creatures)}")
-            
-            if opp["life"] <= 0:
-                done = True
-                reward += 10.0  # Base reward for reducing opponent to zero
-                
-                # Set win/loss flags for state-based actions
-                if gs.agent_is_p1:
-                    gs.p1["won_game"] = True
-                    gs.p2["lost_game"] = True
-                else:
-                    gs.p2["won_game"] = True
-                    gs.p1["lost_game"] = True
-                    
-                logging.debug("Player won - reduced opponent life to zero or below")
-                
-                # ENHANCED QUICK WIN BONUSES: Higher rewards for faster wins
-                if gs.turn <= 4:
-                    bonus = 15.0  # Massive bonus for extremely quick win
-                    reward += bonus
-                    logging.info(f"EXTREMELY FAST WIN BONUS: Victory in only {gs.turn} turns! (+{bonus})")
-                elif gs.turn <= 7:
-                    bonus = 8.0  # Large bonus for quick win
-                    reward += bonus
-                    logging.info(f"QUICK WIN BONUS: Victory in only {gs.turn} turns! (+{bonus})")
-                elif gs.turn <= 10:
-                    bonus = 5.0  # Moderate bonus for reasonably quick win
-                    reward += bonus
-                    logging.info(f"EFFICIENT WIN BONUS: Victory in {gs.turn} turns! (+{bonus})")
-                
-                # Record game statistics
-                if self.has_stats_tracker:
-                    is_p1_winner = gs.agent_is_p1
-                    self.record_game_result(is_p1_winner, gs.turn, me["life"])
-                
-                # Log final game details
-                logging.info(f"GAME OVER: Player WON with {me['life']} life vs opponent's {opp['life']} life")
-                logging.info(f"GAME STATS: Turn {gs.turn}, Victory achieved")
-            
-            # Add life total difference tracking
-            if prev_player_life is not None and prev_opponent_life is not None:
-                player_life_change = me["life"] - prev_player_life
-                opponent_life_change = opp["life"] - prev_opponent_life
-                
-                # Reward positive life swings
-                if player_life_change > 0:
-                    gain_reward = min(player_life_change * 0.1, 0.3)
-                    reward += gain_reward
-                    logging.debug(f"Life gain reward: +{gain_reward:.2f} for gaining {player_life_change} life")
-                    
-                if opponent_life_change < 0:
-                    damage_reward = min(abs(opponent_life_change) * 0.15, 0.5)
-                    reward += damage_reward
-                    logging.debug(f"Damage reward: +{damage_reward:.2f} for dealing {abs(opponent_life_change)} damage")
-            
-            # Check if progress was forced by the game system and apply penalty if necessary
-            if hasattr(gs, 'progress_was_forced') and gs.progress_was_forced:
-                # Apply a significant penalty to discourage behaviors that lead to phase stagnation
-                penalty = -1.0
-                reward += penalty
-                gs.progress_was_forced = False  # Reset the flag
-                logging.info(f"Applied penalty of {penalty} for forcing game progress")
-            
-            # Store current life totals for next step
-            self.prev_player_life = me["life"]
-            self.prev_opponent_life = opp["life"]
-            
-            # Update action and reward memory
-            self.last_n_actions = np.roll(self.last_n_actions, 1)
-            self.last_n_actions[0] = action_idx
-            self.last_n_rewards = np.roll(self.last_n_rewards, 1)
-            self.last_n_rewards[0] = reward
-            
-            # Update enhanced components state if available
-            if hasattr(self, 'strategic_planner'):
-                try:
-                    # Reanalyze game state after action
-                    analysis = self.strategic_planner.analyze_game_state()
-                    strategy_params = self.strategic_planner.adapt_strategy()
-                    
-                    # Add to info dictionary
-                    info["position"] = analysis["position"]["overall"]
-                    info["game_stage"] = analysis["game_info"]["game_stage"]
-                    info["strategy"] = {
-                        "aggression": strategy_params["aggression"],
-                        "risk": strategy_params["risk"]
-                    }
-                except Exception as e:
-                    log_exception(e, "Error updating strategic planner")
-            
-            # Get updated observation and regenerate action mask
-            obs = self._get_obs()
-            
-            try:
-                self.current_valid_actions = self.action_handler.generate_valid_actions()
-            except Exception as e:
-                log_exception(e, "Error generating valid actions at end of step")
-                # Fallback to safe actions
-                if not np.any(self.current_valid_actions):
-                    self.current_valid_actions = np.zeros(480, dtype=bool)
-                    self.current_valid_actions[0] = True  # Enable END_TURN as fallback
-            
+                            logging.debug("Split Second active, cannot resolve stack.")
+                            # Priority stays with the non-active player until they pass again
+                            # This needs careful handling - let's assume passing continues
+                            gs.priority_player = gs._get_active_player()
+                            gs.priority_pass_count = 0 # Reset needed here? Check Split Second rules
+
+                    # 4d. Phase Advancement (If stack empty & both passed)
+                    elif not gs.stack:
+                        prev_phase = gs.phase
+                        logging.debug(f"Both players passed on empty stack. Advancing phase from {prev_phase}.")
+                        gs._advance_phase()
+                        state_changed_this_loop = True
+                        gs.priority_player = gs._get_active_player() # Priority to AP in new phase/step
+                        gs.priority_pass_count = 0
+                        # Handle automatic phase actions (Untap, Draw, Cleanup) immediately
+                        if gs.phase == gs.PHASE_UNTAP: gs._untap_phase(gs.priority_player)
+                        elif gs.phase == gs.PHASE_DRAW: gs._draw_phase(gs.priority_player)
+                        elif gs.phase == gs.PHASE_CLEANUP: gs._end_phase(gs.priority_player); # Includes cleanup
+                        # If phase advancement ended the turn, check game limits again
+                        if prev_phase == gs.PHASE_CLEANUP and gs.turn > gs.max_turns:
+                             done, truncated = True, True
+                             logging.info(f"Turn limit reached during phase advance. Final life: {me['life']} vs {opp['life']}.")
+                             break # Exit main loop
+
+
+                # 5. Apply Continuous Effects (Layers) - ONLY if state changed and stack is empty
+                # -----------------------------------------------------------------------------
+                if state_changed_this_loop and not gs.stack and hasattr(gs, 'layer_system'):
+                     gs.layer_system.invalidate_cache()
+                     gs.layer_system.apply_all_effects()
+                     # Re-check SBAs after layers, might cause further changes
+                     if gs.check_state_based_actions():
+                          state_changed_this_loop = True # Ensure loop continues if SBAs happened
+                     else: # If layers applied but caused no SBAs, we might be stable
+                         pass
+
+
+                # Break outer loop if state didn't change this iteration
+                if not state_changed_this_loop:
+                    logging.debug(f"Game state stabilized in loop {loop_count}.")
+                    break
+
+            # End of Main Loop Safety check
+            if loop_count >= max_loops:
+                logging.error(f"Exceeded max game loop iterations ({max_loops}). Potential infinite loop. Terminating.")
+                done, truncated, step_reward = True, True, -3.0
+
+            # --- Calculate Final Step Reward & Check Game End ---
+            # (These calculations happen *after* the game state stabilizes)
+            current_state = { # Gather final state
+                 "my_life": me["life"], "opp_life": opp["life"], "my_hand": len(me["hand"]), "opp_hand": len(opp["hand"]), "my_board": len(me["battlefield"]), "opp_board": len(opp["battlefield"]),
+                 "my_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) for cid in me["battlefield"] if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
+                 "opp_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) for cid in opp["battlefield"] if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])), }
+            state_change_reward = self.action_handler._add_state_change_rewards(0.0, prev_state, current_state)
+            step_reward += state_change_reward
+            info["state_reward"] = state_change_reward
+
+            # Final Game End Checks (again, in case SBAs within loop ended it)
+            game_already_ended = done
+            if not game_already_ended:
+                 if opp["life"] <= 0: done, step_reward = True, step_reward + 10.0 + max(0, 20 - gs.turn) * 0.2; info["game_result"] = "win"
+                 elif me["life"] <= 0: done, step_reward = True, step_reward - 10.0; info["game_result"] = "loss"
+                 elif hasattr(gs, 'check_for_draw_conditions') and gs.check_for_draw_conditions(): done, step_reward = True, step_reward + 0.0; info["game_result"] = "draw"
+                 elif gs.turn > gs.max_turns: done, truncated = True, True; step_reward += (me["life"] - opp["life"]) * 0.1; info["game_result"] = "win" if (me["life"] > opp["life"]) else "loss" if (me["life"] < opp["life"]) else "draw"
+                 elif self.current_step >= self.max_episode_steps: done, truncated, step_reward = True, True, step_reward - 0.5; info["game_result"] = "truncated"
+
+            # Final Log message for end of step
+            if done or truncated:
+                 logging.info(f"Game end condition met: done={done}, truncated={truncated}. Result: {info.get('game_result', 'unknown')}")
+
+            # --- Finalize and Return ---
+            self.episode_rewards.append(step_reward)
+            if done: self.ensure_game_result_recorded()
+
+            obs = self._get_obs_safe() # Use safe version
+            self.current_valid_actions = self.action_mask() # Final mask for agent's *next* decision
             info["action_mask"] = self.current_valid_actions.astype(bool)
-            
-            # Check for episode step limit
-            truncated = False
-            if self.current_step >= self.max_episode_steps:
-                truncated = True
-                done = True
-                reward -= 1.0
-                logging.debug("Max episode steps reached, ending episode.")
-            
-            # Detailed logging for substantial episodes
-            if done and (sum(self.episode_rewards) > 5 or sum(self.episode_rewards) < -5):
-                self.detailed_logging = True
-                self._log_episode_summary()
-                
-            if done:
-                try:
-                    # Extract final strategy pattern
-                    final_pattern = self.strategy_memory.extract_strategy_pattern(gs)
-                    
-                    # Update strategy with total episode reward
-                    total_reward = sum(self.episode_rewards)
-                    self.strategy_memory.update_strategy(final_pattern, total_reward)
-                    
-                    # Save memory at the end of an episode
-                    if hasattr(self, 'strategy_memory'):
-                        self.strategy_memory.save_memory_async()
-                    
-                    logging.info(f"Episode ended with total reward: {total_reward}")
-                except Exception as e:
-                    log_exception(e, "Error processing final strategy memory update")
-        
-            # Ensure game results are recorded when done=True
-            if done:
-                logging.info(f"Game ended with done=True. Final state: Turn {gs.turn}, Player Life: {me['life']}, Opponent Life: {opp['life']}")
-                self.ensure_game_result_recorded()
-            if done and self.has_card_memory:
-                logging.info("Saving card memory data at the end of the game")
-                self.card_memory.save_all_card_data()
-                
+
+            self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
+            self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = step_reward
+
+            if hasattr(gs, 'strategy_memory') and gs.strategy_memory and pre_action_pattern:
+                 try: gs.strategy_memory.update_strategy(pre_action_pattern, step_reward)
+                 except Exception as strategy_e: log_exception(strategy_e, "Error updating strategy memory")
+
             if DEBUG_ACTION_STEPS:
-                logging.debug(f"== STEP END: reward={reward}, done={done}, truncated={truncated} ==")
-                logging.debug(f"Post-step state: P1 Life={gs.p1['life']}, P2 Life={gs.p2['life']}, Phase={gs.phase}")
-                
-            return obs, reward, done, truncated, info
-                    
+                logging.debug(f"== STEP {self.current_step} END: reward={step_reward:.3f}, done={done}, truncated={truncated} ==")
+                logging.debug(f"End state: P1 Life={gs.p1['life']}, P2 Life={gs.p2['life']}, Phase={gs.phase}, Stack Size={len(gs.stack)}, Prio: {gs.priority_player['name']}")
+
+            return obs, step_reward, done, truncated, info
+
         except Exception as e:
-            # Use log_exception if available
-            try:
-                from Playersim.debug import log_exception
-                log_exception(e, f"Unhandled exception in step method with action {action_idx}")
-            except ImportError:
-                logging.error(f"Unhandled exception in step method: {str(e)}")
-                import traceback
-                logging.error(traceback.format_exc())
-            
-            # Return a safe fallback state to prevent crashes
-            try:
-                obs = self._get_obs()
-            except:
-                # Create a minimal valid observation if _get_obs fails
-                obs = {k: np.zeros(space.shape, dtype=space.dtype) 
-                    for k, space in self.observation_space.spaces.items()}
-                    
-            self.current_valid_actions = np.zeros(480, dtype=bool)
-            self.current_valid_actions[0] = True  # Enable at least one action
-            info = {"action_mask": self.current_valid_actions.astype(bool),
-                    "error_recovery": True}
-            
-            # Return negative reward and continue
-            return obs, -0.1, True, False, info
+            logging.error(f"Critical error in step function (Action {action_idx}): {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            obs = self._get_obs_safe()
+            mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+            mask[11] = True; mask[12] = True # Pass, Concede
+            info = {"action_mask": mask, "critical_error": True, "error_message": str(e)}
+            # Ensure game ends on critical error
+            return obs, -5.0, True, False, info # Harsh penalty and end episode
         
     def get_strategic_recommendation(self):
         """

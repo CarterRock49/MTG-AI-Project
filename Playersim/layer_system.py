@@ -348,63 +348,250 @@ class LayerSystem:
         """Apply a single effect to affected cards with a more extensible handler system."""
         # Check if effect is active via condition
         if 'condition' in effect_data and callable(effect_data['condition']):
-            if not effect_data['condition']():
-                return  # Skip if condition not met
-        
+            # Pass context to condition function if needed
+            context = {'game_state': self.game_state, 'source_id': effect_data.get('source_id')}
+            try:
+                if not effect_data['condition'](context): # Assume condition takes context
+                    return # Skip if condition not met
+            except TypeError: # If condition function doesn't accept context
+                if not effect_data['condition']():
+                    return
+            except Exception as e:
+                 logging.error(f"Error evaluating condition for effect {effect_data.get('effect_id')}: {e}")
+                 return # Skip on error
+
+
         # Get affected cards
         affected_ids = effect_data['affected_ids']
         effect_type = effect_data['effect_type']
         effect_value = effect_data['effect_value']
-        
+
         # Define handlers for different effect types
         effect_handlers = {
-            'set_pt': self._handle_set_pt_effect,
-            'modify_pt': self._handle_modify_pt_effect,
-            'switch_pt': self._handle_switch_pt_effect,
-            'set_color': self._handle_set_color_effect,
-            'add_color': self._handle_add_color_effect,
-            'remove_color': self._handle_remove_color_effect,
+            # Layer 1
+            'copy': self._handle_copy_effect,
+            # Layer 2
+            'change_control': self._handle_change_control_effect,
+            # Layer 3
+            'change_text': self._handle_change_text_effect,
+            # Layer 4
             'add_type': self._handle_add_type_effect,
             'remove_type': self._handle_remove_type_effect,
             'add_subtype': self._handle_add_subtype_effect,
             'remove_subtype': self._handle_remove_subtype_effect,
+            # Layer 5
+            'set_color': self._handle_set_color_effect,
+            'add_color': self._handle_add_color_effect,
+            'remove_color': self._handle_remove_color_effect,
+            # Layer 6
             'add_ability': self._handle_add_ability_effect,
             'remove_ability': self._handle_remove_ability_effect,
-            'copy': self._handle_copy_effect,
-            'change_text': self._handle_change_text_effect,
-            'change_control': self._handle_change_control_effect,
             'cant_attack': self._handle_cant_attack_effect,
             'cant_block': self._handle_cant_block_effect,
             'assign_damage_as_though_not_blocked': self._handle_assign_damage_effect,
             'add_protection': self._handle_add_protection_effect,
             'must_attack': self._handle_must_attack_effect,
-            'enchanted_must_attack': self._handle_enchanted_must_attack_effect
+            'enchanted_must_attack': self._handle_enchanted_must_attack_effect, # Example specific
+            # Layer 7
+            'set_pt': self._handle_set_pt_effect,          # 7a
+            # 'apply_counters': self._handle_counters_pt, # 7b - Usually applied directly by counter system
+            'modify_pt': self._handle_modify_pt_effect,    # 7c
+            'switch_pt': self._handle_switch_pt_effect     # 7d
         }
-        
+
         # Get the appropriate handler for this effect type
         handler = effect_handlers.get(effect_type)
-        
+
         if handler:
             # Process each affected card with the handler
             for card_id in affected_ids:
-                card_location = self._find_card_location(card_id)
-                if not card_location:
+                location_info = self._find_card_location(card_id) # Use unified method
+                if not location_info:
                     continue
-                    
-                owner, zone = card_location
-                
+
+                owner, zone = location_info
+
                 # Only apply to cards in appropriate zones (mainly battlefield)
+                # Allow effects to target non-battlefield if specified
                 if zone != "battlefield" and effect_data.get('only_battlefield', True):
                     continue
-                    
+
                 card = self.game_state._safe_get_card(card_id)
                 if not card:
                     continue
-                    
+
                 # Apply the effect using the handler
                 handler(card, effect_value, owner, zone, effect_data)
         else:
-            logging.warning(f"No handler found for effect type: {effect_type}")
+            # Only log error once per unknown type
+            if not hasattr(self, '_logged_errors'): type(self)._logged_errors = set()
+            if effect_type not in self._logged_errors:
+                 logging.warning(f"No layer system handler found for effect type: {effect_type}")
+                 self._logged_errors.add(effect_type)
+                 
+    def _handle_copy_effect(self, card, effect_value, owner, zone, effect_data):
+        """Handle Layer 1: Copy effect. Effect_value is the source card_id to copy."""
+        source_to_copy_id = effect_value
+        source_card = self.game_state._safe_get_card(source_to_copy_id)
+        if not source_card:
+            logging.warning(f"Copy effect source card {source_to_copy_id} not found.")
+            return
+
+        # Apply copyable values (Rules 707.2)
+        copyable_attrs = ['name', 'mana_cost', 'color_indicator', 'card_type', 'subtype', 'supertype',
+                         'rules_text', 'abilities', 'power', 'toughness', 'loyalty', 'hand_modifier', 'life_modifier']
+
+        original_id = card.card_id # Preserve original ID
+        # Use dict representation of card for easier copying
+        source_data = source_card.__dict__ # WARNING: May not work if Card uses slots
+
+        for attr in copyable_attrs:
+            if attr in source_data:
+                 # Need careful handling of mutable types (lists, dicts) -> deepcopy?
+                 try:
+                     value_to_copy = source_data[attr]
+                     if isinstance(value_to_copy, (list, dict)):
+                          import copy
+                          setattr(card, attr, copy.deepcopy(value_to_copy))
+                     else:
+                          setattr(card, attr, value_to_copy)
+                 except Exception as e:
+                      logging.error(f"Error copying attribute '{attr}' for {card.name}: {e}")
+
+        # Reset some properties based on rules
+        card.colors = self.game_state.mana_system.get_colors_from_cost_or_indicator(card) # Recalculate color
+        card.card_id = original_id # Restore ID
+        card.counters = {} # Reset counters
+        card.is_tapped = False # Reset tapped status? Rules check needed.
+        card.is_flipped = False # Reset flip status
+        card.is_transformed = False # Reset transform status
+        # Reset face-down?
+        # Recalculate type line, keywords etc. from copied data
+        if hasattr(card, 'type_line') and callable(card.parse_type_line):
+             card.card_types, card.subtypes, card.supertypes = card.parse_type_line(card.type_line)
+        if hasattr(card, 'oracle_text') and callable(card._extract_keywords):
+             card.keywords = card._extract_keywords(card.oracle_text)
+
+        logging.debug(f"{card.name} (ID: {card.card_id}) became a copy of {source_card.name} (ID: {source_to_copy_id})")
+        
+    def _handle_change_control_effect(self, card, effect_value, owner, zone, effect_data):
+        """Handle Layer 2: Change control effect."""
+        new_controller = effect_value
+        current_controller = owner # 'owner' passed to handler is the current controller in this context
+
+        if current_controller == new_controller: return # No change needed
+
+        # Ensure the new controller is a valid player object
+        if new_controller not in [self.game_state.p1, self.game_state.p2]:
+             logging.error(f"Invalid new controller specified for control change: {new_controller}")
+             return
+
+        logging.debug(f"Attempting to change control of {card.name} from {current_controller['name']} to {new_controller['name']}")
+
+        # Perform the move using GameState's move_card for proper zone handling
+        success = self.game_state.move_card(card.card_id, current_controller, zone, new_controller, zone, cause="control_change")
+
+        if success:
+             logging.debug(f"Control change successful: {card.name} now controlled by {new_controller['name']}")
+             # Check if duration is temporary, add to revert list
+             if effect_data.get('duration') != 'permanent':
+                  if not hasattr(self.game_state, 'temp_control_effects'): self.game_state.temp_control_effects = {}
+                  # Store original owner for reversion
+                  original_owner = self.game_state._find_card_owner(card.card_id) or current_controller # Best guess
+                  self.game_state.temp_control_effects[card.card_id] = original_owner
+        else:
+             logging.warning(f"Control change failed for {card.name}")
+             
+    def _handle_change_text_effect(self, card, effect_value, owner, zone, effect_data):
+        """Handle Layer 3: Change text effect."""
+        # Simplistic version: replace all text. Need Rule 707.8+ for details.
+        # effect_value might be the new text string or specific modifications
+        if isinstance(effect_value, str): # Assume full text replacement
+            if not hasattr(card, '_original_oracle_text'): card._original_oracle_text = card.oracle_text
+            card.oracle_text = effect_value
+            logging.debug(f"Changed text of {card.name}")
+        # TODO: Implement finding/replacing specific text, losing abilities
+
+    def _handle_add_type_effect(self, card, effect_value, owner, zone, effect_data):
+        """Handle Layer 4: Add type effect."""
+        new_type = effect_value.lower()
+        if hasattr(card, 'card_types') and isinstance(card.card_types, list):
+            if new_type not in card.card_types:
+                card.card_types.append(new_type)
+                logging.debug(f"Added type '{new_type}' to {card.name}")
+                # If becoming a creature, check P/T (should happen in Layer 7a/b/c)
+        elif hasattr(card, 'card_types'): # Might be a string, convert to list
+             existing = [card.card_types.lower()] if isinstance(card.card_types, str) else []
+             if new_type not in existing:
+                  card.card_types = existing + [new_type]
+                  logging.debug(f"Added type '{new_type}' to {card.name}")
+
+    def _handle_remove_type_effect(self, card, effect_value, owner, zone, effect_data):
+        """Handle Layer 4: Remove type effect."""
+        type_to_remove = effect_value.lower()
+        if hasattr(card, 'card_types') and isinstance(card.card_types, list):
+             if type_to_remove in card.card_types:
+                 card.card_types.remove(type_to_remove)
+                 logging.debug(f"Removed type '{type_to_remove}' from {card.name}")
+        elif hasattr(card, 'card_types') and isinstance(card.card_types, str):
+            if card.card_types.lower() == type_to_remove:
+                card.card_types = [] # Remove the only type
+                logging.debug(f"Removed type '{type_to_remove}' from {card.name}")
+                
+    
+    def _handle_add_subtype_effect(self, card, effect_value, owner, zone, effect_data):
+        """Handle Layer 4: Add subtype effect."""
+        new_subtype = effect_value # Keep case? Usually subtypes are capitalized
+        if hasattr(card, 'subtypes') and isinstance(card.subtypes, list):
+            if new_subtype not in card.subtypes:
+                card.subtypes.append(new_subtype)
+                logging.debug(f"Added subtype '{new_subtype}' to {card.name}")
+        elif hasattr(card, 'subtypes'): # String or other type? Initialize properly.
+             card.subtypes = [new_subtype]
+             logging.debug(f"Added subtype '{new_subtype}' to {card.name}")
+        else: # Card didn't have subtypes attribute
+             card.subtypes = [new_subtype]
+             logging.debug(f"Added subtype '{new_subtype}' to {card.name}")
+
+
+    def _handle_remove_subtype_effect(self, card, effect_value, owner, zone, effect_data):
+        """Handle Layer 4: Remove subtype effect."""
+        subtype_to_remove = effect_value # Case sensitive? Let's assume case-insensitive check
+        if hasattr(card, 'subtypes') and isinstance(card.subtypes, list):
+             # Need case-insensitive removal
+             current_subtypes = card.subtypes
+             card.subtypes = [st for st in current_subtypes if st.lower() != subtype_to_remove.lower()]
+             if len(card.subtypes) < len(current_subtypes):
+                  logging.debug(f"Removed subtype '{subtype_to_remove}' from {card.name}")
+        elif hasattr(card, 'subtypes') and isinstance(card.subtypes, str):
+            if card.subtypes.lower() == subtype_to_remove.lower():
+                card.subtypes = [] # Remove the only subtype
+                logging.debug(f"Removed subtype '{subtype_to_remove}' from {card.name}")
+
+    def _handle_set_color_effect(self, card, effect_value, owner, zone, effect_data):
+        """Handle Layer 5: Set color effect."""
+        # effect_value should be a list [W, U, B, R, G]
+        if hasattr(card, 'colors') and isinstance(effect_value, list) and len(effect_value) == 5:
+             card.colors = effect_value[:] # Use slice for new list
+             logging.debug(f"Set {card.name}'s colors")
+
+    def _handle_add_color_effect(self, card, effect_value, owner, zone, effect_data):
+        """Handle Layer 5: Add color effect."""
+        # effect_value should be a list [W, U, B, R, G] where 1 means add that color
+        if hasattr(card, 'colors') and isinstance(effect_value, list) and len(effect_value) == 5:
+            if not hasattr(card, 'added_colors'): card.added_colors = [0]*5
+            for i in range(5):
+                if effect_value[i]:
+                    card.colors[i] = 1
+                    card.added_colors[i] = 1 # Track added colors separately if needed
+            logging.debug(f"Added colors to {card.name}")
+            
+    def _handle_remove_color_effect(self, card, effect_value, owner, zone, effect_data):
+        """Handle Layer 5: Remove color effect (making it colorless)."""
+        # effect_value typically indicates it becomes colorless (e.g., True)
+        if hasattr(card, 'colors') and effect_value:
+            card.colors = [0, 0, 0, 0, 0]
+            logging.debug(f"Removed colors from {card.name} (became colorless)")
             
     def _handle_set_pt_effect(self, card, effect_value, owner, zone, effect_data):
         """Handle Layer 7a: Set power/toughness effect with improved error handling."""

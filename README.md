@@ -27,22 +27,19 @@ graph TD
 
 - Current state: Doesn't work, kinda of a mess, working on version 3.00
 
-- Finish adding support for all keywords
-- Add support for tutors
-- Fix action meanings in actions.py (bunch of issues here)
-- Overhaul the action mask in actions.py (Generate_Vaild_Actions)
-- Overhaul apply_actions in actions.py
+- Finish adding support for all keywords/remove keywords that are accounted for in places other keyword effects
+- Add support for tutors (Basically done need to review the code more and test ti)
+- Refine action meanings in actions.py (nearly done)
 - Add support for coin flips and dice rolls
 - Add support for {2/B} style mana
-- expand layer_system.py and replacement_effects.py
 - Overhaul observation space 
 - Bug fix deck_stat_tracker.py (inconsistent stats?)
-- Add a better MD5 hash to saving decks, one that includes card count to deck_stat_tracker.py
+- Add a better MD5 hash to saving decks, one that includes card count in deck_stat_tracker.py
 - Add support for "Start your engines"
 - Add support for "Exhaust"
 - Overhaul DeckStats_Viewer to work with the current versions of the deck_stat_tracker and card_memory.py
-- General Bug fixing needs to be done, need to refactor somestuff, need to integrate other stuff
-- Clean up codebase
+- General Bug fixing needs to be done, need to integrate other stuff
+- Clean up codebase lots of duplicate logic
 
 ### Key Features
 

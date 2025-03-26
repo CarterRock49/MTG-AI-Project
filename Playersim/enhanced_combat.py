@@ -62,69 +62,149 @@ class ExtendedCombatResolver(EnhancedCombatResolver):
             return True
         return False
                 
-    def _process_attacker_damage(self, attacker_id, attacker_player, defender_player, 
+    def _process_attacker_damage(self, attacker_id, attacker_player, defender_player,
                             damage_to_creatures, damage_to_players, creatures_dealt_damage,
                             killed_creatures, is_first_strike):
-        """Override to handle damage to planeswalkers"""
+        """Override to handle damage to planeswalkers AND BATTLES"""
         gs = self.game_state
-        
-        # Check if this attacker is targeting a planeswalker
+
+        # --- Handle Planeswalker Targeting ---
         if hasattr(gs, "planeswalker_attack_targets") and attacker_id in gs.planeswalker_attack_targets:
             planeswalker_id = gs.planeswalker_attack_targets[attacker_id]
             planeswalker_card = gs._safe_get_card(planeswalker_id)
-            
+
             if not planeswalker_card:
-                # If planeswalker not found, process normal damage
+                # Fallback to regular damage if planeswalker is gone
                 return super()._process_attacker_damage(
-                    attacker_id, attacker_player, defender_player, 
+                    attacker_id, attacker_player, defender_player,
                     damage_to_creatures, damage_to_players, creatures_dealt_damage,
                     killed_creatures, is_first_strike
                 )
-                
-            # Check if the planeswalker is being protected
+
+            # Check if planeswalker is protected
             if hasattr(gs, "planeswalker_protectors") and planeswalker_id in gs.planeswalker_protectors:
                 protector_id = gs.planeswalker_protectors[planeswalker_id]
-                protector_card = gs._safe_get_card(protector_id)
-                
-                if protector_card:
-                    logging.debug(f"COMBAT: Redirecting damage from planeswalker {planeswalker_card.name} to protector {protector_card.name}")
-                    
-                    # Redirect damage to the protector creature
-                    attacker_card = gs._safe_get_card(attacker_id)
-                    if attacker_card:
-                        damage = self._get_card_power(attacker_card, attacker_player)
-                        damage_to_creatures[protector_id] = damage_to_creatures.get(protector_id, 0) + damage
-                        
-                        # Mark the creature as dealt damage for triggers
-                        creatures_dealt_damage.add(attacker_id)
-                        
-                        # Return the damage for additional processing
-                        return damage
-            
-            # Process damage to the planeswalker
-            attacker_card = gs._safe_get_card(attacker_id)
-            if attacker_card:
-                damage = self._get_card_power(attacker_card, attacker_player)
-                self.planeswalker_damage[planeswalker_id] += damage
-                
-                # Track that this creature dealt damage
-                creatures_dealt_damage.add(attacker_id)
-                
-                logging.debug(f"COMBAT: {attacker_card.name} deals {damage} damage to planeswalker {planeswalker_card.name}")
-                
-                # Handle lifelink
-                if self._has_keyword(attacker_card, "lifelink"):
-                    attacker_player["life"] += damage
-                    logging.debug(f"COMBAT: Lifelink from {attacker_card.name} gained {damage} life")
-                
-                return damage
-                
-        # If not attacking a planeswalker, use the parent implementation
+                if self._redirect_damage_to_protector(attacker_id, protector_id):
+                     # Check if creature should deal damage this phase
+                     if self._should_deal_damage_this_phase(gs._safe_get_card(attacker_id), is_first_strike):
+                         # Mark damage dealt for lifelink etc.
+                         attacker_card = gs._safe_get_card(attacker_id)
+                         damage = self._get_card_power(attacker_card, attacker_player)
+                         creatures_dealt_damage.add(attacker_id)
+                         # Apply lifelink for redirected damage
+                         if self._has_keyword(attacker_card, "lifelink"):
+                              attacker_player["life"] += damage
+                              logging.debug(f"COMBAT: Lifelink from {attacker_card.name} gained {damage} life (redirected)")
+                         return damage
+                     else:
+                          return 0
+
+            # Damage to Planeswalker
+            if self._should_deal_damage_this_phase(gs._safe_get_card(attacker_id), is_first_strike):
+                 return self._process_planeswalker_damage(attacker_id, attacker_player, planeswalker_id, damage_to_creatures, creatures_dealt_damage)
+            else:
+                 return 0
+
+        # --- Handle Battle Targeting ---
+        if hasattr(gs, "battle_attack_targets") and attacker_id in gs.battle_attack_targets:
+            battle_id = gs.battle_attack_targets[attacker_id]
+            battle_card = gs._safe_get_card(battle_id)
+
+            if not battle_card:
+                # Fallback if battle is gone
+                return super()._process_attacker_damage(
+                    attacker_id, attacker_player, defender_player,
+                    damage_to_creatures, damage_to_players, creatures_dealt_damage,
+                    killed_creatures, is_first_strike
+                )
+
+            # Check if battle is protected (by defender creatures)
+            # If blocks exist for this battle attacker, damage goes to blockers first
+            blockers = gs.current_block_assignments.get(attacker_id, [])
+            valid_blockers = [b for b in blockers if b not in killed_creatures]
+
+            if valid_blockers:
+                 # Damage assignment handled by super method logic for blocked creatures
+                 return super()._process_attacker_damage(
+                     attacker_id, attacker_player, defender_player,
+                     damage_to_creatures, damage_to_players, creatures_dealt_damage,
+                     killed_creatures, is_first_strike
+                 )
+            else:
+                # Damage to Battle (unblocked)
+                if self._should_deal_damage_this_phase(gs._safe_get_card(attacker_id), is_first_strike):
+                    return self._process_battle_damage(attacker_id, attacker_player, battle_id, creatures_dealt_damage)
+                else:
+                    return 0
+
+        # --- Normal Damage (to player or blockers) ---
+        # Check if damage should be dealt this phase first
+        if not self._should_deal_damage_this_phase(gs._safe_get_card(attacker_id), is_first_strike):
+            return 0
+
+        # If not attacking a planeswalker or battle, use the parent implementation
         return super()._process_attacker_damage(
-            attacker_id, attacker_player, defender_player, 
+            attacker_id, attacker_player, defender_player,
             damage_to_creatures, damage_to_players, creatures_dealt_damage,
             killed_creatures, is_first_strike
         )
+        
+    def _process_planeswalker_damage(self, attacker_id, attacker_player, planeswalker_id, damage_to_creatures, creatures_dealt_damage):
+        """Process damage to a planeswalker."""
+        gs = self.game_state
+        attacker_card = gs._safe_get_card(attacker_id)
+        planeswalker_card = gs._safe_get_card(planeswalker_id)
+        if not attacker_card or not planeswalker_card: return 0
+
+        damage = self._get_card_power(attacker_card, attacker_player)
+        self.planeswalker_damage[planeswalker_id] += damage
+        creatures_dealt_damage.add(attacker_id)
+        logging.debug(f"COMBAT: {attacker_card.name} deals {damage} damage to planeswalker {planeswalker_card.name}")
+
+        if self._has_keyword(attacker_card, "lifelink"):
+            attacker_player["life"] += damage
+            logging.debug(f"COMBAT: Lifelink from {attacker_card.name} gained {damage} life (vs Planeswalker)")
+
+        return damage
+    
+    def _should_deal_damage_this_phase(self, card, is_first_strike_phase):
+        """Check if a creature should deal damage in the current phase."""
+        if not card: return False
+        has_first_strike = self._has_keyword(card, "first strike")
+        has_double_strike = self._has_keyword(card, "double strike")
+
+        if is_first_strike_phase:
+            # Only FS/DS deal damage in first strike phase
+            return has_first_strike or has_double_strike
+        else:
+            # Creatures without FS deal damage, and DS creatures deal damage *again*
+            return not has_first_strike or has_double_strike  
+        
+    def _process_battle_damage(self, attacker_id, attacker_player, battle_id, creatures_dealt_damage):
+        """Process damage dealt to a battle card."""
+        gs = self.game_state
+        attacker_card = gs._safe_get_card(attacker_id)
+        battle_card = gs._safe_get_card(battle_id)
+
+        if not attacker_card or not battle_card:
+            return 0
+
+        damage = self._get_card_power(attacker_card, attacker_player)
+
+        # Use the specific method for damaging battles
+        self.damage_to_battle(battle_id, attacker_id, damage)
+
+        # Mark damage dealt
+        creatures_dealt_damage.add(attacker_id)
+
+        # Apply lifelink if attacker has it
+        if self._has_keyword(attacker_card, "lifelink"):
+            attacker_player["life"] += damage
+            logging.debug(f"COMBAT: Lifelink from {attacker_card.name} gained {damage} life (vs Battle)")
+
+        return damage
+    
+    
         
     def _apply_planeswalker_damage(self):
         """Apply damage to planeswalkers and check if any died with enhanced effect processing"""
