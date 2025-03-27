@@ -183,10 +183,10 @@ ACTION_MEANINGS = {
     # Gap filled with NO_OP (457-459) = 3 actions
     **{i: ("NO_OP", None) for i in range(457, 460)},
 
-    # Attack Battle (460-479) = 20 actions (battle index 0-4, creature index 0-3) - Use (Attacker Index, Battle Index)
-    **{460 + i: ("ATTACK_BATTLE", i) for i in range(20)}, # Param = (Attacker Index, Battle Index) (Indices 0-19 / 0-4?) Need clarification. Let's make it (Battle Index 0-4 * 4 + Attacker Index 0-3)
-    **{460 + (battle_idx * 4) + creature_idx: ("ATTACK_BATTLE", (creature_idx, battle_idx))
-       for battle_idx in range(5) for creature_idx in range(4)},
+    # Actions 460-464: Target Battle index 0-4
+    **{460 + i: ("ATTACK_BATTLE", i) for i in range(5)},
+    # Fill the remaining space (465-479) with No-Ops
+    **{i: ("NO_OP", None) for i in range(465, 480)}
 
     # Final NO_OP to reach 480
     # Action 480 is out of bounds for size 480 (indices 0-479)
@@ -196,12 +196,10 @@ ACTION_MEANINGS = {
 # Check size
 if len(ACTION_MEANINGS) != 480:
     logging.warning(f"ACTION_MEANINGS has {len(ACTION_MEANINGS)} entries, expected 480. Adjusting size...")
-    # Pad with NO_OPs if needed
     max_idx = max(ACTION_MEANINGS.keys()) if ACTION_MEANINGS else -1
     for i in range(max_idx + 1, 480):
         if i not in ACTION_MEANINGS:
             ACTION_MEANINGS[i] = ("NO_OP", None)
-# Ensure all indices from 0 to 479 are present
 for i in range(480):
     if i not in ACTION_MEANINGS:
         ACTION_MEANINGS[i] = ("NO_OP", None)

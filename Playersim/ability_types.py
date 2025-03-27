@@ -771,68 +771,211 @@ class StaticAbility(Ability):
         self.effect = effect.lower()
         
     def apply(self, game_state, affected_cards=None):
-        """Apply the static ability's effect to the game state with comprehensive handling."""
-        effect = self.effect.lower()
-        
-        # Find affected cards if none specified
+        """Register the static ability's effect with the LayerSystem."""
+        if not hasattr(game_state, 'layer_system') or not game_state.layer_system:
+            logging.warning(f"Layer system not found, cannot apply static ability: {self.effect_text}")
+            return False
+
+        effect_lower = self.effect.lower()
+        layer = self._determine_layer_for_effect(effect_lower)
+
+        if layer is None:
+            logging.debug(f"Could not determine layer for static effect: '{self.effect_text}'")
+            return False # Cannot apply if layer unknown
+
+        # Find affected cards if not specified
+        controller = game_state.get_card_controller(self.card_id) # Assuming GS has this method
+        if not controller: return False # Should not happen if card exists
+
         if affected_cards is None:
-            # Find controller
-            controller = None
-            for player in [game_state.p1, game_state.p2]:
-                if self.card_id in player["battlefield"]:
-                    controller = player
-                    break
-            
-            if controller:
-                affected_cards = self.get_affected_cards(game_state, controller)
-        
-        # If no cards are affected, nothing to do
+            affected_cards = self.get_affected_cards(game_state, controller)
+
         if not affected_cards:
+            return False # No targets to affect
+
+        # Prepare base effect data
+        effect_data = {
+            'source_id': self.card_id,
+            'layer': layer,
+            'affected_ids': affected_cards,
+            'effect_text': self.effect_text, # Store original text for reference/debugging
+            'duration': 'permanent', # Static effects are usually permanent while source is on battlefield
+            # Condition: effect is active only if the source card is on the battlefield
+            'condition': lambda gs_check: self.card_id in gs_check.get_card_controller(self.card_id).get("battlefield", []) if gs_check.get_card_controller(self.card_id) else False,
+            # Layer 7 specifics added by handlers below
+        }
+
+        # --- Delegate to specific parsers to fill effect_type and effect_value ---
+        parsed = False
+        if layer == 7:
+            parsed_data = self._parse_layer7_effect(effect_lower)
+            if parsed_data:
+                effect_data.update(parsed_data) # Adds 'sublayer', 'effect_type', 'effect_value'
+                parsed = True
+        elif layer == 6:
+            parsed_data = self._parse_layer6_effect(effect_lower)
+            if parsed_data:
+                effect_data.update(parsed_data) # Adds 'effect_type', 'effect_value'
+                parsed = True
+        elif layer == 5:
+            parsed_data = self._parse_layer5_effect(effect_lower)
+            if parsed_data:
+                effect_data.update(parsed_data) # Adds 'effect_type', 'effect_value'
+                parsed = True
+        elif layer == 4:
+            parsed_data = self._parse_layer4_effect(effect_lower)
+            if parsed_data:
+                effect_data.update(parsed_data) # Adds 'effect_type', 'effect_value'
+                parsed = True
+        # ... add parsers for layers 3, 2, 1 if needed ...
+
+        if parsed:
+            effect_id = game_state.layer_system.register_effect(effect_data)
+            if effect_id:
+                logging.debug(f"Registered static effect '{self.effect_text}' (ID: {effect_id}) for {self.card_id}")
+                return True
+            else:
+                logging.warning(f"Failed to register static effect '{self.effect_text}' for {self.card_id}")
+                return False
+        else:
+            logging.warning(f"Static ability parser could not interpret effect: '{self.effect_text}'")
             return False
         
-        # Create a dictionary mapping effect patterns to handler methods
-        effect_handlers = {
-            r"creatures (you control )?get \+(\d+)/\+(\d+)": self._apply_anthem_effect,
-            r"creatures (you control )?have (flying|trample|vigilance|haste|hexproof|deathtouch|lifelink)": self._apply_keyword_granting,
-            r"creatures (you control )?gain (flying|trample|vigilance|haste|hexproof|deathtouch|lifelink)": self._apply_keyword_granting,
-            r"(all|each) (creature|artifact|land)s? (are|is|become) ([a-z]+)": self._apply_type_changing,
-            r"([a-z]+) spells you cast cost \{(\d+)\} less to cast": self._apply_cost_reduction,
-            r"can't attack": self._apply_prevention_effect,
-            r"can't block": self._apply_prevention_effect,
-            r"spells your opponents cast cost \{(\d+)\} more": self._apply_cost_increase,
-            r"damage is doubled": self._apply_damage_modification,
-            r"damage is prevented": self._apply_damage_modification,
-            r"enters the battlefield tapped": self._apply_etb_effect,
-            r"doesn't untap during (its controller's|your) untap step": self._apply_untap_prevention
-        }
-        
-        # Iterate through effect patterns and apply matching handlers
-        for pattern, handler in effect_handlers.items():
-            match = re.search(pattern, effect)
-            if match:
-                args = [game_state, affected_cards, effect, match]
-                result = handler(*args)
-                if result:
-                    return True
-        
-        # If no specific handler matched, try generic layer-based handling
-        if hasattr(game_state, 'layer_system') and game_state.layer_system:
-            # Try to determine the appropriate layer for this effect
-            layer = self._determine_layer_for_effect(effect)
-            if layer:
-                # Register generic effect in layer system
-                game_state.layer_system.register_effect({
-                    'source_id': self.card_id,
-                    'layer': layer,
-                    'affected_ids': affected_cards,
-                    'effect_text': effect,
-                    'duration': 'permanent',
-                    'condition': lambda: self.card_id in self._find_all_battlefield_cards(game_state)
-                })
-                return True
-        
-        # Default behavior for unrecognized effects
-        return False
+    def _parse_layer7_effect(self, effect_lower):
+        """Parse P/T effects for Layer 7."""
+        # Layer 7a: Set P/T
+        match = re.search(r"has base power and toughness (\d+)/(\d+)", effect_lower)
+        if match:
+            power = int(match.group(1)); toughness = int(match.group(2))
+            return {'sublayer': 'a', 'effect_type': 'set_base_pt', 'effect_value': (power, toughness)}
+        match = re.search(r"\bpower and toughness are each equal to\b", effect_lower) # Characteristic-defining
+        if match:
+            # TODO: Implement CDA logic (complex)
+            # Return a placeholder or function for CDA
+            logging.warning("CDA P/T setting not fully implemented.")
+            return {'sublayer': 'a', 'effect_type': 'set_pt_cda', 'effect_value': lambda gs, card: (len(gs.p1.graveyard), len(gs.p1.graveyard))} # Example CDA
+
+        # Layer 7b: P/T setting (e.g., Becomes X/X) - Note: Might overlap with 7a, clarify rules
+        match = re.search(r"becomes a (\d+)/(\d+)", effect_lower)
+        if match:
+            power = int(match.group(1)); toughness = int(match.group(2))
+            # This might be layer 7b *if* it overrides previous P/T settings but not base P/T? Rules are tricky. Let's use 7b.
+            return {'sublayer': 'b', 'effect_type': 'set_pt', 'effect_value': (power, toughness)}
+
+        # Layer 7c: P/T modification (+X/+Y, -X/-Y)
+        match = re.search(r"gets ([+\-]\d+)/([+\-]\d+)", effect_lower)
+        if match:
+            p_mod = int(match.group(1)); t_mod = int(match.group(2))
+            return {'sublayer': 'c', 'effect_type': 'modify_pt', 'effect_value': (p_mod, t_mod)}
+        match = re.search(r"get \+(\d+)/\+(\d+)", effect_lower) # Anthem pattern
+        if match:
+            p_mod = int(match.group(1)); t_mod = int(match.group(2))
+            return {'sublayer': 'c', 'effect_type': 'modify_pt', 'effect_value': (p_mod, t_mod)}
+        match = re.search(r"get \-(\d+)/\-(\d+)", effect_lower) # Penalty pattern
+        if match:
+            p_mod = -int(match.group(1)); t_mod = -int(match.group(2))
+            return {'sublayer': 'c', 'effect_type': 'modify_pt', 'effect_value': (p_mod, t_mod)}
+
+        # Layer 7d: Switch P/T
+        if "switch its power and toughness" in effect_lower:
+            return {'sublayer': 'd', 'effect_type': 'switch_pt', 'effect_value': True}
+
+        return None
+
+    def _parse_layer6_effect(self, effect_lower):
+        """Parse ability adding/removing effects for Layer 6."""
+        # Add abilities
+        match = re.search(r"(?:have|gains|gain)\s+(flying|first strike|double strike|deathtouch|haste|hexproof|indestructible|lifelink|menace|reach|trample|vigilance|protection from|ward)", effect_lower)
+        if match:
+            ability = match.group(1).strip()
+            # Special handling for protection/ward if needed
+            if "protection from" in ability:
+                protected_from_match = re.search(r"protection from ([\w\s]+)", effect_lower)
+                protected_from = protected_from_match.group(1).strip() if protected_from_match else "unknown"
+                return {'effect_type': 'add_ability', 'effect_value': f"protection from {protected_from}"}
+            elif "ward" in ability:
+                ward_cost_match = re.search(r"ward (\{.*?\})", effect_lower) or re.search(r"ward (\d+)", effect_lower)
+                ward_cost = ward_cost_match.group(1).strip() if ward_cost_match else "1" # Default ward 1?
+                return {'effect_type': 'add_ability', 'effect_value': f"ward {ward_cost}"}
+            else:
+                return {'effect_type': 'add_ability', 'effect_value': ability}
+
+        # Remove abilities
+        match = re.search(r"lose all abilities", effect_lower)
+        if match:
+            return {'effect_type': 'remove_all_abilities', 'effect_value': True}
+        match = re.search(r"loses (flying|first strike|...)", effect_lower) # Add keywords
+        if match:
+            ability = match.group(1).strip()
+            return {'effect_type': 'remove_ability', 'effect_value': ability}
+
+        # Prevent attacking/blocking
+        if "can't attack" in effect_lower: return {'effect_type': 'cant_attack', 'effect_value': True}
+        if "can't block" in effect_lower: return {'effect_type': 'cant_block', 'effect_value': True}
+        if "attack each combat if able" in effect_lower: return {'effect_type': 'must_attack', 'effect_value': True}
+        if "block each combat if able" in effect_lower: return {'effect_type': 'must_block', 'effect_value': True}
+
+        return None
+
+    def _parse_layer5_effect(self, effect_lower):
+        """Parse color adding/removing effects for Layer 5."""
+        colors = {'white': 0, 'blue': 1, 'black': 2, 'red': 3, 'green': 4}
+        target_colors = [0] * 5
+        found_color = False
+
+        # Check if setting specific colors
+        for color, index in colors.items():
+            if f"is {color}" in effect_lower or f"are {color}" in effect_lower:
+                target_colors[index] = 1
+                found_color = True
+
+        if found_color: # If specific colors are set, assume it *sets* the colors
+            return {'effect_type': 'set_color', 'effect_value': target_colors}
+
+        # Check if adding colors
+        added_colors = [0] * 5
+        found_add = False
+        for color, index in colors.items():
+            if f"is also {color}" in effect_lower:
+                added_colors[index] = 1
+                found_add = True
+        if found_add:
+            return {'effect_type': 'add_color', 'effect_value': added_colors}
+
+        # Check if becoming colorless
+        if "becomes colorless" in effect_lower:
+            return {'effect_type': 'set_color', 'effect_value': [0, 0, 0, 0, 0]}
+
+        return None
+
+    def _parse_layer4_effect(self, effect_lower):
+        """Parse type/subtype adding/removing effects for Layer 4."""
+        # Add Type
+        match = re.search(r"is also a(n)?\s+(\w+)", effect_lower)
+        if match:
+            type_to_add = match.group(2).strip()
+            # Validate type?
+            return {'effect_type': 'add_type', 'effect_value': type_to_add}
+
+        # Set Type
+        match = re.search(r"becomes a(n)?\s+(\w+)\s+(in addition to its other types)?", effect_lower)
+        if match:
+            type_to_set = match.group(2).strip()
+            in_addition = match.group(3) is not None
+            if in_addition:
+                return {'effect_type': 'add_type', 'effect_value': type_to_set}
+            else:
+                # Need to distinguish SETTING type vs ADDING type - requires rules clarity. Assume "becomes" SETS.
+                return {'effect_type': 'set_type', 'effect_value': type_to_set} # Might need a dedicated set_type handler
+
+        # Add Subtype
+        match = re.search(r"(?:is|are) also\s+(\w+)\s+((?:creature|artifact|enchantment|land|planeswalker)s?)", effect_lower)
+        if match:
+            subtype_to_add = match.group(1).strip().capitalize() # Subtypes usually capitalized
+            # Check if it's adding a subtype to a valid permanent type
+            return {'effect_type': 'add_subtype', 'effect_value': subtype_to_add}
+
+        return None
 
     # Add helper method to determine which layer an effect belongs to
     def _determine_layer_for_effect(self, effect):
@@ -878,517 +1021,6 @@ class StaticAbility(Ability):
         for player in [game_state.p1, game_state.p2]:
             battlefield_cards.extend(player["battlefield"])
         return battlefield_cards
-    
-    def _apply_anthem_effect(self, game_state, affected_cards, effect, match):
-        """Apply anthem effect that boosts power/toughness of creatures."""
-        if not affected_cards:
-            return False
-            
-        # Extract power and toughness boost values
-        power_boost, toughness_boost = 0, 0
-        if match:
-            power_toughness = match.group(3)
-            if "/" in power_toughness:
-                parts = power_toughness.split("/")
-                try:
-                    power_boost = int(parts[0])
-                    toughness_boost = int(parts[1])
-                except (ValueError, IndexError):
-                    logging.warning(f"Could not parse anthem effect values: {power_toughness}")
-                    return False
-        
-        # Apply the boost to all affected cards
-        for card_id in affected_cards:
-            card = game_state._safe_get_card(card_id)
-            if not card or not hasattr(card, 'card_types') or 'creature' not in card.card_types:
-                continue
-                
-            # Update power and toughness
-            if hasattr(card, 'power') and hasattr(card, 'toughness'):
-                card.power += power_boost
-                card.toughness += toughness_boost
-        
-        logging.debug(f"Applied anthem effect: {power_boost}/+{toughness_boost} to {len(affected_cards)} creatures")
-        return True
-
-    def _apply_keyword_granting(self, game_state, affected_cards, effect, match):
-        """Grant keyword abilities to affected cards."""
-        if not affected_cards:
-            return False
-            
-        # Determine which keyword to grant
-        keyword = None
-        if match:
-            keyword_text = match.group(2)
-            keyword = keyword_text.strip().lower() if keyword_text else None
-        
-        if not keyword:
-            return False
-            
-        # Map of keywords to their index in the keywords array
-        keyword_indices = {
-            'flying': 0, 'trample': 1, 'hexproof': 2, 'lifelink': 3, 'deathtouch': 4,
-            'first strike': 5, 'double strike': 6, 'vigilance': 7, 'flash': 8, 'haste': 9, 'menace': 10
-        }
-        
-        # Apply keyword to all affected cards
-        for card_id in affected_cards:
-            card = game_state._safe_get_card(card_id)
-            if not card:
-                continue
-                
-            # If the card has a keywords array, update it
-            if hasattr(card, 'keywords'):
-                if keyword in keyword_indices and len(card.keywords) > keyword_indices[keyword]:
-                    card.keywords[keyword_indices[keyword]] = 1
-                else:
-                    # Otherwise, add to oracle text
-                    if not hasattr(card, 'granted_keywords'):
-                        card.granted_keywords = set()
-                    card.granted_keywords.add(keyword)
-            else:
-                # If no keywords array, create one
-                card.keywords = [0] * 11
-                if keyword in keyword_indices:
-                    card.keywords[keyword_indices[keyword]] = 1
-        
-        logging.debug(f"Granted keyword '{keyword}' to {len(affected_cards)} permanents")
-        return True
-
-    def _apply_type_changing(self, game_state, affected_cards, effect, match):
-        """Change permanent types (e.g., 'all lands are creatures')."""
-        if not affected_cards:
-            return False
-            
-        # Extract the new type
-        new_type = None
-        if match:
-            new_type = match.group(4).strip().lower() if len(match.groups()) >= 4 else None
-        
-        if not new_type:
-            return False
-            
-        # Apply type change to all affected cards
-        for card_id in affected_cards:
-            card = game_state._safe_get_card(card_id)
-            if not card:
-                continue
-                
-            # Add the new type to card_types if it's not already there
-            if hasattr(card, 'card_types'):
-                if new_type not in card.card_types:
-                    card.card_types.append(new_type)
-            else:
-                card.card_types = [new_type]
-                
-            # If changing to creature, make sure it has power/toughness
-            if new_type == 'creature' and (not hasattr(card, 'power') or not hasattr(card, 'toughness')):
-                # Default to 1/1 if no specific p/t is mentioned
-                pt_match = re.search(r'(\d+)/(\d+)', effect)
-                if pt_match:
-                    card.power = int(pt_match.group(1))
-                    card.toughness = int(pt_match.group(2))
-                else:
-                    card.power = 1
-                    card.toughness = 1
-        
-        logging.debug(f"Changed type to '{new_type}' for {len(affected_cards)} permanents")
-        return True
-
-    def _apply_cost_reduction(self, game_state, affected_cards, effect, match):
-        """Apply cost reduction to spells."""
-        if not hasattr(game_state, 'cost_modifiers'):
-            game_state.cost_modifiers = []
-            
-        # Extract cost reduction amount and spell type
-        amount = 0
-        spell_type = "all"
-        if match:
-            spell_type = match.group(1).strip().lower() if len(match.groups()) >= 1 else "all"
-            amount_str = match.group(2) if len(match.groups()) >= 2 else "0"
-            try:
-                amount = int(amount_str)
-            except ValueError:
-                amount = 1  # Default if parsing fails
-        
-        # Create a cost modifier
-        cost_mod = {
-            'source_id': self.card_id,
-            'amount': amount,  # Positive for reduction
-            'spell_type': spell_type,
-            'duration': 'static'
-        }
-        
-        game_state.cost_modifiers.append(cost_mod)
-        logging.debug(f"Applied cost reduction of {amount} to {spell_type} spells")
-        return True
-
-    def _apply_prevention_effect(self, game_state, affected_cards, effect, match):
-        """Apply effects that prevent certain actions."""
-        if not hasattr(game_state, 'prevention_effects'):
-            game_state.prevention_effects = []
-        
-        # Determine what's being prevented
-        prevention_type = None
-        if "can't attack" in effect:
-            prevention_type = "attack"
-        elif "can't block" in effect:
-            prevention_type = "block"
-        elif "can't be blocked" in effect:
-            prevention_type = "be_blocked"
-        elif "can't be countered" in effect:
-            prevention_type = "be_countered"
-        elif "can't be targeted" in effect:
-            prevention_type = "be_targeted"
-        
-        if not prevention_type:
-            return False
-        
-        # Extract qualifiers from the effect
-        qualifier = ""
-        if match and len(match.groups()) >= 2:
-            qualifier = match.group(2).strip()
-        
-        # Register the prevention effect
-        prevention_effect = {
-            'source_id': self.card_id,
-            'type': prevention_type,
-            'affected_cards': affected_cards.copy() if affected_cards else [],
-            'qualifier': qualifier,
-            'duration': 'static'
-        }
-        
-        game_state.prevention_effects.append(prevention_effect)
-        logging.debug(f"Applied prevention effect: {prevention_type} with qualifier '{qualifier}'")
-        return True
-
-    def _apply_cost_increase(self, game_state, affected_cards, effect, match):
-        """Apply cost increase to spells."""
-        if not hasattr(game_state, 'cost_modifiers'):
-            game_state.cost_modifiers = []
-            
-        # Extract cost increase amount and spell type
-        amount = 0
-        spell_type = "all"
-        if match:
-            spell_type = "opponent" if "your opponents cast" in effect else "all"
-            amount_str = match.group(1) if len(match.groups()) >= 1 else "0"
-            try:
-                amount = int(amount_str)
-            except ValueError:
-                amount = 1  # Default if parsing fails
-        
-        # Create a cost modifier (negative amount for increase)
-        cost_mod = {
-            'source_id': self.card_id,
-            'amount': -amount,  # Negative for increase
-            'spell_type': spell_type,
-            'duration': 'static'
-        }
-        
-        game_state.cost_modifiers.append(cost_mod)
-        logging.debug(f"Applied cost increase of {amount} to {spell_type} spells")
-        return True
-
-    def _apply_damage_modification(self, game_state, affected_cards, effect, match):
-        """Apply damage modification effects like doubling or prevention."""
-        if not hasattr(game_state, 'damage_modifiers'):
-            game_state.damage_modifiers = []
-        
-        # Determine modification type
-        modifier = None
-        if "damage is doubled" in effect:
-            modifier = "double"
-        elif "damage is prevented" in effect or "prevent all damage" in effect:
-            modifier = "prevent"
-        elif "damage can't be prevented" in effect:
-            modifier = "cant_prevent"
-        
-        if not modifier:
-            return False
-        
-        # Register the damage modifier
-        damage_mod = {
-            'source_id': self.card_id,
-            'modifier': modifier,
-            'affected_cards': affected_cards.copy() if affected_cards else [],
-            'duration': 'static'
-        }
-        
-        game_state.damage_modifiers.append(damage_mod)
-        logging.debug(f"Applied damage modification: {modifier}")
-        return True
-
-    def _apply_etb_effect(self, game_state, affected_cards, effect, match):
-        """Apply enters-the-battlefield replacement effects."""
-        if not hasattr(game_state, 'replacement_effects'):
-            return False
-        
-        # Create a replacement effect for ETB
-        replacement_effect = {
-            'source_id': self.card_id,
-            'event_type': 'ENTERS_BATTLEFIELD',
-            'replacement': effect,
-            'affected_cards': affected_cards.copy() if affected_cards else [],
-            'duration': 'static'
-        }
-        
-        # Register the replacement effect
-        game_state.replacement_effects.register_effect(replacement_effect)
-        logging.debug(f"Applied ETB replacement effect: {effect}")
-        return True
-
-    def _apply_untap_prevention(self, game_state, affected_cards, effect, match):
-        """Apply effects that prevent permanents from untapping."""
-        if not hasattr(game_state, 'untap_prevention'):
-            game_state.untap_prevention = []
-        
-        # Extract qualifiers from the effect
-        controller = "its controller"
-        if match and len(match.groups()) >= 1:
-            controller = match.group(1).strip()
-        
-        # Register the untap prevention effect
-        untap_effect = {
-            'source_id': self.card_id,
-            'affected_cards': affected_cards.copy() if affected_cards else [],
-            'controller': controller,
-            'duration': 'static'
-        }
-        
-        game_state.untap_prevention.append(untap_effect)
-        logging.debug(f"Applied untap prevention effect for {controller}'s untap step")
-        return True
-
-    def _apply_pt_modification(self, game_state, affected_cards, effect):
-        """Apply power/toughness modifications (Layer 7)"""
-        # Handle +X/+Y boosts
-        boost_pattern = r'get \+(\d+)/\+(\d+)'
-        match = re.search(boost_pattern, effect)
-        if match and affected_cards:
-            power_boost = int(match.group(1))
-            toughness_boost = int(match.group(2))
-            
-            for card_id in affected_cards:
-                card = game_state._safe_get_card(card_id)
-                if not card or not hasattr(card, 'power') or not hasattr(card, 'toughness'):
-                    continue
-                    
-                # Use layer system if available
-                if hasattr(game_state, 'layer_system') and game_state.layer_system:
-                    game_state.layer_system.add_pt_effect(card_id, power_boost, toughness_boost, self.card_id)
-                else:
-                    # Direct modification fallback
-                    card.power += power_boost
-                    card.toughness += toughness_boost
-                
-                logging.debug(f"Applied +{power_boost}/+{toughness_boost} to {card.name}")
-            return True
-        
-        # Handle -X/-Y penalties
-        penalty_pattern = r'get -(\d+)/-(\d+)'
-        match = re.search(penalty_pattern, effect)
-        if match and affected_cards:
-            power_penalty = int(match.group(1))
-            toughness_penalty = int(match.group(2))
-            
-            for card_id in affected_cards:
-                card = game_state._safe_get_card(card_id)
-                if not card or not hasattr(card, 'power') or not hasattr(card, 'toughness'):
-                    continue
-                    
-                # Use layer system if available
-                if hasattr(game_state, 'layer_system') and game_state.layer_system:
-                    game_state.layer_system.add_pt_effect(card_id, -power_penalty, -toughness_penalty, self.card_id)
-                else:
-                    # Direct modification fallback
-                    card.power = max(0, card.power - power_penalty)
-                    card.toughness = max(0, card.toughness - toughness_penalty)
-                
-                logging.debug(f"Applied -{power_penalty}/-{toughness_penalty} to {card.name}")
-            return True
-        
-        return False
-
-    def _apply_ability_granting(self, game_state, affected_cards, effect):
-        """Apply ability granting effects (Layer 6)"""
-        if not affected_cards:
-            return False
-            
-        # Map of ability text to keyword indices
-        ability_map = {
-            'flying': 0, 'trample': 1, 'hexproof': 2, 'lifelink': 3, 'deathtouch': 4,
-            'first strike': 5, 'double strike': 6, 'vigilance': 7, 'flash': 8, 'haste': 9, 'menace': 10
-        }
-        
-        # Extract the granted ability
-        granted_ability = None
-        for ability in ability_map:
-            if f"gain {ability}" in effect or f"have {ability}" in effect:
-                granted_ability = ability
-                break
-        
-        if not granted_ability:
-            return False
-        
-        ability_idx = ability_map.get(granted_ability)
-        
-        for card_id in affected_cards:
-            card = game_state._safe_get_card(card_id)
-            if not card:
-                continue
-                
-            # Use layer system if available
-            if hasattr(game_state, 'layer_system') and game_state.layer_system:
-                game_state.layer_system.add_ability_effect(card_id, granted_ability, self.card_id)
-            else:
-                # Direct modification fallback
-                if hasattr(card, 'keywords') and len(card.keywords) > ability_idx:
-                    card.keywords[ability_idx] = 1
-            
-            logging.debug(f"Granted {granted_ability} to {card.name}")
-        
-        return True
-
-    def _apply_type_modification(self, game_state, affected_cards, effect):
-        """Apply type changing effects (Layer 4)"""
-        if not affected_cards:
-            return False
-            
-        # Detect what type is being set
-        new_type = None
-        type_pattern = r'(is|are) a(n)? ([a-zA-Z]+)'
-        match = re.search(type_pattern, effect)
-        if match:
-            new_type = match.group(3).lower()
-        
-        if not new_type:
-            return False
-        
-        for card_id in affected_cards:
-            card = game_state._safe_get_card(card_id)
-            if not card:
-                continue
-                
-            # Use layer system if available
-            if hasattr(game_state, 'layer_system') and game_state.layer_system:
-                game_state.layer_system.add_type_effect(card_id, new_type, self.card_id)
-            else:
-                # Direct modification fallback
-                if hasattr(card, 'card_types') and new_type not in card.card_types:
-                    card.card_types.append(new_type)
-            
-            logging.debug(f"Changed type of {card.name} to include {new_type}")
-        
-        return True
-
-    def _apply_cost_modification(self, game_state, affected_cards, effect):
-        """Apply cost modification effects"""
-        # Extract cost change amount
-        amount = 0
-        cost_pattern = r'cost \{(\d+)\} (less|more)'
-        match = re.search(cost_pattern, effect)
-        if match:
-            amount = int(match.group(1))
-            if match.group(2) == 'more':
-                amount = -amount  # Negative for increased cost
-        
-        if amount == 0:
-            return False
-        
-        # Apply cost modification to the game state
-        if hasattr(game_state, 'cost_modifiers'):
-            game_state.cost_modifiers.append({
-                'source': self.card_id,
-                'amount': amount,
-                'affected_cards': affected_cards,
-                'condition': self.additional_condition
-            })
-            logging.debug(f"Applied cost modification of {amount} to affected cards")
-            return True
-        
-        return False
-
-    def _apply_prevention_effect(self, game_state, affected_cards, effect):
-        """Apply prevention effects"""
-        # Identify what is being prevented
-        prevention_type = None
-        
-        if "can't attack" in effect:
-            prevention_type = "attack"
-        elif "can't block" in effect:
-            prevention_type = "block"
-        elif "can't be blocked" in effect:
-            prevention_type = "be_blocked"
-        elif "can't be targeted" in effect:
-            prevention_type = "be_targeted"
-        elif "can't be countered" in effect:
-            prevention_type = "be_countered"
-        
-        if not prevention_type or not affected_cards:
-            return False
-        
-        # Register the prevention effect
-        if hasattr(game_state, 'prevention_effects'):
-            game_state.prevention_effects.append({
-                'source': self.card_id,
-                'type': prevention_type,
-                'affected_cards': affected_cards
-            })
-            logging.debug(f"Applied prevention effect: {prevention_type}")
-            return True
-        
-        return False
-
-    def _apply_mana_effect(self, game_state, affected_cards, effect):
-        """Apply mana production modification effects"""
-        # Extract mana colors being added
-        colors = []
-        color_words = ['white', 'blue', 'black', 'red', 'green']
-        color_symbols = ['W', 'U', 'B', 'R', 'G']
-        
-        for i, color in enumerate(color_words):
-            if color in effect:
-                colors.append(color_symbols[i])
-        
-        if not colors or not affected_cards:
-            return False
-        
-        # Register the mana effect
-        if hasattr(game_state, 'mana_effects'):
-            game_state.mana_effects.append({
-                'source': self.card_id,
-                'colors': colors,
-                'affected_cards': affected_cards
-            })
-            logging.debug(f"Applied mana effect: adding {colors} to affected lands")
-            return True
-        
-        return False
-
-    def _apply_damage_modification(self, game_state, affected_cards, effect):
-        """Apply damage modification effects"""
-        modifier = None
-        
-        if 'damage is doubled' in effect:
-            modifier = 'double'
-        elif 'damage is prevented' in effect:
-            modifier = 'prevent'
-        
-        if not modifier or not affected_cards:
-            return False
-        
-        # Register the damage modification
-        if hasattr(game_state, 'damage_modifiers'):
-            game_state.damage_modifiers.append({
-                'source': self.card_id,
-                'modifier': modifier,
-                'affected_cards': affected_cards
-            })
-            logging.debug(f"Applied damage modifier: {modifier}")
-            return True
-        
-        return False
             
     def get_affected_cards(self, game_state, controller):
         """Determine which cards this static ability affects"""
@@ -2201,57 +1833,70 @@ class ExileEffect(AbilityEffect):
         Initialize exile effect.
 
         Args:
-            target_type: Type of target ('creature', 'artifact', 'permanent', 'graveyard')
-            zone: Zone to exile from ('battlefield', 'graveyard', 'hand')
+            target_type: Type of target ('creature', 'artifact', 'permanent', 'graveyard', 'hand', 'stack', 'card')
+            zone: Zone to exile from ('battlefield', 'graveyard', 'hand', 'stack', 'library')
         """
-        super().__init__(f"Exile target {target_type}")
-        self.target_type = target_type
-        self.zone = zone
+        super().__init__(f"Exile target {target_type} from {zone}")
+        self.target_type = target_type.lower()
+        self.zone = zone.lower()
+        # Set requires_target flag based on whether 'target' is in the description
+        self.requires_target = "target" in self.effect_text.lower()
 
     def _apply_effect(self, game_state, source_id, controller, targets):
-        """Apply exile effect with target handling."""
+        """Apply exile effect with target handling and zone validation."""
         exiled = False
 
         if not targets:
+            logging.warning(f"Exile effect requires targets but none were provided or resolved.")
             return False
 
-        # Get the appropriate target list based on target type and zone
-        target_ids = []
-        if self.zone == "battlefield":
-            if self.target_type == "creature" and "creatures" in targets:
-                target_ids = targets["creatures"]
-            elif self.target_type == "artifact" and "artifacts" in targets:
-                target_ids = targets["artifacts"]
-            elif self.target_type == "permanent" and "permanents" in targets:
-                target_ids = targets["permanents"]
-        elif self.zone == "graveyard" and "graveyard" in targets:
-            target_ids = targets["graveyard"]
-        elif self.zone == "hand" and "hand" in targets:
-            target_ids = targets["hand"]
+        target_ids_to_process = []
+
+        # Get target IDs based on category specified in 'targets' dictionary
+        # Allow for flexibility based on the targeting system's output
+        possible_categories = [self.target_type, "permanents", "creatures", "artifacts", "enchantments", "planeswalkers", "lands", "spells", "graveyard", "hand", "library", "cards", "any"]
+
+        found_targets = False
+        for category in possible_categories:
+            if category in targets and targets[category]:
+                target_ids_to_process.extend(targets[category])
+                found_targets = True
+
+        if not found_targets:
+            logging.warning(f"No valid target IDs found in the provided targets dictionary for type '{self.target_type}' and zone '{self.zone}'. Targets: {targets}")
+            return False
 
         # Process each target
-        for target_id in target_ids:
-            # Find target owner
-            target_owner = None
-            for player in [game_state.p1, game_state.p2]:
-                if self.zone in player and target_id in player[self.zone]:
-                    target_owner = player
-                    break
+        for target_id in target_ids_to_process:
+            # Find target's current location and owner using GameState method
+            location_info = game_state.find_card_location(target_id)
 
-            if not target_owner:
+            if not location_info:
+                logging.warning(f"Cannot exile {target_id}: Card location not found.")
                 continue
 
-            target = game_state._safe_get_card(target_id)
-            if not target:
-                continue
+            target_owner, current_zone = location_info
 
-            # Exile the card using move_card for triggers/replacements
-            if game_state.move_card(target_id, target_owner, self.zone, target_owner, "exile", cause="exile_effect", context={"source_id": source_id}):
-                logging.debug(f"Exiled {target.name} from {self.zone}")
+            # Validate if the card is actually in the specified source zone for exile
+            # Allow 'any' or if the zone matches
+            if self.zone != "any" and current_zone != self.zone:
+                # Special case: Stack might be implicitly targeted
+                if not (self.zone == 'stack' and current_zone == 'stack'):
+                    logging.warning(f"Cannot exile {target_id}: Expected in zone '{self.zone}', but found in '{current_zone}'.")
+                    continue
+
+            # Exile the card using move_card
+            # Pass the current zone as the source zone
+            if game_state.move_card(target_id, target_owner, current_zone, target_owner, "exile", cause="exile_effect", context={"source_id": source_id}):
+                card = game_state._safe_get_card(target_id)
+                card_name = card.name if card else target_id
+                logging.debug(f"Exiled {card_name} from {current_zone}")
                 exiled = True
+            else:
+                 logging.warning(f"Failed to move card {target_id} to exile from {current_zone}.")
+
 
         return exiled
-
 class ReturnToHandEffect(AbilityEffect):
     """Effect that returns cards to their owner's hand."""
     def __init__(self, target_type="permanent", zone="battlefield"):
@@ -2259,65 +1904,93 @@ class ReturnToHandEffect(AbilityEffect):
         Initialize return to hand effect.
 
         Args:
-            target_type: Type of target ('creature', 'artifact', 'permanent')
-            zone: Zone to return from ('battlefield', 'graveyard')
+            target_type: Type of target ('creature', 'artifact', 'permanent', 'card')
+            zone: Zone to return from ('battlefield', 'graveyard', 'exile')
         """
-        super().__init__(f"Return target {target_type} to its owner's hand")
-        self.target_type = target_type
-        self.zone = zone
+        super().__init__(f"Return target {target_type} from {zone} to its owner's hand")
+        self.target_type = target_type.lower()
+        self.zone = zone.lower()
+        self.requires_target = "target" in self.effect_text.lower()
 
     def _apply_effect(self, game_state, source_id, controller, targets):
-        """Apply return to hand effect with target handling."""
-        returned = False
+        """Apply exile effect with target handling and zone validation."""
+        exiled = False
 
         if not targets:
+            logging.warning(f"Exile effect requires targets but none were provided or resolved.")
             return False
 
-        # Get the appropriate target list
-        target_ids = []
-        if self.zone == "battlefield":
-            if self.target_type == "creature" and "creatures" in targets:
-                target_ids = targets["creatures"]
-            elif self.target_type == "artifact" and "artifacts" in targets:
-                target_ids = targets["artifacts"]
-            elif self.target_type == "permanent" and "permanents" in targets:
-                target_ids = targets["permanents"]
-        elif self.zone == "graveyard" and "graveyard" in targets:
-            target_ids = targets["graveyard"]
+        target_ids_to_process = []
+
+        # Get target IDs based on category specified in 'targets' dictionary
+        # Allow for flexibility based on the targeting system's output
+        # Use more specific categories first if available
+        categories_in_order = [
+            "spells", # From stack
+            "creatures", "artifacts", "enchantments", "planeswalkers", "lands", # Battlefield types
+            "permanents", # General battlefield
+            "graveyard", # Cards in graveyard
+            "hand", # Cards in hand
+            "library", # Cards in library (rare for targeted exile)
+            "cards", # General card in any allowed zone
+            "any" # Any valid target
+        ]
+        if self.target_type in categories_in_order: # Add specific target type first if provided
+            categories_in_order.insert(0, self.target_type)
+
+        found_targets = False
+        for category in categories_in_order:
+            if category in targets and targets[category]:
+                target_ids_to_process.extend(targets[category])
+                found_targets = True
+                # Usually stop after finding targets in the most relevant category, unless effect targets multiple types
+                # Let's assume we process all found targets for simplicity for now.
+                # break # Uncomment if only the first matching category should be processed
+
+        if not found_targets:
+            logging.warning(f"No valid target IDs found in the provided targets dictionary for type '{self.target_type}' and zone '{self.zone}'. Targets: {targets}")
+            return False
 
         # Process each target
-        for target_id in target_ids:
-            # Find target owner
-            target_owner = None
-            for player in [game_state.p1, game_state.p2]:
-                # Check all zones a card might be in
-                for check_zone in ["battlefield", "graveyard", "exile", "hand", "library"]:
-                    if check_zone in player and target_id in player[check_zone]:
-                         # If the target zone is specified, check if the card is there
-                        if self.zone == check_zone:
-                            target_owner = player
-                            break
-                         # If zone is 'any' or matches, store owner and check if zone is correct
-                        elif self.zone == "any":
-                             target_owner = player
-                             break
-                if target_owner: break
+        for target_id in target_ids_to_process:
+            # Find target's current location and owner using GameState method
+            location_info = game_state.find_card_location(target_id)
 
-            if not target_owner:
-                logging.warning(f"Cannot return {target_id}: owner not found or not in specified zone '{self.zone}'")
+            if not location_info:
+                logging.warning(f"Cannot exile {target_id}: Card location not found.")
                 continue
 
-            target = game_state._safe_get_card(target_id)
-            if not target:
+            target_owner, current_zone = location_info
+
+            # Validate if the card is actually in the specified source zone for exile
+            # Allow 'any' or if the zone matches the *intended* zone, not necessarily current zone (rules are complex)
+            # Simplify: Check if current zone is one of the plausible zones for this type.
+            plausible_zones = {
+                "creature": ["battlefield"], "artifact": ["battlefield"], "enchantment": ["battlefield"],
+                "planeswalker": ["battlefield"], "land": ["battlefield"], "permanent": ["battlefield"],
+                "spell": ["stack"], "ability": ["stack"],
+                "card": ["graveyard", "hand", "library", "battlefield", "exile"], # Can exile from exile (rare)
+                "graveyard": ["graveyard"], "hand": ["hand"], "library": ["library"],
+                "battlefield": ["battlefield"], "stack": ["stack"]
+            }
+            expected_zones = plausible_zones.get(self.target_type, ["battlefield", "stack", "graveyard", "hand", "library", "exile"])
+            if self.zone != "any" and self.zone not in expected_zones: # Add self.zone check
+                expected_zones = [self.zone] # Override if specific zone mentioned
+
+            if current_zone not in expected_zones:
+                logging.warning(f"Cannot exile {target_id}: Expected target type '{self.target_type}' in zone(s) '{expected_zones}', but found in '{current_zone}'.")
                 continue
 
-            # Return to hand using move_card
-            if game_state.move_card(target_id, target_owner, self.zone, target_owner, "hand", cause="return_to_hand", context={"source_id": source_id}):
-                logging.debug(f"Returned {target.name} to hand from {self.zone}")
-                returned = True
+            # Exile the card using move_card
+            if game_state.move_card(target_id, target_owner, current_zone, target_owner, "exile", cause="exile_effect", context={"source_id": source_id}):
+                card = game_state._safe_get_card(target_id)
+                card_name = card.name if card else target_id
+                logging.debug(f"Exiled {card_name} from {current_zone}")
+                exiled = True
+            else:
+                logging.warning(f"Failed to move card {target_id} to exile from {current_zone}.")
 
-        return returned
-
+        return exiled
 class CopySpellEffect(AbilityEffect):
     """Effect that copies a spell on the stack."""
     def __init__(self, target_type="spell", copy_count=1):
@@ -2454,16 +2127,17 @@ class FightEffect(AbilityEffect):
 
 class SearchLibraryEffect(AbilityEffect):
     """Effect that allows searching a library for cards."""
-    def __init__(self, search_type="any", target="controller"):
+    def __init__(self, search_type="any", target="controller", destination="hand", count=1):
         super().__init__(f"Search for {search_type}")
         self.search_type = search_type
         self.target = target
+        self.destination = destination # e.g., 'hand', 'battlefield', 'graveyard'
+        self.count = count # How many cards to find
 
     def _apply_effect(self, game_state, source_id, controller, targets=None):
-        # Simplified implementation for automation
-        logging.debug(f"Searching library for {self.search_type}")
+        """Apply search effect, allowing for multiple finds and destinations."""
+        logging.debug(f"Searching library for {self.count} '{self.search_type}'")
 
-        # Determine whose library to search
         target_player = controller
         if self.target == "opponent":
             target_player = game_state.p2 if controller == game_state.p1 else game_state.p1
@@ -2471,49 +2145,93 @@ class SearchLibraryEffect(AbilityEffect):
             player_id = targets["players"][0]
             target_player = game_state.p1 if player_id == "p1" else game_state.p2
 
-        # Find a matching card in the library using GameState method
-        found_card_id = None
-        if hasattr(game_state, 'search_library_and_choose'):
-             # Pass AI context if available for smarter choices
-             ai_context = {"goal": "ramp" if self.search_type == "basic land" else "threat" if self.search_type == "creature" else "answer"}
-             found_card_id = game_state.search_library_and_choose(target_player, self.search_type, ai_choice_context=ai_context)
-        else:
-            # Basic fallback
-            for card_id in target_player["library"]:
-                 card = game_state._safe_get_card(card_id)
-                 if self._card_matches_criteria(card, self.search_type): # Requires helper _card_matches_criteria
-                     found_card_id = card_id
-                     break
+        found_cards = []
+        search_count_remaining = self.count
 
-        if found_card_id:
-            # Move the card to hand (default behavior)
-            # Note: GameState search_library method should handle move and shuffle
-            found_card = game_state._safe_get_card(found_card_id)
-            logging.debug(f"Search found: '{found_card.name}' matching '{self.search_type}'")
-            return True
+        if hasattr(game_state, 'search_library_and_choose'):
+             ai_context = {"goal": "ramp" if self.search_type == "basic land" else "threat" if self.search_type == "creature" else "answer",
+                           "count_needed": search_count_remaining}
+             # Loop to find multiple cards if needed
+             while search_count_remaining > 0:
+                 found_card_id = game_state.search_library_and_choose(
+                     target_player,
+                     self.search_type,
+                     ai_choice_context=ai_context,
+                     exclude_ids=found_cards # Exclude already found cards
+                 )
+                 if found_card_id:
+                     found_cards.append(found_card_id)
+                     search_count_remaining -= 1
+                     ai_context["count_needed"] = search_count_remaining # Update context
+                 else:
+                     break # No more matching cards found
         else:
-            logging.debug(f"Search failed for '{self.search_type}'.")
-            # Still need to shuffle even if search fails
+            # Basic fallback (only finds first matching card)
+            temp_library = target_player["library"][:] # Copy to iterate
+            found_indices = []
+            for i, card_id in enumerate(temp_library):
+                 if search_count_remaining <= 0: break
+                 card = game_state._safe_get_card(card_id)
+                 if self._card_matches_criteria(card, self.search_type):
+                     found_cards.append(card_id)
+                     found_indices.append(i) # Store original index before removal affects others
+                     search_count_remaining -= 1
+            # Remove found cards from library (using original indices in reverse)
+            for idx in sorted(found_indices, reverse=True):
+                target_player["library"].pop(idx)
+
+        if found_cards:
+            success_moves = 0
+            for card_id in found_cards:
+                card = game_state._safe_get_card(card_id)
+                card_name = card.name if card else card_id
+                # Use move_card for proper handling of destination zone and triggers
+                if game_state.move_card(card_id, target_player, "library_implicit", target_player, self.destination, cause="search_effect"):
+                     success_moves += 1
+                     logging.debug(f"Search found '{card_name}', moved to {self.destination}.")
+                else:
+                     logging.warning(f"Search found '{card_name}', but failed to move to {self.destination}.")
+                     # Optionally return card to library or other fallback
+                     target_player["library"].append(card_id) # Put it back for now
+
+            # Shuffle library after search attempt (even if not all cards moved successfully)
+            if hasattr(game_state, 'shuffle_library'):
+                game_state.shuffle_library(target_player)
+            else:
+                random.shuffle(target_player["library"])
+
+            return success_moves > 0 # Return true if at least one card was successfully moved
+
+        else:
+            logging.debug(f"Search failed for '{self.search_type}' in {target_player['name']}'s library.")
+            # Shuffle even if search fails
             if hasattr(game_state, 'shuffle_library'):
                  game_state.shuffle_library(target_player)
             else:
                  random.shuffle(target_player["library"])
-                 logging.debug(f"Shuffled library after failed search.")
-            return False # Search itself succeeded, but nothing found
+            return False # Indicate nothing was found/moved
 
-    # Add helper method if not already present in GameState/AbilityUtils
     def _card_matches_criteria(self, card, criteria):
         """Basic check if card matches simple criteria."""
         if not card: return False
         types = getattr(card, 'card_types', [])
         subtypes = getattr(card, 'subtypes', [])
         type_line = getattr(card, 'type_line', '').lower()
+        name = getattr(card, 'name', '').lower() # Search by name
 
-        if criteria == "any": return True
-        if criteria == "basic land" and 'basic' in type_line and 'land' in type_line: return True
-        if criteria == "land" and 'land' in type_line: return True
-        if criteria in types: return True
-        if criteria in subtypes: return True
+        crit_lower = criteria.lower()
+
+        if crit_lower == "any": return True
+        if crit_lower == "basic land" and 'basic' in type_line and 'land' in type_line: return True
+        if crit_lower == "land" and 'land' in type_line: return True
+        if crit_lower in types: return True
+        if crit_lower in subtypes: return True
+        if crit_lower == name: return True
+        # Allow searching for partial names
+        if criteria in name: return True
+        # Allow searching by card type e.g. "artifact creature"
+        if all(word in type_line for word in crit_lower.split()): return True
+
         return False
 
 class TapEffect(AbilityEffect):
@@ -2526,38 +2244,44 @@ class TapEffect(AbilityEffect):
     def _apply_effect(self, game_state, source_id, controller, targets):
         """Apply tap effect with target handling."""
         if not targets:
+            logging.warning("Tap effect requires targets but none were provided or resolved.")
             return False
 
         target_ids = []
-        if self.target_type == "creature" and "creatures" in targets:
-            target_ids = targets["creatures"]
-        elif self.target_type == "artifact" and "artifacts" in targets:
-            target_ids = targets["artifacts"]
-        elif self.target_type == "land" and "lands" in targets:
-            target_ids = targets["lands"]
-        elif self.target_type == "permanent" and "permanents" in targets:
-            target_ids = targets["permanents"]
+        possible_categories = [self.target_type, "permanents", "creatures", "artifacts", "lands"]
+        found_targets = False
+        for category in possible_categories:
+             if category in targets and targets[category]:
+                  target_ids.extend(targets[category])
+                  found_targets = True
 
-        if not target_ids:
+        if not found_targets:
+            logging.warning(f"No valid target IDs found for TapEffect (type: {self.target_type}). Targets: {targets}")
             return False
 
         tapped = False
         for target_id in target_ids:
-            # Find target controller
-            target_controller = None
-            for player in [game_state.p1, game_state.p2]:
-                if "battlefield" in player and target_id in player["battlefield"]:
-                    target_controller = player
-                    break
+            # Find target controller using GameState helper
+            target_controller = game_state.get_card_controller(target_id) # Assume this exists in GameState
 
             if not target_controller:
+                logging.warning(f"Cannot tap {target_id}: Controller not found.")
                 continue
 
-            # Use game_state's tap_permanent method for consistency
-            if game_state.tap_permanent(target_id, target_controller):
-                tapped = True
+            # Use game_state's tap_permanent method for consistency and triggers
+            if hasattr(game_state, 'tap_permanent') and callable(game_state.tap_permanent):
+                 if game_state.tap_permanent(target_id, target_controller):
+                      tapped = True
+            else: # Basic fallback
+                 tapped_set = target_controller.setdefault("tapped_permanents", set())
+                 if target_id not in tapped_set:
+                      tapped_set.add(target_id)
+                      logging.debug(f"Tapped {game_state._safe_get_card(target_id).name} (Basic)")
+                      tapped = True
+
 
         return tapped
+
 
 class UntapEffect(AbilityEffect):
     """Effect that untaps a permanent."""
@@ -2569,36 +2293,40 @@ class UntapEffect(AbilityEffect):
     def _apply_effect(self, game_state, source_id, controller, targets):
         """Apply untap effect with target handling."""
         if not targets:
+            logging.warning("Untap effect requires targets but none were provided or resolved.")
             return False
 
         target_ids = []
-        if self.target_type == "creature" and "creatures" in targets:
-            target_ids = targets["creatures"]
-        elif self.target_type == "artifact" and "artifacts" in targets:
-            target_ids = targets["artifacts"]
-        elif self.target_type == "land" and "lands" in targets:
-            target_ids = targets["lands"]
-        elif self.target_type == "permanent" and "permanents" in targets:
-            target_ids = targets["permanents"]
+        possible_categories = [self.target_type, "permanents", "creatures", "artifacts", "lands"]
+        found_targets = False
+        for category in possible_categories:
+             if category in targets and targets[category]:
+                  target_ids.extend(targets[category])
+                  found_targets = True
 
-        if not target_ids:
+        if not found_targets:
+            logging.warning(f"No valid target IDs found for UntapEffect (type: {self.target_type}). Targets: {targets}")
             return False
 
         untapped = False
         for target_id in target_ids:
-            # Find target controller
-            target_controller = None
-            for player in [game_state.p1, game_state.p2]:
-                if "battlefield" in player and target_id in player["battlefield"]:
-                    target_controller = player
-                    break
+            # Find target controller using GameState helper
+            target_controller = game_state.get_card_controller(target_id)
 
             if not target_controller:
+                logging.warning(f"Cannot untap {target_id}: Controller not found.")
                 continue
 
-            # Use game_state's untap_permanent method for consistency
-            if game_state.untap_permanent(target_id, target_controller):
-                untapped = True
+            # Use game_state's untap_permanent method for consistency and triggers
+            if hasattr(game_state, 'untap_permanent') and callable(game_state.untap_permanent):
+                 if game_state.untap_permanent(target_id, target_controller):
+                     untapped = True
+            else: # Basic fallback
+                 tapped_set = target_controller.setdefault("tapped_permanents", set())
+                 if target_id in tapped_set:
+                     tapped_set.remove(target_id)
+                     logging.debug(f"Untapped {game_state._safe_get_card(target_id).name} (Basic)")
+                     untapped = True
 
         return untapped
 

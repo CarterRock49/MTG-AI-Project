@@ -4,60 +4,99 @@ import re
 from .ability_types import AbilityEffect, DrawCardEffect, GainLifeEffect, DamageEffect, \
     CounterSpellEffect, CreateTokenEffect, DestroyEffect, ExileEffect, \
     DiscardEffect, MillEffect
+from .ability_types import TapEffect, UntapEffect, BuffEffect, SearchLibraryEffect # Add imports for new types
 
 def is_beneficial_effect(effect_text):
     """
     Determine if an effect text describes an effect that is beneficial to its target.
-    
+    Improved logic with more context and specific phrases.
+
     Args:
         effect_text: The text of the effect to analyze
-        
+
     Returns:
         bool: True if the effect is likely beneficial to the target, False otherwise
     """
-    # Convert to lowercase for case-insensitive matching
     effect_text = effect_text.lower() if effect_text else ""
-    
-    # Effects that are usually harmful
-    harmful_terms = [
-        "destroy", "exile", "sacrifice", "damage", "lose", "-1/-1", 
-        "dies", "discard", "return to", "counter", "tap", "doesn't untap",
-        "can't attack", "can't block", "can't cast", "skip", "remove"
+
+    # Explicitly harmful phrases (high confidence)
+    harmful_phrases = [
+        "destroy target", "exile target", "sacrifice", "lose life", "deals damage",
+        "discard", "counter target spell", "mill", "target player loses", "opponent draws",
+        "each player sacrifices", "pay life", "skip your", "remove",
+        "can't attack", "can't block", "can't cast spells", "doesn't untap", "tap target"
     ]
-    
-    # Effects that are usually beneficial
-    beneficial_terms = [
-        "gain", "draw", "put", "+1/+1", "create", "search", "add", 
-        "untap", "hexproof", "indestructible", "protection", "return", 
-        "prevent", "regenerate", "restore", "double", "copy", "trample"
+    for phrase in harmful_phrases:
+        if phrase in effect_text:
+            # Exception: Damage prevention
+            if "damage" in phrase and ("prevent" in effect_text or "prevented" in effect_text):
+                continue
+            # Exception: Self-damage for benefit (needs more context, risky to classify)
+            # Exception: Sacrificing for benefit (needs more context)
+            if phrase == "sacrifice" and "as an additional cost" not in effect_text: # Basic check
+                 # If sacrificing own stuff not as cost, usually bad for target being sac'd
+                 if "you control" in effect_text: # Targeting self is bad
+                     # Hard to say if it benefits the *controller* ultimately. Stick to target.
+                     pass # Can't easily determine for target
+                 else: # Target opponent sacrifices, bad for them
+                      return False
+            elif phrase == "deals damage":
+                # Check if it targets the *controller* (bad for controller)
+                if "deals damage to you" in effect_text or "damage to its controller" in effect_text:
+                    pass # Ambiguous - target is controller, but effect *originates* elsewhere
+                # Check if it targets opponent (bad for opponent)
+                elif re.search(r"deals \d+ damage to target opponent", effect_text):
+                    return False
+                elif re.search(r"deals \d+ damage to target creature", effect_text):
+                     # Harmful to creature, but beneficial to controller if it's opponent's creature
+                     # For *target* creature, it's harmful.
+                    return False
+                elif re.search(r"deals \d+ damage to any target", effect_text):
+                     # Ambiguous, could target opponent (harmful) or self (harmful)
+                    return False # Assume harmful default for damage
+            else:
+                return False # Phrase is generally harmful
+
+    # Explicitly beneficial phrases (high confidence)
+    beneficial_phrases = [
+        "gain life", "draw cards", "+1/+1 counter", "+x/+x", "create token", "search your library",
+        "put onto the battlefield", "add {", "untap target", "gain control", "hexproof",
+        "indestructible", "protection from", "regenerate", "prevent", "double", "copy"
     ]
-    
-    # Context-aware special cases
-    # For "return" effects, check if it's a bounce (harmful) or recursion (beneficial)
-    if "return" in effect_text:
-        if "return target" in effect_text and "to owner's hand" in effect_text:
-            return False  # Bounce effect - harmful
-        if "return target" in effect_text and "from your graveyard" in effect_text:
-            return True   # Recursion effect - beneficial
-    
-    # For damage effects
-    if "damage" in effect_text:
-        if "prevent" in effect_text or "prevented" in effect_text:
-            return True  # Preventing damage is beneficial
-        if "deals damage to you" in effect_text:
-            return False  # Damage to you is harmful
-    
-    # Check for harmful terms
-    for term in harmful_terms:
-        if term in effect_text:
-            return False
-    
-    # Check for beneficial terms
-    for term in beneficial_terms:
-        if term in effect_text:
+    for phrase in beneficial_phrases:
+        if phrase in effect_text:
+            # Exception: "Protection from" might prevent beneficial effects too (rare).
+            # Exception: Creating tokens for opponent is bad for controller.
+            if "create token" in phrase and "opponent controls" in effect_text:
+                return False
             return True
-    
-    # Default to neutral/harmful
+
+    # Context-dependent keywords: "return"
+    if "return" in effect_text:
+        if "return target creature" in effect_text and "to its owner's hand" in effect_text:
+            return False # Bounce is harmful to target owner
+        if "return target" in effect_text and "from your graveyard" in effect_text and ("to your hand" in effect_text or "to the battlefield" in effect_text):
+            return True # Recursion is beneficial
+
+    # Keywords generally beneficial for the permanent
+    beneficial_keywords = [
+        "flying", "first strike", "double strike", "trample", "vigilance",
+        "haste", "lifelink", "reach", "menace", # Menace debatable, but usually better for attacker
+    ]
+    for keyword in beneficial_keywords:
+        # Check for "gains <keyword>" or "has <keyword>"
+        if re.search(rf"(gains?|has)\s+{keyword}", effect_text):
+            return True
+
+    # Keywords generally harmful for the permanent
+    harmful_keywords = ["defender", "decayed"] # Decayed: Can't block, sac after attack
+    for keyword in harmful_keywords:
+        if re.search(rf"(gains?|has)\s+{keyword}", effect_text):
+            return False
+
+    # If no clear indicator, default to harmful/neutral for safety
+    # Many effects involve interaction and aren't purely beneficial.
+    logging.debug(f"Could not confidently determine benefit of '{effect_text}'. Defaulting to False.")
     return False
 
 def text_to_number(text):
@@ -179,104 +218,221 @@ def resolve_targeting(game_state, card_id, controller, effect_text):
     return resolve_simple_targeting(game_state, card_id, controller, effect_text)
 
 class EffectFactory:
-    """Factory class to create appropriate AbilityEffect objects based on effect text."""
-    
-    # Effect pattern definitions
-    EFFECT_PATTERNS = {
-        "draw": {
-            "pattern": r"draw (\d+|\w+) cards?",
-            "factory": lambda count, **kwargs: DrawCardEffect(text_to_number(count), **kwargs)
-        },
-        "gain_life": {
-            "pattern": r"gain (\d+|\w+) life",
-            "factory": lambda amount, **kwargs: GainLifeEffect(text_to_number(amount), **kwargs)
-        },
-        "damage": {
-            "pattern": r"deal[s]? (\d+|\w+) damage",
-            "factory": lambda amount, **kwargs: DamageEffect(text_to_number(amount), **kwargs)
-        },
-        "counter": {
-            "pattern": r"counter target (.*?)(?=\.|$)",
-            "factory": lambda target_type, **kwargs: CounterSpellEffect(target_type, **kwargs)
-        },
-        "token": {
-            "pattern": r"create (\w+|a|an) (.*?) tokens?",
-            "factory": lambda count, desc, **kwargs: CreateTokenEffect(
-                power=kwargs.get('power', 1),
-                toughness=kwargs.get('toughness', 1),
-                creature_type=desc,
-                count=text_to_number(count) if count not in ('a', 'an') else 1,
-                keywords=kwargs.get('keywords', [])
-            )
-        },
-        "destroy": {
-            "pattern": r"destroy target (.*?)(?=\.|$)",
-            "factory": lambda target_type, **kwargs: DestroyEffect(target_type, **kwargs)
-        },
-        "exile": {
-            "pattern": r"exile target (.*?)(?=\.|$)",
-            "factory": lambda target_type, **kwargs: ExileEffect(target_type, **kwargs)
-        },
-        "discard": {
-            "pattern": r"discard (\w+|a|an) (.*?)(?=\.|$)",
-            "factory": lambda count, desc=None, **kwargs: DiscardEffect(
-                count=text_to_number(count) if count not in ('a', 'an') else 1,
-                **kwargs
-            )
-        },
-        "mill": {
-            "pattern": r"(put|mill) (?:the )?top (\d+|\w+) cards?",
-            "factory": lambda action, count, **kwargs: MillEffect(text_to_number(count), **kwargs)
-        }
-    }
-    
+    """
+    Factory class to create AbilityEffect objects.
+    NOTE: This parser is basic and covers common cases. Many MTG effects have
+    complex conditions, targets, and variations not captured here.
+    """
+    @staticmethod
+    def _extract_target_description(effect_text):
+        """Helper to find the most specific target description."""
+        match = re.search(r"target (.*?)(?:\.|$|,|:| gains| gets| has| deals| draws| is)", effect_text)
+        if match:
+            return match.group(1).strip()
+        elif "each opponent" in effect_text:
+            return "each opponent"
+        elif "each player" in effect_text:
+            return "each player"
+        elif "controller" in effect_text: # Less reliable, 'creatures you control' etc.
+             return "controller" # Very rough guess
+        return None # No target description found
+
     @staticmethod
     def create_effects(effect_text, targets=None):
         """Create appropriate AbilityEffect objects based on the effect text."""
+        if not effect_text:
+            return []
+
         effects = []
-        
-        # Lower-case for easier comparison
-        effect_text_lower = effect_text.lower() if effect_text else ""
-        
-        # Try each pattern to find matching effects
-        for effect_type, effect_info in EffectFactory.EFFECT_PATTERNS.items():
-            pattern = effect_info["pattern"]
-            factory = effect_info["factory"]
-            
-            matches = re.finditer(pattern, effect_text_lower)
-            for match in matches:
-                try:
-                    # Extract parameters from match
-                    params = match.groups()
-                    
-                    # Create effect with correct parameters
-                    if len(params) == 1:
-                        effect = factory(params[0], target=EffectFactory._detect_target(effect_text_lower))
-                    elif len(params) == 2:
-                        effect = factory(params[0], params[1], target=EffectFactory._detect_target(effect_text_lower))
-                    else:
-                        # For complex patterns, pass all groups as kwargs
-                        kwargs = {f"param{i}": param for i, param in enumerate(params)}
-                        kwargs["target"] = EffectFactory._detect_target(effect_text_lower)
-                        effect = factory(**kwargs)
-                    
-                    effects.append(effect)
-                except Exception as e:
-                    logging.error(f"Error creating effect for pattern '{pattern}': {str(e)}")
-        
-        # If no effects were created, return generic effect
+        effect_text_lower = effect_text.lower()
+
+        # --- Improved Effect Parsing ---
+        # Split text by sentences/clauses to handle multiple effects
+        clauses = re.split(r'[.;](?=\s*(?:then|also|next|repeat|$)|\s*\w)', effect_text_lower)
+
+        parsed_indices = set() # Keep track of parts of the string already parsed
+
+        for clause_index, clause in enumerate(clauses):
+            clause = clause.strip()
+            if not clause:
+                 continue
+
+            created_effect = False
+            start_pos = effect_text_lower.find(clause, max(parsed_indices) if parsed_indices else 0)
+            if start_pos == -1: continue # Should not happen if clause came from split
+            end_pos = start_pos + len(clause)
+
+            # Check if this clause section has already been parsed by a broader match
+            if any(start <= start_pos and end >= end_pos for start, end in parsed_indices):
+                 continue
+
+            # 1. Draw Cards
+            match = re.search(r"draw (\d+|a|an|\w+) cards?", clause)
+            if match:
+                count = match.group(1)
+                target_desc = EffectFactory._extract_target_description(clause) or "controller"
+                effects.append(DrawCardEffect(text_to_number(count), target=target_desc))
+                parsed_indices.add((start_pos, end_pos))
+                created_effect = True
+
+            # 2. Gain Life
+            match = re.search(r"gain (\d+|a|an|\w+) life", clause)
+            if match and not created_effect:
+                amount = match.group(1)
+                target_desc = EffectFactory._extract_target_description(clause) or "controller"
+                effects.append(GainLifeEffect(text_to_number(amount), target=target_desc))
+                parsed_indices.add((start_pos, end_pos))
+                created_effect = True
+
+            # 3. Damage
+            match = re.search(r"deal[s]?\s+(\d+|\w+|x)\s+damage\s+to\s+(any target|target\s+(.*?))(?=\.|$|,| deals| takes)", clause)
+            if match and not created_effect:
+                amount_str = match.group(1)
+                target_desc_full = match.group(2).strip() # "any target" or "target ..."
+
+                amount = text_to_number(amount_str) if amount_str != 'x' else 1 # Use X=1 default
+
+                target_type = "any" # Default
+                if target_desc_full == "any target":
+                     target_type = "any"
+                elif "target" in target_desc_full:
+                     target_specific = match.group(3).strip() if match.group(3) else ""
+                     if "creature" in target_specific: target_type = "creature"
+                     elif "player" in target_specific or "opponent" in target_specific: target_type = "player"
+                     elif "planeswalker" in target_specific: target_type = "planeswalker"
+                     elif "battle" in target_specific: target_type = "battle" # Add battle type
+                     # Allow falling back to "any" if specific type isn't clear from desc
+                else: # E.g., "deals damage to you", "deals damage to each opponent"
+                     if "you" in target_desc_full or "controller" in target_desc_full:
+                         target_type = "player" # Needs context to target specific player
+                     elif "each opponent" in target_desc_full or "opponent" in target_desc_full:
+                         target_type = "player" # Needs context to target specific player
+                     elif "each creature" in target_desc_full:
+                         target_type = "creature" # Needs context
+
+                # Use target_type in DamageEffect constructor
+                effects.append(DamageEffect(amount, target_type=target_type))
+                parsed_indices.add((start_pos, end_pos))
+                created_effect = True
+
+            # 4. Counter Spell
+            match = re.search(r"counter target (.*?)(?=\.|$|,| unless)", clause)
+            if match and not created_effect:
+                target_spell_type = match.group(1).strip()
+                effects.append(CounterSpellEffect(target_spell_type))
+                parsed_indices.add((start_pos, end_pos))
+                created_effect = True
+
+            # 5. Create Token (Improved Parsing)
+            # Example: create two 1/1 white Soldier creature tokens with vigilance
+            match = re.search(r"create (\w+|a|an) (?:(\d+/\d+)\s+)?(?:([\w\s]+?)\s+)?(artifact|creature|enchantment)?\s*tokens?(?: with (.*?))?(?=\.|$|,)", clause)
+            if match and not created_effect:
+                 count_str, pt_str, colors_and_type, main_type, keywords_str = match.groups()
+                 count = text_to_number(count_str) if count_str not in ('a', 'an') else 1
+                 power, toughness = (1, 1)
+                 if pt_str:
+                     p, t = pt_str.split('/')
+                     power, toughness = int(p), int(t)
+
+                 creature_type = "Token"
+                 if colors_and_type:
+                     parts = colors_and_type.strip().split()
+                     # Filter out colors, assume rest is type
+                     colors = {'white','blue','black','red','green'}
+                     type_parts = [p for p in parts if p not in colors]
+                     if type_parts: creature_type = " ".join(type_parts).capitalize()
+
+                 keywords = keywords_str.split(',') if keywords_str else []
+                 keywords = [k.strip() for k in keywords if k.strip()]
+
+                 effects.append(CreateTokenEffect(power, toughness, creature_type, count, keywords))
+                 parsed_indices.add((start_pos, end_pos))
+                 created_effect = True
+
+            # 6. Destroy
+            match = re.search(r"destroy target (.*?)(?=\.|$|,| unless)", clause)
+            if match and not created_effect:
+                target_desc = match.group(1).strip()
+                effects.append(DestroyEffect(target_desc))
+                parsed_indices.add((start_pos, end_pos))
+                created_effect = True
+
+            # 7. Exile
+            match = re.search(r"exile target (.*?)(?: from (.*?))?(?=\.|$|,| unless)", clause)
+            if match and not created_effect:
+                target_desc = match.group(1).strip()
+                zone = match.group(2).strip() if match.group(2) else "battlefield"
+                effects.append(ExileEffect(target_desc, zone=zone))
+                parsed_indices.add((start_pos, end_pos))
+                created_effect = True
+
+            # 8. Discard
+            match = re.search(r"(target player|each opponent) discards? (\d+|\w+|a|an) cards?", clause)
+            if match and not created_effect:
+                 target_player_desc = match.group(1)
+                 count_str = match.group(2)
+                 count = text_to_number(count_str) if count_str not in ('a', 'an') else 1
+                 target_who = "opponent" if "opponent" in target_player_desc else "target_player"
+                 effects.append(DiscardEffect(count=count, target=target_who))
+                 parsed_indices.add((start_pos, end_pos))
+                 created_effect = True
+
+            # 9. Mill
+            match = re.search(r"(?:target player |each opponent |player )?(?:mills?|put(?:s)? the top) (\d+|\w+) cards?", clause)
+            if match and not created_effect:
+                 count_str = match.group(1)
+                 target_desc = EffectFactory._extract_target_description(clause) or "opponent" # Default mill opponent
+                 effects.append(MillEffect(text_to_number(count_str), target=target_desc))
+                 parsed_indices.add((start_pos, end_pos))
+                 created_effect = True
+
+            # 10. Tap/Untap
+            match = re.search(r"(tap|untap) target (.*?)(?=\.|$|,)", clause)
+            if match and not created_effect:
+                 action = match.group(1)
+                 target_desc = match.group(2).strip()
+                 if action == "tap":
+                     effects.append(TapEffect(target_desc))
+                 else:
+                     effects.append(UntapEffect(target_desc))
+                 parsed_indices.add((start_pos, end_pos))
+                 created_effect = True
+
+            # 11. Buff/Debuff (Temporary)
+            match = re.search(r"target creature gets ([+\-]\d+)/([+\-]\d+) until end of turn", clause)
+            if match and not created_effect:
+                p_mod = int(match.group(1))
+                t_mod = int(match.group(2))
+                effects.append(BuffEffect(p_mod, t_mod))
+                parsed_indices.add((start_pos, end_pos))
+                created_effect = True
+
+            # 12. Search Library
+            match = re.search(r"search your library for (?:up to (\w+|a|an) )?(.*?) cards?", clause)
+            if match and not created_effect:
+                 count_str = match.group(1) or "a"
+                 criteria = match.group(2).replace(" card","").strip()
+                 count = text_to_number(count_str) if count_str not in ('a', 'an') else 1
+                 # Destination? Needs parsing. Default 'hand'.
+                 destination = "hand"
+                 if "put onto the battlefield" in clause: destination = "battlefield"
+                 elif "put into your graveyard" in clause: destination = "graveyard"
+
+                 effects.append(SearchLibraryEffect(criteria, target="controller", destination=destination, count=count))
+                 parsed_indices.add((start_pos, end_pos))
+                 created_effect = True
+
+            # Add other effects here...
+
+        # If no specific effects were parsed for the whole text, add a generic one
         if not effects:
-            logging.warning(f"Could not parse effect text: '{effect_text}'")
+            logging.warning(f"Could not parse effect text into specific effects: '{effect_text}'")
             return [AbilityEffect(effect_text)]
-        
+
+        # If only parts were parsed, add generic effect for remaining parts
+        if parsed_indices:
+             # Find unparsed sections (this is complex, skipping for now)
+             pass
+
         return effects
     
-    @staticmethod
-    def _detect_target(effect_text):
-        """Detect the target of an effect based on text analysis."""
-        if "target opponent" in effect_text or "each opponent" in effect_text:
-            return "opponent"
-        elif "target player" in effect_text:
-            return "target_player"
-        else:
-            return "controller"  # Default

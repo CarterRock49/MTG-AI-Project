@@ -76,9 +76,17 @@ class AlphaZeroMTGEnv(gym.Env):
         
         self.action_memory_size = 80
         
-        # Define observation space
+        try:
+            # Create a dummy card to get feature dimension
+            dummy_card_data = {"name": "Dummy", "type_line": "Creature", "mana_cost": "{1}"}
+            FEATURE_DIM = len(Card(dummy_card_data).to_feature_vector())
+            logging.info(f"Determined FEATURE_DIM dynamically: {FEATURE_DIM}")
+        except Exception as e:
+            logging.warning(f"Could not determine FEATURE_DIM dynamically, using fallback 223: {e}")
+            FEATURE_DIM = 223 # Fallback
+
         self.observation_space = spaces.Dict({
-            # Add to the observation_space dictionary in __init__
+            # --- Existing ---
             "recommended_action": spaces.Box(low=0, high=480, shape=(1,), dtype=np.int32),
             "recommended_action_confidence": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
             "memory_suggested_action": spaces.Box(low=0, high=480, shape=(1,), dtype=np.int32),
@@ -87,54 +95,54 @@ class AlphaZeroMTGEnv(gym.Env):
             "attacker_values": spaces.Box(low=-10, high=10, shape=(self.max_battlefield,), dtype=np.float32),
             "planeswalker_activations": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=np.float32),
             "planeswalker_activation_counts": spaces.Box(low=0, high=10, shape=(self.max_battlefield,), dtype=np.float32),
-            "ability_recommendations": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5, 2), dtype=np.float32),
+            "ability_recommendations": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5, 2), dtype=np.float32), # Shape might need adjustment based on ability count per card
             "phase": spaces.Discrete(MAX_PHASE + 1),
             "mulligan_in_progress": spaces.Box(low=0, high=1, shape=(1,), dtype=np.int32),
             "mulligan_recommendation": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
             "mulligan_reason_count": spaces.Box(low=0, high=5, shape=(1,), dtype=np.int32),
-            "mulligan_reasons": spaces.Box(low=0, high=1, shape=(5,), dtype=np.float32),
+            "mulligan_reasons": spaces.Box(low=0, high=1, shape=(5,), dtype=np.float32), # Represent reasons numerically if possible
             "phase_onehot": spaces.Box(low=0, high=1, shape=(MAX_PHASE + 1,), dtype=np.float32),
             "turn": spaces.Box(low=0, high=self.max_turns, shape=(1,), dtype=np.int32),
             "p1_life": spaces.Box(low=0, high=40, shape=(1,), dtype=np.int32),
             "p2_life": spaces.Box(low=0, high=40, shape=(1,), dtype=np.int32),
-            "p1_battlefield": spaces.Box(low=0, high=50, shape=(self.max_battlefield, FEATURE_DIM), dtype=np.float32),
-            "p2_battlefield": spaces.Box(low=0, high=50, shape=(self.max_battlefield, FEATURE_DIM), dtype=np.float32),
+            "p1_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, FEATURE_DIM), dtype=np.float32), # Use -1 for empty slots?
+            "p2_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, FEATURE_DIM), dtype=np.float32),
             "p1_bf_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
             "p2_bf_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
             "my_life": spaces.Box(low=0, high=40, shape=(1,), dtype=np.int32),
-            "my_mana": spaces.Box(low=0, high=20, shape=(1,), dtype=np.int32),
-            "my_mana_pool": spaces.Box(low=0, high=100, shape=(6,), dtype=np.int32),
-            "my_hand": spaces.Box(low=0, high=50, shape=(self.max_hand_size, FEATURE_DIM), dtype=np.float32),
+            "my_mana": spaces.Box(low=0, high=20, shape=(1,), dtype=np.int32), # Sum of mana pool
+            "my_mana_pool": spaces.Box(low=0, high=100, shape=(6,), dtype=np.int32), # WUBRGC
+            "my_hand": spaces.Box(low=-1, high=50, shape=(self.max_hand_size, FEATURE_DIM), dtype=np.float32),
             "my_hand_count": spaces.Box(low=0, high=self.max_hand_size, shape=(1,), dtype=np.int32),
-            "action_mask": spaces.Box(low=0, high=1, shape=(480,), dtype=bool),
+            "action_mask": spaces.Box(low=0, high=1, shape=(self.ACTION_SPACE_SIZE,), dtype=bool), # Use constant
             "stack_count": spaces.Box(low=0, high=20, shape=(1,), dtype=np.int32),
             "my_graveyard_count": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "opp_graveyard_count": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "hand_playable": spaces.Box(low=0, high=1, shape=(self.max_hand_size,), dtype=np.float32),
             "hand_performance": spaces.Box(low=0, high=1, shape=(self.max_hand_size,), dtype=np.float32),
-            "graveyard_count": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
-            "tapped_permanents": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=bool),
-            "phase_history": spaces.Box(low=0, high=self.game_state.PHASE_TARGETING, shape=(5,), dtype=np.int32),
+            "graveyard_count": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32), # Redundant?
+            "tapped_permanents": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=bool), # Player specific needed?
+            "phase_history": spaces.Box(low=-1, high=MAX_PHASE, shape=(5,), dtype=np.int32), # Use -1 for padding
             "remaining_mana_sources": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
             "is_my_turn": spaces.Box(low=0, high=1, shape=(1,), dtype=np.int32),
             "life_difference": spaces.Box(low=-40, high=40, shape=(1,), dtype=np.int32),
             "opp_life": spaces.Box(low=0, high=40, shape=(1,), dtype=np.int32),
             "card_synergy_scores": spaces.Box(low=-1, high=1, shape=(self.max_battlefield, self.max_battlefield), dtype=np.float32),
-            "graveyard_key_cards": spaces.Box(low=0, high=1, shape=(10, FEATURE_DIM), dtype=np.float32),
-            "exile_key_cards": spaces.Box(low=0, high=1, shape=(10, FEATURE_DIM), dtype=np.float32),
-            "battlefield_keywords": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 15), dtype=np.float32),
+            "graveyard_key_cards": spaces.Box(low=-1, high=50, shape=(10, FEATURE_DIM), dtype=np.float32),
+            "exile_key_cards": spaces.Box(low=-1, high=50, shape=(10, FEATURE_DIM), dtype=np.float32),
+            "battlefield_keywords": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 15), dtype=np.float32), # Player specific needed? Increase keyword count?
             "position_advantage": spaces.Box(low=-1, high=1, shape=(1,), dtype=np.float32),
-            "estimated_opponent_hand": spaces.Box(low=0, high=1, shape=(self.max_hand_size, FEATURE_DIM), dtype=np.float32),
-            "strategic_metrics": spaces.Box(low=-1, high=1, shape=(10,), dtype=np.float32),
-            "deck_composition_estimate": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
-            "threat_assessment": spaces.Box(low=0, high=10, shape=(self.max_battlefield,), dtype=np.float32),
+            "estimated_opponent_hand": spaces.Box(low=-1, high=50, shape=(self.max_hand_size, FEATURE_DIM), dtype=np.float32),
+            "strategic_metrics": spaces.Box(low=-1, high=1, shape=(10,), dtype=np.float32), # Define specific metrics?
+            "deck_composition_estimate": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32), # Define components?
+            "threat_assessment": spaces.Box(low=0, high=10, shape=(self.max_battlefield,), dtype=np.float32), # Opponent battlefield specific?
             "opportunity_assessment": spaces.Box(low=0, high=10, shape=(self.max_hand_size,), dtype=np.float32),
-            "resource_efficiency": spaces.Box(low=0, high=1, shape=(3,), dtype=np.float32),
-            
-            # Additional observations returned by _get_obs but not defined in observation_space
-            "my_battlefield": spaces.Box(low=0, high=50, shape=(self.max_battlefield, FEATURE_DIM), dtype=np.float32),
-            "my_battlefield_flags": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5), dtype=np.float32),
-            "opp_battlefield": spaces.Box(low=0, high=50, shape=(self.max_battlefield, FEATURE_DIM), dtype=np.float32),
+            "resource_efficiency": spaces.Box(low=0, high=1, shape=(3,), dtype=np.float32), # Define components?
+
+            # --- ADDED MISSING ---
+            "my_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, FEATURE_DIM), dtype=np.float32),
+            "my_battlefield_flags": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5), dtype=np.float32), # Tapped, Sick, Attacking, Blocking, Keywords?
+            "opp_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, FEATURE_DIM), dtype=np.float32),
             "opp_battlefield_flags": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5), dtype=np.float32),
             "my_creature_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
             "opp_creature_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
@@ -145,28 +153,28 @@ class AlphaZeroMTGEnv(gym.Env):
             "power_advantage": spaces.Box(low=-100, high=100, shape=(1,), dtype=np.int32),
             "toughness_advantage": spaces.Box(low=-100, high=100, shape=(1,), dtype=np.int32),
             "creature_advantage": spaces.Box(low=-self.max_battlefield, high=self.max_battlefield, shape=(1,), dtype=np.int32),
-            "hand_card_types": spaces.Box(low=0, high=1, shape=(self.max_hand_size, 5), dtype=np.float32),
+            "hand_card_types": spaces.Box(low=0, high=1, shape=(self.max_hand_size, 5), dtype=np.float32), # Land, Creature, Instant, Sorcery, Other
             "opp_hand_count": spaces.Box(low=0, high=self.max_hand_size, shape=(1,), dtype=np.int32),
-            "total_available_mana": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
+            "total_available_mana": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32), # Sum of pool + potential from untapped lands?
             "untapped_land_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
-            "turn_vs_mana": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
-            "stack_controller": spaces.Box(low=0, high=1, shape=(5,), dtype=np.int32),
-            "stack_card_types": spaces.Box(low=0, high=1, shape=(5, 5), dtype=np.float32),
+            "turn_vs_mana": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32), # Mana available / Turn number?
+            "stack_controller": spaces.Box(low=-1, high=1, shape=(5,), dtype=np.int32), # Top 5 stack items: 0=me, 1=opp, -1=empty
+            "stack_card_types": spaces.Box(low=0, high=1, shape=(5, 5), dtype=np.float32), # Top 5 items: Creature, Inst, Sorc, Ability, Other
             "my_dead_creatures": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "opp_dead_creatures": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "attackers_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
             "blockers_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
-            "potential_combat_damage": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
-            "ability_features": spaces.Box(low=0, high=10, shape=(self.max_battlefield, 5), dtype=np.float32),
-            "ability_timing": spaces.Box(low=0, high=1, shape=(5,), dtype=np.float32),
-            "previous_actions": spaces.Box(low=0, high=480, shape=(self.action_memory_size,), dtype=np.int32),
+            "potential_combat_damage": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32), # Expected unblocked damage?
+            "ability_features": spaces.Box(low=0, high=10, shape=(self.max_battlefield, 5), dtype=np.float32), # Count, Can Activate, Mana, Draw, Removal?
+            "ability_timing": spaces.Box(low=0, high=1, shape=(5,), dtype=np.float32), # Appropriateness score per phase type?
+            "previous_actions": spaces.Box(low=-1, high=self.ACTION_SPACE_SIZE, shape=(self.action_memory_size,), dtype=np.int32), # Use -1 padding
             "previous_rewards": spaces.Box(low=-10, high=10, shape=(self.action_memory_size,), dtype=np.float32),
             "hand_synergy_scores": spaces.Box(low=0, high=1, shape=(self.max_hand_size,), dtype=np.float32),
-            "opponent_archetype": spaces.Box(low=0, high=1, shape=(4,), dtype=np.float32),
-            "future_state_projections": spaces.Box(low=-1, high=1, shape=(5,), dtype=np.float32),
-            "multi_turn_plan": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
-            "win_condition_viability": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
-            "win_condition_timings": spaces.Box(low=0, high=20, shape=(6,), dtype=np.float32),
+            "opponent_archetype": spaces.Box(low=0, high=1, shape=(4,), dtype=np.float32), # Aggro, Control, Midrange, Combo?
+            "future_state_projections": spaces.Box(low=-1, high=1, shape=(5,), dtype=np.float32), # E.g. life diff, board diff in N turns
+            "multi_turn_plan": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32), # Encoded plan
+            "win_condition_viability": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32), # Viability of common WCs
+            "win_condition_timings": spaces.Box(low=0, high=self.max_turns, shape=(6,), dtype=np.float32), # Estimated turns for WCs
         })
 
         # Add memory for actions and rewards
@@ -260,188 +268,153 @@ class AlphaZeroMTGEnv(gym.Env):
     def reset(self, seed=None, **kwargs):
         """
         Reset the environment and return initial observation and info.
-        
+
         Args:
             seed: Random seed
             **kwargs: Additional keyword arguments (required by Gymnasium API)
-            
+
         Returns:
             tuple: Initial observation and info dictionary
         """
+        env_id = getattr(self, "env_id", id(self)) # For tracking
         try:
-            from Playersim.debug import log_reset  # Import at function level to avoid circular imports
-            
-            # Get environment ID for tracking
-            env_id = getattr(self, "env_id", id(self))
-            log_reset(env_id)
-            
-            # Ensure we don't reset multiple times in succession
-            if hasattr(self, '_last_reset_time'):
-                current_time = time.time()
-                time_since_last_reset = current_time - self._last_reset_time
-                if time_since_last_reset < 0.1:  # Less than 100ms since last reset
-                    logging.warning(f"Multiple resets detected within {time_since_last_reset:.3f}s - investigating potential loop")
-                    stack = traceback.format_stack()
-                    logging.debug(f"Reset stack: {''.join(stack[-5:])}")
-            
-            self._last_reset_time = time.time()
-            
-            # Original reset code
+            # --- Pre-Reset Logging & Safety Checks ---
+            # Log the reset attempt
+            logging.info(f"RESETTING environment {env_id}...")
+            if DEBUG_MODE:
+                import traceback
+                logging.debug(f"Reset call stack (last 5 frames):\n{''.join(traceback.format_stack()[-6:-1])}")
+
+            # Simple check for rapid resets
+            current_time = time.time()
+            if hasattr(self, '_last_reset_time') and current_time - self._last_reset_time < 0.1:
+                logging.warning(f"Multiple resets detected within {current_time - self._last_reset_time:.3f}s!")
+            self._last_reset_time = current_time
+
+            # Call parent reset method (for seeding primarily)
             super().reset(seed=seed)
-            
-            # Reset episode metrics
+
+            # --- Reset Internal Environment State ---
             self.current_step = 0
             self.invalid_action_count = 0
             self.episode_rewards = []
             self.episode_invalid_actions = 0
             self.current_episode_actions = []
-            
-            # Reset cards played tracking
             self.cards_played = {0: [], 1: []}
-            
+            self.mulligan_data = {'p1': 0, 'p2': 0} # Reset mulligan stats
+            self._game_result_recorded = False # Reset recording flag
+            self._logged_card_ids = set() # Reset logging trackers
+            self._logged_errors = set()   # Reset logging trackers
+
+            # --- Reset GameState and Player Setup ---
             # Choose random decks
-            p1_deck = random.choice(self.decks)
-            p2_deck = random.choice(self.decks)
-            self.current_deck_name_p1 = p1_deck["name"]
-            self.current_deck_name_p2 = p2_deck["name"]
-            # Reset turn tracking
-            self.spells_cast_this_turn = []
-            self.attackers_this_turn = set()
-            self.damage_dealt_this_turn = {}
-            self.cards_drawn_this_turn = {"p1": 0, "p2": 0}
-            self.until_end_of_turn_effects = {}
-            
-            # Reset planeswalker activations
-            for player in [self.game_state.p1, self.game_state.p2]:
-                player["activated_this_turn"] = set()
-                player["pw_activations"] = {}
-            # Reset game state
+            p1_deck_data = random.choice(self.decks)
+            p2_deck_data = random.choice(self.decks)
+            self.current_deck_name_p1 = p1_deck_data["name"]
+            self.current_deck_name_p2 = p2_deck_data["name"]
+            self.original_p1_deck = p1_deck_data["cards"].copy() # Store original for memory
+            self.original_p2_deck = p2_deck_data["cards"].copy()
+
+            # Initialize GameState (creates players, resets turn/phase, etc.)
+            # Make sure GameState's constructor doesn't auto-initialize subsystems we handle below
             self.game_state = GameState(self.card_db, self.max_turns, self.max_hand_size, self.max_battlefield)
-            self.game_state.reset(p1_deck["cards"], p2_deck["cards"], seed)
-            self.original_p1_deck = p1_deck["cards"].copy()
-            self.original_p2_deck = p2_deck["cards"].copy()
-            
-            # Pass the stats tracker to the game state
+            # GameState's reset performs deck setup, shuffling, initial draw
+            self.game_state.reset(p1_deck_data["cards"], p2_deck_data["cards"], seed)
+
+            # --- Initialize & Link Subsystems to GameState ---
+            # Initialize strategy memory early if others depend on it
+            self.initialize_strategic_memory()
+            if self.strategy_memory:
+                 self.game_state.strategy_memory = self.strategy_memory
+
+            # Initialize stats/card memory trackers if available and link to GS
             if self.has_stats_tracker:
                 self.game_state.stats_tracker = self.stats_tracker
                 self.stats_tracker.current_deck_name_p1 = self.current_deck_name_p1
                 self.stats_tracker.current_deck_name_p2 = self.current_deck_name_p2
-            
-            # Sequential initialization with clear dependencies
+            if self.has_card_memory:
+                self.game_state.card_memory = self.card_memory
+
+            # Call GameState's consolidated subsystem initialization
+            # This should create ManaSystem, AbilityHandler, LayerSystem, ReplacementEffects, CombatResolver etc.
+            # *inside* the GameState object
+            self.game_state._init_subsystems()
+
+            # --- Initialize Environment Components Using GameState Subsystems ---
+            # Action Handler depends on GameState and its subsystems
             self.action_handler = ActionHandler(self.game_state)
-            self.initialize_strategic_memory()
-            self.game_state._init_rules_systems()
-            
-            # Register common continuous effects
-            if hasattr(self.game_state, 'replacement_effects'):
-                self.game_state.replacement_effects.register_common_effects()
-            
-            # Initialize targeting system
-            self.game_state.initialize_targeting_system()
-            
-            # Initialize enhanced systems
-            try:
-                # Create mana system first (no dependencies)
-                if hasattr(self, 'strategy_memory'):
-                    self.game_state.strategy_memory = self.strategy_memory
-                    
-                from .enhanced_mana_system import EnhancedManaSystem
-                self.mana_system = EnhancedManaSystem(self.game_state)
-                self.game_state.mana_system = self.mana_system
-                self.mana_system.mana_symbols = {'W', 'U', 'B', 'R', 'G', 'C'}
-                
-                # Combat resolver (doesn't depend on mana system)
-                from .enhanced_combat import ExtendedCombatResolver
-                self.combat_resolver = ExtendedCombatResolver(self.game_state)
-                self.game_state.combat_resolver = self.combat_resolver
-                # Integrate combat actions
-                integrate_combat_actions(self.game_state)
-                # Card evaluator (depends on stats_tracker but not other components)
-                from .enhanced_card_evaluator import EnhancedCardEvaluator
-                self.card_evaluator = EnhancedCardEvaluator(
-                    self.game_state, 
-                    self.stats_tracker if self.has_stats_tracker else None,
-                    self.card_memory if self.has_card_memory else None
-                )
-                self.game_state.card_evaluator = self.card_evaluator
-                
-                # Strategic planner (depends on all other components)
-                from .strategic_planner import MTGStrategicPlanner
-                self.strategic_planner = MTGStrategicPlanner(
-                    self.game_state, 
-                    self.card_evaluator, 
-                    self.combat_resolver
-                )
-                self.game_state.strategic_planner = self.strategic_planner
-                
-                if hasattr(self, 'strategy_memory') and self.strategic_planner:
-                    self.strategic_planner.strategy_memory = self.strategy_memory
-                    
-                # Initialize mulligan state (but don't make decisions automatically)
-                gs = self.game_state
-                gs.mulligan_in_progress = True
-                gs.mulligan_player = gs.p1  # Start with P1's mulligan decision
-                
-                # Ensure P2's mulligan will happen after P1 finishes
-                if not hasattr(gs, 'next_mulligan_player'):
-                    gs.next_mulligan_player = gs.p2
-                
-                # Analyze initial game state if strategic planner is initialized
-                if hasattr(self, 'strategic_planner'):
+
+            # Get references to components created by GameState for env use
+            self.combat_resolver = self.game_state.combat_resolver
+            self.card_evaluator = self.game_state.card_evaluator
+            self.strategic_planner = self.game_state.strategic_planner
+            self.mana_system = self.game_state.mana_system
+
+            # Ensure integration after handlers are created
+            integrate_combat_actions(self.game_state) # Link ActionHandler's combat_handler
+            if self.action_handler.combat_handler:
+                self.action_handler.combat_handler.setup_combat_systems()
+
+            # Link strategy memory to planner AFTER planner is initialized
+            if self.strategy_memory and self.strategic_planner:
+                self.strategic_planner.strategy_memory = self.strategy_memory
+
+            # --- Final Reset Steps ---
+            # Reset mulligan state AFTER subsystems are ready
+            gs = self.game_state # Alias for convenience
+            gs.mulligan_in_progress = True
+            gs.mulligan_player = gs.p1 # Start with P1's mulligan decision
+            gs.mulligan_count = {'p1': 0, 'p2': 0} # Ensure mulligan counts are reset
+            gs.bottoming_in_progress = False
+            gs.bottoming_player = None
+            gs.cards_to_bottom = 0
+            gs.bottoming_count = 0
+
+
+            # Perform initial game state analysis if planner exists
+            if self.strategic_planner:
+                try:
                     self.strategic_planner.analyze_game_state()
-                    
-                logging.debug("Enhanced MTG components initialized successfully")
-            except Exception as e:
-                logging.warning(f"Could not initialize enhanced components: {e}")
-                logging.warning(f"Error details: {str(e)}")
-                # Fall back to standard components
-                from .enhanced_combat import ExtendedCombatResolver
-                self.combat_resolver = ExtendedCombatResolver(self.game_state)
-                self.game_state.combat_resolver = self.combat_resolver
-                # Integrate combat actions
-                integrate_combat_actions(self.game_state, self.action_handler)
-            # Generate valid actions
-            self.current_valid_actions = self.action_handler.generate_valid_actions()
-            
-            # Get observation
-            obs = self._get_obs()
+                except Exception as analysis_e:
+                    logging.warning(f"Error during initial game state analysis: {analysis_e}")
+
+            # Initialize Action Mask for the starting player
+            self.current_valid_actions = self.action_mask()
+
+            # Get initial observation and info
+            obs = self._get_obs_safe() # Use safe get obs
             info = {"action_mask": self.current_valid_actions.astype(bool)}
-            
-            logging.debug(f"Environment {env_id} reset complete. Starting new episode.")
+
+            logging.info(f"Environment {env_id} reset complete. Starting new episode (Turn {gs.turn}, Phase {gs.phase}).")
+            logging.info(f"P1 Deck: {self.current_deck_name_p1}, P2 Deck: {self.current_deck_name_p2}")
+
             return obs, info
+
         except Exception as e:
-            logging.error(f"Error in reset method: {str(e)}")
-            import traceback
+            logging.error(f"CRITICAL error during environment reset: {str(e)}")
             logging.error(traceback.format_exc())
-            
-            # Emergency reset - create minimal valid state
-            self.game_state = GameState(self.card_db, self.max_turns, self.max_hand_size, self.max_battlefield)
-            
-            # Choose any decks
-            if not self.decks or len(self.decks) == 0:
-                # Create simple backup deck
-                backup_deck = [0] * 60
-            else:
-                backup_deck = self.decks[0] if len(self.decks) > 0 else [0] * 60
-                
-            self.game_state.reset(backup_deck, backup_deck, seed)
-            
-            # Minimal valid actions - just END_TURN
-            self.current_valid_actions = np.zeros(480, dtype=bool)
-            self.current_valid_actions[0] = True
-            
-            # Create minimal observation
+
+            # Emergency reset fallback (simplified)
             try:
-                obs = self._get_obs()
-            except:
-                obs = {k: np.zeros(space.shape, dtype=space.dtype) 
-                    for k, space in self.observation_space.spaces.items()}
-            
-            info = {"action_mask": self.current_valid_actions, 
-                    "error_reset": True}
-                    
-            logging.info("Emergency reset completed with minimal state")
-            return obs, info
+                logging.warning("Attempting emergency fallback reset...")
+                self.game_state = GameState(self.card_db, self.max_turns, self.max_hand_size, self.max_battlefield)
+                deck = self.decks[0]["cards"].copy() if self.decks else [0]*60
+                self.game_state.reset(deck, deck.copy(), seed)
+                # Minimal systems setup might be needed here depending on _get_obs_safe needs
+                self._init_subsystems() # Re-run subsystem init on the new GS
+
+                self.current_valid_actions = np.zeros(self.action_space.n, dtype=bool)
+                self.current_valid_actions[11] = True # PASS
+                self.current_valid_actions[12] = True # CONCEDE
+
+                obs = self._get_obs_safe()
+                info = {"action_mask": self.current_valid_actions.astype(bool), "error_reset": True}
+                logging.info("Emergency reset completed with minimal state.")
+                return obs, info
+            except Exception as fallback_e:
+                 logging.critical(f"FALLBACK RESET FAILED: {fallback_e}")
+                 # If even fallback fails, raise the error
+                 raise fallback_e
         
     def ensure_game_result_recorded(self):
         """Make sure game result is recorded if it hasn't been already"""

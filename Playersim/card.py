@@ -1875,10 +1875,18 @@ class Card:
     def _safe_int(self, value):
         """Handle non-numeric power/toughness values, returning None and logging a warning."""
         try:
+            # Handle '*' or similar symbolic values explicitly if needed
+            if isinstance(value, str) and not value.isdigit() and value not in ['*', 'X', '?']: # Add more symbols if needed
+                logging.warning(f"Non-numeric power/toughness value encountered: '{value}'. Returning None.")
+                return None
+            elif isinstance(value, str) and value in ['*', 'X', '?']:
+                # Represent symbolic values as None or a special number like -1? Let's use None.
+                return None
             return int(value)
-        except ValueError:
-            logging.error(f"Non-numeric power/toughness value encountered: {value}. Returning None.")
-            return None  # Return None to indicate non-numeric value
+        except (ValueError, TypeError):
+            # Log as warning, not error, as it might be expected (like '*')
+            logging.warning(f"Could not convert power/toughness value '{value}' to int. Returning None.")
+            return None
 
     def transform(self):
         """
@@ -2152,40 +2160,31 @@ class Card:
         self.subtype_vector = [1 if subtype in self.subtypes else 0 for subtype in Card.SUBTYPE_VOCAB]
 
     def has_keyword(self, keyword_name):
-        """Check if card has a specific keyword ability with improved accuracy."""
+        """Check if card has a specific keyword ability, preferring the keywords array."""
         keyword_name = keyword_name.lower()
-        
-        # First check directly in oracle text for better accuracy
-        if hasattr(self, 'oracle_text') and keyword_name in self.oracle_text.lower():
-            return True
-        
-        # Check in keywords array if available
-        if hasattr(self, 'keywords'):
-            # Map of keyword names to indices in the keywords array
-            keyword_indices = {
-                'flying': 0, 'trample': 1, 'hexproof': 2, 'lifelink': 3, 'deathtouch': 4,
-                'first strike': 5, 'double strike': 6, 'vigilance': 7, 'flash': 8, 'haste': 9,
-                'menace': 10
-            }
-            
-            # Check by index if known keyword
-            if keyword_name in keyword_indices:
-                idx = keyword_indices[keyword_name]
-                if idx < len(self.keywords):
-                    return self.keywords[idx] == 1
-        
-        # Special handling for ability variations
-        if hasattr(self, 'oracle_text'):
-            oracle_text = self.oracle_text.lower()
-            
-            # Handle special cases
-            if keyword_name == 'protection' and 'protection from' in oracle_text:
-                return True
-            elif keyword_name == 'landwalk' and any(land + 'walk' in oracle_text for land in ['island', 'mountain', 'forest', 'swamp', 'plains']):
-                return True
-            elif keyword_name == 'unblockable' and "can't be blocked" in oracle_text:
-                return True
-        
+        try:
+            keyword_index = Card.ALL_KEYWORDS.index(keyword_name)
+            # Check the pre-parsed keywords array first
+            if hasattr(self, 'keywords') and isinstance(self.keywords, list) and keyword_index < len(self.keywords):
+                return self.keywords[keyword_index] == 1
+        except ValueError:
+            # Keyword not in our master list, fall back to text search
+            pass
+
+        # Fallback to oracle text search (less reliable)
+        if hasattr(self, 'oracle_text') and isinstance(self.oracle_text, str):
+            # Use word boundaries for common keywords prone to partial matches
+            if keyword_name in ["flash", "haste", "reach", "ward"]:
+                pattern = r'\b' + re.escape(keyword_name) + r'\b'
+                if re.search(pattern, self.oracle_text.lower()):
+                    return True
+            # Simple substring check for others
+            elif keyword_name in self.oracle_text.lower():
+                # Add specific checks for variations if needed
+                if keyword_name == 'protection' and 'protection from' in self.oracle_text.lower(): return True
+                if keyword_name == 'landwalk' and 'walk' in self.oracle_text.lower(): return True # Simple check
+                return True # Basic substring match
+
         return False
 
     #

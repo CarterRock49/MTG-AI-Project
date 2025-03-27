@@ -19,60 +19,60 @@ def integrate_combat_actions(game_state):
     return game_state.combat_action_handler # Return the instance from game_state
 
 
+
 def apply_combat_action(game_state, action_type, param=None):
     """
-    Apply a specific combat action, serving as a lightweight bridge between 
-    action application and combat action handling.
+    Apply a specific combat action, serving as a lightweight bridge between
+    action application and combat action handling, with improved parameter handling.
 
     Args:
         game_state: The game state object
         action_type: String specifying the action type
-        param: Optional parameter for the action
+        param: Optional parameter for the action (can be simple value or tuple)
 
     Returns:
         bool: True if action was successfully applied
     """
-    # Ensure combat action handler is available
     combat_action_handler = integrate_combat_actions(game_state)
+    if not combat_action_handler:
+        logging.error("Cannot apply combat action: CombatActionHandler is missing.")
+        return False
 
-    # Simplified action mapping with improved error handling
     try:
-        # Call methods on the handler with proper error handling
-        if action_type == "FIRST_STRIKE_ORDER":
-            return combat_action_handler.handle_first_strike_order()
-        elif action_type == "ASSIGN_COMBAT_DAMAGE":
-            if isinstance(param, dict):
-                return combat_action_handler.handle_assign_combat_damage(param)
-            else:
-                return combat_action_handler.handle_assign_combat_damage()
-        elif action_type == "NINJUTSU":
-            attacker_id = game_state.current_attackers[-1] if game_state.current_attackers else None
-            return combat_action_handler.handle_ninjutsu(param, attacker_id)
-        elif action_type == "DECLARE_ATTACKERS_DONE":
-            return combat_action_handler.handle_declare_attackers_done()
-        elif action_type == "DECLARE_BLOCKERS_DONE":
-            return combat_action_handler.handle_declare_blockers_done()
-        elif action_type == "ATTACK_PLANESWALKER":
-            return combat_action_handler.handle_attack_planeswalker(param)
-        elif action_type == "ASSIGN_MULTIPLE_BLOCKERS":
-            return combat_action_handler.handle_assign_multiple_blockers(param)
-        elif action_type == "ATTACK_BATTLE":
-            # Just pass the battle index - creature index is stored separately
-            return combat_action_handler.handle_attack_battle(param)
-        elif action_type == "DEFEND_BATTLE":
-            if isinstance(param, tuple) and len(param) == 2:
-                return combat_action_handler.handle_defend_battle(param[0], param[1])
-            return False
-        elif action_type == "PROTECT_PLANESWALKER":
-            # Handle both tuple parameter and simple parameter cases
-            if isinstance(param, tuple) and len(param) >= 1:
-                planeswalker_id = param[0]
-                defender_idx = param[1] if len(param) >= 2 else None
-            else:
-                planeswalker_id = param
-                defender_idx = None
-            return combat_action_handler.handle_protect_planeswalker(planeswalker_id, defender_idx)
+        # Map action types to their corresponding handler methods
+        handlers = {
+            "FIRST_STRIKE_ORDER": combat_action_handler.handle_first_strike_order,
+            "ASSIGN_COMBAT_DAMAGE": combat_action_handler.handle_assign_combat_damage,
+            "NINJUTSU": combat_action_handler.handle_ninjutsu,
+            "DECLARE_ATTACKERS_DONE": combat_action_handler.handle_declare_attackers_done,
+            "DECLARE_BLOCKERS_DONE": combat_action_handler.handle_declare_blockers_done,
+            "ATTACK_PLANESWALKER": combat_action_handler.handle_attack_planeswalker,
+            "ASSIGN_MULTIPLE_BLOCKERS": combat_action_handler.handle_assign_multiple_blockers,
+            "ATTACK_BATTLE": combat_action_handler.handle_attack_battle,
+            "DEFEND_BATTLE": combat_action_handler.handle_defend_battle,
+            "PROTECT_PLANESWALKER": combat_action_handler.handle_protect_planeswalker
+        }
 
+        handler_method = handlers.get(action_type)
+
+        if handler_method:
+            # Call the method, unpacking parameters if param is a tuple
+            if isinstance(param, tuple):
+                return handler_method(*param) # Assumes handler accepts unpacked tuple args
+            elif param is not None:
+                return handler_method(param) # Single parameter
+            else:
+                return handler_method() # No parameter
+        else:
+            logging.warning(f"No specific combat handler found for action type: {action_type}")
+            return False # Action not recognized within combat context
+
+    except TypeError as te:
+         # Catch cases where the parameter structure doesn't match the handler signature
+         logging.error(f"Parameter mismatch calling handler for {action_type} with param {param}: {te}")
+         import traceback
+         logging.error(traceback.format_exc())
+         return False
     except Exception as e:
         logging.error(f"Error processing combat action {action_type}: {str(e)}")
         import traceback

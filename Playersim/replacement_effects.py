@@ -1730,15 +1730,28 @@ class ReplacementEffectSystem:
 
         def replacement(ctx):
             damage_dealt = ctx.get('damage_amount', 0)
+            lifelink_source_id = effect_id # Capture source_id from outer scope
+            lifelink_controller = player # Capture controller from outer scope
+
             # Create a life gain side effect (doesn't replace the damage itself)
             if damage_dealt > 0:
                 def gain_life_later():
-                     # Verify controller still exists and hasn't lost
-                     if player and player.get("life", 0) > 0:
-                          player['life'] += damage_dealt
-                          logging.debug(f"Lifelink: {source_name} gained {damage_dealt} life.")
-                          # Trigger "gain life" events
-                          self.game_state.trigger_ability(card_id, "LIFE_GAINED", {"amount": damage_dealt, "controller": player})
+                    # Verify controller still exists and hasn't lost
+                    if lifelink_controller and lifelink_controller.get("life", 0) > 0:
+                        # Apply life gain replacement effects to this gain
+                        gain_context = {'player': lifelink_controller, 'life_amount': damage_dealt, 'source_type': 'lifelink'}
+                        modified_gain_context, gain_replaced = self.apply_replacements("LIFE_GAIN", gain_context)
+                        final_life_gain = modified_gain_context.get('life_amount', 0)
+
+                        if final_life_gain > 0:
+                            lifelink_controller['life'] += final_life_gain
+                            logging.debug(f"Lifelink: {source_name} gained {final_life_gain} life.")
+                            # Trigger "gain life" events
+                            if hasattr(self.game_state, 'trigger_ability'):
+                                self.game_state.trigger_ability(lifelink_source_id, "LIFE_GAINED", {"amount": final_life_gain, "controller": lifelink_controller})
+                    else:
+                        logging.debug(f"Lifelink gain prevented for {source_name} (controller lost or invalid).")
+
 
                 # Schedule the life gain after damage event fully resolves
                 if not hasattr(self.game_state, 'delayed_triggers'): self.game_state.delayed_triggers = []
@@ -1988,33 +2001,44 @@ class ReplacementEffectSystem:
         """Remove effects that have expired."""
         current_turn = self.game_state.turn
         # Need to know active player to handle 'until_my_next_turn'
-        active_player = self.game_state._get_active_player()
+        active_player = self.game_state._get_active_player() # Get current active player
         active_player_is_p1 = (active_player == self.game_state.p1)
 
         expired_ids = []
-        for effect in self.active_effects:
-            effect_id = effect.get('effect_id')
-            duration = effect.get('duration', 'permanent')
-            start_turn = effect.get('start_turn', 0)
+        for effect_data in list(self.active_effects): # Iterate over a copy
+            effect_id = effect_data.get('effect_id')
+            duration = effect_data.get('duration', 'permanent')
+            start_turn = effect_data.get('start_turn', 0)
 
             is_expired = False
-            if duration == 'end_of_turn' and start_turn < current_turn: is_expired = True
-            elif duration == 'next_turn' and start_turn < current_turn - 1: is_expired = True
+            if duration == 'permanent' or duration == 'until_source_leaves': # until_source_leaves handled separately
+                is_expired = False # These don't expire based on time
+            elif duration == 'end_of_turn':
+                # Expired if it's not the turn it started AND it's the cleanup step or later
+                is_expired = start_turn < current_turn or (start_turn == current_turn and current_phase >= self.game_state.PHASE_CLEANUP)
+            elif duration == 'next_turn': # Expires at start of player's next turn AFTER the one it started
+                # Hard to track perfectly without start player context, approximate:
+                is_expired = start_turn < current_turn - 1
             elif duration == 'until_my_next_turn':
-                 effect_controller_is_p1 = effect.get('controller_is_p1')
-                 # Expired if it's now the controller's turn again AND it's not the same turn it started
-                 if effect_controller_is_p1 == active_player_is_p1 and start_turn < current_turn:
-                      is_expired = True
+                effect_controller_is_p1 = effect_data.get('controller_is_p1')
+                # Expires if it's the controller's turn again and it's *not* the turn it started
+                is_expired = (effect_controller_is_p1 == active_player_is_p1 and start_turn < current_turn)
             elif duration == 'until_source_leaves':
-                 source_id = effect.get('source_id')
-                 source_location = self.game_state.find_card_location(source_id)
-                 if not source_location or source_location[1] != 'battlefield':
-                      is_expired = True
-            elif duration == 'conditional' and callable(effect.get('duration_condition')):
+                source_id = effect_data.get('source_id')
+                source_location = self.game_state.find_card_location(source_id)
+                if not source_location or source_location[1] != 'battlefield':
+                    is_expired = True
+            elif duration == 'conditional' and callable(effect_data.get('duration_condition')):
                 try:
-                    if not effect['duration_condition'](): is_expired = True
+                    if not effect_data['duration_condition'](): is_expired = True
                 except Exception as e:
                     logging.error(f"Error in duration condition for effect {effect_id}: {e}"); is_expired = True # Remove on error
+            elif duration == 'one_shot': # Handled during apply_replacements usually
+                pass # This should have been removed already if applied_once was True
+            else: # Default for unknown or standard time-based durations
+                # Assuming simple end-of-turn expiration for others for now
+                is_expired = start_turn < current_turn
+
 
             if is_expired:
                 expired_ids.append(effect_id)

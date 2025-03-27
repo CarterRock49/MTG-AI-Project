@@ -1,6 +1,7 @@
 import logging
 from .ability_types import Ability, ActivatedAbility, TriggeredAbility, StaticAbility, KeywordAbility, ManaAbility, AbilityEffect
 import re
+from collections import defaultdict
 from .card import Card
 from .keyword_effects import KeywordEffects
 from .ability_utils import EffectFactory
@@ -418,78 +419,106 @@ class AbilityHandler:
         return True
     
     def _parse_text_with_patterns(self, text, patterns, ability_type, card_id, card, abilities_list):
-        """
-        Parse oracle text using regex patterns and create abilities of the specified type.
-        
-        Args:
-            text: The oracle text to parse
-            patterns: List of (pattern, restriction_generator) tuples for regex matching
-            ability_type: Type of ability to create (ActivatedAbility, TriggeredAbility, etc.)
-            card_id: ID of the card with the ability
-            card: Card object
-            abilities_list: List to add the created abilities to
-        """
-        for pattern, restriction_func in patterns:
-            matches = re.finditer(pattern, text.lower())
-            for match in matches:
-                # Skip reminder text in parentheses
-                if '(' in match.group(0) and ')' in match.group(0):
-                    continue
-                    
-                # Create ability based on type
-                if ability_type == "activated":
-                    cost, effect = match.groups() if len(match.groups()) >= 2 else (None, None)
-                    if cost and effect:
-                        ability = ActivatedAbility(
+            """
+            Parse oracle text using regex patterns and create abilities of the specified type.
+            Correctly handles reminder text removal before group extraction.
+
+            Args:
+                text: The oracle text to parse
+                patterns: List of (pattern, restriction_generator) tuples for regex matching
+                ability_type: Type of ability to create (ActivatedAbility, TriggeredAbility, etc.)
+                card_id: ID of the card with the ability
+                card: Card object
+                abilities_list: List to add the created abilities to
+            """
+            # Pre-process text to remove reminder text in parentheses
+            # Using a non-greedy match .*? to handle nested parentheses potentially better
+            processed_text = re.sub(r'\([^()]*?\)', '', text.lower()).strip()
+            # Double check cleaning edge cases like trailing spaces
+            processed_text = re.sub(r'\s+([:.,;])', r'\1', processed_text).strip() # Remove space before punctuation
+
+            for pattern, restriction_func in patterns:
+                # Use the processed text without reminder text for matching
+                matches = re.finditer(pattern, processed_text) # Use processed_text here
+                for match in matches:
+                    # Create ability based on type
+                    if ability_type == "activated":
+                        # Check number of groups expected by pattern (usually cost:effect = 2)
+                        num_groups = pattern.count('(') - pattern.count('\(') # Estimate groups
+                        if num_groups >= 2:
+                            try:
+                                cost, effect = match.groups()[:2] # Get the first two groups
+                                # Check if cost/effect are valid (not None and not empty)
+                                if cost is not None and effect is not None and cost.strip() and effect.strip():
+                                    ability = ActivatedAbility(
+                                        card_id=card_id,
+                                        cost=cost.strip(),
+                                        effect=effect.strip(),
+                                        effect_text=match.group(0) # Use original match text for display
+                                    )
+                                    abilities_list.append(ability)
+                                    logging.debug(f"Registered activated ability for {card.name}: {cost.strip()}: {effect.strip()}")
+                                else:
+                                    logging.debug(f"Skipped invalid activated ability match: groups were '{cost}', '{effect}'")
+                            except IndexError:
+                                logging.warning(f"Regex pattern '{pattern}' for activated ability generated fewer than 2 groups for match '{match.group(0)}'")
+                        else:
+                            # Fallback/Warning if pattern doesn't look like cost:effect
+                            logging.debug(f"Activated ability pattern '{pattern}' doesn't seem to match 'cost:effect' structure.")
+
+                    elif ability_type == "triggered":
+                        # Assuming pattern captures the full "Trigger, Effect" string
+                        full_match_text = match.group(0).strip()
+                        # Split by the first comma NOT inside parentheses (already removed)
+                        parts = full_match_text.split(',', 1)
+                        trigger = parts[0].strip()
+                        effect = parts[1].strip() if len(parts) > 1 else ""
+
+                        if not trigger or not effect:
+                            logging.debug(f"Skipped invalid triggered ability match: trigger='{trigger}', effect='{effect}'")
+                            continue
+
+                        # Extract any "if" conditions (already handled in original logic)
+                        condition = None
+                        if " if " in effect:
+                            effect_parts = effect.split(" if ", 1)
+                            effect = effect_parts[0].strip()
+                            condition = "if " + effect_parts[1].strip()
+                        elif " only if " in effect:
+                            effect_parts = effect.split(" only if ", 1)
+                            effect = effect_parts[0].strip()
+                            condition = "only if " + effect_parts[1].strip()
+
+                        ability = TriggeredAbility(
                             card_id=card_id,
-                            cost=cost.strip(),
-                            effect=effect.strip(),
-                            effect_text=f"{cost}: {effect}"
+                            trigger_condition=trigger,
+                            effect=effect,
+                            effect_text=full_match_text, # Original matched text
+                            additional_condition=condition
                         )
                         abilities_list.append(ability)
-                        logging.debug(f"Registered activated ability for {card.name}: {cost}: {effect}")
-                
-                elif ability_type == "triggered":
-                    # Extract trigger and effect
-                    effect_parts = match.group(0).split(',', 1)
-                    trigger = effect_parts[0].strip()
-                    effect = effect_parts[1].strip() if len(effect_parts) > 1 else ""
-                    
-                    # Extract any conditions
-                    condition = None
-                    if " if " in effect:
-                        effect_parts = effect.split(" if ", 1)
-                        effect = effect_parts[0].strip()
-                        condition = "if " + effect_parts[1].strip()
-                    elif " only if " in effect:
-                        effect_parts = effect.split(" only if ", 1)
-                        effect = effect_parts[0].strip()
-                        condition = "only if " + effect_parts[1].strip()
-                    
-                    ability = TriggeredAbility(
-                        card_id=card_id,
-                        trigger_condition=trigger,
-                        effect=effect,
-                        effect_text=match.group(0),
-                        additional_condition=condition
-                    )
-                    abilities_list.append(ability)
-                    logging.debug(f"Registered triggered ability for {card.name}: {match.group(0)}")
-                
-                elif ability_type == "static":
-                    # Apply any restrictions from the pattern
-                    restrictions = {}
-                    if callable(restriction_func):
-                        restrictions = restriction_func(match)
-                        
-                    effect = match.group(0)
-                    ability = StaticAbility(
-                        card_id=card_id,
-                        effect=effect,
-                        effect_text=effect
-                    )
-                    abilities_list.append(ability)
-                    logging.debug(f"Registered static ability for {card.name}: {effect}")
+                        logging.debug(f"Registered triggered ability for {card.name}: {full_match_text}")
+
+                    elif ability_type == "static":
+                        # Static ability is typically the whole match
+                        effect = match.group(0).strip()
+                        if not effect:
+                            continue
+
+                        # Apply any restrictions from the pattern (unmodified)
+                        restrictions = {}
+                        if callable(restriction_func):
+                            restrictions = restriction_func(match) # Apply restrictions based on match object
+
+                        ability = StaticAbility(
+                            card_id=card_id,
+                            effect=effect,
+                            effect_text=effect
+                        )
+                        # Optionally add restrictions to the ability object if needed later
+                        # setattr(ability, 'restrictions', restrictions)
+                        abilities_list.append(ability)
+                        logging.debug(f"Registered static ability for {card.name}: {effect}")
                     
     def _get_complex_trigger_phrases(self):
         """Get mapping of complex trigger phrases to event types."""
@@ -1441,78 +1470,64 @@ class AbilityHandler:
         self.active_triggers = []
     
     def resolve_ability(self, ability_type, card_id, controller, context=None):
-        """
-        Resolve an ability that's resolving from the stack.
-        
-        Args:
-            ability_type: Type of ability (ACTIVATED, TRIGGERED, etc.)
-            card_id: ID of the card with the ability
-            controller: Player controlling the ability
-            context: Additional context about the ability
-        """
-        gs = self.game_state
-        card = gs._safe_get_card(card_id)
-        if not card:
-            logging.warning(f"Cannot resolve ability: card {card_id} not found")
-            return
-            
-        # If context contains an actual ability object, use it directly
-        if context and "ability" in context and isinstance(context["ability"], Ability):
-            ability = context["ability"]
-            if hasattr(ability, 'resolve'):
-                try:
-                    # Resolve with targets if they exist
-                    targets = context.get("targets")
-                    if hasattr(ability, 'resolve_with_targets') and targets:
-                        ability.resolve_with_targets(gs, controller, targets)
-                    else:
-                        ability.resolve(gs, controller)
-                        
-                    logging.debug(f"Resolved ability for {card.name}: {ability.effect_text}")
-                    return
-                except Exception as e:
-                    logging.error(f"Error resolving ability: {str(e)}")
-                    import traceback
-                    logging.error(traceback.format_exc())
-                    return
-        
-        # Otherwise, find the ability based on type and index
-        ability = None
-        ability_index = context.get("ability_index", 0) if context else 0
-        
-        if ability_type == "ACTIVATED":
-            activated_abilities = self.get_activated_abilities(card_id)
-            if activated_abilities and 0 <= ability_index < len(activated_abilities):
-                ability = activated_abilities[ability_index]
-        elif ability_type == "TRIGGERED":
-            # Find a matching triggered ability from context
-            effect_text = context.get("effect_text", "") if context else ""
-            card_abilities = self.registered_abilities.get(card_id, [])
-            
-            for a in card_abilities:
-                if isinstance(a, TriggeredAbility) and a.effect_text == effect_text:
-                    ability = a
-                    break
-                    
-        # If we found an ability, resolve it
-        if ability:
-            try:
-                # Get targets if any
-                targets = context.get("targets") if context else None
-                
-                # Resolve with targets if they exist
-                if hasattr(ability, 'resolve_with_targets') and targets:
-                    ability.resolve_with_targets(gs, controller, targets)
+            """
+            Resolve an ability that's resolving from the stack, relying on the context
+            to provide the specific Ability object.
+
+            Args:
+                ability_type: Type of ability (ACTIVATED, TRIGGERED, etc.) - used mainly for logging.
+                card_id: ID of the card with the ability
+                controller: Player controlling the ability
+                context: Additional context about the ability, expected to contain 'ability' object.
+            """
+            gs = self.game_state
+            card = gs._safe_get_card(card_id) # Keep for logging/context if needed
+            source_name = card.name if card else f"Card {card_id}"
+
+            if context and "ability" in context and isinstance(context["ability"], Ability):
+                ability = context["ability"]
+                if hasattr(ability, 'resolve'):
+                    try:
+                        # Use targets directly from the context if they were determined when the ability went on stack
+                        targets_on_stack = context.get("targets")
+
+                        # Validate targets again upon resolution (Rule 608.2b)
+                        if not self.game_state.targeting_system.validate_targets(ability.card_id, targets_on_stack, controller):
+                            logging.debug(f"Targets for {ability.effect_text} became invalid upon resolution. Ability fizzles.")
+                            # Note: Spell/Ability is removed from stack but has no effect.
+                            return # Fizzle
+
+                        # Resolve the ability, passing the validated targets
+                        if hasattr(ability, 'resolve_with_targets') and targets_on_stack is not None:
+                            ability.resolve_with_targets(gs, controller, targets_on_stack)
+                        else:
+                            ability.resolve(gs, controller) # Call resolve if it doesn't need targets or method is standard
+
+                        logging.debug(f"Resolved {ability_type} ability for {source_name}: {ability.effect_text}")
+                        # Trigger "spell/ability resolved" effects? (if applicable)
+                        return
+                    except Exception as e:
+                        # ... (error logging) ...
+                        return
                 else:
-                    ability.resolve(gs, controller)
-                    
-                logging.debug(f"Resolved ability for {card.name}: {ability.effect_text}")
-            except Exception as e:
-                logging.error(f"Error resolving ability: {str(e)}")
-                import traceback
-                logging.error(traceback.format_exc())
-        else:
-            logging.warning(f"No ability found to resolve for {card.name}")
+                    logging.error(f"Ability object for {source_name} lacks a resolve method.")
+            else:
+                logging.warning(f"No valid 'ability' object found in context for resolving {ability_type} from {source_name}.")
+                # Maybe try basic effect parsing from context['effect_text'] as fallback?
+                effect_text_from_context = context.get('effect_text', '') if context else ''
+                if effect_text_from_context:
+                    logging.debug("Attempting fallback effect resolution from context text.")
+                    # This bypasses the Ability object's specific logic, use with caution.
+                    effects = EffectFactory.create_effects(effect_text_from_context)
+                    for effect_obj in effects:
+                        targets_from_context = context.get("targets")
+                        # Validate targets for this specific effect if it requires them
+                        if effect_obj.requires_target and not self.game_state.targeting_system.validate_targets(card_id, targets_from_context, controller):
+                            logging.debug(f"Target for effect '{effect_obj.effect_text}' became invalid. Skipping effect.")
+                            continue
+                        effect_obj.apply(gs, card_id, controller, targets_from_context)
+                else:
+                    logging.warning(f"Could not resolve ability {ability_type} from {source_name}: missing ability object and effect text.")
             
     def handle_attack_triggers(self, attacker_id):
         """Handle triggered abilities that trigger when a creature attacks."""
@@ -1583,129 +1598,133 @@ class TargetingSystem:
         self.game_state = game_state
     
     def get_valid_targets(self, card_id, controller, target_type=None):
-        """
-        Returns a list of valid targets for a card, based on its text and target type.
-        
-        Args:
-            card_id: ID of the card doing the targeting
-            controller: Player dictionary of the card's controller
-            target_type: Optional specific target type to filter for
-            
-        Returns:
-            dict: Dictionary of target types to lists of valid targets
-        """
-        gs = self.game_state
-        card = gs._safe_get_card(card_id)
-        if not card or not hasattr(card, 'oracle_text'):
-            return {}
-            
-        oracle_text = card.oracle_text.lower()
-        opponent = gs.p2 if controller == gs.p1 else gs.p1
-        
-        valid_targets = {
-            "creatures": [],
-            "players": [],
-            "permanents": [],
-            "spells": [],
-            "lands": [],
-            "artifacts": [],
-            "enchantments": [],
-            "planeswalkers": [],
-            "graveyard": [],
-            "exile": [],
-            "library": [],
-            "other": []
-        }
-        
-        # Parse targeting requirements from the oracle text
-        target_requirements = self._parse_targeting_requirements(oracle_text)
-        
-        # If a specific target type is requested, only check that type
-        if target_type:
-            if target_type not in valid_targets:
+            """
+            Returns a list of valid targets for a card, based on its text and target type,
+            using the unified _is_valid_target checker.
+
+            Args:
+                card_id: ID of the card doing the targeting
+                controller: Player dictionary of the card's controller
+                target_type: Optional specific target type to filter for
+
+            Returns:
+                dict: Dictionary of target types to lists of valid targets
+            """
+            gs = self.game_state
+            card = gs._safe_get_card(card_id)
+            if not card or not hasattr(card, 'oracle_text'):
                 return {}
-            valid_targets = {target_type: []}
-            target_requirements = [req for req in target_requirements if req.get("type") == target_type]
-        
-        # Fill valid targets based on requirements
-        for requirement in target_requirements:
-            req_type = requirement.get("type", "other")
-            
-            if req_type == "creature":
-                # Get all creatures on battlefield
-                for player in [gs.p1, gs.p2]:
-                    for target_id in player["battlefield"]:
-                        if self._is_valid_creature_target(card_id, target_id, controller, player, requirement):
-                            valid_targets["creatures"].append(target_id)
-            
-            elif req_type == "player":
-                # Players can be targeted
-                if requirement.get("opponent_only"):
-                    valid_targets["players"].append("p2" if controller == gs.p1 else "p1")
-                elif requirement.get("controller_only"):
-                    valid_targets["players"].append("p1" if controller == gs.p1 else "p2")
-                else:
-                    valid_targets["players"].extend(["p1", "p2"])
-                    
-            elif req_type == "permanent":
-                # Get all permanents on battlefield
-                for player in [gs.p1, gs.p2]:
-                    for target_id in player["battlefield"]:
-                        if self._is_valid_permanent_target(card_id, target_id, controller, player, requirement):
-                            valid_targets["permanents"].append(target_id)
-            
-            elif req_type == "spell":
-                # Get all spells on the stack
-                for stack_item in gs.stack:
-                    if isinstance(stack_item, tuple) and len(stack_item) >= 3:
-                        spell_type, spell_id, spell_caster = stack_item[:3]
-                        if spell_type == "SPELL":
-                            if self._is_valid_spell_target(card_id, spell_id, controller, spell_caster, requirement):
-                                valid_targets["spells"].append(spell_id)
-            
-            elif req_type == "land":
-                # Get all lands on battlefield
-                for player in [gs.p1, gs.p2]:
-                    for target_id in player["battlefield"]:
-                        if self._is_valid_land_target(card_id, target_id, controller, player, requirement):
-                            valid_targets["lands"].append(target_id)
-            
-            elif req_type == "artifact":
-                # Get all artifacts on battlefield
-                for player in [gs.p1, gs.p2]:
-                    for target_id in player["battlefield"]:
-                        if self._is_valid_artifact_target(card_id, target_id, controller, player, requirement):
-                            valid_targets["artifacts"].append(target_id)
-            
-            elif req_type == "enchantment":
-                # Get all enchantments on battlefield
-                for player in [gs.p1, gs.p2]:
-                    for target_id in player["battlefield"]:
-                        if self._is_valid_enchantment_target(card_id, target_id, controller, player, requirement):
-                            valid_targets["enchantments"].append(target_id)
-            
-            elif req_type == "planeswalker":
-                # Get all planeswalkers on battlefield
-                for player in [gs.p1, gs.p2]:
-                    for target_id in player["battlefield"]:
-                        if self._is_valid_planeswalker_target(card_id, target_id, controller, player, requirement):
-                            valid_targets["planeswalkers"].append(target_id)
-            
-            elif req_type == "graveyard":
-                # Get valid cards from graveyards
-                for player in [gs.p1, gs.p2]:
-                    for target_id in player["graveyard"]:
-                        if self._is_valid_graveyard_target(card_id, target_id, controller, player, requirement):
-                            valid_targets["graveyard"].append(target_id)
-                            
-            elif req_type == "exile":
-                # Get valid cards from exile
-                for player in [gs.p1, gs.p2]:
-                    for target_id in player["exile"]:
-                        if self._is_valid_exile_target(card_id, target_id, controller, player, requirement):
-                            valid_targets["exile"].append(target_id)
-        
-        return valid_targets
+
+            oracle_text = card.oracle_text.lower()
+            opponent = gs.p2 if controller == gs.p1 else gs.p1
+
+            valid_targets = {
+                "creature": [], "player": [], "permanent": [], "spell": [],
+                "land": [], "artifact": [], "enchantment": [], "planeswalker": [],
+                "card": [], # For graveyard/exile etc.
+                "ability": [], # For targeting abilities on stack
+                "other": [] # Fallback
+            }
+            all_target_types = list(valid_targets.keys())
+
+            # Parse targeting requirements from the oracle text
+            target_requirements = self._parse_targeting_requirements(oracle_text)
+
+            # If no requirements found but text has "target", add a generic requirement
+            if not target_requirements and "target" in oracle_text:
+                target_requirements.append({"type": "target"}) # Generic target
+
+            # Filter requirements if a specific target type is requested
+            if target_type:
+                target_requirements = [req for req in target_requirements if req.get("type") == target_type or req.get("type") in ["any", "target"]]
+                if not target_requirements: return {} # No matching requirement for requested type
+
+            # Define potential target sources
+            target_sources = [
+                # Players
+                ("p1", gs.p1, "player"),
+                ("p2", gs.p2, "player"),
+                # Battlefield
+                *[(perm_id, gs.get_card_controller(perm_id), "battlefield") for player in [gs.p1, gs.p2] for perm_id in player.get("battlefield", [])],
+                # Stack (Spells and Abilities)
+                *[(item[1], item[2], "stack") for item in gs.stack if isinstance(item, tuple) and len(item) >= 3],
+                # Graveyards
+                *[(card_id, player, "graveyard") for player in [gs.p1, gs.p2] for card_id in player.get("graveyard", [])],
+                # Exile
+                *[(card_id, player, "exile") for player in [gs.p1, gs.p2] for card_id in player.get("exile", [])],
+            ]
+
+            processed_valid = defaultdict(set) # Use set to avoid duplicates
+
+            # Check each requirement against potential targets
+            for requirement in target_requirements:
+                req_type = requirement.get("type", "target") # Use "target" as fallback
+                required_zone = requirement.get("zone")
+
+                for target_id, target_obj_or_owner, current_zone in target_sources:
+                    # Skip if zone doesn't match (unless zone isn't specified in req)
+                    if required_zone and current_zone != required_zone:
+                        continue
+
+                    target_object = None
+                    target_owner = None
+
+                    if current_zone == "player":
+                        target_object = target_obj_or_owner # target_obj_or_owner is the player dict
+                        target_owner = target_obj_or_owner # Player owns themselves? Or maybe None? Let's use the player.
+                    elif current_zone == "stack":
+                        target_object = None
+                        # Find the actual stack item (tuple or Card) based on target_id
+                        for item in gs.stack:
+                            if isinstance(item, tuple) and len(item) >= 3 and item[1] == target_id:
+                                target_object = item # The stack item tuple itself
+                                target_owner = item[2] # Controller of the spell/ability
+                                break
+                            # Less common: stack item is just Card object?
+                            # elif isinstance(item, Card) and item.card_id == target_id:
+                            #      target_object = item; target_owner = ??? # Need controller info
+                        if target_object is None: continue # Stack item not found correctly
+                    elif current_zone in ["battlefield", "graveyard", "exile", "library"]:
+                        target_object = gs._safe_get_card(target_id)
+                        target_owner = target_obj_or_owner # target_obj_or_owner is the player dict
+                    else:
+                        continue # Unknown zone
+
+                    if not target_object: continue # Could be player or Card or Stack Tuple
+
+                    target_info = (target_object, target_owner, current_zone) # Pass tuple to checker
+
+                    # Use the unified validation function
+                    if self._is_valid_target(card_id, target_id, controller, target_info, requirement):
+                        # Determine primary category for this target
+                        primary_cat = "other"
+                        actual_types = set()
+                        if isinstance(target_object, Card):
+                            actual_types.update(getattr(target_object, 'card_types', []))
+                            if 'creature' in actual_types: primary_cat = 'creature'
+                            elif 'land' in actual_types: primary_cat = 'land'
+                            elif 'planeswalker' in actual_types: primary_cat = 'planeswalker'
+                            elif 'artifact' in actual_types: primary_cat = 'artifact'
+                            elif 'enchantment' in actual_types: primary_cat = 'enchantment'
+                            elif current_zone == 'stack': primary_cat = 'spell'
+                            elif current_zone == 'graveyard' or current_zone == 'exile': primary_cat = 'card'
+                        elif current_zone == 'player': primary_cat = 'player'
+                        elif current_zone == 'stack' and isinstance(target_object, tuple): primary_cat = 'ability' # Could be spell too
+
+                        # If specific type requested, use that, otherwise use derived primary category
+                        cat_to_add = target_type if target_type else primary_cat
+
+                        # Ensure category exists and add target
+                        if cat_to_add in valid_targets:
+                            processed_valid[cat_to_add].add(target_id)
+                        elif req_type in valid_targets: # Fallback to requirement type
+                            processed_valid[req_type].add(target_id)
+                        else: # Last resort: "other"
+                            processed_valid["other"].add(target_id)
+
+            # Convert sets back to lists for the final dictionary
+            final_valid_targets = {cat: list(ids) for cat, ids in processed_valid.items() if ids}
+            return final_valid_targets
     
     def resolve_targeting_for_ability(self, card_id, ability_text, controller):
         """
@@ -1995,409 +2014,7 @@ class TargetingSystem:
                 else: req["zone"] = "graveyard" # Default to GY if zone unspecified for 'card'
 
         return requirements
-    
-    def _is_valid_creature_target(self, source_id, target_id, caster, target_owner, requirements):
-        """Check if a creature is a valid target based on requirements."""
-        gs = self.game_state
-        source_card = gs._safe_get_card(source_id)
-        target_card = gs._safe_get_card(target_id)
-        
-        if not target_card or not hasattr(target_card, 'card_types'):
-            return False
-            
-        # Check if it's a creature
-        if 'creature' not in target_card.card_types:
-            return False
-            
-        # Check controller restrictions
-        if requirements.get("controller_is_caster") and target_owner != caster:
-            return False
-            
-        if requirements.get("controller_is_opponent") and target_owner == caster:
-            return False
-            
-        # Check power restrictions
-        if "power_restriction" in requirements:
-            restriction = requirements["power_restriction"]
-            if not hasattr(target_card, 'power'):
-                return False
-                
-            if restriction["comparison"] == "greater":
-                if target_card.power < restriction["value"]:
-                    return False
-            elif restriction["comparison"] == "less":
-                if target_card.power > restriction["value"]:
-                    return False
-                    
-        # Check toughness restrictions
-        if "toughness_restriction" in requirements:
-            restriction = requirements["toughness_restriction"]
-            if not hasattr(target_card, 'toughness'):
-                return False
-                
-            if restriction["comparison"] == "greater":
-                if target_card.toughness < restriction["value"]:
-                    return False
-            elif restriction["comparison"] == "less":
-                if target_card.toughness > restriction["value"]:
-                    return False
-        
-        # Check color restrictions
-        if "color_restriction" in requirements:
-            color = requirements["color_restriction"]
-            color_index = {'white': 0, 'blue': 1, 'black': 2, 'red': 3, 'green': 4}
-            
-            if not hasattr(target_card, 'colors') or not target_card.colors[color_index[color]]:
-                return False
-        
-        # Check tapped/untapped status
-        if requirements.get("must_be_tapped") and target_id not in target_owner.get("tapped_permanents", set()):
-            return False
-            
-        if requirements.get("must_be_untapped") and target_id in target_owner.get("tapped_permanents", set()):
-            return False
-            
-        # Check attacking/blocking status
-        if requirements.get("must_be_attacking") and (not hasattr(gs, 'current_attackers') or target_id not in gs.current_attackers):
-            return False
-            
-        if requirements.get("must_be_blocking"):
-            is_blocking = False
-            if hasattr(gs, 'current_block_assignments'):
-                for blockers in gs.current_block_assignments.values():
-                    if target_id in blockers:
-                        is_blocking = True
-                        break
-            if not is_blocking:
-                return False
-        
-        # Check for protection against the source
-        if self._has_protection_from(target_card, source_card, target_owner, caster):
-            return False
-            
-        # Check for hexproof
-        if target_owner != caster and self._has_hexproof(target_card):
-            return False
-            
-        # Check for shroud
-        if self._has_shroud(target_card):
-            return False
-            
-        # All checks passed, this is a valid target
-        return True
-    
-    def _is_valid_permanent_target(self, source_id, target_id, caster, target_owner, requirements):
-        """Check if a permanent is a valid target based on requirements."""
-        gs = self.game_state
-        source_card = gs._safe_get_card(source_id)
-        target_card = gs._safe_get_card(target_id)
-        
-        if not target_card:
-            return False
-        
-        # Check if this is a permanent (on the battlefield)
-        if target_id not in target_owner["battlefield"]:
-            return False
-            
-        # Check for land exclusion
-        if requirements.get("exclude_land") and hasattr(target_card, 'card_types') and 'land' in target_card.card_types:
-            return False
-            
-        # Check controller restrictions
-        if requirements.get("controller_is_caster") and target_owner != caster:
-            return False
-            
-        if requirements.get("controller_is_opponent") and target_owner == caster:
-            return False
-            
-        # Check color restrictions
-        if "color_restriction" in requirements:
-            color = requirements["color_restriction"]
-            color_index = {'white': 0, 'blue': 1, 'black': 2, 'red': 3, 'green': 4}
-            
-            if not hasattr(target_card, 'colors') or not target_card.colors[color_index[color]]:
-                return False
-            
-        # Check tapped/untapped status
-        if requirements.get("must_be_tapped") and target_id not in target_owner.get("tapped_permanents", set()):
-            return False
-            
-        if requirements.get("must_be_untapped") and target_id in target_owner.get("tapped_permanents", set()):
-            return False
-            
-        # Check for protection against the source
-        if self._has_protection_from(target_card, source_card, target_owner, caster):
-            return False
-            
-        # Check for hexproof
-        if target_owner != caster and self._has_hexproof(target_card):
-            return False
-            
-        # Check for shroud
-        if self._has_shroud(target_card):
-            return False
-            
-        # All checks passed, this is a valid target
-        return True
-    
-    def _is_valid_spell_target(self, source_id, target_id, caster, spell_caster, requirements):
-        """Check if a spell is a valid target based on requirements."""
-        gs = self.game_state
-        source_card = gs._safe_get_card(source_id)
-        target_card = gs._safe_get_card(target_id)
-        
-        if not target_card or not hasattr(target_card, 'card_types'):
-            return False
-            
-        # Check for "can't be countered"
-        if hasattr(source_card, 'oracle_text') and "counter target spell" in source_card.oracle_text.lower():
-            if hasattr(target_card, 'oracle_text') and "can't be countered" in target_card.oracle_text.lower():
-                return False
-            
-        # Check spell type restrictions
-        if "spell_type_restriction" in requirements:
-            restriction = requirements["spell_type_restriction"]
-            if restriction == "instant_or_sorcery" and 'instant' not in target_card.card_types and 'sorcery' not in target_card.card_types:
-                return False
-            elif restriction == "creature" and 'creature' not in target_card.card_types:
-                return False
-            elif restriction == "instant" and 'instant' not in target_card.card_types:
-                return False
-            elif restriction == "sorcery" and 'sorcery' not in target_card.card_types:
-                return False
-                
-        # Check controller restrictions
-        if requirements.get("controller_is_caster") and spell_caster != caster:
-            return False
-            
-        if requirements.get("controller_is_opponent") and spell_caster == caster:
-            return False
-            
-        # All checks passed, this is a valid target
-        return True
-    
-    def _is_valid_land_target(self, source_id, target_id, caster, target_owner, requirements):
-        """Check if a land is a valid target based on requirements."""
-        gs = self.game_state
-        source_card = gs._safe_get_card(source_id)
-        target_card = gs._safe_get_card(target_id)
-        
-        if not target_card or not hasattr(target_card, 'card_types'):
-            return False
-            
-        # Check if it's a land
-        if 'land' not in target_card.card_types:
-            return False
-            
-        # Check basic/nonbasic restrictions
-        if requirements.get("must_be_basic"):
-            land_type = target_card.type_line.lower() if hasattr(target_card, 'type_line') else ""
-            if "basic" not in land_type:
-                return False
-                
-        if requirements.get("must_be_nonbasic"):
-            land_type = target_card.type_line.lower() if hasattr(target_card, 'type_line') else ""
-            if "basic" in land_type:
-                return False
-            
-        # Check controller restrictions
-        if requirements.get("controller_is_caster") and target_owner != caster:
-            return False
-            
-        if requirements.get("controller_is_opponent") and target_owner == caster:
-            return False
-            
-        # Check for protection against the source
-        if self._has_protection_from(target_card, source_card, target_owner, caster):
-            return False
-            
-        # Check for hexproof
-        if target_owner != caster and self._has_hexproof(target_card):
-            return False
-            
-        # Check for shroud
-        if self._has_shroud(target_card):
-            return False
-            
-        # All checks passed, this is a valid target
-        return True
-    
-    def _is_valid_artifact_target(self, source_id, target_id, caster, target_owner, requirements):
-        """Check if an artifact is a valid target based on requirements."""
-        gs = self.game_state
-        source_card = gs._safe_get_card(source_id)
-        target_card = gs._safe_get_card(target_id)
-        
-        if not target_card or not hasattr(target_card, 'card_types'):
-            return False
-            
-        # Check if it's an artifact
-        if 'artifact' not in target_card.card_types:
-            return False
-            
-        # Check must be creature requirement
-        if requirements.get("must_be_creature") and 'creature' not in target_card.card_types:
-            return False
-            
-        # Check controller restrictions
-        if requirements.get("controller_is_caster") and target_owner != caster:
-            return False
-            
-        if requirements.get("controller_is_opponent") and target_owner == caster:
-            return False
-            
-        # Check for protection against the source
-        if self._has_protection_from(target_card, source_card, target_owner, caster):
-            return False
-            
-        # Check for hexproof
-        if target_owner != caster and self._has_hexproof(target_card):
-            return False
-            
-        # Check for shroud
-        if self._has_shroud(target_card):
-            return False
-            
-        # All checks passed, this is a valid target
-        return True
-    
-    def _is_valid_enchantment_target(self, source_id, target_id, caster, target_owner, requirements):
-        """Check if an enchantment is a valid target based on requirements."""
-        gs = self.game_state
-        source_card = gs._safe_get_card(source_id)
-        target_card = gs._safe_get_card(target_id)
-        
-        if not target_card or not hasattr(target_card, 'card_types'):
-            return False
-            
-        # Check if it's an enchantment
-        if 'enchantment' not in target_card.card_types:
-            return False
-            
-        # Check must be aura requirement
-        if requirements.get("must_be_aura") and (not hasattr(target_card, 'subtypes') or 'aura' not in target_card.subtypes):
-            return False
-            
-        # Check controller restrictions
-        if requirements.get("controller_is_caster") and target_owner != caster:
-            return False
-            
-        if requirements.get("controller_is_opponent") and target_owner == caster:
-            return False
-            
-        # Check for protection against the source
-        if self._has_protection_from(target_card, source_card, target_owner, caster):
-            return False
-            
-        # Check for hexproof
-        if target_owner != caster and self._has_hexproof(target_card):
-            return False
-            
-        # Check for shroud
-        if self._has_shroud(target_card):
-            return False
-            
-        # All checks passed, this is a valid target
-        return True
-    
-    def _is_valid_planeswalker_target(self, source_id, target_id, caster, target_owner, requirements):
-        """Check if a planeswalker is a valid target based on requirements."""
-        gs = self.game_state
-        source_card = gs._safe_get_card(source_id)
-        target_card = gs._safe_get_card(target_id)
-        
-        if not target_card or not hasattr(target_card, 'card_types'):
-            return False
-            
-        # Check if it's a planeswalker
-        if 'planeswalker' not in target_card.card_types:
-            return False
-            
-        # Check controller restrictions
-        if requirements.get("controller_is_caster") and target_owner != caster:
-            return False
-            
-        if requirements.get("controller_is_opponent") and target_owner == caster:
-            return False
-            
-        # Check for protection against the source
-        if self._has_protection_from(target_card, source_card, target_owner, caster):
-            return False
-            
-        # Check for hexproof
-        if target_owner != caster and self._has_hexproof(target_card):
-            return False
-            
-        # Check for shroud
-        if self._has_shroud(target_card):
-            return False
-            
-        # All checks passed, this is a valid target
-        return True
-    
-    def _is_valid_graveyard_target(self, source_id, target_id, caster, target_owner, requirements):
-        """Check if a card in a graveyard is a valid target based on requirements."""
-        gs = self.game_state
-        target_card = gs._safe_get_card(target_id)
-        
-        if not target_card:
-            return False
-            
-        # Check card type restrictions
-        if "card_type_restriction" in requirements:
-            restriction = requirements["card_type_restriction"]
-            if restriction == "creature" and (not hasattr(target_card, 'card_types') or 'creature' not in target_card.card_types):
-                return False
-            elif restriction == "instant_or_sorcery" and (not hasattr(target_card, 'card_types') or 
-                                                          ('instant' not in target_card.card_types and 
-                                                           'sorcery' not in target_card.card_types)):
-                return False
-                
-        # Check owner restrictions
-        if requirements.get("owner_is_caster") and target_owner != caster:
-            return False
-            
-        if requirements.get("owner_is_opponent") and target_owner == caster:
-            return False
-            
-        # All checks passed, this is a valid target
-        return True
-    
-    def _is_valid_exile_target(self, source_id, target_id, caster, target_owner, requirements):
-        """Check if a card in exile is a valid target based on requirements."""
-        gs = self.game_state
-        target_card = gs._safe_get_card(target_id)
-        
-        if not target_card:
-            return False
-            
-        # Check face-down requirement
-        if requirements.get("must_be_face_down"):
-            # In a real implementation, we'd check if the card is face down
-            # For now, assume all exile cards are face-up unless otherwise tracked
-            is_face_down = hasattr(gs, 'face_down_cards') and target_id in gs.face_down_cards.get('exile', [])
-            if not is_face_down:
-                return False
-            
-        # Check card type restrictions
-        if "card_type_restriction" in requirements:
-            restriction = requirements["card_type_restriction"]
-            if restriction == "creature" and (not hasattr(target_card, 'card_types') or 'creature' not in target_card.card_types):
-                return False
-            elif restriction == "instant_or_sorcery" and (not hasattr(target_card, 'card_types') or 
-                                                          ('instant' not in target_card.card_types and 
-                                                           'sorcery' not in target_card.card_types)):
-                return False
-                
-        # Check owner restrictions
-        if requirements.get("owner_is_caster") and target_owner != caster:
-            return False
-            
-        if requirements.get("owner_is_opponent") and target_owner == caster:
-            return False
-            
-        # All checks passed, this is a valid target
-        return True
+
     
     def _has_protection_from(self, target_card, source_card, target_owner, source_controller):
         """
