@@ -9,18 +9,18 @@ def integrate_combat_actions(game_state):
         logging.debug("Creating and integrating CombatActionHandler")
         game_state.combat_action_handler = CombatActionHandler(game_state)
     else:
-        # Optionally re-link if needed, but usually just return existing
-        pass
+        pass # Already integrated
 
     # Ensure resolver linkage if resolver exists
     if hasattr(game_state, 'combat_resolver'):
-        game_state.combat_resolver.action_handler = game_state.combat_action_handler
+         # Link handler to resolver if resolver expects it
+         if hasattr(game_state.combat_resolver, 'action_handler'):
+             game_state.combat_resolver.action_handler = game_state.combat_action_handler
 
     return game_state.combat_action_handler # Return the instance from game_state
 
 
-
-def apply_combat_action(game_state, action_type, param=None):
+def apply_combat_action(game_state, action_type, param=None, context=None): # Added context parameter
     """
     Apply a specific combat action, serving as a lightweight bridge between
     action application and combat action handling, with improved parameter handling.
@@ -28,7 +28,8 @@ def apply_combat_action(game_state, action_type, param=None):
     Args:
         game_state: The game state object
         action_type: String specifying the action type
-        param: Optional parameter for the action (can be simple value or tuple)
+        param: Optional parameter for the action (can be simple value)
+        context: Optional dictionary with additional context for complex actions.
 
     Returns:
         bool: True if action was successfully applied
@@ -39,7 +40,7 @@ def apply_combat_action(game_state, action_type, param=None):
         return False
 
     try:
-        # Map action types to their corresponding handler methods
+        # Map action types to their corresponding handler methods within CombatActionHandler
         handlers = {
             "FIRST_STRIKE_ORDER": combat_action_handler.handle_first_strike_order,
             "ASSIGN_COMBAT_DAMAGE": combat_action_handler.handle_assign_combat_damage,
@@ -56,20 +57,27 @@ def apply_combat_action(game_state, action_type, param=None):
         handler_method = handlers.get(action_type)
 
         if handler_method:
-            # Call the method, unpacking parameters if param is a tuple
-            if isinstance(param, tuple):
-                return handler_method(*param) # Assumes handler accepts unpacked tuple args
+            # *** REFACTOR: Pass context to the handler method ***
+            # Check signature? Or just pass context generally? Pass context.
+            if param is not None and context is not None:
+                 # Pass both param and context (e.g., ASSIGN_MULTIPLE_BLOCKERS)
+                 return handler_method(param=param, context=context)
+            elif context is not None:
+                 # Pass only context (e.g., NINJUTSU, PROTECT_PLANESWALKER, DEFEND_BATTLE)
+                 return handler_method(param=None, context=context)
             elif param is not None:
-                return handler_method(param) # Single parameter
+                 # Pass only param (e.g., ATTACK_PLANESWALKER, ATTACK_BATTLE)
+                 return handler_method(param=param)
             else:
-                return handler_method() # No parameter
+                 # No param or context needed (e.g., DECLARE_..._DONE, FIRST_STRIKE_ORDER?)
+                 return handler_method()
         else:
             logging.warning(f"No specific combat handler found for action type: {action_type}")
             return False # Action not recognized within combat context
 
     except TypeError as te:
          # Catch cases where the parameter structure doesn't match the handler signature
-         logging.error(f"Parameter mismatch calling handler for {action_type} with param {param}: {te}")
+         logging.error(f"Parameter mismatch calling combat handler for {action_type} with param {param} and context {context}: {te}")
          import traceback
          logging.error(traceback.format_exc())
          return False

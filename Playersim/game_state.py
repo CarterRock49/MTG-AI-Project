@@ -4,7 +4,7 @@ import numpy as np
 from .card import Card
 from .debug import DEBUG_MODE
 import re
-from .ability_types import TriggeredAbility
+from .ability_types import StaticAbility, TriggeredAbility
 from collections import defaultdict
 
 class GameState:
@@ -679,7 +679,7 @@ class GameState:
         Returns:
             bool: True if the effect is applied successfully.
         """
-        original_controller = self._find_card_owner(card_id)
+        original_controller = self.find_card_location(card_id)
         if original_controller is None:
             logging.warning(f"Temporary control: Original owner not found for card {card_id}.")
             return False
@@ -807,7 +807,7 @@ class GameState:
         This should be called at the end of the turn.
         """
         for card_id, original_controller in list(self.temp_control_effects.items()):
-            current_controller = self._find_card_owner(card_id)
+            current_controller = self.find_card_location(card_id)
             if current_controller and current_controller != original_controller:
                 # Remove from current controller's battlefield
                 if card_id in current_controller["battlefield"]:
@@ -856,15 +856,7 @@ class GameState:
         if self.replacement_effects:
             return self.replacement_effects.register_effect(effect_data)
         return None
-        
-    def _find_card_owner(self, card_id):
-        """Find the player who owns a card (different from controller)."""
-        # In a simplified model, we can consider the controller to be the owner
-        for player in [self.p1, self.p2]:
-            for zone in ["battlefield", "hand", "graveyard", "exile", "library"]:
-                if card_id in player[zone]:
-                    return player
-        return None
+    
     
     def add_defense_counter(self, card_id, count=1):
         """
@@ -1091,115 +1083,193 @@ class GameState:
         return self.move_card(card_id, player, source_zone, player, "graveyard")
     
     def move_card(self, card_id, from_player, from_zone, to_player, to_zone, cause=None, context=None):
-        """Move a card between zones with replacement effect handling and triggers."""
+        """Move a card between zones, applying replacement effects and triggering abilities."""
         if context is None: context = {}
         card = self._safe_get_card(card_id)
-        card_name = card.name if card else f"Card {card_id}"
+        card_name = getattr(card, 'name', f"Card {card_id}") if card else f"Card {card_id}"
 
-        # 1. Check if card exists in source zone
-        source_list = from_player.get(from_zone)
-        if source_list is None or card_id not in source_list:
-            # Check implicit zones like stack
-            if from_zone == "stack_implicit":
-                 pass # Assume it was removed from stack implicitly
-            else:
-                logging.warning(f"Cannot move {card_name}: not found in {from_player['name']}'s {from_zone}.")
-                return False
+        # 1. Validate Source Zone & Card Presence
+        source_list = None
+        actual_from_zone = from_zone # Track actual source if implicit
+        if from_zone == "stack_implicit":
+             # Assume card was on stack, remove implicitly - requires stack handler did this
+             actual_from_zone = "stack"
+             source_list = [] # Placeholder, don't remove from anywhere
+        elif from_zone == "library_implicit":
+             # Assume card was removed from library by search/reveal effect
+             actual_from_zone = "library"
+             source_list = []
+        elif from_zone == "nonexistent_zone":
+             # Used for creating tokens, card doesn't exist before entering BF
+             actual_from_zone = "nonexistent"
+             source_list = []
+        else:
+             source_list = from_player.get(from_zone) if from_player else None
+             if source_list is None or card_id not in source_list:
+                 # Maybe the card already moved due to a previous effect? Re-check location.
+                 current_location_player, current_location_zone = self.find_card_location(card_id)
+                 if current_location_player == from_player and current_location_zone == from_zone:
+                      # It's still there, proceed with removal attempt (maybe set logic failed?)
+                      source_list = current_location_player.get(current_location_zone)
+                      if card_id not in source_list: # Still not found after re-check
+                          logging.warning(f"Cannot move {card_name}: Confirmed not in {from_player['name']}'s {from_zone}.")
+                          return False
+                 elif current_location_zone is not None:
+                      # Card moved already, potentially okay if moving to same destination
+                      if current_location_player == to_player and current_location_zone == to_zone:
+                           logging.debug(f"Card {card_name} already moved to target zone {to_zone}.")
+                           return True # Already there
+                      else:
+                           logging.warning(f"Cannot move {card_name}: Found in unexpected location ({current_location_zone}) instead of source ({from_zone}).")
+                           return False
+                 else: # Card truly doesn't exist anywhere?
+                     logging.warning(f"Cannot move {card_name}: not found in {from_player['name']}'s {from_zone} or anywhere else.")
+                     return False
 
-        # 2. Apply "As this card leaves..." replacement effects
-        leave_event_context = {
-            'card_id': card_id, 'player': from_player, 'from_zone': from_zone,
-            'to_zone': to_zone, 'cause': cause, **context
-        }
-        if self.replacement_effects:
-             modified_leave_context, _ = self.replacement_effects.apply_replacements("LEAVE_" + from_zone.upper(), leave_event_context)
-             # Update target zone/player if modified
-             to_player = modified_leave_context.get('to_player', to_player)
-             to_zone = modified_leave_context.get('to_zone', to_zone)
-             if modified_leave_context.get('prevented', False):
-                 logging.debug(f"Movement of {card_name} from {from_zone} prevented by leave effect.")
-                 return False # Movement prevented
-
-        # 3. Apply "As this card enters..." replacement effects (only determines destination)
-        enter_event_context = {
-            'card_id': card_id, 'player': to_player, 'from_zone': from_zone,
-            'to_zone': to_zone, 'cause': cause, **context
-        }
+        # --- Apply Replacement Effects ---
+        # These effects might change the destination, player, or prevent the move entirely.
         final_destination_player = to_player
         final_destination_zone = to_zone
-        enters_tapped = False
-        enter_counters = None
-        if self.replacement_effects:
-            modified_enter_context, _ = self.replacement_effects.apply_replacements("ENTER_" + to_zone.upper(), enter_event_context)
-            # Update final destination based on replacements
-            final_destination_player = modified_enter_context.get('player', final_destination_player)
-            final_destination_zone = modified_enter_context.get('to_zone', final_destination_zone)
-            enters_tapped = modified_enter_context.get('enters_tapped', False)
-            enter_counters = modified_enter_context.get('enter_counters')
-            if modified_enter_context.get('prevented', False):
-                logging.debug(f"Movement of {card_name} to {to_zone} prevented by enter effect.")
-                return False # Movement prevented
+        event_context = {
+             'card_id': card_id, 'card': card,
+             'from_player': from_player, 'from_zone': actual_from_zone,
+             'to_player': to_player, 'to_zone': to_zone,
+             'cause': cause, **context
+        }
+        prevented = False
+        if hasattr(self, 'replacement_effects') and self.replacement_effects:
+             # Apply "leaves zone" replacements
+             modified_leave_ctx, replaced_leave = self.replacement_effects.apply_replacements(f"LEAVE_{actual_from_zone.upper()}", event_context)
+             if replaced_leave:
+                 event_context.update(modified_leave_ctx) # Update context with changes
+                 final_destination_player = event_context.get('to_player', to_player)
+                 final_destination_zone = event_context.get('to_zone', to_zone)
+                 prevented = event_context.get('prevented', False)
 
-        # 4. Perform the actual move
-        if from_zone != "stack_implicit": # Avoid removing if it wasn't really there
+             # Apply "enters zone" replacements (Only determines final destination)
+             if not prevented:
+                 # Update context for enter check
+                 event_context['to_player'] = final_destination_player
+                 event_context['to_zone'] = final_destination_zone
+                 modified_enter_ctx, replaced_enter = self.replacement_effects.apply_replacements(f"ENTER_{final_destination_zone.upper()}", event_context)
+                 if replaced_enter:
+                      final_destination_player = modified_enter_ctx.get('to_player', final_destination_player)
+                      final_destination_zone = modified_enter_ctx.get('to_zone', final_destination_zone)
+                      prevented = modified_enter_ctx.get('prevented', False)
+                      # Store ETB modifications like tapped status, counters
+                      context['enters_tapped'] = modified_enter_ctx.get('enters_tapped', False)
+                      context['enter_counters'] = modified_enter_ctx.get('enter_counters')
+
+
+        if prevented:
+             logging.debug(f"Movement of {card_name} from {actual_from_zone} to {final_destination_zone} prevented by replacement effect.")
+             # If prevention happened, does card stay in original zone? Rules check needed. Assume yes.
+             return False
+
+        # --- Perform Move ---
+        # 1. Remove from source (if not implicit zone)
+        if source_list is not None and card_id in source_list:
              source_list.remove(card_id)
 
-        # Handle leaving battlefield cleanup
-        if from_zone == "battlefield":
-            if card_id in from_player.get("tapped_permanents", set()): from_player["tapped_permanents"].remove(card_id)
-            if card_id in from_player.get("entered_battlefield_this_turn", set()): from_player["entered_battlefield_this_turn"].remove(card_id)
-            # TODO: Remove attachments, counters, effects from layer system/replacements
-            if self.layer_system: self.layer_system.remove_effects_by_source(card_id)
-            if self.replacement_effects: self.replacement_effects.remove_effects_by_source(card_id)
-            # Reset card state if needed (e.g., morph, Class level)
-            if hasattr(card, 'reset_state_on_zone_change'): card.reset_state_on_zone_change()
+        # 2. Handle "leaves the battlefield" cleanup
+        if actual_from_zone == "battlefield" and from_player:
+             if card_id in from_player.get("tapped_permanents", set()): from_player["tapped_permanents"].remove(card_id)
+             if card_id in from_player.get("entered_battlefield_this_turn", set()): from_player["entered_battlefield_this_turn"].remove(card_id)
+             # Reset attachments (both ways)
+             if hasattr(from_player, "attachments"):
+                 # If card_id was attached to something, remove it
+                 if card_id in from_player["attachments"]: del from_player["attachments"][card_id]
+                 # If something was attached to card_id, remove that attachment
+                 items_attached_to_it = [att_id for att_id, target_id in from_player["attachments"].items() if target_id == card_id]
+                 for att_id in items_attached_to_it: del from_player["attachments"][att_id]
+             # Remove counters from the Card object itself
+             if card and hasattr(card, 'counters'): card.counters = {}
+             # Remove loyalty tracking
+             if hasattr(from_player, 'loyalty_counters') and card_id in from_player['loyalty_counters']: del from_player['loyalty_counters'][card_id]
+             # Remove effects originating from this card
+             if self.layer_system: self.layer_system.remove_effects_by_source(card_id)
+             if self.replacement_effects: self.replacement_effects.remove_effects_by_source(card_id)
+             # Reset specific card states
+             if card and hasattr(card, 'reset_state_on_zone_change'): card.reset_state_on_zone_change()
 
-        # Add to destination zone
+        # 3. Add to destination zone
         destination_list = final_destination_player.get(final_destination_zone)
         if destination_list is None:
-             logging.error(f"Invalid destination zone '{final_destination_zone}' for player.")
+             logging.error(f"Invalid destination zone '{final_destination_zone}' for player {final_destination_player['name']}.")
+             # Attempt to put card back in source zone? Difficult state to recover.
              return False
         destination_list.append(card_id)
 
-        logging.debug(f"Moved {card_name} from {from_player['name']}'s {from_zone} to {final_destination_player['name']}'s {final_destination_zone}")
+        logging.debug(f"Moved {card_name} from {from_player['name'] if from_player else 'N/A'}'s {actual_from_zone} to {final_destination_player['name']}'s {final_destination_zone}")
 
-        # 5. Apply "When this card enters..." triggers and effects
+        # --- Trigger Abilities & Handle ETB ---
+        # Create trigger context containing details about the move
+        trigger_context = {
+            'controller': final_destination_player, # Who controls it *now*
+            'from_zone': actual_from_zone,
+            'to_zone': final_destination_zone,
+            'cause': cause,
+            **context # Pass along original context
+        }
+
+        # 1. "Leaves the <Zone>" Triggers
+        self.trigger_ability(card_id, f"LEAVE_{actual_from_zone.upper()}", trigger_context)
+
+        # 2. "Enters the <Zone>" Triggers (Including ETB for battlefield)
         if final_destination_zone == "battlefield":
-            if "entered_battlefield_this_turn" not in final_destination_player:
-                 final_destination_player["entered_battlefield_this_turn"] = set()
-            final_destination_player["entered_battlefield_this_turn"].add(card_id)
+             # Mark entered this turn
+             final_destination_player.setdefault("entered_battlefield_this_turn", set()).add(card_id)
+             # Apply enters tapped/counters from replacements/card text
+             enters_tapped = context.get('enters_tapped', False) or (hasattr(card, 'oracle_text') and "enters the battlefield tapped" in card.oracle_text.lower())
+             if enters_tapped:
+                 final_destination_player.setdefault("tapped_permanents", set()).add(card_id)
+                 logging.debug(f"{card_name} entered tapped.")
 
-            # Handle enters tapped
-            if enters_tapped:
-                 if "tapped_permanents" not in final_destination_player: final_destination_player["tapped_permanents"] = set()
-                 final_destination_player["tapped_permanents"].add(card_id)
+             enter_counters = context.get('enter_counters') # Counters from replacement effects
+             # Also check counters from card text (e.g., Sagas, Vanishing)
+             # TODO: Refine counter logic to handle precedence/interaction
+             if enter_counters and isinstance(enter_counters, list):
+                 for counter_info in enter_counters:
+                     self.add_counter(card_id, counter_info['type'], counter_info['count'])
+             # Add specific ETB counters from card itself (needs Card parsing logic)
+             # e.g., for Sagas: self.add_counter(card_id, "lore", 1) if card.is_saga()
 
-            # Handle enters with counters
-            if enter_counters and isinstance(enter_counters, dict):
-                 counter_type = enter_counters.get("type")
-                 count = enter_counters.get("count", 1)
-                 if counter_type and count > 0:
-                      self.add_counter(card_id, counter_type, count)
+             # Register continuous/replacement effects *from this card*
+             # Note: Effects on *other* cards affecting this one should already be active via Layer system.
+             if card:
+                self._register_card_effects(card_id, card, final_destination_player)
 
-            # Register card's own continuous/replacement effects
-            if self.layer_system: self.layer_system.register_effects_from_card(card_id, final_destination_player) # Needs implementation in LayerSystem
-            if self.replacement_effects: self.replacement_effects.register_card_replacement_effects(card_id, final_destination_player)
 
-            # Trigger ETB abilities
-            self.trigger_ability(card_id, "ENTERS_BATTLEFIELD", {"controller": final_destination_player, **context})
+             # Trigger ETB (generic and specific like landfall)
+             self.trigger_ability(card_id, "ENTERS_BATTLEFIELD", trigger_context)
+             if card and 'land' in getattr(card,'card_types',[]):
+                 self.trigger_ability(card_id, "LANDFALL", trigger_context)
 
-        # 6. Trigger "leaves zone" and "enters zone" triggers
-        self.trigger_ability(card_id, "LEAVE_" + from_zone.upper(), {"player": from_player, "to_zone": final_destination_zone, **context})
-        self.trigger_ability(card_id, "ENTER_" + final_destination_zone.upper(), {"player": final_destination_player, "from_zone": from_zone, **context})
+        else: # Enters non-battlefield zone
+             self.trigger_ability(card_id, f"ENTER_{final_destination_zone.upper()}", trigger_context)
 
-        # Special Rule: Tokens cease to exist if they leave the battlefield
-        if card and hasattr(card, 'is_token') and card.is_token and from_zone == "battlefield" and final_destination_zone != "battlefield":
+        # 3. Handle Tokens Ceasing to Exist
+        if card and hasattr(card, 'is_token') and card.is_token and actual_from_zone == "battlefield" and final_destination_zone != "battlefield":
             logging.debug(f"Token {card_name} ceased to exist after moving to {final_destination_zone}.")
-            if card_id in destination_list: destination_list.remove(card_id) # Remove from destination zone
+            if card_id in destination_list: destination_list.remove(card_id) # Remove from destination
             if card_id in self.card_db: del self.card_db[card_id] # Remove from db
 
-        self.check_state_based_actions()
+        # SBAs checked in the main game loop after action/resolution completes
         return True
+    
+    def _register_card_effects(self, card_id, card, player):
+        """Register static and replacement effects originating from a card."""
+        # Register static abilities via AbilityHandler if they exist
+        if self.ability_handler:
+            abilities = self.ability_handler.registered_abilities.get(card_id, [])
+            for ability in abilities:
+                if isinstance(ability, StaticAbility):
+                     # StaticAbility.apply() handles registration with LayerSystem
+                     ability.apply(self) # Pass GameState
+
+        # Register replacement effects
+        if self.replacement_effects:
+            self.replacement_effects.register_card_replacement_effects(card_id, player)
     
     def resolve_planeswalker(self, card_id, controller):
         """Handle resolving a planeswalker spell."""
@@ -1281,7 +1351,7 @@ class GameState:
             return False
         
         # Find the current controller of the target
-        target_controller = self._find_card_owner(target_card_id)
+        target_controller = self.find_card_location(target_card_id)
         if not target_controller or target_controller == source_controller:
             return False  # Already controlled by source or not found
             
@@ -4553,7 +4623,7 @@ class GameState:
             for player in [self.p1, self.p2]:
                 if hasattr(self, 'phased_out') and self.phase == self.PHASE_UNTAP:
                     phased_cards = [card_id for card_id in self.phased_out 
-                                if self._find_card_owner(card_id) == player]
+                                if self.find_card_location(card_id) == player]
                     
                     for card_id in phased_cards:
                         self.phased_out.remove(card_id)
@@ -4667,68 +4737,42 @@ class GameState:
         return False
 
     def equip_permanent(self, player, equip_id, target_id):
-        """Attach equipment, handling costs and validation."""
+        """Attach equipment, potentially replacing existing attachment."""
         equip_card = self._safe_get_card(equip_id)
         target_card = self._safe_get_card(target_id)
-        if not equip_card or 'equipment' not in getattr(equip_card, 'subtypes', []) or not target_card or 'creature' not in getattr(target_card, 'card_types', []):
+        if not equip_card or 'equipment' not in getattr(equip_card, 'subtypes', []) or \
+           not target_card or 'creature' not in getattr(target_card, 'card_types', []) or \
+           target_id not in player["battlefield"]: # Can only equip to own creatures normally
+            logging.warning(f"Invalid equip: Eq:{equip_id} to Tgt:{target_id}")
             return False
-        if target_id not in player["battlefield"]: # Can only equip to own creatures normally
-             return False
 
-        cost_str = self._get_equip_cost_str(equip_card) # Need this helper
-        if cost_str and self.mana_system and self.mana_system.can_pay_mana_cost(player, cost_str):
-             if self.mana_system.pay_mana_cost(player, cost_str):
-                 if not hasattr(player, "attachments"): player["attachments"] = {}
-                 # Remove previous attachment of this equipment
-                 for eid, tid in list(player["attachments"].items()):
-                     if eid == equip_id: del player["attachments"][eid]
-                 player["attachments"][equip_id] = target_id
-                 logging.debug(f"Equipped {equip_card.name} to {target_card.name}")
-                 if self.layer_system: self.layer_system.invalidate_cache(); self.layer_system.apply_all_effects() # Recalculate layers
-                 return True
-        return False
+        if not hasattr(player, "attachments"): player["attachments"] = {}
+        # Remove previous attachment of this equipment, if any
+        if equip_id in player["attachments"]:
+            del player["attachments"][equip_id]
+        # Attach to new target
+        player["attachments"][equip_id] = target_id
+        logging.debug(f"Equipped {equip_card.name} to {target_card.name}")
+        if self.layer_system: self.layer_system.invalidate_cache(); self.layer_system.apply_all_effects()
+        return True
 
     def unequip_permanent(self, player, equip_id):
         """Unequip an equipment."""
         if hasattr(player, "attachments") and equip_id in player["attachments"]:
-            equip_name = self._safe_get_card(equip_id).name
+            equip_name = getattr(self._safe_get_card(equip_id), 'name', equip_id)
             del player["attachments"][equip_id]
             logging.debug(f"Unequipped {equip_name}")
             if self.layer_system: self.layer_system.invalidate_cache(); self.layer_system.apply_all_effects()
             return True
-        return False
+        return False # Wasn't attached
 
     def attach_aura(self, player, aura_id, target_id):
-        """Attach an aura, checking validity."""
-        aura_card = self._safe_get_card(aura_id)
-        target_card = self._safe_get_card(target_id)
-        if not aura_card or 'aura' not in getattr(aura_card, 'subtypes', []) or not target_card:
-            return False
-
-        # Check "Enchant X" validity
-        enchant_target_valid = False
-        if hasattr(aura_card, 'oracle_text'):
-            match = re.search(r"enchant (\w+)", aura_card.oracle_text.lower())
-            if match:
-                enchant_type = match.group(1)
-                if enchant_type in getattr(target_card, 'card_types', []) or enchant_type in getattr(target_card, 'subtypes', []):
-                    enchant_target_valid = True
-            else: # No enchant specified? Assume enchant creature.
-                enchant_target_valid = 'creature' in getattr(target_card, 'card_types', [])
-
-        if not enchant_target_valid:
-            logging.warning(f"Cannot attach {aura_card.name}: Invalid target type {target_card.name}")
-            return False
-
-        # Check Protection/Shroud/Hexproof on target
-        if self._check_for_protection(target_card, aura_card): return False
-
+        """Attach an aura."""
+        # Validation should happen before calling this (check enchant type, protection etc.)
         if not hasattr(player, "attachments"): player["attachments"] = {}
-        # Remove previous attachment if any
-        for aid, tid in list(player["attachments"].items()):
-            if aid == aura_id: del player["attachments"][aid]
+        if aura_id in player["attachments"]: del player["attachments"][aura_id] # Remove old if re-attaching
         player["attachments"][aura_id] = target_id
-        logging.debug(f"Attached {aura_card.name} to {target_card.name}")
+        logging.debug(f"Attached {self._safe_get_card(aura_id).name} to {target_id}")
         if self.layer_system: self.layer_system.invalidate_cache(); self.layer_system.apply_all_effects()
         return True
 
@@ -4736,53 +4780,52 @@ class GameState:
         """Attach a fortification to a land."""
         fort_card = self._safe_get_card(fort_id)
         target_card = self._safe_get_card(target_id)
-        if not fort_card or 'fortification' not in getattr(fort_card, 'subtypes', []) or not target_card or 'land' not in getattr(target_card, 'card_types', []):
+        if not fort_card or 'fortification' not in getattr(fort_card, 'subtypes', []) or \
+           not target_card or 'land' not in getattr(target_card, 'card_types', []) or \
+           target_id not in player["battlefield"]:
+            logging.warning(f"Invalid fortify: Fort:{fort_id} to Land:{target_id}")
             return False
-        if target_id not in player["battlefield"]: return False # Must control land
 
-        cost_str = self._get_fortify_cost_str(fort_card) # Need this helper
-        if cost_str and self.mana_system and self.mana_system.can_pay_mana_cost(player, cost_str):
-             if self.mana_system.pay_mana_cost(player, cost_str):
-                 if not hasattr(player, "attachments"): player["attachments"] = {}
-                 for fid, tid in list(player["attachments"].items()):
-                     if fid == fort_id: del player["attachments"][fid]
-                 player["attachments"][fort_id] = target_id
-                 logging.debug(f"Fortified {target_card.name} with {fort_card.name}")
-                 if self.layer_system: self.layer_system.invalidate_cache(); self.layer_system.apply_all_effects()
-                 return True
-        return False
+        if not hasattr(player, "attachments"): player["attachments"] = {}
+        if fort_id in player["attachments"]: del player["attachments"][fort_id]
+        player["attachments"][fort_id] = target_id
+        logging.debug(f"Fortified {target_card.name} with {fort_card.name}")
+        if self.layer_system: self.layer_system.invalidate_cache(); self.layer_system.apply_all_effects()
+        return True
 
     def reconfigure_permanent(self, player, card_id):
-        """Toggle reconfigure state."""
+        """Handle reconfigure. Assumes cost is paid."""
         card = self._safe_get_card(card_id)
-        if not card or 'reconfigure' not in getattr(card, 'oracle_text', '').lower(): return False
-        cost_str = self._get_reconfigure_cost_str(card) # Need this helper
-        if cost_str and self.mana_system and self.mana_system.can_pay_mana_cost(player, cost_str):
-            if self.mana_system.pay_mana_cost(player, cost_str):
-                if not hasattr(player, "attachments"): player["attachments"] = {}
-                was_attached = card_id in player["attachments"]
-                if was_attached:
-                    del player["attachments"][card_id]
-                    if 'creature' not in card.card_types: card.card_types.append('creature')
-                    logging.debug(f"Reconfigured {card.name} to unattach.")
-                else:
-                    # Choose target creature (AI needs to choose). Simple: first creature.
-                    target_id = None
-                    for cid in player["battlefield"]:
-                         c = self._safe_get_card(cid)
-                         if c and cid != card_id and 'creature' in getattr(c, 'card_types', []):
-                              target_id = cid
-                              break
-                    if target_id:
-                         player["attachments"][card_id] = target_id
-                         if 'creature' in card.card_types: card.card_types.remove('creature')
-                         logging.debug(f"Reconfigured {card.name} to attach to {self._safe_get_card(target_id).name}")
-                    else: # No target, refund cost
-                         self.mana_system.refund_mana_cost(player, cost_str)
-                         return False
-                if self.layer_system: self.layer_system.invalidate_cache(); self.layer_system.apply_all_effects()
-                return True
-        return False
+        if not card or card_id not in player["battlefield"] or 'reconfigure' not in getattr(card, 'oracle_text', '').lower():
+            return False
+
+        if not hasattr(player, "attachments"): player["attachments"] = {}
+        is_attached = card_id in player["attachments"]
+
+        if is_attached: # Unattach
+            target_id = player["attachments"].pop(card_id)
+            # Add creature type back if it doesn't have it
+            if 'creature' not in card.card_types: card.card_types.append('creature')
+            logging.debug(f"Reconfigured {card.name} to unattach from {self._safe_get_card(target_id).name}.")
+        else: # Attach
+             # AI Choice needed for target. Simple: first valid creature.
+             target_id = None
+             for cid in player["battlefield"]:
+                  if cid == card_id: continue
+                  c = self._safe_get_card(cid)
+                  if c and 'creature' in getattr(c, 'card_types', []):
+                       target_id = cid; break
+             if target_id:
+                  player["attachments"][card_id] = target_id
+                  # Remove creature type if it has it
+                  if 'creature' in card.card_types: card.card_types.remove('creature')
+                  logging.debug(f"Reconfigured {card.name} to attach to {self._safe_get_card(target_id).name}")
+             else:
+                  logging.warning(f"Reconfigure failed for {card.name}: No valid target creature found.")
+                  return False # No target
+
+        if self.layer_system: self.layer_system.invalidate_cache(); self.layer_system.apply_all_effects()
+        return True
 
     def turn_face_up(self, player, card_id, pay_morph_cost=False, pay_manifest_cost=False):
         """Turn a face-down Morph or Manifest card face up."""
@@ -4854,31 +4897,82 @@ class GameState:
         if cmc1 > cmc2: return player1
         elif cmc2 > cmc1: return player2
         else: return None
+        
+    def _find_card_in_hand(self, player, identifier):
+        """Finds a card ID in the player's hand using index or ID string."""
+        if isinstance(identifier, int):
+             if 0 <= identifier < len(player["hand"]):
+                  return player["hand"][identifier]
+        elif isinstance(identifier, str):
+             if identifier in player["hand"]:
+                  return identifier
+        return None
+        
+    def _find_permanent_id(self, player, identifier):
+        """Finds a permanent ID on the player's battlefield using index or ID string."""
+        if isinstance(identifier, int):
+             if 0 <= identifier < len(player["battlefield"]):
+                  return player["battlefield"][identifier]
+        elif isinstance(identifier, str):
+             # Check if it's a direct ID
+             if identifier in player["battlefield"]:
+                  return identifier
+             # Could potentially add lookup by name here if needed, but ID/index preferred
+        return None
 
-    def conspire(self, player, spell_stack_idx, creature1_idx, creature2_idx):
+    def conspire(self, player, spell_stack_idx, creature1_identifier, creature2_identifier):
         """Perform conspire."""
-        if spell_stack_idx < len(self.stack) and self.stack[spell_stack_idx][0] == "SPELL":
-            spell_type, spell_id, controller, context = self.stack[spell_stack_idx]
-            if controller != player: return False # Can only conspire own spells
-            spell_card = self._safe_get_card(spell_id)
-            if not spell_card: return False
+        if spell_stack_idx < 0 or spell_stack_idx >= len(self.stack) or self.stack[spell_stack_idx][0] != "SPELL":
+             logging.warning("Invalid spell index for conspire.")
+             return False
 
-            c1 = self._get_permanent_at_idx(player, creature1_idx)
-            c2 = self._get_permanent_at_idx(player, creature2_idx)
-            if not c1 or not c2 or creature1_idx == creature2_idx or getattr(c1, 'card_id') in player.get("tapped_permanents", set()) or getattr(c2, 'card_id') in player.get("tapped_permanents", set()):
-                return False # Creatures invalid or tapped
+        spell_type, spell_id, controller, context = self.stack[spell_stack_idx]
+        if controller != player: return False # Can only conspire own spells
+        spell_card = self._safe_get_card(spell_id)
+        if not spell_card: return False
 
-            # Check color sharing
-            if self._share_color(spell_card, c1) and self._share_color(spell_card, c2):
-                self.tap_permanent(getattr(c1, 'card_id'), player)
-                self.tap_permanent(getattr(c2, 'card_id'), player)
-                new_context = context.copy()
-                new_context["is_copy"] = True
-                new_context["is_conspired"] = True
-                self.add_to_stack(spell_type, spell_id, player, new_context)
-                logging.debug(f"Conspired {spell_card.name}")
-                return True
-        return False
+        # --- Find Creatures ---
+        c1_id = self._find_permanent_id(player, creature1_identifier)
+        c2_id = self._find_permanent_id(player, creature2_identifier)
+
+        if not c1_id or not c2_id or c1_id == c2_id:
+             logging.warning("Invalid or duplicate creatures for conspire.")
+             return False
+
+        c1 = self._safe_get_card(c1_id)
+        c2 = self._safe_get_card(c2_id)
+
+        if not c1 or 'creature' not in getattr(c1, 'card_types', []) or c1_id in player.get("tapped_permanents", set()):
+             logging.warning(f"Creature 1 ({getattr(c1,'name','N/A')}) invalid or tapped for conspire.")
+             return False
+        if not c2 or 'creature' not in getattr(c2, 'card_types', []) or c2_id in player.get("tapped_permanents", set()):
+             logging.warning(f"Creature 2 ({getattr(c2,'name','N/A')}) invalid or tapped for conspire.")
+             return False
+
+        # Check color sharing
+        if self._share_color(spell_card, c1) and self._share_color(spell_card, c2):
+            success_tap1 = self.tap_permanent(c1_id, player)
+            success_tap2 = self.tap_permanent(c2_id, player)
+            if not success_tap1 or not success_tap2:
+                 # Rollback taps if needed (simple untap here)
+                 if success_tap1: self.untap_permanent(c1_id, player)
+                 if success_tap2: self.untap_permanent(c2_id, player)
+                 logging.warning("Failed to tap creatures for conspire.")
+                 return False
+
+            # Create copy
+            new_context = context.copy()
+            new_context["is_copy"] = True
+            new_context["is_conspired"] = True
+            # Conspire copy typically needs new targets
+            # Set flag to re-target the copy on resolution? Or require target choice here?
+            new_context["needs_new_targets"] = True
+            self.add_to_stack(spell_type, spell_id, player, new_context)
+            logging.debug(f"Conspired {spell_card.name}")
+            return True
+        else:
+            logging.debug("Creatures do not share a color with conspired spell.")
+            return False
 
     def amass(self, player, amount):
         """Perform Amass N. Finds or creates Army token and adds counters."""
@@ -5031,9 +5125,10 @@ class GameState:
          return None
 
     def _share_color(self, card1, card2):
-         """Check if two cards share a color."""
-         if not card1 or not card2 or not hasattr(card1, 'colors') or not hasattr(card2, 'colors'): return False
-         return any(c1 and c2 for c1, c2 in zip(card1.colors, card2.colors))
+        """Check if two cards share a color."""
+        if not card1 or not card2 or not hasattr(card1, 'colors') or not hasattr(card2, 'colors'): return False
+        # Compare the 5-element color arrays
+        return any(c1 and c2 for c1, c2 in zip(card1.colors[:5], card2.colors[:5]))
 
     # --- Mana System Helper Getters ---
     def _get_equip_cost_str(self, card):
@@ -5255,13 +5350,85 @@ class GameState:
                         spell_controller["graveyard"].append(spell_id)
                         
                         logging.debug(f"Mode effect: countered {spell.name}")
-                        
+    
+    def find_card_location(self, card_id):
+        """
+        Find which player controls a card and in which zone it is.
+        Also handles finding the controller of the source of an effect on the stack.
 
+        Args:
+            card_id: ID of the card or stack item source to locate
+
+        Returns:
+            tuple: (player_object, zone_string) or (None, None) if not found
+        """
+        zones = ["battlefield", "hand", "graveyard", "exile", "library"]
+        special_zones_map = {
+             "adventure_cards": "adventure_zone", "phased_out": "phased_out",
+             "foretold_cards": "foretold_zone", "suspended_cards": "suspended",
+             "unearthed_cards": "unearthed_zone", # Add other special tracking if needed
+             "morphed_cards": "face_down_zone", # Represent face-down state
+             "manifested_cards": "face_down_zone",
+             "commander_zone": "command", # Standardize command zone name
+             "companion": "companion_zone",
+        }
+
+        # Check standard zones for both players
+        for player in [self.p1, self.p2]:
+            if not player: continue # Safety check
+            for zone in zones:
+                if zone in player and isinstance(player[zone], (list, set)) and card_id in player[zone]:
+                    return player, zone
+
+            # Check player-specific special zones (like revealed hand?) - Not standard MTG, skip for now.
+
+        # Check game-level special zones / tracking dicts
+        for attr_name, zone_name in special_zones_map.items():
+            if hasattr(self, attr_name):
+                 container = getattr(self, attr_name)
+                 if isinstance(container, set) and card_id in container:
+                     # Find original owner/controller if possible, default to p1
+                     owner = self._find_card_owner_fallback(card_id) # Use fallback owner finder
+                     return owner, zone_name
+                 elif isinstance(container, dict) and card_id in container:
+                      # Check if the dict value stores the controller
+                      entry = container[card_id]
+                      controller = entry.get("controller") if isinstance(entry, dict) else None
+                      if controller: return controller, zone_name
+                      # Fallback owner find
+                      owner = self._find_card_owner_fallback(card_id)
+                      return owner, zone_name
+
+        # Check stack (Handles spells and abilities)
+        for item in self.stack:
+            # Stack items are tuples: (type, source_id, controller, context)
+            if isinstance(item, tuple) and len(item) >= 3 and item[1] == card_id:
+                 return item[2], "stack" # Return the controller and "stack" zone
+
+        # If not found in any common zone
+        # logging.debug(f"Card/Source ID {card_id} not found in any tracked zone.")
+        return None, None 
+    
+    # Add a helper to find original owner if controller isn't readily available
+    def _find_card_owner_fallback(self, card_id):
+        """Fallback to find card owner based on original deck assignment or DB."""
+        # Check original decks if tracked
+        if hasattr(self, 'original_p1_deck') and card_id in self.original_p1_deck:
+             return self.p1
+        if hasattr(self, 'original_p2_deck') and card_id in self.original_p2_deck:
+             return self.p2
+        # Last resort - default to p1 if owner ambiguous
+        return self.p1
+
+    # Consolidate get_card_controller (use find_card_location)
     def get_card_controller(self, card_id):
         """Find the controller of a card currently on the battlefield."""
-        for p in [self.p1, self.p2]:
-            if card_id in p.get("battlefield",[]):
-                return p
+        player, zone = self.find_card_location(card_id)
+        if zone == "battlefield":
+             return player
+        # Consider returning controller even if not on battlefield?
+        # Depends on rules context. For most purposes, only battlefield controller matters.
+        # If you need owner regardless of zone, use _find_card_owner_fallback or similar.
         return None
             
     def _resolve_spree_spell(self, spell_id, controller, context):

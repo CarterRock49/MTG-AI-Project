@@ -2067,7 +2067,8 @@ class EnhancedCombatResolver:
                 logging.debug(f"Bushido: {attacker.name} has bushido ability")
     
     def _check_lethal_damage(self, damage_to_creatures, killed_creatures):
-        """Basic check for lethal damage. Extended in subclasses for SBAs."""
+        """Basic check for lethal damage. May overlap with GameState's SBAs."""
+        # ... (existing implementation) ...
         gs = self.game_state
         newly_killed = set()
         for player in [gs.p1, gs.p2]:
@@ -2077,15 +2078,15 @@ class EnhancedCombatResolver:
                     if card and hasattr(card, 'toughness'):
                         # Account for deathtouch damage tracked separately
                         dealt_deathtouch = player.get("deathtouch_damage", {}).get(card_id, False)
-                        toughness = self._get_card_toughness(card, player)
+                        toughness = self._get_card_toughness(card, player) # Uses helper that includes counters
                         # Use GS damage counters if available for accuracy
                         current_damage = player.get("damage_counters",{}).get(card_id, 0)
 
                         if not self._has_keyword(card, "indestructible") and (current_damage >= toughness or (dealt_deathtouch and current_damage > 0)):
                             if card_id not in newly_killed: # Avoid duplicate logging/processing
                                 newly_killed.add(card_id)
-                                logging.debug(f"COMBAT BASE: {card.name} marked for death (Damage: {current_damage}, Toughness: {toughness}, Deathtouch: {dealt_deathtouch})")
-                                # Actual move to graveyard happens in SBA check or apply_combat_results
+                                logging.debug(f"COMBAT (Resolver Check): {card.name} marked for death (Damage: {current_damage}, Toughness: {toughness}, Deathtouch: {dealt_deathtouch})")
+                                # Actual move to graveyard happens later
         killed_creatures.update(newly_killed) # Update the set passed in
     
     def _process_combat_triggers(self, creatures_dealt_damage, is_first_strike=False):

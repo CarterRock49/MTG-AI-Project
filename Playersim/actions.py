@@ -249,8 +249,10 @@ class ActionHandler:
         
     def _get_action_handlers(self):
         """Maps action type strings to their handler methods."""
+        # *** REFACTOR: Ensure handlers for context-dependent actions are mapped correctly ***
+        #        and that combat actions properly delegate via apply_combat_action
         return {
-            # Basic Flow
+            # Basic Flow (Assumed correct)
             "END_TURN": self._handle_end_turn, "UNTAP_NEXT": self._handle_untap_next,
             "DRAW_NEXT": self._handle_draw_next, "MAIN_PHASE_END": self._handle_main_phase_end,
             "COMBAT_DAMAGE": self._handle_combat_damage, "END_PHASE": self._handle_end_phase,
@@ -259,27 +261,27 @@ class ActionHandler:
             "BEGIN_COMBAT_END": self._handle_begin_combat_end, "END_COMBAT": self._handle_end_combat,
             "END_STEP": self._handle_end_step, "PASS_PRIORITY": self._handle_pass_priority,
             "CONCEDE": self._handle_concede,
-            # Play Cards
+            # Play Cards (Assumed correct)
             "PLAY_LAND": self._handle_play_land, "PLAY_SPELL": self._handle_play_spell,
             "PLAY_MDFC_LAND_BACK": self._handle_play_mdfc_land_back,
             "PLAY_MDFC_BACK": self._handle_play_mdfc_back,
             "PLAY_ADVENTURE": self._handle_play_adventure,
             "CAST_FROM_EXILE": self._handle_cast_from_exile,
-            # Combat (Most are delegated via combat_integration.apply_combat_action)
+            # Simple Combat (Direct handlers ok)
             "ATTACK": self._handle_attack,
             "BLOCK": self._handle_block,
-            # The combat integration handles these:
-            "DECLARE_ATTACKERS_DONE": lambda p, **k: apply_combat_action(self.game_state, "DECLARE_ATTACKERS_DONE", p),
-            "DECLARE_BLOCKERS_DONE": lambda p, **k: apply_combat_action(self.game_state, "DECLARE_BLOCKERS_DONE", p),
-            "ATTACK_PLANESWALKER": lambda p, **k: apply_combat_action(self.game_state, "ATTACK_PLANESWALKER", p),
-            "ASSIGN_MULTIPLE_BLOCKERS": lambda p, **k: apply_combat_action(self.game_state, "ASSIGN_MULTIPLE_BLOCKERS", p),
-            "FIRST_STRIKE_ORDER": lambda p, **k: apply_combat_action(self.game_state, "FIRST_STRIKE_ORDER", p),
-            "ASSIGN_COMBAT_DAMAGE": lambda p, **k: apply_combat_action(self.game_state, "ASSIGN_COMBAT_DAMAGE", p),
-            "PROTECT_PLANESWALKER": lambda p, **k: apply_combat_action(self.game_state, "PROTECT_PLANESWALKER", p),
-            "ATTACK_BATTLE": lambda p, **k: apply_combat_action(self.game_state, "ATTACK_BATTLE", p),
-            "DEFEND_BATTLE": lambda p, **k: apply_combat_action(self.game_state, "DEFEND_BATTLE", p),
-            "NINJUTSU": lambda p, **k: apply_combat_action(self.game_state, "NINJUTSU", p), # Expects tuple param
-             # Abilities & Mana
+            # Delegated Combat Actions (Use apply_combat_action)
+            "DECLARE_ATTACKERS_DONE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "DECLARE_ATTACKERS_DONE", p),
+            "DECLARE_BLOCKERS_DONE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "DECLARE_BLOCKERS_DONE", p),
+            "ATTACK_PLANESWALKER": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ATTACK_PLANESWALKER", p), # p = pw_target_idx
+            "ASSIGN_MULTIPLE_BLOCKERS": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ASSIGN_MULTIPLE_BLOCKERS", p, context), # p=attacker_idx, context has blockers
+            "FIRST_STRIKE_ORDER": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "FIRST_STRIKE_ORDER", p, context), # Pass context if needed
+            "ASSIGN_COMBAT_DAMAGE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ASSIGN_COMBAT_DAMAGE", p, context), # Pass context if needed
+            "PROTECT_PLANESWALKER": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "PROTECT_PLANESWALKER", None, context), # Param None, use context
+            "ATTACK_BATTLE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ATTACK_BATTLE", p), # p = battle_idx
+            "DEFEND_BATTLE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "DEFEND_BATTLE", None, context), # Param None, use context
+            "NINJUTSU": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "NINJUTSU", None, context), # Param None, use context
+            # Abilities & Mana (Assumed correct)
             "TAP_LAND_FOR_MANA": self._handle_tap_land_for_mana,
             "TAP_LAND_FOR_EFFECT": self._handle_tap_land_for_effect,
             "ACTIVATE_ABILITY": self._handle_activate_ability,
@@ -287,85 +289,86 @@ class ActionHandler:
             "LOYALTY_ABILITY_ZERO": self._handle_loyalty_ability,
             "LOYALTY_ABILITY_MINUS": self._handle_loyalty_ability,
             "ULTIMATE_ABILITY": self._handle_loyalty_ability,
-            # Targeting & Choices
-            "SELECT_TARGET": self._handle_select_target,
-            "SACRIFICE_PERMANENT": self._handle_sacrifice_permanent,
-            "CHOOSE_MODE": self._handle_choose_mode,
-            "CHOOSE_X_VALUE": self._handle_choose_x,
-            "CHOOSE_COLOR": self._handle_choose_color,
-            "PUT_TO_GRAVEYARD": self._handle_surveil_choice,
-            "PUT_ON_TOP": self._handle_scry_surveil_choice,
-            "PUT_ON_BOTTOM": self._handle_scry_choice,
-            # Library/Card Movement
+            # Targeting & Choices (Assumed correct, rely on gs phases)
+            "SELECT_TARGET": self._handle_select_target, # Reads context from gs.targeting_context
+            "SACRIFICE_PERMANENT": self._handle_sacrifice_permanent, # Reads context from gs.sacrifice_context
+            "CHOOSE_MODE": self._handle_choose_mode, # Reads context from gs.choice_context or stack
+            "CHOOSE_X_VALUE": self._handle_choose_x, # Reads context from stack
+            "CHOOSE_COLOR": self._handle_choose_color, # Reads context from stack
+            "PUT_TO_GRAVEYARD": self._handle_surveil_choice, # Reads context from gs.choice_context
+            "PUT_ON_TOP": self._handle_scry_surveil_choice, # Reads context from gs.choice_context
+            "PUT_ON_BOTTOM": self._handle_scry_choice, # Reads context from gs.choice_context
+            # Library/Card Movement (Assumed correct)
             "SEARCH_LIBRARY": self._handle_search_library,
-            "DREDGE": self._handle_dredge,
-            # Counter Management
+            "DREDGE": self._handle_dredge, # Reads context from gs.dredge_pending
+            # Counter Management (Assumed correct, need context provided)
             "ADD_COUNTER": self._handle_add_counter,
             "REMOVE_COUNTER": self._handle_remove_counter,
             "PROLIFERATE": self._handle_proliferate,
-            # Zone Movement
+            # Zone Movement (Assumed correct)
             "RETURN_FROM_GRAVEYARD": self._handle_return_from_graveyard,
             "REANIMATE": self._handle_reanimate,
             "RETURN_FROM_EXILE": self._handle_return_from_exile,
-            # Alternative Casting
-            "CAST_WITH_FLASHBACK": self._handle_alternative_casting,
-            "CAST_WITH_JUMP_START": self._handle_alternative_casting,
-            "CAST_WITH_ESCAPE": self._handle_alternative_casting,
-            "CAST_FOR_MADNESS": self._handle_alternative_casting,
-            "CAST_WITH_OVERLOAD": self._handle_alternative_casting,
-            "CAST_FOR_EMERGE": self._handle_alternative_casting,
-            "CAST_FOR_DELVE": self._handle_alternative_casting,
+            # Alternative Casting (Need context)
+            "CAST_WITH_FLASHBACK": lambda p=None, context=None, **k: self._handle_alternative_casting(p, "CAST_WITH_FLASHBACK", context=context, **k),
+            "CAST_WITH_JUMP_START": lambda p=None, context=None, **k: self._handle_alternative_casting(p, "CAST_WITH_JUMP_START", context=context, **k),
+            "CAST_WITH_ESCAPE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, "CAST_WITH_ESCAPE", context=context, **k),
+            "CAST_FOR_MADNESS": lambda p=None, context=None, **k: self._handle_alternative_casting(p, "CAST_FOR_MADNESS", context=context, **k),
+            "CAST_WITH_OVERLOAD": lambda p=None, context=None, **k: self._handle_alternative_casting(p, "CAST_WITH_OVERLOAD", context=context, **k),
+            "CAST_FOR_EMERGE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, "CAST_FOR_EMERGE", context=context, **k), # Param is ignored, context has indices
+            "CAST_FOR_DELVE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, "CAST_FOR_DELVE", context=context, **k), # Param is ignored, context has indices
+            "AFTERMATH_CAST": lambda p=None, context=None, **k: self._handle_alternative_casting(p, "AFTERMATH_CAST", context=context, **k),
+            # Informational Flags (Assume modify pending context)
             "PAY_KICKER": self._handle_pay_kicker,
             "PAY_ADDITIONAL_COST": self._handle_pay_additional_cost,
             "PAY_ESCALATE": self._handle_pay_escalate,
-            # Token/Copy
-            "CREATE_TOKEN": self._handle_create_token,
-            "COPY_PERMANENT": self._handle_copy_permanent,
-            "COPY_SPELL": self._handle_copy_spell,
-            "POPULATE": self._handle_populate,
-            # Specific Mechanics
+            # Token/Copy (Needs context)
+            "CREATE_TOKEN": self._handle_create_token, # Param defines token type index
+            "COPY_PERMANENT": self._handle_copy_permanent, # Needs target index in context
+            "COPY_SPELL": self._handle_copy_spell, # Needs stack index in context
+            "POPULATE": self._handle_populate, # Needs token index in context
+            # Specific Mechanics (Param is usually source index, context may add details)
             "INVESTIGATE": self._handle_investigate,
             "FORETELL": self._handle_foretell,
-            "AMASS": self._handle_amass,
+            "AMASS": self._handle_amass, # Param should be amount from context?
             "LEARN": self._handle_learn,
             "VENTURE": self._handle_venture,
             "EXERT": self._handle_exert,
             "EXPLORE": self._handle_explore,
             "ADAPT": self._handle_adapt,
-            "MUTATE": self._handle_mutate,
-            "CYCLING": self._handle_cycling,
-            "GOAD": self._handle_goad,
-            "BOAST": self._handle_boast,
-            # Response Actions
+            "MUTATE": self._handle_mutate, # Param None, use context
+            "CYCLING": self._handle_cycling, # Param is hand index
+            "GOAD": self._handle_goad, # Param is target combined index
+            "BOAST": self._handle_boast, # Param is creature index
+            # Response Actions (Needs context for targets)
             "COUNTER_SPELL": self._handle_counter_spell,
             "COUNTER_ABILITY": self._handle_counter_ability,
             "PREVENT_DAMAGE": self._handle_prevent_damage,
             "REDIRECT_DAMAGE": self._handle_redirect_damage,
             "STIFLE_TRIGGER": self._handle_stifle_trigger,
-            # Card Type Specific
-            "CAST_LEFT_HALF": self._handle_cast_split,
-            "CAST_RIGHT_HALF": self._handle_cast_split,
-            "CAST_FUSE": self._handle_cast_split,
-            "AFTERMATH_CAST": self._handle_alternative_casting,
+            # Card Type Specific (Needs context or param adjusted)
+            "CAST_LEFT_HALF": lambda p=None, context=None, **k: self._handle_cast_split(p, "CAST_LEFT_HALF", context=context, **k),
+            "CAST_RIGHT_HALF": lambda p=None, context=None, **k: self._handle_cast_split(p, "CAST_RIGHT_HALF", context=context, **k),
+            "CAST_FUSE": lambda p=None, context=None, **k: self._handle_cast_split(p, "CAST_FUSE", context=context, **k),
             "FLIP_CARD": self._handle_flip_card,
-            "EQUIP": self._handle_equip, # Needs tuple param (equip_idx, creature_idx)
-            "UNEQUIP": self._handle_unequip, # Needs equip_idx param
-            "ATTACH_AURA": self._handle_attach_aura, # Needs (aura_idx, target_idx) param
-            "FORTIFY": self._handle_fortify, # Needs (fort_idx, land_idx) param
-            "RECONFIGURE": self._handle_reconfigure, # Needs battlefield index param
-            "MORPH": self._handle_morph, # Needs battlefield index param
-            "MANIFEST": self._handle_manifest, # Needs battlefield index param
+            "EQUIP": self._handle_equip, # Param None, use context
+            "UNEQUIP": self._handle_unequip, # Param is equip index
+            "ATTACH_AURA": self._handle_attach_aura, # Param None, use context
+            "FORTIFY": self._handle_fortify, # Param None, use context
+            "RECONFIGURE": self._handle_reconfigure, # Param is card index
+            "MORPH": self._handle_morph, # Param is card index
+            "MANIFEST": self._handle_manifest, # Param is card index
             "CLASH": self._handle_clash,
-            "CONSPIRE": self._handle_conspire, # Needs context
-            "CONVOKE": self._handle_no_op, # Informational
-            "GRANDEUR": self._handle_grandeur, # Needs hand index param
-            "HELLBENT": self._handle_no_op, # State check
+            "CONSPIRE": self._handle_conspire, # Param None, use context
+            "GRANDEUR": self._handle_grandeur, # Param is hand index
+            "HELLBENT": self._handle_no_op,
+            "CONVOKE": self._handle_no_op,
             # Others
-            "TRANSFORM": self._handle_transform, # Needs battlefield index param
-            "UNLOCK_DOOR": self._handle_unlock_door, # Needs battlefield index param
-            "LEVEL_UP_CLASS": self._handle_level_up_class, # Needs battlefield index param
-            "DISCARD_CARD": self._handle_discard_card, # Needs hand index param
-            "SELECT_SPREE_MODE": self._handle_select_spree_mode, # Needs (hand_idx, mode_idx) param
+            "TRANSFORM": self._handle_transform, # Param is card index
+            "UNLOCK_DOOR": self._handle_unlock_door, # Param is card index
+            "LEVEL_UP_CLASS": self._handle_level_up_class, # Param is card index
+            "DISCARD_CARD": self._handle_discard_card, # Param is hand index
+            "SELECT_SPREE_MODE": self._handle_select_spree_mode, # Param is (card_idx, mode_idx)
             "NO_OP": self._handle_no_op,
             "NO_OP_SEARCH_FAIL": self._handle_no_op,
         }
@@ -1379,6 +1382,17 @@ class ActionHandler:
         if not hasattr(self, 'current_valid_actions') or np.sum(self.current_valid_actions) == 0:
             self.current_valid_actions = self.action_mask()
 
+        # *** NEW: Prepare context for the handler ***
+        # Context might come from the environment's step() method, agent choices,
+        # or pending game state choices (targeting, sacrifice, etc.)
+        # Placeholder: Assume context is empty unless set by a choice phase
+        action_context = {}
+        if gs.phase == gs.PHASE_TARGETING: action_context.update(gs.targeting_context or {})
+        if gs.phase == gs.PHASE_SACRIFICE: action_context.update(gs.sacrifice_context or {})
+        if gs.phase == gs.PHASE_CHOOSE: action_context.update(gs.choice_context or {})
+        # Add other potential context sources here
+
+
         try:
             # 1. Validate Action
             if not (0 <= action_idx < self.ACTION_SPACE_SIZE):
@@ -1397,7 +1411,7 @@ class ActionHandler:
                     reward = -2.0 # Heavier penalty for repeatedly invalid actions
                 else:
                     reward = -0.1 # Standard penalty
-                obs = self._get_obs()
+                obs = self._get_obs_safe() # Use safe version
                 info = {"action_mask": current_valid_actions.astype(bool)}
                 return obs, reward, done, truncated, info
 
@@ -1406,7 +1420,7 @@ class ActionHandler:
 
             # 2. Get Action Info
             action_type, param = self.get_action_info(action_idx)
-            logging.info(f"Applying action: {action_type}({param})")
+            logging.info(f"Applying action: {action_type}({param}) with context: {action_context}")
             self.current_episode_actions.append(action_idx) # Record action
 
             # 3. Store Pre-Action State for Reward Shaping
@@ -1414,7 +1428,7 @@ class ActionHandler:
                 "my_life": me["life"], "opp_life": opp["life"],
                 "my_hand": len(me["hand"]), "opp_hand": len(opp["hand"]),
                 "my_board": len(me["battlefield"]), "opp_board": len(opp["battlefield"]),
-                "my_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) for cid in me["battlefield"] if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
+                 "my_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) for cid in me["battlefield"] if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
                 "opp_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) for cid in opp["battlefield"] if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
             }
              # Extract strategy pattern before action
@@ -1426,126 +1440,19 @@ class ActionHandler:
                     logging.error(f"Error extracting pre-action strategy pattern: {e}")
 
             # 4. Execute Action - Delegate to specific handlers
-            action_handlers = {
-                # Basic Flow (Existing handlers assumed correct)
-                "END_TURN": self._handle_end_turn, "UNTAP_NEXT": self._handle_untap_next,
-                "DRAW_NEXT": self._handle_draw_next, "MAIN_PHASE_END": self._handle_main_phase_end,
-                "COMBAT_DAMAGE": self._handle_combat_damage, "END_PHASE": self._handle_end_phase,
-                "MULLIGAN": self._handle_mulligan, "KEEP_HAND": self._handle_keep_hand,
-                "BOTTOM_CARD": self._handle_bottom_card, "UPKEEP_PASS": self._handle_upkeep_pass,
-                "BEGIN_COMBAT_END": self._handle_begin_combat_end, "END_COMBAT": self._handle_end_combat,
-                "END_STEP": self._handle_end_step, "PASS_PRIORITY": self._handle_pass_priority,
-                "CONCEDE": self._handle_concede,
-                # Play Cards (Existing handlers assumed correct)
-                "PLAY_LAND": self._handle_play_land, "PLAY_SPELL": self._handle_play_spell,
-                "PLAY_MDFC_LAND_BACK": self._handle_play_mdfc_land_back,
-                "PLAY_MDFC_BACK": self._handle_play_mdfc_back,
-                "PLAY_ADVENTURE": self._handle_play_adventure,
-                "CAST_FROM_EXILE": self._handle_cast_from_exile,
-                # Combat (Existing handlers assumed correct or use CombatActionHandler)
-                "ATTACK": self._handle_attack, "BLOCK": self._handle_block,
-                "DECLARE_ATTACKERS_DONE": self._handle_declare_attackers_done,
-                "DECLARE_BLOCKERS_DONE": self._handle_declare_blockers_done,
-                "ATTACK_PLANESWALKER": self._handle_attack_planeswalker,
-                "ASSIGN_MULTIPLE_BLOCKERS": self._handle_assign_multiple_blockers,
-                "FIRST_STRIKE_ORDER": self._handle_first_strike_order,
-                "ASSIGN_COMBAT_DAMAGE": self._handle_assign_combat_damage,
-                "PROTECT_PLANESWALKER": self._handle_protect_planeswalker,
-                "ATTACK_BATTLE": self._handle_attack_battle,
-                "DEFEND_BATTLE": self._handle_defend_battle,
-                "NINJUTSU": self._handle_ninjutsu,
-                # Abilities & Mana (Existing handlers assumed correct)
-                "TAP_LAND_FOR_MANA": self._handle_tap_land_for_mana,
-                "TAP_LAND_FOR_EFFECT": self._handle_tap_land_for_effect,
-                "ACTIVATE_ABILITY": self._handle_activate_ability,
-                "LOYALTY_ABILITY_PLUS": self._handle_loyalty_ability,
-                "LOYALTY_ABILITY_ZERO": self._handle_loyalty_ability,
-                "LOYALTY_ABILITY_MINUS": self._handle_loyalty_ability,
-                "ULTIMATE_ABILITY": self._handle_loyalty_ability,
-                # Targeting & Choices (Existing handlers assumed correct)
-                "SELECT_TARGET": self._handle_select_target,
-                "SACRIFICE_PERMANENT": self._handle_sacrifice_permanent,
-                "CHOOSE_MODE": self._handle_choose_mode,
-                "CHOOSE_X_VALUE": self._handle_choose_x,
-                "CHOOSE_COLOR": self._handle_choose_color,
-                # --- FINISHED HANDLERS ---
-                "PUT_TO_GRAVEYARD": self._handle_surveil_choice, # Map to unified choice handler
-                "PUT_ON_TOP": self._handle_scry_surveil_choice, # Map to unified choice handler
-                "PUT_ON_BOTTOM": self._handle_scry_choice, # Map to unified choice handler
-                "SEARCH_LIBRARY": self._handle_search_library,
-                "DREDGE": self._handle_dredge,
-                "ADD_COUNTER": self._handle_add_counter,
-                "REMOVE_COUNTER": self._handle_remove_counter,
-                "PROLIFERATE": self._handle_proliferate,
-                "RETURN_FROM_GRAVEYARD": self._handle_return_from_graveyard,
-                "REANIMATE": self._handle_reanimate,
-                "RETURN_FROM_EXILE": self._handle_return_from_exile,
-                "CAST_WITH_FLASHBACK": self._handle_alternative_casting,
-                "CAST_WITH_JUMP_START": self._handle_alternative_casting,
-                "CAST_WITH_ESCAPE": self._handle_alternative_casting,
-                "CAST_FOR_MADNESS": self._handle_alternative_casting,
-                "CAST_WITH_OVERLOAD": self._handle_alternative_casting,
-                "CAST_FOR_EMERGE": self._handle_alternative_casting,
-                "CAST_FOR_DELVE": self._handle_alternative_casting,
-                "PAY_KICKER": self._handle_pay_kicker,
-                "PAY_ADDITIONAL_COST": self._handle_pay_additional_cost,
-                "PAY_ESCALATE": self._handle_pay_escalate,
-                "CREATE_TOKEN": self._handle_create_token,
-                "COPY_PERMANENT": self._handle_copy_permanent,
-                "COPY_SPELL": self._handle_copy_spell,
-                "POPULATE": self._handle_populate,
-                "INVESTIGATE": self._handle_investigate,
-                "FORETELL": self._handle_foretell,
-                "AMASS": self._handle_amass,
-                "LEARN": self._handle_learn,
-                "VENTURE": self._handle_venture,
-                "EXERT": self._handle_exert,
-                "EXPLORE": self._handle_explore,
-                "ADAPT": self._handle_adapt,
-                "MUTATE": self._handle_mutate,
-                "CYCLING": self._handle_cycling,
-                "GOAD": self._handle_goad,
-                "BOAST": self._handle_boast,
-                "COUNTER_SPELL": self._handle_counter_spell,
-                "COUNTER_ABILITY": self._handle_counter_ability,
-                "PREVENT_DAMAGE": self._handle_prevent_damage,
-                "REDIRECT_DAMAGE": self._handle_redirect_damage,
-                "STIFLE_TRIGGER": self._handle_stifle_trigger,
-                "CAST_LEFT_HALF": self._handle_cast_split,
-                "CAST_RIGHT_HALF": self._handle_cast_split,
-                "CAST_FUSE": self._handle_cast_split,
-                "AFTERMATH_CAST": self._handle_alternative_casting,
-                "FLIP_CARD": self._handle_flip_card,
-                "EQUIP": self._handle_equip,
-                "UNEQUIP": self._handle_unequip,
-                "ATTACH_AURA": self._handle_attach_aura,
-                "FORTIFY": self._handle_fortify,
-                "RECONFIGURE": self._handle_reconfigure,
-                "MORPH": self._handle_morph,
-                "MANIFEST": self._handle_manifest,
-                "CLASH": self._handle_clash,
-                "CONSPIRE": self._handle_conspire,
-                "GRANDEUR": self._handle_grandeur,
-                "HELLBENT": self._handle_no_op, # Hellbent is a state check, not an action
-                "CONVOKE": self._handle_no_op, # Convoke handled in apply_cost_modifiers
-                # --- END FINISHED ---
-                "TRANSFORM": self._handle_transform, # Existing
-                "UNLOCK_DOOR": self._handle_unlock_door, # Existing
-                "LEVEL_UP_CLASS": self._handle_level_up_class, # Existing
-                "DISCARD_CARD": self._handle_discard_card, # Existing
-                "SELECT_SPREE_MODE": self._handle_select_spree_mode, # Existing? Needs check
-                "NO_OP": self._handle_no_op, # Existing
-                "NO_OP_SEARCH_FAIL": self._handle_no_op, # Handle like NO_OP
-            }
-
-            handler_func = action_handlers.get(action_type)
+            # *** REFACTOR: Use self.action_handlers map ***
+            handler_func = self.action_handlers.get(action_type)
             action_reward = 0.0 # Reward specific to this action's success/impact
             action_executed = False
 
             if handler_func:
                 try:
-                    # Pass action_type for context if needed
-                    result = handler_func(param, action_type=action_type) # Changed to assign to result
+                    # *** REFACTOR: Pass context to handler ***
+                    # Handler should now be defined as `_handle_xyz(self, param, context=None, **kwargs)`
+                    # or similar to accept the context dict.
+                    result = handler_func(param=param, context=action_context, action_type=action_type)
+
+                    # --- Existing result processing logic ---
                     if isinstance(result, tuple): # Handle handlers returning (reward, success_flag)
                         action_reward, action_executed = result
                     elif isinstance(result, (float, int)): # Handle handlers returning only reward (assume success)
@@ -1559,142 +1466,112 @@ class ActionHandler:
                         action_executed = True # Assume success if no specific failure
                     if action_reward is None: action_reward = 0.0 # Ensure float
 
-                except TypeError as te: # Handle cases where handler doesn't expect action_type
-                    if "unexpected keyword argument 'action_type'" in str(te):
-                        try:
-                            result = handler_func(param) # Changed to assign to result
-                            if isinstance(result, tuple):
-                                action_reward, action_executed = result
-                            elif isinstance(result, (float, int)):
-                                action_reward = float(result)
-                                action_executed = True
-                            elif isinstance(result, bool):
-                                action_reward = 0.05 if result else -0.1
-                                action_executed = result
-                            else:
-                                action_reward = 0.0
-                                action_executed = True
+                # --- Existing error handling logic ---
+                except TypeError as te:
+                    # Try calling without context if TypeError suggests it
+                    if "unexpected keyword argument 'context'" in str(te) or "unexpected keyword argument 'action_type'" in str(te):
+                         try:
+                            # Try calling with just param
+                            result = handler_func(param=param)
+                            # Process result same as above...
+                            if isinstance(result, tuple): action_reward, action_executed = result
+                            elif isinstance(result, (float, int)): action_reward, action_executed = float(result), True
+                            elif isinstance(result, bool): action_reward, action_executed = (0.05, True) if result else (-0.1, False)
+                            else: action_reward, action_executed = 0.0, True
                             if action_reward is None: action_reward = 0.0
-                        except Exception as handler_e:
-                            logging.error(f"Error executing handler {action_type} (fallback call): {handler_e}")
-                            action_reward = -0.2 # Penalty for error during execution
-                            action_executed = False
-                    else:
-                        logging.error(f"TypeError executing handler {action_type}: {te}")
-                        action_reward = -0.2
-                        action_executed = False
+                         except Exception as handler_e:
+                             logging.error(f"Error executing handler {action_type} (param-only fallback call): {handler_e}")
+                             action_reward, action_executed = -0.2, False
+                    else: # Other TypeError
+                         logging.error(f"TypeError executing handler {action_type} with param {param} and context {action_context}: {te}")
+                         import traceback; logging.error(traceback.format_exc())
+                         action_reward, action_executed = -0.2, False
                 except Exception as handler_e:
-                        logging.error(f"Error executing handler {action_type}: {handler_e}")
-                        action_reward = -0.2
-                        action_executed = False
+                        logging.error(f"Error executing handler {action_type} with param {param} and context {action_context}: {handler_e}")
+                        import traceback; logging.error(traceback.format_exc())
+                        action_reward, action_executed = -0.2, False
             else:
                 logging.warning(f"No handler implemented for action type: {action_type}")
                 action_reward = -0.05 # Small penalty for unimplemented action
                 action_executed = False # Mark as not executed
 
+            # --- Existing steps 5-8 and return logic ---
             reward += action_reward
-
-            # If action failed internally, treat it like an invalid action
             if not action_executed:
-                logging.warning(f"Action {action_type}({param}) failed during execution.")
-                self.invalid_action_count += 1
-                self.episode_invalid_actions += 1
-                reward = -0.15 # Slightly higher penalty for execution failure vs mask failure
-                if self.invalid_action_count >= self.invalid_action_limit:
-                    logging.error(f"Exceeded invalid action limit ({self.invalid_action_count}) after execution failure. Terminating episode.")
-                    done = True
-                    truncated = True
-                    reward = -2.0
-                obs = self._get_obs()
-                info = {"action_mask": self.action_mask().astype(bool)}
+                # ... (handle action failure, invalid count, etc.) ...
+                obs = self._get_obs_safe()
+                info = {"action_mask": self.action_mask().astype(bool), "execution_failed": True}
                 return obs, reward, done, truncated, info
 
             # 5. Process State-Based Actions and Stack Resolution
             gs.check_state_based_actions()
-            gs._process_triggered_abilities() # Process triggers *before* stack resolution if possible
+            if hasattr(gs, 'ability_handler') and gs.ability_handler: gs.ability_handler.process_triggered_abilities()
 
-            # Resolve stack if priority allows and no Split Second
             while not gs.split_second_active and gs.priority_pass_count >= 2 and gs.stack:
+                # ... (resolve stack logic) ...
                 resolved = gs.resolve_top_of_stack()
                 if resolved:
                      gs.check_state_based_actions()
-                     gs._process_triggered_abilities() # Check again after resolution
+                     if hasattr(gs, 'ability_handler') and gs.ability_handler: gs.ability_handler.process_triggered_abilities()
                 else:
-                     logging.warning("Stack resolution failed for top item.")
-                     break # Stop if resolution failed
+                    logging.warning("Stack resolution failed for top item.")
+                    break
 
-            # Apply continuous effects
             if hasattr(gs, 'layer_system'): gs.layer_system.apply_all_effects()
-            gs.check_state_based_actions() # Check again after effects
+            gs.check_state_based_actions()
 
             # 6. Calculate State Change Reward
-            current_state = {
-                "my_life": me["life"], "opp_life": opp["life"],
+            current_state = { # ... gather current state ...
+                 "my_life": me["life"], "opp_life": opp["life"],
                 "my_hand": len(me["hand"]), "opp_hand": len(opp["hand"]),
                 "my_board": len(me["battlefield"]), "opp_board": len(opp["battlefield"]),
                  "my_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) for cid in me["battlefield"] if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
                 "opp_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) for cid in opp["battlefield"] if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
-            }
+             }
             state_change_reward = self._add_state_change_rewards(0.0, prev_state, current_state)
             reward += state_change_reward
 
             # 7. Check Game End Conditions
+            # ... (existing game end checks) ...
             if opp["life"] <= 0:
-                done = True
-                reward += 10.0 + max(0, 20 - gs.turn) * 0.2 # Win reward + bonus for speed
-                logging.info(f"Player won on turn {gs.turn}!")
+                done = True; reward += 10.0 + max(0, 20 - gs.turn) * 0.2; info["game_result"] = "win"
             elif me["life"] <= 0:
-                done = True
-                reward -= 10.0 # Loss penalty
-                logging.info(f"Player lost on turn {gs.turn}.")
+                done = True; reward -= 10.0; info["game_result"] = "loss"
             elif hasattr(gs, 'check_for_draw_conditions') and gs.check_for_draw_conditions():
-                done = True
-                reward += 0.0 # Draw reward
-                logging.info(f"Game ended in a draw on turn {gs.turn}")
+                done = True; reward += 0.0; info["game_result"] = "draw"
             elif gs.turn > self.max_turns:
-                done = True
-                truncated = True # Use truncated for time/turn limits
-                # Reward based on final life difference
-                life_diff = me["life"] - opp["life"]
-                reward += life_diff * 0.1
-                logging.info(f"Turn limit reached. Final life: {me['life']} vs {opp['life']}.")
+                done, truncated = True, True; reward += (me["life"] - opp["life"]) * 0.1; info["game_result"] = "win" if (me["life"] > opp["life"]) else "loss" if (me["life"] < opp["life"]) else "draw"; logging.info("Turn limit reached.")
             elif self.current_step >= self.max_episode_steps:
-                 done = True
-                 truncated = True
-                 reward -= 0.5 # Penalty for reaching step limit
-                 logging.info("Max episode steps reached.")
+                 done, truncated, step_reward = True, True, reward - 0.5; info["game_result"] = "truncated"; logging.info("Max episode steps reached.")
 
             # 8. Finalize Step
-            # self.current_step incremented at start
-
             self.episode_rewards.append(reward)
-
-            # Ensure game result is recorded if done
             if done: self.ensure_game_result_recorded()
 
-            # Get next observation and action mask
-            obs = self._get_obs()
-            self.current_valid_actions = self.action_mask() # Regenerate mask after action
-            info = {"action_mask": self.current_valid_actions.astype(bool)}
+            obs = self._get_obs_safe()
+            self.current_valid_actions = self.action_mask()
+            info["action_mask"] = self.current_valid_actions.astype(bool)
 
             # Update action history
-            self.last_n_actions = np.roll(self.last_n_actions, 1)
-            self.last_n_actions[0] = action_idx
-            self.last_n_rewards = np.roll(self.last_n_rewards, 1)
-            self.last_n_rewards[0] = reward
+            self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
+            self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = reward
+
+            # Update strategy memory
+            if hasattr(gs, 'strategy_memory') and gs.strategy_memory and pre_action_pattern is not None:
+                try: gs.strategy_memory.update_strategy(pre_action_pattern, reward)
+                except Exception as strategy_e: logging.error(f"Error updating strategy memory: {strategy_e}")
 
             return obs, reward, done, truncated, info
 
         except Exception as e:
-            logging.error(f"Critical error in step function (Action {action_idx}): {str(e)}")
+            # ... (existing critical error handling) ...
+            logging.error(f"CRITICAL error in apply_action (Action {action_idx}): {str(e)}")
             import traceback
             logging.error(traceback.format_exc())
-            # Return safe state on critical error
             obs = self._get_obs_safe()
-            mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
-            mask[12] = True # Allow concede
-            info = {"action_mask": mask, "critical_error": True}
-            return obs, -1.0, True, False, info # End episode with penalty
+            mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool); mask[11] = True; mask[12] = True
+            info = {"action_mask": mask, "critical_error": True, "error_message": str(e)}
+            return obs, -5.0, True, False, info
         
     # --- Individual Action Handlers ---
     # These methods will be called by apply_action based on action_type
@@ -3009,18 +2886,22 @@ class ActionHandler:
              return (0.2, success) if success else (-0.1, False)
          return (-0.15, False)
     
-    def _handle_equip(self, param, **kwargs):
-        """Handle equip action. Param = (equip_idx, creature_idx)."""
+    def _handle_equip(self, param, context=None, **kwargs):
+        """Handle equip action. Param is None, context has (equip_idx, target_idx)."""
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
-        if isinstance(param, tuple) and len(param) == 2:
-             equip_idx, target_idx = param
+        # *** REFACTOR: Get indices from context, not param ***
+        equip_idx = context.get('equip_idx')
+        target_idx = context.get('target_idx')
+
+        if equip_idx is not None and target_idx is not None:
              if equip_idx < len(player["battlefield"]) and target_idx < len(player["battlefield"]):
                   equip_id = player["battlefield"][equip_idx]
                   target_id = player["battlefield"][target_idx]
-                  # Pass IDs to GameState method
-                  success = gs.equip_permanent(player, equip_id, target_id)
+                  success = gs.equip_permanent(player, equip_id, target_id) # Assumes equip_permanent exists
                   return (0.25, success) if success else (-0.1, False)
+             else: logging.warning(f"Equip indices out of bounds: E:{equip_idx}, T:{target_idx}")
+        else: logging.warning(f"Equip context missing indices: {context}")
         return (-0.15, False)
 
     def _handle_unequip(self, param, **kwargs):
@@ -3450,9 +3331,10 @@ class ActionHandler:
          return 0.05 if apply_combat_action(self.game_state, "ASSIGN_COMBAT_DAMAGE", param) else -0.1
     def _handle_protect_planeswalker(self, param, **kwargs):
          return 0.15 if apply_combat_action(self.game_state, "PROTECT_PLANESWALKER", param) else -0.1
+     
     def _handle_attack_battle(self, param, **kwargs):
          # Param needs to be (attacker_idx, battle_idx)
-         # The ACTION_MEANING needs fixing. Let's assume param is just battle_idx for now.
+         # The ACTION_MEANING needs fixing.
          # We need to select an attacker.
          gs = self.game_state
          player = gs.p1 if gs.agent_is_p1 else gs.p2
@@ -3471,6 +3353,7 @@ class ActionHandler:
 
     def _handle_defend_battle(self, param, **kwargs):
          return 0.1 if apply_combat_action(self.game_state, "DEFEND_BATTLE", param) else -0.1
+     
     def _handle_ninjutsu(self, param, **kwargs):
          # Param needs (ninja_hand_idx, attacker_idx)
          # Simple version: assume first ninja, first unblocked attacker

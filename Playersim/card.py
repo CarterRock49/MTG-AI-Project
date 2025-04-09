@@ -3,6 +3,8 @@ import json
 import logging
 import re
 import numpy as np
+
+from Playersim.ability_utils import EffectFactory
 from .debug import DEBUG_MODE
 
 class Card:
@@ -299,66 +301,6 @@ class Card:
                         return False
         
         return True
-        
-    def is_valid_attacker(self, game_state, controller):
-        """
-        Check if this card can attack based on its properties and current game state.
-        
-        Args:
-            game_state: The game state object
-            controller: The player controlling this card
-            
-        Returns:
-            bool: Whether the card can attack
-        """
-        # Must be a creature
-        if not hasattr(self, 'card_types') or 'creature' not in self.card_types:
-            return False
-        
-        # Check if tapped
-        if self.card_id in controller.get("tapped_permanents", set()):
-            return False
-        
-        # Check for summoning sickness
-        has_haste = self.has_keyword("haste")
-        if self.card_id in controller.get("entered_battlefield_this_turn", set()) and not has_haste:
-            return False
-        
-        # Check for defender
-        if self.has_keyword("defender"):
-            return False
-        
-        # Check if affected by "can't attack" effects
-        if hasattr(game_state, 'prevention_effects'):
-            for effect in game_state.prevention_effects:
-                if effect.get('type') == 'attack' and self.card_id in effect.get('affected_cards', []):
-                    # Check if effect condition is still valid
-                    condition_func = effect.get('condition')
-                    if condition_func and callable(condition_func) and condition_func():
-                        return False
-        
-        # Check for "must attack" requirements
-        if hasattr(self, 'must_attack') and self.must_attack:
-            # This might affect other validation logic in some contexts
-            pass
-            
-        # Check for attack restrictions based on abilities
-        if hasattr(self, 'oracle_text'):
-            oracle_text = self.oracle_text.lower()
-            if "can only attack alone" in oracle_text and len(game_state.current_attackers) > 0:
-                return False
-            if "can't attack players" in oracle_text and not game_state.defenders_with_types(['planeswalker']):
-                return False
-        
-        # Check for global attack restrictions from other permanents
-        if hasattr(game_state, 'ability_handler') and game_state.ability_handler:
-            # Use the ability system to check for restrictions
-            context = {"type": "ATTACKS"}
-            if not game_state.ability_handler._apply_defender(self.card_id, "ATTACKS", context):
-                return False
-                
-        return True
-
     #
     # Spree card handling methods
     #
@@ -434,7 +376,7 @@ class Card:
             logging.error(f"Complex Spree mode parsing error for {self.name}: {str(e)}")
             import traceback
             logging.error(traceback.format_exc())
-
+            
     def _analyze_cost_type(self, cost_text):
         """Determine cost type (mana, life, sacrifice, etc.)"""
         if '{' in cost_text and '}' in cost_text:
@@ -449,7 +391,7 @@ class Card:
         """Extract numeric value from cost"""
         match = re.search(r'\{(\d+)\}', cost_text)
         return int(match.group(1)) if match else None
-
+    
     def _parse_effect_details(self, effect_text):
         """
         Parse detailed effect information
@@ -493,7 +435,6 @@ class Card:
         return details
     #
     # Class card handling methods
-    #
     def _parse_class_data(self, card_data):
         """
         Enhanced parsing of Class card data with comprehensive level handling.
@@ -603,6 +544,41 @@ class Card:
                 return alt_match.group(1)
         
         return None
+
+    def _parse_base_level(self, oracle_text):
+        """
+        Parse the base (level 1) class characteristics.
+        
+        Handles various base level descriptions:
+        - Initial abilities
+        - Base type line
+        - Initial cost (if any)
+        """
+        # Initialize base level dictionary
+        base_level = {
+            'level': 1,
+            'cost': '',
+            'abilities': [],
+            'power': None,
+            'toughness': None,
+            'type_line': self.type_line
+        }
+        
+        # Extract base level abilities
+        # Look for text before first "Level X:" or end of text
+        base_match = re.search(r'^(.*?)(?:level \d+:|$)', oracle_text, re.DOTALL)
+        
+        if base_match:
+            base_abilities_text = base_match.group(1).strip()
+            
+            # Remove explanatory text in parentheses
+            base_abilities_text = re.sub(r'\([^)]*\)', '', base_abilities_text)
+            
+            # Split abilities, handling different separation methods
+            abilities = [a.strip() for a in re.split(r'\n+|[•●\-]', base_abilities_text) if a.strip()]
+            base_level['abilities'] = abilities
+        
+        self.levels.append(base_level)
 
     def _parse_base_level(self, oracle_text):
         """
@@ -1009,6 +985,7 @@ class Card:
         
         return effects
 
+
     def get_current_room_data(self):
         """
         Get the combined data for currently unlocked doors in a Room.
@@ -1106,125 +1083,82 @@ class Card:
 
     def _process_door_effect(self, effect, game_state, controller):
         """
-        Process a door effect when unlocked.
-        Basic implementation that creates tokens, draws cards, etc.
+        Process a door effect when unlocked by creating events or triggering abilities.
         """
-        gs = game_state
-        effect_type = effect.get('type', '')
+        effect_type = effect.get('type')
         details = effect.get('details', '')
-        
-        # Handle different effect types
-        if effect_type == 'token_creation':
-            # Create token tracking if it doesn't exist
-            if not hasattr(controller, "tokens"):
-                controller["tokens"] = []
-                
-            # Create token
-            token_id = f"TOKEN_{len(controller['tokens'])}"
-            
-            # Create a simple token card object
-            token = Card({
-                "name": f"Token",
-                "type_line": "creature",
-                "card_types": ["creature"],
-                "subtypes": [],
-                "power": 1,
-                "toughness": 1,
-                "oracle_text": "",
-                "keywords": [0] * 11  # Default no keywords
-            })
-            
-            # Add token to game
-            gs.card_db[token_id] = token
-            controller["battlefield"].append(token_id)
-            controller["tokens"].append(token_id)
-            
-            logging.debug(f"Door effect: Created a token")
-        
-        elif effect_type == 'card_manipulation':
-            action, count = details
-            count = int(count) if isinstance(count, str) and count.isdigit() else 1
-            
-            if action == 'draw':
-                # Draw cards
-                for _ in range(count):
-                    if controller["library"]:
-                        card_id = controller["library"].pop(0)
-                        controller["hand"].append(card_id)
-                logging.debug(f"Door effect: Drew {count} cards")
-            
-            elif action == 'discard':
-                # Discard cards
-                for _ in range(min(count, len(controller["hand"]))):
-                    # In a real implementation, the player would choose
-                    card_id = controller["hand"][0]
-                    controller["hand"].remove(card_id)
-                    controller["graveyard"].append(card_id)
-                logging.debug(f"Door effect: Discarded {count} cards")
-        
-        elif effect_type == 'damage_effect':
-            damage_amount, target_desc = details
-            damage_amount = int(damage_amount) if isinstance(damage_amount, str) and damage_amount.isdigit() else 1
-            
-            # Simple implementation - deal damage to first valid target
-            opponent = gs.p2 if controller == gs.p1 else gs.p1
-            
-            if "creature" in target_desc:
-                # Deal damage to a creature
-                for creature_id in opponent["battlefield"]:
-                    creature = gs._safe_get_card(creature_id)
-                    if creature and hasattr(creature, 'card_types') and 'creature' in creature.card_types:
-                        # Deal damage - in a real implementation this would use a damage system
-                        if damage_amount >= creature.toughness:
-                            opponent["battlefield"].remove(creature_id)
-                            opponent["graveyard"].append(creature_id)
-                        logging.debug(f"Door effect: Dealt {damage_amount} damage to {creature.name}")
-                        break
-            
-            elif "opponent" in target_desc:
-                # Deal damage to opponent
-                opponent["life"] -= damage_amount
-                logging.debug(f"Door effect: Dealt {damage_amount} damage to opponent")
-                
-        elif effect_type == 'graveyard_return':
-            # Simple implementation - return first matching card
-            target_desc = details
-            
-            # Find the first matching card in graveyard
-            for card_id in controller["graveyard"]:
-                card = gs._safe_get_card(card_id)
-                if card and hasattr(card, 'card_types'):
-                    if "creature" in target_desc and 'creature' in card.card_types:
-                        # Return to hand
-                        controller["graveyard"].remove(card_id)
-                        controller["hand"].append(card_id)
-                        logging.debug(f"Door effect: Returned {card.name} from graveyard to hand")
-                        break
-        
-        elif effect_type == 'surveil':
-            count = int(details) if isinstance(details, str) and details.isdigit() else 1
-            
-            # Look at top N cards
-            if controller["library"]:
-                look_at = controller["library"][:count]
-                
-                # In a real implementation, the player would choose
-                # For simplicity, we'll put all cards back on top
-                logging.debug(f"Door effect: Surveilled {count} cards")
-        
-        elif effect_type == 'manifest':
-            # Simple implementation - manifest the top card
-            if controller["library"]:
-                manifest_id = controller["library"].pop(0)
-                
-                # Create a face-down 2/2 creature
-                controller["battlefield"].append(manifest_id)
-                controller["entered_battlefield_this_turn"].add(manifest_id)
-                
-                # In a real implementation, this would set up the manifested state properly
-                logging.debug(f"Door effect: Manifested a card")
-                
-        # Add more effect types as needed
+
+        if not hasattr(game_state, 'ability_handler') or not game_state.ability_handler:
+             logging.warning("Cannot process door effect: AbilityHandler not found in GameState.")
+             return
+
+        # Context for the effect application
+        context = {'source_id': self.card_id, 'controller': controller, 'effect_origin': 'door_unlock'}
+
+        try:
+            # Convert text descriptions to AbilityEffect objects or direct GameState actions
+            if effect_type == 'token_creation':
+                 # Assuming details = (count_str, type_desc)
+                 token_details = self._parse_token_details(details[1]) # Use helper to parse description
+                 token_data = { # Convert parsed details to data format for GS
+                      "name": token_details.get('name', "Room Token"),
+                      "type_line": token_details.get('type_line', "Token Creature"),
+                      "power": token_details.get('power', 1),
+                      "toughness": token_details.get('toughness', 1),
+                      "colors": token_details.get('colors', [0, 0, 0, 0, 0]),
+                      "subtypes": token_details.get('subtypes', []),
+                      "abilities": token_details.get('abilities', [])
+                 }
+                 token_count = token_details.get('count', 1)
+                 for _ in range(token_count):
+                      game_state.create_token(controller, token_data) # Call GS method
+
+            elif effect_type == 'card_manipulation':
+                 # Assuming details = (action_str, count_str)
+                 action, count = details
+                 count = int(count) if isinstance(count, str) and count.isdigit() else 1
+                 if action == 'draw': game_state.draw_cards(controller, count) # Call GS method
+                 # Add discard logic if needed, possibly via effect
+
+            elif effect_type == 'damage_effect':
+                 # Assuming details = (amount_str, target_desc)
+                 damage_amount, target_desc = details
+                 damage_amount = int(damage_amount) if isinstance(damage_amount, str) and damage_amount.isdigit() else 1
+                 # Create and apply DamageEffect via AbilityHandler
+                 effect_text = f"deals {damage_amount} damage to {target_desc}" # Reconstruct text for parser
+                 # Need to resolve targets first if text requires it
+                 targets = None
+                 if "target" in target_desc:
+                     targets = game_state.targeting_system.resolve_targeting(self.card_id, controller, effect_text)
+                 effects = EffectFactory.create_effects(effect_text, targets=targets)
+                 for eff in effects: eff.apply(game_state, self.card_id, controller, targets)
+
+            elif effect_type == 'graveyard_return':
+                 # Assuming details = target_desc
+                 target_desc = details
+                 effect_text = f"return {target_desc} from your graveyard" # Reconstruct
+                 targets = None # Search handled by effect itself? Or target selection first?
+                 # For now, assume effect handles search
+                 effects = EffectFactory.create_effects(effect_text)
+                 for eff in effects: eff.apply(game_state, self.card_id, controller, targets)
+
+            elif effect_type == 'surveil':
+                 # Assuming details = count_str
+                 count = int(details) if isinstance(details, str) and details.isdigit() else 1
+                 game_state.surveil(controller, count) # Call GS method
+
+            elif effect_type == 'manifest':
+                 # Assuming details = ? (Manifest logic complex)
+                 game_state.manifest_card(controller) # Call GS method (needs count if specified)
+
+            # Add other effect types here, calling appropriate GameState methods or creating AbilityEffect objects
+
+            logging.debug(f"Processed door effect: {effect_type}")
+
+        except Exception as e:
+            logging.error(f"Error processing door effect '{effect_type}': {e}")
+            import traceback
+            logging.error(traceback.format_exc())
     
     
     def _parse_token_details(self, token_desc):
@@ -2159,34 +2093,33 @@ class Card:
         """
         self.subtype_vector = [1 if subtype in self.subtypes else 0 for subtype in Card.SUBTYPE_VOCAB]
 
+    # *** REFACTOR: Centralize keyword checking ***
     def has_keyword(self, keyword_name):
-        """Check if card has a specific keyword ability, preferring the keywords array."""
+        """
+        Check if card has a specific keyword ability using the keywords array.
+        Relies on LayerSystem to have correctly populated self.keywords.
+        """
         keyword_name = keyword_name.lower()
         try:
             keyword_index = Card.ALL_KEYWORDS.index(keyword_name)
-            # Check the pre-parsed keywords array first
-            if hasattr(self, 'keywords') and isinstance(self.keywords, list) and keyword_index < len(self.keywords):
+            # Check the pre-parsed keywords array ONLY
+            # Ensure self.keywords is initialized and has the right length
+            if hasattr(self, 'keywords') and isinstance(self.keywords, (list, np.ndarray)) and keyword_index < len(self.keywords):
                 return self.keywords[keyword_index] == 1
+            else:
+                # Log if keywords array seems malformed or index is out of bounds
+                if not hasattr(self, 'keywords') or not isinstance(self.keywords, (list, np.ndarray)):
+                    logging.warning(f"Card {self.name} missing or has invalid 'keywords' attribute.")
+                elif keyword_index >= len(self.keywords):
+                    logging.warning(f"Keyword index {keyword_index} for '{keyword_name}' out of bounds for card {self.name} (len: {len(self.keywords)}).")
         except ValueError:
-            # Keyword not in our master list, fall back to text search
-            pass
-
-        # Fallback to oracle text search (less reliable)
-        if hasattr(self, 'oracle_text') and isinstance(self.oracle_text, str):
-            # Use word boundaries for common keywords prone to partial matches
-            if keyword_name in ["flash", "haste", "reach", "ward"]:
-                pattern = r'\b' + re.escape(keyword_name) + r'\b'
-                if re.search(pattern, self.oracle_text.lower()):
-                    return True
-            # Simple substring check for others
-            elif keyword_name in self.oracle_text.lower():
-                # Add specific checks for variations if needed
-                if keyword_name == 'protection' and 'protection from' in self.oracle_text.lower(): return True
-                if keyword_name == 'landwalk' and 'walk' in self.oracle_text.lower(): return True # Simple check
-                return True # Basic substring match
+            # Keyword not in the canonical ALL_KEYWORDS list
+            logging.debug(f"Keyword '{keyword_name}' not found in Card.ALL_KEYWORDS.")
+            # Optionally, could check granted/removed sets here as a backup,
+            # but ideally the `keywords` array should be the source of truth.
+            # e.g., return keyword_name in getattr(self, '_granted_abilities', set()) and keyword_name not in getattr(self, '_removed_abilities', set())
 
         return False
-
     #
     # Performance and learning methods
     #

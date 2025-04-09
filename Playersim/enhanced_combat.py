@@ -364,18 +364,24 @@ class ExtendedCombatResolver(EnhancedCombatResolver):
         return total_damage_dealt # Return total assigned damage
     
     def _has_keyword(self, card, keyword):
-        """Checks if a card has a keyword using the central AbilityHandler."""
+        """Checks if a card has a keyword using the central checker."""
         gs = self.game_state
-        if hasattr(gs, 'ability_handler') and gs.ability_handler:
-             card_id = getattr(card, 'card_id', None)
-             if card_id:
-                  # Assumes AbilityHandler has a check_keyword method
-                  return gs.ability_handler.check_keyword(card_id, keyword)
+        card_id = getattr(card, 'card_id', None)
+        if not card_id: return False
 
-        # Fallback basic check if no handler or method found
-        logging.warning(f"Using basic keyword fallback check for {keyword} on {getattr(card, 'name', 'Unknown')}")
-        if card and hasattr(card, 'oracle_text') and isinstance(card.oracle_text, str):
-             return keyword.lower() in card.oracle_text.lower()
+        if hasattr(gs, 'ability_handler') and gs.ability_handler:
+            # Prefer AbilityHandler if it has the check method
+            if hasattr(gs.ability_handler, 'check_keyword'):
+                 return gs.ability_handler.check_keyword(card_id, keyword)
+        elif hasattr(gs, 'targeting_system') and gs.targeting_system:
+             # Fallback to TargetingSystem if it has the check method
+             if hasattr(gs.targeting_system, 'check_keyword'):
+                 return gs.targeting_system.check_keyword(card_id, keyword)
+
+        # Ultimate fallback: Check the card's own keyword array (might be stale if layers not applied)
+        logging.warning(f"Using basic card keyword fallback check for {keyword} on {getattr(card, 'name', 'Unknown')}")
+        if hasattr(card, 'has_keyword'): # Use the refactored card.has_keyword
+             return card.has_keyword(keyword)
         return False
         
     def _process_planeswalker_damage(self, attacker_id, attacker_player, planeswalker_id, damage_to_creatures, creatures_dealt_damage):
