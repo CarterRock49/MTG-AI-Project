@@ -21,40 +21,40 @@ ACTION_MEANINGS = {
     8: ("BEGIN_COMBAT_END", None), 9: ("END_COMBAT", None), 10: ("END_STEP", None), 11: ("PASS_PRIORITY", None),
     12: ("CONCEDE", None),
 
-    # Play land (13-19) = 7 actions (hand 0-6)
+    # Play land (13-19) = 7 actions (param=hand index 0-6)
     **{i: ("PLAY_LAND", i-13) for i in range(13, 20)},
 
-    # Play spell (20-27) = 8 actions (hand 0-7)
+    # Play spell (20-27) = 8 actions (param=hand index 0-7)
     **{i: ("PLAY_SPELL", i-20) for i in range(20, 28)},
 
-    # Attack (28-47) = 20 actions (battlefield 0-19)
+    # Attack (28-47) = 20 actions (param=battlefield index 0-19)
     **{i: ("ATTACK", i-28) for i in range(28, 48)},
 
-    # Block (48-67) = 20 actions (battlefield 0-19)
+    # Block (48-67) = 20 actions (param=battlefield index 0-19)
     **{i: ("BLOCK", i-48) for i in range(48, 68)},
 
-    # Tap land for mana (68-87) = 20 actions (battlefield 0-19)
-    **{i: ("TAP_LAND_FOR_MANA", i-68) for i in range(68, 88)}, # Renamed for clarity
+    # Tap land for mana (68-87) = 20 actions (param=battlefield index 0-19)
+    **{i: ("TAP_LAND_FOR_MANA", i-68) for i in range(68, 88)},
 
-    # Tap land for effect (88-99) = 12 actions (battlefield 0-11, assumes some lands have non-mana tap abilities)
+    # Tap land for effect (88-99) = 12 actions (param=battlefield index 0-11)
     **{i: ("TAP_LAND_FOR_EFFECT", i-88) for i in range(88, 100)},
 
-    # Ability activation (100-159) = 60 actions (battlefield 0-19, ability 0-2)
+    # Ability activation (100-159) = 60 actions (param=(battlefield index 0-19, ability index 0-2))
     **{100 + (i * 3) + j: ("ACTIVATE_ABILITY", (i, j)) for i in range(20) for j in range(3)},
 
-    # Transform (160-179) = 20 actions (battlefield 0-19)
+    # Transform (160-179) = 20 actions (param=battlefield index 0-19)
     **{160 + i: ("TRANSFORM", i) for i in range(20)},
 
-    # MDFC Land Back (180-187) = 8 actions (hand 0-7)
+    # MDFC Land Back (180-187) = 8 actions (param=hand index 0-7)
     **{i: ("PLAY_MDFC_LAND_BACK", i-180) for i in range(180, 188)},
 
-    # MDFC Spell Back (188-195) = 8 actions (hand 0-7)
+    # MDFC Spell Back (188-195) = 8 actions (param=hand index 0-7)
     **{i: ("PLAY_MDFC_BACK", i-188) for i in range(188, 196)},
 
-    # Adventure (196-203) = 8 actions (hand 0-7)
+    # Adventure (196-203) = 8 actions (param=hand index 0-7)
     **{i: ("PLAY_ADVENTURE", i-196) for i in range(196, 204)},
 
-    # Defend Battle (204-223) = 20 actions (battle 0-4, creature 0-3)
+    # Defend Battle (204-223) = 20 actions (param=(battle index 0-4, creature index 0-3) - NEEDS CONTEXT)
     **{204 + (i * 4) + j: ("DEFEND_BATTLE", (i, j)) for i in range(5) for j in range(4)},
 
     # NO_OP (224)
@@ -62,148 +62,150 @@ ACTION_MEANINGS = {
 
     # Mulligan (225-229) = 5 actions
     225: ("KEEP_HAND", None),
-    **{226 + i: ("BOTTOM_CARD", i) for i in range(4)},  # Bottom cards 0-3
+    **{226 + i: ("BOTTOM_CARD", i) for i in range(4)},  # param=card index 0-3
 
-    # Cast from Exile (230-237) = 8 actions (exile 0-7)
+    # Cast from Exile (230-237) = 8 actions (param=exile index 0-7)
     **{i: ("CAST_FROM_EXILE", i-230) for i in range(230, 238)},
 
-    # Discard (238-247) = 10 actions (hand 0-9)
+    # Discard (238-247) = 10 actions (param=hand index 0-9)
     **{238 + i: ("DISCARD_CARD", i) for i in range(10)},
 
     # Room/Class (248-257) = 10 actions
-    **{248 + i: ("UNLOCK_DOOR", i) for i in range(5)}, # Room index 0-4
-    **{253 + i: ("LEVEL_UP_CLASS", i) for i in range(5)}, # Class index 0-4
+    **{248 + i: ("UNLOCK_DOOR", i) for i in range(5)}, # param=battlefield index 0-4
+    **{253 + i: ("LEVEL_UP_CLASS", i) for i in range(5)}, # param=battlefield index 0-4
 
-    # Spree Mode (258-273) = 16 actions (card 0-7, mode 0-1)
+    # Spree Mode (258-273) = 16 actions (param=(hand index 0-7, mode index 0-1) - NEEDS CONTEXT)
     **{258 + (i * 2) + j: ("SELECT_SPREE_MODE", (i, j)) for i in range(8) for j in range(2)},
 
     # Targeting (274-293) = 20 actions
-    **{274 + i: ("SELECT_TARGET", i) for i in range(10)}, # Target index 0-9
-    **{284 + i: ("SACRIFICE_PERMANENT", i) for i in range(10)}, # Permanent index 0-9
+    **{274 + i: ("SELECT_TARGET", i) for i in range(10)}, # param=valid target index 0-9
+    **{284 + i: ("SACRIFICE_PERMANENT", i) for i in range(10)}, # param=valid sacrifice index 0-9
 
     # Gaps filled with NO_OP (294-298) = 5 actions
     **{i: ("NO_OP", None) for i in range(294, 299)},
 
     # Library/Card Movement (299-308) = 10 actions
-    **{299 + i: ("SEARCH_LIBRARY", i) for i in range(5)}, # Search type 0-4
-    304: ("NO_OP_SEARCH_FAIL", None), # Action for failing to find a card during search
-    305: ("PUT_TO_GRAVEYARD", None), # Surveil/Scry choice
-    306: ("PUT_ON_TOP", None), # Surveil/Scry choice
-    307: ("PUT_ON_BOTTOM", None), # Scry choice
-    308: ("DREDGE", None), # Param should be GY index
+    **{299 + i: ("SEARCH_LIBRARY", i) for i in range(5)}, # param=search type 0-4
+    304: ("NO_OP_SEARCH_FAIL", None),
+    305: ("PUT_TO_GRAVEYARD", None), # param=choice index (usually 0)
+    306: ("PUT_ON_TOP", None),       # param=choice index (usually 0)
+    307: ("PUT_ON_BOTTOM", None),    # param=choice index (usually 0)
+    308: ("DREDGE", None),           # param=graveyard index 0-? (Needs Context)
 
     # Counter Management (309-329) = 21 actions
-    **{309 + i: ("ADD_COUNTER", i) for i in range(10)}, # Target permanent 0-9
-    **{319 + i: ("REMOVE_COUNTER", i) for i in range(10)}, # Target permanent 0-9
+    **{309 + i: ("ADD_COUNTER", i) for i in range(10)}, # param=permanent index 0-9 (Needs Context for type/count)
+    **{319 + i: ("REMOVE_COUNTER", i) for i in range(10)}, # param=permanent index 0-9 (Needs Context for type/count)
     329: ("PROLIFERATE", None),
 
     # Zone Movement (330-347) = 18 actions
-    **{330 + i: ("RETURN_FROM_GRAVEYARD", i) for i in range(6)}, # GY index 0-5
-    **{336 + i: ("REANIMATE", i) for i in range(6)}, # GY index 0-5
-    **{342 + i: ("RETURN_FROM_EXILE", i) for i in range(6)}, # Exile index 0-5
+    **{330 + i: ("RETURN_FROM_GRAVEYARD", i) for i in range(6)}, # param=graveyard index 0-5
+    **{336 + i: ("REANIMATE", i) for i in range(6)}, # param=graveyard index 0-5
+    **{342 + i: ("RETURN_FROM_EXILE", i) for i in range(6)}, # param=exile index 0-5
 
     # Modal/Choice (348-372) = 25 actions
-    **{348 + i: ("CHOOSE_MODE", i) for i in range(10)}, # Mode index 0-9
-    **{358 + i: ("CHOOSE_X_VALUE", i+1) for i in range(10)}, # X value 1-10
-    **{368 + i: ("CHOOSE_COLOR", i) for i in range(5)}, # WUBRG 0-4
+    **{348 + i: ("CHOOSE_MODE", i) for i in range(10)}, # param=mode index 0-9
+    **{358 + i: ("CHOOSE_X_VALUE", i+1) for i in range(10)}, # param=X value 1-10
+    **{368 + i: ("CHOOSE_COLOR", i) for i in range(5)}, # param=WUBRG index 0-4
 
     # Advanced Combat (373-377, 383-392) = 15 actions
-    **{373 + i: ("ATTACK_PLANESWALKER", i) for i in range(5)}, # Opponent PW index 0-4
+    **{373 + i: ("ATTACK_PLANESWALKER", i) for i in range(5)}, # param=opponent PW index 0-4
     # Gap filled with NO_OP (378-382) = 5 actions
     **{i: ("NO_OP", None) for i in range(378, 383)},
-    **{383 + i: ("ASSIGN_MULTIPLE_BLOCKERS", i) for i in range(10)}, # Attacker index 0-9
+    **{383 + i: ("ASSIGN_MULTIPLE_BLOCKERS", i) for i in range(10)}, # param=attacker index 0-9
 
     # Alternative Casting (393-404) = 12 actions
-    393: ("CAST_WITH_FLASHBACK", None), # Param = GY index
-    394: ("CAST_WITH_JUMP_START", None), # Param = GY index
-    395: ("CAST_WITH_ESCAPE", None), # Param = GY index
-    396: ("CAST_FOR_MADNESS", None), # Param = Hand index (after discard trigger)
-    397: ("CAST_WITH_OVERLOAD", None), # Param = Hand index
-    398: ("CAST_FOR_EMERGE", None), # Param = (Hand index, Sacrifice index)
-    399: ("CAST_FOR_DELVE", None), # Param = (Hand index, List[GY indices])
-    400: ("PAY_KICKER", True), # Param = Hand index
-    401: ("PAY_KICKER", False), # Param = Hand index
-    402: ("PAY_ADDITIONAL_COST", True), # Param = Hand index
-    403: ("PAY_ADDITIONAL_COST", False), # Param = Hand index
-    404: ("PAY_ESCALATE", None), # Param = (Hand index, List[Modes])
+    393: ("CAST_WITH_FLASHBACK", None), # param=graveyard index (Needs Context)
+    394: ("CAST_WITH_JUMP_START", None), # param=graveyard index (Needs Context for discard)
+    395: ("CAST_WITH_ESCAPE", None), # param=graveyard index (Needs Context for exile choice)
+    396: ("CAST_FOR_MADNESS", None), # param=exile index (Needs Context)
+    397: ("CAST_WITH_OVERLOAD", None), # param=hand index
+    398: ("CAST_FOR_EMERGE", None), # param=(hand_idx, sac_idx) (Needs Context)
+    399: ("CAST_FOR_DELVE", None), # param=(hand_idx, List[GY_idx]) (Needs Context)
+    400: ("PAY_KICKER", True), # Informational, modifies context for PLAY_SPELL
+    401: ("PAY_KICKER", False),# Informational, modifies context for PLAY_SPELL
+    402: ("PAY_ADDITIONAL_COST", True), # Informational, modifies context for PLAY_SPELL
+    403: ("PAY_ADDITIONAL_COST", False),# Informational, modifies context for PLAY_SPELL
+    404: ("PAY_ESCALATE", None), # param=num_extra_modes (Needs Context)
 
     # Token/Copy (405-412) = 8 actions
-    **{405 + i: ("CREATE_TOKEN", i) for i in range(5)}, # Token type index 0-4
-    410: ("COPY_PERMANENT", None), # Param = Target permanent index
-    411: ("COPY_SPELL", None), # Param = Target spell index on stack
-    412: ("POPULATE", None), # Param = Target token index
+    **{405 + i: ("CREATE_TOKEN", i) for i in range(5)}, # param=predefined token type index 0-4
+    410: ("COPY_PERMANENT", None), # param=target permanent index (Needs Context)
+    411: ("COPY_SPELL", None), # param=target spell stack index (Needs Context)
+    412: ("POPULATE", None), # param=target token index (Needs Context)
 
     # Specific Mechanics (413-424) = 12 actions
-    413: ("INVESTIGATE", None), 414: ("FORETELL", None), # Param = Hand index
-    415: ("AMASS", None), # Param = Amount
+    413: ("INVESTIGATE", None), 414: ("FORETELL", None), # param=hand index
+    415: ("AMASS", None), # param=amount (Needs Context)
     416: ("LEARN", None),
-    417: ("VENTURE", None), 418: ("EXERT", None), # Param = Creature index
-    419: ("EXPLORE", None), # Param = Creature index
-    420: ("ADAPT", None), # Param = (Creature index, Amount)
-    421: ("MUTATE", None), # Param = (Hand index, Target index)
-    422: ("CYCLING", None), # Param = Hand index
-    423: ("GOAD", None), # Param = Target creature index
-    424: ("BOAST", None), # Param = Creature index
+    417: ("VENTURE", None), 418: ("EXERT", None), # param=creature index
+    419: ("EXPLORE", None), # param=creature index
+    420: ("ADAPT", None), # param=creature index (Needs Context for amount)
+    421: ("MUTATE", None), # param=(hand_idx, target_idx) (Needs Context)
+    422: ("CYCLING", None), # param=hand index
+    423: ("GOAD", None), # param=target creature index
+    424: ("BOAST", None), # param=creature index
 
     # Response Actions (425-429) = 5 actions
-    425: ("COUNTER_SPELL", None), # Param = Target spell index on stack
-    426: ("COUNTER_ABILITY", None), # Param = Target ability index on stack
-    427: ("PREVENT_DAMAGE", None), # Param = (Source index, Amount)
-    428: ("REDIRECT_DAMAGE", None), # Param = (Source index, New target index)
-    429: ("STIFLE_TRIGGER", None), # Param = Trigger index on stack
+    425: ("COUNTER_SPELL", None), # param=hand_idx (Needs Context for target)
+    426: ("COUNTER_ABILITY", None), # param=hand_idx (Needs Context for target)
+    427: ("PREVENT_DAMAGE", None), # param=hand_idx (Needs Context for amount/target)
+    428: ("REDIRECT_DAMAGE", None), # param=hand_idx (Needs Context for details)
+    429: ("STIFLE_TRIGGER", None), # param=hand_idx (Needs Context for target)
 
     # Combat Actions (430-439) = 10 actions
-    430: ("FIRST_STRIKE_ORDER", None), 431: ("ASSIGN_COMBAT_DAMAGE", None), 432: ("NINJUTSU", None), # Param = (Ninja hand index, Attacker index)
+    430: ("FIRST_STRIKE_ORDER", None), # param=assignments (Needs Context)
+    431: ("ASSIGN_COMBAT_DAMAGE", None), # param=assignments (Needs Context)
+    432: ("NINJUTSU", None), # param=(ninja_hand_idx, attacker_idx)
     433: ("DECLARE_ATTACKERS_DONE", None), 434: ("DECLARE_BLOCKERS_DONE", None),
-    435: ("LOYALTY_ABILITY_PLUS", None), # Param = PW index
-    436: ("LOYALTY_ABILITY_ZERO", None), # Param = PW index
-    437: ("LOYALTY_ABILITY_MINUS", None), # Param = PW index
-    438: ("ULTIMATE_ABILITY", None), # Param = PW index
-    439: ("PROTECT_PLANESWALKER", None), # Param = (PW index, Defender index)
+    435: ("LOYALTY_ABILITY_PLUS", None), # param=battlefield index
+    436: ("LOYALTY_ABILITY_ZERO", None), # param=battlefield index
+    437: ("LOYALTY_ABILITY_MINUS", None),# param=battlefield index
+    438: ("ULTIMATE_ABILITY", None),     # param=battlefield index
+    439: ("PROTECT_PLANESWALKER", None), # param=(pw_idx, defender_idx) (Needs Context)
 
     # Card Type Specific (440-456) = 17 actions
-    440: ("CAST_LEFT_HALF", None), # Param = hand index
-    441: ("CAST_RIGHT_HALF", None), # Param = hand index
-    442: ("CAST_FUSE", None), # Param = hand index
-    443: ("AFTERMATH_CAST", None), # Param = GY index
-    444: ("FLIP_CARD", None), # Param = battlefield index
-    445: ("EQUIP", None), # Param = (equip index, creature index)
-    446: ("UNEQUIP", None), # Param = equip index
-    447: ("ATTACH_AURA", None), # Param = (aura index, target index)
-    448: ("FORTIFY", None), # Param = (fort index, land index)
-    449: ("RECONFIGURE", None), # Param = battlefield index
-    450: ("MORPH", None), # Turn face-up, param = battlefield index
-    451: ("MANIFEST", None), # Turn face-up, param = battlefield index
+    440: ("CAST_LEFT_HALF", None), # param = hand index
+    441: ("CAST_RIGHT_HALF", None), # param = hand index
+    442: ("CAST_FUSE", None), # param = hand index
+    443: ("AFTERMATH_CAST", None), # param = GY index
+    444: ("FLIP_CARD", None), # param = battlefield index
+    445: ("EQUIP", None), # param = (equip_idx, creature_idx) (Needs Context)
+    446: ("UNEQUIP", None), # param = equip index
+    447: ("ATTACH_AURA", None), # param = (aura_idx, target_idx) (Needs Context)
+    448: ("FORTIFY", None), # param = (fort_idx, land_idx) (Needs Context)
+    449: ("RECONFIGURE", None), # param = battlefield index
+    450: ("MORPH", None), # param = battlefield index
+    451: ("MANIFEST", None), # param = battlefield index
     452: ("CLASH", None),
-    453: ("CONSPIRE", None), # Param = (spell index, creature1 index, creature2 index)
-    454: ("CONVOKE", None), # Param = list of creatures to tap
-    455: ("GRANDEUR", None), # Param = hand index of same card
-    456: ("HELLBENT", None), # Context check (need to be removed or replaced this is a state check, not an action itself)
+    453: ("CONSPIRE", None), # param = (spell_stack_idx, creature1_idx, creature2_idx) (Needs Context)
+    454: ("CONVOKE", None), # Informational, handled by PLAY_SPELL context
+    455: ("GRANDEUR", None), # param = hand index
+    456: ("HELLBENT", None), # State check, not an action
 
     # Gap filled with NO_OP (457-459) = 3 actions
     **{i: ("NO_OP", None) for i in range(457, 460)},
 
     # Actions 460-464: Target Battle index 0-4
-    **{460 + i: ("ATTACK_BATTLE", i) for i in range(5)},
+    **{460 + i: ("ATTACK_BATTLE", i) for i in range(5)}, # param = relative battle index 0-4
     # Fill the remaining space (465-479) with No-Ops
     **{i: ("NO_OP", None) for i in range(465, 480)}
-
-    # Final NO_OP to reach 480
-    # Action 480 is out of bounds for size 480 (indices 0-479)
-    # The last valid index is 479. The loop above ends at 460 + (4*4)+3 = 460 + 19 = 479.
-    # So we have exactly 480 actions defined (0-479).
 }
-# Check size
-if len(ACTION_MEANINGS) != 480:
-    logging.warning(f"ACTION_MEANINGS has {len(ACTION_MEANINGS)} entries, expected 480. Adjusting size...")
+required_size = 480
+if len(ACTION_MEANINGS) != required_size:
+    logging.warning(f"ACTION_MEANINGS has {len(ACTION_MEANINGS)} entries, expected {required_size}. Adjusting size...")
     max_idx = max(ACTION_MEANINGS.keys()) if ACTION_MEANINGS else -1
-    for i in range(max_idx + 1, 480):
+    # Add missing entries up to required_size
+    for i in range(required_size):
         if i not in ACTION_MEANINGS:
             ACTION_MEANINGS[i] = ("NO_OP", None)
-for i in range(480):
-    if i not in ACTION_MEANINGS:
-        ACTION_MEANINGS[i] = ("NO_OP", None)
-        logging.warning(f"Added missing NO_OP for index {i}")
+            # logging.debug(f"Added missing NO_OP for index {i}") # Optional: Debug log
+
+    # Remove excess entries if any (less common)
+    if len(ACTION_MEANINGS) > required_size:
+        keys_to_remove = [k for k in ACTION_MEANINGS if k >= required_size]
+        for k in keys_to_remove:
+            del ACTION_MEANINGS[k]
+            logging.debug(f"Removed excess action index {k}")
 
 class ActionHandler:
     """Handles action validation and execution"""
@@ -215,14 +217,18 @@ class ActionHandler:
         # Ensure CardEvaluator is initialized safely
         self.action_reasons = {} # For debugging valid actions
         try:
-            self.card_evaluator = EnhancedCardEvaluator(game_state,
-            getattr(game_state, 'stats_tracker', None),
-            getattr(game_state, 'card_memory', None))
-            game_state.card_evaluator = self.card_evaluator # Link to game_state
+            # Check if GS already has one, potentially initialized elsewhere
+            if not hasattr(game_state, 'card_evaluator') or game_state.card_evaluator is None:
+                self.card_evaluator = EnhancedCardEvaluator(game_state,
+                getattr(game_state, 'stats_tracker', None),
+                getattr(game_state, 'card_memory', None))
+                game_state.card_evaluator = self.card_evaluator # Link to game_state
+            else:
+                self.card_evaluator = game_state.card_evaluator
         except Exception as e:
             logging.error(f"Error initializing EnhancedCardEvaluator: {e}")
             self.card_evaluator = None # Fallback
-            game_state.card_evaluator = None
+            if hasattr(game_state, 'card_evaluator'): game_state.card_evaluator = None
 
         # Use CombatActionHandler for combat-specific functionality
         self.combat_handler = integrate_combat_actions(self.game_state)
@@ -231,16 +237,138 @@ class ActionHandler:
             self.combat_handler.setup_combat_systems()
         else:
             logging.error("CombatActionHandler could not be initialized!")
-            # Fallback basic initialization
+            # Fallback basic initialization (Consider adding these to GameState directly if handler fails)
             if not hasattr(self.game_state, 'current_attackers'):
                 self.game_state.current_attackers = []
             if not hasattr(self.game_state, 'current_block_assignments'):
                 self.game_state.current_block_assignments = {}
 
         self.action_reasons = {} # For debugging valid actions
+        # Map action types to methods for cleaner dispatch in apply_action
+        self.action_handlers = self._get_action_handlers()
         
-    # --- Delegation Methods to CombatActionHandler ---
-    # These methods now simply call the corresponding method on the combat_handler instance
+    def _get_action_handlers(self):
+        """Maps action type strings to their handler methods."""
+        return {
+            # Basic Flow
+            "END_TURN": self._handle_end_turn, "UNTAP_NEXT": self._handle_untap_next,
+            "DRAW_NEXT": self._handle_draw_next, "MAIN_PHASE_END": self._handle_main_phase_end,
+            "COMBAT_DAMAGE": self._handle_combat_damage, "END_PHASE": self._handle_end_phase,
+            "MULLIGAN": self._handle_mulligan, "KEEP_HAND": self._handle_keep_hand,
+            "BOTTOM_CARD": self._handle_bottom_card, "UPKEEP_PASS": self._handle_upkeep_pass,
+            "BEGIN_COMBAT_END": self._handle_begin_combat_end, "END_COMBAT": self._handle_end_combat,
+            "END_STEP": self._handle_end_step, "PASS_PRIORITY": self._handle_pass_priority,
+            "CONCEDE": self._handle_concede,
+            # Play Cards
+            "PLAY_LAND": self._handle_play_land, "PLAY_SPELL": self._handle_play_spell,
+            "PLAY_MDFC_LAND_BACK": self._handle_play_mdfc_land_back,
+            "PLAY_MDFC_BACK": self._handle_play_mdfc_back,
+            "PLAY_ADVENTURE": self._handle_play_adventure,
+            "CAST_FROM_EXILE": self._handle_cast_from_exile,
+            # Combat (Most are delegated via combat_integration.apply_combat_action)
+            "ATTACK": self._handle_attack,
+            "BLOCK": self._handle_block,
+            # The combat integration handles these:
+            "DECLARE_ATTACKERS_DONE": lambda p, **k: apply_combat_action(self.game_state, "DECLARE_ATTACKERS_DONE", p),
+            "DECLARE_BLOCKERS_DONE": lambda p, **k: apply_combat_action(self.game_state, "DECLARE_BLOCKERS_DONE", p),
+            "ATTACK_PLANESWALKER": lambda p, **k: apply_combat_action(self.game_state, "ATTACK_PLANESWALKER", p),
+            "ASSIGN_MULTIPLE_BLOCKERS": lambda p, **k: apply_combat_action(self.game_state, "ASSIGN_MULTIPLE_BLOCKERS", p),
+            "FIRST_STRIKE_ORDER": lambda p, **k: apply_combat_action(self.game_state, "FIRST_STRIKE_ORDER", p),
+            "ASSIGN_COMBAT_DAMAGE": lambda p, **k: apply_combat_action(self.game_state, "ASSIGN_COMBAT_DAMAGE", p),
+            "PROTECT_PLANESWALKER": lambda p, **k: apply_combat_action(self.game_state, "PROTECT_PLANESWALKER", p),
+            "ATTACK_BATTLE": lambda p, **k: apply_combat_action(self.game_state, "ATTACK_BATTLE", p),
+            "DEFEND_BATTLE": lambda p, **k: apply_combat_action(self.game_state, "DEFEND_BATTLE", p),
+            "NINJUTSU": lambda p, **k: apply_combat_action(self.game_state, "NINJUTSU", p), # Expects tuple param
+             # Abilities & Mana
+            "TAP_LAND_FOR_MANA": self._handle_tap_land_for_mana,
+            "TAP_LAND_FOR_EFFECT": self._handle_tap_land_for_effect,
+            "ACTIVATE_ABILITY": self._handle_activate_ability,
+            "LOYALTY_ABILITY_PLUS": self._handle_loyalty_ability,
+            "LOYALTY_ABILITY_ZERO": self._handle_loyalty_ability,
+            "LOYALTY_ABILITY_MINUS": self._handle_loyalty_ability,
+            "ULTIMATE_ABILITY": self._handle_loyalty_ability,
+            # Targeting & Choices
+            "SELECT_TARGET": self._handle_select_target,
+            "SACRIFICE_PERMANENT": self._handle_sacrifice_permanent,
+            "CHOOSE_MODE": self._handle_choose_mode,
+            "CHOOSE_X_VALUE": self._handle_choose_x,
+            "CHOOSE_COLOR": self._handle_choose_color,
+            "PUT_TO_GRAVEYARD": self._handle_surveil_choice,
+            "PUT_ON_TOP": self._handle_scry_surveil_choice,
+            "PUT_ON_BOTTOM": self._handle_scry_choice,
+            # Library/Card Movement
+            "SEARCH_LIBRARY": self._handle_search_library,
+            "DREDGE": self._handle_dredge,
+            # Counter Management
+            "ADD_COUNTER": self._handle_add_counter,
+            "REMOVE_COUNTER": self._handle_remove_counter,
+            "PROLIFERATE": self._handle_proliferate,
+            # Zone Movement
+            "RETURN_FROM_GRAVEYARD": self._handle_return_from_graveyard,
+            "REANIMATE": self._handle_reanimate,
+            "RETURN_FROM_EXILE": self._handle_return_from_exile,
+            # Alternative Casting
+            "CAST_WITH_FLASHBACK": self._handle_alternative_casting,
+            "CAST_WITH_JUMP_START": self._handle_alternative_casting,
+            "CAST_WITH_ESCAPE": self._handle_alternative_casting,
+            "CAST_FOR_MADNESS": self._handle_alternative_casting,
+            "CAST_WITH_OVERLOAD": self._handle_alternative_casting,
+            "CAST_FOR_EMERGE": self._handle_alternative_casting,
+            "CAST_FOR_DELVE": self._handle_alternative_casting,
+            "PAY_KICKER": self._handle_pay_kicker,
+            "PAY_ADDITIONAL_COST": self._handle_pay_additional_cost,
+            "PAY_ESCALATE": self._handle_pay_escalate,
+            # Token/Copy
+            "CREATE_TOKEN": self._handle_create_token,
+            "COPY_PERMANENT": self._handle_copy_permanent,
+            "COPY_SPELL": self._handle_copy_spell,
+            "POPULATE": self._handle_populate,
+            # Specific Mechanics
+            "INVESTIGATE": self._handle_investigate,
+            "FORETELL": self._handle_foretell,
+            "AMASS": self._handle_amass,
+            "LEARN": self._handle_learn,
+            "VENTURE": self._handle_venture,
+            "EXERT": self._handle_exert,
+            "EXPLORE": self._handle_explore,
+            "ADAPT": self._handle_adapt,
+            "MUTATE": self._handle_mutate,
+            "CYCLING": self._handle_cycling,
+            "GOAD": self._handle_goad,
+            "BOAST": self._handle_boast,
+            # Response Actions
+            "COUNTER_SPELL": self._handle_counter_spell,
+            "COUNTER_ABILITY": self._handle_counter_ability,
+            "PREVENT_DAMAGE": self._handle_prevent_damage,
+            "REDIRECT_DAMAGE": self._handle_redirect_damage,
+            "STIFLE_TRIGGER": self._handle_stifle_trigger,
+            # Card Type Specific
+            "CAST_LEFT_HALF": self._handle_cast_split,
+            "CAST_RIGHT_HALF": self._handle_cast_split,
+            "CAST_FUSE": self._handle_cast_split,
+            "AFTERMATH_CAST": self._handle_alternative_casting,
+            "FLIP_CARD": self._handle_flip_card,
+            "EQUIP": self._handle_equip, # Needs tuple param (equip_idx, creature_idx)
+            "UNEQUIP": self._handle_unequip, # Needs equip_idx param
+            "ATTACH_AURA": self._handle_attach_aura, # Needs (aura_idx, target_idx) param
+            "FORTIFY": self._handle_fortify, # Needs (fort_idx, land_idx) param
+            "RECONFIGURE": self._handle_reconfigure, # Needs battlefield index param
+            "MORPH": self._handle_morph, # Needs battlefield index param
+            "MANIFEST": self._handle_manifest, # Needs battlefield index param
+            "CLASH": self._handle_clash,
+            "CONSPIRE": self._handle_conspire, # Needs context
+            "CONVOKE": self._handle_no_op, # Informational
+            "GRANDEUR": self._handle_grandeur, # Needs hand index param
+            "HELLBENT": self._handle_no_op, # State check
+            # Others
+            "TRANSFORM": self._handle_transform, # Needs battlefield index param
+            "UNLOCK_DOOR": self._handle_unlock_door, # Needs battlefield index param
+            "LEVEL_UP_CLASS": self._handle_level_up_class, # Needs battlefield index param
+            "DISCARD_CARD": self._handle_discard_card, # Needs hand index param
+            "SELECT_SPREE_MODE": self._handle_select_spree_mode, # Needs (hand_idx, mode_idx) param
+            "NO_OP": self._handle_no_op,
+            "NO_OP_SEARCH_FAIL": self._handle_no_op,
+        }
 
     def _add_battle_attack_actions(self, player, valid_actions, set_valid_action):
         """Delegate to CombatActionHandler._add_battle_attack_actions"""
@@ -1790,8 +1918,9 @@ class ActionHandler:
 
     def _handle_pass_priority(self, param, **kwargs):
         gs = self.game_state
-        gs._pass_priority()
-        return 0.0
+        gs._pass_priority() # Let GameState handle the logic
+        # Reward is neutral for passing priority itself; consequences come later.
+        return 0.0, True
 
     def _handle_concede(self, param, **kwargs):
         # Handled directly in apply_action's main logic
@@ -1808,51 +1937,35 @@ class ActionHandler:
                 return -0.1 # Penalty for trying invalid land play
         return -0.2 # Invalid index
 
+
     def _handle_play_spell(self, param, **kwargs):
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
-        if param < len(player["hand"]):
-            card_id = player["hand"][param]
+        context = kwargs.get('context', {}) # Use context passed in
+        hand_idx = param
+
+        if hand_idx < len(player["hand"]):
+            card_id = player["hand"][hand_idx]
             card = gs._safe_get_card(card_id)
             if not card: return -0.2, False # Card not found
 
-            # --- Context-Based Cost Payment (Convoke/Delve/Emerge etc.) ---
-            # Assume agent provided necessary choices in `kwargs.get('context', {})`
-            context = kwargs.get('context', {})
+            # Add hand index to context if needed by handlers/mana system
+            if 'hand_idx' not in context: context['hand_idx'] = hand_idx
 
-            # Example: Check for convoke context
-            tapped_for_convoke = []
-            if "convoke" in getattr(card, 'oracle_text', '').lower() and context.get("convoke_creatures"):
-                 # Validate and tap creatures specified in context
-                 for creature_idx in context["convoke_creatures"]:
-                      if creature_idx < len(player["battlefield"]):
-                           convoke_id = player["battlefield"][creature_idx]
-                           if convoke_id not in player.get("tapped_permanents", set()) and 'creature' in getattr(gs._safe_get_card(convoke_id), 'card_types', []):
-                                player["tapped_permanents"].add(convoke_id)
-                                tapped_for_convoke.append(convoke_id)
-                 if not tapped_for_convoke and context["convoke_creatures"]:
-                     logging.warning("Failed to tap creatures for Convoke from context.")
-                     # Optionally return failure or proceed without convoke discount
-                 context['tapped_for_convoke'] = tapped_for_convoke # Pass tapped info to mana system if needed
-
-            # Add similar checks for Delve (exile from GY), Emerge (sacrifice) here,
-            # using the card IDs provided in the context.
-
+            # Use CardEvaluator to estimate value BEFORE casting
             card_value = 0
             if self.card_evaluator:
-                 card_value = self.card_evaluator.evaluate_card(card_id, "play")
+                 eval_context = {"situation": "casting", **context} # Merge context
+                 card_value = self.card_evaluator.evaluate_card(card_id, "play", context_details=eval_context)
 
-            # Pass the potentially modified context to cast_spell
+            # Attempt to cast
             if gs.cast_spell(card_id, player, context=context):
-                # Reward based on card value
+                # Reward based on card value and successful cast
                 return 0.1 + card_value * 0.3, True
             else:
-                 # If cast failed, untap creatures tapped for convoke, return exiled cards etc.
-                 for convoke_id in tapped_for_convoke: player["tapped_permanents"].remove(convoke_id)
-                 # Add similar rollback for Delve/Emerge
-                 return -0.1, False # Penalty for trying invalid cast
-        return -0.2, False # Invalid index
-
+                 # Penalty for trying invalid cast (failed affordability or targeting inside cast_spell)
+                 return -0.1, False
+        return -0.2, False # Invalid hand index
     def _handle_play_mdfc_land_back(self, param, **kwargs):
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
@@ -1919,53 +2032,97 @@ class ActionHandler:
     def _handle_attack(self, param, **kwargs):
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
-        if param < len(player["battlefield"]):
-            card_id = player["battlefield"][param]
+        battlefield_idx = param
+        if battlefield_idx < len(player["battlefield"]):
+            card_id = player["battlefield"][battlefield_idx]
+            card = gs._safe_get_card(card_id)
+            if not card: return -0.2, False # Card not found
+
+            # Use CombatActionHandler's validation method if available
+            can_attack = False
+            if self.combat_handler:
+                can_attack = self.combat_handler.is_valid_attacker(card_id)
+            else: # Fallback validation
+                 if 'creature' in getattr(card, 'card_types', []) and \
+                    card_id not in player.get("tapped_permanents", set()) and \
+                    not (card_id in player.get("entered_battlefield_this_turn", set()) and not self._has_haste(card_id)):
+                     can_attack = True
+
+
             if card_id in gs.current_attackers:
+                # If already attacking, deselect
                 gs.current_attackers.remove(card_id)
-                return -0.05 # Small penalty for cancelling attack
+                # Remove targeting info if applicable
+                if hasattr(gs, 'planeswalker_attack_targets') and card_id in gs.planeswalker_attack_targets: del gs.planeswalker_attack_targets[card_id]
+                if hasattr(gs, 'battle_attack_targets') and card_id in gs.battle_attack_targets: del gs.battle_attack_targets[card_id]
+                return -0.05, True # Small penalty for cancelling attack declaration
             else:
-                if self.is_valid_attacker(card_id):
+                # If not attacking, declare attack if valid
+                if can_attack:
                      gs.current_attackers.append(card_id)
-                     return 0.1 # Small reward for declaring attacker
+                     # Reset targeting (target needs separate action now)
+                     if hasattr(gs, 'planeswalker_attack_targets') and card_id in gs.planeswalker_attack_targets: del gs.planeswalker_attack_targets[card_id]
+                     if hasattr(gs, 'battle_attack_targets') and card_id in gs.battle_attack_targets: del gs.battle_attack_targets[card_id]
+                     return 0.1, True # Small reward for declaring attacker
                 else:
-                     return -0.1 # Invalid attacker
-        return -0.2
+                     return -0.1, False # Invalid attacker selected
+        return -0.2, False # Invalid battlefield index
+
 
     def _handle_block(self, param, **kwargs):
         gs = self.game_state
-        player = gs.p1 if gs.agent_is_p1 else gs.p2 # Blocker is 'me'
-        if param < len(player["battlefield"]):
-            blocker_id = player["battlefield"][param]
-            # Assign to first available attacker (or best strategic target)
-            assigned = False
-            if gs.current_attackers:
-                 # Find best attacker to block
-                 best_attacker_id = None
-                 best_value = -float('inf')
-                 for attacker_id in gs.current_attackers:
-                      if self._can_block(blocker_id, attacker_id):
-                           # Simple heuristic: block highest power attacker
-                           attacker_card = gs._safe_get_card(attacker_id)
-                           value = getattr(attacker_card, 'power', 0)
-                           if value > best_value:
-                                best_value = value
-                                best_attacker_id = attacker_id
+        blocker_player = gs.p1 if gs.agent_is_p1 else gs.p2 # Blocker is 'me'
+        battlefield_idx = param
+        if battlefield_idx < len(blocker_player["battlefield"]):
+            blocker_id = blocker_player["battlefield"][battlefield_idx]
+            blocker_card = gs._safe_get_card(blocker_id)
+            if not blocker_card or 'creature' not in getattr(blocker_card, 'card_types', []): return -0.15, False # Not a creature
 
-                 if best_attacker_id:
-                      if best_attacker_id not in gs.current_block_assignments:
-                           gs.current_block_assignments[best_attacker_id] = []
-                      # Toggle block: If already blocking, remove; otherwise add.
-                      if blocker_id in gs.current_block_assignments[best_attacker_id]:
-                           gs.current_block_assignments[best_attacker_id].remove(blocker_id)
-                           return -0.05 # Cancel block
-                      else:
-                           gs.current_block_assignments[best_attacker_id].append(blocker_id)
-                           assigned = True
-                           return 0.1 # Assign block
+            # Determine which attacker to block (needs context or agent decision)
+            # Simple heuristic: Block the attacker this creature is already blocking if possible, else find a new one
+            current_block_target = None
+            for atk_id, blockers in gs.current_block_assignments.items():
+                if blocker_id in blockers:
+                    current_block_target = atk_id
+                    break
 
-            if not assigned: return -0.1 # No valid attacker to block
-        return -0.2
+            # If already blocking an attacker, deselect block
+            if current_block_target:
+                gs.current_block_assignments[current_block_target].remove(blocker_id)
+                if not gs.current_block_assignments[current_block_target]: # Remove empty list
+                    del gs.current_block_assignments[current_block_target]
+                return -0.05, True # Deselected block
+
+            # If not blocking, find an attacker to block
+            else:
+                target_attacker_id = None
+                if 'target_attacker_id' in kwargs.get('context', {}): # Agent specified target
+                    target_attacker_id = kwargs['context']['target_attacker_id']
+                else: # AI chooses target
+                    possible_targets = [atk_id for atk_id in gs.current_attackers if self._can_block(blocker_id, atk_id)]
+                    if possible_targets:
+                        # Simple heuristic: Block highest power attacker
+                        possible_targets.sort(key=lambda atk_id: getattr(gs._safe_get_card(atk_id),'power',0), reverse=True)
+                        target_attacker_id = possible_targets[0]
+
+                # Assign block if target found
+                if target_attacker_id and self._can_block(blocker_id, target_attacker_id): # Double check block validity
+                     if target_attacker_id not in gs.current_block_assignments: gs.current_block_assignments[target_attacker_id] = []
+                     # Check menace constraint only when finalizing blocks? Or check here? Let's check basic validity here.
+                     attacker_card = gs._safe_get_card(target_attacker_id)
+                     if self._has_keyword(attacker_card, "menace") and len(gs.current_block_assignments.get(target_attacker_id, [])) == 0:
+                          # Need another blocker - don't assign yet, maybe signal multi-block needed?
+                          # Or use ASSIGN_MULTIPLE_BLOCKERS action instead?
+                          # For now, allow assignment, let validation happen later.
+                          logging.debug(f"Assigning first blocker to Menace attacker {attacker_card.name}")
+                          pass
+
+                     gs.current_block_assignments[target_attacker_id].append(blocker_id)
+                     return 0.1, True
+                else:
+                    return -0.1, False # No valid attacker found or can't block
+
+        return -0.2, False # Invalid battlefield index
 
     def _handle_tap_land_for_mana(self, param, **kwargs):
          gs = self.game_state
@@ -2001,14 +2158,18 @@ class ActionHandler:
                  # Get ability value before activating
                  ability_value = 0
                  if self.card_evaluator:
+                     # Pass GameState directly to evaluator method
                       ability_value, _ = self.evaluate_ability_activation(card_id, ability_idx)
 
+                 # Use GameState's ability handler
                  if hasattr(gs, 'ability_handler') and gs.ability_handler.activate_ability(card_id, ability_idx, player):
                       # Reward based on ability value
-                      return 0.1 + ability_value * 0.4
+                      return 0.1 + ability_value * 0.4, True
                  else:
-                      return -0.1 # Failed activation
-         return -0.2 # Invalid param
+                      return -0.1, False # Failed activation
+             else: # card_idx out of bounds
+                  return -0.2, False
+         return -0.2, False # Invalid param format
 
     def _handle_loyalty_ability(self, param, action_type, **kwargs):
          gs = self.game_state

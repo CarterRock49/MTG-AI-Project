@@ -1,8 +1,13 @@
+
 import logging
 import numpy as np
 from collections import defaultdict
 from .card import Card
-from .debug import DEBUG_MODE
+# Assuming DEBUG_MODE is defined in debug.py or elsewhere
+try:
+    from .debug import DEBUG_MODE
+except ImportError:
+    DEBUG_MODE = False # Default if not found
 
 class EnhancedCombatResolver:
     """Advanced combat resolution system implementing detailed MTG combat rules"""
@@ -11,19 +16,19 @@ class EnhancedCombatResolver:
         self.game_state = game_state
         self.combat_log = []
         self.creatures_killed = 0
-        self.cards_drawn = 0
+        # Removed cards_drawn as it wasn't used consistently here
         self.damage_prevention = defaultdict(int)  # Track damage prevention effects
         self.combat_triggers = []  # Track combat triggers that need to be processed
-        
+        self.action_handler = None # Link to action handler (set externally if needed)
+
         # Check if ability_handler exists in game_state
         if not hasattr(game_state, 'ability_handler') or game_state.ability_handler is None:
-            # Optionally create it if needed
             try:
                 from .ability_handler import AbilityHandler
                 game_state.ability_handler = AbilityHandler(game_state)
                 logging.debug("Initialized AbilityHandler in EnhancedCombatResolver")
             except (ImportError, AttributeError) as e:
-                logging.debug(f"Could not initialize AbilityHandler: {e}")
+                logging.warning(f"Could not initialize AbilityHandler in Base Resolver: {e}")
                 
     def assign_manual_combat_damage(self, damage_assignments):
         """
@@ -128,6 +133,30 @@ class EnhancedCombatResolver:
         gs.combat_damage_dealt = True
         
         return True
+    
+    def _get_card_power(self, card, controller):
+        """Get a card's current power with temporary buffs."""
+        if not card or not hasattr(card, 'power'): return 0
+        base_power = card.power
+        # Add counters (Layer system should ideally handle this, simplified here)
+        base_power += getattr(card, 'counters', {}).get('+1/+1', 0)
+        base_power -= getattr(card, 'counters', {}).get('-1/-1', 0)
+        # Add temporary buffs
+        if hasattr(controller, 'temp_buffs') and getattr(card, 'card_id', None) in controller.get('temp_buffs', {}):
+             base_power += controller['temp_buffs'][card.card_id].get('power', 0)
+        return max(0, base_power)
+
+    def _get_card_toughness(self, card, controller):
+        """Get a card's current toughness with temporary buffs."""
+        if not card or not hasattr(card, 'toughness'): return 0
+        base_toughness = card.toughness
+        # Add counters
+        base_toughness += getattr(card, 'counters', {}).get('+1/+1', 0)
+        base_toughness -= getattr(card, 'counters', {}).get('-1/-1', 0)
+        # Add temporary buffs
+        if hasattr(controller, 'temp_buffs') and getattr(card, 'card_id', None) in controller.get('temp_buffs', {}):
+             base_toughness += controller['temp_buffs'][card.card_id].get('toughness', 0)
+        return max(1, base_toughness) # Toughness usually can't be less than 1 unless damage marked
 
     def _process_planeswalker_damage(self, attacker_id, attacker_player, planeswalker_id):
         """Process damage to a planeswalker."""
@@ -1023,78 +1052,16 @@ class EnhancedCombatResolver:
         return damage_assignment
     
     def _has_keyword(self, card, keyword):
-        """
-        More robust keyword detection checking both oracle text, keywords attribute, and ability handler.
-        
-        Args:
-            card: The card object to check
-            keyword: The keyword to look for
-            
-        Returns:
-            bool: True if the card has the keyword, False otherwise
-        """
-        if not card:
-            return False
-            
+        """Checks if a card has a keyword using the central AbilityHandler."""
         gs = self.game_state
-        
-        # First try ability_handler if available for most accurate results
         if hasattr(gs, 'ability_handler') and gs.ability_handler:
-            # Try different method variants that might exist
-            if hasattr(gs.ability_handler, '_check_keyword'):
-                return gs.ability_handler._check_keyword(card, keyword)
-            elif hasattr(gs.ability_handler, 'has_keyword'):
-                card_id = getattr(card, 'card_id', None)
-                if card_id is not None:
-                    return gs.ability_handler.has_keyword(card_id, keyword)
-        
-        # Check oracle text
-        if hasattr(card, 'oracle_text') and isinstance(card.oracle_text, str):
-            # More precise keyword matching with word boundaries where appropriate
-            keyword_lower = keyword.lower()
-            oracle_lower = card.oracle_text.lower()
-            
-            # For keywords that are likely to be part of other words (like "flash")
-            if keyword_lower in ["flash", "haste", "reach"]:
-                import re
-                pattern = r'\b' + re.escape(keyword_lower) + r'\b'
-                if re.search(pattern, oracle_lower):
-                    return True
-            elif keyword_lower in oracle_lower:
-                return True
-        
-        # Check keywords array with error handling
-        if hasattr(card, 'keywords') and isinstance(card.keywords, list):
-            keyword_mapping = {
-                'flying': 0,
-                'trample': 1,
-                'hexproof': 2,
-                'lifelink': 3,
-                'deathtouch': 4,
-                'first strike': 5,
-                'double strike': 6,
-                'vigilance': 7,
-                'flash': 8,
-                'haste': 9,
-                'menace': 10,
-                'reach': 11,
-                'indestructible': 12,
-                'defender': 13
-            }
-            
-            if keyword in keyword_mapping and len(card.keywords) > keyword_mapping[keyword]:
-                return card.keywords[keyword_mapping[keyword]] == 1
-        
-        # Check card types for artifact (sometimes referenced as a "keyword")
-        if keyword.lower() == "artifact" and hasattr(card, 'card_types'):
-            return 'artifact' in card.card_types
-        
-        # Check colors for color-related keywords
-        if keyword.lower() in ["white", "blue", "black", "red", "green"] and hasattr(card, 'colors'):
-            color_index = {"white": 0, "blue": 1, "black": 2, "red": 3, "green": 4}
-            if keyword.lower() in color_index and len(card.colors) > color_index[keyword.lower()]:
-                return card.colors[color_index[keyword.lower()]] == 1
-        
+             # Assumes AbilityHandler has a method like this
+             if hasattr(gs.ability_handler, '_has_keyword_check'):
+                 return gs.ability_handler._has_keyword_check(card, keyword)
+        # Fallback basic check if no handler or method
+        elif card and hasattr(card, 'oracle_text') and isinstance(card.oracle_text, str):
+             # Basic check, might be inaccurate for dynamically granted/removed keywords
+             return keyword.lower() in card.oracle_text.lower()
         return False
             
     def simulate_first_strike_damage(self):
@@ -2099,52 +2066,63 @@ class EnhancedCombatResolver:
             if "bushido" in attacker.oracle_text.lower():
                 logging.debug(f"Bushido: {attacker.name} has bushido ability")
     
-    def _check_lethal_damage(self, damage_to_creatures, already_killed):
-        """Check for lethal damage and move creatures to graveyard using improved state-based action processing."""
-        return self._process_state_based_actions(damage_to_creatures, already_killed)
+    def _check_lethal_damage(self, damage_to_creatures, killed_creatures):
+        """Basic check for lethal damage. Extended in subclasses for SBAs."""
+        gs = self.game_state
+        newly_killed = set()
+        for player in [gs.p1, gs.p2]:
+            for card_id, damage in list(damage_to_creatures.items()): # Iterate copy
+                if card_id in player["battlefield"] and card_id not in killed_creatures:
+                    card = gs._safe_get_card(card_id)
+                    if card and hasattr(card, 'toughness'):
+                        # Account for deathtouch damage tracked separately
+                        dealt_deathtouch = player.get("deathtouch_damage", {}).get(card_id, False)
+                        toughness = self._get_card_toughness(card, player)
+                        # Use GS damage counters if available for accuracy
+                        current_damage = player.get("damage_counters",{}).get(card_id, 0)
+
+                        if not self._has_keyword(card, "indestructible") and (current_damage >= toughness or (dealt_deathtouch and current_damage > 0)):
+                            if card_id not in newly_killed: # Avoid duplicate logging/processing
+                                newly_killed.add(card_id)
+                                logging.debug(f"COMBAT BASE: {card.name} marked for death (Damage: {current_damage}, Toughness: {toughness}, Deathtouch: {dealt_deathtouch})")
+                                # Actual move to graveyard happens in SBA check or apply_combat_results
+        killed_creatures.update(newly_killed) # Update the set passed in
     
     def _process_combat_triggers(self, creatures_dealt_damage, is_first_strike=False):
-        """Process triggers that happened during combat."""
+        """Basic processing of combat triggers."""
         gs = self.game_state
-        
-        # Process each stored trigger
+        processed_triggers = set() # Avoid double processing if same trigger added multiple times
+
         for creature_id, trigger_type, context in self.combat_triggers:
-            if is_first_strike:
-                # Only process triggers specific to first strike damage step
-                if trigger_type == "deals_damage" and context.get("is_first_strike", False):
-                    gs.trigger_ability(creature_id, "DEALS_DAMAGE", context)
-                elif trigger_type == "is_dealt_damage" and context.get("is_first_strike", False):
-                    gs.trigger_ability(creature_id, "DEALT_DAMAGE", context)
-            else:
-                # Process regular damage step triggers
-                if trigger_type == "deals_damage" and not context.get("is_first_strike", False):
-                    gs.trigger_ability(creature_id, "DEALS_DAMAGE", context)
-                elif trigger_type == "is_dealt_damage" and not context.get("is_first_strike", False):
-                    gs.trigger_ability(creature_id, "DEALT_DAMAGE", context)
-                
-        # Generic "whenever a creature deals combat damage" triggers
+            trigger_key = (creature_id, trigger_type, context.get("is_first_strike"))
+            if trigger_key in processed_triggers: continue
+
+            # Only process triggers matching the current damage step type
+            if is_first_strike == context.get("is_first_strike", False):
+                if hasattr(gs, 'trigger_ability'): # Ensure GameState has the method
+                     gs.trigger_ability(creature_id, trigger_type.upper(), context) # Use uppercase convention
+                     processed_triggers.add(trigger_key)
+                else:
+                     logging.warning("GameState missing trigger_ability method.")
+
+        # Generic "deals combat damage" trigger
         for creature_id in creatures_dealt_damage:
-            # Only trigger if it matches the current damage step
-            matching_trigger = any(
-                trigger[0] == creature_id and 
-                is_first_strike == trigger[2].get("is_first_strike", False) 
-                for trigger in self.combat_triggers
-            )
-            
-            if matching_trigger:
-                gs.trigger_ability(creature_id, "DEALS_COMBAT_DAMAGE")
+             # Check if damage was dealt in the correct step implicitly
+             # This is simpler than tracking exact context match for this generic trigger
+             if hasattr(gs, 'trigger_ability'):
+                  gs.trigger_ability(creature_id, "DEALS_COMBAT_DAMAGE", {"is_first_strike": is_first_strike})
+             else:
+                  logging.warning("GameState missing trigger_ability method.")
+
+
+        # Clear triggers after processing for the current step
+        self.combat_triggers = [t for t in self.combat_triggers if is_first_strike != t[2].get("is_first_strike", False)]
         
-        # Clear stored triggers after processing
-        self.combat_triggers.clear()
-        
+
     def _add_combat_trigger(self, creature_id, trigger_type, context=None, is_first_strike=False):
         """Add a combat trigger to be processed later."""
-        if context is None:
-            context = {}
-        
-        # Add first strike flag to context
+        if context is None: context = {}
         context["is_first_strike"] = is_first_strike
-        
         self.combat_triggers.append((creature_id, trigger_type, context))
     
     def _get_card_power(self, card, controller):
@@ -2201,29 +2179,30 @@ class EnhancedCombatResolver:
         
     def _log_combat_state(self):
         """Log the current combat state for debugging."""
+        # ... (implementation mostly unchanged, uses self._get_card_power/toughness) ...
         gs = self.game_state
-        attacker = gs.p1 if gs.agent_is_p1 else gs.p2
-        
+        attacker_player = gs.p1 if gs.agent_is_p1 else gs.p2
+
         # Log attackers
         attacker_names = [
-            f"{gs._safe_get_card(aid).name} ({self._get_card_power(gs._safe_get_card(aid), attacker)}/{self._get_card_toughness(gs._safe_get_card(aid), attacker)})"
+            f"{gs._safe_get_card(aid).name} ({self._get_card_power(gs._safe_get_card(aid), attacker_player)}/{self._get_card_toughness(gs._safe_get_card(aid), attacker_player)})"
             for aid in gs.current_attackers
             if gs._safe_get_card(aid)
         ]
-        logging.debug(f"COMBAT: {len(gs.current_attackers)} attackers: {', '.join(attacker_names)}")
-        
+        logging.debug(f"COMBAT BASE: {len(gs.current_attackers)} attackers: {', '.join(attacker_names)}")
+
         # Log blockers
+        defender_player = gs.p2 if gs.agent_is_p1 else gs.p1
         for attacker_id, blockers in gs.current_block_assignments.items():
             attacker_card = gs._safe_get_card(attacker_id)
-            if not attacker_card:
-                continue
-                
+            if not attacker_card: continue
+
             blocker_names = [
-                f"{gs._safe_get_card(bid).name} ({self._get_card_power(gs._safe_get_card(bid), attacker)}/{self._get_card_toughness(gs._safe_get_card(bid), attacker)})"
+                f"{gs._safe_get_card(bid).name} ({self._get_card_power(gs._safe_get_card(bid), defender_player)}/{self._get_card_toughness(gs._safe_get_card(bid), defender_player)})"
                 for bid in blockers
                 if gs._safe_get_card(bid)
             ]
-            logging.debug(f"COMBAT: {attacker_card.name} blocked by {len(blockers)} creatures: {', '.join(blocker_names)}")
+            logging.debug(f"COMBAT BASE: {attacker_card.name} blocked by {len(blockers)} creatures: {', '.join(blocker_names)}")
     
     def simulate_combat(self):
         """

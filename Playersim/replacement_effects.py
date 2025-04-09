@@ -482,197 +482,6 @@ class ReplacementEffectSystem:
         
         return clauses
     
-    def _handle_set_pt_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 7a: Set power/toughness effect."""
-        if hasattr(card, 'power') and hasattr(card, 'toughness'):
-            card.power, card.toughness = effect_value
-            logging.debug(f"Set {card.name}'s power/toughness to {effect_value[0]}/{effect_value[1]}")
-
-    def _handle_modify_pt_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 7c: Modify power/toughness effect."""
-        if hasattr(card, 'power') and hasattr(card, 'toughness'):
-            power_mod, toughness_mod = effect_value
-            card.power += power_mod
-            card.toughness += toughness_mod
-            logging.debug(f"Modified {card.name}'s power/toughness by +{power_mod}/+{toughness_mod}")
-
-    def _handle_switch_pt_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 7d: Switch power/toughness effect."""
-        if hasattr(card, 'power') and hasattr(card, 'toughness'):
-            card.power, card.toughness = card.toughness, card.power
-            logging.debug(f"Switched {card.name}'s power/toughness to {card.power}/{card.toughness}")
-
-    def _handle_set_color_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 5: Set color effect."""
-        if hasattr(card, 'colors'):
-            card.colors = effect_value
-            logging.debug(f"Set {card.name}'s colors")
-
-    def _handle_add_color_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 5: Add color effect."""
-        if hasattr(card, 'colors'):
-            for i, color in enumerate(effect_value):
-                if i < len(card.colors) and color:
-                    card.colors[i] = 1
-            logging.debug(f"Added colors to {card.name}")
-
-    def _handle_remove_color_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 5: Remove color effect."""
-        if hasattr(card, 'colors'):
-            for i, color in enumerate(effect_value):
-                if i < len(card.colors) and color:
-                    card.colors[i] = 0
-            logging.debug(f"Removed colors from {card.name}")
-
-    def _handle_add_type_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 4: Add type effect."""
-        if hasattr(card, 'card_types'):
-            if effect_value not in card.card_types:
-                card.card_types.append(effect_value)
-                logging.debug(f"Added type '{effect_value}' to {card.name}")
-
-    def _handle_remove_type_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 4: Remove type effect."""
-        if hasattr(card, 'card_types') and effect_value in card.card_types:
-            card.card_types.remove(effect_value)
-            logging.debug(f"Removed type '{effect_value}' from {card.name}")
-
-    def _handle_add_subtype_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 4: Add subtype effect."""
-        if hasattr(card, 'subtypes'):
-            if effect_value not in card.subtypes:
-                card.subtypes.append(effect_value)
-                logging.debug(f"Added subtype '{effect_value}' to {card.name}")
-
-    def _handle_remove_subtype_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 4: Remove subtype effect."""
-        if hasattr(card, 'subtypes') and effect_value in card.subtypes:
-            card.subtypes.remove(effect_value)
-            logging.debug(f"Removed subtype '{effect_value}' from {card.name}")
-
-    def _handle_add_ability_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 6: Add ability effect."""
-        if not hasattr(card, 'granted_abilities'):
-            card.granted_abilities = []
-        if effect_value not in card.granted_abilities:
-            card.granted_abilities.append(effect_value)
-            
-            # Update keywords for game mechanics
-            if hasattr(card, 'keywords') and isinstance(effect_value, str):
-                ability_to_keyword_index = {
-                    'flying': 0, 'trample': 1, 'hexproof': 2, 
-                    'lifelink': 3, 'deathtouch': 4, 'first strike': 5,
-                    'double strike': 6, 'vigilance': 7, 'flash': 8,
-                    'haste': 9, 'menace': 10
-                }
-                if effect_value.lower() in ability_to_keyword_index:
-                    card.keywords[ability_to_keyword_index[effect_value.lower()]] = 1
-                    logging.debug(f"Added ability '{effect_value}' to {card.name}")
-
-    def _handle_remove_ability_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 6: Remove ability effect."""
-        if hasattr(card, 'granted_abilities') and effect_value in card.granted_abilities:
-            card.granted_abilities.remove(effect_value)
-            
-            # Update keywords for game mechanics
-            if hasattr(card, 'keywords') and isinstance(effect_value, str):
-                ability_to_keyword_index = {
-                    'flying': 0, 'trample': 1, 'hexproof': 2, 
-                    'lifelink': 3, 'deathtouch': 4, 'first strike': 5,
-                    'double strike': 6, 'vigilance': 7, 'flash': 8,
-                    'haste': 9, 'menace': 10
-                }
-                if effect_value.lower() in ability_to_keyword_index:
-                    card.keywords[ability_to_keyword_index[effect_value.lower()]] = 0
-                    logging.debug(f"Removed ability '{effect_value}' from {card.name}")
-
-    def _handle_copy_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 1: Copy effect."""
-        source_card = self.game_state._safe_get_card(effect_value)
-        if source_card:
-            # Copy core attributes but maintain original card ID
-            original_id = card.card_id if hasattr(card, 'card_id') else None
-            for attr in ['name', 'type_line', 'oracle_text', 'power', 'toughness', 
-                        'mana_cost', 'cmc', 'card_types', 'colors', 'subtypes']:
-                if hasattr(source_card, attr):
-                    setattr(card, attr, getattr(source_card, attr))
-            # Restore original ID
-            if hasattr(card, 'card_id') and original_id is not None:
-                card.card_id = original_id
-            logging.debug(f"{card.name} copied {source_card.name}")
-
-    def _handle_change_text_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 3: Change text effect."""
-        old_text, new_text = effect_value
-        if hasattr(card, 'oracle_text'):
-            card.oracle_text = card.oracle_text.replace(old_text, new_text)
-            logging.debug(f"Changed text in {card.name}: '{old_text}' to '{new_text}'")
-
-    def _handle_change_control_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 2: Change control effect."""
-        new_controller = effect_value
-        current_controller = owner
-        
-        # Move card to new controller's battlefield
-        if hasattr(card, 'card_id'):
-            if card.card_id in current_controller["battlefield"]:
-                current_controller["battlefield"].remove(card.card_id)
-                new_controller["battlefield"].append(card.card_id)
-                logging.debug(f"Control changed: {card.name} now controlled by different player")
-
-    def _handle_cant_attack_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 6: Add restriction on attacking."""
-        if not hasattr(card, 'attack_restrictions'):
-            card.attack_restrictions = []
-        if effect_value not in card.attack_restrictions:
-            card.attack_restrictions.append(effect_value)
-            logging.debug(f"Added attack restriction to {card.name}: {effect_value}")
-
-    def _handle_cant_block_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 6: Add restriction on blocking."""
-        if not hasattr(card, 'block_restrictions'):
-            card.block_restrictions = []
-        if effect_value not in card.block_restrictions:
-            card.block_restrictions.append(effect_value)
-            logging.debug(f"Added block restriction to {card.name}: {effect_value}")
-
-    def _handle_assign_damage_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 6: Special combat damage assignment rule."""
-        if not hasattr(card, 'combat_abilities'):
-            card.combat_abilities = []
-        if 'assign_damage_as_though_not_blocked' not in card.combat_abilities:
-            card.combat_abilities.append('assign_damage_as_though_not_blocked')
-            logging.debug(f"{card.name} can now assign combat damage as though it weren't blocked")
-
-    def _handle_add_protection_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 6: Add protection."""
-        if not hasattr(card, 'protection'):
-            card.protection = []
-        # effect_value should be what the card has protection from (e.g., 'red', 'creatures')
-        if effect_value not in card.protection:
-            card.protection.append(effect_value)
-            logging.debug(f"Added protection from {effect_value} to {card.name}")
-
-    def _handle_must_attack_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 6: Add attack requirement."""
-        if not hasattr(card, 'attack_requirements'):
-            card.attack_requirements = []
-        if effect_value not in card.attack_requirements:
-            card.attack_requirements.append(effect_value)
-            logging.debug(f"Added attack requirement to {card.name}: {effect_value}")
-
-    def _handle_enchanted_must_attack_effect(self, card, effect_value, owner, zone, effect_data):
-        """Handle Layer 6: Force enchanted creature to attack."""
-        if hasattr(self.game_state, 'attachments') and card.card_id in self.game_state.attachments:
-            enchanted_id = self.game_state.attachments[card.card_id]
-            enchanted_card = self.game_state._safe_get_card(enchanted_id)
-            if enchanted_card:
-                if not hasattr(enchanted_card, 'attack_requirements'):
-                    enchanted_card.attack_requirements = []
-                if 'must_attack_each_turn' not in enchanted_card.attack_requirements:
-                    enchanted_card.attack_requirements.append('must_attack_each_turn')
-                    logging.debug(f"Enchanted creature {enchanted_card.name} must attack each turn if able")
-    
     def _create_enhanced_condition_function(self, event_type, subject, condition, controller):
         """Create an enhanced condition function with better context handling."""
         gs = self.game_state
@@ -1730,8 +1539,11 @@ class ReplacementEffectSystem:
 
         def replacement(ctx):
             damage_dealt = ctx.get('damage_amount', 0)
-            lifelink_source_id = effect_id # Capture source_id from outer scope
-            lifelink_controller = player # Capture controller from outer scope
+            # Capture effect_id and player from outer scope (or get dynamically?)
+            # NOTE: Capturing effect_id here can be tricky if it's assigned after function creation.
+            # It might be better to pass necessary info into the scheduled function.
+            lifelink_source_id = card_id # Use card_id as source
+            lifelink_controller = player # Use captured player controller
 
             # Create a life gain side effect (doesn't replace the damage itself)
             if damage_dealt > 0:
@@ -1739,6 +1551,7 @@ class ReplacementEffectSystem:
                     # Verify controller still exists and hasn't lost
                     if lifelink_controller and lifelink_controller.get("life", 0) > 0:
                         # Apply life gain replacement effects to this gain
+                        # Ensure self.apply_replacements is callable or exists
                         gain_context = {'player': lifelink_controller, 'life_amount': damage_dealt, 'source_type': 'lifelink'}
                         modified_gain_context, gain_replaced = self.apply_replacements("LIFE_GAIN", gain_context)
                         final_life_gain = modified_gain_context.get('life_amount', 0)
@@ -1748,6 +1561,7 @@ class ReplacementEffectSystem:
                             logging.debug(f"Lifelink: {source_name} gained {final_life_gain} life.")
                             # Trigger "gain life" events
                             if hasattr(self.game_state, 'trigger_ability'):
+                                # Pass lifelink source ID and controller
                                 self.game_state.trigger_ability(lifelink_source_id, "LIFE_GAINED", {"amount": final_life_gain, "controller": lifelink_controller})
                     else:
                         logging.debug(f"Lifelink gain prevented for {source_name} (controller lost or invalid).")
@@ -1758,15 +1572,23 @@ class ReplacementEffectSystem:
                 self.game_state.delayed_triggers.append(gain_life_later)
             return ctx # Don't modify the damage event itself
 
-        effect_id = self.register_effect({
+        # Ensure effect_id is assigned *before* being potentially captured by the closure
+        effect_id = f"replace_{self.effect_counter}" # Pre-assign ID
+
+        # Register the effect
+        registered_id = self.register_effect({
             'source_id': card_id, 'event_type': 'DAMAGE',
             'condition': condition, 'replacement': replacement,
             'duration': 'until_source_leaves', # Lifelink is tied to the card being on battlefield
             'controller_id': player,
-            'description': f"{source_name} Lifelink"
+            'description': f"{source_name} Lifelink",
+            'effect_id': effect_id # Explicitly pass pre-assigned ID
         })
+        # If register_effect reassigns ID, use the returned one if needed elsewhere
+        # For the closure, using card_id might be safer if effect_id isn't stable
+
         logging.debug(f"Registered Lifelink effect for {source_name}")
-        return effect_id
+        return registered_id # Return the actual registered ID
 
 
     def _register_deathtouch_effect(self, card_id, player):
@@ -1783,11 +1605,11 @@ class ReplacementEffectSystem:
 
         def replacement(ctx):
             target_id = ctx.get('target_id')
-            target_controller = self.game_state._find_card_controller(target_id)
+            # Find controller using _find_card_controller helper
+            target_controller = self._find_card_controller(target_id)
             if target_controller:
-                 if not hasattr(target_controller, 'deathtouch_damage'): target_controller['deathtouch_damage'] = {}
-                 # Mark that *any* amount of damage from this source is deathtouch
-                 target_controller['deathtouch_damage'][target_id] = True # Mark as lethal
+                 # Use setdefault for cleaner handling if dict doesn't exist
+                 target_controller.setdefault('deathtouch_damage', {})[target_id] = True # Mark as lethal
                  logging.debug(f"Deathtouch: {source_name} marked damage to {target_id} as deathtouch.")
             return ctx # Don't modify the damage amount
 
@@ -1957,12 +1779,29 @@ class ReplacementEffectSystem:
     def _find_card_controller(self, card_id):
         """Find which player controls a card."""
         gs = self.game_state
-        
+
+        # Check players first if card_id might be a player ID string
+        if card_id == "p1": return gs.p1
+        if card_id == "p2": return gs.p2
+
+        # Check zones for card objects
         for player in [gs.p1, gs.p2]:
-            if card_id in player["battlefield"]:
-                return player
-                
-        return None
+            # Check primary zones where control matters most often
+            if card_id in player.get("battlefield", []): return player
+            if card_id in player.get("hand", []): return player
+            if card_id in player.get("graveyard", []): return player
+            if card_id in player.get("library", []): return player
+            if card_id in player.get("exile", []): return player
+
+        # Check stack
+        for item in gs.stack:
+            if isinstance(item, tuple) and len(item) >= 3 and item[1] == card_id:
+                 return item[2] # The controller of the spell/ability
+
+        # Check other potential locations tracked by GameState if needed
+        # E.g., gs.phased_out, gs.suspended_cards (might store controller info)
+
+        return None # Card not found or controller unclear
     
     def _determine_event_type(self, action):
         """Determine the event type from action text with improved recognition."""

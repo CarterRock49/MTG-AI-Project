@@ -9,190 +9,28 @@ from .ability_utils import EffectFactory
 class AbilityHandler:
     """Handles card abilities and special effects"""
     
+
     def __init__(self, game_state=None):
         self.game_state = game_state
-        self.registered_abilities = {}
-        self.active_triggers = []
-        self.keyword_effects = KeywordEffects(game_state)
-        self.keyword_handlers = self._initialize_keyword_handlers()
-        
+        self.registered_abilities = {} # {card_id: [Ability, ...]}
+        self.active_triggers = [] # Stores (Ability, controller) tuples to be processed
+        self.targeting_system = None # Initialize targeting system reference
+
         if game_state is not None:
             self._initialize_abilities()
-            self.targeting_system = TargetingSystem(game_state)
-    
-    def _initialize_keyword_handlers(self):
-        """Initialize handlers for all keywords."""
-        # Create a mapping of keywords to their handler methods
-        handlers = {
-            # Basic keywords
-            "saga": self.keyword_effects._apply_saga,
-            "adventure": self.keyword_effects._apply_adventure,
-            "mdfc": self.keyword_effects._apply_mdfc,
-            "battle": self.keyword_effects._apply_battle,
-            "flying": self.keyword_effects._apply_flying,
-            "trample": self.keyword_effects._apply_trample,
-            "hexproof": self.keyword_effects._apply_hexproof,
-            "lifelink": self.keyword_effects._apply_lifelink,
-            "deathtouch": self.keyword_effects._apply_deathtouch,
-            "first strike": self.keyword_effects._apply_first_strike,
-            "double strike": self.keyword_effects._apply_double_strike,
-            "vigilance": self.keyword_effects._apply_vigilance,
-            "flash": self.keyword_effects._apply_flash,
-            "haste": self.keyword_effects._apply_haste,
-            "menace": self.keyword_effects._apply_menace,
-            "reach": self.keyword_effects._apply_reach,
-            "defender": self.keyword_effects._apply_defender,
-            "indestructible": self.keyword_effects._apply_indestructible,
-            "protection": self.keyword_effects._apply_protection,
-            "ward": self.keyword_effects._apply_ward,
-            # Add Room handler
-            "room": self.keyword_effects._apply_room_door_state,
-        
-            # Add Class handler
-            "class": self.keyword_effects._apply_class_level,
-            # Extended keywords
-            "prowess": self.keyword_effects._apply_prowess,
-            "scry": self.keyword_effects._apply_scry,
-            "cascade": self.keyword_effects._apply_cascade,
-            "unblockable": self.keyword_effects._apply_unblockable,
-            "shroud": self.keyword_effects._apply_shroud,
-            "regenerate": self.keyword_effects._apply_regenerate,
-            "persist": self.keyword_effects._apply_persist,
-            "undying": self.keyword_effects._apply_undying,
-            "riot": self.keyword_effects._apply_riot,
-            "enrage": self.keyword_effects._apply_enrage,
-            "afflict": self.keyword_effects._apply_afflict,
-            "exalted": self.keyword_effects._apply_exalted,
-            "mentor": self.keyword_effects._apply_mentor,
-            "convoke": self.keyword_effects._apply_convoke,
-            "absorb": self.keyword_effects._apply_absorb,
-            "affinity": self.keyword_effects._apply_affinity,
-            "afterlife": self.keyword_effects._apply_afterlife,
-            "cumulative upkeep": self.keyword_effects._apply_cumulative_upkeep,
-            "banding": self.keyword_effects._apply_banding,
-            "annihilator": self.keyword_effects._apply_annihilator,
-            "bloodthirst": self.keyword_effects._apply_bloodthirst,
-            "bushido": self.keyword_effects._apply_bushido,
-            "companion": self.keyword_effects._apply_companion,
-            "cycling": self.keyword_effects._apply_cycling,
-            "dash": self.keyword_effects._apply_dash,
-            "dredge": self.keyword_effects._apply_dredge,
-            "echo": self.keyword_effects._apply_echo,
-            "embalm": self.keyword_effects._apply_embalm,
-            "devoid": self.keyword_effects._apply_devoid,
-            "eternalize": self.keyword_effects._apply_eternalize,
-            "evoke": self.keyword_effects._apply_evoke,
-            "evolve": self.keyword_effects._apply_evolve,
-            "fabricate": self.keyword_effects._apply_fabricate,
-            "flashback": self.keyword_effects._apply_flashback,
-            "foretell": self.keyword_effects._apply_foretell,
-            "gravestorm": self.keyword_effects._apply_gravestorm,
-            "hideaway": self.keyword_effects._apply_hideaway,
-            "infect": self.keyword_effects._apply_infect,
-            "kicker": self.keyword_effects._apply_kicker,
-            "modular": self.keyword_effects._apply_modular,
-            "morph": self.keyword_effects._apply_morph,
-            "mutate": self.keyword_effects._apply_mutate,
-            "myriad": self.keyword_effects._apply_myriad,
-            "madness": self.keyword_effects._apply_madness,
-            "phasing": self.keyword_effects._apply_phasing,
-            "prowl": self.keyword_effects._apply_prowl,
-            "unearth": self.keyword_effects._apply_unearth,
-            "unleash": self.keyword_effects._apply_unleash,
-            "shadow": self.keyword_effects._apply_shadow,
-            "splice": self.keyword_effects._apply_splice,
-            "sunburst": self.keyword_effects._apply_sunburst,
-            "suspend": self.keyword_effects._apply_suspend,
-            "training": self.keyword_effects._apply_training,
-            "amplify": self.keyword_effects._apply_amplify,
-            "ascend": self.keyword_effects._apply_ascend,
-            "assist": self.keyword_effects._apply_assist,
-            "aura swap": self.keyword_effects._apply_aura_swap,
-            "awaken": self.keyword_effects._apply_awaken,
-            "battle cry": self.keyword_effects._apply_battle_cry,
-            "bestow": self.keyword_effects._apply_bestow,
-            "blitz": self.keyword_effects._apply_blitz,
-            "boast": self.keyword_effects._apply_boast,
-            "buyback": self.keyword_effects._apply_buyback,
-            "casualty": self.keyword_effects._apply_casualty,
-            "storm": self.keyword_effects._apply_storm,
-            "crew": self.keyword_effects._apply_crew,
-            "delve": self.keyword_effects._apply_delve,
-            "equip": self.keyword_effects._apply_equip,
-            "cleave": self.keyword_effects._apply_cleave,
-            "daybound": self.keyword_effects._apply_daybound,
-            "nightbound": self.keyword_effects._apply_nightbound,
-            "decayed": self.keyword_effects._apply_decayed,
-            "champion": self.keyword_effects._apply_champion,
-            "changeling": self.keyword_effects._apply_changeling,
-            "conspire": self.keyword_effects._apply_conspire,
+            # Initialize TargetingSystem here after GameState is available
+            try:
+                 # Make sure TargetingSystem is imported correctly
+                 from .ability_handler import TargetingSystem
+                 self.targeting_system = TargetingSystem(game_state)
+                 # Link it back to the game_state if necessary
+                 if not hasattr(game_state, 'targeting_system'):
+                      game_state.targeting_system = self.targeting_system
+            except ImportError as e:
+                 logging.error(f"Could not import TargetingSystem: {e}")
+            except Exception as e:
+                 logging.error(f"Error initializing TargetingSystem: {e}")
 
-            "devour": self.keyword_effects._apply_devour,
-            "disturb": self.keyword_effects._apply_disturb,
-            "emerge": self.keyword_effects._apply_emerge,
-            "enchant": self.keyword_effects._apply_enchant,
-            "compleated": self.keyword_effects._apply_compleated,
-            "encore": self.keyword_effects._apply_encore,
-            "entwine": self.keyword_effects._apply_entwine,
-            "epic": self.keyword_effects._apply_epic,
-            "escape": self.keyword_effects._apply_escape,
-            "exploit": self.keyword_effects._apply_exploit,
-            "extort": self.keyword_effects._apply_extort,
-            "fading": self.keyword_effects._apply_fading,
-            "fear": self.keyword_effects._apply_fear,
-            "flanking": self.keyword_effects._apply_flanking,
-            "forecast": self.keyword_effects._apply_forecast,
-            "fortify": self.keyword_effects._apply_fortify,
-            "frenzy": self.keyword_effects._apply_frenzy,
-            "friends forever": self.keyword_effects._apply_friends_forever,
-            "fuse": self.keyword_effects._apply_fuse,
-            "graft": self.keyword_effects._apply_graft,
-            "haunt": self.keyword_effects._apply_haunt,
-            "hidden agenda": self.keyword_effects._apply_hidden_agenda,
-            "horsemanship": self.keyword_effects._apply_horsemanship,
-            "improvise": self.keyword_effects._apply_improvise,
-            "ingest": self.keyword_effects._apply_ingest,
-            "intimidate": self.keyword_effects._apply_intimidate,
-            "jump-start": self.keyword_effects._apply_jump_start,
-            "landwalk": self.keyword_effects._apply_landwalk,
-            "cipher": self.keyword_effects._apply_cipher,
-            "demonstrate": self.keyword_effects._apply_demonstrate,
-            "living weapon": self.keyword_effects._apply_living_weapon,
-            "melee": self.keyword_effects._apply_melee,
-            "miracle": self.keyword_effects._apply_miracle,
-            "offering": self.keyword_effects._apply_offering,
-            "outlast": self.keyword_effects._apply_outlast,
-            "overload": self.keyword_effects._apply_overload,
-            "partner": self.keyword_effects._apply_partner,
-            "poisonous": self.keyword_effects._apply_poisonous,
-            "provoke": self.keyword_effects._apply_provoke,
-            "rampage": self.keyword_effects._apply_rampage,
-            "rebound": self.keyword_effects._apply_rebound,
-            "reconfigure": self.keyword_effects._apply_reconfigure,
-            "recover": self.keyword_effects._apply_recover,
-            "reinforce": self.keyword_effects._apply_reinforce,
-            "renown": self.keyword_effects._apply_renown,
-            "replicate": self.keyword_effects._apply_replicate,
-            "retrace": self.keyword_effects._apply_retrace,
-            "ripple": self.keyword_effects._apply_ripple,
-            "scavenge": self.keyword_effects._apply_scavenge,
-            "skulk": self.keyword_effects._apply_skulk,
-            "soulbond": self.keyword_effects._apply_soulbond,
-            "soulshift": self.keyword_effects._apply_soulshift,
-            "spectacle": self.keyword_effects._apply_spectacle,
-            "split second": self.keyword_effects._apply_split_second,
-            "surge": self.keyword_effects._apply_surge,
-            "totem armor": self.keyword_effects._apply_totem_armor,
-            "transfigure": self.keyword_effects._apply_transfigure,
-            "transmute": self.keyword_effects._apply_transmute,
-            "tribute": self.keyword_effects._apply_tribute,
-            "undaunted": self.keyword_effects._apply_undaunted,
-            "vanishing": self.keyword_effects._apply_vanishing,
-            "wither": self.keyword_effects._apply_wither,
-            "aftermath": self.keyword_effects._apply_aftermath
-        }
-
-        return handlers
 
     def handle_class_level_up(self, class_idx):
         """
@@ -753,15 +591,6 @@ class AbilityHandler:
         
         return clean_modes
         
-    def _find_controller(self, card_id):
-        """Find the controller of a card."""
-        gs = self.game_state
-        for player in [gs.p1, gs.p2]:
-            for zone in ["battlefield", "hand", "graveyard", "exile"]:
-                if card_id in player.get(zone, []):
-                    return player
-        return None
-        
     def register_card_abilities(self, card_id, player):
         """Register all abilities for a card as it enters the battlefield."""
         try:
@@ -769,23 +598,22 @@ class AbilityHandler:
             if not card:
                 logging.warning(f"Cannot register abilities: card {card_id} not found")
                 return
-                
-            # Parse and register abilities
+
+            # Parse and register abilities (relies on _parse_and_register_abilities)
             self._parse_and_register_abilities(card_id, card)
-            
+
             # Check for replacement effects
-            if hasattr(self.game_state, 'replacement_effect_system'):
+            if hasattr(self.game_state, 'replacement_effect_system') and self.game_state.replacement_effect_system:
                 self.game_state.replacement_effect_system.register_card_replacement_effects(card_id, player)
-                
-            # Check for static abilities that need to be applied
+
+            # Check for static abilities that need to be applied via LayerSystem
+            # Layer system application now happens centrally in LayerSystem.apply_all_effects
+            # We just need to ensure effects are registered. StaticAbility.apply handles registration.
             for ability in self.registered_abilities.get(card_id, []):
                 if isinstance(ability, StaticAbility):
-                    # Determine affected cards
-                    affected_cards = ability.get_affected_cards(self.game_state, player)
-                    
-                    # Apply the static ability
-                    ability.apply(self.game_state, affected_cards)
-                    
+                    # StaticAbility.apply will register with LayerSystem if needed
+                    ability.apply(self.game_state) # Pass only game_state now
+
         except Exception as e:
             logging.error(f"Error registering abilities for card {card_id}: {str(e)}")
             import traceback
@@ -823,31 +651,28 @@ class AbilityHandler:
         card = gs._safe_get_card(room_id)
         if not card:
             return
-            
-        # Find controller
-        controller = None
-        for player in [gs.p1, gs.p2]:
-            if room_id in player["battlefield"]:
-                controller = player
-                break
-                
+
+        # Find controller using GameState method
+        controller = gs.get_card_controller(room_id) # Use GameState helper
+
         if not controller:
+            logging.warning(f"Could not find controller for room {room_id}") # Added logging
             return
-        
+
         # Create context for the trigger
         context = {
             "door_number": door_number,
             "controller": controller,
             "game_state": gs
         }
-        
+
         # Trigger abilities
         self.check_abilities(room_id, "DOOR_UNLOCKED", context)
-        
+
         # If this is a specific door, also trigger abilities for that door
         if door_number > 0:
             self.check_abilities(room_id, f"DOOR{door_number}_UNLOCKED", context)
-        
+
         # Process door effect triggers from card data if available
         if hasattr(card, 'door_effects') and card.door_effects.get("unlock_trigger"):
             for effect_text in card.door_effects.get("unlock_trigger", []):
@@ -857,61 +682,216 @@ class AbilityHandler:
                     "controller": controller,
                     "source_id": room_id
                 }
-                
+
                 # Add to stack
                 gs.add_to_stack("ABILITY", room_id, controller, effect_context)
-                
+
         logging.debug(f"Processed door unlock triggers for door {door_number} of {card.name}")
     
     def _initialize_abilities(self):
         """Parse abilities from all cards in the database and register them"""
         gs = self.game_state
+        # Ensure card_db is a dict
+        if not isinstance(gs.card_db, dict):
+             logging.error("GameState card_db is not a dictionary, cannot initialize abilities.")
+             return
         for card_id, card in gs.card_db.items():
             self._parse_and_register_abilities(card_id, card)
-    
+            
     def _parse_and_register_abilities(self, card_id, card):
-        """Parse a card's oracle text to identify and register abilities, with class level support."""
-        if not hasattr(card, 'oracle_text') or not card.oracle_text:
-            return
-            
-        # Extract abilities from card text
-        oracle_text = card.oracle_text.lower()
+        """Parse a card's oracle text to identify and register abilities, including keywords."""
+        if not card: return
+
         abilities = []
-        
-        # Check if this is a Class card with multiple levels
+        oracle_text = getattr(card, 'oracle_text', '').lower() if hasattr(card, 'oracle_text') else ''
+        keywords_text = getattr(card, 'keywords_list_text', []) # Assume card might have pre-parsed keyword list
+
+        # 1. Handle Class Card Levels
         if hasattr(card, 'is_class') and card.is_class:
-            # Register abilities based on current level
-            current_level = getattr(card, 'current_level', 0)
-            
-            # Get class data for current level
-            level_data = None
-            if hasattr(card, 'get_current_class_data'):
-                level_data = card.get_current_class_data()
-                
+            current_level = getattr(card, 'current_level', 1)
+            level_data = card.get_current_class_data() if hasattr(card, 'get_current_class_data') else None
             if level_data and 'abilities' in level_data:
-                # Register level-specific abilities
                 for ability_text in level_data['abilities']:
-                    self._parse_ability_text(card_id, card, ability_text, abilities)
-                    
-                logging.debug(f"Registered {len(level_data['abilities'])} abilities for {card.name} at level {current_level}")
-                
-                # Check if class became a creature at this level
-                if 'creature' in level_data.get('type_line', '').lower() and 'creature' not in card.type_line.lower():
-                    # Register any keywords that apply to creatures
-                    self._register_keyword_abilities(card_id, card, abilities)
-                    logging.debug(f"Class {card.name} became a creature at level {current_level}")
-        
-        # Continue with normal ability registration
-        self._register_keyword_abilities(card_id, card, abilities)
-        self._parse_activated_abilities(card_id, card, oracle_text, abilities)
-        self._parse_triggered_abilities(card_id, card, oracle_text, abilities)
-        self._parse_static_abilities(card_id, card, oracle_text, abilities)
-        
+                    self._parse_ability_text(card_id, card, ability_text.lower(), abilities)
+                # Explicit keywords from level
+                level_keywords = level_data.get('keywords', [])
+                for kw_text in level_keywords: # kw_text might be "flying" or "trample 2"
+                     keyword_name = kw_text.split()[0] # Extract base keyword
+                     self._create_keyword_ability(card_id, card, keyword_name, abilities, kw_text)
+
+        # 2. Parse Standard Oracle Text if not fully handled by Class levels or if not a Class card
+        ability_texts = []
+        if oracle_text:
+            processed_oracle = re.sub(r'\([^)]*\)', '', oracle_text).strip()
+            # Split by newline AND common ability separators like '•'
+            potential_texts = re.split(r'\n\s*•\s*|\n', processed_oracle)
+            ability_texts = [text.strip() for text in potential_texts if text.strip()]
+
+        for ability_text in ability_texts:
+             self._parse_ability_text(card_id, card, ability_text, abilities)
+
+        # 3. Parse Explicit Keywords (from keywords array/list if available)
+        # --- Consolidated keyword parsing using _create_keyword_ability ---
+        # Get keywords already parsed from text/levels to avoid duplicates
+        parsed_keywords_from_text = {ab.keyword for ab in abilities if hasattr(ab, 'keyword')} # Check Static/Triggered too
+
+        # Check keywords array first for efficiency
+        if hasattr(card, 'keywords') and isinstance(card.keywords, list):
+            for i, keyword_name in enumerate(Card.ALL_KEYWORDS):
+                if i < len(card.keywords) and card.keywords[i] == 1:
+                    if keyword_name not in parsed_keywords_from_text:
+                        self._create_keyword_ability(card_id, card, keyword_name, abilities)
+                        parsed_keywords_from_text.add(keyword_name) # Mark as handled
+        # Check text list as fallback/addition
+        elif keywords_text:
+             for kw_text in keywords_text: # e.g., "Flying", "Trample", "Annihilator 2"
+                  parts = kw_text.lower().split()
+                  keyword_name = parts[0]
+                  if keyword_name in Card.ALL_KEYWORDS: # Check if it's a known keyword base
+                       if keyword_name not in parsed_keywords_from_text:
+                           self._create_keyword_ability(card_id, card, keyword_name, abilities, kw_text) # Pass full text
+                           parsed_keywords_from_text.add(keyword_name)
+
+
         # Store all parsed abilities
         if abilities:
             self.registered_abilities[card_id] = abilities
-            logging.debug(f"Registered {len(abilities)} abilities for {card.name}")
-            
+            logging.debug(f"Registered {len(abilities)} abilities/keywords for {card.name} ({card_id})")
+
+        # Special Case: Immediately register continuous effects via StaticAbility.apply
+        for ability in abilities:
+            if isinstance(ability, StaticAbility):
+                 # apply() method now handles registration with LayerSystem
+                 ability.apply(self.game_state)
+
+    def _create_keyword_ability(self, card_id, card, keyword_name, abilities_list, full_keyword_text=None):
+        """Creates the appropriate Ability object for a given keyword. Now handles parameters."""
+        keyword_lower = keyword_name.lower()
+        full_text = (full_keyword_text or keyword_name).lower() # Use full text if provided for parameter parsing
+
+        # Check if this exact keyword (considering parameters potentially) is already added
+        # This requires KeywordAbility to store its parameters if applicable
+        # For now, using simple name check.
+        if any(isinstance(a, (KeywordAbility, StaticAbility, TriggeredAbility, ActivatedAbility)) and getattr(a, 'keyword', None) == keyword_lower for a in abilities_list):
+             return # Avoid duplicates based on simple name match
+
+        # Helper to parse value like "Keyword N"
+        def parse_value(text, keyword):
+             match = re.search(rf"{keyword}\s+(\d+)", text)
+             return int(match.group(1)) if match else 1 # Default to 1 if no number
+
+        # Static Combat Keywords -> StaticAbility granting the keyword
+        static_combat = ["flying", "first strike", "double strike", "trample", "vigilance", "haste", "menace", "reach", "defender", "indestructible", "hexproof", "shroud", "unblockable", "fear", "intimidate", "shadow", "horsemanship", "flanking", "banding", "decayed", "phasing"]
+        if keyword_lower in static_combat:
+             ability_effect_text = f"This permanent has {full_text}."
+             abilities_list.append(StaticAbility(card_id, ability_effect_text, ability_effect_text))
+             setattr(abilities_list[-1], 'keyword', keyword_lower) # Add keyword attr for tracking
+             return
+
+        # Other Static Keywords -> StaticAbility + potentially specific layer logic registration
+        if keyword_lower in ["lifelink", "deathtouch", "changeling", "devoid", "protection", "ward"]:
+             ability_effect_text = f"This permanent has {full_text}."
+             # Need to pass parameters like "protection from red" or "ward {2}"
+             # The StaticAbility object itself might store this parameter if needed,
+             # or the LayerSystem registration parses it from the effect_text.
+             abilities_list.append(StaticAbility(card_id, ability_effect_text, ability_effect_text))
+             setattr(abilities_list[-1], 'keyword', keyword_lower) # Add keyword attr for tracking
+             return
+
+        # Triggered Keywords -> TriggeredAbility
+        triggered_map = {
+             "prowess": ("whenever you cast a noncreature spell", "this creature gets +1/+1 until end of turn"),
+             "cascade": ("when you cast this spell", "exile cards from the top of your library until you exile a nonland card that costs less. you may cast it without paying its mana cost."),
+             "storm": ("when you cast this spell", "copy it for each spell cast before it this turn."),
+             "riot": ("this permanent enters the battlefield", "choose haste or a +1/+1 counter"), # Needs choice handling
+             "enrage": ("whenever this creature is dealt damage", "{effect_from_oracle}"), # Needs effect parsing
+             "afflict": ("whenever this creature becomes blocked", "defending player loses N life"), # Needs N parsing
+             "mentor": ("whenever this creature attacks", "put a +1/+1 counter on target attacking creature with lesser power."), # Needs targeting
+             "afterlife": ("when this permanent dies", "create N 1/1 white and black Spirit creature tokens with flying."), # Needs N parsing
+             "annihilator": ("whenever this creature attacks", "defending player sacrifices N permanents."), # Needs N parsing
+             "bloodthirst": ("this creature enters the battlefield", "if an opponent was dealt damage this turn, it enters with N +1/+1 counters."), # Needs N parsing & condition check
+             "bushido": ("whenever this creature blocks or becomes blocked", "it gets +N/+N until end of turn."), # Needs N parsing
+             "evolve": ("whenever a creature enters the battlefield under your control", "if that creature has greater power or toughness than this creature, put a +1/+1 counter on this creature."),
+             "fabricate": ("when this permanent enters the battlefield", "put N +1/+1 counters on it or create N 1/1 colorless Servo artifact creature tokens."), # Needs N parsing & choice
+             "fading": ("this permanent enters the battlefield", "it enters with N fade counters on it. at the beginning of your upkeep, remove a fade counter. if you can't, sacrifice it."), # Needs N parsing & upkeep trigger
+             "flanking": ("whenever a creature without flanking blocks this creature", "the blocking creature gets -1/-1 until end of turn."),
+             "gravestorm": ("when you cast this spell", "copy it for each permanent put into a graveyard this turn."),
+             "haunt": ("when this permanent dies", "exile it haunting target creature."), # Needs effect on haunted creature death
+             "ingest": ("whenever this creature deals combat damage to a player", "that player exiles the top card of their library."),
+             "infect": ("this deals damage", "deals damage to creatures in the form of -1/-1 counters and players in the form of poison counters."), # Static effect + trigger interpretation
+             "modular": ("this enters the battlefield", "with N +1/+1 counters. when it dies, you may put its +1/+1 counters on target artifact creature."), # Needs N parsing & death trigger
+             "persist": ("when this permanent dies", "if it had no -1/-1 counters, return it with a -1/-1 counter."),
+             "poisonous": ("whenever this creature deals combat damage to a player", "that player gets N poison counters."), # Needs N parsing
+             "rampage": ("whenever this creature becomes blocked", "it gets +N/+N for each creature blocking it beyond the first."), # Needs N parsing
+             "renown": ("whenever this creature deals combat damage to a player", "if it isn't renowned, put N +1/+1 counters on it and it becomes renowned."), # Needs N parsing & state tracking
+             "ripple": ("when you cast this spell", "you may reveal the top N cards of your library. you may cast any revealed cards with the same name without paying their mana costs."), # Needs N parsing
+             "soulshift": ("when this permanent dies", "you may return target spirit card with cmc N or less from your graveyard to hand."), # Needs N parsing
+             "sunburst": ("this permanent enters the battlefield", "with a +1/+1 counter or charge counter for each color of mana spent to cast it."), # Needs mana spent tracking
+             "training": ("whenever this creature attacks with another creature with greater power", "put a +1/+1 counter on this creature."),
+             "undying": ("when this permanent dies", "if it had no +1/+1 counters, return it with a +1/+1 counter."),
+             "vanishing": ("this permanent enters the battlefield", "with N time counters. at the beginning of your upkeep, remove a time counter. when the last is removed, sacrifice it."), # Needs N parsing & upkeep trigger
+             "wither": ("this deals damage", "deals damage to creatures in the form of -1/-1 counters."), # Static effect + trigger interpretation
+        }
+        if keyword_lower in triggered_map:
+             trigger, effect = triggered_map[keyword_lower]
+             # Replace N or parse specific effects
+             val = parse_value(full_text, keyword_lower)
+             effect = effect.replace(" N ", f" {val} ") # Simple replacement
+             # TODO: More complex effect parsing/parameterization needed for many keywords
+             abilities_list.append(TriggeredAbility(card_id, trigger, effect, full_text))
+             setattr(abilities_list[-1], 'keyword', keyword_lower)
+             return
+
+        # Activated Keywords -> ActivatedAbility
+        activated_map = {
+            "cycling": ("draw a card."),
+            "equip": ("attach to target creature you control. activate only as a sorcery."),
+            "fortify": ("attach to target land you control. activate only as a sorcery."),
+            "unearth": ("return this card from your graveyard to the battlefield. it gains haste. exile it at the beginning of the next end step or if it would leave the battlefield. unearth only as a sorcery."),
+            "flashback": ("you may cast this card from your graveyard for its flashback cost. then exile it."), # Cost is parsed, effect is rule modification
+            "retrace": ("you may cast this card from your graveyard by discarding a land card in addition to paying its other costs."),
+            "scavenge": ("exile this card from your graveyard: put a number of +1/+1 counters equal to this card's power on target creature. scavenge only as a sorcery."),
+            "transfigure": ("sacrifice this creature: search your library for a creature card with the same cmc, put it onto the battlefield, then shuffle. activate only as a sorcery."),
+            "transmute": ("discard this card: search your library for a card with the same cmc, reveal it, put it into your hand, then shuffle. activate only as a sorcery."),
+            "auraswap": ("exchange this aura with an aura card in your hand."),
+            "outlast": ("put a +1/+1 counter on this creature. activate only as a sorcery."),
+            "recover": ("when a creature is put into your graveyard from the battlefield, you may pay {cost}. if you do, return this card from your graveyard to your hand."), # This is actually triggered! Needs fixing.
+            "reinforce": ("discard this card: put n +1/+1 counters on target creature."), # Needs N parsing
+            # Reconfigure handled via specific ActionHandler
+        }
+        cost_match = re.search(rf"{keyword_lower}(?:\s*(\d+))?\s*(?:—|-)?\s*(\{{\".*?\"\}})", full_text)
+        cost_str = cost_match.group(2) if cost_match else None
+        val_str = cost_match.group(1) if cost_match and cost_match.group(1) else None
+        if not cost_str: # Try other cost formats like just number or ability words
+             cost_match = re.search(rf"{keyword_lower}(?:\s*(\d+))?\s*(?:—|-)?\s*(\d+|[xX])", full_text)
+             cost_str = f"{{{cost_match.group(2)}}}" if cost_match else "{0}" # Assume free if no cost found? Check rules.
+             if not val_str and cost_match and cost_match.group(1): val_str = cost_match.group(1)
+
+        val = int(val_str) if val_str and val_str.isdigit() else 1
+
+        if keyword_lower in activated_map and cost_str:
+             effect = activated_map[keyword_lower]
+             effect = effect.replace(" n ", f" {val} ") # Simple replace
+             # Need to handle cost/effect parameterization better
+             abilities_list.append(ActivatedAbility(card_id, cost_str, effect, full_text))
+             setattr(abilities_list[-1], 'keyword', keyword_lower)
+             return
+
+        # Rule Modifying / Cost Keywords - Register as StaticAbility for clarity, actual effect handled elsewhere
+        rule_keywords = ["affinity", "convoke", "delve", "improvise", "bestow", "buyback", "entwine", "escape", "kicker", "madness", "overload", "splice", "surge", "split second", "suspend", "companion"]
+        if keyword_lower in rule_keywords:
+             ability_effect_text = f"This card has {full_text}."
+             abilities_list.append(StaticAbility(card_id, ability_effect_text, ability_effect_text))
+             setattr(abilities_list[-1], 'keyword', keyword_lower) # Add keyword attr for tracking
+             return
+
+        # Fallback for completely unparsed keywords (should be fewer now)
+        logging.warning(f"Keyword '{keyword_lower}' (from '{full_text}') not fully mapped to specific ability type.")
+        # Add as generic static grant
+        ability_effect_text = f"This permanent has {full_text}."
+        abilities_list.append(StaticAbility(card_id, ability_effect_text, ability_effect_text))
+        setattr(abilities_list[-1], 'keyword', keyword_lower)
+        
     def _parse_triggered_abilities(self, card_id, card, oracle_text, abilities_list):
         """Parse triggered abilities from card text with improved patterns"""
         # Define enhanced patterns for triggered abilities
@@ -1020,46 +1000,6 @@ class AbilityHandler:
             effect_text=ability_text
         )
         abilities_list.append(ability)
-    
-    def _register_keyword_abilities(self, card_id, card, abilities_list):
-        """Register keyword abilities from the card's keywords attribute"""
-        keywords = [
-            "flying", "trample", "hexproof", "lifelink", "deathtouch",
-            "first strike", "double strike", "vigilance", "flash", "haste", 
-            "menace", "reach", "defender", "indestructible"
-        ]
-        
-        # Check card.keywords (boolean array) if it exists
-        if hasattr(card, 'keywords') and isinstance(card.keywords, list):
-            # Map keyword indices to actual keyword names
-            keyword_indices = {
-                0: "flying",
-                1: "trample", 
-                2: "hexproof",
-                3: "lifelink",
-                4: "deathtouch",
-                5: "first strike",
-                6: "double strike",
-                7: "vigilance",
-                8: "flash",
-                9: "haste",
-                10: "menace"
-            }
-            
-            for idx, has_keyword in enumerate(card.keywords):
-                if has_keyword and idx in keyword_indices:
-                    keyword_name = keyword_indices[idx]
-                    keyword_ability = KeywordAbility(card_id, keyword_name)
-                    abilities_list.append(keyword_ability)
-                    logging.debug(f"Registered {keyword_name} for {card.name}")
-        
-        # Also check card text for keywords as backup
-        if hasattr(card, 'oracle_text'):
-            for keyword in keywords:
-                if keyword in card.oracle_text.lower() and not any(isinstance(a, KeywordAbility) and a.keyword == keyword for a in abilities_list):
-                    keyword_ability = KeywordAbility(card_id, keyword)
-                    abilities_list.append(keyword_ability)
-                    logging.debug(f"Registered {keyword} for {card.name} from text")
                     
     def _create_token(self, controller, token_data):
         """Create a token creature or artifact"""
@@ -1245,119 +1185,78 @@ class AbilityHandler:
         self._parse_text_with_patterns(
             oracle_text, static_patterns, "static", card_id, card, abilities_list)
     
+
     def check_abilities(self, card_id, event_type, context=None):
-        try:
-            gs = self.game_state
-            card = gs._safe_get_card(card_id)
-            if not card:
-                return []
-            
-            # Find which player owns this card
-            owner = None
-            for player in [gs.p1, gs.p2]:
-                for zone in ["battlefield", "graveyard", "hand", "exile"]:
-                    if zone in player and card_id in player[zone]:
-                        owner = player
-                        break
-                if owner:
-                    break
-            
-            if not owner:
-                logging.warning(f"Could not find owner for card {card_id}")
-                return []
-            
-            # Expanded mapping of event types to relevant keywords/abilities
-            event_to_keywords = {
-                # Existing mappings
-                "DEALS_DAMAGE": ["lifelink", "deathtouch", "infect", "wither", "enrage"],
-                "ATTACKS": ["prowess", "battle cry", "exalted", "mentor", "myriad", "raid", "annihilator"],
-                "BLOCKS": ["bushido", "banding", "flanking"],
-                "DIES": ["persist", "undying", "afterlife", "haunt"],
-                "ENTERS_BATTLEFIELD": ["saga", "fabricate", "riot", "modular", "evolve"],
-                "CAST_SPELL": ["storm", "cascade", "prowess", "cipher"], 
-                "UPKEEP": ["cumulative upkeep", "phasing", "echo", "fading", "vanishing"],
-                "END_STEP": ["unearth", "dash", "blitz", "madness"],
-                
-                # New mappings
-                "DRAW_CARD": ["madness", "miracle"],
-                "DISCARD": ["madness", "hellbent"],
-                "GAIN_LIFE": ["ajani's pridemate", "well of lost dreams"],
-                "LOSE_LIFE": ["spectacle", "bloodthirst"],
-                "ROOM_COMPLETED": ["room", "explore", "dungeon"],
-                "DOOR_UNLOCKED": ["door", "room"],
-                "CLASS_LEVEL_UP": ["class", "level"],
-            }
-            
-            triggered_abilities = []
-            
-            # First check card.keywords (more efficient)
-            if hasattr(card, 'keywords') and isinstance(card.keywords, list):
-                keyword_map = {
-                    0: "flying",
-                    1: "trample", 
-                    2: "hexproof",
-                    3: "lifelink",
-                    4: "deathtouch",
-                    5: "first strike",
-                    6: "double strike",
-                    7: "vigilance",
-                    8: "flash",
-                    9: "haste",
-                    10: "menace"
-                }
-                
-                # Get relevant keywords for this event type
-                relevant_keywords = []
-                for evt_type, keywords in event_to_keywords.items():
-                    if evt_type == event_type:
-                        relevant_keywords.extend(keywords)
-                
-                # Check each keyword flag that's set
-                for idx, has_keyword in enumerate(card.keywords):
-                    if has_keyword and idx in keyword_map:
-                        keyword = keyword_map[idx]
-                        # Only process if relevant for this event
-                        if keyword in relevant_keywords:
-                            handler = self.keyword_handlers.get(keyword)
-                            if handler:
-                                result = handler(card_id, event_type, context)
-                                if result and not isinstance(result, bool):
-                                    triggered_abilities.append(result)
-            
-            # Check registered abilities with expanded context
-            card_abilities = self.registered_abilities.get(card_id, [])
-            for ability in card_abilities:
+        """
+        Checks for triggered abilities based on game events. Relies on parsed abilities.
+        (Now fully uses the TriggeredAbility logic).
+        """
+        if context is None: context = {}
+        gs = self.game_state
+        card = gs._safe_get_card(card_id) # Card associated with the event ORIGIN
+
+        # Add game state and event type to context for conditions
+        context['game_state'] = gs
+        context['event_type'] = event_type # Ensure event type is in context
+
+        triggered_abilities_found = [] # Abilities triggered by this event
+
+        # Check abilities registered for *all* cards currently in a relevant zone
+        cards_to_check = set()
+        for p in [gs.p1, gs.p2]:
+             cards_to_check.update(p.get("battlefield", []))
+             cards_to_check.update(p.get("graveyard", [])) # For abilities triggering from GY (e.g., Haunt, Recover)
+             # Add other zones if needed (hand, exile for madness etc.)
+             # cards_to_check.update(p.get("hand", []))
+             # cards_to_check.update(p.get("exile", []))
+
+        # Check abilities on permanents currently phased out? Rules check needed. Maybe not.
+
+        for ability_source_id in cards_to_check:
+            source_card = gs._safe_get_card(ability_source_id)
+            # Basic check: Ability source must exist
+            if not source_card: continue
+
+            # Optimization: Check if card is actually in a zone where its abilities function
+            # E.g., battlefield abilities only active on battlefield (unless specified otherwise)
+            source_location = gs.find_card_location(ability_source_id)
+            # Determine if ability works from its current zone (default: battlefield)
+            # TODO: This check needs refinement based on specific ability rules (e.g., cycling from hand)
+            # if not source_location or source_location[1] not in ["battlefield", "graveyard"]: # Simplistic check
+            #      continue
+
+            registered_abilities = self.registered_abilities.get(ability_source_id, [])
+            for ability in registered_abilities:
+                # Only check TriggeredAbility instances
                 if isinstance(ability, TriggeredAbility):
-                    # Add more context information to help with conditional triggers
-                    if context is None:
-                        context = {}
-                    
-                    # Add card info to context
-                    if 'card' not in context:
-                        context['card'] = card
-                    
-                    # Add game_state to context for conditions that need it
-                    if 'game_state' not in context:
-                        context['game_state'] = gs
-                    
-                    # Add event_type to context
-                    context['event_type'] = event_type
-                    
-                    if ability.can_trigger(event_type, context):
-                        triggered_abilities.append(ability)
-                        logging.debug(f"Ability triggered for {card.name}: {ability.effect_text}")
-            
-            # Queue these abilities to be put on the stack
-            for ability in triggered_abilities:
-                self.active_triggers.append((ability, owner))
-                
-            return triggered_abilities
-        
-        except Exception as e:
-            logging.error(f"Error checking abilities for card {card_id}: {str(e)}")
-            import traceback
-            logging.error(traceback.format_exc())
-            return []
+                    # Prepare context specific to this potential trigger check
+                    trigger_check_context = context.copy()
+                    trigger_check_context['source_card_id'] = ability_source_id
+                    trigger_check_context['source_card'] = source_card
+                    # Add event card info if not already the same as source
+                    if 'event_card_id' not in trigger_check_context: trigger_check_context['event_card_id'] = card_id
+                    if 'event_card' not in trigger_check_context: trigger_check_context['event_card'] = card
+
+                    try:
+                        if ability.can_trigger(event_type, trigger_check_context):
+                            # Find controller of the ability source at the time of trigger check
+                            ability_controller = gs.get_card_controller(ability_source_id)
+                            if ability_controller:
+                                # Queue the trigger: (Ability object, Controller dict)
+                                self.active_triggers.append((ability, ability_controller))
+                                triggered_abilities_found.append(ability)
+                                # Reduced verbosity logging
+                                # logging.debug(f"Queued trigger: '{ability.trigger_condition}' from {ability_source_id} due to {event_type}")
+                            else:
+                                 # This can happen if the source left the battlefield before trigger check
+                                 # logging.warning(f"Could not find controller for triggered ability source {ability_source_id}")
+                                 pass # Ability cannot trigger without a controller
+                    except Exception as e:
+                         logging.error(f"Error checking trigger condition for {ability.effect_text} from {ability_source_id}: {e}")
+                         # Continue checking other abilities
+
+        # Return the list of ability objects that triggered (used by trigger_ability)
+        return triggered_abilities_found
 
     def get_activated_abilities(self, card_id):
         """Get all activated abilities for a given card"""
@@ -1470,64 +1369,61 @@ class AbilityHandler:
         self.active_triggers = []
     
     def resolve_ability(self, ability_type, card_id, controller, context=None):
-            """
-            Resolve an ability that's resolving from the stack, relying on the context
-            to provide the specific Ability object.
+        """
+        Resolve an ability from the stack. Finds the specific ability instance from the context.
+        (Now uses unified fallback logic).
+        """
+        gs = self.game_state
+        card = gs._safe_get_card(card_id) # Source card for logging
+        source_name = card.name if card else f"Card {card_id}"
 
-            Args:
-                ability_type: Type of ability (ACTIVATED, TRIGGERED, etc.) - used mainly for logging.
-                card_id: ID of the card with the ability
-                controller: Player controlling the ability
-                context: Additional context about the ability, expected to contain 'ability' object.
-            """
-            gs = self.game_state
-            card = gs._safe_get_card(card_id) # Keep for logging/context if needed
-            source_name = card.name if card else f"Card {card_id}"
+        if context and "ability" in context and isinstance(context["ability"], Ability):
+            ability = context["ability"] # Get the specific Ability object instance
 
-            if context and "ability" in context and isinstance(context["ability"], Ability):
-                ability = context["ability"]
-                if hasattr(ability, 'resolve'):
-                    try:
-                        # Use targets directly from the context if they were determined when the ability went on stack
-                        targets_on_stack = context.get("targets")
+            # Validate Targets using Targeting System
+            targets_on_stack = context.get("targets", {}) # Default to empty dict
+            if self.targeting_system: # Check if targeting system exists
+                if not self.targeting_system.validate_targets(ability.card_id, targets_on_stack, controller):
+                    logging.debug(f"Targets for '{getattr(ability, 'effect_text', 'Unknown')}' from {source_name} became invalid. Fizzling.")
+                    return # Fizzle
 
-                        # Validate targets again upon resolution (Rule 608.2b)
-                        if not self.game_state.targeting_system.validate_targets(ability.card_id, targets_on_stack, controller):
-                            logging.debug(f"Targets for {ability.effect_text} became invalid upon resolution. Ability fizzles.")
-                            # Note: Spell/Ability is removed from stack but has no effect.
-                            return # Fizzle
-
-                        # Resolve the ability, passing the validated targets
-                        if hasattr(ability, 'resolve_with_targets') and targets_on_stack is not None:
-                            ability.resolve_with_targets(gs, controller, targets_on_stack)
-                        else:
-                            ability.resolve(gs, controller) # Call resolve if it doesn't need targets or method is standard
-
-                        logging.debug(f"Resolved {ability_type} ability for {source_name}: {ability.effect_text}")
-                        # Trigger "spell/ability resolved" effects? (if applicable)
-                        return
-                    except Exception as e:
-                        # ... (error logging) ...
-                        return
+            # If targets still valid (or none required), resolve the ability
+            try:
+                if hasattr(ability, 'resolve_with_targets') and targets_on_stack:
+                    ability.resolve_with_targets(gs, controller, targets_on_stack)
+                elif hasattr(ability, 'resolve'):
+                    ability.resolve(gs, controller) # Standard resolve
                 else:
-                    logging.error(f"Ability object for {source_name} lacks a resolve method.")
-            else:
-                logging.warning(f"No valid 'ability' object found in context for resolving {ability_type} from {source_name}.")
-                # Maybe try basic effect parsing from context['effect_text'] as fallback?
-                effect_text_from_context = context.get('effect_text', '') if context else ''
-                if effect_text_from_context:
-                    logging.debug("Attempting fallback effect resolution from context text.")
-                    # This bypasses the Ability object's specific logic, use with caution.
-                    effects = EffectFactory.create_effects(effect_text_from_context)
-                    for effect_obj in effects:
-                        targets_from_context = context.get("targets")
-                        # Validate targets for this specific effect if it requires them
-                        if effect_obj.requires_target and not self.game_state.targeting_system.validate_targets(card_id, targets_from_context, controller):
-                            logging.debug(f"Target for effect '{effect_obj.effect_text}' became invalid. Skipping effect.")
-                            continue
-                        effect_obj.apply(gs, card_id, controller, targets_from_context)
-                else:
-                    logging.warning(f"Could not resolve ability {ability_type} from {source_name}: missing ability object and effect text.")
+                    # Fallback using generic resolution if specific resolve missing
+                    logging.warning(f"Ability object for {source_name} lacks specific resolve method. Using generic effect application.")
+                    ability._resolve_ability_effect(gs, controller, targets_on_stack)
+
+                logging.debug(f"Resolved {ability_type} ability for {source_name}: {getattr(ability,'effect_text','Unknown effect')}")
+
+            except Exception as e:
+                logging.error(f"Error resolving ability {ability_type} ({getattr(ability,'effect_text','Unknown')}) for {source_name}: {str(e)}")
+                import traceback
+                logging.error(traceback.format_exc())
+
+        else: # Fallback if 'ability' object missing in context
+             logging.warning(f"No valid 'ability' object found in context for resolving {ability_type} from {source_name}. Attempting fallback resolution from text.")
+             effect_text = context.get('effect_text', '') if context else ''
+             targets_on_stack = context.get("targets", {}) # Get targets passed when added to stack
+             if effect_text:
+                  # Use EffectFactory and generic resolution
+                  effects = EffectFactory.create_effects(effect_text, targets=targets_on_stack)
+                  for effect_obj in effects:
+                       # Re-validate targets just before applying this specific effect?
+                       # Might be overkill if overall validation passed, but safer.
+                       # effect_obj.apply(gs, card_id, controller, targets_on_stack) # Simple apply
+                       # Enhanced apply with pre-validation:
+                       if effect_obj.requires_target and self.targeting_system:
+                            if not self.targeting_system.validate_targets(card_id, targets_on_stack, controller):
+                                 logging.debug(f"Targets invalid for effect '{effect_obj.effect_text}'. Skipping.")
+                                 continue # Skip this specific effect if its targets are now bad
+                       effect_obj.apply(gs, card_id, controller, targets_on_stack)
+             else:
+                  logging.error(f"Cannot resolve {ability_type} from {source_name}: Missing ability object and effect text in context.")
             
     def handle_attack_triggers(self, attacker_id):
         """Handle triggered abilities that trigger when a creature attacks."""
@@ -1725,6 +1621,37 @@ class TargetingSystem:
             # Convert sets back to lists for the final dictionary
             final_valid_targets = {cat: list(ids) for cat, ids in processed_valid.items() if ids}
             return final_valid_targets
+        
+    def _has_keyword_check(self, card, keyword):
+        """Helper within TargetingSystem to check keywords using GS AbilityHandler."""
+        gs = self.game_state
+        if not card or not isinstance(card, Card): return False # Ensure it's a Card object
+        card_id = getattr(card, 'card_id', None)
+        if not card_id: return False
+
+        # Prefer checking via AbilityHandler if available
+        if hasattr(gs, 'ability_handler') and gs.ability_handler:
+            registered_abilities = gs.ability_handler.registered_abilities.get(card_id, [])
+            # Check StaticAbility grants or KeywordAbility instances
+            if any(isinstance(ab, StaticAbility) and f"has {keyword}" in ab.effect for ab in registered_abilities): return True
+            if any(isinstance(ab, KeywordAbility) and ab.keyword == keyword for ab in registered_abilities): return True
+            # Check if the static grant was parsed correctly (alternative check)
+            if any(isinstance(ab, StaticAbility) and ab.effect_text == f"This permanent has {keyword}." for ab in registered_abilities): return True
+
+
+        # Fallback checks (less ideal as they don't respect layer system removals)
+        # Check keywords array on the card object (reflects layers maybe?)
+        if hasattr(card, 'keywords') and isinstance(card.keywords, list):
+            try:
+                idx = Card.ALL_KEYWORDS.index(keyword)
+                if idx < len(card.keywords) and card.keywords[idx] == 1: return True
+            except ValueError: pass
+        # Last resort: Check oracle text directly
+        elif hasattr(card, 'oracle_text') and keyword in getattr(card, 'oracle_text', '').lower():
+             # Add specific checks for multi-word/variants if needed
+             return True
+
+        return False
     
     def resolve_targeting_for_ability(self, card_id, ability_text, controller):
         """
@@ -1809,9 +1736,9 @@ class TargetingSystem:
                  # Protection
                  if self._has_protection_from(target_obj, source_card, target_owner, caster): return False
                  # Hexproof (if targeted by opponent)
-                 if caster != target_owner and self._has_hexproof(target_obj): return False
+                 if caster != target_owner and self._has_keyword_check(target_obj, "hexproof"): return False
                  # Shroud (if targeted by anyone)
-                 if self._has_shroud(target_obj): return False
+                 if self._has_keyword_check(target_obj, "shroud"): return False
                  # Ward (Check handled separately - involves paying cost)
 
 
@@ -2016,97 +1943,57 @@ class TargetingSystem:
         return requirements
 
     
+
     def _has_protection_from(self, target_card, source_card, target_owner, source_controller):
-        """
-        Comprehensive check if target has protection from source.
-        Protection prevents DEBT: Damage, Enchanting/Equipping, Blocking, Targeting
-        """
-        if not target_card or not hasattr(target_card, 'oracle_text'):
-            return False
-            
-        if not source_card:
-            return False
-            
-        oracle_text = target_card.oracle_text.lower()
-        
-        # Check for protection from everything
-        if "protection from everything" in oracle_text:
-            return True
-            
-        # Check for protection from colors
-        if hasattr(source_card, 'colors'):
-            if "protection from white" in oracle_text and source_card.colors[0]:
-                return True
-            if "protection from blue" in oracle_text and source_card.colors[1]:
-                return True
-            if "protection from black" in oracle_text and source_card.colors[2]:
-                return True
-            if "protection from red" in oracle_text and source_card.colors[3]:
-                return True
-            if "protection from green" in oracle_text and source_card.colors[4]:
-                return True
-            if "protection from all colors" in oracle_text and any(source_card.colors):
-                return True
-            if "protection from multicolored" in oracle_text and sum(source_card.colors) > 1:
-                return True
-            if "protection from monocolored" in oracle_text and sum(source_card.colors) == 1:
-                return True
-            if "protection from colorless" in oracle_text and sum(source_card.colors) == 0:
-                return True
-            
-        # Check for protection from card types
-        if hasattr(source_card, 'card_types'):
-            if "protection from creatures" in oracle_text and 'creature' in source_card.card_types:
-                return True
-            if "protection from artifacts" in oracle_text and 'artifact' in source_card.card_types:
-                return True
-            if "protection from enchantments" in oracle_text and 'enchantment' in source_card.card_types:
-                return True
-            if "protection from planeswalkers" in oracle_text and 'planeswalker' in source_card.card_types:
-                return True
-            
-        # Check for protection from specific subtypes
-        if hasattr(source_card, 'subtypes') and hasattr(target_card, 'oracle_text'):
-            for subtype in source_card.subtypes:
-                if f"protection from {subtype.lower()}" in target_card.oracle_text.lower():
-                    return True
-        
-        # Check for protection from players (rare)
-        if target_owner != source_controller and "protection from opponent" in oracle_text:
-            return True
-            
+        """Robust protection check using _has_keyword_check."""
+        if not target_card or not source_card: return False
+
+        # Check specific "protection from X" grants first
+        protection_details = None
+        card_id = getattr(target_card, 'card_id', None)
+        if card_id and hasattr(self.game_state, 'ability_handler'):
+             abilities = self.game_state.ability_handler.registered_abilities.get(card_id, [])
+             for ab in abilities:
+                  if isinstance(ab, StaticAbility) and "protection from" in ab.effect:
+                       protection_details = ab.effect.split("protection from", 1)[-1].strip().lower()
+                       break # Found protection grant
+
+        if protection_details:
+            # Perform checks based on protection_details against source_card
+            source_colors = getattr(source_card, 'colors', [0]*5)
+            source_types = getattr(source_card, 'card_types', [])
+            source_subtypes = getattr(source_card, 'subtypes', [])
+
+            if protection_details == "everything": return True
+            if protection_details == "white" and source_colors[0]: return True
+            if protection_details == "blue" and source_colors[1]: return True
+            if protection_details == "black" and source_colors[2]: return True
+            if protection_details == "red" and source_colors[3]: return True
+            if protection_details == "green" and source_colors[4]: return True
+            if protection_details == "all colors" and any(source_colors): return True
+            if protection_details == "colorless" and not any(source_colors): return True
+            if protection_details == "multicolored" and sum(source_colors) > 1: return True
+            if protection_details == "monocolored" and sum(source_colors) == 1: return True
+            if protection_details == "creatures" and "creature" in source_types: return True
+            if protection_details == "artifacts" and "artifact" in source_types: return True
+            if protection_details == "enchantments" and "enchantment" in source_types: return True
+            if protection_details == "planeswalkers" and "planeswalker" in source_types: return True
+            if protection_details == "instants" and "instant" in source_types: return True
+            if protection_details == "sorceries" and "sorcery" in source_types: return True
+            if protection_details == "opponent" and target_owner != source_controller: return True # Opponent check
+            # Check specific subtypes
+            if protection_details in source_subtypes: return True
+            # Check specific named card? Needs name comparison.
+            if protection_details == getattr(source_card, 'name', '').lower(): return True
+
+        # If no specific grant found via abilities, can fallback to oracle text check if needed
+        # But prefer ability checks as they reflect current game state better potentially
+
         return False
     
     def _has_hexproof(self, card):
-        """Check if card has hexproof or conditional hexproof."""
-        if not card or not hasattr(card, 'oracle_text'):
-            return False
-            
-        oracle_text = card.oracle_text.lower()
-        
-        # Check for standard hexproof
-        if "hexproof" in oracle_text:
-            # Check for conditional hexproof
-            if "hexproof from" in oracle_text:
-                # Common conditional hexproof variants
-                if "hexproof from white" in oracle_text:
-                    # Would need to check source color here
-                    return False  # For now, assume source doesn't match
-                if "hexproof from blue" in oracle_text:
-                    return False
-                if "hexproof from black" in oracle_text:
-                    return False
-                if "hexproof from red" in oracle_text:
-                    return False
-                if "hexproof from green" in oracle_text:
-                    return False
-                if "hexproof from multicolored" in oracle_text:
-                    return False
-            else:
-                # Standard hexproof prevents all opponent targeting
-                return True
-            
-        return False
+        """Robust hexproof check using _has_keyword_check."""
+        return self._has_keyword_check(card, "hexproof")
     
     def _has_shroud(self, card):
         """Check if card has shroud."""

@@ -3621,11 +3621,6 @@ class KeywordEffects:
         
         return True
 
-    def _apply_changeling(self, card_id, event_type, context=None):
-        # Modifies subtype checks. The logic needs to be in places where subtypes are checked.
-        # This handler just confirms the keyword exists.
-        return True
-
     def _apply_cipher(self, card_id, event_type, context=None):
         """
         Cipher ability: When the encoded spell deals combat damage, you may cast a copy
@@ -5897,59 +5892,6 @@ class KeywordEffects:
         
         return True
     
-    def _apply_trample(self, card_id, event_type, context=None):
-        # Handled by Combat Resolver's _process_attacker_damage
-        return True
-    
-    def _apply_hexproof(self, card_id, event_type, context=None):
-        # Handled by Targeting System's _is_valid_..._target methods
-        return True
-        
-    def _apply_lifelink(self, card_id, event_type, context=None):
-        # Handled by Combat Resolver's damage application and ReplacementEffectSystem
-        return True
-    
-    def _apply_deathtouch(self, card_id, event_type, context=None):
-        # Handled by Combat Resolver's damage application and ReplacementEffectSystem
-        return True
-    
-    def _apply_first_strike(self, card_id, event_type, context=None):
-        # Handled by Combat Resolver's resolve_combat method
-        return True
-
-    def _apply_double_strike(self, card_id, event_type, context=None):
-        # Handled by Combat Resolver's resolve_combat method
-        return True
-    
-    def _apply_vigilance(self, card_id, event_type, context=None):
-        # Prevents tapping when attacking - handled by ATTACKS handler/resolution
-        return True
-    
-    def _apply_flash(self, card_id, event_type, context=None):
-        """Apply flash ability effects - allows casting at instant speed"""
-        # This is handled in action validation, not here
-        return True
-    
-    def _apply_haste(self, card_id, event_type, context=None):
-        # Removes summoning sickness - handled by Action Handler's validation
-        return True
-    
-    def _apply_menace(self, card_id, event_type, context=None):
-        # Handled by Combat Resolver's _check_block_restrictions
-        return True
-    
-    def _apply_reach(self, card_id, event_type, context=None):
-        # Allows blocking fliers - handled by Combat Resolver's _check_block_restrictions
-        return True
-    
-    def _apply_defender(self, card_id, event_type, context=None):
-        # Prevents attacking - handled by Action Handler's validation
-        return True
-    
-    def _apply_indestructible(self, card_id, event_type, context=None):
-        # Handled by State Based Actions check and DestroyEffect
-        return True    
-    
     def _apply_boast(self, card_id, event_type, context=None):
         """Apply boast ability effects (activate only if creature attacked this turn)"""
         gs = self.game_state
@@ -6412,30 +6354,6 @@ class KeywordEffects:
             logging.debug(f"Awaken: Turned {target_land.name} into a {awaken_value}/{awaken_value} creature with {awaken_value} +1/+1 counters")
             
         return True
-    
-    def _apply_battle(self, card_id, event_type, context=None):
-        # Handled by Battle card logic in GameState/Card
-        return True
-
-    def _apply_saga(self, card_id, event_type, context=None):
-        # Handled by Saga card logic in GameState/Card
-        return True
-
-    def _apply_adventure(self, card_id, event_type, context=None):
-        # Handled by Adventure card logic in GameState/Card/ActionHandler
-        return True
-
-    def _apply_mdfc(self, card_id, event_type, context=None):
-        # Handled by MDFC logic in GameState/Card/ActionHandler
-        return True
-
-    def _apply_room_door_state(self, card_id, event_type, context=None):
-        # Handled by Room card logic in GameState/Card/ActionHandler
-        return True
-
-    def _apply_class_level(self, card_id, event_type, context=None):
-        # Handled by Class card logic in GameState/Card/ActionHandler
-        return True
         
     def _apply_spree(self, card_id, event_type, context=None):
         """Apply effects for the spree keyword."""
@@ -6790,16 +6708,6 @@ class KeywordEffects:
                 
         return True
 
-
-    def _apply_protection(self, card_id, event_type, context=None):
-        # Handled by Targeting System and Combat Resolver
-        return True
-    
-    def _apply_ward(self, card_id, event_type, context=None):
-        # Handled by Targeting System (requires opponent payment or counter)
-        return True
-
-
     def _apply_afterlife(self, card_id, event_type, context=None):
         gs = self.game_state
         if event_type == "DIES":
@@ -7102,6 +7010,33 @@ class KeywordEffects:
                       logging.debug(f"Prowess: {gs._safe_get_card(card_id).name} gets +1/+1.")
         return True
     
+    def _apply_riot(self, card_id, event_type, context=None):
+        gs = self.game_state
+        if event_type == "ENTERS_BATTLEFIELD":
+            card = gs._safe_get_card(card_id)
+            if not card: return True
+            controller = gs.get_card_controller(card_id)
+            if not controller: return True
+
+            # AI Choice: Haste or +1/+1 counter? Simple: Choose haste if creature has high power already.
+            choose_haste = getattr(card, 'power', 0) >= 3
+            if choose_haste:
+                 if hasattr(gs, 'give_haste_until_eot'): gs.give_haste_until_eot(card_id)
+                 logging.debug(f"Riot: {card.name} chose haste.")
+            else:
+                 if hasattr(gs, 'add_counter'): gs.add_counter(card_id, "+1/+1", 1)
+                 logging.debug(f"Riot: {card.name} chose a +1/+1 counter.")
+        return True
+    
+    #all these could likely be removed
+    def _apply_protection(self, card_id, event_type, context=None):
+        # Handled by Targeting System and Combat Resolver
+        return True
+    
+    def _apply_ward(self, card_id, event_type, context=None):
+        # Handled by Targeting System (requires opponent payment or counter)
+        return True
+    
     def _apply_scry(self, card_id, event_type, context=None):
         # Usually triggered by spell resolution - handled in resolve_spell_effects
         return True
@@ -7130,25 +7065,6 @@ class KeywordEffects:
     def _apply_undying(self, card_id, event_type, context=None):
         # Triggered on death - handled in DIES trigger processing
         return True
-    
-    def _apply_riot(self, card_id, event_type, context=None):
-        gs = self.game_state
-        if event_type == "ENTERS_BATTLEFIELD":
-            card = gs._safe_get_card(card_id)
-            if not card: return True
-            controller = gs.get_card_controller(card_id)
-            if not controller: return True
-
-            # AI Choice: Haste or +1/+1 counter? Simple: Choose haste if creature has high power already.
-            choose_haste = getattr(card, 'power', 0) >= 3
-            if choose_haste:
-                 if hasattr(gs, 'give_haste_until_eot'): gs.give_haste_until_eot(card_id)
-                 logging.debug(f"Riot: {card.name} chose haste.")
-            else:
-                 if hasattr(gs, 'add_counter'): gs.add_counter(card_id, "+1/+1", 1)
-                 logging.debug(f"Riot: {card.name} chose a +1/+1 counter.")
-        return True
-    
 
     def _apply_enrage(self, card_id, event_type, context=None):
         # Triggered when damaged - handled in damage application / triggers
@@ -7169,4 +7085,86 @@ class KeywordEffects:
 
     def _apply_convoke(self, card_id, event_type, context=None):
         # Casting cost modification - handled in Mana System / Casting
+        return True
+    
+    def _apply_trample(self, card_id, event_type, context=None):
+        # Handled by Combat Resolver's _process_attacker_damage
+        return True
+    
+    def _apply_hexproof(self, card_id, event_type, context=None):
+        # Handled by Targeting System's _is_valid_..._target methods
+        return True
+        
+    def _apply_lifelink(self, card_id, event_type, context=None):
+        # Handled by Combat Resolver's damage application and ReplacementEffectSystem
+        return True
+    
+    def _apply_deathtouch(self, card_id, event_type, context=None):
+        # Handled by Combat Resolver's damage application and ReplacementEffectSystem
+        return True
+    
+    def _apply_first_strike(self, card_id, event_type, context=None):
+        # Handled by Combat Resolver's resolve_combat method
+        return True
+
+    def _apply_double_strike(self, card_id, event_type, context=None):
+        # Handled by Combat Resolver's resolve_combat method
+        return True
+    
+    def _apply_vigilance(self, card_id, event_type, context=None):
+        # Prevents tapping when attacking - handled by ATTACKS handler/resolution
+        return True
+    
+    def _apply_flash(self, card_id, event_type, context=None):
+        """Apply flash ability effects - allows casting at instant speed"""
+        # This is handled in action validation, not here
+        return True
+    
+    def _apply_haste(self, card_id, event_type, context=None):
+        # Removes summoning sickness - handled by Action Handler's validation
+        return True
+    
+    def _apply_menace(self, card_id, event_type, context=None):
+        # Handled by Combat Resolver's _check_block_restrictions
+        return True
+    
+    def _apply_reach(self, card_id, event_type, context=None):
+        # Allows blocking fliers - handled by Combat Resolver's _check_block_restrictions
+        return True
+    
+    def _apply_defender(self, card_id, event_type, context=None):
+        # Prevents attacking - handled by Action Handler's validation
+        return True
+    
+    def _apply_indestructible(self, card_id, event_type, context=None):
+        # Handled by State Based Actions check and DestroyEffect
+        return True
+    
+    def _apply_changeling(self, card_id, event_type, context=None):
+        # Modifies subtype checks. The logic needs to be in places where subtypes are checked.
+        # This handler just confirms the keyword exists.
+        return True
+
+    def _apply_battle(self, card_id, event_type, context=None):
+        # Handled by Battle card logic in GameState/Card
+        return True
+
+    def _apply_saga(self, card_id, event_type, context=None):
+        # Handled by Saga card logic in GameState/Card
+        return True
+
+    def _apply_adventure(self, card_id, event_type, context=None):
+        # Handled by Adventure card logic in GameState/Card/ActionHandler
+        return True
+
+    def _apply_mdfc(self, card_id, event_type, context=None):
+        # Handled by MDFC logic in GameState/Card/ActionHandler
+        return True
+
+    def _apply_room_door_state(self, card_id, event_type, context=None):
+        # Handled by Room card logic in GameState/Card/ActionHandler
+        return True
+
+    def _apply_class_level(self, card_id, event_type, context=None):
+        # Handled by Class card logic in GameState/Card/ActionHandler
         return True
