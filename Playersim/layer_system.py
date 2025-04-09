@@ -1,6 +1,7 @@
 import logging
 from collections import defaultdict
 from .card import Card
+import re
 class LayerSystem:
     """
     Implements the 7-layer system for applying continuous effects in MTG.
@@ -386,23 +387,28 @@ class LayerSystem:
     def _update_final_keywords(self, char_dict):
          """ Recalculates the 'keywords' array based on inherent, granted, and removed abilities. """
          # 1. Start with inherent keywords (from potentially copied/text-changed state)
-         inherent_keywords_set = self._approximate_keywords_set(char_dict['oracle_text'])
+         inherent_keywords_set = self._approximate_keywords_set(char_dict.get('oracle_text', ''))
 
          # 2. Add granted abilities/keywords
-         granted_set = char_dict['_granted_abilities']
+         granted_set = char_dict.get('_granted_abilities', set())
 
          # 3. Remove removed abilities/keywords
-         removed_set = char_dict['_removed_abilities']
+         removed_set = char_dict.get('_removed_abilities', set())
 
+         # Calculate final set of active keywords
          final_keywords_set = (inherent_keywords_set.union(granted_set)) - removed_set
 
          # 4. Convert back to array/list format expected
-         final_keyword_list = [0] * len(Card.ALL_KEYWORDS) # Assuming Card class accessible
+         final_keyword_list = [0] * len(Card.ALL_KEYWORDS)
          for i, kw in enumerate(Card.ALL_KEYWORDS):
+              # Normalize keyword from ALL_KEYWORDS for comparison
               if kw.lower() in final_keywords_set:
                    final_keyword_list[i] = 1
 
          char_dict['keywords'] = final_keyword_list
+         # Log the final keywords for debugging if needed
+         # active_kws = [kw for i, kw in enumerate(Card.ALL_KEYWORDS) if final_keyword_list[i] == 1]
+         # logging.debug(f"Final keywords for {char_dict.get('name', 'Unknown')}: {active_kws}")
 
     def _get_all_inherent_abilities(self, card_id):
         """ Helper to get the set of inherent abilities/keywords from a card's (potentially modified) text. """
@@ -418,9 +424,25 @@ class LayerSystem:
          found_keywords = set()
          if not oracle_text: return found_keywords
          text_lower = oracle_text.lower()
+         # Improved check using word boundaries for some keywords
          for kw in Card.ALL_KEYWORDS:
-              if kw in text_lower: # Basic check
-                   found_keywords.add(kw)
+              kw_lower = kw.lower()
+              # Use word boundaries for single-word keywords prone to false positives
+              if ' ' not in kw_lower and kw_lower in ["flash", "haste", "reach", "ward", "fear", "band"]:
+                   if re.search(r'\b' + re.escape(kw_lower) + r'\b', text_lower):
+                        found_keywords.add(kw_lower)
+              # Use simple substring check for multi-word or less ambiguous keywords
+              elif kw_lower in text_lower:
+                    # Add specific checks for variations if needed
+                    if kw_lower == 'protection' and 'protection from' in text_lower: found_keywords.add(kw_lower)
+                    elif kw_lower == 'landwalk' and 'walk' in text_lower: found_keywords.add(kw_lower) # Simple check
+                    elif kw_lower not in ['protection', 'landwalk']: # Avoid double adding
+                         found_keywords.add(kw_lower)
+
+         # Special case for "can't be blocked"
+         if "can't be blocked" in text_lower:
+              found_keywords.add("unblockable")
+
          return found_keywords
 
     # Layer 7 Helpers

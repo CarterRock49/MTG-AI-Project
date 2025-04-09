@@ -218,19 +218,6 @@ class CombatActionHandler:
              if num_valid_for_this_attacker >= 2:
                  if atk_idx < 10: # Action 383-392 assume attacker index 0-9
                     set_valid_action(383 + atk_idx, f"ASSIGN_MULTIPLE_BLOCKERS to {attacker_card.name} (Atk Index {atk_idx})")
-     
-        
-    def _has_first_strike(self, card):
-        """Check if a card has first strike."""
-        # Prioritize checking keywords attribute if available and correct length
-        if hasattr(card, 'keywords') and isinstance(card.keywords, list) and len(card.keywords) > 5:
-            return card.keywords[5] == 1 # Index 5 = First Strike
-
-        # Fallback to oracle text
-        if card and hasattr(card, 'oracle_text') and "first strike" in card.oracle_text.lower():
-            return True
-
-        return False
 
             
     def setup_combat_systems(self):
@@ -852,29 +839,6 @@ class CombatActionHandler:
              logging.info(f"{gs._safe_get_card(defender_id).name} assigned to block {gs._safe_get_card(attacker_id).name} (protecting PW {gs._safe_get_card(target_pw_id).name})")
              return True
         return False # Already assigned
-
-        # --- Find Defender ---
-        player = gs._get_active_player() # The player who CONTROLS the potential blocker
-        defender_id = None
-        if isinstance(defender_idx_or_id, int): # Assume index on player's battlefield
-            if 0 <= defender_idx_or_id < len(player["battlefield"]):
-                 defender_id = player["battlefield"][defender_idx_or_id]
-        elif isinstance(defender_idx_or_id, str): # Assume card ID
-            if defender_idx_or_id in player["battlefield"]: defender_id = defender_idx_or_id
-        if not defender_id: return False # Invalid defender
-
-        # --- Validate Blocker ---
-        if not self._can_block(defender_id, attacker_id): # Check if defender can block attacker
-            logging.warning(f"Defender {gs._safe_get_card(defender_id).name} cannot block attacker {gs._safe_get_card(attacker_id).name}")
-            return False
-
-        # --- Assign Block ---
-        if attacker_id not in gs.current_block_assignments: gs.current_block_assignments[attacker_id] = []
-        if defender_id not in gs.current_block_assignments[attacker_id]:
-             gs.current_block_assignments[attacker_id].append(defender_id)
-             logging.info(f"{gs._safe_get_card(defender_id).name} assigned to block {gs._safe_get_card(attacker_id).name} (protecting PW {gs._safe_get_card(target_pw_id).name})")
-             return True
-        return False # Already assigned
     
     # --- Mana Cost String Helpers ---
     def _get_equip_cost_str(self, card):
@@ -923,31 +887,30 @@ class CombatActionHandler:
     def _can_block(self, blocker_id, attacker_id):
         """Check if blocker_id can legally block attacker_id."""
         gs = self.game_state
-        # Use resolver's check if available
-        # Adjusted to use check_can_be_blocked from TargetingSystem if resolver missing specific method
-        if hasattr(gs, 'combat_resolver') and hasattr(gs.combat_resolver, '_check_block_restrictions'):
-            return gs.combat_resolver._check_block_restrictions(attacker_id, blocker_id)
-        elif hasattr(gs, 'targeting_system') and hasattr(gs.targeting_system, 'check_can_be_blocked'):
+        # Use targeting_system's check_can_be_blocked method
+        if hasattr(gs, 'targeting_system') and gs.targeting_system:
             return gs.targeting_system.check_can_be_blocked(attacker_id, blocker_id)
+
         # Basic fallback (should be avoided if possible)
-        logging.warning("Using basic _can_block fallback.")
+        logging.warning("Using basic _can_block fallback in CombatActionHandler.")
         blocker = gs._safe_get_card(blocker_id); attacker = gs._safe_get_card(attacker_id)
         if not blocker or not attacker: return False
-        # ... (keep basic checks like flying/reach/can't block as fallback) ...
         if self._has_keyword(attacker, "flying") and not (self._has_keyword(blocker, "flying") or self._has_keyword(blocker, "reach")): return False
         if self._has_keyword(blocker, "can't block"): return False
-        # Assume true for fallback if basic checks pass
         return True
 
     def _has_keyword(self, card, keyword):
         """Checks if a card has a keyword using the central AbilityHandler."""
         gs = self.game_state
         if hasattr(gs, 'ability_handler') and gs.ability_handler:
-             # Assumes AbilityHandler has a method like this
-             if hasattr(gs.ability_handler, '_has_keyword_check'):
-                 return gs.ability_handler._has_keyword_check(card, keyword)
-        # Fallback basic check if no handler or method
-        elif card and hasattr(card, 'oracle_text') and isinstance(card.oracle_text, str):
+             card_id = getattr(card, 'card_id', None)
+             if card_id:
+                  # Assumes AbilityHandler has a check_keyword method
+                  return gs.ability_handler.check_keyword(card_id, keyword)
+
+        # Fallback basic check if no handler or method found
+        logging.warning(f"Using basic keyword fallback check for {keyword} on {getattr(card, 'name', 'Unknown')}")
+        if card and hasattr(card, 'oracle_text') and isinstance(card.oracle_text, str):
              return keyword.lower() in card.oracle_text.lower()
         return False
      

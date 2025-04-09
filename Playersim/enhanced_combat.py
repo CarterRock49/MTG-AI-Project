@@ -362,6 +362,21 @@ class ExtendedCombatResolver(EnhancedCombatResolver):
              self.potential_lifegain[attacker_player['name']] += total_damage_dealt
 
         return total_damage_dealt # Return total assigned damage
+    
+    def _has_keyword(self, card, keyword):
+        """Checks if a card has a keyword using the central AbilityHandler."""
+        gs = self.game_state
+        if hasattr(gs, 'ability_handler') and gs.ability_handler:
+             card_id = getattr(card, 'card_id', None)
+             if card_id:
+                  # Assumes AbilityHandler has a check_keyword method
+                  return gs.ability_handler.check_keyword(card_id, keyword)
+
+        # Fallback basic check if no handler or method found
+        logging.warning(f"Using basic keyword fallback check for {keyword} on {getattr(card, 'name', 'Unknown')}")
+        if card and hasattr(card, 'oracle_text') and isinstance(card.oracle_text, str):
+             return keyword.lower() in card.oracle_text.lower()
+        return False
         
     def _process_planeswalker_damage(self, attacker_id, attacker_player, planeswalker_id, damage_to_creatures, creatures_dealt_damage):
         """Process damage to a planeswalker."""
@@ -417,8 +432,6 @@ class ExtendedCombatResolver(EnhancedCombatResolver):
             logging.debug(f"COMBAT: Lifelink from {attacker_card.name} gained {damage} life (vs Battle)")
 
         return damage
-    
-    
         
     def _apply_planeswalker_damage(self):
         """Apply damage to planeswalkers and check if any died with enhanced effect processing"""

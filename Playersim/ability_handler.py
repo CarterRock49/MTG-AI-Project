@@ -1,10 +1,13 @@
 import logging
+# Remove KeywordEffects if not used directly after refactoring
+# from .keyword_effects import KeywordEffects
 from .ability_types import Ability, ActivatedAbility, TriggeredAbility, StaticAbility, KeywordAbility, ManaAbility, AbilityEffect
 import re
 from collections import defaultdict
 from .card import Card
-from .keyword_effects import KeywordEffects
 from .ability_utils import EffectFactory
+# *** CHANGED: Import TargetingSystem from its new file ***
+from .targeting import TargetingSystem # Import TargetingSystem from targeting.py
 
 class AbilityHandler:
     """Handles card abilities and special effects"""
@@ -17,19 +20,16 @@ class AbilityHandler:
         self.targeting_system = None # Initialize targeting system reference
 
         if game_state is not None:
-            self._initialize_abilities()
-            # Initialize TargetingSystem here after GameState is available
+            # *** CHANGED: Initialize TargetingSystem correctly ***
             try:
-                 # Make sure TargetingSystem is imported correctly
-                 from .ability_handler import TargetingSystem
                  self.targeting_system = TargetingSystem(game_state)
                  # Link it back to the game_state if necessary
                  if not hasattr(game_state, 'targeting_system'):
                       game_state.targeting_system = self.targeting_system
-            except ImportError as e:
-                 logging.error(f"Could not import TargetingSystem: {e}")
             except Exception as e:
                  logging.error(f"Error initializing TargetingSystem: {e}")
+            # Initialize abilities AFTER targeting system is ready, if needed
+            self._initialize_abilities()
 
 
     def handle_class_level_up(self, class_idx):
@@ -765,132 +765,159 @@ class AbilityHandler:
                  ability.apply(self.game_state)
 
     def _create_keyword_ability(self, card_id, card, keyword_name, abilities_list, full_keyword_text=None):
-        """Creates the appropriate Ability object for a given keyword. Now handles parameters."""
-        keyword_lower = keyword_name.lower()
-        full_text = (full_keyword_text or keyword_name).lower() # Use full text if provided for parameter parsing
+            """
+            Creates the appropriate Ability object for a given keyword. Handles parameters better.
+            Acknowledges complexity for keywords requiring specific rules/effects.
+            """
+            keyword_lower = keyword_name.lower()
+            full_text = (full_keyword_text or keyword_name).lower() # Use full text if provided
 
-        # Check if this exact keyword (considering parameters potentially) is already added
-        # This requires KeywordAbility to store its parameters if applicable
-        # For now, using simple name check.
-        if any(isinstance(a, (KeywordAbility, StaticAbility, TriggeredAbility, ActivatedAbility)) and getattr(a, 'keyword', None) == keyword_lower for a in abilities_list):
-             return # Avoid duplicates based on simple name match
+            # Avoid duplicates based on simple name match (can be enhanced later)
+            if any(isinstance(a, (KeywordAbility, StaticAbility, TriggeredAbility, ActivatedAbility)) and getattr(a, 'keyword', None) == keyword_lower for a in abilities_list):
+                 return
 
-        # Helper to parse value like "Keyword N"
-        def parse_value(text, keyword):
-             match = re.search(rf"{keyword}\s+(\d+)", text)
-             return int(match.group(1)) if match else 1 # Default to 1 if no number
+            def parse_value(text, keyword):
+                 match = re.search(rf"{re.escape(keyword)}\s+(\d+)", text)
+                 return int(match.group(1)) if match else 1
 
-        # Static Combat Keywords -> StaticAbility granting the keyword
-        static_combat = ["flying", "first strike", "double strike", "trample", "vigilance", "haste", "menace", "reach", "defender", "indestructible", "hexproof", "shroud", "unblockable", "fear", "intimidate", "shadow", "horsemanship", "flanking", "banding", "decayed", "phasing"]
-        if keyword_lower in static_combat:
-             ability_effect_text = f"This permanent has {full_text}."
-             abilities_list.append(StaticAbility(card_id, ability_effect_text, ability_effect_text))
-             setattr(abilities_list[-1], 'keyword', keyword_lower) # Add keyword attr for tracking
-             return
+            def parse_cost(text, keyword):
+                 # Enhanced cost parsing to handle various formats {W}{2}, {X}, etc.
+                 cost_patterns = [
+                     rf"{re.escape(keyword)}\s*(?:—|-|:)?\s*(\{{[^\}}]+\}}|\d+|[xX])"
+                     rf"{re.escape(keyword)}\s*(\d+)\b", # Just a number
+                     rf"{re.escape(keyword)}\s*(\{{[xX]\}})\b", # {X}
+                 ]
+                 for pattern in cost_patterns:
+                     match = re.search(pattern, text)
+                     if match:
+                         cost_part = match.group(1)
+                         if cost_part.isdigit(): return f"{{{cost_part}}}" # Normalize number
+                         return cost_part # Return cost string like {W}{2} or {X}
+                 return "{0}" # Default free if no cost found
 
-        # Other Static Keywords -> StaticAbility + potentially specific layer logic registration
-        if keyword_lower in ["lifelink", "deathtouch", "changeling", "devoid", "protection", "ward"]:
-             ability_effect_text = f"This permanent has {full_text}."
-             # Need to pass parameters like "protection from red" or "ward {2}"
-             # The StaticAbility object itself might store this parameter if needed,
-             # or the LayerSystem registration parses it from the effect_text.
-             abilities_list.append(StaticAbility(card_id, ability_effect_text, ability_effect_text))
-             setattr(abilities_list[-1], 'keyword', keyword_lower) # Add keyword attr for tracking
-             return
+            # --- Static Combat/Attribute Keywords -> StaticAbility grant ---
+            static_keywords = [
+                "flying", "first strike", "double strike", "trample", "vigilance", "haste",
+                "menace", "reach", "defender", "indestructible", "hexproof", "shroud",
+                "unblockable", "fear", "intimidate", "shadow", "horsemanship", "flanking", # Note: Flanking also has a trigger
+                "banding", "phasing", "lifelink", "deathtouch", "changeling", "devoid",
+                "protection", "ward" # Protection/Ward parameters handled via effect_text
+            ]
+            if keyword_lower in static_keywords:
+                 # The effect text includes parameters like "protection from red" or "ward {2}"
+                 ability_effect_text = f"This permanent has {full_text}."
+                 ability = StaticAbility(card_id, ability_effect_text, ability_effect_text)
+                 setattr(ability, 'keyword', keyword_lower)
+                 abilities_list.append(ability)
+                 return
 
-        # Triggered Keywords -> TriggeredAbility
-        triggered_map = {
-             "prowess": ("whenever you cast a noncreature spell", "this creature gets +1/+1 until end of turn"),
-             "cascade": ("when you cast this spell", "exile cards from the top of your library until you exile a nonland card that costs less. you may cast it without paying its mana cost."),
-             "storm": ("when you cast this spell", "copy it for each spell cast before it this turn."),
-             "riot": ("this permanent enters the battlefield", "choose haste or a +1/+1 counter"), # Needs choice handling
-             "enrage": ("whenever this creature is dealt damage", "{effect_from_oracle}"), # Needs effect parsing
-             "afflict": ("whenever this creature becomes blocked", "defending player loses N life"), # Needs N parsing
-             "mentor": ("whenever this creature attacks", "put a +1/+1 counter on target attacking creature with lesser power."), # Needs targeting
-             "afterlife": ("when this permanent dies", "create N 1/1 white and black Spirit creature tokens with flying."), # Needs N parsing
-             "annihilator": ("whenever this creature attacks", "defending player sacrifices N permanents."), # Needs N parsing
-             "bloodthirst": ("this creature enters the battlefield", "if an opponent was dealt damage this turn, it enters with N +1/+1 counters."), # Needs N parsing & condition check
-             "bushido": ("whenever this creature blocks or becomes blocked", "it gets +N/+N until end of turn."), # Needs N parsing
-             "evolve": ("whenever a creature enters the battlefield under your control", "if that creature has greater power or toughness than this creature, put a +1/+1 counter on this creature."),
-             "fabricate": ("when this permanent enters the battlefield", "put N +1/+1 counters on it or create N 1/1 colorless Servo artifact creature tokens."), # Needs N parsing & choice
-             "fading": ("this permanent enters the battlefield", "it enters with N fade counters on it. at the beginning of your upkeep, remove a fade counter. if you can't, sacrifice it."), # Needs N parsing & upkeep trigger
-             "flanking": ("whenever a creature without flanking blocks this creature", "the blocking creature gets -1/-1 until end of turn."),
-             "gravestorm": ("when you cast this spell", "copy it for each permanent put into a graveyard this turn."),
-             "haunt": ("when this permanent dies", "exile it haunting target creature."), # Needs effect on haunted creature death
-             "ingest": ("whenever this creature deals combat damage to a player", "that player exiles the top card of their library."),
-             "infect": ("this deals damage", "deals damage to creatures in the form of -1/-1 counters and players in the form of poison counters."), # Static effect + trigger interpretation
-             "modular": ("this enters the battlefield", "with N +1/+1 counters. when it dies, you may put its +1/+1 counters on target artifact creature."), # Needs N parsing & death trigger
-             "persist": ("when this permanent dies", "if it had no -1/-1 counters, return it with a -1/-1 counter."),
-             "poisonous": ("whenever this creature deals combat damage to a player", "that player gets N poison counters."), # Needs N parsing
-             "rampage": ("whenever this creature becomes blocked", "it gets +N/+N for each creature blocking it beyond the first."), # Needs N parsing
-             "renown": ("whenever this creature deals combat damage to a player", "if it isn't renowned, put N +1/+1 counters on it and it becomes renowned."), # Needs N parsing & state tracking
-             "ripple": ("when you cast this spell", "you may reveal the top N cards of your library. you may cast any revealed cards with the same name without paying their mana costs."), # Needs N parsing
-             "soulshift": ("when this permanent dies", "you may return target spirit card with cmc N or less from your graveyard to hand."), # Needs N parsing
-             "sunburst": ("this permanent enters the battlefield", "with a +1/+1 counter or charge counter for each color of mana spent to cast it."), # Needs mana spent tracking
-             "training": ("whenever this creature attacks with another creature with greater power", "put a +1/+1 counter on this creature."),
-             "undying": ("when this permanent dies", "if it had no +1/+1 counters, return it with a +1/+1 counter."),
-             "vanishing": ("this permanent enters the battlefield", "with N time counters. at the beginning of your upkeep, remove a time counter. when the last is removed, sacrifice it."), # Needs N parsing & upkeep trigger
-             "wither": ("this deals damage", "deals damage to creatures in the form of -1/-1 counters."), # Static effect + trigger interpretation
-        }
-        if keyword_lower in triggered_map:
-             trigger, effect = triggered_map[keyword_lower]
-             # Replace N or parse specific effects
-             val = parse_value(full_text, keyword_lower)
-             effect = effect.replace(" N ", f" {val} ") # Simple replacement
-             # TODO: More complex effect parsing/parameterization needed for many keywords
-             abilities_list.append(TriggeredAbility(card_id, trigger, effect, full_text))
-             setattr(abilities_list[-1], 'keyword', keyword_lower)
-             return
+            # --- Triggered Keywords -> TriggeredAbility ---
+            # (Map updated slightly, simplified effects where full impl is complex)
+            triggered_map = {
+                 "prowess": ("whenever you cast a noncreature spell", "this creature gets +1/+1 until end of turn"),
+                 "cascade": ("when you cast this spell", "cascade."), # Effect handled by game logic
+                 "storm": ("when you cast this spell", "storm."), # Effect handled by game logic
+                 "riot": ("this permanent enters the battlefield", "choose haste or a +1/+1 counter"),
+                 "enrage": ("whenever this creature is dealt damage", "{effect_from_oracle}"), # Placeholder
+                 "afflict": ("whenever this creature becomes blocked", "defending player loses N life"),
+                 "mentor": ("whenever this creature attacks", "put a +1/+1 counter on target attacking creature with lesser power."),
+                 "afterlife": ("when this permanent dies", "create N 1/1 white and black Spirit creature tokens with flying."),
+                 "annihilator": ("whenever this creature attacks", "defending player sacrifices N permanents."),
+                 "bloodthirst": ("this creature enters the battlefield", "if an opponent was dealt damage this turn, it enters with N +1/+1 counters."),
+                 "bushido": ("whenever this creature blocks or becomes blocked", "it gets +N/+N until end of turn."),
+                 "evolve": ("whenever a creature enters the battlefield under your control", "if that creature has greater power or toughness than this creature, put a +1/+1 counter on this creature."),
+                 "fabricate": ("when this permanent enters the battlefield", "put N +1/+1 counters on it or create N 1/1 colorless Servo artifact creature tokens."),
+                 "fading": ("this permanent enters the battlefield", "it enters with N fade counters on it. at the beginning of your upkeep, remove a fade counter. if you can't, sacrifice it."),
+                 "flanking": ("whenever a creature without flanking blocks this creature", "the blocking creature gets -1/-1 until end of turn."),
+                 "gravestorm": ("when you cast this spell", "gravestorm."), # Effect handled by game logic
+                 "haunt": ("when this permanent dies", "exile it haunting target creature. (Haunt trigger happens when haunted creature dies)"),
+                 "ingest": ("whenever this creature deals combat damage to a player", "that player exiles the top card of their library."),
+                 "infect": ("this deals damage", "damage is dealt in the form of -1/-1 counters (creatures) or poison counters (players)."), # Static/replacement
+                 "modular": ("this enters the battlefield", "with N +1/+1 counters. when it dies, you may put its +1/+1 counters on target artifact creature."),
+                 "persist": ("when this permanent dies", "if it had no -1/-1 counters, return it with a -1/-1 counter."),
+                 "poisonous": ("whenever this creature deals combat damage to a player", "that player gets N poison counters."),
+                 "rampage": ("whenever this creature becomes blocked", "it gets +N/+N for each creature blocking it beyond the first."),
+                 "renown": ("whenever this creature deals combat damage to a player", "if it isn't renowned, put N +1/+1 counters on it and it becomes renowned."),
+                 "ripple": ("when you cast this spell", "ripple N."), # Effect handled by game logic
+                 "soulshift": ("when this permanent dies", "you may return target spirit card with mana value N or less from your graveyard to hand."),
+                 "sunburst": ("this permanent enters the battlefield", "with a +1/+1 counter or charge counter for each color of mana spent to cast it."),
+                 "training": ("whenever this creature attacks with another creature with greater power", "put a +1/+1 counter on this creature."),
+                 "undying": ("when this permanent dies", "if it had no +1/+1 counters, return it with a +1/+1 counter."),
+                 "vanishing": ("this permanent enters the battlefield", "with N time counters. at the beginning of your upkeep, remove a time counter. when the last is removed, sacrifice it."),
+                 "wither": ("this deals damage", "damage is dealt to creatures in the form of -1/-1 counters."), # Static/replacement
+                 # --- Add potentially missed triggered keywords ---
+                 "decayed": ("this creature can't block. when it attacks", "sacrifice it at end of combat."),
+                 "battle cry": ("whenever this creature attacks", "each other attacking creature gets +1/+0 until end of turn."),
+                 "explore": ("when this creature enters the battlefield", "explore."), # Effect handled by game logic
+                 "extort": ("whenever you cast a spell", "you may pay {W/B}. if you do, each opponent loses 1 life and you gain that much life."),
+                 "melee": ("whenever this creature attacks", "it gets +1/+1 until end of turn for each opponent you attacked this combat."),
+                 "investigate": ("when {condition}", "create a Clue token."), # Trigger varies
+            }
+            if keyword_lower in triggered_map:
+                 trigger, effect = triggered_map[keyword_lower]
+                 val = parse_value(full_text, keyword_lower)
+                 effect = effect.replace(" N ", f" {val} ")
+                 # Create TriggeredAbility, but acknowledge complex effects might need specific handlers
+                 ability = TriggeredAbility(card_id, trigger, effect, full_text)
+                 setattr(ability, 'keyword', keyword_lower)
+                 abilities_list.append(ability)
+                 return
 
-        # Activated Keywords -> ActivatedAbility
-        activated_map = {
-            "cycling": ("draw a card."),
-            "equip": ("attach to target creature you control. activate only as a sorcery."),
-            "fortify": ("attach to target land you control. activate only as a sorcery."),
-            "unearth": ("return this card from your graveyard to the battlefield. it gains haste. exile it at the beginning of the next end step or if it would leave the battlefield. unearth only as a sorcery."),
-            "flashback": ("you may cast this card from your graveyard for its flashback cost. then exile it."), # Cost is parsed, effect is rule modification
-            "retrace": ("you may cast this card from your graveyard by discarding a land card in addition to paying its other costs."),
-            "scavenge": ("exile this card from your graveyard: put a number of +1/+1 counters equal to this card's power on target creature. scavenge only as a sorcery."),
-            "transfigure": ("sacrifice this creature: search your library for a creature card with the same cmc, put it onto the battlefield, then shuffle. activate only as a sorcery."),
-            "transmute": ("discard this card: search your library for a card with the same cmc, reveal it, put it into your hand, then shuffle. activate only as a sorcery."),
-            "auraswap": ("exchange this aura with an aura card in your hand."),
-            "outlast": ("put a +1/+1 counter on this creature. activate only as a sorcery."),
-            "recover": ("when a creature is put into your graveyard from the battlefield, you may pay {cost}. if you do, return this card from your graveyard to your hand."), # This is actually triggered! Needs fixing.
-            "reinforce": ("discard this card: put n +1/+1 counters on target creature."), # Needs N parsing
-            # Reconfigure handled via specific ActionHandler
-        }
-        cost_match = re.search(rf"{keyword_lower}(?:\s*(\d+))?\s*(?:—|-)?\s*(\{{\".*?\"\}})", full_text)
-        cost_str = cost_match.group(2) if cost_match else None
-        val_str = cost_match.group(1) if cost_match and cost_match.group(1) else None
-        if not cost_str: # Try other cost formats like just number or ability words
-             cost_match = re.search(rf"{keyword_lower}(?:\s*(\d+))?\s*(?:—|-)?\s*(\d+|[xX])", full_text)
-             cost_str = f"{{{cost_match.group(2)}}}" if cost_match else "{0}" # Assume free if no cost found? Check rules.
-             if not val_str and cost_match and cost_match.group(1): val_str = cost_match.group(1)
+            # --- Activated Keywords -> ActivatedAbility ---
+            activated_map = {
+                "cycling": ("draw a card."),
+                "equip": ("attach to target creature you control. activate only as a sorcery."),
+                "fortify": ("attach to target land you control. activate only as a sorcery."),
+                "unearth": ("return this card from your graveyard to the battlefield. it gains haste. exile it at the beginning of the next end step or if it would leave the battlefield. unearth only as a sorcery."),
+                "flashback": ("cast from graveyard, then exile."), # Rule modification
+                "retrace": ("cast from graveyard by discarding a land."), # Rule modification
+                "scavenge": ("exile this card from graveyard: put N +1/+1 counters on target creature. scavenge only as a sorcery."),
+                "transfigure": ("sacrifice this creature: search library for creature with same mana value, put onto battlefield, shuffle. activate only as a sorcery."),
+                "transmute": ("discard this card: search library for card with same mana value, put into hand, shuffle. activate only as a sorcery."),
+                "auraswap": ("exchange this aura with an aura card in your hand."), # Needs hand interaction
+                "outlast": ("put a +1/+1 counter on this creature. activate only as a sorcery."),
+                "reinforce": ("discard this card: put N +1/+1 counters on target creature."),
+                "reconfigure": ("attach to target creature you control or unattach. activate only as a sorcery."),
+                # --- Add potentially missed activated keywords ---
+                "adapt": ("if this creature has no +1/+1 counters on it, put N +1/+1 counters on it."),
+                "level up": ("put a level counter on this creature. level up only as a sorcery."), # Needs Class card logic
+                "monstrosity": ("put N +1/+1 counters on this creature and it becomes monstrous."),
+                "crew": ("tap N power of creatures you control: this vehicle becomes an artifact creature."),
+                "channel": ("discard this card: {effect}."), # Effect varies
+                "forecast": ("reveal this card from hand during upkeep: {effect}."), # Effect varies
+            }
+            cost_str = parse_cost(full_text, keyword_lower)
+            val = parse_value(full_text, keyword_lower) # Still need value for effects like reinforce N
 
-        val = int(val_str) if val_str and val_str.isdigit() else 1
+            if keyword_lower in activated_map and cost_str != "{0}": # Ensure cost was found
+                 effect = activated_map[keyword_lower]
+                 effect = effect.replace(" N ", f" {val} ")
+                 # Create ActivatedAbility
+                 ability = ActivatedAbility(card_id, cost_str, effect, full_text)
+                 setattr(ability, 'keyword', keyword_lower)
+                 abilities_list.append(ability)
+                 return
 
-        if keyword_lower in activated_map and cost_str:
-             effect = activated_map[keyword_lower]
-             effect = effect.replace(" n ", f" {val} ") # Simple replace
-             # Need to handle cost/effect parameterization better
-             abilities_list.append(ActivatedAbility(card_id, cost_str, effect, full_text))
-             setattr(abilities_list[-1], 'keyword', keyword_lower)
-             return
+            # --- Rule Modifying Keywords -> StaticAbility (effect handled by game rules) ---
+            rule_keywords = [
+                "affinity", "convoke", "delve", "improvise", "bestow", "buyback",
+                "entwine", "escape", "kicker", "madness", "overload", "splice",
+                "surge", "split second", "suspend", "companion", "demonstrate", # Demonstrate handled by rule
+                "embalm", "eternalize", "jump-start", "rebound", "spree" # Handled by rules/context
+            ]
+            if keyword_lower in rule_keywords:
+                 ability_effect_text = f"This card has {full_text}."
+                 ability = StaticAbility(card_id, ability_effect_text, ability_effect_text)
+                 setattr(ability, 'keyword', keyword_lower)
+                 abilities_list.append(ability)
+                 return
 
-        # Rule Modifying / Cost Keywords - Register as StaticAbility for clarity, actual effect handled elsewhere
-        rule_keywords = ["affinity", "convoke", "delve", "improvise", "bestow", "buyback", "entwine", "escape", "kicker", "madness", "overload", "splice", "surge", "split second", "suspend", "companion"]
-        if keyword_lower in rule_keywords:
-             ability_effect_text = f"This card has {full_text}."
-             abilities_list.append(StaticAbility(card_id, ability_effect_text, ability_effect_text))
-             setattr(abilities_list[-1], 'keyword', keyword_lower) # Add keyword attr for tracking
-             return
-
-        # Fallback for completely unparsed keywords (should be fewer now)
-        logging.warning(f"Keyword '{keyword_lower}' (from '{full_text}') not fully mapped to specific ability type.")
-        # Add as generic static grant
-        ability_effect_text = f"This permanent has {full_text}."
-        abilities_list.append(StaticAbility(card_id, ability_effect_text, ability_effect_text))
-        setattr(abilities_list[-1], 'keyword', keyword_lower)
+            # --- Fallback for keywords not fully mapped ---
+            logging.warning(f"Keyword '{keyword_lower}' (from '{full_text}') not fully mapped. Creating generic StaticAbility.")
+            ability_effect_text = f"This permanent has {full_text}." # Treat as static grant
+            ability = StaticAbility(card_id, ability_effect_text, ability_effect_text)
+            setattr(ability, 'keyword', keyword_lower)
+            abilities_list.append(ability)
         
     def _parse_triggered_abilities(self, card_id, card, oracle_text, abilities_list):
         """Parse triggered abilities from card text with improved patterns"""
@@ -1424,6 +1451,53 @@ class AbilityHandler:
                        effect_obj.apply(gs, card_id, controller, targets_on_stack)
              else:
                   logging.error(f"Cannot resolve {ability_type} from {source_name}: Missing ability object and effect text in context.")
+                  
+    def _check_keyword_internal(self, card, keyword):
+        """
+        Centralized check for keywords, considering layers and static abilities.
+        (Internal helper for TargetingSystem and other modules).
+        """
+        if not card or not isinstance(card, Card): return False
+        keyword_lower = keyword.lower()
+        card_id = getattr(card, 'card_id', None)
+        if not card_id: # Fallback for temporary cards maybe?
+            return keyword_lower in getattr(card, 'oracle_text', '').lower()
+
+        # 1. Check Layer System modifications (Layer 6)
+        gs = self.game_state
+        if hasattr(gs, 'layer_system'):
+             if gs.layer_system.has_effect(card_id, 'remove_ability', keyword_lower) or \
+                gs.layer_system.has_effect(card_id, 'remove_all_abilities'):
+                  return False # Ability explicitly removed
+             if gs.layer_system.has_effect(card_id, 'add_ability', keyword_lower):
+                  return True # Ability explicitly granted
+
+        # 2. Check static abilities registered for the card (e.g., from itself or levels)
+        registered_abilities = self.registered_abilities.get(card_id, [])
+        # Check StaticAbility grant (more specific text match)
+        if any(isinstance(ab, StaticAbility) and ab.effect_text == f"This permanent has {keyword_lower}." for ab in registered_abilities):
+             return True
+        # Check KeywordAbility instances
+        if any(isinstance(ab, KeywordAbility) and ab.keyword == keyword_lower for ab in registered_abilities):
+             return True
+        # Broader check in StaticAbility effect text (less precise)
+        if any(isinstance(ab, StaticAbility) and f"has {keyword_lower}" in ab.effect for ab in registered_abilities):
+             return True
+
+        # 3. Fallback: Check the Card object's calculated 'keywords' array (reflects layers if updated)
+        if hasattr(card, 'keywords') and isinstance(card.keywords, list):
+            try:
+                idx = Card.ALL_KEYWORDS.index(keyword_lower)
+                if idx < len(card.keywords) and card.keywords[idx] == 1:
+                    return True
+            except ValueError: pass # Keyword not in list
+
+        # 4. Last Resort: Check original oracle text (least reliable for current state)
+        # This should rarely be needed if layers and abilities are parsed correctly
+        # elif hasattr(card, 'oracle_text') and keyword_lower in getattr(card, 'oracle_text', '').lower():
+        #      return True
+
+        return False
             
     def handle_attack_triggers(self, attacker_id):
         """Handle triggered abilities that trigger when a creature attacks."""
@@ -1483,901 +1557,3 @@ class AbilityHandler:
                 # Parse the ability and add to triggered abilities
                 context = {"attacker_id": attacker_id, "controller": opponent}
                 self.check_abilities(permanent_id, "CREATURE_ATTACKS_YOU", context)
-
-class TargetingSystem:
-    """
-    Enhanced system for handling targeting in Magic: The Gathering.
-    Supports comprehensive restrictions, protection effects, and validates targets.
-    """
-    
-    def __init__(self, game_state):
-        self.game_state = game_state
-    
-    def get_valid_targets(self, card_id, controller, target_type=None):
-            """
-            Returns a list of valid targets for a card, based on its text and target type,
-            using the unified _is_valid_target checker.
-
-            Args:
-                card_id: ID of the card doing the targeting
-                controller: Player dictionary of the card's controller
-                target_type: Optional specific target type to filter for
-
-            Returns:
-                dict: Dictionary of target types to lists of valid targets
-            """
-            gs = self.game_state
-            card = gs._safe_get_card(card_id)
-            if not card or not hasattr(card, 'oracle_text'):
-                return {}
-
-            oracle_text = card.oracle_text.lower()
-            opponent = gs.p2 if controller == gs.p1 else gs.p1
-
-            valid_targets = {
-                "creature": [], "player": [], "permanent": [], "spell": [],
-                "land": [], "artifact": [], "enchantment": [], "planeswalker": [],
-                "card": [], # For graveyard/exile etc.
-                "ability": [], # For targeting abilities on stack
-                "other": [] # Fallback
-            }
-            all_target_types = list(valid_targets.keys())
-
-            # Parse targeting requirements from the oracle text
-            target_requirements = self._parse_targeting_requirements(oracle_text)
-
-            # If no requirements found but text has "target", add a generic requirement
-            if not target_requirements and "target" in oracle_text:
-                target_requirements.append({"type": "target"}) # Generic target
-
-            # Filter requirements if a specific target type is requested
-            if target_type:
-                target_requirements = [req for req in target_requirements if req.get("type") == target_type or req.get("type") in ["any", "target"]]
-                if not target_requirements: return {} # No matching requirement for requested type
-
-            # Define potential target sources
-            target_sources = [
-                # Players
-                ("p1", gs.p1, "player"),
-                ("p2", gs.p2, "player"),
-                # Battlefield
-                *[(perm_id, gs.get_card_controller(perm_id), "battlefield") for player in [gs.p1, gs.p2] for perm_id in player.get("battlefield", [])],
-                # Stack (Spells and Abilities)
-                *[(item[1], item[2], "stack") for item in gs.stack if isinstance(item, tuple) and len(item) >= 3],
-                # Graveyards
-                *[(card_id, player, "graveyard") for player in [gs.p1, gs.p2] for card_id in player.get("graveyard", [])],
-                # Exile
-                *[(card_id, player, "exile") for player in [gs.p1, gs.p2] for card_id in player.get("exile", [])],
-            ]
-
-            processed_valid = defaultdict(set) # Use set to avoid duplicates
-
-            # Check each requirement against potential targets
-            for requirement in target_requirements:
-                req_type = requirement.get("type", "target") # Use "target" as fallback
-                required_zone = requirement.get("zone")
-
-                for target_id, target_obj_or_owner, current_zone in target_sources:
-                    # Skip if zone doesn't match (unless zone isn't specified in req)
-                    if required_zone and current_zone != required_zone:
-                        continue
-
-                    target_object = None
-                    target_owner = None
-
-                    if current_zone == "player":
-                        target_object = target_obj_or_owner # target_obj_or_owner is the player dict
-                        target_owner = target_obj_or_owner # Player owns themselves? Or maybe None? Let's use the player.
-                    elif current_zone == "stack":
-                        target_object = None
-                        # Find the actual stack item (tuple or Card) based on target_id
-                        for item in gs.stack:
-                            if isinstance(item, tuple) and len(item) >= 3 and item[1] == target_id:
-                                target_object = item # The stack item tuple itself
-                                target_owner = item[2] # Controller of the spell/ability
-                                break
-                            # Less common: stack item is just Card object?
-                            # elif isinstance(item, Card) and item.card_id == target_id:
-                            #      target_object = item; target_owner = ??? # Need controller info
-                        if target_object is None: continue # Stack item not found correctly
-                    elif current_zone in ["battlefield", "graveyard", "exile", "library"]:
-                        target_object = gs._safe_get_card(target_id)
-                        target_owner = target_obj_or_owner # target_obj_or_owner is the player dict
-                    else:
-                        continue # Unknown zone
-
-                    if not target_object: continue # Could be player or Card or Stack Tuple
-
-                    target_info = (target_object, target_owner, current_zone) # Pass tuple to checker
-
-                    # Use the unified validation function
-                    if self._is_valid_target(card_id, target_id, controller, target_info, requirement):
-                        # Determine primary category for this target
-                        primary_cat = "other"
-                        actual_types = set()
-                        if isinstance(target_object, Card):
-                            actual_types.update(getattr(target_object, 'card_types', []))
-                            if 'creature' in actual_types: primary_cat = 'creature'
-                            elif 'land' in actual_types: primary_cat = 'land'
-                            elif 'planeswalker' in actual_types: primary_cat = 'planeswalker'
-                            elif 'artifact' in actual_types: primary_cat = 'artifact'
-                            elif 'enchantment' in actual_types: primary_cat = 'enchantment'
-                            elif current_zone == 'stack': primary_cat = 'spell'
-                            elif current_zone == 'graveyard' or current_zone == 'exile': primary_cat = 'card'
-                        elif current_zone == 'player': primary_cat = 'player'
-                        elif current_zone == 'stack' and isinstance(target_object, tuple): primary_cat = 'ability' # Could be spell too
-
-                        # If specific type requested, use that, otherwise use derived primary category
-                        cat_to_add = target_type if target_type else primary_cat
-
-                        # Ensure category exists and add target
-                        if cat_to_add in valid_targets:
-                            processed_valid[cat_to_add].add(target_id)
-                        elif req_type in valid_targets: # Fallback to requirement type
-                            processed_valid[req_type].add(target_id)
-                        else: # Last resort: "other"
-                            processed_valid["other"].add(target_id)
-
-            # Convert sets back to lists for the final dictionary
-            final_valid_targets = {cat: list(ids) for cat, ids in processed_valid.items() if ids}
-            return final_valid_targets
-        
-    def _has_keyword_check(self, card, keyword):
-        """Helper within TargetingSystem to check keywords using GS AbilityHandler."""
-        gs = self.game_state
-        if not card or not isinstance(card, Card): return False # Ensure it's a Card object
-        card_id = getattr(card, 'card_id', None)
-        if not card_id: return False
-
-        # Prefer checking via AbilityHandler if available
-        if hasattr(gs, 'ability_handler') and gs.ability_handler:
-            registered_abilities = gs.ability_handler.registered_abilities.get(card_id, [])
-            # Check StaticAbility grants or KeywordAbility instances
-            if any(isinstance(ab, StaticAbility) and f"has {keyword}" in ab.effect for ab in registered_abilities): return True
-            if any(isinstance(ab, KeywordAbility) and ab.keyword == keyword for ab in registered_abilities): return True
-            # Check if the static grant was parsed correctly (alternative check)
-            if any(isinstance(ab, StaticAbility) and ab.effect_text == f"This permanent has {keyword}." for ab in registered_abilities): return True
-
-
-        # Fallback checks (less ideal as they don't respect layer system removals)
-        # Check keywords array on the card object (reflects layers maybe?)
-        if hasattr(card, 'keywords') and isinstance(card.keywords, list):
-            try:
-                idx = Card.ALL_KEYWORDS.index(keyword)
-                if idx < len(card.keywords) and card.keywords[idx] == 1: return True
-            except ValueError: pass
-        # Last resort: Check oracle text directly
-        elif hasattr(card, 'oracle_text') and keyword in getattr(card, 'oracle_text', '').lower():
-             # Add specific checks for multi-word/variants if needed
-             return True
-
-        return False
-    
-    def resolve_targeting_for_ability(self, card_id, ability_text, controller):
-        """
-        Handle targeting for an ability using the unified targeting system.
-        
-        Args:
-            card_id: ID of the card with the ability
-            ability_text: Text of the ability requiring targets
-            controller: Player controlling the ability
-            
-        Returns:
-            dict: Selected targets or None if targeting failed
-        """
-        return self.resolve_targeting(card_id, controller, ability_text)
-    
-    def resolve_targeting_for_spell(self, spell_id, controller):
-        """
-        Handle targeting for a spell using the unified targeting system.
-        
-        Args:
-            spell_id: ID of the spell requiring targets
-            controller: Player casting the spell
-            
-        Returns:
-            dict: Selected targets or None if targeting failed
-        """
-        return self.resolve_targeting(spell_id, controller)
-    
-    def _is_valid_target(self, source_id, target_id, caster, target_info, requirement):
-        """Unified check for any target type."""
-        gs = self.game_state
-        target_type = requirement.get("type")
-        target_obj, target_owner, target_zone = target_info # Expect target_info=(obj, owner, zone)
-
-        if not target_obj: return False
-
-        # 1. Zone Check
-        req_zone = requirement.get("zone")
-        if req_zone and target_zone != req_zone: return False
-        if not req_zone and target_zone not in ["battlefield", "stack", "player"]: # Default targetable zones
-            # Check if the type allows targeting outside default zones
-            if target_type == "card" and target_zone not in ["graveyard", "exile", "library"]: return False
-            # Other types usually target battlefield/stack/players unless zone specified
-            elif target_type != "card": return False
-
-
-        # 2. Type Check
-        actual_types = set()
-        if isinstance(target_obj, dict) and target_id in ["p1", "p2"]: # Player target
-            actual_types.add("player")
-            # Also check owner relationship for player targets
-            if requirement.get("opponent_only") and target_obj == caster: return False
-            if requirement.get("controller_is_caster") and target_obj != caster: return False # Target self only
-        elif isinstance(target_obj, Card): # Card object
-            actual_types.update(getattr(target_obj, 'card_types', []))
-            actual_types.update(getattr(target_obj, 'subtypes', []))
-        elif isinstance(target_obj, tuple): # Stack item (Ability/Trigger)
-             item_type = target_obj[0]
-             if item_type == "ABILITY": actual_types.add("ability")
-             elif item_type == "TRIGGER": actual_types.add("ability"); actual_types.add("triggered") # Allow target triggered ability
-
-        # Check against required type
-        valid_type = False
-        if target_type == "target": valid_type = True # Generic "target" - skip specific type check initially
-        elif target_type == "any": # Creature, Player, Planeswalker
-             valid_type = any(t in actual_types for t in ["creature", "player", "planeswalker"])
-        elif target_type == "card" and isinstance(target_obj, Card): valid_type = True # Targeting a card in specific zone
-        elif target_type in actual_types: valid_type = True
-        elif target_type == "permanent" and any(t in actual_types for t in ["creature", "artifact", "enchantment", "land", "planeswalker"]): valid_type = True
-        elif target_type == "spell" and target_zone == "stack" and isinstance(target_obj, Card): valid_type = True # Targeting spell on stack
-
-        if not valid_type: return False
-
-
-        # 3. Protection / Hexproof / Shroud / Ward (Only for permanents, players, spells)
-        if target_zone in ["battlefield", "stack", "player"]:
-             source_card = gs._safe_get_card(source_id)
-             if isinstance(target_obj, dict) and target_id in ["p1","p2"]: # Player
-                  # TODO: Add player protection checks (e.g., Leyline of Sanctity)
-                  pass
-             elif isinstance(target_obj, Card): # Permanent or Spell
-                 # Protection
-                 if self._has_protection_from(target_obj, source_card, target_owner, caster): return False
-                 # Hexproof (if targeted by opponent)
-                 if caster != target_owner and self._has_keyword_check(target_obj, "hexproof"): return False
-                 # Shroud (if targeted by anyone)
-                 if self._has_keyword_check(target_obj, "shroud"): return False
-                 # Ward (Check handled separately - involves paying cost)
-
-
-        # 4. Specific Requirement Checks (applies mostly to battlefield permanents)
-        if target_zone == "battlefield" and isinstance(target_obj, Card):
-            # Owner/Controller
-            if requirement.get("controller_is_caster") and target_owner != caster: return False
-            if requirement.get("controller_is_opponent") and target_owner == caster: return False
-
-            # Exclusions
-            if requirement.get("exclude_land") and 'land' in actual_types: return False
-            if requirement.get("exclude_creature") and 'creature' in actual_types: return False
-            if requirement.get("exclude_color") and self._has_color(target_obj, requirement["exclude_color"]): return False
-
-            # Inclusions
-            if requirement.get("must_be_artifact") and 'artifact' not in actual_types: return False
-            if requirement.get("must_be_aura") and 'aura' not in actual_types: return False
-            if requirement.get("must_be_basic") and 'basic' not in getattr(target_obj,'type_line',''): return False
-            if requirement.get("must_be_nonbasic") and 'basic' in getattr(target_obj,'type_line',''): return False
-
-            # State
-            if requirement.get("must_be_tapped") and target_id not in target_owner.get("tapped_permanents", set()): return False
-            if requirement.get("must_be_untapped") and target_id in target_owner.get("tapped_permanents", set()): return False
-            if requirement.get("must_be_attacking") and target_id not in getattr(gs, 'current_attackers', []): return False
-            # Note: Blocking state needs better tracking than just the current assignments dict
-            # if requirement.get("must_be_blocking") and not is_blocking(target_id): return False
-            if requirement.get("must_be_face_down") and not getattr(target_obj, 'face_down', False): return False
-
-            # Color Restriction
-            colors_req = requirement.get("color_restriction", [])
-            if colors_req:
-                if not any(self._has_color(target_obj, color) for color in colors_req): return False
-                if "multicolored" in colors_req and sum(getattr(target_obj,'colors',[0]*5)) <= 1: return False
-                if "colorless" in colors_req and sum(getattr(target_obj,'colors',[0]*5)) > 0: return False
-
-            # Stat Restrictions
-            if "power_restriction" in requirement:
-                pr = requirement["power_restriction"]
-                power = getattr(target_obj, 'power', None)
-                if power is None: return False
-                if pr["comparison"] == "greater" and not power >= pr["value"]: return False
-                if pr["comparison"] == "less" and not power <= pr["value"]: return False
-                if pr["comparison"] == "exactly" and not power == pr["value"]: return False
-            if "toughness_restriction" in requirement:
-                tr = requirement["toughness_restriction"]
-                toughness = getattr(target_obj, 'toughness', None)
-                if toughness is None: return False
-                if tr["comparison"] == "greater" and not toughness >= tr["value"]: return False
-                if tr["comparison"] == "less" and not toughness <= tr["value"]: return False
-                if tr["comparison"] == "exactly" and not toughness == tr["value"]: return False
-            if "mana value_restriction" in requirement:
-                cmcr = requirement["mana value_restriction"]
-                cmc = getattr(target_obj, 'cmc', None)
-                if cmc is None: return False
-                if cmcr["comparison"] == "greater" and not cmc >= cmcr["value"]: return False
-                if cmcr["comparison"] == "less" and not cmc <= cmcr["value"]: return False
-                if cmcr["comparison"] == "exactly" and not cmc == cmcr["value"]: return False
-
-            # Subtype Restriction
-            if "subtype_restriction" in requirement:
-                if requirement["subtype_restriction"] not in actual_types: return False
-
-        # 5. Spell/Ability Specific Checks
-        if target_zone == "stack":
-             source_card = gs._safe_get_card(source_id)
-             if isinstance(target_obj, Card): # Spell target
-                 # Can't be countered? (Only if source is a counter)
-                 if "counter target spell" in getattr(source_card, 'oracle_text', '').lower():
-                     if "can't be countered" in getattr(target_obj, 'oracle_text', '').lower(): return False
-                 # Spell Type
-                 st_req = requirement.get("spell_type_restriction")
-                 if st_req == "instant" and 'instant' not in actual_types: return False
-                 if st_req == "sorcery" and 'sorcery' not in actual_types: return False
-                 if st_req == "creature" and 'creature' not in actual_types: return False
-                 if st_req == "noncreature" and 'creature' in actual_types: return False
-             elif isinstance(target_obj, tuple): # Ability target
-                 ab_req = requirement.get("ability_type_restriction")
-                 item_type = target_obj[0]
-                 if ab_req == "activated" and item_type != "ABILITY": return False
-                 if ab_req == "triggered" and item_type != "TRIGGER": return False
-
-
-        return True # All checks passed
-    
-    def _has_color(self, card, color_name):
-        """Check if a card has a specific color."""
-        if not card or not hasattr(card, 'colors') or len(getattr(card,'colors',[])) != 5: return False
-        color_index_map = {'white': 0, 'blue': 1, 'black': 2, 'red': 3, 'green': 4}
-        if color_name not in color_index_map: return False
-        return card.colors[color_index_map[color_name]] == 1
-    
-    def _parse_targeting_requirements(self, oracle_text):
-        """Parse targeting requirements from oracle text with comprehensive rules."""
-        requirements = []
-        oracle_text = oracle_text.lower()
-        
-        # Pattern to find "target X" phrases, excluding nested clauses
-        # Matches "target [adjectives] type [restrictions]"
-        target_pattern = r"target\s+((?:(?:[a-z\-]+)\s+)*?)?([a-z]+)\s*((?:(?:with|of|that)\s+[^,\.;\(]+?|you control|an opponent controls|you don\'t control)*)"
-
-        matches = re.finditer(target_pattern, oracle_text)
-
-        for match in matches:
-            req = {"type": match.group(2).strip()} # Basic type (creature, player, etc.)
-            adjectives = match.group(1).strip().split() if match.group(1) else []
-            restrictions = match.group(3).strip()
-
-            # ---- Map Type ----
-            type_map = {
-                "creature": "creature", "player": "player", "opponent": "player", "permanent": "permanent",
-                "spell": "spell", "ability": "ability", "land": "land", "artifact": "artifact",
-                "enchantment": "enchantment", "planeswalker": "planeswalker", "card": "card", # General card (often in GY/Exile)
-                "instant": "spell", "sorcery": "spell", "aura": "enchantment",
-                # Add more specific types if needed
-            }
-            req["type"] = type_map.get(req["type"], req["type"]) # Normalize type
-
-            # ---- Process Adjectives & Restrictions ----
-            # Owner/Controller
-            if "you control" in restrictions: req["controller_is_caster"] = True
-            elif "an opponent controls" in restrictions or "you don't control" in restrictions: req["controller_is_opponent"] = True
-            elif "target opponent" in oracle_text: req["opponent_only"] = True # Different phrasing
-
-            # State/Status
-            if "tapped" in adjectives: req["must_be_tapped"] = True
-            if "untapped" in adjectives: req["must_be_untapped"] = True
-            if "attacking" in adjectives: req["must_be_attacking"] = True
-            if "blocking" in adjectives: req["must_be_blocking"] = True
-            if "face-down" in adjectives or "face down" in restrictions: req["must_be_face_down"] = True
-
-            # Card Type / Supertype / Subtype Restrictions
-            if "nonland" in adjectives: req["exclude_land"] = True
-            if "noncreature" in adjectives: req["exclude_creature"] = True
-            if "nonblack" in adjectives: req["exclude_color"] = 'black'
-            # ... add more non-X types
-
-            if "basic" in adjectives and req["type"] == "land": req["must_be_basic"] = True
-            if "nonbasic" in adjectives and req["type"] == "land": req["must_be_nonbasic"] = True
-
-            if "artifact creature" in match.group(0): req["must_be_artifact_creature"] = True
-            elif "artifact" in adjectives and req["type"]=="creature": req["must_be_artifact"] = True # Adj before type
-            elif "artifact" in adjectives and req["type"]=="permanent": req["must_be_artifact"] = True
-
-            if "aura" in adjectives and req["type"]=="enchantment": req["must_be_aura"] = True # Check Aura specifically
-
-            # Color Restrictions (from adjectives or restrictions)
-            colors = {"white", "blue", "black", "red", "green", "colorless", "multicolored"}
-            found_colors = colors.intersection(set(adjectives)) or colors.intersection(set(restrictions.split()))
-            if found_colors: req["color_restriction"] = list(found_colors)
-
-            # Power/Toughness/CMC Restrictions (from restrictions)
-            pt_cmc_pattern = r"(?:with|of)\s+(power|toughness|mana value)\s+(\d+)\s+(or greater|or less|exactly)"
-            pt_match = re.search(pt_cmc_pattern, restrictions)
-            if pt_match:
-                 stat, value, comparison = pt_match.groups()
-                 req[f"{stat}_restriction"] = {"comparison": comparison.replace("or ","").strip(), "value": int(value)}
-
-            # Zone restrictions (usually implied by context, but check)
-            if "in a graveyard" in restrictions: req["zone"] = "graveyard"; req["type"]="card" # Override type
-            elif "in exile" in restrictions: req["zone"] = "exile"; req["type"]="card"
-            elif "on the stack" in restrictions: req["zone"] = "stack" # Type should be spell/ability
-
-            # Spell/Ability type restrictions
-            if req["type"] == "spell":
-                 if "instant" in adjectives: req["spell_type_restriction"] = "instant"
-                 elif "sorcery" in adjectives: req["spell_type_restriction"] = "sorcery"
-                 elif "creature" in adjectives: req["spell_type_restriction"] = "creature"
-                 elif "noncreature" in adjectives: req["spell_type_restriction"] = "noncreature"
-                 # ... add others
-            elif req["type"] == "ability":
-                if "activated" in adjectives: req["ability_type_restriction"] = "activated"
-                elif "triggered" in adjectives: req["ability_type_restriction"] = "triggered"
-
-            # Specific subtypes
-            # Look for "target Goblin creature", "target Island land" etc.
-            subtype_match = re.search(r"target\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:creature|land|artifact|etc)", match.group(0))
-            if subtype_match:
-                potential_subtype = subtype_match.group(1).strip()
-                # TODO: Check if potential_subtype is a known subtype for the target type
-                req["subtype_restriction"] = potential_subtype
-
-            requirements.append(req)
-
-        # Special cases not matching the main pattern
-        if "any target" in oracle_text:
-             requirements.append({"type": "any"}) # Any target includes creatures, players, planeswalkers
-
-        if not requirements and "target" in oracle_text:
-             # Fallback if "target" exists but pattern failed
-             requirements.append({"type": "target"})
-
-        # Refine types based on restrictions
-        for req in requirements:
-            if req.get("must_be_artifact_creature"): req["type"] = "creature"; req["must_be_artifact"]=True
-            if req.get("must_be_aura"): req["type"] = "enchantment"
-            if req.get("type") == "opponent": req["type"] = "player"; req["opponent_only"] = True
-            if req.get("type") == "card": # Refine card targets
-                if req.get("zone") == "graveyard": pass # Okay
-                elif req.get("zone") == "exile": pass # Okay
-                else: req["zone"] = "graveyard" # Default to GY if zone unspecified for 'card'
-
-        return requirements
-
-    
-
-    def _has_protection_from(self, target_card, source_card, target_owner, source_controller):
-        """Robust protection check using _has_keyword_check."""
-        if not target_card or not source_card: return False
-
-        # Check specific "protection from X" grants first
-        protection_details = None
-        card_id = getattr(target_card, 'card_id', None)
-        if card_id and hasattr(self.game_state, 'ability_handler'):
-             abilities = self.game_state.ability_handler.registered_abilities.get(card_id, [])
-             for ab in abilities:
-                  if isinstance(ab, StaticAbility) and "protection from" in ab.effect:
-                       protection_details = ab.effect.split("protection from", 1)[-1].strip().lower()
-                       break # Found protection grant
-
-        if protection_details:
-            # Perform checks based on protection_details against source_card
-            source_colors = getattr(source_card, 'colors', [0]*5)
-            source_types = getattr(source_card, 'card_types', [])
-            source_subtypes = getattr(source_card, 'subtypes', [])
-
-            if protection_details == "everything": return True
-            if protection_details == "white" and source_colors[0]: return True
-            if protection_details == "blue" and source_colors[1]: return True
-            if protection_details == "black" and source_colors[2]: return True
-            if protection_details == "red" and source_colors[3]: return True
-            if protection_details == "green" and source_colors[4]: return True
-            if protection_details == "all colors" and any(source_colors): return True
-            if protection_details == "colorless" and not any(source_colors): return True
-            if protection_details == "multicolored" and sum(source_colors) > 1: return True
-            if protection_details == "monocolored" and sum(source_colors) == 1: return True
-            if protection_details == "creatures" and "creature" in source_types: return True
-            if protection_details == "artifacts" and "artifact" in source_types: return True
-            if protection_details == "enchantments" and "enchantment" in source_types: return True
-            if protection_details == "planeswalkers" and "planeswalker" in source_types: return True
-            if protection_details == "instants" and "instant" in source_types: return True
-            if protection_details == "sorceries" and "sorcery" in source_types: return True
-            if protection_details == "opponent" and target_owner != source_controller: return True # Opponent check
-            # Check specific subtypes
-            if protection_details in source_subtypes: return True
-            # Check specific named card? Needs name comparison.
-            if protection_details == getattr(source_card, 'name', '').lower(): return True
-
-        # If no specific grant found via abilities, can fallback to oracle text check if needed
-        # But prefer ability checks as they reflect current game state better potentially
-
-        return False
-    
-    def _has_hexproof(self, card):
-        """Robust hexproof check using _has_keyword_check."""
-        return self._has_keyword_check(card, "hexproof")
-    
-    def _has_shroud(self, card):
-        """Check if card has shroud."""
-        if not card or not hasattr(card, 'oracle_text'):
-            return False
-            
-        return "shroud" in card.oracle_text.lower()
-    
-    def resolve_targeting(self, source_id, controller, effect_text=None, target_types=None):
-        """
-        Unified method to resolve targeting for both spells and abilities.
-        
-        Args:
-            source_id: ID of the spell or ability source
-            controller: Player who controls the source
-            effect_text: Text of the effect requiring targets
-            target_types: Specific types of targets to find
-            
-        Returns:
-            dict: Selected targets or None if targeting failed
-        """
-        gs = self.game_state
-        source_card = gs._safe_get_card(source_id)
-        if not source_card:
-            return None
-            
-        # Use effect_text if provided, otherwise try to get it from the card
-        text_to_parse = effect_text
-        if not text_to_parse and hasattr(source_card, 'oracle_text'):
-            text_to_parse = source_card.oracle_text
-            
-        if not text_to_parse:
-            return None
-            
-        # Get valid targets
-        valid_targets = self.get_valid_targets(source_id, controller, target_types)
-        
-        # If no valid targets, targeting fails
-        if not valid_targets or not any(valid_targets.values()):
-            return None
-        
-        # Determine target requirements from the text
-        target_requirements = self._parse_targeting_requirements(text_to_parse.lower())
-        
-        # Extract category names from the target requirements
-        target_categories = [req.get("type", "other") for req in target_requirements]
-        
-        # Get AI selected targets based on effect type and context
-        selected_targets = self._select_targets_by_strategy(
-            source_card, valid_targets, len(target_requirements), target_categories, controller)
-        
-        if selected_targets and any(selected_targets.values()):
-            return selected_targets
-        else:
-            return None
-    
-    def validate_targets(self, card_id, targets, controller):
-        """
-        Validate if the selected targets are legal for the card.
-        
-        Args:
-            card_id: ID of the card doing the targeting
-            targets: Dictionary of target categories to target IDs
-            controller: Player dictionary of the card's controller
-            
-        Returns:
-            bool: Whether the targets are valid
-        """
-        valid_targets = self.get_valid_targets(card_id, controller)
-        
-        # Check if all targets are valid
-        for category, target_list in targets.items():
-            if category not in valid_targets:
-                return False
-                
-            for target in target_list:
-                if target not in valid_targets[category]:
-                    return False
-                    
-        return True
-    
-    def _select_targets_by_strategy(self, card, valid_targets, target_count, target_categories, controller):
-        """
-        Select targets strategically based on card type and effect.
-        
-        Args:
-            card: The card requiring targets
-            valid_targets: Dictionary of valid targets by category
-            target_count: Number of targets required
-            target_categories: Categories of targets needed
-            controller: Player controlling the effect
-            
-        Returns:
-            dict: Selected targets by category
-        """
-        gs = self.game_state
-        selected_targets = {}
-        
-        # Determine if this is a beneficial or harmful effect
-        is_beneficial = self._is_beneficial_effect(card.oracle_text.lower() if hasattr(card, 'oracle_text') else "")
-        
-        # Get opponent
-        opponent = gs.p2 if controller == gs.p1 else gs.p1
-        
-        # Select targets for each required category
-        for category in target_categories:
-            if category not in valid_targets or not valid_targets[category]:
-                continue
-                
-            # How many targets we still need
-            remaining_count = target_count - sum(len(targets) for targets in selected_targets.values())
-            if remaining_count <= 0:
-                break
-                
-            # Get targets for this category
-            category_targets = valid_targets[category]
-            selected_for_category = []
-            
-            # Strategy depends on category and whether effect is beneficial
-            if category == "creatures":
-                if is_beneficial:
-                    # For beneficial effects, target own creatures
-                    own_creatures = [cid for cid in category_targets if cid in controller["battlefield"]]
-                    
-                    # Sort by most valuable (highest power/toughness)
-                    own_creatures.sort(
-                        key=lambda cid: (
-                            getattr(gs._safe_get_card(cid), 'power', 0) +
-                            getattr(gs._safe_get_card(cid), 'toughness', 0)
-                        ),
-                        reverse=True
-                    )
-                    
-                    selected_for_category = own_creatures[:remaining_count]
-                else:
-                    # For harmful effects, target opponent creatures
-                    opp_creatures = [cid for cid in category_targets if cid in opponent["battlefield"]]
-                    
-                    # Sort by most threatening (highest power/toughness)
-                    opp_creatures.sort(
-                        key=lambda cid: (
-                            getattr(gs._safe_get_card(cid), 'power', 0) +
-                            getattr(gs._safe_get_card(cid), 'toughness', 0)
-                        ),
-                        reverse=True
-                    )
-                    
-                    selected_for_category = opp_creatures[:remaining_count]
-                    
-            elif category == "players":
-                if is_beneficial:
-                    # Target self for beneficial effects
-                    if "p1" in category_targets and controller == gs.p1:
-                        selected_for_category = ["p1"]
-                    elif "p2" in category_targets and controller == gs.p2:
-                        selected_for_category = ["p2"]
-                else:
-                    # Target opponent for harmful effects
-                    if "p1" in category_targets and controller != gs.p1:
-                        selected_for_category = ["p1"]
-                    elif "p2" in category_targets and controller != gs.p2:
-                        selected_for_category = ["p2"]
-            
-            elif category == "spells":
-                # For counterspells, target opponent's spells
-                opponent_spells = []
-                for spell_id in category_targets:
-                    for item in gs.stack:
-                        if isinstance(item, tuple) and len(item) >= 3:
-                            _, stack_id, spell_controller = item[:3]
-                            if stack_id == spell_id and spell_controller != controller:
-                                opponent_spells.append(spell_id)
-                
-                # Take the most recently cast spell (top of stack)
-                if opponent_spells:
-                    selected_for_category = [opponent_spells[0]]
-            
-            # Handle other categories similarly...
-            elif category in ["artifacts", "enchantments", "lands", "planeswalkers", "permanents"]:
-                if is_beneficial:
-                    own_permanents = [cid for cid in category_targets if cid in controller["battlefield"]]
-                    selected_for_category = own_permanents[:remaining_count]
-                else:
-                    opp_permanents = [cid for cid in category_targets if cid in opponent["battlefield"]]
-                    selected_for_category = opp_permanents[:remaining_count]
-            
-            elif category == "graveyard":
-                # For graveyard targeting, choose your own cards for beneficial effects
-                if is_beneficial:
-                    own_graveyard_cards = [cid for cid in category_targets if cid in controller["graveyard"]]
-                    selected_for_category = own_graveyard_cards[:remaining_count]
-                else:
-                    opp_graveyard_cards = [cid for cid in category_targets if cid in opponent["graveyard"]]
-                    selected_for_category = opp_graveyard_cards[:remaining_count]
-            
-            elif category == "exile":
-                # Similar logic for exile zone
-                own_exile_cards = [cid for cid in category_targets if cid in controller["exile"]]
-                selected_for_category = own_exile_cards[:remaining_count]
-                
-            # Fallback for any other category - just take the first valid targets
-            else:
-                selected_for_category = category_targets[:remaining_count]
-            
-            # Add selected targets to result
-            if selected_for_category:
-                selected_targets[category] = selected_for_category
-        
-        return selected_targets
-
-    def _is_beneficial_effect(self, oracle_text):
-        """Determine if an effect is beneficial to the target."""
-        from .ability_utils import is_beneficial_effect
-        return is_beneficial_effect(oracle_text)
-    
-    def check_can_be_blocked(self, attacker_id, blocker_id):
-        """
-        Check if an attacker can be blocked by this blocker considering all restrictions.
-        
-        Args:
-            attacker_id: The attacking creature ID
-            blocker_id: The potential blocker creature ID
-            
-        Returns:
-            bool: Whether the blocker can legally block the attacker
-        """
-        gs = self.game_state
-        attacker = gs._safe_get_card(attacker_id)
-        blocker = gs._safe_get_card(blocker_id)
-        
-        if not attacker or not blocker:
-            return False
-            
-        # Get controller info
-        attacker_controller = None
-        blocker_controller = None
-        
-        for player in [gs.p1, gs.p2]:
-            if attacker_id in player["battlefield"]:
-                attacker_controller = player
-            if blocker_id in player["battlefield"]:
-                blocker_controller = player
-                
-        if not attacker_controller or not blocker_controller:
-            return False
-        
-        # Check if blocker is tapped
-        if blocker_id in blocker_controller.get("tapped_permanents", set()):
-            return False
-            
-        # Check for protection
-        if hasattr(attacker, 'oracle_text') and hasattr(blocker, 'oracle_text'):
-            # Check if attacker has protection from blocker
-            if self._has_protection_from(attacker, blocker, attacker_controller, blocker_controller):
-                return False
-                
-            # Check if blocker has protection from attacker
-            if self._has_protection_from(blocker, attacker, blocker_controller, attacker_controller):
-                return False
-        
-        # Check for "can't be blocked" abilities
-        if hasattr(attacker, 'oracle_text'):
-            attacker_text = attacker.oracle_text.lower()
-            
-            # Absolute unblockable
-            if "can't be blocked" in attacker_text and "except" not in attacker_text:
-                return False
-                
-            # Menace (can't be blocked except by two or more creatures)
-            if "menace" in attacker_text or "can't be blocked except by two or more creatures" in attacker_text:
-                # Check if there are already blockers for this attacker
-                existing_blockers = 0
-                for blockers_list in gs.current_block_assignments.values():
-                    if attacker_id in gs.current_block_assignments:
-                        existing_blockers = len(gs.current_block_assignments[attacker_id])
-                    
-                if existing_blockers == 0:
-                    return False  # First blocker can't block alone with menace
-            
-            # Flying (can only be blocked by creatures with flying or reach)
-            if "flying" in attacker_text:
-                has_flying = "flying" in blocker.oracle_text.lower() if hasattr(blocker, 'oracle_text') else False
-                has_reach = "reach" in blocker.oracle_text.lower() if hasattr(blocker, 'oracle_text') else False
-                
-                if not has_flying and not has_reach:
-                    return False
-            
-            # Check for other specific "can't be blocked except by" restrictions
-            if "can't be blocked except by" in attacker_text:
-                can_block = False
-                
-                # Common variations
-                if "can't be blocked except by artifacts" in attacker_text:
-                    if hasattr(blocker, 'card_types') and 'artifact' in blocker.card_types:
-                        can_block = True
-                        
-                elif "can't be blocked except by walls" in attacker_text:
-                    if hasattr(blocker, 'subtypes') and 'wall' in [s.lower() for s in blocker.subtypes]:
-                        can_block = True
-                
-                # Return false if none of the exceptions apply
-                if not can_block:
-                    return False
-        
-        # Check for specific blocker restrictions
-        if hasattr(blocker, 'oracle_text'):
-            blocker_text = blocker.oracle_text.lower()
-            
-            # "Can't block" ability
-            if "can't block" in blocker_text:
-                return False
-            
-            # "Can block only" restrictions
-            if "can block only" in blocker_text:
-                can_block = False
-                
-                # Common variations
-                if "can block only creatures with flying" in blocker_text:
-                    if hasattr(attacker, 'oracle_text') and "flying" in attacker.oracle_text.lower():
-                        can_block = True
-                
-                # Return false if none of the exceptions apply
-                if not can_block:
-                    return False
-        
-        # All checks pass, this blocker can block this attacker
-        return True
-    
-    def check_must_attack(self, card_id):
-        """
-        Check if a creature must attack this turn.
-        
-        Args:
-            card_id: The creature ID to check
-            
-        Returns:
-            bool: Whether the creature must attack if able
-        """
-        gs = self.game_state
-        card = gs._safe_get_card(card_id)
-        
-        if not card or not hasattr(card, 'oracle_text'):
-            return False
-            
-        oracle_text = card.oracle_text.lower()
-        
-        # Check for "must attack each combat if able"
-        if "must attack" in oracle_text and "if able" in oracle_text:
-            return True
-            
-        # Check for "must attack [specific player/planeswalker] if able"
-        if "must attack" in oracle_text and "if able" in oracle_text:
-            # For simplicity, return true for any "must attack" restriction
-            # In a full implementation, we would check specific attack requirements
-            return True
-            
-        return False
-    
-    def check_must_block(self, card_id):
-        """
-        Check if a creature must block this turn.
-        
-        Args:
-            card_id: The creature ID to check
-            
-        Returns:
-            bool: Whether the creature must block if able
-        """
-        gs = self.game_state
-        card = gs._safe_get_card(card_id)
-        
-        if not card or not hasattr(card, 'oracle_text'):
-            return False
-            
-        oracle_text = card.oracle_text.lower()
-        
-        # Check for "must block if able"
-        if "must block" in oracle_text and "if able" in oracle_text:
-            return True
-            
-        # Check for "must block [specific creature] if able"
-        if "must block" in oracle_text and "if able" in oracle_text:
-            # For simplicity, return true for any "must block" restriction
-            # In a full implementation, we would check specific block requirements
-            return True
-            
-        return False

@@ -159,164 +159,111 @@ class ActivatedAbility(Ability):
 
     def pay_cost(self, game_state, controller):
         """Pay the activation cost of this ability with comprehensive cost handling."""
-        # Check for complex costs (includes mana and non-mana components)
         cost_text = self.cost.lower()
-        
-        # Track if all costs were paid successfully
         all_costs_paid = True
-        
-        # Process non-mana costs first
-        
-        # Check for tap symbol
-        if "{t}" in cost_text or "tap" in cost_text:
-            # Check if card is already tapped
-            if self.card_id in controller.get("tapped_permanents", set()):
-                logging.debug(f"Cannot pay tap cost: {game_state._safe_get_card(self.card_id).name} is already tapped")
-                return False
-            # Add to tapped_permanents
-            if "tapped_permanents" not in controller:
-                controller["tapped_permanents"] = set()
-            controller["tapped_permanents"].add(self.card_id)
-            logging.debug(f"Paid tap cost for {game_state._safe_get_card(self.card_id).name}")
-        
-        # Check for sacrifice costs
-        if "sacrifice" in cost_text:
-            # Extract what needs to be sacrificed
-            sacrifice_match = re.search(r"sacrifice ([^:,]+)", cost_text)
-            if sacrifice_match:
-                sacrifice_req = sacrifice_match.group(1).strip()
-                
-                # Check if we can meet the sacrifice requirement
-                if not self._can_sacrifice(game_state, controller, sacrifice_req):
-                    logging.debug(f"Cannot pay sacrifice cost: {sacrifice_req}")
-                    return False
-                    
-                # Pay the sacrifice cost
-                self._pay_sacrifice_cost(game_state, controller, sacrifice_req)
-        
-        # Check for discard costs
-        if "discard" in cost_text:
-            # Extract what needs to be discarded
-            discard_match = re.search(r"discard ([^:,]+)", cost_text)
-            if discard_match:
-                discard_req = discard_match.group(1).strip()
-                
-                # Check if hand has enough cards
-                if discard_req == "your hand" and not controller["hand"]:
-                    logging.debug("Cannot pay discard cost: hand is empty")
-                    return False
-                elif discard_req.startswith("a ") or discard_req.startswith("one "):
-                    if not controller["hand"]:
-                        logging.debug("Cannot pay discard cost: hand is empty")
-                        return False
-                
-                # Pay the discard cost
-                self._pay_discard_cost(game_state, controller, discard_req)
-        
-        # Check for exile costs
-        if "exile" in cost_text and "from" in cost_text:
-            # Extract what needs to be exiled
-            exile_match = re.search(r"exile ([^:,]+) from ([^:,]+)", cost_text)
-            if exile_match:
-                exile_what = exile_match.group(1).strip()
-                exile_from = exile_match.group(2).strip()
-                
-                # Handle different types of exile costs
-                if exile_from == "your graveyard":
-                    if not self._can_exile_from_graveyard(game_state, controller, exile_what):
-                        logging.debug(f"Cannot pay exile cost: {exile_what} from {exile_from}")
-                        return False
-                    self._pay_exile_from_graveyard_cost(game_state, controller, exile_what)
-                elif exile_from == "your hand":
-                    if not self._can_exile_from_hand(game_state, controller, exile_what):
-                        logging.debug(f"Cannot pay exile cost: {exile_what} from {exile_from}")
-                        return False
-                    self._pay_exile_from_hand_cost(game_state, controller, exile_what)
-        
-        # Check for life payment
-        if "pay" in cost_text and "life" in cost_text:
-            # Extract life amount
-            life_match = re.search(r"pay (\d+) life", cost_text)
-            if life_match:
-                life_amount = int(life_match.group(1))
-                
-                # Check if player has enough life
-                if controller["life"] <= life_amount:
-                    logging.debug(f"Cannot pay life cost: not enough life")
-                    return False
-                    
-                # Pay the life
-                controller["life"] -= life_amount
-                logging.debug(f"Paid {life_amount} life for ability")
-        
-        # Check for "remove X counters"
-        if "remove" in cost_text and "counter" in cost_text:
-            counter_match = re.search(r"remove (\d+) ([^:,]+) counters? from", cost_text)
-            if counter_match:
-                counter_amount = int(counter_match.group(1))
-                counter_type = counter_match.group(2).strip()
-                
-                # Check if permanent has enough counters
-                card = game_state._safe_get_card(self.card_id)
-                if not hasattr(card, 'counters') or counter_type not in card.counters or card.counters[counter_type] < counter_amount:
-                    logging.debug(f"Cannot pay counter removal cost: not enough {counter_type} counters")
-                    return False
-                    
-                # Remove counters
-                card.counters[counter_type] -= counter_amount
-                
-                # Apply counter removal effects
-                if counter_type == "+1/+1" and hasattr(card, 'power') and hasattr(card, 'toughness'):
-                    card.power -= counter_amount
-                    card.toughness -= counter_amount
-                elif counter_type == "-1/-1" and hasattr(card, 'power') and hasattr(card, 'toughness'):
-                    card.power += counter_amount
-                    card.toughness += counter_amount
-                    
-                logging.debug(f"Removed {counter_amount} {counter_type} counters from {card.name}")
-        
-        # Handle mana costs using enhanced mana system if available
+
+        # --- Non-Mana Costs FIRST ---
+        # Tap Cost
+        if "{t}" in cost_text:
+             if not game_state.tap_permanent(self.card_id, controller):
+                 logging.debug(f"Cannot pay tap cost: {game_state._safe_get_card(self.card_id).name} couldn't be tapped.")
+                 return False
+             logging.debug(f"Paid tap cost for {game_state._safe_get_card(self.card_id).name}")
+        # Untap Cost {Q} (Less common)
+        if "{q}" in cost_text:
+             if not game_state.untap_permanent(self.card_id, controller):
+                 logging.debug(f"Cannot pay untap cost for {game_state._safe_get_card(self.card_id).name}")
+                 return False
+             logging.debug(f"Paid untap cost for {game_state._safe_get_card(self.card_id).name}")
+
+        # Sacrifice Cost
+        sac_match = re.search(r"sacrifice (a|an|another|\d*)?\s*([^:,{]+)", cost_text)
+        if sac_match:
+             sac_req = sac_match.group(0).replace("sacrifice ", "").strip() # Get the full requirement text
+             if game_state.ability_handler._can_sacrifice(game_state, controller, sac_req):
+                 if not game_state.ability_handler._pay_sacrifice_cost(game_state, controller, sac_req, self.card_id): # Pass source ID
+                     return False # Failed to pay sacrifice
+             else:
+                 logging.debug(f"Cannot meet sacrifice requirement: {sac_req}")
+                 return False
+        # Discard Cost
+        discard_match = re.search(r"discard (\w+|\d*) cards?", cost_text)
+        if discard_match:
+             count_str = discard_match.group(1)
+             count = text_to_number(count_str)
+             if len(controller["hand"]) < count:
+                 logging.debug("Cannot pay discard cost: not enough cards.")
+                 return False
+             # TODO: Implement choice for discard if not random
+             # Simple: discard first N cards
+             for _ in range(count):
+                  if controller["hand"]:
+                       discard_id = controller["hand"][0]
+                       game_state.move_card(discard_id, controller, "hand", controller, "graveyard")
+             logging.debug(f"Paid discard cost ({count} cards).")
+        # Pay Life Cost
+        life_match = re.search(r"pay (\d+) life", cost_text)
+        if life_match:
+             amount = int(life_match.group(1))
+             if controller["life"] < amount:
+                 logging.debug("Cannot pay life cost: not enough life.")
+                 return False
+             controller["life"] -= amount
+             logging.debug(f"Paid {amount} life.")
+        # Remove Counters Cost
+        counter_match = re.search(r"remove (\w+|\d*) ([\w\s\-]+) counters?", cost_text)
+        if counter_match:
+             count_str, counter_type = counter_match.groups()
+             count = text_to_number(count_str)
+             counter_type = counter_type.strip()
+             if not game_state.add_counter(self.card_id, counter_type, -count): # Use add_counter with negative
+                 logging.debug(f"Cannot remove {count} {counter_type} counters.")
+                 return False
+             logging.debug(f"Paid by removing {count} {counter_type} counters.")
+
+        # --- Mana Costs LAST ---
         if hasattr(game_state, 'mana_system') and game_state.mana_system:
-            # Check for mana components in the cost
-            if any(symbol in cost_text for symbol in ["{w}", "{u}", "{b}", "{r}", "{g}", "{c}", "{x}"]):
-                mana_cost = game_state.mana_system.parse_mana_cost(cost_text)
-                if not game_state.mana_system.can_pay_mana_cost(controller, mana_cost):
-                    logging.debug(f"Cannot pay mana cost: {cost_text}")
-                    return False
-                
-                # Pay the mana cost
-                game_state.mana_system.pay_mana_cost(controller, mana_cost)
-                logging.debug(f"Paid mana cost: {cost_text}")
-                
-        logging.debug(f"Successfully paid all costs for ability of {game_state._safe_get_card(self.card_id).name if hasattr(game_state._safe_get_card(self.card_id), 'name') else self.card_id}")
-        return all_costs_paid
-    
-    def _can_sacrifice(self, game_state, controller, sacrifice_req):
-        """Check if controller can meet sacrifice requirements"""
-        # Handle various sacrifice costs
-        card_type_requirement = None
-        
-        # Common patterns
-        if 'creature' in sacrifice_req:
-            card_type_requirement = 'creature'
-        elif 'artifact' in sacrifice_req:
-            card_type_requirement = 'artifact'
-        elif 'land' in sacrifice_req:
-            card_type_requirement = 'land'
-        elif 'permanent' in sacrifice_req:
-            # Any permanent can be sacrificed
-            return len(controller["battlefield"]) > 0
-        
-        if card_type_requirement:
-            # Check if player controls any permanents of the required type
-            for card_id in controller["battlefield"]:
-                card = game_state._safe_get_card(card_id)
-                if card and card_type_requirement in card.card_types:
-                    return True
-            return False
-            
-        # If we reach here, assume the cost can be paid
+             mana_cost_str = re.sub(r"(?:\{[tq]\}|sacrifice.*?|discard.*?|pay \d+ life|remove.*?)(?:,|$)\s*", "", self.cost).strip()
+             if mana_cost_str: # Check if there's any mana cost left
+                 parsed_cost = game_state.mana_system.parse_mana_cost(mana_cost_str)
+                 if not game_state.mana_system.pay_mana_cost(controller, parsed_cost):
+                     logging.warning(f"Failed to pay mana cost '{mana_cost_str}' after non-mana costs.")
+                     # IMPORTANT: Rollback non-mana costs if mana payment fails
+                     # This is complex and not fully implemented here. Assume failure is final.
+                     return False
+                 logging.debug(f"Paid mana cost: {mana_cost_str}")
+        else:
+             # Basic mana check/payment if no system
+             if any(c in cost_text for c in "WUBRGC123456789X"):
+                 if sum(controller["mana_pool"].values()) == 0: return False # Simplistic check
+                 controller["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0} # Assume all mana used
+
+        logging.debug(f"Successfully paid cost '{self.cost}' for {game_state._safe_get_card(self.card_id).name}")
         return True
+    
+    def _can_sacrifice(game_state, controller, sacrifice_req):
+        """Basic check if controller can meet sacrifice requirements"""
+        if not sacrifice_req: return False
+        req_lower = sacrifice_req.lower()
+        valid_types = ['creature', 'artifact', 'enchantment', 'land', 'planeswalker', 'permanent']
+        req_type = next((t for t in valid_types if t in req_lower), None)
+
+        # Check if self sacrifice
+        if "this permanent" in req_lower or "this creature" in req_lower or req_lower == 'it':
+            # In pay_cost, self.card_id will be the source card ID.
+            # Here, we only check if *a* sacrifice is possible, specific card checked later.
+            return True # Assume the source itself is valid if required.
+
+        # Check if player controls any permanent of the required type
+        if req_type:
+            for card_id in controller.get("battlefield", []):
+                card = game_state._safe_get_card(card_id)
+                if card and (req_type == 'permanent' or req_type in getattr(card, 'card_types', [])):
+                    return True # Found at least one valid permanent
+            return False # No valid permanent found
+
+        # If no type specified, assume any permanent can be sacrificed
+        return bool(controller.get("battlefield"))
     
     def _pay_generic_mana(self, game_state, controller, amount):
         """Pay generic mana cost using available colored mana"""
@@ -342,44 +289,40 @@ class ActivatedAbility(Ability):
             
         return amount <= 0
     
-    def _pay_sacrifice_cost(self, game_state, controller, sacrifice_req):
-        """Pay a sacrifice cost"""
-        # Parse the sacrifice requirement
-        card_type_requirement = None
-        
-        if 'creature' in sacrifice_req:
-            card_type_requirement = 'creature'
-        elif 'artifact' in sacrifice_req:
-            card_type_requirement = 'artifact'
-        elif 'land' in sacrifice_req:
-            card_type_requirement = 'land'
-        elif 'permanent' in sacrifice_req or sacrifice_req.strip() == 'it':
-            # Sacrificing self or any permanent
-            if sacrifice_req.strip() == 'it':
-                # Sacrifice the ability source itself
-                target_id = self.card_id
-            else:
-                # Just pick the first permanent
-                target_id = controller["battlefield"][0] if controller["battlefield"] else None
+    def _pay_sacrifice_cost(game_state, controller, sacrifice_req, ability_source_id):
+        """Basic payment of sacrifice cost (AI chooses simplest valid target)"""
+        if not sacrifice_req: return False
+        req_lower = sacrifice_req.lower()
+        valid_types = ['creature', 'artifact', 'enchantment', 'land', 'planeswalker', 'permanent']
+        req_type = next((t for t in valid_types if t in req_lower), None)
+        target_id_to_sacrifice = None
+
+        if "this permanent" in req_lower or "this creature" in req_lower or req_lower == 'it':
+            target_id_to_sacrifice = ability_source_id # Sacrifice the source itself
         else:
-            # Default to sacrificing the source of the ability
-            target_id = self.card_id
-        
-        # Find a card to sacrifice
-        if card_type_requirement:
-            # Find a permanent of the required type
-            for card_id in controller["battlefield"]:
+            # Find a suitable permanent (simple choice: first valid found)
+            valid_options = []
+            for card_id in controller.get("battlefield", []):
                 card = game_state._safe_get_card(card_id)
-                if card and card_type_requirement in card.card_types:
-                    target_id = card_id
-                    break
-        
-        # Perform the sacrifice
-        if target_id and target_id in controller["battlefield"]:
-            game_state.move_card(target_id, controller, "battlefield", controller, "graveyard")
-            logging.debug(f"Sacrificed {game_state._safe_get_card(target_id).name} to pay ability cost")
-        else:
-            logging.warning("Failed to find a valid permanent to sacrifice")
+                if card and (req_type == 'permanent' or not req_type or req_type in getattr(card, 'card_types', [])):
+                    valid_options.append(card_id)
+            # Basic AI: sacrifice least valuable (e.g., lowest CMC, or a token)
+            if valid_options:
+                # Prefer tokens
+                tokens = [opt for opt in valid_options if "TOKEN" in opt]
+                if tokens: target_id_to_sacrifice = tokens[0]
+                else:
+                    # Choose lowest CMC non-token
+                    non_tokens = sorted([opt for opt in valid_options if "TOKEN" not in opt], key=lambda cid: getattr(game_state._safe_get_card(cid), 'cmc', 99))
+                    if non_tokens: target_id_to_sacrifice = non_tokens[0]
+
+        if target_id_to_sacrifice and target_id_to_sacrifice in controller.get("battlefield", []):
+            sac_card_name = getattr(game_state._safe_get_card(target_id_to_sacrifice), 'name', target_id_to_sacrifice)
+            if game_state.move_card(target_id_to_sacrifice, controller, "battlefield", controller, "graveyard"):
+                logging.debug(f"Sacrificed {sac_card_name} to pay cost.")
+                return True
+        logging.warning(f"Could not find valid permanent to sacrifice for '{sacrifice_req}'")
+        return False
     
     def _pay_discard_cost(self, game_state, controller, discard_req):
         """Pay a discard cost"""
@@ -594,130 +537,60 @@ class TriggeredAbility(Ability):
                 
         return None
 
-    def _evaluate_condition(self, condition, context):
-        """Evaluate if a condition is met based on the game context"""
-        if not condition or not context:
-            return True  # Default to true if no condition or context
-            
-        game_state = context.get('game_state')
-        controller = context.get('controller')
-        if not game_state or not controller:
-            return True  # Can't evaluate without game state and controller
-        
-        # Evaluate common condition patterns
-        condition = condition.lower()
-        
-        # "if you control X or more Y"
-        control_match = re.search(r'you control (\w+) or more ([^,.]+)', condition)
-        if control_match:
-            count_text, permanent_type = control_match.groups()
-            required_count = text_to_number(count_text)
-            
-            # Count matching permanents
-            matching_count = 0
-            for card_id in controller["battlefield"]:
-                card = game_state._safe_get_card(card_id)
-                if not card or not hasattr(card, 'type_line'):
-                    continue
-                    
-                # Check if card type matches
-                if permanent_type.lower() in card.type_line.lower():
-                    matching_count += 1
-            
-            return matching_count >= required_count
-        
-        # "if you have X or more life/cards in hand"
-        resource_match = re.search(r'you have (\w+) or more ([^,.]+)', condition)
-        if resource_match:
-            count_text, resource_type = resource_match.groups()
-            required_count = text_to_number(count_text)
-            
-            if "life" in resource_type:
-                return controller["life"] >= required_count
-            elif "cards in hand" in resource_type or "cards in your hand" in resource_type:
-                return len(controller["hand"]) >= required_count
-        
-        # "if an opponent controls X or more Y"
-        opponent_match = re.search(r'(an opponent|your opponent) controls (\w+) or more ([^,.]+)', condition)
-        if opponent_match:
-            _, count_text, permanent_type = opponent_match.groups()
-            required_count = text_to_number(count_text)
-            
-            # Get opponent
-            opponent = game_state.p2 if controller == game_state.p1 else game_state.p1
-            
-            # Count matching permanents
-            matching_count = 0
-            for card_id in opponent["battlefield"]:
-                card = game_state._safe_get_card(card_id)
-                if not card or not hasattr(card, 'type_line'):
-                    continue
-                    
-                # Check if card type matches
-                if permanent_type.lower() in card.type_line.lower():
-                    matching_count += 1
-            
-            return matching_count >= required_count
-        
-        # "if you've X or more Y this turn" (e.g., drawn cards, gained life)
-        action_match = re.search(r'you\'ve (\w+) (\w+) or more ([^,.]+) this turn', condition)
-        if action_match:
-            action, count_text, what = action_match.groups()
-            required_count = text_to_number(count_text)
-            
-            # Check tracking variables based on the action type
-            if action == "drawn" and "cards" in what and hasattr(game_state, 'cards_drawn_this_turn'):
-                cards_drawn = game_state.cards_drawn_this_turn.get(controller, 0)
-                return cards_drawn >= required_count
-            elif action == "gained" and "life" in what and hasattr(game_state, 'life_gained_this_turn'):
-                life_gained = game_state.life_gained_this_turn.get(controller, 0)
-                return life_gained >= required_count
-        
-        # Default to true for unrecognized conditions
-        return True
+    def _evaluate_condition(self, condition_text, context):
+        """Evaluate if a trigger's conditional clause is met."""
+        if not condition_text or not context: return True
+        gs = context.get('game_state')
+        controller = context.get('controller') # Controller of the trigger source
+        if not gs or not controller: return True
 
-    # Using the text_to_number utility function from ability_utils
+        # Use the card evaluator for condition checking if available
+        if hasattr(gs, 'card_evaluator') and gs.card_evaluator:
+            try:
+                # Pass context and condition text
+                return gs.card_evaluator.evaluate_condition(condition_text, context)
+            except NotImplementedError:
+                logging.warning(f"CardEvaluator does not implement condition: {condition_text}")
+            except Exception as e:
+                logging.error(f"Error evaluating condition via CardEvaluator: {e}")
+
+        # --- Basic Fallback Parsing ---
+        logging.debug(f"Evaluating basic condition: '{condition_text}'")
+        # Check "if you control..."
+        control_match = re.search(r"if you control (?:a|an|another|\d+)?\s*([\w\s\-]+?)(?: with|$)", condition_text)
+        if control_match:
+            required_type = control_match.group(1).strip()
+            return any(self._card_matches_criteria(gs._safe_get_card(cid), required_type)
+                       for cid in controller.get("battlefield", []))
+
+        # Check opponent control
+        opp_control_match = re.search(r"if an opponent controls (?:a|an|\d+)?\s*([\w\s\-]+?)(?: with|$)", condition_text)
+        if opp_control_match:
+            required_type = opp_control_match.group(1).strip()
+            opponent = gs.p2 if controller == gs.p1 else gs.p1
+            return any(self._card_matches_criteria(gs._safe_get_card(cid), required_type)
+                       for cid in opponent.get("battlefield", []))
+
+        # Check life total
+        life_match = re.search(r"if (you have|your life total is) (\d+) or more life", condition_text)
+        if life_match and controller["life"] >= int(life_match.group(2)): return True
+        life_match = re.search(r"if (you have|your life total is) (\d+) or less life", condition_text)
+        if life_match and controller["life"] <= int(life_match.group(2)): return True
+
+        # Check card count in hand/graveyard
+        card_count_match = re.search(r"if you have (\d+) or more cards in (your hand|your graveyard)", condition_text)
+        if card_count_match:
+             count = int(card_count_match.group(1))
+             zone = card_count_match.group(2).replace("your ", "")
+             if len(controller.get(zone, [])) >= count: return True
+
+        logging.warning(f"Could not parse trigger condition: '{condition_text}'. Assuming True.")
+        return True # Default to true if condition unparsed
     
     def _check_additional_condition(self, context):
-        """Check if any additional conditions are met"""
-        if not self.additional_condition:
-            return True
-            
-        # Process common conditional patterns
-        condition = self.additional_condition.lower()
-        
-        # "if you control X" conditions
-        if "if you control" in condition:
-            controller = context.get("controller")
-            if not controller:
-                return False
-                
-            # Extract what needs to be controlled
-            import re
-            match = re.search(r"if you control (a|an|[\d]+) ([\w\s]+)", condition)
-            if match:
-                count_req = match.group(1)
-                permanent_type = match.group(2)
-                
-                # Count matching permanents
-                count = 0
-                for perm_id in controller["battlefield"]:
-                    perm = self.game_state._safe_get_card(perm_id)
-                    if not perm or not hasattr(perm, 'type_line'):
-                        continue
-                        
-                    # Check if permanent matches the required type
-                    if permanent_type in perm.type_line.lower():
-                        count += 1
-                
-                # Check if count requirement is met
-                if count_req.isdigit():
-                    return count >= int(count_req)
-                else:
-                    return count >= 1  # "a" or "an" requires at least 1
-        
-        # Default to True if we can't parse the condition
-        return True
+        """Checks self.additional_condition using the same evaluation logic."""
+        if not self.additional_condition: return True
+        return self._evaluate_condition(self.additional_condition, context)
     
     def resolve(self, game_state, controller):
         """Resolve this triggered ability using effect classes."""
@@ -1311,33 +1184,43 @@ class DamageEffect(AbilityEffect):
                  has_lifelink = "lifelink" in source_card.oracle_text.lower()
                  has_deathtouch = "deathtouch" in source_card.oracle_text.lower()
 
-        targets_to_damage = [] # List of (target_id, target_obj, target_player, is_player_target)
+        if not targets:
+             logging.warning(f"DamageEffect: No targets provided or resolved for '{self.effect_text}'.")
+             return False
 
-        # --- Collect targets logic (remains mostly the same) ---
-        # ... (target collection logic as before) ...
-        if self.target_type == "each opponent":
-            opponent = game_state.p2 if controller == game_state.p1 else game_state.p1
-            targets_to_damage.append(("p1" if opponent == game_state.p1 else "p2", opponent, opponent, True))
-        elif self.target_type == "any target":
-            # Combine players and creatures/planeswalkers from targets dict
-             if targets.get("players"):
-                 for pid in targets["players"]:
-                     p_obj = game_state.p1 if pid == "p1" else game_state.p2
-                     targets_to_damage.append((pid, p_obj, p_obj, True))
-             categories = ["creatures", "planeswalkers", "battles"] # Add battles if targetable by damage
-             for cat in categories:
-                 if targets.get(cat):
-                     for t_id in targets[cat]:
-                          target_location = game_state.find_card_location(t_id)
-                          if target_location:
-                                t_owner, _ = target_location
-                                t_obj = game_state._safe_get_card(t_id)
-                                if t_obj and t_owner: targets_to_damage.append((t_id, t_obj, t_owner, False))
-                          else: # Could be targeting something not on battlefield (e.g., grave for some effects)
-                               # Basic object fetch if location unknown (less safe)
-                               t_obj = game_state._safe_get_card(t_id)
-                               # Cannot determine owner easily without location, might need context
-                               if t_obj: targets_to_damage.append((t_id, t_obj, None, False)) # Owner unknown
+        targets_to_damage = [] # List of (target_id, target_obj, target_player, is_player_target)
+        # --- Improved Target Collection ---
+        for category, target_ids in targets.items():
+            if not target_ids: continue
+            is_player_cat = category == "players"
+            for target_id in target_ids:
+                 target_obj = None
+                 target_owner = None
+                 if is_player_cat:
+                     target_obj = game_state.p1 if target_id == "p1" else game_state.p2
+                     target_owner = target_obj
+                 else: # Assume permanent ID
+                     location_info = game_state.find_card_location(target_id)
+                     if location_info:
+                          target_owner, _ = location_info
+                          target_obj = game_state._safe_get_card(target_id)
+                     else: # Fallback if not found (e.g., just left battlefield?)
+                          target_obj = game_state._safe_get_card(target_id)
+
+                 if target_obj:
+                      targets_to_damage.append((target_id, target_obj, target_owner, is_player_cat))
+                 else:
+                      logging.warning(f"Could not find target object for ID: {target_id}")
+
+        if not targets_to_damage and "each opponent" in self.target_type: # Handle 'each opponent' specifically if no target provided
+             opponent = game_state.p2 if controller == game_state.p1 else game_state.p1
+             opp_id = "p2" if opponent == game_state.p2 else "p1"
+             targets_to_damage.append((opp_id, opponent, opponent, True))
+
+
+        if not targets_to_damage:
+            logging.warning(f"DamageEffect: No valid targets resolved for '{self.effect_text}'.")
+            return False
 
         else: # Specific target type like "creature", "player"
             cat_map = {"creature": "creatures", "player": "players", "planeswalker": "planeswalkers", "battle": "battles"}
@@ -1596,61 +1479,53 @@ class DestroyEffect(AbilityEffect):
         self.can_target_indestructible = can_target_indestructible
 
     def _apply_effect(self, game_state, source_id, controller, targets):
-        """Apply destroy effect."""
+        # ... (collect targets logic - can be refined like DamageEffect) ...
         destroyed_count = 0
-        targets_to_affect = []
-        target_cat_map = {"creature": "creatures", "artifact": "artifacts", "enchantment": "enchantments", "planeswalker": "planeswalkers", "land":"lands", "permanent": "permanents"}
-        target_cat = target_cat_map.get(self.target_type)
+        target_ids_to_process = []
 
-        if target_cat and targets.get(target_cat):
-             targets_to_affect.extend(targets[target_cat])
-        elif self.target_type == "all": # Handle "destroy all creatures" etc.
-            # Determine which type 'all' refers to
-            if "all creatures" in self.effect_text.lower(): search_type = "creature"
-            elif "all artifacts" in self.effect_text.lower(): search_type = "artifact"
-            # Add more types...
-            else: search_type = "permanent" # Default assumption for "destroy all"
-            for p in [game_state.p1, game_state.p2]:
-                for p_id in p["battlefield"]:
-                    p_card = game_state._safe_get_card(p_id)
-                    if p_card and (search_type=="permanent" or search_type in getattr(p_card,'card_types',[])):
-                         targets_to_affect.append(p_id)
+        # --- Improved Target Collection ---
+        for category, target_list in targets.items():
+            if category in ["creatures", "artifacts", "enchantments", "planeswalkers", "lands", "permanents"]:
+                target_ids_to_process.extend(target_list)
 
+        if not target_ids_to_process:
+             logging.warning(f"DestroyEffect: No valid targets provided/resolved for '{self.effect_text}'. Targets: {targets}")
+             return False
 
-        if not targets_to_affect:
-            logging.warning(f"DestroyEffect: No valid targets found for '{self.effect_text}'. Targets provided: {targets}")
-            return False
-
-        for target_id in targets_to_affect:
+        for target_id in target_ids_to_process:
             target_card = game_state._safe_get_card(target_id)
-            if not target_card: continue
-            target_owner = game_state.get_card_controller(target_id)
-            if not target_owner: continue
+            target_owner = game_state.get_card_controller(target_id) # Use helper
+            if not target_card or not target_owner: continue
 
-            # Check indestructible
-            is_indestructible = hasattr(game_state,'ability_handler') and game_state.ability_handler._has_keyword(target_card, "indestructible")
+            # Indestructible Check (using ability handler if possible)
+            is_indestructible = False
+            if hasattr(game_state, 'ability_handler') and hasattr(game_state.ability_handler, '_has_keyword_check'):
+                 is_indestructible = game_state.ability_handler._has_keyword_check(target_card, "indestructible")
+            elif hasattr(target_card, 'oracle_text'): # Fallback
+                 is_indestructible = "indestructible" in target_card.oracle_text.lower()
+
             if is_indestructible and not self.can_target_indestructible:
                 logging.debug(f"DestroyEffect: Cannot destroy {target_card.name} (Indestructible).")
                 continue
 
-            # Check regeneration/totem armor replacement effects
+            # Check Replacement Effects (Regeneration, Totem Armor, etc.)
             destroy_context = {"card_id": target_id, "controller": target_owner, "to_zone": "graveyard", "cause": "destroy_effect"}
-            modified_context, replaced = game_state.apply_replacement_effect("DIES", destroy_context) # Check DIES replacements
+            modified_context, replaced = game_state.apply_replacement_effect("DIES", destroy_context)
 
-            if replaced and modified_context.get('prevented'):
+            if replaced and modified_context.get('prevented', False):
                  logging.debug(f"DestroyEffect: Destruction of {target_card.name} prevented (e.g., regeneration).")
-                 continue # Destruction prevented/replaced by regeneration/etc
+                 # Ensure side effects of replacement (like tapping for regen) are handled by the replacement effect itself
+                 continue # Destruction prevented
 
             final_dest_zone = modified_context.get('to_zone', 'graveyard')
 
-            # Move card using GameState method
+            # Move card
             if game_state.move_card(target_id, target_owner, "battlefield", target_owner, final_dest_zone, cause="destroy_effect", context={"source_id": source_id}):
                 destroyed_count += 1
-                logging.debug(f"DestroyEffect: Moved {target_card.name} to {final_dest_zone}.")
             else:
                  logging.warning(f"DestroyEffect: Failed to move {target_card.name} to {final_dest_zone}.")
 
-        # SBAs will handle the actual death triggers etc.
+        # Call SBAs *after* processing all targets for this effect
         if destroyed_count > 0: game_state.check_state_based_actions()
         return destroyed_count > 0
 
@@ -1856,60 +1731,50 @@ class ExileEffect(AbilityEffect):
         self.zone = zone.lower()
 
     def _apply_effect(self, game_state, source_id, controller, targets):
-        """Apply exile effect."""
+        # ... (improved target collection logic similar to DestroyEffect/DamageEffect) ...
         exiled_count = 0
-        targets_to_affect = []
-        # Map target types to categories expected in targets dict
-        target_cat_map = {
-            "creature": "creatures", "artifact": "artifacts", "enchantment": "enchantments",
-            "planeswalker": "planeswalkers", "land": "lands", "permanent": "permanents",
-            "card": "cards", # For graveyard/hand etc.
-            "spell": "spells" # For stack
-        }
-        target_cat = target_cat_map.get(self.target_type)
+        target_ids_to_process = []
 
-        # Find targets based on category or explicit 'target' keyword
-        if target_cat and targets.get(target_cat):
-             targets_to_affect.extend(targets[target_cat])
-        elif self.target_type == "any": # If effect is "exile any target"
-             for cat in ["creatures", "players", "planeswalkers", "battles"]: # Common 'any target' types
-                  targets_to_affect.extend(targets.get(cat, []))
-        elif "target" in self.effect_text.lower() and not targets_to_affect:
-             # If 'target' is mentioned but no specific category matched, look across common categories
-             for cat in ["creatures", "players", "planeswalkers", "artifacts", "enchantments", "permanents", "spells", "cards"]:
-                  targets_to_affect.extend(targets.get(cat, []))
+        # --- Improved Target Collection ---
+        for category, target_list in targets.items():
+            # Check categories relevant to exile (permanents, cards from zones, stack items)
+            if category in ["creatures", "artifacts", "enchantments", "planeswalkers", "lands", "permanents", "cards", "spells"]:
+                target_ids_to_process.extend(target_list)
 
-        if not targets_to_affect:
-            logging.warning(f"ExileEffect: No valid targets found for '{self.effect_text}'. Targets provided: {targets}")
-            return False
+        if not target_ids_to_process:
+             logging.warning(f"ExileEffect: No valid targets provided/resolved for '{self.effect_text}'. Targets: {targets}")
+             return False
 
-        for target_id in targets_to_affect:
-            # Find target location and owner
+        for target_id in target_ids_to_process:
             location_info = game_state.find_card_location(target_id)
             if not location_info:
-                # Special check for player targets
-                if target_id in ["p1", "p2"]:
-                    logging.warning(f"ExileEffect: Cannot exile player {target_id}.")
-                    continue
-                logging.warning(f"ExileEffect: Could not find location for target {target_id}.")
-                continue
+                 if target_id in ["p1", "p2"]: continue # Cannot exile player
+                 logging.warning(f"ExileEffect: Could not find location for target {target_id}.")
+                 continue
 
             target_owner, current_zone = location_info
 
-            # Check if the source zone matches the effect's requirement
+            # Validate zone if specified
             if self.zone != 'any' and current_zone != self.zone:
                 logging.warning(f"ExileEffect: Target {target_id} not in expected zone '{self.zone}', found in '{current_zone}'.")
                 continue
 
-            # Move card using GameState method
-            if game_state.move_card(target_id, target_owner, current_zone, target_owner, "exile", cause="exile_effect", context={"source_id": source_id}):
-                 exiled_count += 1
-                 card_name = game_state._safe_get_card(target_id).name if game_state._safe_get_card(target_id) else target_id
-                 logging.debug(f"ExileEffect: Exiled {card_name} from {current_zone}.")
-            else:
-                 logging.warning(f"ExileEffect: Failed to move {target_id} to exile from {current_zone}.")
+            # Check Replacement Effects
+            exile_context = {"card_id": target_id, "player": target_owner, "from_zone": current_zone, "to_zone": "exile", "cause": "exile_effect"}
+            modified_context, replaced = game_state.apply_replacement_effect("EXILE", exile_context)
 
-        # SBAs check needed? Usually exile doesn't trigger immediate SBAs unless it causes another effect.
+            if replaced and modified_context.get('prevented', False):
+                 logging.debug(f"ExileEffect: Exile of {target_id} prevented.")
+                 continue
+
+            final_dest_zone = modified_context.get('to_zone', 'exile')
+
+            # Perform the move
+            if game_state.move_card(target_id, target_owner, current_zone, target_owner, final_dest_zone, cause="exile_effect", context={"source_id": source_id}):
+                 exiled_count += 1
+            else:
+                 logging.warning(f"ExileEffect: Failed to move {target_id} to {final_dest_zone} from {current_zone}.")
+
         return exiled_count > 0
 class ReturnToHandEffect(AbilityEffect):
     """Effect that returns cards to their owner's hand."""
@@ -2226,26 +2091,12 @@ class SearchLibraryEffect(AbilityEffect):
             return False # Indicate nothing was found/moved
 
     def _card_matches_criteria(self, card, criteria):
-        """Basic check if card matches simple criteria."""
         if not card: return False
-        types = getattr(card, 'card_types', [])
-        subtypes = getattr(card, 'subtypes', [])
-        type_line = getattr(card, 'type_line', '').lower()
-        name = getattr(card, 'name', '').lower() # Search by name
-
         crit_lower = criteria.lower()
-
-        if crit_lower == "any": return True
-        if crit_lower == "basic land" and 'basic' in type_line and 'land' in type_line: return True
-        if crit_lower == "land" and 'land' in type_line: return True
-        if crit_lower in types: return True
-        if crit_lower in subtypes: return True
-        if crit_lower == name: return True
-        # Allow searching for partial names
-        if criteria in name: return True
-        # Allow searching by card type e.g. "artifact creature"
-        if all(word in type_line for word in crit_lower.split()): return True
-
+        # Simple checks, can be expanded
+        if crit_lower in getattr(card, 'card_types', []): return True
+        if crit_lower in getattr(card, 'subtypes', []): return True
+        if crit_lower in getattr(card, 'type_line', '').lower(): return True
         return False
 
 class TapEffect(AbilityEffect):
