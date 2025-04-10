@@ -27,7 +27,6 @@ graph TD
 
 - Current state: Doesn't work, kinda of a mess, working on version 3.00
 
-- Add support for tutors (Basically done need to review the code more and test ti)
 - Add support for coin flips and dice rolls
 - Add support for {2/B} style mana
 - Bug fix deck_stat_tracker.py (inconsistent stats?)
@@ -36,7 +35,6 @@ graph TD
 - Add support for "Exhaust"
 - Overhaul DeckStats_Viewer to work with the current versions of the deck_stat_tracker and card_memory.py
 - General Bug fixing needs to be done, need to integrate other stuff
-- Clean up codebase lots of duplicate logic
 
 ### Key Features
 
