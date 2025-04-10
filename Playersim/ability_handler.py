@@ -47,6 +47,7 @@ class AbilityHandler:
     def handle_class_level_up(self, class_idx):
         """
         Handle leveling up a Class card with proper trigger processing.
+        Includes mana cost payment and trigger processing.
 
         Args:
             class_idx: Index of the Class card in the controller's battlefield.
@@ -58,7 +59,7 @@ class AbilityHandler:
         active_player = gs._get_active_player() # Use GS helper method
 
         # Validate index
-        if not (0 <= class_idx < len(active_player["battlefield"])):
+        if not (0 <= class_idx < len(active_player.get("battlefield", []))): # Use get
             logging.warning(f"Invalid class index: {class_idx}")
             return False
 
@@ -70,13 +71,13 @@ class AbilityHandler:
         if not class_card or not hasattr(class_card, 'is_class') or not class_card.is_class:
             logging.warning(f"Card {class_id} (index {class_idx}) is not a Class.")
             return False
-        if not hasattr(class_card, 'can_level_up') or not class_card.can_level_up():
+        if not hasattr(class_card, 'can_level_up') or not class_card.can_level_up(): # Changed card_card to class_card
             logging.warning(f"Class {class_card.name} cannot level up further.")
             return False
 
         # Determine next level and cost
         next_level = getattr(class_card, 'current_level', 1) + 1 # Default current level is 1 if not set
-        level_cost_str = class_card.get_level_cost(next_level) # Assumes this method exists
+        level_cost_str = class_card.get_level_cost(next_level) # Assumes this method exists on Card object
 
         if not level_cost_str:
             logging.warning(f"No cost found for level {next_level} of {class_card.name}.")
@@ -85,31 +86,36 @@ class AbilityHandler:
         # Check affordability using ManaSystem
         parsed_cost = None
         if hasattr(gs, 'mana_system') and gs.mana_system:
-            parsed_cost = gs.mana_system.parse_mana_cost(level_cost_str)
-            if not gs.mana_system.can_pay_mana_cost(active_player, parsed_cost):
-                logging.debug(f"Cannot afford to level up {class_card.name} (Cost: {level_cost_str})")
+            # Use mana system to parse and check affordability
+            try:
+                parsed_cost_dict = gs.mana_system.parse_mana_cost(level_cost_str)
+                if not gs.mana_system.can_pay_mana_cost(active_player, parsed_cost_dict):
+                    logging.debug(f"Cannot afford to level up {class_card.name} (Cost: {level_cost_str})")
+                    return False
+            except Exception as e:
+                logging.error(f"Error checking mana cost for level up: {e}")
                 return False
         else:
             logging.warning("Mana system not found, cannot check level-up affordability.")
             return False # Cannot proceed without mana system
 
-        # Pay the cost
-        if not gs.mana_system.pay_mana_cost(active_player, parsed_cost):
-            logging.warning(f"Failed to pay level-up cost for {class_card.name}")
+        # --- Pay the cost using ManaSystem ---
+        if not gs.mana_system.pay_mana_cost(active_player, level_cost_str): # Pass cost string directly
+            logging.warning(f"Failed to pay level-up cost {level_cost_str} for {class_card.name}")
             # Mana system should handle rollback internally if needed
             return False
 
         # Level up the class (Card object handles its state change)
-        # previous_type_line should be tracked by the Card object during level_up
         previous_level = getattr(class_card, 'current_level', 1)
-        success = class_card.level_up() # This should update current_level and potentially P/T, type
+        success = False
+        if hasattr(class_card, 'level_up'): # Ensure method exists
+            success = class_card.level_up() # This should update current_level and potentially P/T, type
 
         if success:
             logging.info(f"Leveled up {class_card.name} from level {previous_level} to {next_level}")
 
             # Re-register abilities for the new level
-            # Note: Unregistering old ones might be needed if they don't persist
-            # self.unregister_card_abilities(class_id) # Optionally unregister first
+            # parse_and_register clears old ones first
             self._parse_and_register_abilities(class_id, class_card)
 
             # Trigger level-up event using unified check_abilities
@@ -119,21 +125,26 @@ class AbilityHandler:
                 "new_level": next_level,
                 "controller": active_player
             }
+            # Trigger a generic level up event
+            self.check_abilities(class_id, "LEVEL_UP", context)
+            # Trigger a specific class level up event
             self.check_abilities(class_id, "CLASS_LEVEL_UP", context) # Event origin is the class itself
+
 
             # Check if it became a creature *at this level* (handled by Card.level_up or here)
             # Example: Card might gain 'creature' type now. Ensure Layer System updates.
-            if hasattr(gs, 'layer_system'):
+            if hasattr(gs, 'layer_system') and gs.layer_system:
+                gs.layer_system.invalidate_cache() # Force recalculation
                 gs.layer_system.apply_all_effects()
 
             gs.phase = gs.PHASE_PRIORITY # Reset priority
 
         return success
         
-
     def handle_unlock_door(self, room_idx):
         """
         Handle unlocking a door on a Room card with proper trigger processing.
+        Includes mana cost payment and trigger processing.
 
         Args:
             room_idx: Index of the Room card in the controller's battlefield.
@@ -145,7 +156,7 @@ class AbilityHandler:
         active_player = gs._get_active_player() # Use GS helper method
 
         # Validate index
-        if not (0 <= room_idx < len(active_player["battlefield"])):
+        if not (0 <= room_idx < len(active_player.get("battlefield", []))): # Use get
             logging.warning(f"Invalid room index: {room_idx}")
             return False
 
@@ -154,66 +165,93 @@ class AbilityHandler:
         room_card = gs._safe_get_card(room_id)
 
         # Verify it's a Room card
-        if not room_card or not hasattr(room_card, 'is_room') or not room_card.is_room:
+        if not room_card or not hasattr(room_card, 'is_room') or not card_room.is_room: # Changed card_room to room_card
             logging.warning(f"Card {room_id} (index {room_idx}) is not a Room.")
             return False
 
-        # Check which door to unlock (Assume door 2 for now, rule needs clarification)
-        door_number = 2 # Assume we always try to unlock door 2 with this action
-        door_attr = f"door{door_number}"
-        door_data = getattr(room_card, door_attr, None)
+        # --- Determine which door to unlock ---
+        # Assume action always targets the *next* locked door sequentially, or door 2 if available?
+        # For simplicity, let's try door 2 if it exists and is locked. If not, try door 1.
+        door_to_unlock_num = None
+        door_data = None
 
-        if not door_data or door_data.get('unlocked', False):
-            logging.warning(f"Door {door_number} is already unlocked or does not exist for Room {room_card.name}")
-            return False
+        if hasattr(room_card, 'door2') and not room_card.door2.get('unlocked', False):
+            door_to_unlock_num = 2
+            door_data = room_card.door2
+        elif hasattr(room_card, 'door1') and not room_card.door1.get('unlocked', False):
+             # Note: Door 1 unlocking might not always be an explicit action
+             # If door 1 has a cost, we can proceed. If not, it might unlock implicitly.
+             if room_card.door1.get('mana_cost'):
+                 door_to_unlock_num = 1
+                 door_data = room_card.door1
+             else:
+                 logging.debug(f"Door 1 of {room_card.name} has no cost, assumed implicitly unlocked or via other means.")
+                 # If Door 2 also doesn't exist or is unlocked, no action possible.
+                 if not hasattr(room_card, 'door2') or room_card.door2.get('unlocked', False):
+                     logging.warning(f"No available doors to unlock for {room_card.name}.")
+                     return False
 
-        # Get door cost
+        if door_to_unlock_num is None:
+             logging.warning(f"No lockable door found or selected for {room_card.name}.")
+             return False
+
+        # --- Get Door Cost ---
         door_cost_str = door_data.get('mana_cost', '')
         if not door_cost_str:
-            logging.warning(f"No mana cost defined for Door {door_number} of {room_card.name}.")
-            return False # Cannot unlock without cost? Assume yes.
+            logging.warning(f"No mana cost defined for Door {door_to_unlock_num} of {room_card.name}. Assuming free?")
+            door_cost_str = "{0}" # Treat as free if no cost defined
 
         # Check affordability using ManaSystem
         parsed_cost = None
         if hasattr(gs, 'mana_system') and gs.mana_system:
-            parsed_cost = gs.mana_system.parse_mana_cost(door_cost_str)
-            if not gs.mana_system.can_pay_mana_cost(active_player, parsed_cost):
-                logging.debug(f"Cannot afford to unlock Door {door_number} for {room_card.name} (Cost: {door_cost_str})")
-                return False
+             try:
+                 parsed_cost_dict = gs.mana_system.parse_mana_cost(door_cost_str)
+                 if not gs.mana_system.can_pay_mana_cost(active_player, parsed_cost_dict):
+                     logging.debug(f"Cannot afford to unlock Door {door_to_unlock_num} for {room_card.name} (Cost: {door_cost_str})")
+                     return False
+             except Exception as e:
+                  logging.error(f"Error checking mana cost for door unlock: {e}")
+                  return False
         else:
             logging.warning("Mana system not found, cannot check door unlock affordability.")
             return False # Cannot proceed without mana system
 
-        # Pay the cost
-        if not gs.mana_system.pay_mana_cost(active_player, parsed_cost):
-            logging.warning(f"Failed to pay unlock cost for Door {door_number} of {room_card.name}")
+        # --- Pay the cost ---
+        if not gs.mana_system.pay_mana_cost(active_player, door_cost_str):
+            logging.warning(f"Failed to pay unlock cost {door_cost_str} for Door {door_to_unlock_num} of {room_card.name}")
             return False
 
         # Unlock the door (Update the card's state)
         door_data['unlocked'] = True
-        logging.info(f"Unlocked Door {door_number} for Room {room_card.name}")
+        logging.info(f"Unlocked Door {door_to_unlock_num} for Room {room_card.name}")
 
-        # Check if fully unlocked
-        fully_unlocked = all(getattr(room_card, f"door{n}", {}).get('unlocked', False) for n in [1, 2] if hasattr(room_card, f"door{n}"))
+        # --- Check if fully unlocked ---
+        fully_unlocked = True
+        for n in [1, 2]: # Check standard door numbers
+             door_attr = f"door{n}"
+             if hasattr(room_card, door_attr):
+                  if not getattr(room_card, door_attr, {}).get('unlocked', False):
+                       fully_unlocked = False; break
 
-        # Prepare context for triggers
+        # --- Prepare context for triggers ---
         context = {
-            "door_number": door_number,
+            "door_number": door_to_unlock_num,
             "room_id": room_id,
             "controller": active_player,
             "cost_paid": door_cost_str,
             "fully_unlocked": fully_unlocked
         }
 
-        # Trigger "DOOR_UNLOCKED" event for the room itself
+        # --- Trigger Events ---
+        # Generic door unlocked event
         self.check_abilities(room_id, "DOOR_UNLOCKED", context)
-        # Trigger specific door event
-        self.check_abilities(room_id, f"DOOR{door_number}_UNLOCKED", context)
-        # Trigger if fully unlocked
+        # Specific door unlocked event
+        self.check_abilities(room_id, f"DOOR{door_to_unlock_num}_UNLOCKED", context)
+        # Room fully unlocked event
         if fully_unlocked:
             self.check_abilities(room_id, "ROOM_FULLY_UNLOCKED", context)
 
-        # Handle Chapter Advancement (if applicable on Room cards)
+        # --- Handle Chapter Advancement (if applicable) ---
         if hasattr(room_card, 'advance_chapter') and callable(getattr(room_card, 'advance_chapter')):
              chapter_advanced = room_card.advance_chapter() # Card handles its chapter logic
              if chapter_advanced:
@@ -223,16 +261,21 @@ class AbilityHandler:
                      "chapter": getattr(room_card, 'current_chapter', None)
                  }
                  logging.debug(f"Room {room_card.name} advanced to chapter {chapter_context['chapter']}")
-                 # Apply chapter ability (assuming EffectFactory can handle text)
-                 # Or call specific handler if complex
-                 # self.apply_chapter_ability(...)
-                 # Trigger room completion if final chapter reached
+                 # Trigger chapter ability event
+                 self.check_abilities(room_id, "CHAPTER_ADVANCED", chapter_context)
+
+                 # Check for completion
                  if hasattr(room_card, 'is_complete') and room_card.is_complete():
                       logging.debug(f"Room {room_card.name} completed.")
                       self.check_abilities(room_id, "ROOM_COMPLETED", chapter_context)
 
-        # Re-register abilities if unlocking changes available effects
+
+        # Re-register abilities if unlocking changes available effects or state
         self._parse_and_register_abilities(room_id, room_card)
+        # Trigger layer update if needed
+        if hasattr(gs, 'layer_system') and gs.layer_system:
+             gs.layer_system.invalidate_cache()
+             gs.layer_system.apply_all_effects()
 
         gs.phase = gs.PHASE_PRIORITY # Reset priority
 
@@ -541,6 +584,7 @@ class AbilityHandler:
         """
         Parse a card's text to identify and register its abilities.
         Handles regular cards, Class cards, and MDFCs. Clears previous abilities first.
+        Now uses _create_keyword_ability for keywords found in text blocks.
         """
         if not card:
             logging.warning(f"Attempted to parse abilities for non-existent card {card_id}.")
@@ -552,87 +596,100 @@ class AbilityHandler:
 
         try:
             texts_to_parse = []
-            keywords_to_parse = []
+            keywords_from_card_data = [] # Keywords explicitly listed on card data
 
             # --- Get Text Source(s) ---
             if hasattr(card, 'is_class') and card.is_class:
                 # For Class cards, parse abilities of the *current* level primarily
                 current_level_data = card.get_current_class_data()
                 if current_level_data:
-                    # Add abilities from current level
                     texts_to_parse.extend(current_level_data.get('abilities', []))
-                    # Consolidate inherited abilities/keywords up to current level
-                    inherited_abilities = []
-                    inherited_keywords = set()
-                    for level_num in range(1, getattr(card,'current_level', 1) + 1):
-                        level_data = next((lvl for lvl in getattr(card, 'levels', []) if lvl.get('level') == level_num), None)
-                        if level_data:
-                            # Check keywords mentioned in level abilities
-                            for ability_text in level_data.get('abilities', []):
-                                 for kw in Card.ALL_KEYWORDS: # Check against canonical list
-                                      if kw.lower() in ability_text.lower():
-                                           inherited_keywords.add(kw.lower())
-                    keywords_to_parse.extend(list(inherited_keywords))
                     # Add level up action text if applicable
                     if hasattr(card, 'can_level_up') and card.can_level_up():
                         next_level = getattr(card, 'current_level', 1) + 1
                         cost_str = card.get_level_cost(next_level)
                         if cost_str:
-                            texts_to_parse.append(f"{cost_str}: Level up to {next_level}.") # Represents the Level Up ability
+                            texts_to_parse.append(f"{cost_str}: Level up to {next_level}.")
 
             elif hasattr(card, 'faces') and card.faces and hasattr(card, 'current_face') and card.current_face is not None and card.current_face < len(card.faces):
                  # MDFC or Transforming DFC - use current face
                  current_face_data = card.faces[card.current_face]
                  texts_to_parse.append(current_face_data.get('oracle_text', ''))
-                 # Keywords might be on the main card object or face data
+                 # Get keywords from face data if present, else from main card
                  keywords_source = current_face_data if 'keywords' in current_face_data else card
-                 if hasattr(keywords_source, 'keywords') and isinstance(keywords_source.keywords, list):
-                     # Assuming binary array for now, map back to names
-                     keywords_to_parse.extend([kw_name for i, kw_name in enumerate(Card.ALL_KEYWORDS) if i < len(keywords_source.keywords) and keywords_source.keywords[i] == 1])
-
+                 if hasattr(keywords_source, 'keywords'):
+                     keywords_from_card_data = keywords_source.keywords # Expect list of strings or array
 
             else:
                  # Standard card or other types
                  texts_to_parse.append(getattr(card, 'oracle_text', ''))
                  # Get keywords from the card's keyword list/array
-                 if hasattr(card, 'keywords') and isinstance(card.keywords, list):
-                     # Assuming binary array for now, map back to names
-                      keywords_to_parse.extend([kw_name for i, kw_name in enumerate(Card.ALL_KEYWORDS) if i < len(card.keywords) and card.keywords[i] == 1])
+                 if hasattr(card, 'keywords'):
+                      keywords_from_card_data = card.keywords # Expect list of strings or array
+
+            # Convert keyword data to list of strings if it's an array
+            parsed_keywords = set()
+            if isinstance(keywords_from_card_data, list):
+                # Check if it's a list of numbers (like the binary array) or strings
+                if keywords_from_card_data and isinstance(keywords_from_card_data[0], (int, np.integer)):
+                     # Assume binary array - map back to names
+                     parsed_keywords.update(kw_name.lower() for i, kw_name in enumerate(Card.ALL_KEYWORDS) if i < len(keywords_from_card_data) and keywords_from_card_data[i] == 1)
+                elif keywords_from_card_data:
+                     # Assume list of strings
+                     parsed_keywords.update(kw.lower() for kw in keywords_from_card_data if kw)
+            elif isinstance(keywords_from_card_data, np.ndarray):
+                 parsed_keywords.update(kw_name.lower() for i, kw_name in enumerate(Card.ALL_KEYWORDS) if i < len(keywords_from_card_data) and keywords_from_card_data[i] == 1)
 
 
-            # --- Process Keywords ---
-            unique_keywords = set(kw.lower() for kw in keywords_to_parse if kw) # Normalize and make unique
-            for keyword_text in unique_keywords:
-                # Use helper to create appropriate ability object (Static, Triggered, Activated)
-                # Pass the keyword name only (e.g., 'flying', not 'flying, vigilance')
-                first_word = keyword_text.split()[0]
-                self._create_keyword_ability(card_id, card, first_word, abilities_list, full_keyword_text=keyword_text)
+            # --- Process Keywords from card data ---
+            for keyword_text in parsed_keywords:
+                 # Use helper to create appropriate ability object (Static, Triggered, Activated)
+                 first_word = keyword_text.split()[0] # Just the base keyword
+                 self._create_keyword_ability(card_id, card, first_word, abilities_list, full_keyword_text=keyword_text)
 
             # --- Process Oracle Text ---
             processed_text_hashes = set() # Avoid processing duplicate lines/clauses
             for text_block in texts_to_parse:
                 if not text_block: continue
-                # Split text into potential ability clauses (e.g., by newline, sentence)
-                potential_abilities = []
+                # Split text into potential ability clauses
                 lines = text_block.strip().split('\n')
                 for line in lines:
                      line = line.strip()
                      if not line: continue
-                     # Simple split by '.' or ';'? Still risky, but better than nothing if no bullets.
-                     # Try splitting by common separators like bullets or sentence enders
+                     # Use more robust splitting
                      split_pattern = r'\s*[•●]\s*|(?<=[.!?])\s+(?=[A-Z0-9{\[])' # Split by bullets or sentence end + start
                      clauses = re.split(split_pattern, line)
                      for clause in clauses:
                          clause = clause.strip()
-                         if clause: potential_abilities.append(clause)
+                         if not clause: continue
 
-                for ability_text in potential_abilities:
-                     # Remove reminder text specific to this clause
-                     cleaned_ability_text = re.sub(r'\s*\([^()]*?\)\s*', ' ', ability_text).strip()
-                     text_hash = hash(cleaned_ability_text)
-                     if cleaned_ability_text and text_hash not in processed_text_hashes:
-                         self._parse_ability_text(card_id, card, cleaned_ability_text, abilities_list)
-                         processed_text_hashes.add(text_hash)
+                         # Remove reminder text specific to this clause
+                         cleaned_clause_text = re.sub(r'\s*\([^()]*?\)\s*', ' ', clause).strip()
+                         text_hash = hash(cleaned_clause_text)
+
+                         if cleaned_clause_text and text_hash not in processed_text_hashes:
+                             # Check if this clause IS a keyword before general parsing
+                             is_keyword_clause = False
+                             for kw in Card.ALL_KEYWORDS:
+                                  # Use more precise matching for keywords within the clause
+                                  kw_pattern = r'\b' + re.escape(kw.lower()) + r'\b'
+                                  if re.match(kw_pattern + r'$', cleaned_clause_text.lower()): # Match whole clause as keyword
+                                       # Delegate to keyword creator
+                                       self._create_keyword_ability(card_id, card, kw.lower(), abilities_list, full_keyword_text=cleaned_clause_text)
+                                       is_keyword_clause = True
+                                       break
+                                  # Handle "Flying, Vigilance" type clauses
+                                  if ',' in cleaned_clause_text:
+                                      sub_keywords = [sk.strip().lower() for sk in cleaned_clause_text.split(',')]
+                                      if all(sub_kw in Card.ALL_KEYWORDS for sub_kw in sub_keywords):
+                                          for sub_kw in sub_keywords:
+                                               self._create_keyword_ability(card_id, card, sub_kw, abilities_list, full_keyword_text=sub_kw)
+                                          is_keyword_clause = True
+                                          break
+                             # If not purely a keyword clause, parse normally
+                             if not is_keyword_clause:
+                                 self._parse_ability_text(card_id, card, cleaned_clause_text, abilities_list)
+                             processed_text_hashes.add(text_hash)
 
 
             # Log final count for this card
@@ -641,7 +698,8 @@ class AbilityHandler:
             # Immediately apply newly registered Static Abilities
             for ability in abilities_list:
                 if isinstance(ability, StaticAbility):
-                    ability.apply(self.game_state) # apply should call LayerSystem.register_effect
+                    # Apply should register with LayerSystem if needed
+                    ability.apply(self.game_state)
 
         except Exception as e:
             logging.error(f"Error parsing abilities for card {card_id} ({getattr(card, 'name', 'Unknown')}): {str(e)}")
@@ -719,31 +777,41 @@ class AbilityHandler:
 
 
             # --- Static Grant Keywords (Layer 6) -> StaticAbility ---
+            # Expanded list based on previous definition
             static_keywords = [
                 "flying", "first strike", "double strike", "trample", "vigilance", "haste",
-                "menace", "reach", "defender", "indestructible", "hexproof", "shroud",
-                "unblockable", # Can't be blocked
-                "fear", "intimidate", "shadow", "horsemanship", "deathtouch", "lifelink",
-                "phasing", "banding", "changeling", "devoid", "infect", "wither",
-                "protection", "ward", # Value parsed
-                "landwalk", # Catch-all landwalks
-                "islandwalk", "swampwalk", "mountainwalk", "forestwalk", "plainswalk", "desertwalk", "snow-covered landwalk", # Specific landwalks
+                "lifelink", "deathtouch", "indestructible", "hexproof", "shroud", "reach",
+                "menace", "defender", "unblockable", # Consolidated "can't be blocked"
+                "protection", "ward", # Value handled
+                "landwalk", "islandwalk", "swampwalk", "mountainwalk", "forestwalk", "plainswalk", # Landwalks
+                "fear", "intimidate", "shadow", "horsemanship", # Evasion
+                "phasing", "banding", # Older complex
+                "infect", "wither", # Damage modification
+                # Other static grants if needed...
             ]
+            # Check if keyword_lower matches any of these
             is_static_grant = keyword_lower in static_keywords or "walk" in keyword_lower
 
             if is_static_grant:
+                # Create StaticAbility representing the keyword grant
+                # The EffectFactory should recognize these ability texts
                 ability_effect_text = f"This permanent has {full_text}."
-                # Value already parsed above for protection/ward check
+                # Use StaticAbility class
                 ability = StaticAbility(card_id, ability_effect_text, ability_effect_text)
                 setattr(ability, 'keyword', keyword_lower) # Mark the keyword
-                setattr(ability, 'keyword_value', current_value) # Store parsed value
+                # Value already parsed above for protection/ward check
+                setattr(ability, 'keyword_value', current_value) # Store parsed value for protection/ward
+
                 abilities_list.append(ability)
-                ability.apply(self.game_state) # Register with LayerSystem
+                # Apply immediately registers with LayerSystem
+                ability.apply(self.game_state)
+                logging.debug(f"Created StaticAbility for keyword: {full_text}")
                 return
 
             # --- Triggered Keywords -> TriggeredAbility ---
+            # (Existing triggered_map is good, keep it)
             triggered_map = {
-                # keyword: (trigger_phrase, simple_effect_description)
+                # ... (keep existing map) ...
                 "prowess": ("whenever you cast a noncreature spell", "this creature gets +1/+1 until end of turn."),
                 "cascade": ("when you cast this spell", "Exile cards until you hit a nonland card with lesser mana value. You may cast it without paying its mana cost."),
                 "storm": ("when you cast this spell", "Copy this spell for each spell cast before it this turn."),
@@ -771,23 +839,27 @@ class AbilityHandler:
 
                 # Handle complex keywords like Decayed
                 if keyword_lower == "decayed":
+                    # Create StaticAbility for "can't block"
                     static_part = StaticAbility(card_id, "This creature can't block.", "This creature can't block.")
                     setattr(static_part, 'keyword', 'cant_block_static')
                     abilities_list.append(static_part)
-                    static_part.apply(self.game_state)
+                    static_part.apply(self.game_state) # Apply static part
                     # Modify trigger/effect for the second part
                     trigger_cond = "when this creature attacks"
                     effect = "sacrifice it at end of combat."
 
+                # Use TriggeredAbility class
                 ability = TriggeredAbility(card_id, trigger_cond, effect, effect_text=full_text)
                 setattr(ability, 'keyword', keyword_lower)
                 setattr(ability, 'keyword_value', val)
                 abilities_list.append(ability)
+                logging.debug(f"Created TriggeredAbility for keyword: {full_text}")
                 return
 
             # --- Activated Keywords -> ActivatedAbility ---
+            # (Existing activated_map is good, keep it)
             activated_map = {
-                # keyword: simple_effect_description
+                 # ... (keep existing map) ...
                 "cycling": ("discard this card: draw a card."),
                 "equip": ("attach to target creature you control. Equip only as a sorcery."),
                 "fortify": ("attach to target land you control. Fortify only as a sorcery."),
@@ -802,24 +874,22 @@ class AbilityHandler:
             }
             if keyword_lower in activated_map:
                 cost_str = parse_cost(full_text, keyword_lower)
-                # Handle non-mana costs like discard for channel/transmute
-                if keyword_lower in ["channel", "transmute", "cycling"]: # These often have a mana cost *and* discard
-                    # Cost parsing already handles the mana part. Discard is implicit action.
-                    pass
-                # Handle specific N parsing for crew/scavenge
                 val = parse_value(full_text, keyword_lower) if keyword_lower in ["crew", "scavenge"] else None
 
                 if cost_str is not None:
                     effect_desc = activated_map[keyword_lower]
                     effect = effect_desc.replace(" N ", f" {val} ") if val is not None else effect_desc
 
+                    # Use ActivatedAbility class
                     ability = ActivatedAbility(card_id, cost_str, effect, effect_text=full_text)
                     setattr(ability, 'keyword', keyword_lower)
                     setattr(ability, 'keyword_value', val)
                     abilities_list.append(ability)
+                    logging.debug(f"Created ActivatedAbility for keyword: {full_text}")
                     return
 
             # --- Rule Modifying Keywords -> Placeholder StaticAbility ---
+            # (Keep existing logic for rule keywords)
             rule_keywords = [
                 "affinity", "convoke", "delve", "improvise", # Cost reduction
                 "bestow", "buyback", "entwine", "escape", "kicker", # Alt/Additional costs
@@ -827,21 +897,21 @@ class AbilityHandler:
                 "split second", "suspend", # Timing
                 "companion", # Setup/Game rules
                 "embalm", "eternalize", "jump-start", "rebound", # Alt casting zone/timing
-                # Other keywords modifying core rules: Phasing, Banding
             ]
             if keyword_lower in rule_keywords:
-                ability_effect_text = f"This card has the rule-modifying keyword: {full_text}."
-                ability = StaticAbility(card_id, ability_effect_text, ability_effect_text)
-                setattr(ability, 'keyword', keyword_lower)
-                # Parse cost/value if applicable (e.g., Kicker {cost}, Suspend N {cost})
-                cost_str = parse_cost(full_text, keyword_lower)
-                val = parse_value(full_text, keyword_lower)
-                setattr(ability, 'keyword_cost', cost_str)
-                setattr(ability, 'keyword_value', val)
-                abilities_list.append(ability)
-                ability.apply(self.game_state) # Register presence
-                logging.warning(f"Registered rule-modifying keyword '{keyword_lower}' as StaticAbility (Placeholder). Effect requires specific implementation in game rules.")
-                return
+                 # Create a placeholder StaticAbility to indicate presence
+                 ability_effect_text = f"This card has the rule-modifying keyword: {full_text}."
+                 ability = StaticAbility(card_id, ability_effect_text, ability_effect_text)
+                 setattr(ability, 'keyword', keyword_lower)
+                 # Parse cost/value if applicable
+                 cost_str = parse_cost(full_text, keyword_lower)
+                 val = parse_value(full_text, keyword_lower)
+                 setattr(ability, 'keyword_cost', cost_str)
+                 setattr(ability, 'keyword_value', val)
+                 abilities_list.append(ability)
+                 ability.apply(self.game_state) # Register presence
+                 logging.warning(f"Registered rule-modifying keyword '{keyword_lower}' as StaticAbility (Placeholder). Effect requires specific implementation in game rules.")
+                 return
 
             # --- Fallback ---
             logging.warning(f"Keyword '{keyword_lower}' (from '{full_text}') not explicitly mapped or parsed.")

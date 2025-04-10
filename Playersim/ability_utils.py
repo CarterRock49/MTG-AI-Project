@@ -4,9 +4,11 @@ import re
 from .ability_types import AbilityEffect, DrawCardEffect, GainLifeEffect, DamageEffect, \
     CounterSpellEffect, CreateTokenEffect, DestroyEffect, ExileEffect, \
     DiscardEffect, MillEffect
-from .ability_types import TapEffect, UntapEffect, BuffEffect, SearchLibraryEffect # Add imports for new types
+# --- MODIFIED: Added TapEffect, UntapEffect, BuffEffect, SearchLibraryEffect ---
+from .ability_types import TapEffect, UntapEffect, BuffEffect, SearchLibraryEffect, AddCountersEffect # Added AddCountersEffect too
 
 def is_beneficial_effect(effect_text):
+    # (Keep existing implementation)
     """
     Determine if an effect text describes an effect that is beneficial to its target.
     Improved logic with more context and specific phrases.
@@ -105,21 +107,21 @@ def text_to_number(text):
         'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
         'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10
     }
-    
-    if text.lower() in text_to_num:
+
+    if isinstance(text, str) and text.lower() in text_to_num:
         return text_to_num[text.lower()]
-    
+
     try:
         return int(text)
-    except ValueError:
+    except (ValueError, TypeError):
         return 1  # Default to 1 if conversion fails
 
 def resolve_simple_targeting(game_state, card_id, controller, effect_text):
     """Simplified targeting resolution when targeting system isn't available"""
-    targets = {"creatures": [], "players": [], "spells": [], "lands": [], 
+    targets = {"creatures": [], "players": [], "spells": [], "lands": [],
             "artifacts": [], "enchantments": [], "permanents": []}
     opponent = game_state.p2 if controller == game_state.p1 else game_state.p1
-    
+
     # Target creature
     if "target creature" in effect_text:
         for player in [opponent, controller]:  # Prioritize opponent targets
@@ -135,7 +137,7 @@ def resolve_simple_targeting(game_state, card_id, controller, effect_text):
                     break  # Just take the first valid target
             if targets["creatures"]:
                 break
-    
+
     # Target player
     if "target player" in effect_text or "target opponent" in effect_text:
         if "target opponent" in effect_text:
@@ -143,7 +145,7 @@ def resolve_simple_targeting(game_state, card_id, controller, effect_text):
         else:
             # Default to targeting opponent
             targets["players"].append("p2" if controller == game_state.p1 else "p1")
-    
+
     # Target land
     if "target land" in effect_text:
         for player in [opponent, controller]:
@@ -154,7 +156,7 @@ def resolve_simple_targeting(game_state, card_id, controller, effect_text):
                     break  # Just take the first valid target
             if targets["lands"]:
                 break
-    
+
     # Target artifact
     if "target artifact" in effect_text:
         for player in [opponent, controller]:
@@ -165,7 +167,7 @@ def resolve_simple_targeting(game_state, card_id, controller, effect_text):
                     break  # Just take the first valid target
             if targets["artifacts"]:
                 break
-    
+
     # Target enchantment
     if "target enchantment" in effect_text:
         for player in [opponent, controller]:
@@ -176,35 +178,35 @@ def resolve_simple_targeting(game_state, card_id, controller, effect_text):
                     break  # Just take the first valid target
             if targets["enchantments"]:
                 break
-    
+
     # Target permanent (any permanent type)
     if "target permanent" in effect_text:
         for player in [opponent, controller]:
             if player["battlefield"]:
                 targets["permanents"].append(player["battlefield"][0])  # Just take the first one
                 break
-    
+
     # Target spell (on the stack)
     if "target spell" in effect_text:
         for item in reversed(list(game_state.stack)):  # Start from top of stack
             if isinstance(item, tuple) and len(item) >= 3 and item[0] == "SPELL":
                 spell_id = item[1]
                 spell_card = game_state._safe_get_card(spell_id)
-                
+
                 if not spell_card:
                     continue
-                    
+
                 # Check for spell type restrictions
-                if "creature spell" in effect_text and (not hasattr(spell_card, 'card_types') or 
+                if "creature spell" in effect_text and (not hasattr(spell_card, 'card_types') or
                                                     'creature' not in spell_card.card_types):
                     continue
-                elif "noncreature spell" in effect_text and (hasattr(spell_card, 'card_types') and 
+                elif "noncreature spell" in effect_text and (hasattr(spell_card, 'card_types') and
                                                         'creature' in spell_card.card_types):
                     continue
-                
+
                 targets["spells"].append(spell_id)
                 break
-    
+
     return targets
 
 def safe_int(value, default=0):
@@ -221,12 +223,20 @@ def safe_int(value, default=0):
 def resolve_targeting(game_state, card_id, controller, effect_text):
     """Enhanced targeting resolution that uses TargetingSystem if available, otherwise falls back to simple targeting."""
     # Try to use TargetingSystem if available
-    if hasattr(game_state, 'ability_handler') and hasattr(game_state.ability_handler, 'targeting_system'):
-        return game_state.ability_handler.targeting_system.resolve_targeting_for_ability(
-            card_id, effect_text, controller)
-    
+    # Check both targeting_system and ability_handler.targeting_system
+    targeting_system = getattr(game_state, 'targeting_system', None) or \
+                       getattr(getattr(game_state, 'ability_handler', None), 'targeting_system', None)
+
+    if targeting_system:
+        if hasattr(targeting_system, 'resolve_targeting'):
+             # Assuming resolve_targeting can handle both spells and abilities based on source_id and effect_text
+             return targeting_system.resolve_targeting(card_id, controller, effect_text)
+        # Add checks for other method names if necessary
+
     # Fall back to simple targeting
+    logging.warning(f"TargetingSystem not found or missing 'resolve_targeting' method. Using simple targeting fallback.")
     return resolve_simple_targeting(game_state, card_id, controller, effect_text)
+
 
 class EffectFactory:
     """
@@ -236,6 +246,7 @@ class EffectFactory:
     """
     @staticmethod
     def _extract_target_description(effect_text):
+        # (Keep existing helper implementation)
         """Helper to find the most specific target description."""
         # Pattern tries to find "target [adjective(s)] [type]"
         match = re.search(r"target\s+(?:(up to \w+)\s+)?(?:((?:[\w\-]+\s+)*?)(\w+))?", effect_text)
@@ -252,6 +263,7 @@ class EffectFactory:
         elif re.search(r"(creatures?|permanents?) you control", effect_text): return "permanents you control" # Group targets
         return None # No target description found
 
+
     @staticmethod
     def create_effects(effect_text, targets=None): # targets arg currently unused here
         """Create appropriate AbilityEffect objects based on the effect text."""
@@ -260,21 +272,21 @@ class EffectFactory:
         effects = []
         processed_clauses = []
         # Basic clause splitting (commas, 'and', 'then') - needs improvement for complex sentences
-        parts = re.split(r'\s*,\s+|\s+and\s+|\s+then\s+', effect_text.lower().strip('. '))
+        parts = re.split(r'\s*,\s*(?:and\s+)?(?:then\s+)?|\s+and\s+(?:then\s+)?|\s+then\s+', effect_text.lower().strip('. '))
         processed_clauses.extend(p.strip() for p in parts if p.strip())
         if not processed_clauses: processed_clauses = [effect_text.lower()] # Use full text if split fails
 
         for clause in processed_clauses:
             created_effect = None
             # Draw Card
-            match = re.search(r"\b(draw(?:s)?)\b\s+(a|an|one|two|three|four|\d+)\s+cards?", clause)
+            match = re.search(r"(?:target player|you)?\s*\b(draw(?:s)?)\b\s+(a|an|one|two|three|four|\d+)\s+cards?", clause)
             if match:
                 count = text_to_number(match.group(2))
                 target_desc = EffectFactory._extract_target_description(clause) or "controller"
                 created_effect = DrawCardEffect(count, target=target_desc)
 
             # Gain Life
-            elif re.search(r"\b(gain(?:s)?)\b\s+(\d+|x)\s+life", clause):
+            elif re.search(r"(?:target player|you)?\s*\b(gain(?:s)?)\b\s+(\d+|x)\s+life", clause):
                 amount_str = re.search(r"gain(?:s)?\s+(\d+|x)\s+life", clause).group(1)
                 amount = text_to_number(amount_str) if amount_str != 'x' else 1 # Default X=1 for now
                 target_desc = EffectFactory._extract_target_description(clause) or "controller"
@@ -285,25 +297,25 @@ class EffectFactory:
                 amount_match = re.search(r"deals?\s+(\d+|x)\s+damage", clause)
                 amount = 1
                 if amount_match: amount = text_to_number(amount_match.group(1)) if amount_match.group(1) != 'x' else 1
-                target_desc = EffectFactory._extract_target_description(clause) or "any target" # Default 'any target'
-                # Extract target type more reliably
-                target_type = "any"
-                if "target creature or player" in target_desc or "any target" in target_desc: target_type="any target"
-                elif "target creature" in target_desc: target_type="creature"
-                elif "target player" in target_desc or "target opponent" in target_desc: target_type="player"
-                elif "target planeswalker" in target_desc: target_type="planeswalker"
-                elif "target battle" in target_desc: target_type="battle"
+                target_desc = EffectFactory._extract_target_description(clause) or "any target"
+                target_type = "any target" # Default
+                if "creature or player" in target_desc or "any target" in target_desc: target_type="any target"
+                elif "creature" in target_desc: target_type="creature"
+                elif "player" in target_desc or "opponent" in target_desc: target_type="player"
+                elif "planeswalker" in target_desc: target_type="planeswalker"
+                elif "battle" in target_desc: target_type="battle"
                 elif "each opponent" in target_desc: target_type="each opponent"
                 created_effect = DamageEffect(amount, target_type=target_type)
 
             # Destroy
             elif re.search(r"\b(destroy(?:s)?)\b\s+target", clause):
                  target_desc = EffectFactory._extract_target_description(clause) or "permanent"
-                 target_type = "permanent" # Determine from desc
+                 target_type = "permanent"
                  if "creature" in target_desc: target_type = "creature"
                  elif "artifact" in target_desc: target_type = "artifact"
                  elif "enchantment" in target_desc: target_type = "enchantment"
-                 # Add more types...
+                 elif "land" in target_desc: target_type = "land"
+                 elif "nonland permanent" in target_desc: target_type = "nonland permanent"
                  created_effect = DestroyEffect(target_type=target_type)
 
             # Exile
@@ -311,7 +323,8 @@ class EffectFactory:
                  target_desc = EffectFactory._extract_target_description(clause) or "permanent"
                  target_type = "permanent"
                  if "creature" in target_desc: target_type = "creature"
-                 # ... add more types ...
+                 elif "artifact" in target_desc: target_type = "artifact"
+                 # Add more types
                  zone_match = re.search(r"from (?:the )?(\w+)", clause)
                  zone = zone_match.group(1) if zone_match else "battlefield"
                  created_effect = ExileEffect(target_type=target_type, zone=zone)
@@ -321,34 +334,56 @@ class EffectFactory:
                  count_match = re.search(r"create(?:s)?\s+(a|an|one|two|three|\d+)", clause)
                  count = text_to_number(count_match.group(1)) if count_match else 1
                  pt_match = re.search(r"(\d+)/(\d+)", clause)
-                 power, toughness = (pt_match.group(1), pt_match.group(2)) if pt_match else (1, 1)
-                 power, toughness = int(power), int(toughness)
-                 # Extract type (simple color + type word)
-                 type_match = re.search(r"(\d+/\d+)\s+(?:([\w\-]+)\s+)?(\w+)\s+creature token", clause) # Needs refinement
-                 color = "Colorless"
-                 creature_type = "Token"
-                 if type_match:
-                      color = type_match.group(2).capitalize() if type_match.group(2) else "Colorless" # Example only
-                      creature_type = type_match.group(3).capitalize()
-                 # Parse keywords (simple split)
+                 power, toughness = (int(pt_match.group(1)), int(pt_match.group(2))) if pt_match else (1, 1)
+                 type_match = re.search(r"(\d+/\d+)\s+(?:([\w\-]+)\s+)?(\w+)\s+(?:creature )?token", clause)
+                 creature_type = type_match.group(3).capitalize() if type_match else "Creature"
                  keywords = []
-                 if "with" in clause:
-                     kw_part = clause.split(" with ")[-1]
-                     keywords = [k.strip() for k in kw_part.split(',')]
-                 # controller_gets = "opponent controls" not in clause
+                 kw_match = re.search(r"with ([\w\s,]+)", clause)
+                 if kw_match: keywords = [k.strip() for k in kw_match.group(1).split(',') if k.strip()]
                  created_effect = CreateTokenEffect(power, toughness, creature_type, count, keywords)
 
             # Buff (+X/+Y)
-            elif re.search(r"\b(get(?:s)?)\b\s+([+\-]\d+)/([+\-]\d+)", clause):
+            elif re.search(r"(?:target |creatures you control)?\s*(get(?:s)?)\b\s+([+\-]\d+)/([+\-]\d+)", clause):
                 match = re.search(r"get(?:s)?\s+([+\-]\d+)/([+\-]\d+)", clause)
                 p_mod, t_mod = int(match.group(1)), int(match.group(2))
                 duration = "end_of_turn" if "until end of turn" in clause else "permanent"
-                target_desc = EffectFactory._extract_target_description(clause) or "creatures you control" # Assume target if specified, else group buff
-                # Determine target type more robustly
-                target_type = "creature"
+                target_desc = EffectFactory._extract_target_description(clause) or "creatures you control"
+                target_type = "creature" # Determine based on target_desc
                 if "target creature" in target_desc: target_type = "target creature"
                 elif "creatures you control" in target_desc: target_type = "creatures you control"
                 created_effect = BuffEffect(p_mod, t_mod, duration=duration, target_type=target_type)
+
+            # Tap
+            elif re.search(r"\b(tap(?:s)?)\b\s+target", clause):
+                 target_desc = EffectFactory._extract_target_description(clause) or "permanent"
+                 target_type = "permanent" # Refine based on desc
+                 if "creature" in target_desc: target_type = "creature"
+                 elif "artifact" in target_desc: target_type = "artifact"
+                 elif "land" in target_desc: target_type = "land"
+                 created_effect = TapEffect(target_type=target_type)
+
+            # Untap
+            elif re.search(r"\b(untap(?:s)?)\b\s+target", clause):
+                 target_desc = EffectFactory._extract_target_description(clause) or "permanent"
+                 target_type = "permanent" # Refine based on desc
+                 if "creature" in target_desc: target_type = "creature"
+                 # Add others
+                 created_effect = UntapEffect(target_type=target_type)
+
+            # Add Counters
+            elif re.search(r"\bput(?:s)?\b.*?\bcounter", clause):
+                 count_match = re.search(r"put\s+(a|an|one|two|three|\d+)", clause)
+                 count = text_to_number(count_match.group(1)) if count_match else 1
+                 type_match = re.search(r"([\+\-\d/]+|[\w\-]+)\s+counter", clause) # Matches "+1/+1", "-1/-1", "loyalty", "charge" etc.
+                 counter_type = type_match.group(1).replace('/','_') if type_match else "+1/+1" # Default
+                 target_desc = EffectFactory._extract_target_description(clause) or "self" # Default target is source? Or requires target? Needs context.
+                 target_type = "creature" # Determine from desc
+                 if "target creature" in target_desc: target_type = "target creature"
+                 elif "target permanent" in target_desc: target_type = "target permanent"
+                 elif "target artifact" in target_desc: target_type = "target artifact"
+                 elif "target planeswalker" in target_desc: target_type = "target planeswalker"
+                 elif "this permanent" in target_desc or target_desc == "self": target_type="self"
+                 created_effect = AddCountersEffect(counter_type, count, target_type=target_type)
 
 
             if created_effect:

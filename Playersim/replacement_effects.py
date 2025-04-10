@@ -208,36 +208,41 @@ class ReplacementEffectSystem:
         effect_id = None
 
         # Simple pattern: "If you tap a [type] for mana, it produces twice as much"
-        match = re.search(r"tap a (\w+) for mana, it produces twice as much", oracle_text.lower())
+        # Also handle "Whenever you tap..."
+        match = re.search(r"(?:if|whenever)\s+you\s+tap\s+a(?:n)?\s+(\w+)\s+for\s+mana,\s+.*?(add|produce)s?\s+twice\s+that\s+much", oracle_text.lower())
         if match:
-             tapped_type = match.group(1) # e.g., 'permanent', 'land', 'forest'
+             tapped_type = match.group(1).lower() # e.g., 'permanent', 'land', 'forest'
 
              def condition(ctx):
-                 # Check if event is mana production via tapping
-                 if ctx.get('source_action') != 'tap_for_mana': return False
-                 # Check if player matches
+                 # Check if event is mana production via tapping from player
+                 if ctx.get('event_type') != 'PRODUCE_MANA': return False # Event needs to exist
                  if ctx.get('player') != player: return False
+                 if not ctx.get('source_is_tap_ability', False): return False # Requires ability tapped source
+
                  # Check if source permanent type matches
                  source_perm_id = ctx.get('source_permanent_id')
                  source_perm = self.game_state._safe_get_card(source_perm_id)
                  if not source_perm: return False
+
                  if tapped_type == 'permanent': return True
-                 if tapped_type == 'land' and 'land' in getattr(source_perm, 'type_line',''): return True
-                 if tapped_type in getattr(source_perm, 'subtypes', []): return True
-                 # Add more specific type checks if needed
+                 perm_types = getattr(source_perm, 'card_types', [])
+                 perm_subtypes = getattr(source_perm, 'subtypes', [])
+                 if tapped_type in perm_types: return True
+                 if tapped_type in perm_subtypes: return True
                  return False
 
              def replacement(ctx):
                  mana_produced = ctx.get('mana_produced', {}) # Expecting dict like {'G': 1}
                  doubled_mana = {k: v*2 for k,v in mana_produced.items()}
                  ctx['mana_produced'] = doubled_mana
+                 source_perm_id = ctx.get('source_permanent_id', 'Unknown source')
                  logging.debug(f"{source_name}: Doubled mana production from {source_perm_id}. Original: {mana_produced}, New: {doubled_mana}")
                  return ctx
 
              duration = self._determine_duration(oracle_text.lower())
              effect_id = self.register_effect({
                  'source_id': card_id,
-                 'event_type': 'PRODUCE_MANA', # Need a suitable event type
+                 'event_type': 'PRODUCE_MANA', # Use a standardized event type
                  'condition': condition,
                  'replacement': replacement,
                  'duration': duration,
@@ -252,163 +257,122 @@ class ReplacementEffectSystem:
         """Register token creation replacement effects."""
         source_card = self.game_state._safe_get_card(card_id)
         source_name = source_card.name if source_card and hasattr(source_card, 'name') else f"Card {card_id}"
-        
-        # Look for token creation replacement patterns
-        if "if you would create" in oracle_text.lower() or "if a player would create" in oracle_text.lower():
-            # Figure out what happens instead
-            replacement_text = ""
-            
-            # Check for common patterns
-            if "create twice that many" in oracle_text.lower():
-                replacement_text = "create twice that many tokens"
-            elif "create that many plus" in oracle_text.lower():
-                # Extract bonus amount
-                bonus_match = re.search(r'plus (\d+)', oracle_text.lower())
-                bonus = int(bonus_match.group(1)) if bonus_match else 1
-                replacement_text = f"create that many plus {bonus} tokens"
-            elif "you create no tokens" in oracle_text.lower() or "doesn't create tokens" in oracle_text.lower():
-                replacement_text = "create no tokens"
-            
-            # Create the condition function
-            def token_creation_condition(context):
-                # Get details from the token creation event
-                creator = context.get('creator')
-                
-                # Check if this is the right player
-                if "you would create" in oracle_text.lower():
-                    return creator == player
-                elif "an opponent would create" in oracle_text.lower():
-                    return creator != player
-                elif "a player would create" in oracle_text.lower():
-                    return True  # Applies to any player
-                
-                return creator == player  # Default to controller only
-            
-            # Create the replacement function based on what should happen instead
-            def token_creation_replacement(context):
-                # Get the token details
-                token_count = context.get('token_count', 1)
-                token_type = context.get('token_type', 'unknown')
-                
-                # Create modified context based on replacement text
-                modified_context = dict(context)
-                
-                if "twice that many" in replacement_text:
-                    modified_context['token_count'] = token_count * 2
-                    logging.debug(f"{source_name} doubled token creation to {token_count * 2} {token_type} tokens")
-                elif "plus" in replacement_text:
-                    bonus_match = re.search(r'plus (\d+)', replacement_text)
-                    bonus = int(bonus_match.group(1)) if bonus_match else 1
-                    modified_context['token_count'] = token_count + bonus
-                    logging.debug(f"{source_name} added {bonus} more {token_type} tokens, creating {token_count + bonus} total")
-                elif "create no tokens" in replacement_text:
-                    modified_context['token_count'] = 0
-                    modified_context['prevented'] = True
-                    logging.debug(f"{source_name} prevented token creation")
-                
-                return modified_context
-            
-            # Determine duration
-            duration = 'permanent'
-            if "until end of turn" in oracle_text.lower():
-                duration = 'end_of_turn'
-            elif "until your next turn" in oracle_text.lower():
-                duration = 'until_my_next_turn'
-            
-            # Register the effect
+        effect_id = None
+
+        # Pattern: "If [subject] would create [tokens], [subject] create(s) [replacement] instead."
+        match = re.search(r"if (you|a player|an opponent) would create (?:one or more )?tokens?(?:.*?),\s*(?:instead )?(?:he or she creates?|they create|you create)\s*(.*?)(?:\.|$)", oracle_text.lower())
+        if match:
+            subject, replacement_text = match.groups()
+            replacement_text = replacement_text.strip()
+
+            # Determine what the replacement is
+            modifier = "none"
+            if "twice that many" in replacement_text: modifier = "double"
+            elif "one additional" in replacement_text or "create that many plus one" in replacement_text: modifier = "plus_one"
+            elif re.search(r"(?:two|three|four|five)\s+additional", replacement_text):
+                 num_word = re.search(r"(two|three|four|five)", replacement_text).group(1)
+                 modifier = f"plus_{self._word_to_number(num_word)}"
+            elif "doesn't create" in replacement_text or "create no tokens" in replacement_text: modifier = "prevent"
+            # Add more modifiers if needed
+
+            def condition(ctx):
+                event_player = ctx.get('creator')
+                if subject == "you" and event_player != player: return False
+                if subject == "an opponent" and event_player == player: return False
+                if subject == "a player": pass # Always applies
+                return True
+
+            def replacement(ctx):
+                 original_count = ctx.get('token_count', 1)
+                 if modifier == "double": new_count = original_count * 2
+                 elif modifier == "plus_one": new_count = original_count + 1
+                 elif modifier.startswith("plus_"): new_count = original_count + int(modifier.split('_')[1])
+                 elif modifier == "prevent": new_count = 0; ctx['prevented'] = True
+                 else: new_count = original_count # No change if modifier unknown
+
+                 if new_count != original_count:
+                     logging.debug(f"{source_name}: Replacing token creation ({original_count}) with {new_count}.")
+                     ctx['token_count'] = new_count
+                 return ctx
+
+            duration = self._determine_duration(oracle_text.lower())
             effect_id = self.register_effect({
-                'source_id': card_id,
-                'event_type': 'CREATE_TOKEN',
-                'condition': token_creation_condition,
-                'replacement': token_creation_replacement,
-                'duration': duration,
-                'controller_id': player,
-                'description': f"{source_name} token creation replacement effect"
+                'source_id': card_id, 'event_type': 'CREATE_TOKEN',
+                'condition': condition, 'replacement': replacement,
+                'duration': duration, 'controller_id': player,
+                'description': f"{source_name} Token Creation Replacement ({modifier})"
             })
-            
-            logging.debug(f"Registered token creation replacement effect for {source_name}")
-            return effect_id
-        
-        return None
+            logging.debug(f"Registered Token Creation Replacement effect for {source_name}")
+
+        return effect_id
     
     def _register_life_gain_replacement(self, card_id, player, oracle_text):
         """Register life gain replacement effects."""
         source_card = self.game_state._safe_get_card(card_id)
         source_name = source_card.name if source_card and hasattr(source_card, 'name') else f"Card {card_id}"
-        
-        # Look for life gain replacement patterns
-        if "if you would gain life" in oracle_text.lower() or "if a player would gain life" in oracle_text.lower():
-            # Figure out what happens instead
-            replacement_text = ""
-            
-            # Check for common patterns
-            if "twice that much" in oracle_text.lower():
-                replacement_text = "gain twice that much life"
-            elif "you gain no life" in oracle_text.lower() or "doesn't gain life" in oracle_text.lower():
-                replacement_text = "gain no life"
-            elif "opponent loses that much life" in oracle_text.lower():
-                replacement_text = "opponent loses that much life instead"
-            
-            # Create the condition function
-            def life_gain_condition(context):
-                # Get details from the life gain event
-                target_player = context.get('player')
-                
-                # Check if this is the right player
-                if "you would gain" in oracle_text.lower():
-                    return target_player == player
-                elif "an opponent would gain" in oracle_text.lower():
-                    return target_player != player
-                elif "a player would gain" in oracle_text.lower():
-                    return True  # Applies to any player
-                
-                return target_player == player  # Default to controller only
-            
-            # Create the replacement function based on what should happen instead
-            def life_gain_replacement(context):
-                # Get the amount being gained
-                amount = context.get('life_amount', 0)
-                
-                # Create modified context based on replacement text
-                modified_context = dict(context)
-                
-                if "twice that much" in replacement_text:
-                    modified_context['life_amount'] = amount * 2
-                    logging.debug(f"{source_name} doubled life gain to {amount * 2}")
-                elif "gain no life" in replacement_text:
-                    modified_context['life_amount'] = 0
-                    logging.debug(f"{source_name} prevented life gain")
-                elif "opponent loses that much life" in replacement_text:
-                    # Original gain still happens, but opponent also loses life
-                    opponent = self.game_state.p2 if player == self.game_state.p1 else self.game_state.p1
-                    if hasattr(opponent, 'life'):
-                        opponent['life'] -= amount
-                        logging.debug(f"{source_name} caused opponent to lose {amount} life")
-                
-                return modified_context
-            
-            # Determine duration
-            duration = 'permanent'
-            if "until end of turn" in oracle_text.lower():
-                duration = 'end_of_turn'
-            elif "until your next turn" in oracle_text.lower():
-                duration = 'until_my_next_turn'
-            
-            # Register the effect
+        effect_id = None
+
+        # Pattern: "If [subject] would gain life, [replacement] instead."
+        match = re.search(r"if (you|a player|an opponent) would gain life(?:.*?),\s*(?:instead )?(.*?)(?:\.|$)", oracle_text.lower())
+        if match:
+            subject, replacement_text = match.groups()
+            replacement_text = replacement_text.strip()
+
+            # Determine replacement type
+            modifier = "none"
+            if "gain twice that much" in replacement_text: modifier = "double"
+            elif "gain that much life plus" in replacement_text:
+                plus_match = re.search(r"plus (\d+)", replacement_text)
+                modifier = f"plus_{plus_match.group(1)}" if plus_match else "plus_1"
+            elif "gain no life" in replacement_text or "doesn't gain life" in replacement_text: modifier = "prevent"
+            elif "each opponent loses that much life" in replacement_text: modifier = "opponent_lose"
+            # Add more modifiers
+
+            def condition(ctx):
+                event_player = ctx.get('player') # Player gaining life
+                if subject == "you" and event_player != player: return False
+                if subject == "an opponent" and event_player == player: return False
+                if subject == "a player": pass # Always applies
+                return True
+
+            def replacement(ctx):
+                original_amount = ctx.get('life_amount', 0)
+                new_amount = original_amount
+                side_effect = None
+
+                if modifier == "double": new_amount = original_amount * 2
+                elif modifier.startswith("plus_"): new_amount = original_amount + int(modifier.split('_')[1])
+                elif modifier == "prevent": new_amount = 0; ctx['prevented'] = True
+                elif modifier == "opponent_lose":
+                     side_effect = ("lose_life", original_amount)
+                     # Original gain is NOT replaced unless explicitly stated otherwise
+
+                if new_amount != original_amount:
+                    logging.debug(f"{source_name}: Replacing life gain ({original_amount}) with {new_amount}.")
+                    ctx['life_amount'] = new_amount
+
+                # Handle side effects like opponent losing life
+                if side_effect and side_effect[0] == "lose_life":
+                     opponent = self.game_state.p2 if player == self.game_state.p1 else self.game_state.p1
+                     loss_amount = side_effect[1]
+                     if loss_amount > 0:
+                         # Use LifeLossEffect for consistency? Or direct modification? Direct for now.
+                         opponent['life'] -= loss_amount
+                         logging.debug(f"{source_name}: Opponent loses {loss_amount} life due to replacement effect.")
+                         # Trigger life loss event if needed
+                         # self.game_state.trigger_ability(opponent_id, "LOSE_LIFE", ...)
+                return ctx
+
+            duration = self._determine_duration(oracle_text.lower())
             effect_id = self.register_effect({
-                'source_id': card_id,
-                'event_type': 'LIFE_GAIN',
-                'condition': life_gain_condition,
-                'replacement': life_gain_replacement,
-                'duration': duration,
-                'controller_id': player,
-                'description': f"{source_name} life gain replacement effect"
+                'source_id': card_id, 'event_type': 'LIFE_GAIN',
+                'condition': condition, 'replacement': replacement,
+                'duration': duration, 'controller_id': player,
+                'description': f"{source_name} Life Gain Replacement ({modifier})"
             })
-            
-            logging.debug(f"Registered life gain replacement effect for {source_name}")
-            return effect_id
-        
-        return None
+            logging.debug(f"Registered Life Gain Replacement effect for {source_name}")
+
+        return effect_id
         
     def remove_effect(self, effect_id):
         """Remove a replacement effect."""
@@ -510,55 +474,65 @@ class ReplacementEffectSystem:
         return card and hasattr(card, 'card_types') and 'creature' in card.card_types
     
     def _register_exile_instead_of_death(self, card_id, player, oracle_text):
-        """Register effects like Rest in Peace."""
+        """Register effects like Rest in Peace ('If X would die, exile it instead')."""
         source_card = self.game_state._safe_get_card(card_id)
         source_name = source_card.name if source_card and hasattr(source_card, 'name') else f"Card {card_id}"
+        effect_id = None
 
-        # Determine scope (e.g., "creatures", "cards", specific types?)
-        subject = "creature" # Default based on common phrasing
-        if "if a card would be put into a graveyard" in oracle_text.lower():
-            subject = "card"
-        # TODO: Add more specific subject parsing if needed
+        # Pattern: "If [subject] would die, exile it instead."
+        # Pattern: "If a nontoken creature would die..."
+        match = re.search(r"if a (nontoken\s+)?(creature|permanent|card) would die(?:.*?),\s*exile it instead", oracle_text.lower())
+        if match:
+            is_nontoken, subject_type = match.groups()
+            is_nontoken = bool(is_nontoken)
 
-        def condition(ctx):
-            # Check if the event is a 'dies' or 'put into graveyard' event
-            target_card_id = ctx.get('card_id')
-            if not target_card_id: return False
+            def condition(ctx):
+                # Only applies if source is on battlefield
+                if card_id not in player.get("battlefield", []): return False
+                # Event must be 'DIES'
+                # if ctx.get('event_type') != 'DIES': return False # ApplyReplacements passes type
 
-            target_card = self.game_state._safe_get_card(target_card_id)
-            if not target_card: return False
+                target_card_id = ctx.get('card_id')
+                if not target_card_id: return False
+                target_card = self.game_state._safe_get_card(target_card_id)
+                if not target_card: return False
 
-            # Check if subject matches
-            if subject == "creature" and 'creature' not in getattr(target_card, 'card_types', []):
-                return False
-            if subject == "card": # Applies to any card going to GY from anywhere? Check rules.
-                # Assume it applies if card is involved
-                pass
+                # Check subject type
+                if subject_type == "creature" and 'creature' not in getattr(target_card, 'card_types', []): return False
+                if subject_type == "permanent": # Assumes it's dying from battlefield
+                     if ctx.get('from_zone') != 'battlefield': return False
+                if subject_type == "card": # Can apply to cards from other zones too if text specifies
+                    # Example: "If a card would be put into an opponent's graveyard..."
+                    # Add specific checks based on full oracle text parsing if needed.
+                    pass
 
-            # Check source zone (usually battlefield for 'dies')
-            # Rule 614.1a: Only applies if source is on battlefield unless specified. Assume source is the card itself.
-            return card_id in player["battlefield"] # Effect only active if source is on BF
+                # Check nontoken restriction
+                if is_nontoken and hasattr(target_card, 'is_token') and target_card.is_token:
+                     return False
 
-        def replacement(ctx):
-            logging.debug(f"{source_name}: Exiling {ctx.get('card_id')} instead of sending to graveyard.")
-            ctx['to_zone'] = 'exile' # Change destination zone
-            return ctx
+                return True
 
-        # Usually permanent duration while source is on battlefield
-        duration = 'until_source_leaves'
-        effect_id = self.register_effect({
-            'source_id': card_id,
-            'event_type': 'DIES', # Also need to register for other 'to graveyard' events?
-            'condition': condition,
-            'replacement': replacement,
-            'duration': duration,
-            'controller_id': player,
-            'description': f"{source_name} Exile instead of Death"
-        })
-        # Might need to register for other events like DISCARD -> Graveyard, MILL -> Graveyard too if it affects all cards
-        # For now, just handle DIES.
+            def replacement(ctx):
+                logging.debug(f"{source_name}: Replacing death with exile for {ctx.get('card_id')}.")
+                ctx['to_zone'] = 'exile' # Change destination zone
+                return ctx
 
-        if effect_id: logging.debug(f"Registered Exile Instead of Death effect for {source_name}")
+            duration = 'until_source_leaves'
+            effect_id = self.register_effect({
+                'source_id': card_id,
+                'event_type': 'DIES', # Register primarily for DIES event
+                'condition': condition,
+                'replacement': replacement,
+                'duration': duration,
+                'controller_id': player,
+                'description': f"{source_name} Exile Instead of Death ({subject_type}{' nontoken' if is_nontoken else ''})"
+            })
+            # Consider if it also needs to apply to MILL, DISCARD events? Read card carefully.
+            # Example: If card says "If a card would be put into a graveyard FROM ANYWHERE..."
+            # register for other event types too.
+
+            if effect_id: logging.debug(f"Registered Exile Instead of Death effect for {source_name}")
+
         return effect_id
     
     def _register_as_enters_effect(self, card_id, player, oracle_text):
@@ -567,71 +541,139 @@ class ReplacementEffectSystem:
         source_name = source_card.name if source_card and hasattr(source_card, 'name') else f"Card {card_id}"
         effect_id = None
 
-        # Common patterns: Choose a type, choose a color, choose an opponent
-        choice_needed = None
-        if "choose a card type" in oracle_text.lower(): choice_needed = "card_type"
-        elif "choose a color" in oracle_text.lower(): choice_needed = "color"
-        elif "choose an opponent" in oracle_text.lower(): choice_needed = "opponent"
-        # TODO: Add pattern for choosing counters if done with "as enters"
+        # Look for "As [this permanent] enters the battlefield, [action]"
+        # Action is usually "choose" or placing counters
+        match = re.search(r"as (?:this permanent|this creature|{}) enters the battlefield".format(re.escape(source_name.lower())), oracle_text.lower())
+        if match:
+             following_text = oracle_text.lower()[match.end():].split('.')[0].strip() # Get text after "enters..."
 
-        if choice_needed:
-            def condition(ctx):
-                # Applies only when THIS card is entering
-                return ctx.get('card_id') == card_id
+             choice_needed = None
+             etb_counters = None
 
-            def replacement(ctx):
-                logging.debug(f"Applying 'As enters' effect from {source_name} ({card_id})")
-                # Signal that a choice is required BEFORE the card fully enters.
-                # The GameState needs to handle pausing resolution to get this choice.
-                ctx['as_enters_choice_needed'] = choice_needed
-                ctx['as_enters_source_id'] = card_id
-                # The actual effect application (e.g., granting protection) will often be
-                # handled by a static ability that *uses* the choice made here.
-                # The choice itself is stored (e.g., on the card or in GameState tracking).
-                return ctx
+             if following_text.startswith(", choose"):
+                 if "a card type" in following_text: choice_needed = "card_type"
+                 elif "a color" in following_text: choice_needed = "color"
+                 elif "an opponent" in following_text: choice_needed = "opponent"
+                 elif "a creature type" in following_text: choice_needed = "creature_type"
+                 # Add more common choices
+             elif following_text.startswith("with"): # e.g., "with a +1/+1 counter"
+                 counter_match = re.search(r"with (a|an|one|two|three|\d+)\s+([\+\-\d/]+\s+)?(\w+)\s+counters?", following_text)
+                 if counter_match:
+                     count_word, _, counter_type = counter_match.groups() # Ignored middle group for p/t marker
+                     count = self._word_to_number(count_word)
+                     counter_type = counter_type.strip()
+                     etb_counters = {'type': counter_type, 'count': count}
 
-            effect_id = self.register_effect({
-                'source_id': card_id,
-                'event_type': 'ENTERS_BATTLEFIELD',
-                'condition': condition,
-                'replacement': replacement,
-                'duration': 'self', # Applies only to the ETB event itself
-                'controller_id': player,
-                'description': f"{source_name} 'As enters' choice"
-            })
-            if effect_id: logging.debug(f"Registered 'As enters' effect for {source_name}")
+             if choice_needed or etb_counters:
+                 def condition(ctx):
+                     # Applies only when THIS card is entering
+                     return ctx.get('card_id') == card_id
+
+                 def replacement(ctx):
+                     logging.debug(f"Applying 'As enters' effect from {source_name} ({card_id})")
+                     if choice_needed:
+                         ctx['as_enters_choice_needed'] = choice_needed
+                         ctx['as_enters_source_id'] = card_id
+                         # The GameState needs to handle pausing resolution to get this choice.
+                         # Choice is stored (e.g., on the card or GS tracking) for static abilities to use.
+                     if etb_counters:
+                          # Add counters info to the context, will be applied during ETB processing
+                          ctx['enter_counters'] = ctx.get('enter_counters', [])
+                          ctx['enter_counters'].append(etb_counters)
+                          logging.debug(f"'As enters' adding counters: {etb_counters}")
+                     return ctx
+
+                 effect_id = self.register_effect({
+                     'source_id': card_id,
+                     'event_type': 'ENTERS_BATTLEFIELD',
+                     'condition': condition,
+                     'replacement': replacement,
+                     'duration': 'self', # Applies only to the ETB event itself
+                     'controller_id': player,
+                     'description': f"{source_name} 'As enters' {choice_needed or 'counters'}"
+                 })
+                 if effect_id: logging.debug(f"Registered 'As enters' effect for {source_name}")
 
         return effect_id
     
     def _register_draw_replacement(self, card_id, player, oracle_text):
-        """Register standard 'if you would draw... instead...' effects."""
+        """Register standard 'if you would draw... instead...' effects, including Dredge."""
         source_card = self.game_state._safe_get_card(card_id)
         source_name = source_card.name if source_card and hasattr(source_card, 'name') else f"Card {card_id}"
         effect_id = None
 
-        replacement_text = ""
-        match = re.search(r"if you would draw a card.*?, instead (.*?)(?:\.|$)", oracle_text.lower())
-        if match: replacement_text = match.group(1).strip()
+        # Standard "if you would draw a card..., instead..."
+        match = re.search(r"if you would draw a card(?:.*?),\s*instead (.*?)(?:\.|$)", oracle_text.lower())
+        if match:
+            replacement_text = match.group(1).strip()
 
-        if replacement_text:
             def condition(ctx):
                 # Only affects the controller of the source card
                 return ctx.get('player') == player
 
+            # Use the enhanced function creator
             replacement_func = self._create_enhanced_replacement_function("DRAW", replacement_text, player, source_name)
 
             duration = self._determine_duration(oracle_text.lower())
 
             effect_id = self.register_effect({
-                'source_id': card_id,
-                'event_type': 'DRAW',
-                'condition': condition,
-                'replacement': replacement_func,
-                'duration': duration,
-                'controller_id': player,
-                'description': f"{source_name} Draw Replacement"
+                'source_id': card_id, 'event_type': 'DRAW',
+                'condition': condition, 'replacement': replacement_func,
+                'duration': duration, 'controller_id': player,
+                'description': f"{source_name} Draw Replacement: {replacement_text}"
             })
             if effect_id: logging.debug(f"Registered Draw Replacement effect for {source_name}")
+
+        # Dredge specific replacement (from graveyard only)
+        dredge_match = re.search(r"dredge (\d+)", oracle_text.lower())
+        if dredge_match:
+             dredge_value = int(dredge_match.group(1))
+
+             def dredge_condition(ctx):
+                 # Card must be in player's graveyard AND they must be about to draw
+                 _, current_zone = self.game_state.find_card_location(card_id)
+                 return ctx.get('player') == player and current_zone == "graveyard"
+
+             def dredge_replacement(ctx):
+                  # Replace the draw. Set up pending dredge state.
+                  # Player needs to choose whether to dredge via an action.
+                  if self.game_state.phase != self.game_state.PHASE_DRAW: # Check timing? Dredge usually replaces draw step draw.
+                       # Allow dredge replacement anytime a draw would happen
+                       pass
+
+                  # Check if enough cards to mill
+                  if len(player.get("library", [])) >= dredge_value:
+                      logging.debug(f"Dredge opportunity: {source_name} (Dredge {dredge_value}) replacing draw.")
+                      # Set state for player to choose dredge action
+                      # Prevent the default draw
+                      ctx['prevented'] = True
+                      # Store dredge info for action handler
+                      self.game_state.dredge_pending = {
+                          'player': player,
+                          'card_id': card_id,
+                          'value': dredge_value,
+                          'original_draw_context': ctx # Store original context if needed
+                      }
+                      # Need to enter a choice phase or similar
+                      # self.game_state.phase = GameState.PHASE_CHOOSE # Example phase
+                      # self.game_state.choice_context = {'type':'dredge', ...}
+                  else:
+                       logging.debug(f"Cannot dredge {source_name}: Not enough cards in library.")
+                       # Don't prevent draw if dredge isn't possible
+
+                  return ctx # Return modified (or original) context
+
+             # Register this effect only when card is in graveyard? Complex.
+             # Let condition handle it for now. Duration is permanent while in GY.
+             dredge_effect_id = self.register_effect({
+                 'source_id': card_id, 'event_type': 'DRAW',
+                 'condition': dredge_condition, 'replacement': dredge_replacement,
+                 'duration': 'permanent', 'controller_id': player,
+                 'description': f"{source_name} Dredge {dredge_value}"
+             })
+             if dredge_effect_id: logging.debug(f"Registered Dredge effect for {source_name}")
+             # Return the FIRST effect ID registered if multiple match
+             if not effect_id: effect_id = dredge_effect_id
 
         return effect_id
     

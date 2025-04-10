@@ -1,7 +1,9 @@
 import logging
 import re
 from collections import defaultdict
-import numpy as np  # Add if needed for array operations
+import numpy as np
+
+from Playersim.card import Card  # Add if needed for array operations
 from .enhanced_card_evaluator import EnhancedCardEvaluator  # If used directly
 from .enhanced_combat import ExtendedCombatResolver  # If referenced directly
 
@@ -339,38 +341,46 @@ class CombatActionHandler:
         return best_combo
         
     def is_valid_attacker(self, card_id):
-        """Determine if a creature can attack, incorporating dynamic restrictions."""
+        """Determine if a creature can attack, incorporating dynamic restrictions. Uses centralized keyword check."""
         gs = self.game_state
         card = gs._safe_get_card(card_id)
-        # Find controller using GameState method
         player = gs.get_card_controller(card_id)
-        if not card or not player or card_id not in player["battlefield"]: return False
+
+        # Basic checks
+        if not card or not player or card_id not in player.get("battlefield", []): return False
         if 'creature' not in getattr(card, 'card_types', []): return False
 
         # Tapped check
         if card_id in player.get("tapped_permanents", set()): return False
 
-        # Summoning Sickness check
-        if card_id in player.get("entered_battlefield_this_turn", set()):
-             # CONSOLIDATION: Use central _has_keyword check
-             if not self._has_keyword(card, "haste"):
-                  return False
+        # Summoning Sickness check (using central keyword check for haste)
+        if card_id in player.get("entered_battlefield_this_turn", set()) and not self._has_keyword(card, "haste"):
+             return False
 
-        # Defender check
-        # CONSOLIDATION: Use central _has_keyword check
+        # Defender check (using central keyword check)
         if self._has_keyword(card, "defender"):
-             # Check for exceptions like "can attack as though it didn't have defender"
-             # This check might need enhancement based on Layer 6 effects
-             if "can attack" not in getattr(card, 'oracle_text', '').lower():
+             # Simple exception check - might be overridden by layer effects
+             if "can attack as though it didn't have defender" not in getattr(card, 'oracle_text', '').lower():
                   return False
 
-        # Ability Restrictions (Can't Attack etc.) - Check Layer System effects
-        # CONSOLIDATION: Check Layer 6 effects for 'cant_attack'
-        if hasattr(gs, 'layer_system'):
-            is_restricted = gs.layer_system.has_effect(card_id, 'cant_attack') # Assumes LayerSystem has `has_effect` method
-            if is_restricted:
-                 logging.debug(f"Attacker {card.name} invalid: 'Can't Attack' effect active.")
-                 return False
+        # --- Check Layer System Effects for 'cant_attack' ---
+        cant_attack = False
+        if hasattr(gs, 'layer_system') and gs.layer_system:
+            # This assumes LayerSystem calculates the 'keywords' array correctly,
+            # including 'cant_attack' as a negative ability/restriction.
+            # Need a consistent way to represent this. Let's assume 'cant_attack' is a pseudo-keyword.
+            try:
+                if self._has_keyword(card, "cant_attack"): # Check the effective keywords
+                    cant_attack = True
+            except Exception as e:
+                 logging.warning(f"Error checking LayerSystem cant_attack effect: {e}")
+        # Direct check if LayerSystem doesn't use keyword array for this
+        # elif hasattr(gs, 'layer_system') and hasattr(gs.layer_system, 'has_effect'):
+        #     if gs.layer_system.has_effect(card_id, 'cant_attack'): cant_attack = True
+
+        if cant_attack:
+            logging.debug(f"Attacker {card.name} invalid: 'Can't Attack' effect active.")
+            return False
 
         # Check other game state restrictions if applicable (e.g., Ghostly Prison effect)
         # if gs.has_attack_restriction(player, card_id): return False # Example hook
@@ -916,34 +926,67 @@ class CombatActionHandler:
         return gs.mana_system.can_pay_mana_cost(player, cost_string)
 
     def _can_block(self, blocker_id, attacker_id):
-        """Check if blocker_id can legally block attacker_id."""
+        """Check if blocker_id can legally block attacker_id. Uses TargetingSystem."""
         gs = self.game_state
+        # Prioritize using TargetingSystem's check
         if hasattr(gs, 'targeting_system') and gs.targeting_system:
             if hasattr(gs.targeting_system, 'check_can_be_blocked'):
-                 return gs.targeting_system.check_can_be_blocked(attacker_id, blocker_id)
+                 try:
+                     return gs.targeting_system.check_can_be_blocked(attacker_id, blocker_id)
+                 except Exception as e:
+                      logging.error(f"Error checking block via TargetingSystem: {e}")
+                      # Fall through to basic check on error
 
+        # --- Fallback logic ---
         logging.warning("Using basic _can_block fallback in CombatActionHandler.")
         blocker = gs._safe_get_card(blocker_id); attacker = gs._safe_get_card(attacker_id)
         if not blocker or not attacker: return False
+        if 'creature' not in getattr(blocker, 'card_types', []): return False # Must be creature
+        if blocker_id in getattr(gs.get_card_controller(blocker_id), "tapped_permanents", set()): return False # Must be untapped
+
+        # Use central _has_keyword for evasion checks
         if self._has_keyword(attacker, "flying") and not (self._has_keyword(blocker, "flying") or self._has_keyword(blocker, "reach")): return False
         if self._has_keyword(blocker, "can't block"): return False
+        if self._has_keyword(attacker, "shadow") and not self._has_keyword(blocker, "shadow"): return False
+        if self._has_keyword(attacker, "unblockable"): return False # Basic unblockable
+        # Add other evasion/restriction checks if needed (fear, intimidate, landwalk etc.)
+
         return True
 
     def _has_keyword(self, card, keyword):
-        """Checks if a card has a keyword using the central checker."""
+        """Checks if a card has a keyword using the central checker (AbilityHandler preferred)."""
         gs = self.game_state
         card_id = getattr(card, 'card_id', None)
         if not card_id: return False
 
+        # 1. Prefer AbilityHandler (handles static grants/removals)
         if hasattr(gs, 'ability_handler') and gs.ability_handler:
             if hasattr(gs.ability_handler, 'check_keyword'):
-                 return gs.ability_handler.check_keyword(card_id, keyword)
+                 try:
+                     return gs.ability_handler.check_keyword(card_id, keyword)
+                 except Exception as e:
+                      logging.error(f"Error checking keyword via AbilityHandler: {e}")
+                      # Fall through on error
+
+        # 2. Fallback to TargetingSystem (might also check layers)
         elif hasattr(gs, 'targeting_system') and gs.targeting_system:
              if hasattr(gs.targeting_system, 'check_keyword'):
-                 return gs.targeting_system.check_keyword(card_id, keyword)
+                 try:
+                     return gs.targeting_system.check_keyword(card_id, keyword)
+                 except Exception as e:
+                      logging.error(f"Error checking keyword via TargetingSystem: {e}")
+                      # Fall through on error
 
-        logging.warning(f"Using basic card keyword fallback check for {keyword} on {getattr(card, 'name', 'Unknown')}")
-        if hasattr(card, 'has_keyword'):
-             return card.has_keyword(keyword)
-        return False
+        # 3. Ultimate Fallback: Check card's own property (may be inaccurate)
+        logging.warning(f"Using basic card keyword fallback check in CombatActionHandler for {keyword} on {getattr(card, 'name', 'Unknown')}")
+        if hasattr(card, 'has_keyword') and callable(card.has_keyword):
+             return card.has_keyword(keyword) # Uses card's own logic
+        # Optional: Direct check of 'keywords' array if card doesn't have has_keyword method
+        elif hasattr(card, 'keywords') and isinstance(card.keywords, (list, np.ndarray)):
+            try:
+                 idx = Card.ALL_KEYWORDS.index(keyword.lower())
+                 if idx < len(card.keywords): return bool(card.keywords[idx])
+            except (ValueError, IndexError): pass
+
+        return False # Default to false if checks fail
      

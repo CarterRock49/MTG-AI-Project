@@ -13,6 +13,7 @@ from .enhanced_card_evaluator import EnhancedCardEvaluator
 from .combat_actions import CombatActionHandler
 
 # ACTION_MEANINGS dictionary - Corrected and verified for size 480 (Indices 0-479)
+# Added Context Required comments
 ACTION_MEANINGS = {
     # Basic game flow (0-12) = 13 actions
     0: ("END_TURN", None), 1: ("UNTAP_NEXT", None), 2: ("DRAW_NEXT", None), 3: ("MAIN_PHASE_END", None),
@@ -30,16 +31,19 @@ ACTION_MEANINGS = {
     **{i: ("ATTACK", i-28) for i in range(28, 48)},
 
     # Block (48-67) = 20 actions (param=battlefield index 0-19)
+    # Context Required: {'target_attacker_id': int} (Optional, if agent specifies blocker target)
     **{i: ("BLOCK", i-48) for i in range(48, 68)},
 
     # Tap land for mana (68-87) = 20 actions (param=battlefield index 0-19)
     **{i: ("TAP_LAND_FOR_MANA", i-68) for i in range(68, 88)},
 
     # Tap land for effect (88-99) = 12 actions (param=battlefield index 0-11)
+    # Context Required: {'ability_idx': int} (Typically 0 for land effect)
     **{i: ("TAP_LAND_FOR_EFFECT", i-88) for i in range(88, 100)},
 
-    # Ability activation (100-159) = 60 actions (param=(battlefield index 0-19, ability index 0-2))
-    # Note: Handler needs context={'battlefield_idx': i, 'ability_idx': j}
+    # Activate Ability (100-159) = 60 actions
+    # Maps (battlefield_idx 0-19, ability_idx 0-2) -> action index
+    # Context Required: {'battlefield_idx': int, 'ability_idx': int} (Handler extracts this)
     **{100 + (i * 3) + j: ("ACTIVATE_ABILITY", None) for i in range(20) for j in range(3)},
 
     # Transform (160-179) = 20 actions (param=battlefield index 0-19)
@@ -54,8 +58,9 @@ ACTION_MEANINGS = {
     # Adventure (196-203) = 8 actions (param=hand index 0-7)
     **{i: ("PLAY_ADVENTURE", i-196) for i in range(196, 204)},
 
-    # Defend Battle (204-223) = 20 actions (param=(battle index 0-4, creature index 0-3) - NEEDS CONTEXT)
-    # Note: Handler needs context={'battle_identifier': i, 'defender_identifier': j}
+    # Defend Battle (204-223) = 20 actions
+    # Maps (battle_idx 0-4, defender_idx 0-3) -> action index
+    # Context Required: {'battle_identifier': id_or_idx, 'defender_identifier': id_or_idx} (Handler extracts this)
     **{204 + (i * 4) + j: ("DEFEND_BATTLE", None) for i in range(5) for j in range(4)},
 
     # NO_OP (224)
@@ -75,13 +80,18 @@ ACTION_MEANINGS = {
     **{248 + i: ("UNLOCK_DOOR", i) for i in range(5)}, # param=battlefield index 0-4
     **{253 + i: ("LEVEL_UP_CLASS", i) for i in range(5)}, # param=battlefield index 0-4
 
-    # Spree Mode (258-273) = 16 actions (param=(hand index 0-7, mode index 0-1) - NEEDS CONTEXT)
-    # Note: Handler needs context={'hand_idx': i, 'mode_idx': j}
+    # Spree Mode (258-273) = 16 actions
+    # Maps (hand_idx 0-7, mode_idx 0-1) -> action index
+    # Context Required: {'hand_idx': int, 'mode_idx': int} (Handler extracts this)
     **{258 + (i * 2) + j: ("SELECT_SPREE_MODE", None) for i in range(8) for j in range(2)},
 
     # Targeting (274-293) = 20 actions
-    **{274 + i: ("SELECT_TARGET", i) for i in range(10)}, # param=valid target index 0-9
-    **{284 + i: ("SACRIFICE_PERMANENT", i) for i in range(10)}, # param=valid sacrifice index 0-9
+    # Param is index into list of valid targets presented based on game state targeting_context.
+    # Context Required: {'targeting_context': game_state.targeting_context} (Needed by handler)
+    **{274 + i: ("SELECT_TARGET", i) for i in range(10)},
+    # Param is index into list of valid sacrifice targets presented based on game state sacrifice_context.
+    # Context Required: {'sacrifice_context': game_state.sacrifice_context} (Needed by handler)
+    **{284 + i: ("SACRIFICE_PERMANENT", i) for i in range(10)},
 
     # Gaps filled with NO_OP (294-298) = 5 actions
     **{i: ("NO_OP", None) for i in range(294, 299)},
@@ -89,121 +99,172 @@ ACTION_MEANINGS = {
     # Library/Card Movement (299-308) = 10 actions
     **{299 + i: ("SEARCH_LIBRARY", i) for i in range(5)}, # param=search type 0-4
     304: ("NO_OP_SEARCH_FAIL", None),
-    305: ("PUT_TO_GRAVEYARD", None), # param=choice index (usually 0) -> Scry/Surveil
+    # Context Required for Scry/Surveil: {'choice_context': game_state.choice_context} (Needed by handlers)
+    305: ("PUT_TO_GRAVEYARD", None), # param=choice index (usually 0) -> Surveil
     306: ("PUT_ON_TOP", None),       # param=choice index (usually 0) -> Scry/Surveil
     307: ("PUT_ON_BOTTOM", None),    # param=choice index (usually 0) -> Scry
-    308: ("DREDGE", None),           # Note: Handler needs context={'gy_idx': X}
+    # Context Required: {'dredge_pending': game_state.dredge_pending, 'gy_idx': int} (gy_idx derived from action param)
+    308: ("DREDGE", None), # Action param (0-5) likely maps to gy_idx
 
     # Counter Management (309-329) = 21 actions
-    **{309 + i: ("ADD_COUNTER", i) for i in range(10)}, # param=permanent index 0-9 (Needs Context for type/count)
-    **{319 + i: ("REMOVE_COUNTER", i) for i in range(10)}, # param=permanent index 0-9 (Needs Context for type/count)
-    329: ("PROLIFERATE", None),
+    # Param is index relative to a list of valid targets.
+    # Context Required: {'counter_type': str, 'count': int, 'target_id': str_or_int}
+    **{309 + i: ("ADD_COUNTER", i) for i in range(10)},
+    # Param is index relative to a list of valid targets.
+    # Context Required: {'counter_type': str, 'count': int, 'target_id': str_or_int}
+    **{319 + i: ("REMOVE_COUNTER", i) for i in range(10)},
+    329: ("PROLIFERATE", None), # Context defines targets if needed by AI choice
 
     # Zone Movement (330-347) = 18 actions
-    **{330 + i: ("RETURN_FROM_GRAVEYARD", i) for i in range(6)}, # param=graveyard index 0-5
-    **{336 + i: ("REANIMATE", i) for i in range(6)}, # param=graveyard index 0-5
-    **{342 + i: ("RETURN_FROM_EXILE", i) for i in range(6)}, # param=exile index 0-5
+    # Param is graveyard index 0-5
+    **{330 + i: ("RETURN_FROM_GRAVEYARD", i) for i in range(6)},
+    # Param is graveyard index 0-5
+    **{336 + i: ("REANIMATE", i) for i in range(6)},
+    # Param is exile index 0-5
+    **{342 + i: ("RETURN_FROM_EXILE", i) for i in range(6)},
 
     # Modal/Choice (348-372) = 25 actions
-    **{348 + i: ("CHOOSE_MODE", i) for i in range(10)}, # param=mode index 0-9
-    **{358 + i: ("CHOOSE_X_VALUE", i+1) for i in range(10)}, # param=X value 1-10
-    **{368 + i: ("CHOOSE_COLOR", i) for i in range(5)}, # param=WUBRG index 0-4
+    # Param is mode index 0-9.
+    # Context Required: {'choice_context': game_state.choice_context} (Needed by handler)
+    **{348 + i: ("CHOOSE_MODE", i) for i in range(10)},
+    # Param is X value 1-10.
+    # Context Required: {'choice_context': game_state.choice_context} (Needed by handler)
+    **{358 + i: ("CHOOSE_X_VALUE", i+1) for i in range(10)},
+    # Param is WUBRG index 0-4.
+    # Context Required: {'choice_context': game_state.choice_context} (Needed by handler)
+    **{368 + i: ("CHOOSE_COLOR", i) for i in range(5)},
 
     # Advanced Combat (373-377, 383-392) = 15 actions
-    # Note: Handler needs context={'attacker_idx': X} implicitly (last attacker)
-    **{373 + i: ("ATTACK_PLANESWALKER", i) for i in range(5)}, # param=opponent PW index 0-4
+    # Param=opponent PW index 0-4. Assumes last declared attacker targets this.
+    **{373 + i: ("ATTACK_PLANESWALKER", i) for i in range(5)},
     # Gap filled with NO_OP (378-382) = 5 actions
     **{i: ("NO_OP", None) for i in range(378, 383)},
-    # Note: Handler needs context={'blocker_identifiers': [idx/id,...]}
-    **{383 + i: ("ASSIGN_MULTIPLE_BLOCKERS", i) for i in range(10)}, # param=attacker index 0-9
+    # Param=attacker index 0-9 (index within gs.current_attackers).
+    # Context Required: {'blocker_identifiers': [id_or_idx,...]} (List of blocker indices/IDs to assign)
+    **{383 + i: ("ASSIGN_MULTIPLE_BLOCKERS", i) for i in range(10)},
 
     # Alternative Casting (393-404) = 12 actions
-    # Note: Handlers need context={'gy_idx':X} or {'hand_idx':X, ...}
+    # Context required by handlers, often needs gy_idx, hand_idx, exile_idx, etc.
+    # Context required: {'gy_idx': int}
     393: ("CAST_WITH_FLASHBACK", None),
+    # Context required: {'gy_idx': int, 'discard_idx': int}
     394: ("CAST_WITH_JUMP_START", None),
+    # Context required: {'gy_idx': int, 'gy_indices_escape': [int,...]}
     395: ("CAST_WITH_ESCAPE", None),
+    # Context required: {'exile_idx': int} (card assumed to be in exile via discard)
     396: ("CAST_FOR_MADNESS", None),
-    397: ("CAST_WITH_OVERLOAD", None), # Needs context={'hand_idx':X}
-    398: ("CAST_FOR_EMERGE", None), # Needs context={'hand_idx':X, 'sacrifice_idx':Y}
-    399: ("CAST_FOR_DELVE", None), # Needs context={'hand_idx':X, 'gy_indices':[...]}
+    # Context required: {'hand_idx': int}
+    397: ("CAST_WITH_OVERLOAD", None),
+    # Context required: {'hand_idx': int, 'sacrifice_idx': int}
+    398: ("CAST_FOR_EMERGE", None),
+    # Context required: {'hand_idx': int, 'gy_indices': [int,...]}
+    399: ("CAST_FOR_DELVE", None),
+    # Context flag setting actions (param=True/False)
     400: ("PAY_KICKER", True),
     401: ("PAY_KICKER", False),
     402: ("PAY_ADDITIONAL_COST", True),
     403: ("PAY_ADDITIONAL_COST", False),
-    404: ("PAY_ESCALATE", None), # Needs context={'num_extra_modes':X}
+    # Context required: {'num_extra_modes': int} (param likely maps to num_extra_modes)
+    404: ("PAY_ESCALATE", None),
 
     # Token/Copy (405-412) = 8 actions
     **{405 + i: ("CREATE_TOKEN", i) for i in range(5)}, # param=predefined token type index 0-4
-    410: ("COPY_PERMANENT", None), # Needs context={'target_permanent_idx':X}
-    411: ("COPY_SPELL", None), # Needs context={'target_spell_idx':X}
-    412: ("POPULATE", None), # Needs context={'target_token_idx':X}
+    # Context Required: {'target_permanent_idx': int} (combined index?)
+    410: ("COPY_PERMANENT", None),
+    # Context Required: {'target_spell_idx': int} (stack index)
+    411: ("COPY_SPELL", None),
+    # Context Required: {'target_token_idx': int} (index among player's tokens)
+    412: ("POPULATE", None),
 
     # Specific Mechanics (413-424) = 12 actions
     413: ("INVESTIGATE", None),
-    414: ("FORETELL", None), # Needs context={'hand_idx':X}
-    415: ("AMASS", None), # Needs context={'amount':X}
-    416: ("LEARN", None),
-    417: ("VENTURE", None),
-    418: ("EXERT", None), # Needs context={'creature_idx':X}
-    419: ("EXPLORE", None), # Needs context={'creature_idx':X}
-    420: ("ADAPT", None), # Needs context={'creature_idx':X}
-    421: ("MUTATE", None), # Needs context={'hand_idx':X, 'target_idx':Y}
-    422: ("CYCLING", None), # Needs context={'hand_idx':X}
-    423: ("GOAD", None), # Needs context={'target_creature_idx':X}
-    424: ("BOAST", None), # Needs context={'creature_idx':X}
+    # Context Required: {'hand_idx': int}
+    414: ("FORETELL", None),
+    # Context Required: {'amount': int}
+    415: ("AMASS", None),
+    416: ("LEARN", None), # Context might be needed if choosing Lesson
+    417: ("VENTURE", None), # Context might be needed for dungeon choice/path
+    # Context Required: {'creature_idx': int} (battlefield index)
+    418: ("EXERT", None),
+    # Context Required: {'creature_idx': int} (battlefield index)
+    419: ("EXPLORE", None),
+    # Context Required: {'creature_idx': int, 'amount': int}
+    420: ("ADAPT", None),
+    # Context Required: {'hand_idx': int, 'target_idx': int}
+    421: ("MUTATE", None),
+    # Context Required: {'hand_idx': int}
+    422: ("CYCLING", None),
+    # Context Required: {'target_creature_idx': int} (combined index?)
+    423: ("GOAD", None),
+    # Context Required: {'creature_idx': int} (battlefield index)
+    424: ("BOAST", None),
 
     # Response Actions (425-429) = 5 actions
-    425: ("COUNTER_SPELL", None), # Needs context={'hand_idx':X, 'target_spell_idx':Y}
-    426: ("COUNTER_ABILITY", None), # Needs context={'hand_idx':X, 'target_ability_idx':Y}
-    427: ("PREVENT_DAMAGE", None), # Needs context={'hand_idx':X, 'amount':Y, 'target':Z}
-    428: ("REDIRECT_DAMAGE", None), # Needs context={'hand_idx':X, 'new_target':Y}
-    429: ("STIFLE_TRIGGER", None), # Needs context={'hand_idx':X, 'target_trigger_idx':Y}
+    # Context Required: {'hand_idx': int, 'target_spell_idx': int}
+    425: ("COUNTER_SPELL", None),
+    # Context Required: {'hand_idx': int, 'target_ability_idx': int}
+    426: ("COUNTER_ABILITY", None),
+    # Context Required: {'hand_idx': int, 'amount': int, 'target': id_or_idx}
+    427: ("PREVENT_DAMAGE", None),
+    # Context Required: {'hand_idx': int, 'new_target': id_or_idx}
+    428: ("REDIRECT_DAMAGE", None),
+    # Context Required: {'hand_idx': int, 'target_trigger_idx': int}
+    429: ("STIFLE_TRIGGER", None),
 
-    # Combat Actions (430-439) = 10 actions
-    # Note: Handlers need context, e.g., context={'assignments':{...}}
+    # Combat Actions (Delegated via apply_combat_action) (430-439) = 10 actions
+    # Context Required (for handler): {'assignments': {attacker_id: [blocker_id,...],...}} (Damage order)
     430: ("FIRST_STRIKE_ORDER", None),
+    # Context Required (optional for handler): {'assignments': {attacker_id: {target_id: damage,...},...}} (Manual assignment)
     431: ("ASSIGN_COMBAT_DAMAGE", None),
-    # Note: Handler needs context={'ninja_hand_idx':X, 'attacker_bf_idx':Y}
+    # Context Required (for handler): {'ninja_identifier': id_or_idx, 'attacker_identifier': id_or_idx}
     432: ("NINJUTSU", None),
     433: ("DECLARE_ATTACKERS_DONE", None),
     434: ("DECLARE_BLOCKERS_DONE", None),
-    435: ("LOYALTY_ABILITY_PLUS", None), # Needs context={'battlefield_idx':X}
-    436: ("LOYALTY_ABILITY_ZERO", None), # Needs context={'battlefield_idx':X}
-    437: ("LOYALTY_ABILITY_MINUS", None),# Needs context={'battlefield_idx':X}
-    438: ("ULTIMATE_ABILITY", None), # Needs context={'battlefield_idx':X}
-    # Note: Handler needs context={'pw_identifier':X, 'defender_identifier':Y}
+    # Context Required (for handler): {'battlefield_idx': int}
+    435: ("LOYALTY_ABILITY_PLUS", None),
+    436: ("LOYALTY_ABILITY_ZERO", None),
+    437: ("LOYALTY_ABILITY_MINUS", None),
+    438: ("ULTIMATE_ABILITY", None),
+    # Context Required (for handler): {'pw_identifier': id_or_idx, 'defender_identifier': id_or_idx}
     439: ("PROTECT_PLANESWALKER", None),
 
     # Card Type Specific (440-453, 455) = 15 actions (plus 1 NO_OP)
-    440: ("CAST_LEFT_HALF", None), # Needs context={'hand_idx':X}
-    441: ("CAST_RIGHT_HALF", None), # Needs context={'hand_idx':X}
-    442: ("CAST_FUSE", None), # Needs context={'hand_idx':X}
-    443: ("AFTERMATH_CAST", None), # Needs context={'gy_idx':X}
-    444: ("FLIP_CARD", None), # Needs context={'battlefield_idx':X}
-    # Note: Handler needs context={'equip_idx':X, 'target_idx':Y}
+    # Context required: {'hand_idx': int}
+    440: ("CAST_LEFT_HALF", None),
+    441: ("CAST_RIGHT_HALF", None),
+    442: ("CAST_FUSE", None),
+    # Context required: {'gy_idx': int}
+    443: ("AFTERMATH_CAST", None),
+    # Context Required: {'battlefield_idx': int}
+    444: ("FLIP_CARD", None),
+    # Context Required: {'equip_idx': int, 'target_idx': int}
     445: ("EQUIP", None),
-    446: ("UNEQUIP", None), # Needs context={'equip_idx':X}
-    # Note: Handler needs context={'aura_idx':X, 'target_idx':Y} -> Usually done via spell casting?
+    # Context Required: {'equip_idx': int}
+    446: ("UNEQUIP", None),
+    # Context Required: {'aura_idx': int, 'target_idx': int} - Likely handled via ability?
     447: ("ATTACH_AURA", None),
-    # Note: Handler needs context={'fort_idx':X, 'target_idx':Y}
+    # Context Required: {'fort_idx': int, 'target_idx': int}
     448: ("FORTIFY", None),
-    # Note: Handler needs context={'battlefield_idx':X}
+    # Context Required: {'battlefield_idx': int} (Target chosen by AI/logic)
     449: ("RECONFIGURE", None),
-    450: ("MORPH", None), # Needs context={'battlefield_idx':X}
-    451: ("MANIFEST", None), # Needs context={'battlefield_idx':X}
+    # Context Required: {'battlefield_idx': int}
+    450: ("MORPH", None),
+    451: ("MANIFEST", None),
     452: ("CLASH", None),
-    # Note: Handler needs context={'spell_stack_idx':X, 'creature1_identifier':Y, 'creature2_identifier':Z}
+    # Context Required: {'spell_stack_idx': int, 'creature1_identifier': id_or_idx, 'creature2_identifier': id_or_idx}
     453: ("CONSPIRE", None),
     454: ("NO_OP", None), # Replaced CONVOKE
-    455: ("GRANDEUR", None), # Needs context={'hand_idx':X}
+    # Context Required: {'hand_idx': int}
+    455: ("GRANDEUR", None),
     456: ("NO_OP", None), # Replaced HELLBENT
 
     # Gap filled with NO_OP (457-459) = 3 actions
     **{i: ("NO_OP", None) for i in range(457, 460)},
 
     # Actions 460-464: Target Battle index 0-4
-    # Note: Handler needs context={'attacker_idx': X} implicitly (last attacker)
-    **{460 + i: ("ATTACK_BATTLE", i) for i in range(5)}, # param = relative battle index 0-4
+    # Param = relative battle index 0-4
+    # Context Required: Implicit attacker assumed (last declared)
+    **{460 + i: ("ATTACK_BATTLE", i) for i in range(5)},
     # Fill the remaining space (465-479) with No-Ops
     **{i: ("NO_OP", None) for i in range(465, 480)}
 }
@@ -2085,54 +2146,70 @@ class ActionHandler:
 
     def _handle_pass_priority(self, param, **kwargs):
         gs = self.game_state
-        gs._pass_priority() # Let GameState handle the logic
-        # Reward is neutral for passing priority itself; consequences come later.
+        gs._pass_priority() # Let GameState handle the logic (priority toggle, stack/phase advance)
+        # Passing priority itself is generally neutral reward; consequences come later.
         return 0.0, True
 
     def _handle_concede(self, param, **kwargs):
         # Handled directly in apply_action's main logic
         return -10.0 # Large penalty
 
+
     def _handle_play_land(self, param, **kwargs):
         gs = self.game_state
-        player = gs.p1 if gs.agent_is_p1 else gs.p2
-        if param < len(player["hand"]):
-            card_id = player["hand"][param]
-            if gs.play_land(card_id, player):
-                return 0.2 # Good reward for successful land play
-            else:
-                return -0.1 # Penalty for trying invalid land play
-        return -0.2 # Invalid index
+        player = gs._get_active_player()
+        hand_idx = param
+
+        # Check index validity
+        if hand_idx >= len(player.get("hand", [])):
+            logging.warning(f"PLAY_LAND: Invalid hand index {hand_idx}")
+            return -0.2, False # Significant penalty for invalid index
+
+        card_id = player["hand"][hand_idx]
+
+        # Call GameState method to handle play logic
+        # GameState.play_land handles rules checks (is land, one per turn, timing) and triggers
+        if gs.play_land(card_id, player):
+            return 0.2, True # Positive reward for successful land play
+        else:
+            logging.debug(f"PLAY_LAND: Failed (handled by gs.play_land validation). Card: {card_id}")
+            return -0.1, False # Penalty for attempting invalid play
+
 
 
     def _handle_play_spell(self, param, **kwargs):
         gs = self.game_state
-        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        player = gs._get_active_player()
         context = kwargs.get('context', {}) # Use context passed in
         hand_idx = param
 
-        if hand_idx < len(player["hand"]):
-            card_id = player["hand"][hand_idx]
-            card = gs._safe_get_card(card_id)
-            if not card: return -0.2, False # Card not found
+        # Check index validity
+        if hand_idx >= len(player.get("hand", [])):
+            logging.warning(f"PLAY_SPELL: Invalid hand index {hand_idx}")
+            return -0.2, False
 
-            # Add hand index to context if needed by handlers/mana system
-            if 'hand_idx' not in context: context['hand_idx'] = hand_idx
+        card_id = player["hand"][hand_idx]
+        card = gs._safe_get_card(card_id)
+        if not card: return -0.2, False # Card not found
 
-            # Use CardEvaluator to estimate value BEFORE casting
-            card_value = 0
-            if self.card_evaluator:
-                 eval_context = {"situation": "casting", **context} # Merge context
-                 card_value = self.card_evaluator.evaluate_card(card_id, "play", context_details=eval_context)
+        # Add hand index to context if needed by handlers/mana system
+        if 'hand_idx' not in context: context['hand_idx'] = hand_idx
 
-            # Attempt to cast
-            if gs.cast_spell(card_id, player, context=context):
-                # Reward based on card value and successful cast
-                return 0.1 + card_value * 0.3, True
-            else:
-                 # Penalty for trying invalid cast (failed affordability or targeting inside cast_spell)
-                 return -0.1, False
-        return -0.2, False # Invalid hand index
+        # Evaluate card value BEFORE casting (use context for more accuracy)
+        card_value = 0
+        if self.card_evaluator:
+             eval_context = {"situation": "casting", "current_phase": gs.phase, **context}
+             card_value = self.card_evaluator.evaluate_card(card_id, "play", context_details=eval_context)
+
+        # Attempt to cast using GameState method
+        # GameState.cast_spell handles timing, cost, targeting checks, and adds to stack
+        if gs.cast_spell(card_id, player, context=context):
+            # Reward based on successful cast + estimated card value
+            return 0.1 + card_value * 0.3, True
+        else:
+             logging.debug(f"PLAY_SPELL: Failed (handled by gs.cast_spell validation). Card: {card_id}")
+             return -0.1, False # Penalty for attempting invalid cast
+    
     def _handle_play_mdfc_land_back(self, param, **kwargs):
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
@@ -2198,109 +2275,157 @@ class ActionHandler:
 
     def _handle_attack(self, param, **kwargs):
         gs = self.game_state
-        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        player = gs._get_active_player() # Only active player attacks
         battlefield_idx = param
-        if battlefield_idx < len(player["battlefield"]):
-            card_id = player["battlefield"][battlefield_idx]
-            card = gs._safe_get_card(card_id)
-            if not card: return -0.2, False # Card not found
 
-            # Use CombatActionHandler's validation method if available
-            can_attack = False
-            if self.combat_handler:
-                can_attack = self.combat_handler.is_valid_attacker(card_id)
-            else: # Fallback validation
-                 if 'creature' in getattr(card, 'card_types', []) and \
-                    card_id not in player.get("tapped_permanents", set()) and \
-                    not (card_id in player.get("entered_battlefield_this_turn", set()) and not self._has_haste(card_id)):
-                     can_attack = True
+        # Check index validity
+        if battlefield_idx >= len(player.get("battlefield", [])):
+            logging.warning(f"ATTACK: Invalid battlefield index {battlefield_idx}")
+            return -0.2, False
 
+        card_id = player["battlefield"][battlefield_idx]
+        card = gs._safe_get_card(card_id)
+        if not card: return -0.2, False # Card not found
 
-            if card_id in gs.current_attackers:
-                # If already attacking, deselect
-                gs.current_attackers.remove(card_id)
-                # Remove targeting info if applicable
-                if hasattr(gs, 'planeswalker_attack_targets') and card_id in gs.planeswalker_attack_targets: del gs.planeswalker_attack_targets[card_id]
-                if hasattr(gs, 'battle_attack_targets') and card_id in gs.battle_attack_targets: del gs.battle_attack_targets[card_id]
-                return -0.05, True # Small penalty for cancelling attack declaration
+        # --- Combat Handler Integration ---
+        # Use CombatActionHandler validation if available
+        can_attack = False
+        if self.combat_handler:
+            can_attack = self.combat_handler.is_valid_attacker(card_id)
+        else: # Fallback basic validation (less accurate)
+            if 'creature' in getattr(card, 'card_types', []):
+                 tapped_set = player.get("tapped_permanents", set())
+                 entered_set = player.get("entered_battlefield_this_turn", set())
+                 has_haste = self._has_keyword(card, "haste") # Uses centralized check
+                 if card_id not in tapped_set and not (card_id in entered_set and not has_haste):
+                      can_attack = True
+
+        # Toggle Attacker Status
+        # Use game state attributes directly
+        if not hasattr(gs, 'current_attackers'): gs.current_attackers = []
+        if not hasattr(gs, 'planeswalker_attack_targets'): gs.planeswalker_attack_targets = {}
+        if not hasattr(gs, 'battle_attack_targets'): gs.battle_attack_targets = {}
+
+        if card_id in gs.current_attackers:
+            # If already attacking, deselect
+            gs.current_attackers.remove(card_id)
+            # Remove any target assignment for this creature
+            gs.planeswalker_attack_targets.pop(card_id, None)
+            gs.battle_attack_targets.pop(card_id, None)
+            logging.debug(f"ATTACK: Deselected {card.name}")
+            return -0.05, True # Small penalty for deselecting
+        else:
+            # If not attacking, declare attack if valid
+            if can_attack:
+                 gs.current_attackers.append(card_id)
+                 logging.debug(f"ATTACK: Declared {card.name} as attacker.")
+                 # Target assignment (player/PW/Battle) happens via SEPARATE actions (e.g., ATTACK_PLANESWALKER)
+                 return 0.1, True # Small reward for declaring a valid attacker
             else:
-                # If not attacking, declare attack if valid
-                if can_attack:
-                     gs.current_attackers.append(card_id)
-                     # Reset targeting (target needs separate action now)
-                     if hasattr(gs, 'planeswalker_attack_targets') and card_id in gs.planeswalker_attack_targets: del gs.planeswalker_attack_targets[card_id]
-                     if hasattr(gs, 'battle_attack_targets') and card_id in gs.battle_attack_targets: del gs.battle_attack_targets[card_id]
-                     return 0.1, True # Small reward for declaring attacker
-                else:
-                     return -0.1, False # Invalid attacker selected
-        return -0.2, False # Invalid battlefield index
-
+                 logging.warning(f"ATTACK: {card.name} cannot attack now.")
+                 return -0.1, False # Penalty for trying invalid attack
 
     def _handle_block(self, param, **kwargs):
         gs = self.game_state
-        blocker_player = gs.p1 if gs.agent_is_p1 else gs.p2 # Blocker is 'me'
+        blocker_player = gs._get_non_active_player() # Only non-active player blocks
         battlefield_idx = param
-        if battlefield_idx < len(blocker_player["battlefield"]):
-            blocker_id = blocker_player["battlefield"][battlefield_idx]
-            blocker_card = gs._safe_get_card(blocker_id)
-            if not blocker_card or 'creature' not in getattr(blocker_card, 'card_types', []): return -0.15, False # Not a creature
+        context = kwargs.get('context', {})
 
-            # Determine which attacker to block (needs context or agent decision)
-            # Simple heuristic: Block the attacker this creature is already blocking if possible, else find a new one
-            current_block_target = None
-            for atk_id, blockers in gs.current_block_assignments.items():
-                if blocker_id in blockers:
-                    current_block_target = atk_id
-                    break
+        # Check index validity
+        if battlefield_idx >= len(blocker_player.get("battlefield", [])):
+            logging.warning(f"BLOCK: Invalid battlefield index {battlefield_idx}")
+            return -0.2, False
 
-            # If already blocking an attacker, deselect block
-            if current_block_target:
-                gs.current_block_assignments[current_block_target].remove(blocker_id)
-                if not gs.current_block_assignments[current_block_target]: # Remove empty list
-                    del gs.current_block_assignments[current_block_target]
-                return -0.05, True # Deselected block
+        blocker_id = blocker_player["battlefield"][battlefield_idx]
+        blocker_card = gs._safe_get_card(blocker_id)
+        if not blocker_card or 'creature' not in getattr(blocker_card, 'card_types', []):
+             logging.warning(f"BLOCK: {blocker_id} is not a creature.")
+             return -0.15, False # Not a creature
 
-            # If not blocking, find an attacker to block
+        # --- Determine Target Attacker ---
+        # Find which attacker this blocker is currently assigned to (if any)
+        if not hasattr(gs, 'current_block_assignments'): gs.current_block_assignments = {}
+        currently_blocking_attacker = None
+        for atk_id, blockers_list in gs.current_block_assignments.items():
+            if blocker_id in blockers_list:
+                currently_blocking_attacker = atk_id
+                break
+
+        # --- Toggle Blocking Assignment ---
+        if currently_blocking_attacker:
+            # If already blocking, unassign
+            gs.current_block_assignments[currently_blocking_attacker].remove(blocker_id)
+            # Clean up dict if list becomes empty
+            if not gs.current_block_assignments[currently_blocking_attacker]:
+                del gs.current_block_assignments[currently_blocking_attacker]
+            logging.debug(f"BLOCK: Unassigned {blocker_card.name} from blocking {gs._safe_get_card(currently_blocking_attacker).name}")
+            return -0.05, True # Deselected block
+        else:
+            # If not blocking, try to assign to an attacker
+            target_attacker_id = None
+            # 1. Agent specified target via context
+            if 'target_attacker_id' in context:
+                target_attacker_id = context['target_attacker_id']
+                # Validate the provided target attacker ID exists
+                if target_attacker_id not in getattr(gs, 'current_attackers', []):
+                     logging.warning(f"BLOCK: Provided target attacker {target_attacker_id} not in current attackers.")
+                     target_attacker_id = None # Reset if invalid
+            # 2. AI chooses target (if not specified or invalid)
+            if target_attacker_id is None:
+                possible_targets = [atk_id for atk_id in getattr(gs, 'current_attackers', []) if self._can_block(blocker_id, atk_id)]
+                if possible_targets:
+                    # Basic AI: Block highest power attacker first
+                    possible_targets.sort(key=lambda atk_id: getattr(gs._safe_get_card(atk_id),'power',0), reverse=True)
+                    target_attacker_id = possible_targets[0]
+                    logging.debug(f"BLOCK: AI chose attacker {gs._safe_get_card(target_attacker_id).name} for {blocker_card.name}")
+
+            # Assign block if a valid target was found/chosen
+            if target_attacker_id:
+                 # Final check: can this blocker block the chosen attacker?
+                 if self._can_block(blocker_id, target_attacker_id):
+                      if target_attacker_id not in gs.current_block_assignments:
+                           gs.current_block_assignments[target_attacker_id] = []
+                      # Prevent duplicates if accidentally called twice
+                      if blocker_id not in gs.current_block_assignments[target_attacker_id]:
+                          gs.current_block_assignments[target_attacker_id].append(blocker_id)
+                          logging.debug(f"BLOCK: Assigned {blocker_card.name} to block {gs._safe_get_card(target_attacker_id).name}")
+                          return 0.1, True # Successfully assigned block
+                      else:
+                          logging.debug(f"BLOCK: {blocker_card.name} already assigned to block {gs._safe_get_card(target_attacker_id).name}")
+                          return -0.01, False # Minor penalty for redundant action
+                 else:
+                      logging.warning(f"BLOCK: {blocker_card.name} cannot legally block {gs._safe_get_card(target_attacker_id).name}")
+                      return -0.1, False # Invalid block assignment
             else:
-                target_attacker_id = None
-                if 'target_attacker_id' in kwargs.get('context', {}): # Agent specified target
-                    target_attacker_id = kwargs['context']['target_attacker_id']
-                else: # AI chooses target
-                    possible_targets = [atk_id for atk_id in gs.current_attackers if self._can_block(blocker_id, atk_id)]
-                    if possible_targets:
-                        # Simple heuristic: Block highest power attacker
-                        possible_targets.sort(key=lambda atk_id: getattr(gs._safe_get_card(atk_id),'power',0), reverse=True)
-                        target_attacker_id = possible_targets[0]
-
-                # Assign block if target found
-                if target_attacker_id and self._can_block(blocker_id, target_attacker_id): # Double check block validity
-                     if target_attacker_id not in gs.current_block_assignments: gs.current_block_assignments[target_attacker_id] = []
-                     # Check menace constraint only when finalizing blocks? Or check here? Let's check basic validity here.
-                     attacker_card = gs._safe_get_card(target_attacker_id)
-                     if self._has_keyword(attacker_card, "menace") and len(gs.current_block_assignments.get(target_attacker_id, [])) == 0:
-                          # Need another blocker - don't assign yet, maybe signal multi-block needed?
-                          # Or use ASSIGN_MULTIPLE_BLOCKERS action instead?
-                          # For now, allow assignment, let validation happen later.
-                          logging.debug(f"Assigning first blocker to Menace attacker {attacker_card.name}")
-                          pass
-
-                     gs.current_block_assignments[target_attacker_id].append(blocker_id)
-                     return 0.1, True
-                else:
-                    return -0.1, False # No valid attacker found or can't block
-
-        return -0.2, False # Invalid battlefield index
+                 logging.warning(f"BLOCK: No valid attacker found for {blocker_card.name} to block.")
+                 return -0.1, False # No valid attacker to assign block to
 
     def _handle_tap_land_for_mana(self, param, **kwargs):
          gs = self.game_state
-         player = gs.p1 if gs.agent_is_p1 else gs.p2
-         if param < len(player["battlefield"]):
-             card_id = player["battlefield"][param]
-             if gs.tap_for_mana(card_id, player): # Assumes tap_for_mana exists
-                  return 0.05 # Mana is useful
-             else:
-                  return -0.1 # Failed tap
-         return -0.2
+         player = gs._get_active_player()
+         land_idx = param
+
+         if land_idx >= len(player.get("battlefield", [])):
+             logging.warning(f"TAP_LAND_FOR_MANA: Invalid land index {land_idx}")
+             return -0.2, False
+
+         card_id = player["battlefield"][land_idx]
+
+         # Check if it's a land and untapped
+         card = gs._safe_get_card(card_id)
+         if not card or 'land' not in getattr(card, 'type_line', ''):
+             logging.warning(f"TAP_LAND_FOR_MANA: Card {card_id} is not a land.")
+             return -0.15, False
+         if card_id in player.get("tapped_permanents", set()):
+             logging.warning(f"TAP_LAND_FOR_MANA: Land {card.name} is already tapped.")
+             return -0.1, False # Already tapped
+
+         # Use ManaSystem to handle tapping and mana addition
+         if gs.mana_system and gs.mana_system.tap_land_for_mana(player, card_id):
+             return 0.05, True # Mana is useful
+         else:
+             logging.warning(f"TAP_LAND_FOR_MANA: Failed (handled by gs.mana_system). Card: {card_id}")
+             return -0.1, False
 
     def _handle_tap_land_for_effect(self, param, **kwargs):
          # Similar to activate ability, but specific to land effects
@@ -2317,33 +2442,43 @@ class ActionHandler:
 
       
     def _handle_activate_ability(self, param, context, **kwargs):
-            gs = self.game_state
-            player = gs.p1 if gs.agent_is_p1 else gs.p2
-            # --- CHANGED: Get parameters from context ---
-            battlefield_idx = context.get('battlefield_idx')
-            ability_idx = context.get('ability_idx')
+        gs = self.game_state
+        player = gs._get_active_player()
+        # Extract indices from context (based on ACTION_MEANING calculation)
+        # Example: action_idx 100 = bf_idx 0, ability_idx 0; action_idx 104 = bf_idx 1, ability_idx 1
+        action_idx_base = 100
+        total_bf_slots = 20
+        abilities_per_card = 3
+        bf_idx = (kwargs.get('action_index', 0) - action_idx_base) // abilities_per_card
+        ability_idx = (kwargs.get('action_index', 0) - action_idx_base) % abilities_per_card
 
-            if battlefield_idx is not None and ability_idx is not None:
-                if battlefield_idx < len(player["battlefield"]):
-                    card_id = player["battlefield"][battlefield_idx]
-                    # Get ability value before activating
-                    ability_value = 0
-                    if self.card_evaluator:
-                        ability_value, _ = self.evaluate_ability_activation(card_id, ability_idx)
+        # Update context with extracted indices for clarity
+        context['battlefield_idx'] = bf_idx
+        context['ability_idx'] = ability_idx
 
-                    # Use GameState's ability handler
-                    if hasattr(gs, 'ability_handler'):
-                        # Pass context to activate_ability
-                        success = gs.ability_handler.activate_ability(card_id, ability_idx, player, context=context)
-                        if success:
-                            return 0.1 + ability_value * 0.4, True
-                    # Fallback or failure
-                    return -0.1, False # Failed activation
-                else: # battlefield_idx out of bounds
-                    return -0.2, False
+        if bf_idx >= len(player.get("battlefield", [])):
+            logging.warning(f"ACTIVATE_ABILITY: Invalid battlefield index {bf_idx}")
+            return -0.2, False
+
+        card_id = player["battlefield"][bf_idx]
+
+        # Evaluate ability value before activating
+        ability_value = 0
+        if self.card_evaluator:
+            ability_value, _ = self.evaluate_ability_activation(card_id, ability_idx)
+
+        # Use AbilityHandler to activate
+        if gs.ability_handler:
+            # Pass context which now includes indices
+            success = gs.ability_handler.activate_ability(card_id, ability_idx, player, context=context)
+            if success:
+                return 0.1 + ability_value * 0.4, True
             else:
-                logging.error(f"ACTIVATE_ABILITY context missing battlefield_idx or ability_idx: {context}")
-                return -0.2, False # Invalid context format
+                logging.debug(f"ACTIVATE_ABILITY: Failed (Handled by ability_handler). Card: {card_id}, Ability: {ability_idx}")
+                return -0.1, False
+        else:
+             logging.warning("ACTIVATE_ABILITY: AbilityHandler not found.")
+             return -0.15, False # Handler missing
 
     def _handle_loyalty_ability(self, param, action_type, **kwargs):
          gs = self.game_state

@@ -4,18 +4,27 @@ from .combat_actions import CombatActionHandler
 def integrate_combat_actions(game_state):
     """
     Integrate the CombatActionHandler with the game state. Ensures a single instance.
+    Handles potential None value for combat_resolver.
     """
     if not hasattr(game_state, 'combat_action_handler') or game_state.combat_action_handler is None:
         logging.debug("Creating and integrating CombatActionHandler")
         game_state.combat_action_handler = CombatActionHandler(game_state)
     else:
-        pass # Already integrated
+        # Ensure the existing handler points to the current game_state if it changed
+        if game_state.combat_action_handler.game_state != game_state:
+            game_state.combat_action_handler.game_state = game_state
+            logging.debug("Updated CombatActionHandler game_state reference.")
+        else:
+             pass # Already integrated
 
-    # Ensure resolver linkage if resolver exists
-    if hasattr(game_state, 'combat_resolver'):
+    # Ensure resolver linkage if resolver exists AND IS NOT NONE
+    if hasattr(game_state, 'combat_resolver') and game_state.combat_resolver is not None:
          # Link handler to resolver if resolver expects it
          if hasattr(game_state.combat_resolver, 'action_handler'):
              game_state.combat_resolver.action_handler = game_state.combat_action_handler
+    elif hasattr(game_state, 'combat_resolver'):
+         # Resolver attribute exists but is None
+         logging.debug("combat_resolver exists but is None, cannot link.")
 
     return game_state.combat_action_handler # Return the instance from game_state
 
@@ -28,7 +37,7 @@ def apply_combat_action(game_state, action_type, param=None, context=None): # Ad
     Args:
         game_state: The game state object
         action_type: String specifying the action type
-        param: Optional parameter for the action (can be simple value)
+        param: Optional parameter for the action (can be simple value or derived context)
         context: Optional dictionary with additional context for complex actions.
 
     Returns:
@@ -52,32 +61,42 @@ def apply_combat_action(game_state, action_type, param=None, context=None): # Ad
             "ATTACK_BATTLE": combat_action_handler.handle_attack_battle,
             "DEFEND_BATTLE": combat_action_handler.handle_defend_battle,
             "PROTECT_PLANESWALKER": combat_action_handler.handle_protect_planeswalker
+            # Add more delegated actions here as needed
         }
 
         handler_method = handlers.get(action_type)
 
         if handler_method:
-            # *** REFACTOR: Pass context to the handler method ***
-            # Check signature? Or just pass context generally? Pass context.
-            if param is not None and context is not None:
-                 # Pass both param and context (e.g., ASSIGN_MULTIPLE_BLOCKERS)
-                 return handler_method(param=param, context=context)
-            elif context is not None:
-                 # Pass only context (e.g., NINJUTSU, PROTECT_PLANESWALKER, DEFEND_BATTLE)
-                 return handler_method(param=None, context=context)
-            elif param is not None:
-                 # Pass only param (e.g., ATTACK_PLANESWALKER, ATTACK_BATTLE)
-                 return handler_method(param=param)
+            # --- CLEANER CALL LOGIC ---
+            # Prioritize passing context if it exists, as it might contain required info.
+            # Handler methods are now expected to handle potentially receiving
+            # param, context, or both.
+            # Let the handler method's signature (*args, **kwargs) or explicit checks handle it.
+            kwargs = {}
+            if param is not None:
+                kwargs['param'] = param
+            if context is not None:
+                kwargs['context'] = context
             else:
-                 # No param or context needed (e.g., DECLARE_..._DONE, FIRST_STRIKE_ORDER?)
-                 return handler_method()
+                 # Ensure context is at least an empty dict if None was passed
+                 kwargs['context'] = {}
+
+            # If the handler name implies it needs `param` but `param` is None, log warning
+            # (e.g., ATTACK_PLANESWALKER needs the index from `param`)
+            actions_expecting_param = ["ATTACK_PLANESWALKER", "ATTACK_BATTLE"] # Add others as needed
+            if action_type in actions_expecting_param and param is None:
+                 logging.warning(f"Action '{action_type}' likely expects a 'param' argument, but it was None. Handler might fail.")
+
+            # Call the handler with keyword arguments
+            return handler_method(**kwargs)
+
         else:
             logging.warning(f"No specific combat handler found for action type: {action_type}")
             return False # Action not recognized within combat context
 
     except TypeError as te:
          # Catch cases where the parameter structure doesn't match the handler signature
-         logging.error(f"Parameter mismatch calling combat handler for {action_type} with param {param} and context {context}: {te}")
+         logging.error(f"Parameter mismatch calling combat handler for {action_type}. Param: {param}, Context: {context}. Error: {te}")
          import traceback
          logging.error(traceback.format_exc())
          return False

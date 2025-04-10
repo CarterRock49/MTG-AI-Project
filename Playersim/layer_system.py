@@ -35,64 +35,126 @@ class LayerSystem:
         """
         gs = self.game_state
         affected_card_ids = self._get_affected_card_ids()
+        # Include cards with abilities that might be affected (e.g., losing abilities)
+        cards_with_effects = set()
+        for layer_effects in self.layers.values():
+             if isinstance(layer_effects, list):
+                 cards_with_effects.update(data['source_id'] for _, data in layer_effects if 'source_id' in data)
+             elif isinstance(layer_effects, dict): # Layer 7 sublayers
+                 for sub_effects in layer_effects.values():
+                      cards_with_effects.update(data['source_id'] for _, data in sub_effects if 'source_id' in data)
+        affected_card_ids.update(cards_with_effects)
+
+
         if not affected_card_ids:
-            return
+            # Optimization: If no effects registered AND state hasn't changed since last FULL calc, skip.
+            # Need a more robust hash check if skipping here.
+            # For now, always run if potentially affected IDs change, even if 0 effects registered.
+            # Recalculate characteristics for all cards on battlefield if no effects, to reset them.
+            # Let's recalculate only if there *are* effects or potential effects.
+            # If no effects, return early for optimization.
+            # Check if any card characteristics have been calculated previously
+            if not getattr(self, '_calculated_characteristics_cache', {}):
+                logging.debug("LayerSystem: No effects registered and no previous calculation cache. Skipping.")
+                return
+            else:
+                 # Clear cache and proceed to reset cards below.
+                 self._calculated_characteristics_cache = {}
+                 logging.debug("LayerSystem: No effects registered, resetting all battlefield cards to base.")
+                 # Re-fetch all battlefield cards
+                 affected_card_ids = set()
+                 for p in [gs.p1, gs.p2]:
+                      affected_card_ids.update(p.get("battlefield", []))
 
         # Optimization Hash Check (remains the same)
+        state_tuple_items = list(gs.p1.get("battlefield", [])) + list(gs.p2.get("battlefield", []))
         current_state_tuple = (
-            tuple(sorted(gs.p1.get("battlefield", []))),
-            tuple(sorted(gs.p2.get("battlefield", []))),
-            self.effect_counter
+            tuple(sorted(state_tuple_items)),
+            self.effect_counter, # Track effect registrations
+            gs.turn, # Include turn number
+            gs.phase # Include phase
         )
         current_state_hash = hash(current_state_tuple)
 
         if current_state_hash == self._last_applied_state_hash:
-             return
+            # logging.debug("LayerSystem: State hash matched, skipping recalculation.")
+            return
 
         logging.debug(f"LayerSystem: Recalculating effects for {len(affected_card_ids)} cards.")
-        calculated_characteristics = {}
+        calculated_characteristics = {} # Store calculated state during this run
 
-        # 1. Initialize: Get base characteristics
+        # 1. Initialize: Get base characteristics for ALL affected cards
         for card_id in affected_card_ids:
             original_card = gs.card_db.get(card_id)
-            live_card = gs._safe_get_card(card_id)
+            live_card = gs._safe_get_card(card_id) # Find the live object
 
-            if not original_card or not live_card:
-                logging.warning(f"LayerSystem: Could not find original or live card for ID {card_id}. Skipping.")
-                continue
+            # Need the card object to exist in db and live state
+            # Check if the card is currently in a zone where layers apply (usually battlefield)
+            card_owner, card_zone = gs.find_card_location(card_id)
+            if card_zone != 'battlefield':
+                 # If card left battlefield, its effects should have been removed. Skip calculation.
+                 # logging.debug(f"LayerSystem: Skipping card {card_id}, not on battlefield (in {card_zone}).")
+                 continue
+            if not original_card:
+                # Use live card as base if original DB entry missing (e.g., for tokens)
+                if live_card and hasattr(live_card, 'is_token') and live_card.is_token:
+                    original_card = live_card # Use token's current state as 'base'
+                else:
+                    logging.warning(f"LayerSystem: Could not find original card data for ID {card_id}. Skipping.")
+                    continue
 
-            # *** CHANGE: Initialize with copy.deepcopy for mutable attributes ***
+            # Use live card reference to get base state if needed, and for counter application
+            if not live_card: live_card = original_card # Fallback if not found in GS zones? Risky.
+
+            # --- MODIFIED: Deep copy mutable types ---
             import copy
             base_chars = {
                 'name': getattr(original_card, 'name', 'Unknown'),
                 'mana_cost': getattr(original_card, 'mana_cost', ''),
-                'colors': copy.deepcopy(getattr(original_card, 'colors', [0]*5)), # Deep copy
-                'card_types': copy.deepcopy(getattr(original_card, 'card_types', [])), # Deep copy
-                'subtypes': copy.deepcopy(getattr(original_card, 'subtypes', [])), # Deep copy
-                'supertypes': copy.deepcopy(getattr(original_card, 'supertypes', [])), # Deep copy
+                'colors': copy.deepcopy(getattr(original_card, 'colors', [0]*5)), # Deep copy list
+                'card_types': copy.deepcopy(getattr(original_card, 'card_types', [])), # Deep copy list
+                'subtypes': copy.deepcopy(getattr(original_card, 'subtypes', [])), # Deep copy list
+                'supertypes': copy.deepcopy(getattr(original_card, 'supertypes', [])), # Deep copy list
                 'oracle_text': getattr(original_card, 'oracle_text', ''),
                  # Start with base keywords array (ensure correct length)
-                'keywords': copy.deepcopy(getattr(original_card, 'keywords', [0]*len(Card.ALL_KEYWORDS))),
-                'power': getattr(original_card, 'power', 0),
-                'toughness': getattr(original_card, 'toughness', 0),
-                'loyalty': getattr(original_card, 'loyalty', 0),
+                'keywords': copy.deepcopy(getattr(original_card, 'keywords', [0]*len(Card.ALL_KEYWORDS))), # Deep copy list
+                'power': getattr(original_card, 'power', None), # Keep None if base is None
+                'toughness': getattr(original_card, 'toughness', None), # Keep None if base is None
+                'loyalty': getattr(original_card, 'loyalty', None), # Keep None if base is None
+                'defense': getattr(original_card, 'defense', None), # For Battles
                 'cmc': getattr(original_card, 'cmc', 0),
                 'type_line': getattr(original_card, 'type_line', ''),
-                # Base P/T tracked separately
-                '_base_power': getattr(original_card, 'power', 0),
-                '_base_toughness': getattr(original_card, 'toughness', 0),
-                '_inherent_abilities': self._approximate_keywords_set(getattr(original_card, 'oracle_text', '')), # Store inherent keywords
-                '_granted_abilities': set(),
-                '_removed_abilities': set(),
-                '_controller': gs.get_card_controller(card_id),
-                '_live_card_ref': live_card
+                # Base P/T tracked separately, default to original values or 0 if None
+                '_base_power': getattr(original_card, 'power', 0) if getattr(original_card, 'power', None) is not None else 0,
+                '_base_toughness': getattr(original_card, 'toughness', 0) if getattr(original_card, 'toughness', None) is not None else 0,
+                # Calculate inherent abilities from BASE text (before Layer 3 changes)
+                '_inherent_abilities': self._approximate_keywords_set(getattr(original_card, 'oracle_text', '')),
+                '_granted_abilities': set(), # Track granted abilities within this calculation pass
+                '_removed_abilities': set(), # Track removed abilities within this calculation pass
+                '_controller': gs.get_card_controller(card_id), # Get current controller
+                '_live_card_ref': live_card # Store reference to the live object for counter checks
             }
             # Ensure base keywords array has correct dimension
             if len(base_chars['keywords']) != len(Card.ALL_KEYWORDS):
-                base_chars['keywords'] = [0] * len(Card.ALL_KEYWORDS)
+                 logging.warning(f"Correcting keyword array dimension for {base_chars['name']} ({card_id}).")
+                 kw_copy = base_chars['keywords'][:] # Copy
+                 base_chars['keywords'] = [0] * len(Card.ALL_KEYWORDS)
+                 common_len = min(len(kw_copy), len(base_chars['keywords']))
+                 base_chars['keywords'][:common_len] = kw_copy[:common_len] # Copy known values
+
 
             calculated_characteristics[card_id] = base_chars
 
+        # If no cards were initialized (all skipped), exit early
+        if not calculated_characteristics:
+             logging.debug("LayerSystem: No valid cards found for layer application.")
+             self._last_applied_state_hash = current_state_hash # Still update hash to avoid re-check
+             return
+
+        # Store calculated characteristics temporarily for internal lookups during layer application
+        self._calculated_characteristics_cache = calculated_characteristics
+
+        # ... (Layer Application logic remains the same, but uses calculated_characteristics) ...
         # 2. Apply Layers Sequentially
         # --- Layer 1: Copy ---
         sorted_layer1 = self._sort_layer_effects(1, self.layers[1])
@@ -108,12 +170,13 @@ class LayerSystem:
         sorted_layer3 = self._sort_layer_effects(3, self.layers[3])
         for _, effect_data in sorted_layer3:
              self._calculate_layer3_text(effect_data, calculated_characteristics)
-             # Re-calculate inherent abilities after text change
+             # Re-calculate inherent abilities AFTER text change for affected cards
              target_ids = effect_data.get('affected_ids', [])
              for target_id in target_ids:
                  if target_id in calculated_characteristics:
                      chars = calculated_characteristics[target_id]
-                     chars['_inherent_abilities'] = self._approximate_keywords_set(chars['oracle_text'])
+                     # Recalculate using the MODIFIED oracle_text in chars dict
+                     chars['_inherent_abilities'] = self._approximate_keywords_set(chars.get('oracle_text', ''))
 
 
         # --- Layer 4: Type ---
@@ -127,67 +190,106 @@ class LayerSystem:
              self._calculate_layer5_color(effect_data, calculated_characteristics)
 
         # --- Layer 6: Abilities ---
-        # Inherents calculated after Layer 3, granted/removed applied now
         sorted_layer6 = self._sort_layer_effects(6, self.layers[6])
         for _, effect_data in sorted_layer6:
+            # Apply effect data to modify _granted_abilities and _removed_abilities sets
             self._calculate_layer6_abilities(effect_data, calculated_characteristics)
-        # *** CHANGE: Finalize keywords AFTER all layer 6 effects ***
+        # Finalize keywords array for each card AFTER all layer 6 effects are calculated
         for card_id in calculated_characteristics:
              self._update_final_keywords(calculated_characteristics[card_id])
 
+
         # --- Layer 7: P/T ---
-        # Apply in sublayer order
+        # IMPORTANT: Re-check if object is a creature AFTER Layer 4 (Type changing)
+
+        # 7a: CDAs and Base P/T setting
         sorted_layer7a = self._sort_layer_effects(7, self.layers[7]['a'], sublayer='a')
         for _, effect_data in sorted_layer7a:
              self._calculate_layer7a_set(effect_data, calculated_characteristics)
 
-        # *** CHANGE: Moved Layer 7b to apply after 7a ***
+        # 7b: Effects setting P/T to specific values (e.g., "becomes 1/1")
+        sorted_layer7b = self._sort_layer_effects(7, self.layers[7].get('b', []), sublayer='b') # Get sublayer safely
+        for _, effect_data in sorted_layer7b:
+            self._calculate_layer7b_set_specific(effect_data, calculated_characteristics) # Use new method name
+
+        # 7c: P/T modifications from counters (+1/+1, -1/-1)
+        # Apply counters AFTER CDA/Set effects have established current P/T
         for card_id in calculated_characteristics:
-            self._calculate_layer7b_counters(card_id, calculated_characteristics[card_id])
+            # Check if it's a creature *now*
+            if 'creature' in calculated_characteristics[card_id].get('card_types', []):
+                self._calculate_layer7c_counters(card_id, calculated_characteristics[card_id]) # New method name
 
-        sorted_layer7c = self._sort_layer_effects(7, self.layers[7]['c'], sublayer='c')
-        for _, effect_data in sorted_layer7c:
-             self._calculate_layer7c_modify(effect_data, calculated_characteristics)
-
-        sorted_layer7d = self._sort_layer_effects(7, self.layers[7]['d'], sublayer='d')
+        # 7d: P/T modifications from static abilities (+X/+Y, Anthems)
+        sorted_layer7d = self._sort_layer_effects(7, self.layers[7].get('c', []), sublayer='c') # Original Layer 7c is now 7d
         for _, effect_data in sorted_layer7d:
-             self._calculate_layer7d_switch(effect_data, calculated_characteristics)
+             self._calculate_layer7d_modify(effect_data, calculated_characteristics) # Use new method name
 
-        # 3. Update GameState LIVE Card Objects
+        # 7e: P/T switching
+        sorted_layer7e = self._sort_layer_effects(7, self.layers[7].get('d', []), sublayer='d') # Original Layer 7d is now 7e
+        for _, effect_data in sorted_layer7e:
+             self._calculate_layer7e_switch(effect_data, calculated_characteristics) # Use new method name
+
+
+        # 3. Update GameState LIVE Card Objects (mostly unchanged, handles None for P/T)
         for card_id, final_chars in calculated_characteristics.items():
+            # Use the stored live_card_ref
             live_card = final_chars.get('_live_card_ref')
-            if not live_card: continue
+            if not live_card:
+                # logging.warning(f"LayerSystem Update: Live card ref missing for {card_id}, skipping update.")
+                continue
+
+            # Re-fetch from GameState in case it was recreated (e.g., token copy)
+            live_card_check = gs._safe_get_card(card_id)
+            if not live_card_check or live_card_check != live_card:
+                 live_card = live_card_check # Update ref
+                 if not live_card: continue # Still not found? Skip.
+
 
             for attr, value in final_chars.items():
-                if attr.startswith('_'): continue
+                if attr.startswith('_'): continue # Skip internal attributes
                 if hasattr(live_card, attr):
-                    # *** CHANGE: Handle None P/T by setting to 0 ***
-                    if value is None and attr in ['power', 'toughness', 'loyalty']:
-                        setattr(live_card, attr, 0)
+                    # Handle None P/T by setting to 0 if it becomes non-creature? Or leave as None?
+                    # Current logic sets to 0 later if non-creature. Let's keep P/T as None if calculated as None.
+                    # BUT if it was numeric before and becomes None, set to 0.
+                    current_live_value = getattr(live_card, attr, None)
+                    if value is None and isinstance(current_live_value, (int, float)):
+                        setattr(live_card, attr, 0) # Reset to 0 if previously numeric
                         continue
-                    # Type checking/conversion attempt
-                    current_type = type(getattr(live_card, attr, None))
-                    if value is not None and not isinstance(value, current_type):
-                        try:
-                            if current_type == int and isinstance(value, float): value = int(value)
-                            elif current_type == float and isinstance(value, int): value = float(value)
-                            # Add more safe conversions if needed
-                        except (TypeError, ValueError):
-                             logging.warning(f"LayerSystem Update: Type mismatch for '{attr}' on {card_id}. Expected {current_type}, got {type(value)}. Skipping set.")
+                    # Basic type check (handle float/int conversions safely)
+                    current_type = type(current_live_value) if current_live_value is not None else None
+                    if value is not None and current_type is not None and not isinstance(value, current_type):
+                         try:
+                             if current_type == int and isinstance(value, float): value = int(value)
+                             elif current_type == float and isinstance(value, int): value = float(value)
+                             elif current_type == int and isinstance(value, str) and value.isdigit(): value = int(value)
+                             # Add more safe conversions if needed
+                             else:
+                                 # Only log if conversion isn't trivial
+                                 logging.debug(f"LayerSystem Update: Type mismatch for '{attr}' on {card_id}. Expected {current_type}, got {type(value)}. Attempting direct set.")
+                         except (TypeError, ValueError):
+                             logging.warning(f"LayerSystem Update: Cannot convert value for '{attr}' on {card_id}. Expected {current_type}, got {type(value)}. Skipping set.")
                              continue
+
+                    # Apply the value
                     try:
                         setattr(live_card, attr, value)
                     except Exception as e:
-                        logging.error(f"LayerSystem Update: Error setting attribute '{attr}' on card {card_id}. Value: {value}. Error: {e}")
-                # else: logging.warning(f"LayerSystem Update: Live card {card_id} missing attribute '{attr}'") # Optional warning
+                        logging.error(f"LayerSystem Update: Error setting attribute '{attr}' on card {card_id}. Value: {repr(value)}. Error: {e}")
 
-            # Final check for non-creature P/T
+            # --- Final Checks/Adjustments ---
+            # Ensure non-creatures have 0 P/T (Rule 208.3)
             if 'creature' not in getattr(live_card, 'card_types', []):
-                 live_card.power = 0
-                 live_card.toughness = 0
+                # Check if P/T were non-None before setting to 0
+                p_changed = getattr(live_card, 'power', 0) != 0
+                t_changed = getattr(live_card, 'toughness', 0) != 0
+                if p_changed: live_card.power = 0
+                if t_changed: live_card.toughness = 0
+                #if p_changed or t_changed: logging.debug(f"Set P/T of non-creature {live_card.name} to 0/0.")
 
         self._last_applied_state_hash = current_state_hash
         logging.debug(f"LayerSystem: Finished applying effects.")
+        # Clear the temporary calculation cache
+        self._calculated_characteristics_cache = {}
         
     
     def _get_affected_card_ids(self):
