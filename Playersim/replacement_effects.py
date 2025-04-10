@@ -97,88 +97,156 @@ class ReplacementEffectSystem:
     def register_card_replacement_effects(self, card_id, player):
         """
         Scan a card's text for replacement effects and register them.
-        
+
         Args:
             card_id: ID of the card with potential replacement effects
             player: Player who controls the card
-            
+
         Returns:
             list: IDs of registered replacement effects
         """
         card = self.game_state._safe_get_card(card_id)
         if not card or not hasattr(card, 'oracle_text'):
             return []
-            
+
         oracle_text = card.oracle_text
         source_name = card.name if hasattr(card, 'name') else f"Card {card_id}"
         registered_effects = []
-        
-        # Scan for standard replacement patterns
+
+        # Scan for standard replacement patterns ("if..would..instead")
         if "if" in oracle_text.lower() and "would" in oracle_text.lower() and "instead" in oracle_text.lower():
             effect_ids = self._register_if_would_instead_effect(card_id, player, oracle_text)
             registered_effects.extend(effect_ids)
-        
-        # Scan for ETB with counters effects
-        if "enters the battlefield with" in oracle_text.lower() and "counter" in oracle_text.lower():
+
+        # Scan for "As ~ enters the battlefield" replacement effects (e.g., choose a type)
+        if "as this permanent enters the battlefield" in oracle_text.lower() or \
+           "as this creature enters the battlefield" in oracle_text.lower() or \
+           re.search(r"as .* enters the battlefield", oracle_text.lower()):
+            effect_id = self._register_as_enters_effect(card_id, player, oracle_text)
+            if effect_id:
+                registered_effects.append(effect_id)
+
+        # Scan for ETB with counters effects (separate from 'as enters')
+        # Make this more specific to avoid overlap with 'as enters' counter effects
+        if "enters the battlefield with" in oracle_text.lower() and "counter" in oracle_text.lower() and not "as this permanent enters" in oracle_text.lower():
             effect_id = self._register_etb_with_effect(card_id, player, oracle_text)
             if effect_id:
                 registered_effects.append(effect_id)
-        
+
         # Scan for damage prevention effects
         if "prevent" in oracle_text.lower() and "damage" in oracle_text.lower():
             effect_id = self._register_damage_prevention(card_id, player, oracle_text)
             if effect_id:
                 registered_effects.append(effect_id)
-        
+
+        # Scan for effects that exile instead of going to graveyard ("exile it instead")
+        if "if a creature would die" in oracle_text.lower() and "exile it instead" in oracle_text.lower():
+             effect_id = self._register_exile_instead_of_death(card_id, player, oracle_text)
+             if effect_id:
+                  registered_effects.append(effect_id)
+
         # Check for lifelink
-        if "lifelink" in oracle_text.lower() or (hasattr(card, 'keywords') and 
+        if "lifelink" in oracle_text.lower() or (hasattr(card, 'keywords') and
                                             len(card.keywords) > 7 and card.keywords[7]):
             effect_id = self._register_lifelink_effect(card_id, player)
             if effect_id:
                 registered_effects.append(effect_id)
-        
+
         # Check for deathtouch
-        if "deathtouch" in oracle_text.lower() or (hasattr(card, 'keywords') and 
+        if "deathtouch" in oracle_text.lower() or (hasattr(card, 'keywords') and
                                                 len(card.keywords) > 2 and card.keywords[2]):
             effect_id = self._register_deathtouch_effect(card_id, player)
             if effect_id:
                 registered_effects.append(effect_id)
-        
+
         # Register specialized effects
-        
+
         # 1. Life gain replacements
         if "if you would gain life" in oracle_text.lower() or "if a player would gain life" in oracle_text.lower():
             effect_id = self._register_life_gain_replacement(card_id, player, oracle_text)
             if effect_id:
                 registered_effects.append(effect_id)
-        
+
         # 2. Token creation replacements
         if "if you would create" in oracle_text.lower() or "if a player would create" in oracle_text.lower():
             effect_id = self._register_token_creation_replacement(card_id, player, oracle_text)
             if effect_id:
                 registered_effects.append(effect_id)
-        
+
         # 3. Redirect damage effects
         if any(phrase in oracle_text.lower() for phrase in ["redirect", "dealt to you is dealt to", "would be dealt to"]):
             effect_id = self._register_redirect_damage_effect(card_id, player, oracle_text)
             if effect_id:
                 registered_effects.append(effect_id)
-        
+
         # 4. Doubling effects
-        if "double" in oracle_text.lower() and any(word in oracle_text.lower() for word in ["counters", "tokens"]):
+        if "double" in oracle_text.lower() and any(word in oracle_text.lower() for word in ["counters", "tokens", "damage", "mana"]):
             effect_id = self._register_doubling_effect(card_id, player, oracle_text)
             if effect_id:
                 registered_effects.append(effect_id)
-        
+
         # 5. Skip step/phase effects
         if any(phrase in oracle_text.lower() for phrase in ["skip", "additional"]) and any(
-            phase in oracle_text.lower() for phase in 
+            phase in oracle_text.lower() for phase in
             ["upkeep", "draw", "combat", "end", "turn", "phase", "step"]):
             effect_id = self._register_skip_phase_effect(card_id, player, oracle_text)
             if effect_id:
                 registered_effects.append(effect_id)
-        
+
+        # 6. Card draw replacements (e.g., Dredge - though dredge might be handled differently)
+        if "if you would draw a card" in oracle_text.lower() and "instead" in oracle_text.lower():
+            effect_id = self._register_draw_replacement(card_id, player, oracle_text)
+            if effect_id:
+                 registered_effects.append(effect_id)
+
         return registered_effects
+    
+    def _register_mana_doubling_effect(self, card_id, player, oracle_text):
+        """Register mana doubling effects (simplified)."""
+        source_card = self.game_state._safe_get_card(card_id)
+        source_name = source_card.name if source_card and hasattr(source_card, 'name') else f"Card {card_id}"
+        effect_id = None
+
+        # Simple pattern: "If you tap a [type] for mana, it produces twice as much"
+        match = re.search(r"tap a (\w+) for mana, it produces twice as much", oracle_text.lower())
+        if match:
+             tapped_type = match.group(1) # e.g., 'permanent', 'land', 'forest'
+
+             def condition(ctx):
+                 # Check if event is mana production via tapping
+                 if ctx.get('source_action') != 'tap_for_mana': return False
+                 # Check if player matches
+                 if ctx.get('player') != player: return False
+                 # Check if source permanent type matches
+                 source_perm_id = ctx.get('source_permanent_id')
+                 source_perm = self.game_state._safe_get_card(source_perm_id)
+                 if not source_perm: return False
+                 if tapped_type == 'permanent': return True
+                 if tapped_type == 'land' and 'land' in getattr(source_perm, 'type_line',''): return True
+                 if tapped_type in getattr(source_perm, 'subtypes', []): return True
+                 # Add more specific type checks if needed
+                 return False
+
+             def replacement(ctx):
+                 mana_produced = ctx.get('mana_produced', {}) # Expecting dict like {'G': 1}
+                 doubled_mana = {k: v*2 for k,v in mana_produced.items()}
+                 ctx['mana_produced'] = doubled_mana
+                 logging.debug(f"{source_name}: Doubled mana production from {source_perm_id}. Original: {mana_produced}, New: {doubled_mana}")
+                 return ctx
+
+             duration = self._determine_duration(oracle_text.lower())
+             effect_id = self.register_effect({
+                 'source_id': card_id,
+                 'event_type': 'PRODUCE_MANA', # Need a suitable event type
+                 'condition': condition,
+                 'replacement': replacement,
+                 'duration': duration,
+                 'controller_id': player,
+                 'description': f"{source_name} Mana Doubling ({tapped_type})"
+             })
+             if effect_id: logging.debug(f"Registered Mana Doubling effect for {source_name}")
+
+        return effect_id
     
     def _register_token_creation_replacement(self, card_id, player, oracle_text):
         """Register token creation replacement effects."""
@@ -441,36 +509,174 @@ class ReplacementEffectSystem:
         card = self.game_state._safe_get_card(card_id)
         return card and hasattr(card, 'card_types') and 'creature' in card.card_types
     
+    def _register_exile_instead_of_death(self, card_id, player, oracle_text):
+        """Register effects like Rest in Peace."""
+        source_card = self.game_state._safe_get_card(card_id)
+        source_name = source_card.name if source_card and hasattr(source_card, 'name') else f"Card {card_id}"
+
+        # Determine scope (e.g., "creatures", "cards", specific types?)
+        subject = "creature" # Default based on common phrasing
+        if "if a card would be put into a graveyard" in oracle_text.lower():
+            subject = "card"
+        # TODO: Add more specific subject parsing if needed
+
+        def condition(ctx):
+            # Check if the event is a 'dies' or 'put into graveyard' event
+            target_card_id = ctx.get('card_id')
+            if not target_card_id: return False
+
+            target_card = self.game_state._safe_get_card(target_card_id)
+            if not target_card: return False
+
+            # Check if subject matches
+            if subject == "creature" and 'creature' not in getattr(target_card, 'card_types', []):
+                return False
+            if subject == "card": # Applies to any card going to GY from anywhere? Check rules.
+                # Assume it applies if card is involved
+                pass
+
+            # Check source zone (usually battlefield for 'dies')
+            # Rule 614.1a: Only applies if source is on battlefield unless specified. Assume source is the card itself.
+            return card_id in player["battlefield"] # Effect only active if source is on BF
+
+        def replacement(ctx):
+            logging.debug(f"{source_name}: Exiling {ctx.get('card_id')} instead of sending to graveyard.")
+            ctx['to_zone'] = 'exile' # Change destination zone
+            return ctx
+
+        # Usually permanent duration while source is on battlefield
+        duration = 'until_source_leaves'
+        effect_id = self.register_effect({
+            'source_id': card_id,
+            'event_type': 'DIES', # Also need to register for other 'to graveyard' events?
+            'condition': condition,
+            'replacement': replacement,
+            'duration': duration,
+            'controller_id': player,
+            'description': f"{source_name} Exile instead of Death"
+        })
+        # Might need to register for other events like DISCARD -> Graveyard, MILL -> Graveyard too if it affects all cards
+        # For now, just handle DIES.
+
+        if effect_id: logging.debug(f"Registered Exile Instead of Death effect for {source_name}")
+        return effect_id
+    
+    def _register_as_enters_effect(self, card_id, player, oracle_text):
+        """Register 'As ~ enters the battlefield' replacement effects (e.g., choosing a type/color)."""
+        source_card = self.game_state._safe_get_card(card_id)
+        source_name = source_card.name if source_card and hasattr(source_card, 'name') else f"Card {card_id}"
+        effect_id = None
+
+        # Common patterns: Choose a type, choose a color, choose an opponent
+        choice_needed = None
+        if "choose a card type" in oracle_text.lower(): choice_needed = "card_type"
+        elif "choose a color" in oracle_text.lower(): choice_needed = "color"
+        elif "choose an opponent" in oracle_text.lower(): choice_needed = "opponent"
+        # TODO: Add pattern for choosing counters if done with "as enters"
+
+        if choice_needed:
+            def condition(ctx):
+                # Applies only when THIS card is entering
+                return ctx.get('card_id') == card_id
+
+            def replacement(ctx):
+                logging.debug(f"Applying 'As enters' effect from {source_name} ({card_id})")
+                # Signal that a choice is required BEFORE the card fully enters.
+                # The GameState needs to handle pausing resolution to get this choice.
+                ctx['as_enters_choice_needed'] = choice_needed
+                ctx['as_enters_source_id'] = card_id
+                # The actual effect application (e.g., granting protection) will often be
+                # handled by a static ability that *uses* the choice made here.
+                # The choice itself is stored (e.g., on the card or in GameState tracking).
+                return ctx
+
+            effect_id = self.register_effect({
+                'source_id': card_id,
+                'event_type': 'ENTERS_BATTLEFIELD',
+                'condition': condition,
+                'replacement': replacement,
+                'duration': 'self', # Applies only to the ETB event itself
+                'controller_id': player,
+                'description': f"{source_name} 'As enters' choice"
+            })
+            if effect_id: logging.debug(f"Registered 'As enters' effect for {source_name}")
+
+        return effect_id
+    
+    def _register_draw_replacement(self, card_id, player, oracle_text):
+        """Register standard 'if you would draw... instead...' effects."""
+        source_card = self.game_state._safe_get_card(card_id)
+        source_name = source_card.name if source_card and hasattr(source_card, 'name') else f"Card {card_id}"
+        effect_id = None
+
+        replacement_text = ""
+        match = re.search(r"if you would draw a card.*?, instead (.*?)(?:\.|$)", oracle_text.lower())
+        if match: replacement_text = match.group(1).strip()
+
+        if replacement_text:
+            def condition(ctx):
+                # Only affects the controller of the source card
+                return ctx.get('player') == player
+
+            replacement_func = self._create_enhanced_replacement_function("DRAW", replacement_text, player, source_name)
+
+            duration = self._determine_duration(oracle_text.lower())
+
+            effect_id = self.register_effect({
+                'source_id': card_id,
+                'event_type': 'DRAW',
+                'condition': condition,
+                'replacement': replacement_func,
+                'duration': duration,
+                'controller_id': player,
+                'description': f"{source_name} Draw Replacement"
+            })
+            if effect_id: logging.debug(f"Registered Draw Replacement effect for {source_name}")
+
+        return effect_id
+    
     def _extract_replacement_clauses(self, text):
         """Extract replacement clauses from card text with better pattern recognition."""
         clauses = []
-        
+
         # Common replacement patterns with named groups
         patterns = [
             # If X would Y, instead Z
-            r'if (?P<subject>[^,]+?) would (?P<action>[^,]+?), (?:instead )?(?P<replacement>[^\.]+)',
+            r'if (?P<subject>[^,]+?) would (?P<action>[^,]+?), (?:instead )?(?P<replacement>[^\.]+)\.?',
             # If X would Y, Z instead
-            r'if (?P<subject>[^,]+?) would (?P<action>[^,]+?), (?P<replacement>[^\.]+?) instead',
+            r'if (?P<subject>[^,]+?) would (?P<action>[^,]+?), (?P<replacement>[^\.]+?) instead\.?',
             # Instead of X doing Y, Z
-            r'instead of (?P<subject>[^,]+?) (?P<action>[^,]+?), (?P<replacement>[^\.]+)',
+            r'instead of (?P<subject>[^,]+?) (?P<action>[^,]+?), (?P<replacement>[^\.]+)\.?',
+            # As X enters..., ... instead
+            r'as (?P<subject>[^,]+?) enters.*?, (?P<replacement>[^\.]+) instead\.?',
+            # X is replaced by Y
+            r'(?P<action>[^,]+?) is replaced by (?P<replacement>[^\.]+)\.?' # Subject might be implicit
         ]
-        
+
+        # Normalize potential line breaks affecting patterns
+        text = text.replace('\n', ' ')
+
         for pattern in patterns:
-            for match in re.finditer(pattern, text):
-                subject = match.group('subject').strip()
-                action = match.group('action').strip()
-                replacement = match.group('replacement').strip()
-                
+            for match in re.finditer(pattern, text, re.IGNORECASE | re.DOTALL):
+                subject = match.groupdict().get('subject', 'it').strip() # Default subject if pattern misses it
+                action = match.groupdict().get('action', '').strip()
+                replacement = match.groupdict().get('replacement', '').strip()
+
                 # Determine event type from action
                 event_type = self._determine_event_type(action)
-                
-                # Extract condition (if any)
+
+                # Extract condition (if any) - check within replacement text first
                 condition = None
                 if " if " in replacement:
                     parts = replacement.split(" if ", 1)
                     replacement = parts[0].strip()
                     condition = parts[1].strip()
-                
+                # Also check subject for simple conditions like "a creature an opponent controls"
+                if condition is None and "opponent controls" in subject:
+                     # This simple check is weak, _create_enhanced_condition_function is better
+                     # condition = f"subject controller is opponent" # Example marker
+                     pass
+
                 clauses.append({
                     'clause': match.group(0),
                     'event_type': event_type,
@@ -479,7 +685,7 @@ class ReplacementEffectSystem:
                     'replacement': replacement,
                     'condition': condition
                 })
-        
+
         return clauses
     
     def _create_enhanced_condition_function(self, event_type, subject, condition, controller):
@@ -1247,9 +1453,10 @@ class ReplacementEffectSystem:
         return None
 
     def _register_doubling_effect(self, card_id, player, oracle_text):
-        """Register effects that double counters or tokens."""
+        """Register effects that double counters, tokens, damage, or mana."""
         source_card = self.game_state._safe_get_card(card_id)
         source_name = source_card.name if source_card and hasattr(source_card, 'name') else f"Card {card_id}"
+        registered_id = None
         
         # Check for counter doubling
         if "double the number of" in oracle_text.lower() and "counter" in oracle_text.lower():
@@ -1309,8 +1516,28 @@ class ReplacementEffectSystem:
             logging.debug(f"Registered counter doubling effect for {source_name}")
             return effect_id
         
+        # Check for damage doubling
+        elif "double" in oracle_text.lower() and "damage" in oracle_text.lower():
+            # ... existing damage doubling logic (add if not present) ...
+            def damage_doubling_condition(context): return context.get('damage_amount', 0) > 0 # Basic condition
+            def damage_doubling_replacement(context):
+                 ctx = context.copy()
+                 ctx['damage_amount'] = ctx.get('damage_amount', 0) * 2
+                 logging.debug(f"{source_name} doubled damage.")
+                 return ctx
+            registered_id = self.register_effect({
+                'source_id': card_id, 'event_type': 'DAMAGE',
+                'condition': damage_doubling_condition, 'replacement': damage_doubling_replacement,
+                'duration': 'permanent', 'controller_id': player, 'description': f"{source_name} Damage Doubling"})
+            if registered_id: logging.debug(f"Registered damage doubling effect for {source_name}")
+
+        # Check for mana doubling (call new helper)
+        elif "double" in oracle_text.lower() and "mana" in oracle_text.lower():
+            registered_id = self._register_mana_doubling_effect(card_id, player, oracle_text)
+            # Logging handled inside helper
+        
         # Check for token doubling
-        if "double" in oracle_text.lower() and "token" in oracle_text.lower():
+        elif "double" in oracle_text.lower() and "token" in oracle_text.lower():
             def token_doubling_condition(context):
                 # Only apply to token creation events
                 event_type = context.get('event_type', '')
@@ -1352,7 +1579,7 @@ class ReplacementEffectSystem:
             logging.debug(f"Registered token doubling effect for {source_name}")
             return effect_id
         
-        return None
+        return registered_id
 
     def _register_skip_phase_effect(self, card_id, player, oracle_text):
         """Register effects that cause players to skip phases or steps."""

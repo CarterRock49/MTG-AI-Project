@@ -1750,33 +1750,73 @@ class EnhancedManaSystem:
     
     def _refund_payment(self, player, payment):
         """
-        Refund all mana from a failed payment.
-        
+        Refund all costs (mana, life, tapped permanents, etc.) from a failed payment.
+
         Args:
             player: The player dictionary
             payment: Payment tracking dictionary
         """
+        logging.debug(f"Refunding payment: {payment}")
+
         # Refund regular mana
         for color, amount in payment['colors'].items():
-            if color in player["mana_pool"]:
-                player["mana_pool"][color] += amount
-            else:
-                player["mana_pool"][color] = amount
-        
+            if amount > 0:
+                player["mana_pool"][color] = player["mana_pool"].get(color, 0) + amount
+
         # Refund conditional mana
         for restriction_key, colors in payment['conditional'].items():
             if restriction_key not in player.get("conditional_mana", {}):
                 player["conditional_mana"][restriction_key] = {}
-                
             for color, amount in colors.items():
-                if color in player["conditional_mana"][restriction_key]:
-                    player["conditional_mana"][restriction_key][color] += amount
-                else:
-                    player["conditional_mana"][restriction_key][color] = amount
-        
-        # Refund life if needed
+                if amount > 0:
+                    player["conditional_mana"][restriction_key][color] = player["conditional_mana"][restriction_key].get(color, 0) + amount
+
+        # Refund phase-restricted mana
+        for color, amount in payment['phase_restricted'].items():
+             if amount > 0:
+                  player["phase_restricted_mana"][color] = player["phase_restricted_mana"].get(color, 0) + amount
+
+
+        # Refund life paid for Phyrexian mana
         if payment['life'] > 0:
             player["life"] += payment['life']
+
+        # Refund snow mana? (Harder, involves untapping) - For now, assume snow payment succeeds if checked.
+
+        # Untap creatures tapped for Convoke
+        if payment['tapped_creatures']:
+            for creature_id in payment['tapped_creatures']:
+                 # Use GameState's untap method if available and safe
+                 if hasattr(self.game_state, 'untap_permanent'):
+                     self.game_state.untap_permanent(creature_id, player)
+                 elif creature_id in player.get("tapped_permanents", set()): # Fallback
+                     player["tapped_permanents"].remove(creature_id)
+
+        # Return exiled cards for Delve (to Graveyard)
+        if payment['exiled_cards']:
+            for card_id in payment['exiled_cards']:
+                if card_id in player.get("exile", []):
+                    player["exile"].remove(card_id)
+                    player.setdefault("graveyard", []).append(card_id)
+
+        # Return sacrificed permanents for Additional Costs (to Battlefield - complex state reset needed)
+        # Basic rollback: Just put back on battlefield, needs state reset (tapped, counters etc.)
+        if payment['sacrificed_perms']:
+            for card_id in payment['sacrificed_perms']:
+                if card_id in player.get("graveyard", []): # Assuming it went to GY
+                     player["graveyard"].remove(card_id)
+                     player.setdefault("battlefield", []).append(card_id)
+                     # TODO: Full state reset for the returned permanent is needed here
+
+        # Return discarded cards for Additional Costs (to Hand)
+        if payment['discarded_cards']:
+            for card_id in payment['discarded_cards']:
+                 if card_id in player.get("graveyard", []): # Assuming it went to GY
+                     player["graveyard"].remove(card_id)
+                     player.setdefault("hand", []).append(card_id)
+
+        logging.debug("Payment refund completed.")
+        # No need to clean up empty conditional mana here, done after successful payment
 
     def _cleanup_empty_conditional_mana(self, player):
         """
@@ -1819,302 +1859,297 @@ class EnhancedManaSystem:
             parts.append(f"{payment['life']} life")
         
         return ", ".join(parts)
-
+    
     def pay_mana_cost(self, player, cost, context=None):
         """
         Enhanced method to pay a mana cost from a player's mana pool with all effects,
         including handling non-mana costs like tapping creatures or exiling cards based on context.
-        Now handles non-mana costs first.
+        Now handles non-mana costs first and includes rollback.
         """
         if context is None: context = {}
+        gs = self.game_state # Alias for easier access
+
+        # Track payment details - EXPANDED
+        payment = {
+            'colors': defaultdict(int), 'conditional': defaultdict(lambda: defaultdict(int)),
+            'life': 0, 'snow': 0,
+            'tapped_creatures': [], # For Convoke, Improvise
+            'exiled_cards': [], # For Delve, Escape
+            'sacrificed_perms': [], # For Emerge, Additional Costs
+            'discarded_cards': [], # For Jump-Start, Additional Costs
+            'phase_restricted': defaultdict(int) # Track phase restricted mana used
+        }
 
         # --- Determine Final Mana Cost ---
-        # Parse cost and apply modifiers
-        if hasattr(cost, 'mana_cost'):
-            card_id = cost.card_id if hasattr(cost, 'card_id') else None
-            parsed_cost = self.parse_mana_cost(cost.mana_cost)
-            if card_id:
-                parsed_cost = self.apply_cost_modifiers(player, parsed_cost, card_id, context)
-        elif isinstance(cost, str):
-            card_id = context.get('card_id')
-            parsed_cost = self.parse_mana_cost(cost)
-            if card_id:
+        try:
+            if hasattr(cost, 'mana_cost'): # Card Object
+                card_id = cost.card_id if hasattr(cost, 'card_id') else None
+                parsed_cost = self.parse_mana_cost(cost.mana_cost)
+                if card_id: parsed_cost = self.apply_cost_modifiers(player, parsed_cost, card_id, context)
+                else: parsed_cost = self.apply_cost_modifiers(player, parsed_cost, None, context) # Apply generic mods
+            elif isinstance(cost, str): # String Cost
+                card_id = context.get('card_id')
+                parsed_cost = self.parse_mana_cost(cost)
+                parsed_cost = self.apply_cost_modifiers(player, parsed_cost, card_id, context) # Apply mods if card_id available
+            elif isinstance(cost, dict): # Pre-parsed/Modified Cost Dict
+                parsed_cost = cost.copy() # Use a copy to avoid modifying original
+                card_id = context.get('card_id')
+                # Re-apply mods ensures context changes (like chosen X) are reflected
                 parsed_cost = self.apply_cost_modifiers(player, parsed_cost, card_id, context)
             else:
-                 parsed_cost = self.apply_cost_modifiers(player, parsed_cost, None, context)
-        elif isinstance(cost, dict): # Assume already parsed and potentially modified
-             parsed_cost = cost
-             card_id = context.get('card_id')
-             # Re-apply modifiers just in case context has changed (like chosen X)
-             if card_id:
-                  parsed_cost = self.apply_cost_modifiers(player, parsed_cost, card_id, context)
-             else:
-                  parsed_cost = self.apply_cost_modifiers(player, parsed_cost, None, context)
-        else:
-            logging.error(f"Invalid cost type provided to pay_mana_cost: {type(cost)}")
-            return False
+                logging.error(f"Invalid cost type provided to pay_mana_cost: {type(cost)}")
+                return False
+        except Exception as cost_calc_e:
+             logging.error(f"Error calculating final cost: {cost_calc_e}", exc_info=True)
+             return False
 
-        # Verify cost can be paid *before* attempting payment
-        if not self.can_pay_mana_cost(player, parsed_cost, context):
-            logging.warning(f"Cannot afford final cost {self._format_mana_cost_for_logging(parsed_cost)}")
-            return False
+        # Verify affordability *before* attempting payment of non-mana costs
+        can_afford_check_cost = parsed_cost.copy() # Use a copy for the check
+        # Temporarily adjust for context costs that reduce mana needed *before* check
+        if context.get("convoke_creatures") and len(context["convoke_creatures"]) > 0:
+            can_afford_check_cost['generic'] = max(0, can_afford_check_cost['generic'] - len(context["convoke_creatures"]))
+        if context.get("delve_cards") and len(context["delve_cards"]) > 0:
+            can_afford_check_cost['generic'] = max(0, can_afford_check_cost['generic'] - len(context["delve_cards"]))
+        # Add other similar non-mana costs here that directly reduce mana needed (Improvise)
 
-        # Track payment details
-        payment = { 'colors': defaultdict(int), 'conditional': defaultdict(lambda: defaultdict(int)),
-                    'life': 0, 'snow': 0, 'tapped_creatures': [], 'exiled_cards': [], 'sacrificed_perms': [], 'discarded_cards': [], 'phase_restricted': defaultdict(int)} # Added phase restricted tracking
+        if not self.can_pay_mana_cost(player, can_afford_check_cost, context):
+            cost_str = self._format_mana_cost_for_logging(parsed_cost, context.get('X', 0) if 'X' in parsed_cost else 0)
+            logging.warning(f"Cannot afford final mana cost {cost_str} for {getattr(gs._safe_get_card(card_id),'name', 'spell')}")
+            return False
 
         # --- Execute Non-Mana Costs specified in context FIRST ---
-        gs = self.game_state # Alias for easier access
-        non_mana_costs_paid = True
+        non_mana_costs_paid_successfully = True
+        try:
+            # Convoke: Tap creatures provided in context
+            if context.get("convoke_creatures"):
+                tapped_for_convoke = []
+                for creature_idx_or_id in context["convoke_creatures"]:
+                    convoke_id = gs._resolve_permanent_identifier(player, creature_idx_or_id)
+                    if not convoke_id:
+                         logging.warning(f"Invalid creature identifier for Convoke: {creature_idx_or_id}")
+                         non_mana_costs_paid_successfully = False; break
+                    # Use GameState's method; ensure it returns bool for success
+                    if hasattr(gs, 'tap_permanent') and gs.tap_permanent(convoke_id, player):
+                        tapped_for_convoke.append(convoke_id)
+                    else:
+                        logging.warning(f"Failed to tap {gs._safe_get_card(convoke_id).name} for Convoke.")
+                        non_mana_costs_paid_successfully = False; break
+                if non_mana_costs_paid_successfully: payment['tapped_creatures'] = tapped_for_convoke
+                else: raise ValueError("Convoke payment failed.") # Trigger rollback
 
-        # Convoke: Tap creatures provided in context
-        if context.get("convoke_creatures"):
-             tapped_for_convoke = []
-             for creature_idx_or_id in context["convoke_creatures"]:
-                 convoke_id = None
-                 # Check if param is index or ID
-                 if isinstance(creature_idx_or_id, int):
-                      if creature_idx_or_id < len(player["battlefield"]):
-                           convoke_id = player["battlefield"][creature_idx_or_id]
-                 elif isinstance(creature_idx_or_id, str):
-                      if creature_idx_or_id in player["battlefield"]:
-                           convoke_id = creature_idx_or_id
-                 else:
-                     logging.warning(f"Invalid creature identifier for Convoke: {creature_idx_or_id}")
-                     continue
+            # Delve: Exile cards from GY provided in context
+            if context.get("delve_cards"):
+                exiled_for_delve = []
+                # Assume list of indices, needs validation
+                gy_indices_to_exile = context["delve_cards"]
+                valid_indices = [idx for idx in gy_indices_to_exile if isinstance(idx, int) and 0 <= idx < len(player["graveyard"])]
+                if len(valid_indices) != len(gy_indices_to_exile):
+                    logging.warning("Invalid graveyard indices provided for Delve.")
+                    non_mana_costs_paid_successfully = False; raise ValueError("Delve payment failed.")
+                # Remove from graveyard (safer: iterate sorted indices descending)
+                gy_cards_to_exile = [player["graveyard"][idx] for idx in sorted(valid_indices, reverse=True)]
+                for card_to_exile in gy_cards_to_exile:
+                    # Use move_card for robustness (handles triggers/replacements if any)
+                    if not gs.move_card(card_to_exile, player, "graveyard", player, "exile", cause="delve_cost"):
+                        logging.warning(f"Failed to exile {gs._safe_get_card(card_to_exile).name} for Delve.")
+                        non_mana_costs_paid_successfully = False; break
+                    exiled_for_delve.append(card_to_exile) # Track successfully exiled
+                if non_mana_costs_paid_successfully: payment['exiled_cards'] = exiled_for_delve
+                else: raise ValueError("Delve payment failed.")
 
-                 if convoke_id and gs.tap_permanent(convoke_id, player): # Use GameState's method
-                         tapped_for_convoke.append(convoke_id)
-                 elif convoke_id: # Tap failed (e.g. already tapped)
-                     logging.warning(f"Failed to tap {gs._safe_get_card(convoke_id).name} for Convoke.")
-                     non_mana_costs_paid = False; break # Stop if any tap fails
+            # Emerge Sacrifice: Handled by AbilityHandler/GameState via context before mana payment typically.
+            # Check context for already sacrificed permanent.
+            if context.get("emerge_sacrificed_id"):
+                 payment['sacrificed_perms'].append(context["emerge_sacrificed_id"]) # Record sacrifice
 
-             if non_mana_costs_paid:
-                 payment['tapped_creatures'].extend(tapped_for_convoke)
-                 logging.debug(f"Paid Convoke cost by tapping {len(tapped_for_convoke)} creatures.")
-             else:
-                 # Rollback convoke taps? More complex. For now, just fail.
-                 return False
+            # Additional Sacrifice (from card text "As an additional cost...")
+            if context.get("sacrifice_additional"):
+                sacrificed_for_add = []
+                for sac_ident in context["sacrifice_additional"]:
+                    sac_id = gs._resolve_permanent_identifier(player, sac_ident)
+                    if not sac_id:
+                        logging.warning(f"Invalid sacrifice identifier: {sac_ident}")
+                        non_mana_costs_paid_successfully = False; break
+                    # Use move_card for robustness
+                    if not gs.move_card(sac_id, player, "battlefield", player, "graveyard", cause="additional_cost_sacrifice"):
+                         logging.warning(f"Failed to sacrifice {gs._safe_get_card(sac_id).name} as additional cost.")
+                         non_mana_costs_paid_successfully = False; break
+                    sacrificed_for_add.append(sac_id)
+                if non_mana_costs_paid_successfully: payment['sacrificed_perms'].extend(sacrificed_for_add)
+                else: raise ValueError("Additional Sacrifice payment failed.")
 
-        # Delve: Exile cards from GY provided in context
-        if context.get("delve_cards"):
-             exiled_for_delve = []
-             gy_indices_to_exile = context["delve_cards"] # Assume list of indices
-             # Validate indices first
-             valid_indices = [idx for idx in gy_indices_to_exile if 0 <= idx < len(player["graveyard"])]
-             if len(valid_indices) != len(gy_indices_to_exile):
-                  logging.warning("Invalid graveyard indices provided for Delve.")
-                  non_mana_costs_paid = False
-             else:
-                  # Remove from graveyard (safer: iterate sorted indices descending)
-                  gy_cards_to_exile = [player["graveyard"][idx] for idx in sorted(valid_indices, reverse=True)]
-                  for card_to_exile in gy_cards_to_exile:
-                       if card_to_exile in player["graveyard"]: # Double check presence
-                           if gs.move_card(card_to_exile, player, "graveyard", player, "exile"):
-                               exiled_for_delve.append(card_to_exile)
-                       else: # Card vanished?
-                           logging.warning(f"Card {card_to_exile} unexpectedly not in graveyard for Delve.")
-                           non_mana_costs_paid = False; break
+            # Additional Discard (from card text)
+            if context.get("discard_additional"):
+                discarded_for_add = []
+                discard_indices = context["discard_additional"] # Assume list of hand indices
+                if not isinstance(discard_indices, list):
+                    logging.warning("Invalid discard_additional context.")
+                    non_mana_costs_paid_successfully = False; raise ValueError("Additional Discard context invalid.")
 
-                  if not non_mana_costs_paid:
-                      # Rollback exiled cards? Very complex. Fail for now.
-                      return False
-                  else:
-                      payment['exiled_cards'].extend(exiled_for_delve)
-                      logging.debug(f"Paid Delve cost by exiling {len(exiled_for_delve)} cards.")
+                if len(discard_indices) > len(player["hand"]):
+                    logging.warning("Not enough cards in hand for additional discard cost.")
+                    non_mana_costs_paid_successfully = False; raise ValueError("Additional Discard payment failed.")
 
-        # Emerge: Sacrifice was handled in _handle_alternative_casting. No payment action needed here.
+                # Validate indices before proceeding
+                valid_indices = [idx for idx in discard_indices if isinstance(idx, int) and 0 <= idx < len(player["hand"])]
+                if len(valid_indices) != len(discard_indices):
+                    logging.warning("Invalid hand indices for additional discard.")
+                    non_mana_costs_paid_successfully = False; raise ValueError("Additional Discard payment failed.")
 
-        # Escape: Exiling from GY was handled in _handle_alternative_casting.
+                # Discard from hand (sorted reverse index)
+                cards_to_discard = [player["hand"][idx] for idx in sorted(valid_indices, reverse=True)]
+                for card_to_discard in cards_to_discard:
+                    # Use move_card
+                    if not gs.move_card(card_to_discard, player, "hand", player, "graveyard", cause="additional_cost_discard"):
+                        logging.warning(f"Failed to discard {gs._safe_get_card(card_to_discard).name} as additional cost.")
+                        non_mana_costs_paid_successfully = False; break
+                    discarded_for_add.append(card_to_discard)
+                if non_mana_costs_paid_successfully: payment['discarded_cards'] = discarded_for_add
+                else: raise ValueError("Additional Discard payment failed.")
 
-        # Jump-Start: Discard was handled in _handle_alternative_casting.
-
-        # Generic Sacrifice (from "Additional Costs")
-        if context.get("sacrifice_additional"): # Expects list of permanent indices/IDs
-            sacrificed_for_add = []
-            for sac_idx_or_id in context["sacrifice_additional"]:
-                sac_id = None
-                if isinstance(sac_idx_or_id, int):
-                    if sac_idx_or_id < len(player["battlefield"]):
-                        sac_id = player["battlefield"][sac_idx_or_id]
-                elif isinstance(sac_idx_or_id, str):
-                    if sac_idx_or_id in player["battlefield"]:
-                        sac_id = sac_idx_or_id
-                if sac_id:
-                    if gs.move_card(sac_id, player, "battlefield", player, "graveyard"):
-                        sacrificed_for_add.append(sac_id)
-                    else: # Failed to sacrifice
-                         non_mana_costs_paid = False; break
-                else: non_mana_costs_paid = False; break
-            if non_mana_costs_paid:
-                 payment['sacrificed_perms'].extend(sacrificed_for_add)
-                 logging.debug(f"Paid additional sacrifice cost for {len(sacrificed_for_add)} permanents.")
-            else:
-                # Rollback needed
-                return False
-
-        # Generic Discard (from "Additional Costs")
-        if context.get("discard_additional"): # Expects list of hand indices/IDs
-            discarded_for_add = []
-            discard_indices = context["discard_additional"] # Assume indices
-            if len(discard_indices) <= len(player["hand"]):
-                 cards_to_discard = [player["hand"][idx] for idx in sorted(discard_indices, reverse=True)]
-                 for card_to_discard in cards_to_discard:
-                      if card_to_discard in player["hand"]: # Double check
-                          if gs.move_card(card_to_discard, player, "hand", player, "graveyard"):
-                              discarded_for_add.append(card_to_discard)
-                          else: non_mana_costs_paid = False; break
-                 if non_mana_costs_paid:
-                      payment['discarded_cards'].extend(discarded_for_add)
-                      logging.debug(f"Paid additional discard cost for {len(discarded_for_add)} cards.")
-                 else: return False # Rollback needed
-            else: return False # Not enough cards
-
-        # If any non-mana cost failed, stop payment.
-        if not non_mana_costs_paid:
-            # Ideally, rollback all previously paid non-mana costs here.
-            # For now, just return failure.
-            logging.error("Failed to pay required non-mana costs.")
-            return False
-
-        # --- Pay Mana Costs ---
-        # Use a mutable copy of the pool for payment attempt
-        current_pool = player["mana_pool"].copy()
-        conditional_pool = {k: v.copy() for k, v in player.get("conditional_mana", {}).items()} # Deep copy
-        phase_pool = player.get("phase_restricted_mana", {}).copy() # Copy phase restricted mana
-
-        # Get usable conditional mana based on context
-        usable_conditional = self._get_usable_conditional_mana(conditional_pool, context)
-
-        # Pay colored mana
-        for color in ['W', 'U', 'B', 'R', 'G', 'C']:
-            required = parsed_cost[color]
-            if required <= 0: continue
-
-            paid_count = 0
-            # Priority: Regular -> Phase -> Conditional
-            # Pay with Regular
-            can_pay_reg = min(required, current_pool.get(color, 0))
-            current_pool[color] -= can_pay_reg
-            paid_count += can_pay_reg
-            payment['colors'][color] += can_pay_reg
-
-            # Pay with Phase
-            if paid_count < required:
-                 can_pay_phase = min(required - paid_count, phase_pool.get(color, 0))
-                 phase_pool[color] -= can_pay_phase
-                 paid_count += can_pay_phase
-                 payment['phase_restricted'][color] += can_pay_phase # Use correct defaultdict init
-
-            # Pay with Conditional
-            if paid_count < required:
-                 for restriction_key, pool_part in conditional_pool.items():
-                      if paid_count >= required: break
-                      # Check usability for *this specific color requirement*?
-                      # Assume _get_usable includes all usable for the context.
-                      # Use only mana marked usable earlier.
-                      if color in usable_conditional.get(restriction_key, {}):
-                          can_pay_cond = min(required - paid_count, pool_part.get(color, 0))
-                          pool_part[color] -= can_pay_cond
-                          paid_count += can_pay_cond
-                          payment['conditional'][restriction_key][color] += can_pay_cond # Use correct defaultdict init
-
-            if paid_count < required:
-                logging.error(f"Insufficient {color} mana during payment (logic error). Required: {required}, Paid: {paid_count}")
-                self._refund_payment(player, payment)
-                return False
-
-        # Pay hybrid mana (Use the helper function, ensure it handles pool types)
-        if not self._pay_hybrid_mana_with_all_pools(player, parsed_cost['hybrid'], payment, current_pool, phase_pool, conditional_pool, usable_conditional, context):
-             logging.error("Failed to pay hybrid mana")
+        except ValueError as non_mana_error:
+             logging.warning(f"Failed to pay non-mana costs: {non_mana_error}")
+             self._refund_payment(player, payment) # Rollback what was paid
+             return False
+        except Exception as non_mana_e:
+             logging.error(f"Error paying non-mana costs: {non_mana_e}", exc_info=True)
              self._refund_payment(player, payment)
              return False
 
-        # Pay Phyrexian mana
-        paid_phy_life = 0
-        for color in parsed_cost['phyrexian']:
-            # Try paying with mana first (Regular -> Phase -> Conditional)
-            if current_pool.get(color, 0) > 0:
-                 current_pool[color] -= 1
-                 payment['colors'][color] += 1
-            elif phase_pool.get(color, 0) > 0:
-                 phase_pool[color] -= 1
-                 payment['phase_restricted'][color] += 1
+
+        # --- Pay Mana Costs ---
+        mana_payment_successful = False
+        try:
+            # Use a mutable copy of the pool for payment attempt
+            current_pool = player["mana_pool"].copy()
+            conditional_pool = {k: v.copy() for k, v in player.get("conditional_mana", {}).items()}
+            phase_pool = player.get("phase_restricted_mana", {}).copy()
+
+            # Get usable conditional mana based on context
+            usable_conditional = self._get_usable_conditional_mana(conditional_pool, context)
+
+            # Pay colored mana
+            for color in ['W', 'U', 'B', 'R', 'G', 'C']:
+                required = parsed_cost[color]
+                if required <= 0: continue
+                paid_count = 0
+                # Priority: Regular -> Phase -> Conditional
+                can_pay_reg = min(required, current_pool.get(color, 0))
+                current_pool[color] = current_pool.get(color, 0) - can_pay_reg
+                paid_count += can_pay_reg
+                payment['colors'][color] += can_pay_reg
+
+                if paid_count < required:
+                    can_pay_phase = min(required - paid_count, phase_pool.get(color, 0))
+                    phase_pool[color] = phase_pool.get(color, 0) - can_pay_phase
+                    paid_count += can_pay_phase
+                    payment['phase_restricted'][color] += can_pay_phase
+
+                if paid_count < required:
+                    for r_key, pool_part in conditional_pool.items():
+                        if paid_count >= required: break
+                        # Check usability (should be consistent with _get_usable_conditional_mana)
+                        if color in pool_part and self._can_use_conditional_mana(r_key, context):
+                            can_pay_cond = min(required - paid_count, pool_part.get(color, 0))
+                            pool_part[color] = pool_part.get(color, 0) - can_pay_cond
+                            paid_count += can_pay_cond
+                            payment['conditional'][r_key][color] += can_pay_cond
+
+                if paid_count < required:
+                    raise ValueError(f"Insufficient {color} mana during payment")
+
+            # Pay hybrid mana
+            if not self._pay_hybrid_mana_with_all_pools(player, parsed_cost['hybrid'], payment, current_pool, phase_pool, conditional_pool, usable_conditional, context):
+                 raise ValueError("Failed to pay hybrid mana")
+
+            # Pay Phyrexian mana
+            paid_phy_life = 0
+            phy_success = True
+            phy_colors_to_pay = list(parsed_cost.get('phyrexian',[]))
+            mana_paid_for_phy = defaultdict(int)
+            cond_paid_for_phy = defaultdict(lambda: defaultdict(int))
+            phase_paid_for_phy = defaultdict(int)
+
+            # Try paying with mana first
+            temp_phy_colors = []
+            for color in phy_colors_to_pay:
+                paid_with_mana = False
+                if current_pool.get(color, 0) > 0: current_pool[color] -= 1; mana_paid_for_phy[color] += 1; paid_with_mana = True
+                elif phase_pool.get(color, 0) > 0: phase_pool[color] -= 1; phase_paid_for_phy[color] += 1; paid_with_mana = True
+                else:
+                    for r_key, pool_part in conditional_pool.items():
+                        if color in pool_part and pool_part.get(color, 0) > 0 and self._can_use_conditional_mana(r_key, context):
+                             pool_part[color] -= 1; cond_paid_for_phy[r_key][color] += 1; paid_with_mana = True; break
+                if not paid_with_mana:
+                    temp_phy_colors.append(color) # Add to list needing life payment
+            phy_colors_to_pay = temp_phy_colors
+
+            # Pay remaining with life
+            life_needed = len(phy_colors_to_pay) * 2
+            if player['life'] >= life_needed:
+                 paid_phy_life = life_needed
             else:
-                 paid_with_cond = False
-                 for restriction_key, pool_part in conditional_pool.items():
-                      if color in usable_conditional.get(restriction_key, {}) and pool_part.get(color, 0) > 0:
-                           pool_part[color] -= 1
-                           payment['conditional'][restriction_key][color] += 1
-                           paid_with_cond = True
-                           break
-                 if not paid_with_cond:
-                     # Pay with life
-                     if player['life'] >= 2:
-                         paid_phy_life += 2
-                     else:
-                         logging.error("Cannot pay Phyrexian mana with life.")
-                         self._refund_payment(player, payment)
-                         return False
-        payment['life'] += paid_phy_life
-        player['life'] -= paid_phy_life # Deduct life here, before paying generic
+                phy_success = False
+                raise ValueError("Cannot pay Phyrexian mana with life")
 
-        # Pay snow mana
-        if parsed_cost['snow'] > 0:
-            if not self.pay_snow_cost(player, parsed_cost['snow']): # pay_snow_cost needs to interact with pools or directly tap
-                 logging.error("Failed to pay Snow mana cost.")
-                 self._refund_payment(player, payment)
-                 return False
-            payment['snow'] += parsed_cost['snow']
+            # If successful, record mana/life used
+            if phy_success:
+                payment['life'] += paid_phy_life
+                player['life'] -= paid_phy_life # Deduct life immediately after check
+                for color, count in mana_paid_for_phy.items(): payment['colors'][color] += count
+                for color, count in phase_paid_for_phy.items(): payment['phase_restricted'][color] += count
+                for r_key, colors in cond_paid_for_phy.items():
+                    for color, count in colors.items(): payment['conditional'][r_key][color] += count
 
-        # Pay generic mana
-        generic_required = parsed_cost['generic']
-        if parsed_cost['X'] > 0 and context and 'X' in context:
-            generic_required += context['X'] * parsed_cost['X']
 
-        if generic_required > 0:
-            paid_generic = 0
-            # Define pools and keys for payment tracking
-            all_pools = [
-                (current_pool, 'colors', 'C'),
-                (phase_pool, 'phase_restricted', 'C'),
-                *[(pool_part, f'conditional.{r_key}', 'C') for r_key, pool_part in conditional_pool.items() if 'C' in usable_conditional.get(r_key, {})],
-                (current_pool, 'colors', 'W'), (current_pool, 'colors', 'U'), (current_pool, 'colors', 'B'), (current_pool, 'colors', 'R'), (current_pool, 'colors', 'G'),
-                (phase_pool, 'phase_restricted', 'W'), (phase_pool, 'phase_restricted', 'U'), (phase_pool, 'phase_restricted', 'B'), (phase_pool, 'phase_restricted', 'R'), (phase_pool, 'phase_restricted', 'G'),
-                 *[(pool_part, f'conditional.{r_key}', color) for r_key, pool_part in conditional_pool.items() for color in ['W', 'U', 'B', 'R', 'G'] if color in usable_conditional.get(r_key, {})]
-            ]
+            # Pay snow mana
+            if parsed_cost['snow'] > 0:
+                # pay_snow_cost needs more complex integration or should return used sources
+                # Assuming pay_snow_cost deducts mana from pools if applicable and taps permanents
+                if not self.pay_snow_cost(player, parsed_cost['snow']): # This might interact with mana pools used above - CAUTION NEEDED
+                    raise ValueError("Failed to pay Snow mana cost")
+                payment['snow'] += parsed_cost['snow']
 
-            # Pay from pools
-            for pool, payment_key, color in all_pools:
-                if paid_generic >= generic_required: break
-                can_pay = min(generic_required - paid_generic, pool.get(color, 0))
-                if can_pay > 0:
-                     pool[color] -= can_pay
-                     paid_generic += can_pay
-                     # Update payment structure based on key
-                     if payment_key == 'colors': payment['colors'][color] += can_pay
-                     elif payment_key == 'phase_restricted': payment['phase_restricted'][color] += can_pay
-                     elif payment_key.startswith('conditional'):
-                          r_key = payment_key.split('.')[-1]
-                          payment['conditional'][r_key][color] += can_pay
+            # Pay generic mana
+            generic_required = parsed_cost['generic']
+            if parsed_cost['X'] > 0 and context and 'X' in context:
+                generic_required += context['X'] * parsed_cost['X']
 
-            if paid_generic < generic_required:
-                 logging.error(f"Failed to pay generic mana cost. Required={generic_required}, Paid={paid_generic}")
-                 self._refund_payment(player, payment)
-                 return False
+            if generic_required > 0:
+                remaining_generic = self._pay_generic_mana_with_all_pools(player, generic_required, payment, current_pool, phase_pool, conditional_pool, usable_conditional, context)
+                if remaining_generic > 0:
+                    raise ValueError(f"Failed to pay generic mana cost. Required={generic_required}, Short={remaining_generic}")
+
+            mana_payment_successful = True
+
+        except ValueError as mana_error:
+            logging.error(f"Failed to pay mana costs: {mana_error}")
+            self._refund_payment(player, payment) # Rollback EVERYTHING if mana payment fails
+            return False
+        except Exception as mana_e:
+             logging.error(f"Error paying mana costs: {mana_e}", exc_info=True)
+             self._refund_payment(player, payment)
+             return False
+
 
         # --- Finalize Payment ---
-        # Update player's pools with the final state from current_pool, conditional_pool, phase_pool
-        player["mana_pool"] = current_pool
-        player["conditional_mana"] = conditional_pool
-        player["phase_restricted_mana"] = phase_pool
+        if mana_payment_successful:
+            # Update player's pools with the final state from successful payment
+            player["mana_pool"] = current_pool
+            player["conditional_mana"] = conditional_pool
+            player["phase_restricted_mana"] = phase_pool
 
-        # Log payment
-        cost_str = self._format_mana_cost_for_logging(parsed_cost, context.get('X', 0) if 'X' in parsed_cost else 0)
-        payment_str = self._format_payment_for_logging(payment)
-        logging.debug(f"Paid mana cost {cost_str} with {payment_str}")
-        self._cleanup_empty_conditional_mana(player)
-        return True
+            # Log payment
+            cost_str = self._format_mana_cost_for_logging(parsed_cost, context.get('X', 0) if 'X' in parsed_cost else 0)
+            payment_str = self._format_payment_for_logging(payment)
+            logging.debug(f"Paid cost {cost_str} for {getattr(gs._safe_get_card(card_id),'name', 'spell')} with {payment_str}")
+            self._cleanup_empty_conditional_mana(player)
+            return True
+        else:
+             # This path shouldn't be reached due to error handling above, but included for safety
+             logging.error("Reached end of pay_mana_cost with mana_payment_successful=False. Should have been caught earlier.")
+             self._refund_payment(player, payment)
+             return False
     
     def _pay_generic_mana(self, player, amount, payment_tracker):
         """

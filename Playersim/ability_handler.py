@@ -529,7 +529,6 @@ class AbilityHandler:
                  count += 1
         logging.debug(f"Finished initializing abilities for {count} cards.")
             
-
     def _parse_and_register_abilities(self, card_id, card):
         """
         Parse a card's text to identify and register its abilities.
@@ -552,73 +551,89 @@ class AbilityHandler:
                 # For Class cards, parse abilities of the *current* level primarily
                 current_level_data = card.get_current_class_data()
                 if current_level_data:
+                    # Add abilities from current level
                     texts_to_parse.extend(current_level_data.get('abilities', []))
-                    keywords_to_parse.extend(current_level_data.get('keywords', []))
-                # TODO: Consider inherited static abilities from previous levels? Rules check needed.
-                # Add Level Up ability definition if applicable
-                if hasattr(card, 'can_level_up') and card.can_level_up():
-                     next_level = getattr(card, 'current_level', 1) + 1
-                     cost_str = card.get_level_cost(next_level)
-                     if cost_str:
-                          # Create a specific text representation for the level-up action
-                          texts_to_parse.append(f"{cost_str}: Level up to {next_level}.")
-                          # Note: Actual leveling is handled by GameState/ActionHandler
+                    # Consolidate inherited abilities/keywords up to current level
+                    inherited_abilities = []
+                    inherited_keywords = set()
+                    for level_num in range(1, getattr(card,'current_level', 1) + 1):
+                        level_data = next((lvl for lvl in getattr(card, 'levels', []) if lvl.get('level') == level_num), None)
+                        if level_data:
+                            # Check keywords mentioned in level abilities
+                            for ability_text in level_data.get('abilities', []):
+                                 for kw in Card.ALL_KEYWORDS: # Check against canonical list
+                                      if kw.lower() in ability_text.lower():
+                                           inherited_keywords.add(kw.lower())
+                    keywords_to_parse.extend(list(inherited_keywords))
+                    # Add level up action text if applicable
+                    if hasattr(card, 'can_level_up') and card.can_level_up():
+                        next_level = getattr(card, 'current_level', 1) + 1
+                        cost_str = card.get_level_cost(next_level)
+                        if cost_str:
+                            texts_to_parse.append(f"{cost_str}: Level up to {next_level}.") # Represents the Level Up ability
 
-            elif hasattr(card, 'faces') and card.faces and hasattr(card, 'current_face'):
+            elif hasattr(card, 'faces') and card.faces and hasattr(card, 'current_face') and card.current_face is not None and card.current_face < len(card.faces):
                  # MDFC or Transforming DFC - use current face
                  current_face_data = card.faces[card.current_face]
                  texts_to_parse.append(current_face_data.get('oracle_text', ''))
-                 keywords_to_parse.extend(current_face_data.get('keywords', [])) # Assumes keywords list on face data
+                 # Keywords might be on the main card object or face data
+                 keywords_source = current_face_data if 'keywords' in current_face_data else card
+                 if hasattr(keywords_source, 'keywords') and isinstance(keywords_source.keywords, list):
+                     # Assuming binary array for now, map back to names
+                     keywords_to_parse.extend([kw_name for i, kw_name in enumerate(Card.ALL_KEYWORDS) if i < len(keywords_source.keywords) and keywords_source.keywords[i] == 1])
+
+
             else:
                  # Standard card or other types
                  texts_to_parse.append(getattr(card, 'oracle_text', ''))
-                 # Get keywords from the card's keyword list/array if it exists
+                 # Get keywords from the card's keyword list/array
                  if hasattr(card, 'keywords') and isinstance(card.keywords, list):
-                     # Map binary array back to names? Or assume keywords_to_parse holds names?
-                     # Assume Card.keywords holds names directly or requires mapping
-                     # If it's the binary array:
-                     # keywords_to_parse.extend([kw_name for i, kw_name in enumerate(Card.ALL_KEYWORDS) if i < len(card.keywords) and card.keywords[i] == 1])
-                     # If it holds names already:
-                      keywords_to_parse.extend(getattr(card,'keywords',[]))
+                     # Assuming binary array for now, map back to names
+                      keywords_to_parse.extend([kw_name for i, kw_name in enumerate(Card.ALL_KEYWORDS) if i < len(card.keywords) and card.keywords[i] == 1])
 
 
             # --- Process Keywords ---
             unique_keywords = set(kw.lower() for kw in keywords_to_parse if kw) # Normalize and make unique
             for keyword_text in unique_keywords:
                 # Use helper to create appropriate ability object (Static, Triggered, Activated)
-                self._create_keyword_ability(card_id, card, keyword_text.split()[0], abilities_list, full_keyword_text=keyword_text)
+                # Pass the keyword name only (e.g., 'flying', not 'flying, vigilance')
+                first_word = keyword_text.split()[0]
+                self._create_keyword_ability(card_id, card, first_word, abilities_list, full_keyword_text=keyword_text)
 
             # --- Process Oracle Text ---
+            processed_text_hashes = set() # Avoid processing duplicate lines/clauses
             for text_block in texts_to_parse:
                 if not text_block: continue
                 # Split text into potential ability clauses (e.g., by newline, sentence)
-                # More robust splitting: Split by newline, then by sentence-ending punctuation if feasible.
                 potential_abilities = []
                 lines = text_block.strip().split('\n')
                 for line in lines:
                      line = line.strip()
                      if not line: continue
-                     # Further split by sentence enders followed by space/capital? More complex.
-                     # Simple split by '.' or ';'? Risky. Let's try line by line first.
-                     # Split by '•' only if it doesn't look like part of a cost
-                     if '•' in line and ':' not in line.split('•')[0]:
-                          potential_abilities.extend(p.strip() for p in re.split(r'\s*[•●]\s*', line) if p.strip())
-                     elif line: # Treat the whole line as a potential ability
-                         potential_abilities.append(line)
+                     # Simple split by '.' or ';'? Still risky, but better than nothing if no bullets.
+                     # Try splitting by common separators like bullets or sentence enders
+                     split_pattern = r'\s*[•●]\s*|(?<=[.!?])\s+(?=[A-Z0-9{\[])' # Split by bullets or sentence end + start
+                     clauses = re.split(split_pattern, line)
+                     for clause in clauses:
+                         clause = clause.strip()
+                         if clause: potential_abilities.append(clause)
 
                 for ability_text in potential_abilities:
-                     self._parse_ability_text(card_id, card, ability_text, abilities_list)
+                     # Remove reminder text specific to this clause
+                     cleaned_ability_text = re.sub(r'\s*\([^()]*?\)\s*', ' ', ability_text).strip()
+                     text_hash = hash(cleaned_ability_text)
+                     if cleaned_ability_text and text_hash not in processed_text_hashes:
+                         self._parse_ability_text(card_id, card, cleaned_ability_text, abilities_list)
+                         processed_text_hashes.add(text_hash)
+
 
             # Log final count for this card
-            # logging.debug(f"Parsed {len(abilities_list)} abilities for {card.name} ({card_id})")
+            logging.debug(f"Parsed {len(abilities_list)} abilities for {card.name} ({card_id})")
 
             # Immediately apply newly registered Static Abilities
-            # LayerSystem application happens centrally after all effects are registered for the turn/event.
-            # But the StaticAbility object needs to register its effect *intent* with the LayerSystem now.
             for ability in abilities_list:
                 if isinstance(ability, StaticAbility):
-                    ability.apply(self.game_state) # apply should now just call LayerSystem.register_effect
-
+                    ability.apply(self.game_state) # apply should call LayerSystem.register_effect
 
         except Exception as e:
             logging.error(f"Error parsing abilities for card {card_id} ({getattr(card, 'name', 'Unknown')}): {str(e)}")
@@ -1235,32 +1250,51 @@ class AbilityHandler:
             ability_effect_text = getattr(ability, 'effect_text', effect_text_from_context) # Prefer ability's text
 
             # Validate Targets using Targeting System just before resolution
+            valid_targets = True # Assume valid if no targeting system
             if self.targeting_system:
-                if not self.targeting_system.validate_targets(card_id, targets_on_stack, controller):
-                    logging.info(f"Targets for '{ability_effect_text}' from {source_name} became invalid. Fizzling.")
-                    return # Fizzle if targets invalid
+                # Ensure targets_on_stack is a dict
+                validation_targets = targets_on_stack if isinstance(targets_on_stack, dict) else {}
+                valid_targets = self.targeting_system.validate_targets(card_id, validation_targets, controller)
+
+            if not valid_targets:
+                logging.info(f"Targets for '{ability_effect_text}' from {source_name} became invalid. Fizzling.")
+                return # Fizzle if targets invalid
 
             # Resolve using the ability's method
             try:
                 # Check if ability has a specific resolve method
                 # Pass targets if the method accepts them, otherwise use standard resolve
                 resolve_method = None
-                if hasattr(ability, 'resolve_with_targets'): resolve_method = ability.resolve_with_targets
-                elif hasattr(ability, 'resolve'): resolve_method = ability.resolve
+                # Prefer resolve_with_targets if available
+                if hasattr(ability, 'resolve_with_targets') and callable(ability.resolve_with_targets):
+                    resolve_method = ability.resolve_with_targets
+                elif hasattr(ability, 'resolve') and callable(ability.resolve):
+                    resolve_method = ability.resolve
+                elif hasattr(ability, '_resolve_ability_implementation') and callable(ability._resolve_ability_implementation):
+                     # Use internal method if public ones are missing (e.g., from base class)
+                     resolve_method = ability._resolve_ability_implementation
+                elif hasattr(ability, '_resolve_ability_effect') and callable(ability._resolve_ability_effect):
+                     # Fallback to the effect application method
+                     resolve_method = ability._resolve_ability_effect
+
 
                 if resolve_method:
                     # Inspect if method expects targets
                     import inspect
                     sig = inspect.signature(resolve_method)
+                    # Pass targets only if the parameter exists
                     if 'targets' in sig.parameters:
-                         resolve_method(gs, controller, targets=targets_on_stack)
+                         resolve_method(game_state=gs, controller=controller, targets=targets_on_stack)
                     else:
-                         resolve_method(gs, controller) # Standard resolve without targets arg
+                         resolve_method(game_state=gs, controller=controller) # Standard resolve without targets arg
                     logging.debug(f"Resolved {type(ability).__name__} ability for {source_name}: {ability_effect_text}")
                 else:
-                    # Fallback to generic internal resolution if no specific method found
-                    logging.warning(f"Ability object for {source_name} lacks specific resolve method. Using generic effect application.")
-                    ability._resolve_ability_effect(gs, controller, targets_on_stack) # Internal fallback
+                    logging.error(f"No resolve method found for ability object {type(ability).__name__} on {source_name}.")
+                    # Attempt generic resolution as last resort if no method at all
+                    if hasattr(ability, '_create_ability_effects'):
+                         effects = ability._create_ability_effects(ability.effect, targets_on_stack)
+                         for effect_obj in effects:
+                             effect_obj.apply(gs, card_id, controller, targets_on_stack)
 
             except Exception as e:
                 logging.error(f"Error resolving ability {ability_type} ({ability_effect_text}) for {source_name}: {str(e)}")
@@ -1271,18 +1305,22 @@ class AbilityHandler:
              logging.warning(f"No valid 'ability' object found in context for resolving {ability_type} from {source_name}. Attempting fallback resolution from effect text: '{effect_text_from_context}'")
              if effect_text_from_context and effect_text_from_context != "Unknown":
                  # Use EffectFactory and generic resolution
+                 # Validate targets for the effect text
+                 valid_targets_for_text = True
+                 if self.targeting_system:
+                      validation_targets = targets_on_stack if isinstance(targets_on_stack, dict) else {}
+                      valid_targets_for_text = self.targeting_system.validate_targets(card_id, validation_targets, controller)
+
+                 if not valid_targets_for_text:
+                      logging.info(f"Targets for fallback effect '{effect_text_from_context}' from {source_name} became invalid. Fizzling.")
+                      return # Fizzle
+
                  effects = EffectFactory.create_effects(effect_text_from_context, targets=targets_on_stack)
                  if not effects:
                      logging.error(f"Cannot resolve {ability_type} from {source_name}: EffectFactory failed for text '{effect_text_from_context}'.")
                      return
 
                  for effect_obj in effects:
-                      # Re-validate targets just before applying this specific effect?
-                      if effect_obj.requires_target and self.targeting_system:
-                           if not self.targeting_system.validate_targets(card_id, targets_on_stack, controller):
-                                logging.debug(f"Targets invalid for fallback effect '{effect_obj.effect_text}'. Skipping.")
-                                continue # Skip this specific effect
-
                       # Apply the effect
                       try:
                            effect_obj.apply(gs, card_id, controller, targets_on_stack)

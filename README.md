@@ -27,12 +27,9 @@ graph TD
 
 - Current state: Doesn't work, kinda of a mess, working on version 3.00
 
-- Finish adding support for all keywords/remove keywords that are accounted for in places other keyword effects
 - Add support for tutors (Basically done need to review the code more and test ti)
-- Refine action meanings in actions.py (nearly done)
 - Add support for coin flips and dice rolls
 - Add support for {2/B} style mana
-- Overhaul observation space 
 - Bug fix deck_stat_tracker.py (inconsistent stats?)
 - Add a better MD5 hash to saving decks, one that includes card count in deck_stat_tracker.py
 - Add support for "Start your engines"

@@ -1,6 +1,8 @@
 import random
 import logging
 import numpy as np
+
+from Playersim.ability_utils import EffectFactory
 from .card import Card
 from .debug import DEBUG_MODE
 import re
@@ -1066,21 +1068,7 @@ class GameState:
                 logging.debug(f"Both players passed with empty stack. Moving from {prev_phase} to {self.phase}")
                 self.priority_pass_count = 0
                 self.priority_player = active_player
-    
-    def _move_to_graveyard(self, player, card_id, source_zone):
-        """
-        Legacy method that has been deprecated. Use move_card instead.
-        
-        Args:
-            player: The player who owns the card
-            card_id: ID of the card to move
-            source_zone: Source zone of the card
-            
-        Returns:
-            bool: Whether the movement was successful
-        """
-        logging.warning("_move_to_graveyard is deprecated. Use move_card instead.")
-        return self.move_card(card_id, player, source_zone, player, "graveyard")
+
     
     def move_card(self, card_id, from_player, from_zone, to_player, to_zone, cause=None, context=None):
         """Move a card between zones, applying replacement effects and triggering abilities."""
@@ -1271,39 +1259,6 @@ class GameState:
         if self.replacement_effects:
             self.replacement_effects.register_card_replacement_effects(card_id, player)
     
-    def resolve_planeswalker(self, card_id, controller):
-        """Handle resolving a planeswalker spell."""
-        card = self._safe_get_card(card_id)
-        if not card or 'planeswalker' not in card.card_types:
-            return False
-        
-        # Make sure loyalty value is set
-        if not hasattr(card, "loyalty"):
-            if hasattr(card, "_init_planeswalker"):
-                card._init_planeswalker(card.__dict__)
-            else:
-                # Default to loyalty 3 if method not available
-                card.loyalty = 3
-        
-        # Add to battlefield
-        controller["battlefield"].append(card_id)
-        
-        # Initialize loyalty counters dictionary if it doesn't exist
-        if not hasattr(controller, "loyalty_counters"):
-            controller["loyalty_counters"] = {}
-        
-        controller["loyalty_counters"][card_id] = card.loyalty
-        
-        # Track that it entered this turn (for "summoning sickness" equivalent)
-        controller["entered_battlefield_this_turn"].add(card_id)
-        
-        # Trigger "enters the battlefield" abilities
-        self.trigger_ability(card_id, "ENTERS_BATTLEFIELD")
-        self.check_state_based_actions()
-        logging.debug(f"Planeswalker {card.name} entered with {card.loyalty} loyalty")
-        return True
-    
-
     def record_strategy_pattern(self, action_idx, reward):
         """Record the current strategy pattern and action."""
         if hasattr(self, 'strategy_memory'):
@@ -1442,177 +1397,6 @@ class GameState:
          if "target permanent" in text: return "permanent"
          if "any target" in text: return "any"
          return "target" # Default
-
-    
-    def _process_planeswalker_ability_effect(self, card_id, controller, effect_text):
-        """
-        Process planeswalker ability effects based on text patterns.
-        
-        Args:
-            card_id: The ID of the planeswalker
-            controller: The player controlling the planeswalker
-            effect_text: The text of the ability effect
-        """
-        # First check if we have an ability handler
-        if hasattr(self, 'ability_handler') and self.ability_handler:
-            # Try to use the ability handler to process the effect
-            try:
-                ability_context = {
-                    "source_id": card_id,
-                    "controller": controller,
-                    "effect_text": effect_text,
-                    "is_planeswalker_ability": True
-                }
-                
-                # Check if ability handler has a parse effect text function
-                if hasattr(self.ability_handler, 'parse_effect_text'):
-                    effects = self.ability_handler.parse_effect_text(effect_text, ability_context)
-                    for effect in effects:
-                        effect.apply(self, card_id, controller, ability_context)
-                    return
-            except Exception as e:
-                logging.error(f"Error processing planeswalker ability with ability handler: {str(e)}")
-                # Fall through to default handling
-        
-        # Default handling for common planeswalker effects
-        effect_text = effect_text.lower() if isinstance(effect_text, str) else ""
-        
-        # Parse common effects based on text patterns
-        if "draw" in effect_text and "card" in effect_text:
-            # Draw cards effect
-            import re
-            match = re.search(r"draw (\w+) cards?", effect_text)
-            count = 1  # Default
-            if match:
-                count_word = match.group(1)
-                if count_word.isdigit():
-                    count = int(count_word)
-                elif count_word == "a":
-                    count = 1
-                elif count_word == "two":
-                    count = 2
-                elif count_word == "three":
-                    count = 3
-                    
-            for _ in range(count):
-                if controller["library"]:
-                    controller["hand"].append(controller["library"].pop(0))
-            
-            logging.debug(f"Planeswalker ability: Drew {count} cards")
-        
-        elif "damage" in effect_text:
-            # Damage effect
-            import re
-            match = re.search(r"(\d+) damage", effect_text)
-            damage = 1  # Default
-            if match:
-                damage = int(match.group(1))
-                
-            # Determine target
-            opponent = self.p2 if controller == self.p1 else self.p1
-            
-            if "to target player" in effect_text or "to any target" in effect_text:
-                # Damage to opponent
-                opponent["life"] -= damage
-                logging.debug(f"Planeswalker ability: Dealt {damage} damage to opponent")
-                
-            elif "to target creature" in effect_text or "to target permanent" in effect_text:
-                # For simplicity, target the strongest opponent creature
-                creatures = [cid for cid in opponent["battlefield"] 
-                        if self._safe_get_card(cid) and 
-                        hasattr(self._safe_get_card(cid), 'card_types') and 
-                        'creature' in self._safe_get_card(cid).card_types]
-                
-                if creatures:
-                    target = max(creatures, key=lambda cid: self._safe_get_card(cid).power 
-                                                        if hasattr(self._safe_get_card(cid), 'power') else 0)
-                    target_card = self._safe_get_card(target)
-                    
-                    # Check if lethal damage
-                    if hasattr(target_card, 'toughness') and target_card.toughness <= damage:
-                        self.move_card(target, opponent, "battlefield", opponent, "graveyard")
-                        logging.debug(f"Planeswalker ability: Killed {target_card.name} with {damage} damage")
-                    else:
-                        # Add damage counter
-                        if "damage_counters" not in opponent:
-                            opponent["damage_counters"] = {}
-                        opponent["damage_counters"][target] = opponent["damage_counters"].get(target, 0) + damage
-                        logging.debug(f"Planeswalker ability: Dealt {damage} damage to {target_card.name}")
-        
-        elif "gain" in effect_text and "life" in effect_text:
-            # Life gain effect
-            import re
-            match = re.search(r"gain (\d+) life", effect_text)
-            life_gain = 1  # Default
-            if match:
-                life_gain = int(match.group(1))
-                
-            controller["life"] += life_gain
-            logging.debug(f"Planeswalker ability: Gained {life_gain} life")
-        
-        elif "create" in effect_text and "token" in effect_text:
-            # Token creation effect
-            import re
-            match = re.search(r"create (?:a|an|\d+) (.*?) token", effect_text)
-            if match:
-                token_desc = match.group(1)
-                
-                # Parse token details
-                power, toughness = 1, 1
-                pt_match = re.search(r"(\d+)/(\d+)", token_desc)
-                if pt_match:
-                    power = int(pt_match.group(1))
-                    toughness = int(pt_match.group(2))
-                
-                # Create token data
-                token_data = {
-                    "name": f"{token_desc.title()} Token",
-                    "power": power,
-                    "toughness": toughness,
-                    "card_types": ["creature"],
-                    "subtypes": [],
-                    "oracle_text": ""
-                }
-                
-                # Add specific token abilities
-                if "flying" in token_desc:
-                    token_data["oracle_text"] += "Flying\n"
-                if "vigilance" in token_desc:
-                    token_data["oracle_text"] += "Vigilance\n"
-                    
-                # Create the token
-                if hasattr(self, 'create_token'):
-                    self.create_token(controller, token_data)
-                    logging.debug(f"Planeswalker ability: Created a {token_desc} token")
-        
-        elif "exile" in effect_text:
-            # Exile effect
-            opponent = self.p2 if controller == self.p1 else self.p1
-            
-            if "exile target permanent" in effect_text or "exile target creature" in effect_text:
-                # For simplicity, target the strongest opponent creature
-                target_type = "permanent" if "target permanent" in effect_text else "creature"
-                
-                if target_type == "creature":
-                    targets = [cid for cid in opponent["battlefield"] 
-                            if self._safe_get_card(cid) and 
-                            hasattr(self._safe_get_card(cid), 'card_types') and 
-                            'creature' in self._safe_get_card(cid).card_types]
-                else:
-                    targets = opponent["battlefield"]
-                    
-                if targets:
-                    # For creatures, target the strongest one
-                    if target_type == "creature":
-                        target = max(targets, key=lambda cid: self._safe_get_card(cid).power 
-                                                        if hasattr(self._safe_get_card(cid), 'power') else 0)
-                    else:
-                        # For any permanent, just take the first one
-                        target = targets[0]
-                        
-                    target_card = self._safe_get_card(target)
-                    self.move_card(target, opponent, "battlefield", opponent, "exile")
-                    logging.debug(f"Planeswalker ability: Exiled {target_card.name}")
     
     def handle_card_type_specific_rules(self, card_id, zone, player):
         """
@@ -2429,160 +2213,189 @@ class GameState:
                     logging.debug(f"Planeswalker uniqueness rule: Sacrificed duplicate planeswalker")
                 
     def _resolve_creature_spell(self, spell_id, controller, context=None):
-        """
-        Resolve a creature spell - put it onto the battlefield and handle ETB effects.
-        
-        Args:
-            spell_id: The ID of the creature spell
-            controller: The player casting the spell
-            context: Additional spell context
-        """
-        if context is None:
-            context = {}
-            
-        spell = self._safe_get_card(spell_id)
-        if not spell:
-            return
-            
-        # If this is a copy, we need to create a token copy instead
-        if context.get("is_copy", False):
-            self._create_token_copy(spell, controller)
-            return
-            
-        # Put the creature onto the battlefield
-        controller["battlefield"].append(spell_id)
-        
-        # Mark as having summoning sickness
-        if "entered_battlefield_this_turn" not in controller:
-            controller["entered_battlefield_this_turn"] = set()
-        controller["entered_battlefield_this_turn"].add(spell_id)
-        
-        # Trigger enters-the-battlefield abilities
-        self.trigger_ability(spell_id, "ENTERS_BATTLEFIELD", {"controller": controller})
-        
-        # Handle any replacement effects
-        if hasattr(self, 'replacement_effects') and self.replacement_effects:
-            self.replacement_effects.apply_replacements("ENTERS_BATTLEFIELD", {
-                "card_id": spell_id,
-                "controller": controller
-            })
-
-    def _resolve_planeswalker_spell(self, spell_id, controller, context=None):
-        """Resolve a planeswalker spell - put it onto the battlefield with loyalty counters."""
+        """Resolve a creature spell - put it onto the battlefield using move_card."""
         if context is None: context = {}
         spell = self._safe_get_card(spell_id)
-        if not spell or ('planeswalker' not in getattr(spell, 'card_types', []) and 'planeswalker' not in getattr(spell,'type_line','').lower()):
-            # If it failed basic checks, maybe it's a copy that shouldn't enter
+        if not spell or ('creature' not in getattr(spell, 'card_types', [])):
+             # Spell might have lost creature type? Or invalid ID?
+             logging.warning(f"Attempted to resolve {spell_id} as creature, but it's not.")
+             # Move to GY if not a copy
+             if not context.get("is_copy", False): controller["graveyard"].append(spell_id)
+             return False
+
+        # Use move_card to handle ETB, replacements, static effects
+        if context.get("is_copy", False):
+            # Create a token copy on the battlefield
+            token_id = self.create_token_copy(spell, controller)
+            logging.debug(f"Resolved copy of Creature spell {spell.name} as token {token_id}.")
+            return token_id is not None
+        else:
+            # Move the actual card to the battlefield
+            success = self.move_card(spell_id, controller, "stack_implicit", controller, "battlefield", cause="spell_resolution", context=context)
+            if success:
+                 logging.debug(f"Resolved Creature spell {spell.name}")
+            else: # Move failed
+                 controller["graveyard"].append(spell_id)
+            return success
+
+
+    def _resolve_planeswalker_spell(self, spell_id, controller, context=None):
+        """Resolve a planeswalker spell - put it onto the battlefield using move_card."""
+        if context is None: context = {}
+        spell = self._safe_get_card(spell_id)
+        # Ensure it's still a planeswalker upon resolution
+        if not spell or ('planeswalker' not in getattr(spell, 'card_types', [])):
+            logging.warning(f"Attempted to resolve {spell_id} as planeswalker, but it's not.")
             if not context.get("is_copy", False): controller["graveyard"].append(spell_id)
             return False
 
         if context.get("is_copy", False):
-            # Copies of PW spells usually create non-legendary tokens (or nothing?) - Complex rule
-            # Simple: Create token copy
-            self.create_token_copy(spell, controller)
-            logging.debug(f"Resolved copy of Planeswalker spell {spell.name} as token.")
-            return True
-
-        # Put the actual planeswalker onto the battlefield
-        success = self.move_card(spell_id, controller, "stack_implicit", controller, "battlefield", cause="spell_resolution", context=context)
-        if success:
-            # Note: ETB loyalty/triggers handled by move_card's call to trigger_ability/check_sba
-            logging.debug(f"Resolved Planeswalker spell {spell.name}")
-            # Planeswalker uniqueness rule applied in check_state_based_actions
-        else: # Move failed, put in GY
-             controller["graveyard"].append(spell_id)
-
-        return success
+            token_id = self.create_token_copy(spell, controller)
+            logging.debug(f"Resolved copy of Planeswalker spell {spell.name} as token {token_id}.")
+            return token_id is not None
+        else:
+            success = self.move_card(spell_id, controller, "stack_implicit", controller, "battlefield", cause="spell_resolution", context=context)
+            if success:
+                logging.debug(f"Resolved Planeswalker spell {spell.name}")
+                # Uniqueness rule checked via SBAs
+            else: # Move failed
+                controller["graveyard"].append(spell_id)
+            return success
 
     def _resolve_permanent_spell(self, spell_id, controller, context=None):
-        """
-        Resolve an artifact or enchantment spell - put it onto the battlefield.
-        
-        Args:
-            spell_id: The ID of the artifact or enchantment spell
-            controller: The player casting the spell
-            context: Additional spell context
-        """
-        if context is None:
-            context = {}
-            
+        """Resolve other permanent spells (Artifact, Enchantment, Battle) using move_card."""
+        if context is None: context = {}
         spell = self._safe_get_card(spell_id)
-        if not spell:
-            return
-            
-        # If this is a copy, we need to create a token copy instead
+        valid_types = ['artifact', 'enchantment', 'battle']
+        # Check if it's one of the expected permanent types
+        if not spell or not any(t in getattr(spell, 'card_types', []) or t in getattr(spell, 'type_line', '').lower() for t in valid_types):
+            logging.warning(f"Attempted to resolve {spell_id} as permanent, but type is invalid.")
+            if not context.get("is_copy", False): controller["graveyard"].append(spell_id)
+            return False
+
         if context.get("is_copy", False):
-            self._create_token_copy(spell, controller)
-            return
-            
-        # Put the permanent onto the battlefield
-        controller["battlefield"].append(spell_id)
+            token_id = self.create_token_copy(spell, controller)
+            logging.debug(f"Resolved copy of Permanent spell {spell.name} as token {token_id}.")
+            return token_id is not None
+        else:
+            # Handle Aura attachment targeting specifically during resolution if needed
+            if 'aura' in getattr(spell, 'subtypes', []):
+                 # Targets should be in context['targets']['chosen'] from targeting phase
+                 chosen_targets = context.get('targets',{}).get('chosen', [])
+                 if not chosen_targets:
+                      logging.warning(f"Aura {spell.name} resolving without target, fizzling to graveyard.")
+                      controller["graveyard"].append(spell_id)
+                      return False
+                 target_id = chosen_targets[0] # Assume first chosen target
+                 # Check if target is still valid *now*
+                 target_card = self._safe_get_card(target_id)
+                 target_owner, target_zone = self.find_card_location(target_id)
+                 if not target_card or target_zone != 'battlefield': # Add legality check later
+                      logging.warning(f"Target {target_id} for Aura {spell.name} no longer valid. Fizzling.")
+                      controller["graveyard"].append(spell_id)
+                      return False
+                 # Store attachment intention for move_card/ETB handling
+                 context['attach_to_target'] = target_id
+
+            # Use move_card for ETB, replacements, etc.
+            success = self.move_card(spell_id, controller, "stack_implicit", controller, "battlefield", cause="spell_resolution", context=context)
+            if success:
+                logging.debug(f"Resolved Permanent spell {spell.name}")
+                # If it was an Aura, move_card's ETB handling should call _resolve_aura_attachment
+                # if context included 'attach_to_target'
+            else: # Move failed
+                controller["graveyard"].append(spell_id)
+            return success
         
-        # Handle auras specifically
-        if hasattr(spell, 'subtypes') and 'aura' in spell.subtypes:
-            self._resolve_aura_attachment(spell_id, controller, context)
-        
-        # Trigger enters-the-battlefield abilities
-        self.trigger_ability(spell_id, "ENTERS_BATTLEFIELD", {"controller": controller})
+    def _resolve_aura_attachment(self, aura_id, controller, context):
+        """Handles attaching an aura when it resolves or enters the battlefield."""
+        aura_card = self._safe_get_card(aura_id)
+        if not aura_card: return
+
+        target_id = context.get('attach_to_target') # Get target decided during casting/ETB
+        if target_id:
+             # Verify target still valid
+             target_card = self._safe_get_card(target_id)
+             target_owner, target_zone = self.find_card_location(target_id)
+             if target_card and target_zone == 'battlefield': # Add legality check
+                 if hasattr(self, 'attach_aura') and self.attach_aura(controller, aura_id, target_id):
+                     logging.debug(f"Aura {aura_card.name} resolved and attached to {target_card.name}")
+                     return
+             # Target invalid or attachment failed
+             logging.warning(f"Target {target_id} for Aura {aura_card.name} invalid on resolution or attachment failed.")
+             # Aura goes to graveyard if target invalid upon resolution (handled by SBA usually)
+             # Move directly here for clarity
+             if aura_id in controller["battlefield"]:
+                  self.move_card(aura_id, controller, "battlefield", controller, "graveyard", cause="aura_fizzle")
+        else:
+             logging.warning(f"Aura {aura_card.name} resolving without a target specified in context.")
+             # Goes to graveyard if it needed a target but didn't have one
+             if aura_id in controller["battlefield"]:
+                 self.move_card(aura_id, controller, "battlefield", controller, "graveyard", cause="aura_fizzle")
 
     def _resolve_land_spell(self, spell_id, controller, context=None):
-        """
-        Resolve a land - put it onto the battlefield and handle special land effects.
-        
-        Args:
-            spell_id: The ID of the land
-            controller: The player playing the land
-            context: Additional land context
-        """
-        if context is None:
-            context = {}
-            
+        """Resolve a land spell (e.g., from effects like Dryad Arbor). Uses move_card."""
+        if context is None: context = {}
         spell = self._safe_get_card(spell_id)
-        if not spell:
-            return
-            
-        # Put the land onto the battlefield
-        controller["battlefield"].append(spell_id)
-        
-        # Mark that a land has been played this turn
-        controller["land_played"] = True
-        
-        # Check if land enters tapped
-        if hasattr(spell, 'oracle_text') and "enters the battlefield tapped" in spell.oracle_text.lower():
-            if "tapped_permanents" not in controller:
-                controller["tapped_permanents"] = set()
-            controller["tapped_permanents"].add(spell_id)
-        
-        # Trigger enters-the-battlefield abilities
-        self.trigger_ability(spell_id, "ENTERS_BATTLEFIELD", {"controller": controller})
+        if not spell or ('land' not in getattr(spell, 'card_types', []) and 'land' not in getattr(spell,'type_line','').lower()):
+             logging.warning(f"Attempted to resolve {spell_id} as land spell, but type is invalid.")
+             if not context.get("is_copy", False): controller["graveyard"].append(spell_id)
+             return False
+
+        # Lands resolving as spells don't count towards land drop normally
+        # Use move_card to handle ETB
+        success = self.move_card(spell_id, controller, "stack_implicit", controller, "battlefield", cause="spell_resolution", context=context)
+        if success:
+             logging.debug(f"Resolved Land spell {spell.name}")
+        else: # Move failed
+             controller["graveyard"].append(spell_id)
+        return success
 
     def _resolve_instant_sorcery_spell(self, spell_id, controller, context=None):
-        """
-        Resolve an instant or sorcery spell - apply its effects and put it in the graveyard.
-        
-        Args:
-            spell_id: The ID of the instant or sorcery spell
-            controller: The player casting the spell
-            context: Additional spell context
-        """
-        if context is None:
-            context = {}
-            
+        """Resolve instant/sorcery. Applies effects then moves to graveyard."""
+        if context is None: context = {}
         spell = self._safe_get_card(spell_id)
-        if not spell:
-            return
-            
-        # Handle targeting if needed
-        targets = context.get("targets")
-        if not targets and hasattr(self, 'targeting_system'):
-            targets = self.targeting_system.resolve_targeting_for_spell(spell_id, controller)
-            
-        # Apply spell effects
-        self.resolve_spell_effects(spell_id, controller, targets, context)
-        
-        # If this is a copy, don't move it to the graveyard
-        if not context.get("is_copy", False) and not context.get("skip_default_movement", False):
-            controller["graveyard"].append(spell_id)
+        valid_types = ['instant', 'sorcery']
+        if not spell or not any(t in getattr(spell, 'card_types', []) for t in valid_types):
+             logging.warning(f"Attempted to resolve {spell_id} as instant/sorcery, but type is invalid.")
+             if not context.get("is_copy", False): controller["graveyard"].append(spell_id)
+             return False
+
+        spell_name = getattr(spell, 'name', f"Spell {spell_id}")
+        logging.debug(f"Resolving Instant/Sorcery: {spell_name}")
+
+        # Apply effects using AbilityHandler or EffectFactory
+        if hasattr(self, 'ability_handler'):
+            # Ideally, find a specific resolve function on the card or handler
+            # Fallback: Create effects from text
+            effects = EffectFactory.create_effects(getattr(spell, 'oracle_text', ''), context.get('targets'))
+            for effect_obj in effects:
+                effect_obj.apply(self, spell_id, controller, context.get('targets'))
+        else:
+            logging.warning("No ability handler found to resolve instant/sorcery effects.")
+
+        # Determine final destination zone based on context (Flashback, Rebound etc.)
+        final_zone = "graveyard"
+        if context.get('cast_from_zone') == 'graveyard' and "flashback" in getattr(spell,'oracle_text','').lower():
+            final_zone = "exile"
+        if context.get('rebound', False):
+            final_zone = "exile" # Rebound puts it in exile first
+            if not hasattr(self, 'rebounded_cards'): self.rebounded_cards = {}
+            self.rebounded_cards[spell_id] = controller # Track who rebounded it
+
+        # Handle copies (they cease to exist)
+        if context.get("is_copy", False):
+            logging.debug(f"Copy of {spell_name} resolved and ceased to exist.")
+            # Optionally trigger "spell resolved" for copies too?
+        elif context.get("skip_default_movement", False):
+             logging.debug(f"Default movement skipped for {spell_name} (e.g., Buyback, Commander tax zone).")
+        else:
+            # Use move_card to handle triggers etc.
+            self.move_card(spell_id, controller, "stack_implicit", controller, final_zone, cause="spell_resolution", context=context)
+
+        # Trigger "spell resolved" event if needed
+        self.trigger_ability(spell_id, "SPELL_RESOLVED", {"controller": controller})
+        return True
             
     def _word_to_number(self, word):
         """Convert word representation of number to int."""
@@ -3803,10 +3616,20 @@ class GameState:
         if not hasattr(self, 'haste_until_eot'): self.haste_until_eot = set()
         self.haste_until_eot.add(card_id)
     
+    def get_stack_item_controller(self, stack_item_id):
+        """Find the controller of a spell or ability on the stack."""
+        for item in self.stack:
+            if isinstance(item, tuple) and len(item) >= 3 and item[1] == stack_item_id:
+                return item[2] # The controller is the 3rd element
+        return None
+
     def shuffle_library(self, player):
         """Shuffles the player's library."""
-        random.shuffle(player["library"])
-        logging.debug(f"{player['name']}'s library shuffled.")
+        if player and "library" in player:
+            random.shuffle(player["library"])
+            logging.debug(f"{player['name']}'s library shuffled.")
+            return True
+        return False
         
     def venture(self, player):
         """Handle venture into the dungeon. Needs dungeon tracking."""
@@ -4647,46 +4470,110 @@ class GameState:
 
         # Gather all players and permanents with counters
         for p in [self.p1, self.p2]:
-            if p.get("poison_counters", 0) > 0 or p.get("experience_counters", 0) > 0:
-                 valid_targets.append(p)
-            for card_id in p["battlefield"]:
-                card = self._safe_get_card(card_id)
-                if card and hasattr(card, 'counters') and card.counters:
-                     valid_targets.append(card_id)
+            if p: # Check player exists
+                if p.get("poison_counters", 0) > 0 or p.get("experience_counters", 0) > 0 or p.get("energy_counters", 0) > 0:
+                     valid_targets.append(p)
+                for card_id in p.get("battlefield", []):
+                    card = self._safe_get_card(card_id)
+                    # Include permanents (including PWs) with any type of counter
+                    if card and hasattr(card, 'counters') and card.counters:
+                         valid_targets.append(card_id)
+                    # Include planeswalkers specifically for loyalty if not in card.counters yet
+                    elif card and 'planeswalker' in getattr(card,'card_types',[]) and p.get('loyalty_counters',{}).get(card_id, 0) > 0:
+                         valid_targets.append(card_id) # Add PW id if it has loyalty
 
-        # Determine which targets to proliferate
-        if targets == "all":
-            targets_to_proliferate = valid_targets
-        elif isinstance(targets, list):
-             targets_to_proliferate = [t for t in valid_targets if (isinstance(t, dict) and t in targets) or (isinstance(t, str) and t in targets)]
-        else:
-             targets_to_proliferate = [] # Invalid target list
+        # Determine which targets to proliferate based on player choice
+        # For AI, need a selection mechanism. Simple: Proliferate all valid targets.
+        targets_to_proliferate = valid_targets # Simple: affect all valid
 
-        if not targets_to_proliferate: return False
+        if not targets_to_proliferate:
+            logging.debug("Proliferate: No valid targets with counters found.")
+            return False
 
-        # Player chooses targets (or defaults to all if specified)
-        chosen_targets = targets_to_proliferate # AI selects all valid targets for simplicity
-
-        for target in chosen_targets:
-            if isinstance(target, dict): # Player
-                if target.get("poison_counters", 0) > 0:
-                     target["poison_counters"] += 1
-                     proliferated_something = True
-                if target.get("experience_counters", 0) > 0:
-                     target["experience_counters"] += 1
-                     proliferated_something = True
-                logging.debug(f"Proliferated counters on player {target['name']}")
-            else: # Permanent card_id
+        # --- AI Choice ---
+        # More complex AI would choose which subset of valid_targets to affect.
+        # Simple: proliferate all possible targets chosen by the player activating proliferate
+        chosen_targets = [t for t in targets_to_proliferate if t == player or (isinstance(t, str) and self.get_card_controller(t) == player)]
+        # If the effect specified 'opponent' or 'target', selection would differ.
+        # Assuming "You choose..." - AI chooses based on strategy (e.g., buff self, poison opponent)
+        # Simplification: affect everything controlled by the player + opponent players
+        chosen_targets = []
+        for target in valid_targets:
+            if target == player: # Target self (player counters)
+                chosen_targets.append(target)
+            elif target == self._get_non_active_player() and target != player: # Target opponent (player counters)
+                chosen_targets.append(target)
+            elif isinstance(target, str): # Is a permanent ID
                 card = self._safe_get_card(target)
-                if card and hasattr(card, 'counters'):
-                     # Choose ONE kind of counter to add (AI choice)
-                     # Simple: Add one of the first type found
-                     for counter_type in list(card.counters.keys()):
-                          self.add_counter(target, counter_type, 1)
-                          proliferated_something = True
-                          logging.debug(f"Proliferated {counter_type} counter on {card.name}")
-                          break # Only add one type per permanent
+                target_controller = self.get_card_controller(target)
+                # Simple heuristic: proliferate own good counters, opponent's bad counters
+                is_good_counter = any(ct in card.counters for ct in ["+1/+1", "lore", "loyalty"]) if hasattr(card, 'counters') else False
+                is_bad_counter = any(ct in card.counters for ct in ["-1/-1", "poison"]) if hasattr(card, 'counters') else False
+                if target_controller == player and is_good_counter: chosen_targets.append(target)
+                if target_controller != player and is_bad_counter: chosen_targets.append(target)
+                if target_controller != player and 'planeswalker' in getattr(card,'card_types',[]): chosen_targets.append(target) # Proliferate loyalty removal? Seems bad. Skip.
 
+        # Fallback if heuristic finds nothing: proliferate own first valid target with counters.
+        if not chosen_targets:
+             for target in valid_targets:
+                 if isinstance(target, str) and self.get_card_controller(target) == player:
+                     chosen_targets.append(target); break
+
+        logging.debug(f"Proliferate choosing targets: {chosen_targets}")
+
+
+        # --- Apply Proliferation ---
+        for target in chosen_targets:
+            if isinstance(target, dict) and target in [self.p1, self.p2]: # Player target
+                player_to_affect = target
+                added_counter = False
+                # Choose ONE type of counter the player has to increment
+                counters_present = []
+                if player_to_affect.get("poison_counters", 0) > 0: counters_present.append("poison")
+                if player_to_affect.get("experience_counters", 0) > 0: counters_present.append("experience")
+                if player_to_affect.get("energy_counters", 0) > 0: counters_present.append("energy")
+                # AI Choice needed here which counter type to choose if multiple exist. Simple: First found.
+                if counters_present:
+                    chosen_counter_type = counters_present[0]
+                    if chosen_counter_type == "poison": player_to_affect["poison_counters"] += 1; added_counter=True
+                    elif chosen_counter_type == "experience": player_to_affect["experience_counters"] += 1; added_counter=True
+                    elif chosen_counter_type == "energy": player_to_affect["energy_counters"] += 1; added_counter=True
+
+                if added_counter:
+                    logging.debug(f"Proliferated {chosen_counter_type} counter on player {player_to_affect['name']}")
+                    proliferated_something = True
+
+            elif isinstance(target, str): # Permanent card_id
+                card = self._safe_get_card(target)
+                target_controller = self.get_card_controller(target)
+                if not card or not target_controller: continue
+
+                # Choose ONE kind of counter already on the permanent to add another of.
+                counters_present = []
+                if hasattr(card, 'counters') and card.counters:
+                    counters_present.extend(list(card.counters.keys()))
+                # Check loyalty counters separately
+                if 'planeswalker' in getattr(card,'card_types',[]) and target_controller.get('loyalty_counters',{}).get(target, 0) > 0:
+                    counters_present.append('loyalty')
+
+                if counters_present:
+                    # AI Choice needed here which counter type to choose. Simple: First found.
+                    chosen_counter_type = counters_present[0]
+                    if chosen_counter_type == 'loyalty':
+                        # Need method to add loyalty counter
+                        current_loyalty = target_controller.get("loyalty_counters", {}).get(target, 0)
+                        target_controller.setdefault("loyalty_counters", {})[target] = current_loyalty + 1
+                        logging.debug(f"Proliferated loyalty counter on {card.name}")
+                        proliferated_something = True
+                    else:
+                        # Use existing add_counter method
+                        if self.add_counter(target, chosen_counter_type, 1):
+                             # Logging handled by add_counter
+                             proliferated_something = True
+
+
+        # Check SBAs after proliferation might change things (e.g., PW death, -1/-1 kill)
+        if proliferated_something: self.check_state_based_actions()
         return proliferated_something
 
     def mutate(self, player, mutating_card_id, target_id):
@@ -4696,24 +4583,51 @@ class GameState:
         if not target_card or not mutating_card: return False
 
         # Validation (non-human creature target)
-        if 'creature' not in getattr(target_card, 'card_types', []) or 'human' in getattr(target_card, 'subtypes', []): return False
+        if 'creature' not in getattr(target_card, 'card_types', []) or 'Human' in getattr(target_card, 'subtypes', []):
+             logging.warning(f"Mutate failed: Target {target_card.name} is not a non-Human creature.")
+             return False
 
-        # Track mutation stack
+        # Decide top/bottom (AI choice, default: new card on top)
+        mutate_on_top = True
+
+        # Apply mutation based on top/bottom choice
+        merged_card = None
+        current_mutation_stack = getattr(player,"mutation_stacks", {}).get(target_id, [target_id])
+
+        if mutate_on_top:
+            merged_card = mutating_card # Top card defines name, types, P/T
+            # Combine abilities/text (simplistic append)
+            merged_card.oracle_text = getattr(target_card, 'oracle_text','') + "\n" + getattr(mutating_card, 'oracle_text','')
+            # Keep counters, auras, equipment from target_card
+            merged_card.counters = target_card.counters.copy() if hasattr(target_card, 'counters') else {}
+            # Update the representation in card_db? Or just modify the live object? Modify live for now.
+            target_card.name = merged_card.name
+            target_card.power = merged_card.power
+            target_card.toughness = merged_card.toughness
+            target_card.card_types = merged_card.card_types
+            target_card.subtypes = merged_card.subtypes
+            target_card.oracle_text = merged_card.oracle_text
+            # Keep target_card.counters
+            current_mutation_stack.insert(0, mutating_card_id) # New card on top of stack list
+        else: # Mutate under
+            merged_card = target_card # Target defines name, types, P/T
+            merged_card.oracle_text = getattr(target_card, 'oracle_text','') + "\n" + getattr(mutating_card, 'oracle_text','')
+            # Keep target_card.counters
+            current_mutation_stack.append(mutating_card_id) # New card at bottom of stack list
+
+        # Track the mutation stack
         if not hasattr(player, "mutation_stacks"): player["mutation_stacks"] = {}
-        if target_id not in player["mutation_stacks"]: player["mutation_stacks"][target_id] = [target_id]
+        player["mutation_stacks"][target_id] = current_mutation_stack
 
-        # Assume mutating card goes on top (updates P/T)
-        player["mutation_stacks"][target_id].insert(0, mutating_card_id)
-        target_card.power = getattr(mutating_card, 'power', target_card.power)
-        target_card.toughness = getattr(mutating_card, 'toughness', target_card.toughness)
+        # Mutating card leaves original zone (usually hand) implicitly handled by cast_spell
+        # If cast from elsewhere, that needs handling too.
 
-        # Combine abilities (Simplified: append oracle text)
-        target_card.oracle_text = getattr(target_card, 'oracle_text', '') + "\n" + getattr(mutating_card, 'oracle_text', '')
-        # TODO: More robust ability combination needed here, likely involving LayerSystem
+        # Trigger mutate ability (triggers for EACH card in the stack now)
+        for card_in_stack_id in current_mutation_stack:
+            self.trigger_ability(card_in_stack_id, "MUTATES", {"target_id": target_id, "top_card_id": current_mutation_stack[0]})
 
-        # Trigger mutate ability
-        self.trigger_ability(target_id, "MUTATES", {"mutating_card_id": mutating_card_id})
-        logging.debug(f"{mutating_card.name} mutated onto {target_card.name}")
+        logging.debug(f"{mutating_card.name} mutated {'onto' if mutate_on_top else 'under'} {target_card.name}. Result is now {merged_card.name}.")
+        if self.layer_system: self.layer_system.apply_all_effects() # Re-apply layers
         return True
 
     def reanimate(self, player, gy_index):
@@ -4726,89 +4640,129 @@ class GameState:
         return False
 
     def flip_card(self, card_id):
-        """Handle flipping a flip card."""
+        """Handle flipping a flip card. Assumes card object has flip logic."""
         card = self._safe_get_card(card_id)
-        # Flip logic depends heavily on how Card class stores flip state/faces
-        if card and hasattr(card, 'flip'): # Assume a method exists
-            card.flip()
-            logging.debug(f"Flipped {card.name}")
-            # Trigger LTB/ETB for flip side? Check rules.
-            return True
+        player = self.get_card_controller(card_id)
+        if card and player and hasattr(card, 'flip'): # Assume a method exists
+            if card.flip(): # Assume flip() returns True on success
+                logging.debug(f"Flipped {card.name}")
+                self.trigger_ability(card_id, "FLIPPED", {"controller": player})
+                if self.layer_system: self.layer_system.apply_all_effects()
+                return True
         return False
+
 
     def equip_permanent(self, player, equip_id, target_id):
         """Attach equipment, potentially replacing existing attachment."""
         equip_card = self._safe_get_card(equip_id)
         target_card = self._safe_get_card(target_id)
+        target_owner = self.get_card_controller(target_id)
+
+        # Basic validation
         if not equip_card or 'equipment' not in getattr(equip_card, 'subtypes', []) or \
            not target_card or 'creature' not in getattr(target_card, 'card_types', []) or \
-           target_id not in player["battlefield"]: # Can only equip to own creatures normally
-            logging.warning(f"Invalid equip: Eq:{equip_id} to Tgt:{target_id}")
+           target_owner != player: # Can only equip to own creatures normally (Rule 301.5)
+            logging.warning(f"Invalid equip: Eq:{equip_id} to Tgt:{target_id}. Target controller: {target_owner['name'] if target_owner else 'None'}")
             return False
 
         if not hasattr(player, "attachments"): player["attachments"] = {}
         # Remove previous attachment of this equipment, if any
         if equip_id in player["attachments"]:
+            logging.debug(f"Unequipping {equip_card.name} from previous target {player['attachments'][equip_id]}")
             del player["attachments"][equip_id]
         # Attach to new target
         player["attachments"][equip_id] = target_id
         logging.debug(f"Equipped {equip_card.name} to {target_card.name}")
         if self.layer_system: self.layer_system.invalidate_cache(); self.layer_system.apply_all_effects()
+        self.trigger_ability(equip_id, "EQUIPPED", {"target_id": target_id})
+        self.trigger_ability(target_id, "BECAME_EQUIPPED", {"equipment_id": equip_id})
         return True
 
     def unequip_permanent(self, player, equip_id):
         """Unequip an equipment."""
         if hasattr(player, "attachments") and equip_id in player["attachments"]:
             equip_name = getattr(self._safe_get_card(equip_id), 'name', equip_id)
-            del player["attachments"][equip_id]
-            logging.debug(f"Unequipped {equip_name}")
+            target_id = player["attachments"].pop(equip_id)
+            logging.debug(f"Unequipped {equip_name} from {target_id}")
             if self.layer_system: self.layer_system.invalidate_cache(); self.layer_system.apply_all_effects()
+            # Trigger unequipped events? (Less common than equip)
             return True
+        logging.debug(f"Cannot unequip {equip_id}: Not attached.")
         return False # Wasn't attached
 
     def attach_aura(self, player, aura_id, target_id):
-        """Attach an aura."""
-        # Validation should happen before calling this (check enchant type, protection etc.)
+        """Attach an aura. Assumes validation (legal target) happened before."""
         if not hasattr(player, "attachments"): player["attachments"] = {}
-        if aura_id in player["attachments"]: del player["attachments"][aura_id] # Remove old if re-attaching
+        aura_card = self._safe_get_card(aura_id)
+        target_card = self._safe_get_card(target_id)
+        aura_name = getattr(aura_card, 'name', aura_id)
+        target_name = getattr(target_card, 'name', target_id)
+
+        # Find target's actual location/controller for validation
+        target_owner, target_zone = self.find_card_location(target_id)
+        if target_zone != "battlefield":
+             logging.warning(f"Cannot attach {aura_name}: Target {target_name} not on battlefield.")
+             return False
+        # TODO: Add "enchant <type>" validation and protection checks from TargetingSystem here if not done externally.
+
+        if aura_id in player["attachments"]:
+            logging.debug(f"Re-attaching {aura_name} from {player['attachments'][aura_id]} to {target_name}")
+            del player["attachments"][aura_id]
+
         player["attachments"][aura_id] = target_id
-        logging.debug(f"Attached {self._safe_get_card(aura_id).name} to {target_id}")
+        logging.debug(f"Attached {aura_name} to {target_name}")
         if self.layer_system: self.layer_system.invalidate_cache(); self.layer_system.apply_all_effects()
+        self.trigger_ability(aura_id, "ATTACHED", {"target_id": target_id})
+        self.trigger_ability(target_id, "BECAME_ENCHANTED", {"aura_id": aura_id})
         return True
 
     def fortify_land(self, player, fort_id, target_id):
         """Attach a fortification to a land."""
         fort_card = self._safe_get_card(fort_id)
         target_card = self._safe_get_card(target_id)
+        target_owner = self.get_card_controller(target_id)
+
+        # Validation
         if not fort_card or 'fortification' not in getattr(fort_card, 'subtypes', []) or \
            not target_card or 'land' not in getattr(target_card, 'card_types', []) or \
-           target_id not in player["battlefield"]:
-            logging.warning(f"Invalid fortify: Fort:{fort_id} to Land:{target_id}")
+           target_owner != player: # Fortify requires controlling the land (Rule 301.6)
+            logging.warning(f"Invalid fortify: Fort:{fort_id} to Land:{target_id}. Target controller: {target_owner['name'] if target_owner else 'None'}")
             return False
 
         if not hasattr(player, "attachments"): player["attachments"] = {}
-        if fort_id in player["attachments"]: del player["attachments"][fort_id]
+        if fort_id in player["attachments"]:
+            logging.debug(f"Unequipping {fort_card.name} from previous land {player['attachments'][fort_id]}")
+            del player["attachments"][fort_id]
         player["attachments"][fort_id] = target_id
         logging.debug(f"Fortified {target_card.name} with {fort_card.name}")
         if self.layer_system: self.layer_system.invalidate_cache(); self.layer_system.apply_all_effects()
+        self.trigger_ability(fort_id, "FORTIFIED", {"target_id": target_id})
+        self.trigger_ability(target_id, "BECAME_FORTIFIED", {"fortification_id": fort_id})
         return True
 
     def reconfigure_permanent(self, player, card_id):
         """Handle reconfigure. Assumes cost is paid."""
         card = self._safe_get_card(card_id)
         if not card or card_id not in player["battlefield"] or 'reconfigure' not in getattr(card, 'oracle_text', '').lower():
+            logging.warning(f"Invalid reconfigure: Card {card_id} not found, not owned, or doesn't have reconfigure.")
             return False
 
         if not hasattr(player, "attachments"): player["attachments"] = {}
         is_attached = card_id in player["attachments"]
+        # Must be a creature OR equipment to reconfigure
+        can_reconfigure = 'creature' in getattr(card, 'card_types',[]) or 'equipment' in getattr(card, 'subtypes',[])
 
-        if is_attached: # Unattach
+        if not can_reconfigure:
+            logging.warning(f"Cannot reconfigure {card.name}, not a creature or equipment currently.")
+            return False
+
+        if is_attached: # Unattach: Becomes creature, loses equipment type
             target_id = player["attachments"].pop(card_id)
-            # Add creature type back if it doesn't have it
-            if 'creature' not in card.card_types: card.card_types.append('creature')
-            logging.debug(f"Reconfigured {card.name} to unattach from {self._safe_get_card(target_id).name}.")
-        else: # Attach
-             # AI Choice needed for target. Simple: first valid creature.
+            if 'equipment' in getattr(card,'subtypes',[]): card.subtypes.remove('equipment')
+            if 'creature' not in getattr(card, 'card_types',[]): card.card_types.append('creature')
+            logging.debug(f"Reconfigured {card.name} to unattach from {self._safe_get_card(target_id).name}. It's now a creature.")
+        else: # Attach: Becomes equipment, loses creature type
+             # AI Choice needed for target. Simple: first valid owned creature.
              target_id = None
              for cid in player["battlefield"]:
                   if cid == card_id: continue
@@ -4817,86 +4771,149 @@ class GameState:
                        target_id = cid; break
              if target_id:
                   player["attachments"][card_id] = target_id
-                  # Remove creature type if it has it
                   if 'creature' in card.card_types: card.card_types.remove('creature')
-                  logging.debug(f"Reconfigured {card.name} to attach to {self._safe_get_card(target_id).name}")
+                  if 'equipment' not in getattr(card, 'subtypes',[]): card.subtypes.append('equipment')
+                  logging.debug(f"Reconfigured {card.name} to attach to {self._safe_get_card(target_id).name}. It's now an Equipment.")
              else:
                   logging.warning(f"Reconfigure failed for {card.name}: No valid target creature found.")
                   return False # No target
 
         if self.layer_system: self.layer_system.invalidate_cache(); self.layer_system.apply_all_effects()
+        self.trigger_ability(card_id, "RECONFIGURED")
         return True
 
     def turn_face_up(self, player, card_id, pay_morph_cost=False, pay_manifest_cost=False):
         """Turn a face-down Morph or Manifest card face up."""
         card = self._safe_get_card(card_id)
         if not card or card_id not in player["battlefield"]: return False
-        # Need state tracking for face-down status
-        if not getattr(card, 'face_down', False): return False # Already face up
 
-        cost_str = None
+        is_face_down = False
         original_info = None
-        is_morph = card_id in getattr(self, 'morphed_cards', {})
-        is_manifest = card_id in getattr(self, 'manifested_cards', {})
+        cost_to_pay_str = None
+        source_mechanic = None
 
-        if is_morph and pay_morph_cost:
-             original_info = self.morphed_cards[card_id]['original']
-             original_card_temp = Card(original_info) # Temporary card to parse cost
-             match = re.search(r"morph (\{[^\}]+\})", getattr(original_card_temp, 'oracle_text', '').lower())
-             if match: cost_str = match.group(1)
-        elif is_manifest and pay_manifest_cost:
-             original_info = self.manifested_cards[card_id]['original']
-             if 'creature' in original_info.get('card_types', []): # Only creatures can be turned up via manifest cost
-                 cost_str = original_info.get('mana_cost')
-             else: return False # Cannot turn non-creature manifest up this way
+        # Check if manifested
+        manifest_info = getattr(self, 'manifested_cards', {}).get(card_id)
+        if manifest_info and manifest_info.get('face_down', True):
+            is_face_down = True
+            source_mechanic = "Manifest"
+            if pay_manifest_cost:
+                 original_info = manifest_info.get('original')
+                 if original_info and 'creature' in original_info.get('card_types', []): # Only creatures can be turned up via manifest cost
+                     cost_to_pay_str = original_info.get('mana_cost')
+                 else:
+                     logging.debug(f"Cannot turn up non-creature manifest {card_id} via cost.")
+                     return False # Cannot turn non-creature manifest up this way
 
-        if not cost_str or not original_info: return False
+        # Check if morphed (if not already identified as manifest)
+        morph_info = getattr(self, 'morphed_cards', {}).get(card_id)
+        if not is_face_down and morph_info and morph_info.get('face_down', True):
+             is_face_down = True
+             source_mechanic = "Morph"
+             if pay_morph_cost:
+                  original_info = morph_info.get('original')
+                  original_card_temp = Card(original_info) # Temporary card to parse cost
+                  match = re.search(r"morph\s*(\{.*?\})", getattr(original_card_temp, 'oracle_text', '').lower())
+                  if match: cost_to_pay_str = match.group(1)
+                  else: logging.warning(f"Could not parse Morph cost for {original_info.get('name')}")
 
-        if self.mana_system.can_pay_mana_cost(player, cost_str):
-            if self.mana_system.pay_mana_cost(player, cost_str):
-                # Restore original card properties from original_info dict
-                card.name = original_info["name"]
-                card.power = original_info["power"] # Should use _safe_int? Needs stored format check
-                card.toughness = original_info["toughness"]
-                card.card_types = original_info["card_types"].copy()
-                card.subtypes = original_info["subtypes"].copy()
-                card.oracle_text = original_info["oracle_text"]
-                card.mana_cost = original_info["mana_cost"]
-                card.cmc = original_info["cmc"]
-                card.colors = original_info["colors"].copy()
-                card.keywords = original_info["keywords"].copy()
-                # ... any other relevant original stats ...
+        # Check generic face-down attribute if specific tracking missed
+        if not is_face_down and getattr(card, 'face_down', False):
+             is_face_down = True
+             source_mechanic = "Unknown Face-down" # Possibly from other effects
+             # Cannot determine original info or cost for generic face-down easily
+             logging.warning(f"Cannot turn face-down card {card_id} up: Unknown origin or cost.")
+             return False
 
-                # Update face-down state
-                card.face_down = False
-                if is_morph: del self.morphed_cards[card_id] # Or set face_down=False
-                if is_manifest: del self.manifested_cards[card_id]
 
-                logging.debug(f"Turned {card.name} face up.")
-                self.trigger_ability(card_id, "TURNED_FACE_UP")
-                if self.layer_system: self.layer_system.invalidate_cache(); self.layer_system.apply_all_effects() # Abilities might change
-                return True
-        return False
+        if not is_face_down:
+            logging.debug(f"Cannot turn {card.name} face up: Not face down.")
+            return False
+
+        if (pay_morph_cost or pay_manifest_cost):
+            if not cost_to_pay_str:
+                logging.debug(f"Cannot turn {card.name} face up: No valid cost found for {source_mechanic}.")
+                return False
+            # Check and Pay Cost
+            if not self.mana_system.can_pay_mana_cost(player, cost_to_pay_str):
+                 logging.debug(f"Cannot turn {card.name} face up: Cannot afford cost {cost_to_pay_str}.")
+                 return False
+            if not self.mana_system.pay_mana_cost(player, cost_to_pay_str):
+                 logging.warning(f"Failed to pay cost {cost_to_pay_str} for turning {card.name} face up.")
+                 return False
+
+        # If cost paid or turning face up for other reason (e.g., effect):
+        if not original_info: # If turning up a generic face-down, we might not have original info
+             # Maybe check card's own definition if it wasn't morphed/manifested? Complex.
+             logging.warning(f"Turning {card.name} face up, but original info unknown (not Morph/Manifest).")
+             # Minimal change: just mark face up, assume current stats are correct.
+             card.face_down = False
+        else:
+             # Restore original card properties from original_info dict
+             original_card_temp = Card(original_info) # Create temp instance to avoid modifying original_info
+             card.name = getattr(original_card_temp, 'name', card.name)
+             card.power = getattr(original_card_temp, 'power', card.power)
+             card.toughness = getattr(original_card_temp, 'toughness', card.toughness)
+             card.card_types = getattr(original_card_temp, 'card_types', card.card_types).copy()
+             card.subtypes = getattr(original_card_temp, 'subtypes', card.subtypes).copy()
+             card.supertypes = getattr(original_card_temp, 'supertypes', card.supertypes).copy()
+             card.oracle_text = getattr(original_card_temp, 'oracle_text', card.oracle_text)
+             card.mana_cost = getattr(original_card_temp, 'mana_cost', card.mana_cost)
+             card.cmc = getattr(original_card_temp, 'cmc', card.cmc)
+             card.colors = getattr(original_card_temp, 'colors', card.colors).copy()
+             card.keywords = getattr(original_card_temp, 'keywords', card.keywords).copy()
+             card.type_line = getattr(original_card_temp, 'type_line', card.type_line)
+             # Restore other necessary attributes
+
+             card.face_down = False
+             # Clear from morph/manifest tracking
+             if source_mechanic == "Morph": self.morphed_cards.pop(card_id, None)
+             if source_mechanic == "Manifest": self.manifested_cards.pop(card_id, None)
+
+        logging.debug(f"Turned {card.name} face up.")
+        self.trigger_ability(card_id, "TURNED_FACE_UP")
+        if self.layer_system: self.layer_system.invalidate_cache(); self.layer_system.apply_all_effects() # Abilities might change
+        return True
 
     def clash(self, player1, player2):
         """Perform clash."""
-        card1_id = player1["library"].pop(0) if player1["library"] else None
-        card2_id = player2["library"].pop(0) if player2["library"] else None
+        # Ensure players are valid and have libraries
+        if not player1 or not player2 or not player1.get("library") or not player2.get("library"):
+             logging.warning("Clash cannot occur: Invalid players or empty library.")
+             return None
+
+        card1_id = player1["library"].pop(0)
+        card2_id = player2["library"].pop(0)
         card1 = self._safe_get_card(card1_id)
         card2 = self._safe_get_card(card2_id)
         cmc1 = getattr(card1, 'cmc', -1) if card1 else -1
         cmc2 = getattr(card2, 'cmc', -1) if card2 else -1
 
-        logging.debug(f"Clash: P1 revealed {getattr(card1,'name','nothing')} (CMC {cmc1}), P2 revealed {getattr(card2,'name','nothing')} (CMC {cmc2})")
+        name1 = getattr(card1,'name','nothing')
+        name2 = getattr(card2,'name','nothing')
+        logging.debug(f"Clash: {player1['name']} revealed {name1} (CMC {cmc1}), {player2['name']} revealed {name2} (CMC {cmc2})")
 
-        # AI Choice needed for top/bottom. Simple: put back on top.
+        # AI Choice needed for top/bottom. Simple: put back on top for now.
+        # Store revealed cards temporarily for potential choice phase
+        self.clash_context = {'p1': (card1_id, card1), 'p2': (card2_id, card2)}
+        # TODO: Implement PHASE_CHOOSE for clash result destination
+        # Temporary: Put back on top
         if card1_id: player1["library"].insert(0, card1_id)
         if card2_id: player2["library"].insert(0, card2_id)
 
+        # Trigger clash event
+        self.trigger_ability(None, "CLASHED", {"player1": player1, "player2": player2, "card1_id": card1_id, "card2_id": card2_id})
+
         # Return winning player (or None for draw/neither)
-        if cmc1 > cmc2: return player1
-        elif cmc2 > cmc1: return player2
-        else: return None
+        if cmc1 > cmc2:
+            logging.debug(f"Clash result: {player1['name']} wins.")
+            return player1
+        elif cmc2 > cmc1:
+            logging.debug(f"Clash result: {player2['name']} wins.")
+            return player2
+        else:
+            logging.debug("Clash result: Draw.")
+            return None
         
     def _find_card_in_hand(self, player, identifier):
         """Finds a card ID in the player's hand using index or ID string."""
@@ -4974,6 +4991,129 @@ class GameState:
             logging.debug("Creatures do not share a color with conspired spell.")
             return False
 
+    def manifest_card(self, player, count=1):
+         """Manifest the top card(s) of the library."""
+         manifested_ids = []
+         for _ in range(count):
+             if not player["library"]: break
+             card_id = player["library"].pop(0)
+             original_info = self._safe_get_card(card_id).__dict__.copy() # Store original data
+
+             # Create face-down creature state
+             manifest_data = {
+                 "name": "Manifested Creature", # Generic name
+                 "power": 2, "toughness": 2,
+                 "card_types": ["creature"], "subtypes": [], "supertypes": [],
+                 "colors": [0,0,0,0,0], # Colorless
+                 "mana_cost": "", "cmc": 0,
+                 "oracle_text": "Face-down creature (2/2). Can be turned face up.",
+                 "face_down": True
+             }
+             # Create a new Card object for the face-down state *or* modify existing?
+             # Modifying existing is simpler for tracking, but needs careful state management.
+             # Let's modify the existing card object in card_db.
+             manifested_card = self._safe_get_card(card_id)
+             if manifested_card:
+                 manifested_card.power = manifest_data["power"]
+                 manifested_card.toughness = manifest_data["toughness"]
+                 manifested_card.card_types = manifest_data["card_types"]
+                 manifested_card.subtypes = manifest_data["subtypes"]
+                 # Keep original name/mana cost/etc hidden but associated? Use tracking dict.
+                 if not hasattr(self, 'manifested_cards'): self.manifested_cards = {}
+                 self.manifested_cards[card_id] = {'original': original_info, 'face_down': True} # Store original
+                 manifested_card.face_down = True # Set flag on card object too
+
+                 # Move to battlefield
+                 success = self.move_card(card_id, player, "library_implicit", player, "battlefield")
+                 if success: manifested_ids.append(card_id)
+                 else: # Failed move, undo?
+                      player["library"].insert(0, card_id) # Put back
+                      if card_id in self.manifested_cards: del self.manifested_cards[card_id] # Clean up tracking
+                      manifested_card.face_down = False # Reset flag
+         if manifested_ids:
+             logging.debug(f"Manifested {len(manifested_ids)} card(s).")
+             return manifested_ids
+         return None
+     
+    def damage_planeswalker(self, planeswalker_id, amount, source_id):
+        """Deal damage to a planeswalker (removes loyalty counters)."""
+        pw_card = self._safe_get_card(planeswalker_id)
+        owner = self.get_card_controller(planeswalker_id)
+        if not pw_card or not owner or 'planeswalker' not in getattr(pw_card, 'card_types', []): return False
+
+        # Apply damage replacement effects targeting this planeswalker
+        damage_context = { "source_id": source_id, "target_id": planeswalker_id, "target_obj": pw_card, "target_is_player": False, "damage_amount": amount, "is_combat_damage": False }
+        actual_damage = amount
+        if hasattr(self, 'replacement_effects'):
+            modified_context, _ = self.replacement_effects.apply_replacements("DAMAGE", damage_context)
+            actual_damage = modified_context.get("damage_amount", 0)
+            # TODO: Handle redirection if target changes
+
+        if actual_damage > 0:
+            current_loyalty = owner.get("loyalty_counters", {}).get(planeswalker_id, getattr(pw_card, 'loyalty', 0))
+            new_loyalty = max(0, current_loyalty - actual_damage)
+            owner.setdefault("loyalty_counters", {})[planeswalker_id] = new_loyalty
+            # Update card object's loyalty too for observation consistency? Maybe not, counters are authoritative.
+            # pw_card.loyalty = new_loyalty # Careful with modifying card state directly here
+
+            source_name = getattr(self._safe_get_card(source_id),'name',source_id)
+            logging.debug(f"{source_name} dealt {actual_damage} damage to {pw_card.name}. Loyalty now {new_loyalty}")
+            self.trigger_ability(planeswalker_id, "DAMAGED", {"amount": actual_damage, "source_id": source_id})
+            self.check_state_based_actions() # PW might die
+            return True
+        return False
+
+    def damage_battle(self, battle_id, amount, source_id):
+        """Deal damage to a battle (removes defense counters)."""
+        battle_card = self._safe_get_card(battle_id)
+        owner = self.get_card_controller(battle_id)
+        if not battle_card or not owner or 'battle' not in getattr(battle_card, 'type_line', ''): return False
+
+        # Apply damage replacement effects targeting this battle
+        damage_context = { "source_id": source_id, "target_id": battle_id, "target_obj": battle_card, "target_is_player": False, "damage_amount": amount, "is_combat_damage": False }
+        actual_damage = amount
+        if hasattr(self, 'replacement_effects'):
+            modified_context, _ = self.replacement_effects.apply_replacements("DAMAGE", damage_context)
+            actual_damage = modified_context.get("damage_amount", 0)
+            # TODO: Handle redirection
+
+        if actual_damage > 0:
+            success = self.add_defense_counter(battle_id, -actual_damage) # Use helper to remove defense
+            if success:
+                source_name = getattr(self._safe_get_card(source_id),'name',source_id)
+                current_defense = getattr(self,'battle_cards',{}).get(battle_id,0) # Read current defense
+                logging.debug(f"{source_name} dealt {actual_damage} damage to {battle_card.name}. Defense now {current_defense}")
+                self.trigger_ability(battle_id, "DAMAGED", {"amount": actual_damage, "source_id": source_id})
+                # SBA check for battle defeat handled within add_defense_counter or separate SBA check
+                self.check_state_based_actions()
+            return success
+        return False
+
+    def apply_damage_to_permanent(self, target_id, amount, source_id, is_combat_damage=False, has_deathtouch=False):
+        """Marks damage on a creature, considering deathtouch."""
+        target_card = self._safe_get_card(target_id)
+        target_owner = self.get_card_controller(target_id)
+        if not target_card or not target_owner or 'creature' not in getattr(target_card, 'card_types', []): return False
+
+        # Apply damage replacement effects targeting this creature
+        damage_context = { "source_id": source_id, "target_id": target_id, "target_obj": target_card, "target_is_player": False, "damage_amount": amount, "is_combat_damage": is_combat_damage }
+        actual_damage = amount
+        if hasattr(self, 'replacement_effects'):
+            modified_context, _ = self.replacement_effects.apply_replacements("DAMAGE", damage_context)
+            actual_damage = modified_context.get("damage_amount", 0)
+            # TODO: Handle redirection
+
+        if actual_damage > 0:
+             target_owner.setdefault("damage_counters", {})[target_id] = target_owner.get("damage_counters", {}).get(target_id, 0) + actual_damage
+             if has_deathtouch:
+                  target_owner.setdefault("deathtouch_damage", {})[target_id] = True
+             source_name = getattr(self._safe_get_card(source_id),'name',source_id)
+             logging.debug(f"{source_name} marked {actual_damage} damage on {target_card.name}{' (Deathtouch)' if has_deathtouch else ''}.")
+             self.trigger_ability(target_id, "DAMAGED", {"amount": actual_damage, "source_id": source_id, "is_combat": is_combat_damage})
+             # SBA check will happen later in the game loop
+             return True
+        return False
+
     def amass(self, player, amount):
         """Perform Amass N. Finds or creates Army token and adds counters."""
         army_token_id = None
@@ -5001,76 +5141,156 @@ class GameState:
     
     def explore(self, player, creature_id):
         """Perform explore for a creature."""
-        if not player["library"]:
+        if not player or "library" not in player or not player["library"]:
             logging.debug("Explore: Library empty.")
             return False # Nothing to reveal
 
         top_card_id = player["library"].pop(0) # Remove from top
         top_card = self._safe_get_card(top_card_id)
+        if not top_card: # Should not happen if library is just IDs
+            logging.error(f"Explore failed: Invalid card ID {top_card_id} found in library.")
+            return False
         card_name = getattr(top_card,'name','Unknown Card')
-        logging.debug(f"Exploring (via {self._safe_get_card(creature_id).name}): Revealed {card_name}")
+        exploring_creature = self._safe_get_card(creature_id)
+        exploring_creature_name = getattr(exploring_creature, 'name', creature_id) if exploring_creature else creature_id
+        logging.debug(f"Exploring (via {exploring_creature_name}): Revealed {card_name}")
 
-        is_land = top_card and 'land' in getattr(top_card, 'type_line', '').lower()
+        is_land = 'land' in getattr(top_card, 'type_line', '').lower()
 
         if is_land:
             success_move = self.move_card(top_card_id, player, "library_implicit", player, "hand") # Use implicit source zone
-            if success_move: logging.debug("Explore hit a land, put into hand.")
-            else: player["library"].insert(0, top_card_id) # Put back if move fails? Rare.
+            if success_move:
+                 logging.debug(f"Explore hit a land ({card_name}), put into hand.")
+                 self.trigger_ability(creature_id, "EXPLORED_LAND", {"revealed_card_id": top_card_id})
+            else:
+                 player["library"].insert(0, top_card_id) # Put back if move fails? Rare.
             return success_move
         else:
             # Put +1/+1 counter on exploring creature
             success_counter = self.add_counter(creature_id, "+1/+1", 1)
-            if success_counter: logging.debug(f"Explore hit nonland, put +1/+1 counter on {self._safe_get_card(creature_id).name}")
+            if success_counter: logging.debug(f"Explore hit nonland, put +1/+1 counter on {exploring_creature_name}")
 
-            # AI choice: top or graveyard? Simple: Graveyard unless high value non-land.
-            value = self.card_evaluator.evaluate_card(top_card_id, "explore_nonland") if self.card_evaluator else 0
-            if value > 0.6: # Threshold to keep non-land on top
-                 player["library"].insert(0, top_card_id) # Put back on top
-                 logging.debug(f"Explore: Kept high-value nonland {card_name} on top.")
-            else:
+            # AI choice: top or graveyard? Use CardEvaluator if available.
+            put_in_gy = True # Default to graveyard
+            if self.card_evaluator:
+                 value = self.card_evaluator.evaluate_card(top_card_id, "explore_nonland")
+                 if value > 0.6: # Threshold to keep non-land on top
+                      put_in_gy = False
+            elif getattr(top_card, 'cmc', 0) >= 4: # Simple heuristic: Keep expensive non-lands
+                put_in_gy = False
+
+            if put_in_gy:
                  success_move = self.move_card(top_card_id, player, "library_implicit", player, "graveyard")
                  if success_move: logging.debug(f"Explore: Put nonland {card_name} into graveyard.")
                  else: player["library"].insert(0, top_card_id) # Put back if move fails
+                 self.trigger_ability(creature_id, "EXPLORED_NONLAND_GY", {"revealed_card_id": top_card_id})
                  return success_move
-            return True
-        
+            else:
+                 player["library"].insert(0, top_card_id) # Put back on top
+                 logging.debug(f"Explore: Kept nonland {card_name} on top.")
+                 self.trigger_ability(creature_id, "EXPLORED_NONLAND_TOP", {"revealed_card_id": top_card_id})
+                 return True
+
     def adapt(self, player, creature_id, amount):
         """Perform adapt N."""
         card = self._safe_get_card(creature_id)
         # Adapt only if creature has no +1/+1 counters
         if card and getattr(card, 'counters', {}).get('+1/+1', 0) == 0:
-            # Adapt cost is usually an activated ability cost.
-            # Assume cost is paid elsewhere (this just applies the counters)
             success = self.add_counter(creature_id, '+1/+1', amount)
-            if success: logging.debug(f"Adapt {amount}: Added {amount} counters to {card.name}.")
+            if success:
+                logging.debug(f"Adapt {amount}: Added {amount} counters to {card.name}.")
+                self.trigger_ability(creature_id, "ADAPTED", {"amount": amount})
             return success
         else:
-            logging.debug(f"Adapt: Cannot adapt {card.name} (already has +1/+1 counters).")
+            logging.debug(f"Adapt: Cannot adapt {getattr(card,'name',creature_id)} (already has +1/+1 counters or not found).")
             return False
 
     def goad_creature(self, target_id):
         """Mark creature as goaded."""
         card = self._safe_get_card(target_id)
-        if not card or 'creature' not in getattr(card, 'card_types', []): return False
-        if not hasattr(self, 'goaded_creatures'): self.goaded_creatures = {} # Store turn goaded
-        self.goaded_creatures[target_id] = self.turn
+        target_owner = self.get_card_controller(target_id)
+        if not card or 'creature' not in getattr(card, 'card_types', []) or not target_owner: return False
+
+        # Track goaded status, perhaps on the player dictionary
+        target_owner.setdefault("goaded_creatures", set()).add(target_id)
+        # Could store turn goaded for duration: target_owner.setdefault("goaded_status", {})[target_id] = self.turn
         logging.debug(f"Goaded {card.name}")
+        self.trigger_ability(target_id, "GOADED") # Trigger ability if needed
         return True
 
     def prevent_damage(self, target, amount):
-        """Register damage prevention shield."""
-        # Target can be player dict or card_id str
-        target_key = target['name'] if isinstance(target, dict) else target
-        if not hasattr(self, 'damage_prevention_shields'): self.damage_prevention_shields = defaultdict(int)
-        self.damage_prevention_shields[target_key] += amount
-        logging.debug(f"Registered prevention shield: {amount} damage to {target_key}")
+        """Register damage prevention. (Uses Replacement System)"""
+        if not self.replacement_effects:
+             logging.warning("Cannot prevent damage: ReplacementEffectSystem missing.")
+             return False
+        target_key = target['name'] if isinstance(target, dict) else target # Player dict or permanent ID
+        source_name = "Generic Prevention" # Need source context usually
+        logging.debug(f"Registering {amount} damage prevention for {target_key}.")
+
+        def condition(ctx):
+            # Basic check: Target matches, damage > 0
+            return ctx.get('target_id') == target_key and ctx.get('damage_amount', 0) > 0
+
+        def replacement(ctx):
+            original_damage = ctx.get('damage_amount', 0)
+            prevented = min(original_damage, amount)
+            ctx['damage_amount'] = max(0, original_damage - prevented)
+            logging.debug(f"Prevention: Prevented {prevented} damage to {target_key}. Remaining: {ctx['damage_amount']}")
+            # TODO: Track remaining prevention shield if limited use
+            return ctx
+
+        # Needs a source ID and duration, use placeholders
+        self.replacement_effects.register_effect({
+             'source_id': 'PREVENTION_EFFECT', 'event_type': 'DAMAGE',
+             'condition': condition, 'replacement': replacement,
+             'duration': 'end_of_turn', 'controller_id': None, # Affects target, not controller based
+             'description': f"Prevent {amount} damage to {target_key}"
+        })
         return True
 
     def redirect_damage(self, source_filter, original_target, new_target):
-        """Register damage redirection. Needs full implementation."""
-        # Requires integrating with ReplacementEffectSystem properly. Placeholder.
-        logging.warning("Redirect damage needs proper implementation.")
-        return False
+        """Register damage redirection. (Uses Replacement System)"""
+        if not self.replacement_effects:
+             logging.warning("Cannot redirect damage: ReplacementEffectSystem missing.")
+             return False
+        original_target_key = original_target['name'] if isinstance(original_target, dict) else original_target
+        new_target_key = new_target['name'] if isinstance(new_target, dict) else new_target
+        new_target_is_player = isinstance(new_target, dict)
+        new_target_obj = new_target if new_target_is_player else self._safe_get_card(new_target_key)
+        new_target_owner = new_target if new_target_is_player else self.get_card_controller(new_target_key)
+
+        logging.debug(f"Registering damage redirection from {original_target_key} to {new_target_key}.")
+
+        def condition(ctx):
+            # Check source matches filter (basic: allow any for now)
+            # Check original target matches
+            return ctx.get('target_id') == original_target_key and ctx.get('damage_amount', 0) > 0
+
+        def replacement(ctx):
+            original_damage = ctx.get('damage_amount', 0)
+            logging.debug(f"Redirecting {original_damage} damage from {original_target_key} to {new_target_key}.")
+            ctx['damage_amount'] = 0 # Prevent original damage
+            ctx['redirected'] = True
+            # --- Schedule separate damage event to new target ---
+            # Avoid applying damage directly inside replacement to prevent loops
+            def deal_redirected_damage():
+                 if new_target_is_player:
+                     if hasattr(new_target_obj, 'life'): new_target_obj['life'] -= original_damage
+                 else:
+                     self.apply_damage_to_permanent(new_target_key, original_damage, ctx.get('source_id', 'redirect_source'))
+
+            if not hasattr(self, 'delayed_triggers'): self.delayed_triggers = []
+            self.delayed_triggers.append(deal_redirected_damage)
+            return ctx
+
+        # Needs source ID and duration
+        self.replacement_effects.register_effect({
+             'source_id': 'REDIRECT_EFFECT', 'event_type': 'DAMAGE',
+             'condition': condition, 'replacement': replacement,
+             'duration': 'end_of_turn', 'controller_id': None, # Belongs to game state rule?
+             'description': f"Redirect damage from {original_target_key} to {new_target_key}"
+        })
+        return True
 
 
     def counter_spell(self, stack_index):

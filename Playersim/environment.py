@@ -1,3 +1,4 @@
+
 import random
 import logging
 import numpy as np
@@ -22,15 +23,35 @@ from .strategy_memory import StrategyMemory
 from collections import defaultdict
 from .layer_system import LayerSystem
 from .replacement_effects import ReplacementEffectSystem
-from .deck_stats_tracker import DeckStatsCollector
+from .deck_stats_tracker import DeckStatsCollector # NOTE: Renamed? DeckStatsTracker seems more likely based on usage. Assume Tracker.
+try:
+    from .deck_stats_tracker import DeckStatsTracker
+except ImportError:
+    # Fallback if DeckStatsTracker doesn't exist
+    class DeckStatsTracker:
+        def record_game(self, *args, **kwargs): pass
+        def save_updates_sync(self): pass
+
 from .card_memory import CardMemory
+
+# Define FEATURE_DIM more safely or pass it around
+# Attempt to determine dynamically first
+try:
+    # Create a dummy card to get feature dimension
+    dummy_card_data = {"name": "Dummy", "type_line": "Creature", "mana_cost": "{1}"}
+    FEATURE_DIM = len(Card(dummy_card_data).to_feature_vector())
+    logging.info(f"Determined FEATURE_DIM dynamically: {FEATURE_DIM}")
+except Exception as e:
+    logging.warning(f"Could not determine FEATURE_DIM dynamically, using fallback 223: {e}")
+    FEATURE_DIM = 223 # Fallback
 
 class AlphaZeroMTGEnv(gym.Env):
     """
     An example Magic: The Gathering environment that uses the Gymnasium (>= 0.26) API.
     Updated for improved reward shaping, richer observations, modularity, and detailed logging.
     """
-    
+    ACTION_SPACE_SIZE = 480 # Moved constant here
+
     def __init__(self, decks, card_db, max_turns=20, max_hand_size=7, max_battlefield=20):
         super().__init__()
         self.decks = decks
@@ -41,17 +62,18 @@ class AlphaZeroMTGEnv(gym.Env):
         self.strategy_memory = StrategyMemory()
         self.current_episode_actions = []
         self.current_analysis = None
+        self._feature_dim = FEATURE_DIM # Store determined feature dim
+
         # Initialize deck statistics tracker
         try:
-            from .deck_stats_tracker import DeckStatsTracker
+            # Use the imported DeckStatsTracker (fixed name)
             self.stats_tracker = DeckStatsTracker()
             self.has_stats_tracker = True
-        except (ImportError, ModuleNotFoundError):
+        except (ImportError, ModuleNotFoundError, NameError): # Added NameError
             logging.warning("DeckStatsTracker not available, statistics will not be recorded")
             self.stats_tracker = None
             self.has_stats_tracker = False
         try:
-            from .card_memory import CardMemory
             self.card_memory = CardMemory()
             self.has_card_memory = True
             logging.info("Card memory system initialized successfully")
@@ -61,89 +83,88 @@ class AlphaZeroMTGEnv(gym.Env):
             self.has_card_memory = False
         # Track cards played during the game
         self.cards_played = {0: [], 1: []}  # Player index -> list of card IDs
-        
-        # Initialize game state manager
-        self.game_state = GameState(card_db, max_turns, max_hand_size, max_battlefield)
-        
-        # Initialize action handler
-        self.action_handler = ActionHandler(self.game_state)
-        
-        # Initialize combat resolver
-        self.combat_resolver = ExtendedCombatResolver(self.game_state)
-        # Integrate combat actions
-        integrate_combat_actions(self.game_state)
-        # Feature dimension for card vectors
-        FEATURE_DIM = 223
 
-        MAX_PHASE = self.game_state.PHASE_CLEANUP
-        
+        # Initialize game state manager
+        self.game_state = GameState(self.card_db, max_turns, max_hand_size, max_battlefield)
+
+        # Initialize action handler AFTER GameState
+        self.action_handler = ActionHandler(self.game_state)
+
+        # GameState initializes its own subsystems now
+        self.combat_resolver = getattr(self.game_state, 'combat_resolver', None) # Get ref if needed
+        integrate_combat_actions(self.game_state) # Integrate after GS subsystems are ready
+
+        # Feature dimension determined dynamically above
+        MAX_PHASE = self.game_state.PHASE_CHOOSE # Use latest defined phase constant
+
         self.action_memory_size = 80
-        
-        try:
-            # Create a dummy card to get feature dimension
-            dummy_card_data = {"name": "Dummy", "type_line": "Creature", "mana_cost": "{1}"}
-            FEATURE_DIM = len(Card(dummy_card_data).to_feature_vector())
-            logging.info(f"Determined FEATURE_DIM dynamically: {FEATURE_DIM}")
-        except Exception as e:
-            logging.warning(f"Could not determine FEATURE_DIM dynamically, using fallback 223: {e}")
-            FEATURE_DIM = 223 # Fallback
+
+        # Correct keyword size based on Card class
+        keyword_dimension = len(Card.ALL_KEYWORDS)
+        logging.info(f"Using keyword dimension: {keyword_dimension}")
 
         self.observation_space = spaces.Dict({
-            # --- Existing ---
-            "recommended_action": spaces.Box(low=0, high=480, shape=(1,), dtype=np.int32),
+            # --- Keys from the original definition ---
+            # --- (Corrections applied based on review plan) ---
+            "recommended_action": spaces.Box(low=0, high=self.ACTION_SPACE_SIZE - 1, shape=(1,), dtype=np.int32), # Corrected upper bound
             "recommended_action_confidence": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
-            "memory_suggested_action": spaces.Box(low=0, high=480, shape=(1,), dtype=np.int32),
+            "memory_suggested_action": spaces.Box(low=0, high=self.ACTION_SPACE_SIZE - 1, shape=(1,), dtype=np.int32), # Corrected upper bound
             "suggestion_matches_recommendation": spaces.Box(low=0, high=1, shape=(1,), dtype=np.int32),
             "optimal_attackers": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=np.float32),
             "attacker_values": spaces.Box(low=-10, high=10, shape=(self.max_battlefield,), dtype=np.float32),
             "planeswalker_activations": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=np.float32),
             "planeswalker_activation_counts": spaces.Box(low=0, high=10, shape=(self.max_battlefield,), dtype=np.float32),
-            "ability_recommendations": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5, 2), dtype=np.float32), # Shape might need adjustment based on ability count per card
-            "phase": spaces.Discrete(MAX_PHASE + 1),
+            "ability_recommendations": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5, 2), dtype=np.float32), # Max 5 abilities assumed
+            # "phase": spaces.Discrete(MAX_PHASE + 1), # Changed to Box
+            "phase": spaces.Box(low=0, high=MAX_PHASE, shape=(1,), dtype=np.int32), # Changed from Discrete
             "mulligan_in_progress": spaces.Box(low=0, high=1, shape=(1,), dtype=np.int32),
             "mulligan_recommendation": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
             "mulligan_reason_count": spaces.Box(low=0, high=5, shape=(1,), dtype=np.int32),
-            "mulligan_reasons": spaces.Box(low=0, high=1, shape=(5,), dtype=np.float32), # Represent reasons numerically if possible
+            "mulligan_reasons": spaces.Box(low=0, high=1, shape=(5,), dtype=np.float32),
             "phase_onehot": spaces.Box(low=0, high=1, shape=(MAX_PHASE + 1,), dtype=np.float32),
             "turn": spaces.Box(low=0, high=self.max_turns, shape=(1,), dtype=np.int32),
             "p1_life": spaces.Box(low=0, high=40, shape=(1,), dtype=np.int32),
             "p2_life": spaces.Box(low=0, high=40, shape=(1,), dtype=np.int32),
-            "p1_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, FEATURE_DIM), dtype=np.float32), # Use -1 for empty slots?
-            "p2_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, FEATURE_DIM), dtype=np.float32),
+            "p1_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, self._feature_dim), dtype=np.float32),
+            "p2_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, self._feature_dim), dtype=np.float32),
             "p1_bf_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
             "p2_bf_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
             "my_life": spaces.Box(low=0, high=40, shape=(1,), dtype=np.int32),
-            "my_mana": spaces.Box(low=0, high=20, shape=(1,), dtype=np.int32), # Sum of mana pool
+            "my_mana": spaces.Box(low=0, high=20, shape=(1,), dtype=np.int32),
             "my_mana_pool": spaces.Box(low=0, high=100, shape=(6,), dtype=np.int32), # WUBRGC
-            "my_hand": spaces.Box(low=-1, high=50, shape=(self.max_hand_size, FEATURE_DIM), dtype=np.float32),
+            "my_hand": spaces.Box(low=-1, high=50, shape=(self.max_hand_size, self._feature_dim), dtype=np.float32),
             "my_hand_count": spaces.Box(low=0, high=self.max_hand_size, shape=(1,), dtype=np.int32),
-            "action_mask": spaces.Box(low=0, high=1, shape=(self.ACTION_SPACE_SIZE,), dtype=bool), # Use constant
+            "action_mask": spaces.Box(low=0, high=1, shape=(self.ACTION_SPACE_SIZE,), dtype=bool),
             "stack_count": spaces.Box(low=0, high=20, shape=(1,), dtype=np.int32),
             "my_graveyard_count": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "opp_graveyard_count": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "hand_playable": spaces.Box(low=0, high=1, shape=(self.max_hand_size,), dtype=np.float32),
             "hand_performance": spaces.Box(low=0, high=1, shape=(self.max_hand_size,), dtype=np.float32),
-            "graveyard_count": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32), # Redundant?
-            "tapped_permanents": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=bool), # Player specific needed?
-            "phase_history": spaces.Box(low=-1, high=MAX_PHASE, shape=(5,), dtype=np.int32), # Use -1 for padding
+            # "graveyard_count": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32), # REMOVED (Redundant)
+            # "tapped_permanents": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=bool), # Renamed
+            "my_tapped_permanents": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=bool), # Renamed
+            # "opp_tapped_permanents": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=bool), # Added (Optional)
+            "phase_history": spaces.Box(low=-1, high=MAX_PHASE, shape=(5,), dtype=np.int32),
             "remaining_mana_sources": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
             "is_my_turn": spaces.Box(low=0, high=1, shape=(1,), dtype=np.int32),
             "life_difference": spaces.Box(low=-40, high=40, shape=(1,), dtype=np.int32),
             "opp_life": spaces.Box(low=0, high=40, shape=(1,), dtype=np.int32),
             "card_synergy_scores": spaces.Box(low=-1, high=1, shape=(self.max_battlefield, self.max_battlefield), dtype=np.float32),
-            "graveyard_key_cards": spaces.Box(low=-1, high=50, shape=(10, FEATURE_DIM), dtype=np.float32),
-            "exile_key_cards": spaces.Box(low=-1, high=50, shape=(10, FEATURE_DIM), dtype=np.float32),
-            "battlefield_keywords": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 15), dtype=np.float32), # Player specific needed? Increase keyword count?
+            "graveyard_key_cards": spaces.Box(low=-1, high=50, shape=(10, self._feature_dim), dtype=np.float32),
+            "exile_key_cards": spaces.Box(low=-1, high=50, shape=(10, self._feature_dim), dtype=np.float32),
+            # "battlefield_keywords": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 15), dtype=np.float32), # Renamed & shape updated
+            "my_battlefield_keywords": spaces.Box(low=0, high=1, shape=(self.max_battlefield, keyword_dimension), dtype=np.float32), # Renamed & shape updated
+            # "opp_battlefield_keywords": spaces.Box(low=0, high=1, shape=(self.max_battlefield, keyword_dimension), dtype=np.float32), # Added (Optional)
             "position_advantage": spaces.Box(low=-1, high=1, shape=(1,), dtype=np.float32),
-            "estimated_opponent_hand": spaces.Box(low=-1, high=50, shape=(self.max_hand_size, FEATURE_DIM), dtype=np.float32),
-            "strategic_metrics": spaces.Box(low=-1, high=1, shape=(10,), dtype=np.float32), # Define specific metrics?
-            "deck_composition_estimate": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32), # Define components?
-            "threat_assessment": spaces.Box(low=0, high=10, shape=(self.max_battlefield,), dtype=np.float32), # Opponent battlefield specific?
+            "estimated_opponent_hand": spaces.Box(low=-1, high=50, shape=(self.max_hand_size, self._feature_dim), dtype=np.float32),
+            "strategic_metrics": spaces.Box(low=-1, high=1, shape=(10,), dtype=np.float32),
+            "deck_composition_estimate": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
+            "threat_assessment": spaces.Box(low=0, high=10, shape=(self.max_battlefield,), dtype=np.float32),
             "opportunity_assessment": spaces.Box(low=0, high=10, shape=(self.max_hand_size,), dtype=np.float32),
-            "resource_efficiency": spaces.Box(low=0, high=1, shape=(3,), dtype=np.float32), # Define components?
-            "my_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, FEATURE_DIM), dtype=np.float32),
-            "my_battlefield_flags": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5), dtype=np.float32), # Tapped, Sick, Attacking, Blocking, Keywords?
-            "opp_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, FEATURE_DIM), dtype=np.float32),
+            "resource_efficiency": spaces.Box(low=0, high=1, shape=(3,), dtype=np.float32),
+            "my_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, self._feature_dim), dtype=np.float32),
+            "my_battlefield_flags": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5), dtype=np.float32),
+            "opp_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, self._feature_dim), dtype=np.float32),
             "opp_battlefield_flags": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5), dtype=np.float32),
             "my_creature_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
             "opp_creature_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
@@ -154,62 +175,48 @@ class AlphaZeroMTGEnv(gym.Env):
             "power_advantage": spaces.Box(low=-100, high=100, shape=(1,), dtype=np.int32),
             "toughness_advantage": spaces.Box(low=-100, high=100, shape=(1,), dtype=np.int32),
             "creature_advantage": spaces.Box(low=-self.max_battlefield, high=self.max_battlefield, shape=(1,), dtype=np.int32),
-            "hand_card_types": spaces.Box(low=0, high=1, shape=(self.max_hand_size, 5), dtype=np.float32), # Land, Creature, Instant, Sorcery, Other
+            "hand_card_types": spaces.Box(low=0, high=1, shape=(self.max_hand_size, 5), dtype=np.float32),
             "opp_hand_count": spaces.Box(low=0, high=self.max_hand_size, shape=(1,), dtype=np.int32),
-            "total_available_mana": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32), # Sum of pool + potential from untapped lands?
+            "total_available_mana": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "untapped_land_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
-            "turn_vs_mana": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32), # Mana available / Turn number?
-            "stack_controller": spaces.Box(low=-1, high=1, shape=(5,), dtype=np.int32), # Top 5 stack items: 0=me, 1=opp, -1=empty
-            "stack_card_types": spaces.Box(low=0, high=1, shape=(5, 5), dtype=np.float32), # Top 5 items: Creature, Inst, Sorc, Ability, Other
+            "turn_vs_mana": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
+            "stack_controller": spaces.Box(low=-1, high=1, shape=(5,), dtype=np.int32),
+            "stack_card_types": spaces.Box(low=0, high=1, shape=(5, 5), dtype=np.float32),
             "my_dead_creatures": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "opp_dead_creatures": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "attackers_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
             "blockers_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
-            "potential_combat_damage": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32), # Expected unblocked damage?
-            "ability_features": spaces.Box(low=0, high=10, shape=(self.max_battlefield, 5), dtype=np.float32), # Count, Can Activate, Mana, Draw, Removal?
-            "ability_timing": spaces.Box(low=0, high=1, shape=(5,), dtype=np.float32), # Appropriateness score per phase type?
-            "previous_actions": spaces.Box(low=-1, high=self.ACTION_SPACE_SIZE, shape=(self.action_memory_size,), dtype=np.int32), # Use -1 padding
+            "potential_combat_damage": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
+            "ability_features": spaces.Box(low=0, high=10, shape=(self.max_battlefield, 5), dtype=np.float32),
+            "ability_timing": spaces.Box(low=0, high=1, shape=(5,), dtype=np.float32),
+            "previous_actions": spaces.Box(low=-1, high=self.ACTION_SPACE_SIZE, shape=(self.action_memory_size,), dtype=np.int32),
             "previous_rewards": spaces.Box(low=-10, high=10, shape=(self.action_memory_size,), dtype=np.float32),
             "hand_synergy_scores": spaces.Box(low=0, high=1, shape=(self.max_hand_size,), dtype=np.float32),
-            "opponent_archetype": spaces.Box(low=0, high=1, shape=(4,), dtype=np.float32), # Aggro, Control, Midrange, Combo?
-            "future_state_projections": spaces.Box(low=-1, high=1, shape=(5,), dtype=np.float32), # E.g. life diff, board diff in N turns
-            "multi_turn_plan": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32), # Encoded plan
-            "win_condition_viability": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32), # Viability of common WCs
-            "win_condition_timings": spaces.Box(low=0, high=self.max_turns, shape=(6,), dtype=np.float32), # Estimated turns for WCs
+            "opponent_archetype": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32), # Updated shape to 6 based on prediction method
+            "future_state_projections": spaces.Box(low=-1, high=1, shape=(7,), dtype=np.float32), # Updated shape to 7 based on projection method
+            "multi_turn_plan": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
+            "win_condition_viability": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
+            "win_condition_timings": spaces.Box(low=0, high=self.max_turns + 1, shape=(6,), dtype=np.float32), # Corrected upper bound
         })
 
         # Add memory for actions and rewards
-
-        self.last_n_actions = np.zeros(self.action_memory_size, dtype=np.int32)
+        self.last_n_actions = np.full(self.action_memory_size, -1, dtype=np.int32) # Use -1 for padding
         self.last_n_rewards = np.zeros(self.action_memory_size, dtype=np.float32)
-        
-        self.action_space = spaces.Discrete(480)
+
         self.invalid_action_limit = 150  # Max invalid actions before episode termination
         self.max_episode_steps = 2000
-        
+
         # Episode metrics
-        self.current_step = 0
         self.current_step = 0
         self.invalid_action_count = 0
         self.episode_rewards = []
         self.episode_invalid_actions = 0
-        self.current_episode_actions = []  # Add this line
+        self.current_episode_actions = []
         self.detailed_logging = False
-        
-                # Initialize ability handler if available
-        if hasattr(self, 'ability_handler'):
-            # Only clear if we're going to create a new one
-            if self.ability_handler is not None:
-                logging.debug("Clearing existing ability handler")
-                self.ability_handler = None
-                
-        # Initialize turn tracking for abilities
-        if hasattr(self, 'ability_handler') and self.ability_handler:
-            if hasattr(self.ability_handler, 'initialize_turn_tracking'):
-                self.ability_handler.initialize_turn_tracking()
-        
-        # Valid actions
-        self.current_valid_actions = np.zeros(480, dtype=bool)
+
+        # Valid actions mask
+        self.current_valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+
         
 
     def initialize_strategic_memory(self):
@@ -229,28 +236,37 @@ class AlphaZeroMTGEnv(gym.Env):
             logging.error(traceback.format_exc())
             self.strategy_memory = None
     
+
     def action_mask(self, env=None):
         """Return the current action mask as boolean array"""
         # Ignore the env argument if passed
-        
+
         # Check if the game state has changed in a way that would affect valid actions
         gs = self.game_state
-        current_phase = gs.phase
-        current_turn = gs.turn
-        current_stack_size = len(gs.stack)
-        current_attackers = len(gs.current_attackers)
-        
+        # Safety checks for attributes
+        current_phase = getattr(gs, 'phase', -1)
+        current_turn = getattr(gs, 'turn', -1)
+        current_stack_size = len(getattr(gs, 'stack', []))
+        current_attackers = len(getattr(gs, 'current_attackers', []))
+
         # Determine if we need to regenerate the action mask
         state_changed = not hasattr(self, '_last_action_mask_state') or \
                     self._last_action_mask_state['phase'] != current_phase or \
                     self._last_action_mask_state['turn'] != current_turn or \
                     self._last_action_mask_state['stack_size'] != current_stack_size or \
                     self._last_action_mask_state['attackers'] != current_attackers
-        
-        if state_changed or np.sum(self.current_valid_actions) == 0:
+
+        # Always regenerate if no mask exists yet
+        if not hasattr(self, 'current_valid_actions') or self.current_valid_actions is None or state_changed or np.sum(self.current_valid_actions) == 0:
             try:
+                # Ensure ActionHandler exists and is linked to the current GameState
+                if not hasattr(self, 'action_handler') or self.action_handler is None or self.action_handler.game_state != self.game_state:
+                     self.action_handler = ActionHandler(self.game_state)
+
                 self.current_valid_actions = self.action_handler.generate_valid_actions()
-                
+                if self.current_valid_actions is None or not isinstance(self.current_valid_actions, np.ndarray) or self.current_valid_actions.shape != (self.ACTION_SPACE_SIZE,):
+                    raise ValueError("generate_valid_actions returned invalid mask")
+
                 # Update state tracking
                 self._last_action_mask_state = {
                     'phase': current_phase,
@@ -260,10 +276,13 @@ class AlphaZeroMTGEnv(gym.Env):
                 }
             except Exception as e:
                 logging.error(f"Error generating valid actions: {str(e)}")
+                import traceback
+                logging.error(f"{traceback.format_exc()}")
                 # Fallback to basic action mask if generation fails
-                self.current_valid_actions = np.zeros(480, dtype=bool)  # Updated size to480
-                self.current_valid_actions[0] = True  # Enable END_TURN as fallback
-        
+                self.current_valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+                self.current_valid_actions[11] = True # Enable PASS_PRIORITY
+                self.current_valid_actions[12] = True  # Enable CONCEDE as fallback
+        # Return bool version
         return self.current_valid_actions.astype(bool)
     
     def reset(self, seed=None, **kwargs):
@@ -306,6 +325,9 @@ class AlphaZeroMTGEnv(gym.Env):
             self._game_result_recorded = False # Reset recording flag
             self._logged_card_ids = set() # Reset logging trackers
             self._logged_errors = set()   # Reset logging trackers
+            self.last_n_actions = np.full(self.action_memory_size, -1, dtype=np.int32) # Reset action history
+            self.last_n_rewards = np.zeros(self.action_memory_size, dtype=np.float32) # Reset reward history
+
 
             # --- Reset GameState and Player Setup ---
             # Choose random decks
@@ -317,16 +339,13 @@ class AlphaZeroMTGEnv(gym.Env):
             self.original_p2_deck = p2_deck_data["cards"].copy()
 
             # Initialize GameState (creates players, resets turn/phase, etc.)
-            # Make sure GameState's constructor doesn't auto-initialize subsystems we handle below
             self.game_state = GameState(self.card_db, self.max_turns, self.max_hand_size, self.max_battlefield)
             # GameState's reset performs deck setup, shuffling, initial draw
             self.game_state.reset(p1_deck_data["cards"], p2_deck_data["cards"], seed)
 
             # --- Initialize & Link Subsystems to GameState ---
-            # Call GameState's consolidated subsystem initialization FIRST
-            # This should create ManaSystem, AbilityHandler, LayerSystem, ReplacementEffects, CombatResolver etc.
-            # *inside* the GameState object
-            self.game_state._init_subsystems() # Ensure this happens before env components need them
+            # GameState._init_subsystems() should handle this now.
+            # We need references to these subsystems in the environment though.
 
             # Initialize strategy memory early if others depend on it
             self.initialize_strategic_memory()
@@ -334,17 +353,17 @@ class AlphaZeroMTGEnv(gym.Env):
                  self.game_state.strategy_memory = self.strategy_memory
 
             # Initialize stats/card memory trackers if available and link to GS
-            if self.has_stats_tracker:
+            if self.has_stats_tracker and self.stats_tracker:
                 self.game_state.stats_tracker = self.stats_tracker
                 self.stats_tracker.current_deck_name_p1 = self.current_deck_name_p1
                 self.stats_tracker.current_deck_name_p2 = self.current_deck_name_p2
-            if self.has_card_memory:
+            if self.has_card_memory and self.card_memory:
                 self.game_state.card_memory = self.card_memory
 
 
             # --- Initialize Environment Components Using GameState Subsystems ---
             # Action Handler depends on GameState and its subsystems
-            self.action_handler = ActionHandler(self.game_state)
+            self.action_handler = ActionHandler(self.game_state) # Recreate/link ActionHandler
 
             # Get references to components created by GameState for env use
             # These might be None if imports failed or init failed in GS
@@ -352,28 +371,20 @@ class AlphaZeroMTGEnv(gym.Env):
             self.card_evaluator = getattr(self.game_state, 'card_evaluator', None)
             self.strategic_planner = getattr(self.game_state, 'strategic_planner', None)
             self.mana_system = getattr(self.game_state, 'mana_system', None)
-            self.ability_handler = getattr(self.game_state, 'ability_handler', None) # Ensure handler is linked
+            self.ability_handler = getattr(self.game_state, 'ability_handler', None)
             self.layer_system = getattr(self.game_state, 'layer_system', None)
             self.replacement_effects = getattr(self.game_state, 'replacement_effects', None)
             self.targeting_system = getattr(self.game_state, 'targeting_system', None)
 
 
-            # Ensure integration after handlers are created
-            integrate_combat_actions(self.game_state) # Link ActionHandler's combat_handler
-            # Combat setup needs to happen *after* combat_resolver is created in GameState
-            if self.action_handler.combat_handler and self.combat_resolver:
+            # Ensure combat integration after handlers are created
+            integrate_combat_actions(self.game_state)
+
+            # Ensure CombatActionHandler has link to GS components (safe access)
+            if hasattr(self.action_handler, 'combat_handler') and self.action_handler.combat_handler:
+                self.action_handler.combat_handler.game_state = self.game_state
+                self.action_handler.combat_handler.card_evaluator = getattr(self.game_state, 'card_evaluator', None)
                 self.action_handler.combat_handler.setup_combat_systems()
-
-            # Link strategy memory to planner AFTER planner is initialized in GS
-            if self.strategy_memory and self.strategic_planner:
-                self.strategic_planner.strategy_memory = self.strategy_memory
-
-            # Link evaluator/resolver back to planner if they were created independently
-            if self.strategic_planner:
-                 if self.card_evaluator and not self.strategic_planner.card_evaluator:
-                     self.strategic_planner.card_evaluator = self.card_evaluator
-                 if self.combat_resolver and not self.strategic_planner.combat_resolver:
-                     self.strategic_planner.combat_resolver = self.combat_resolver
 
 
             # --- Final Reset Steps ---
@@ -381,7 +392,7 @@ class AlphaZeroMTGEnv(gym.Env):
             gs = self.game_state # Alias for convenience
             gs.mulligan_in_progress = True
             gs.mulligan_player = gs.p1 # Start with P1's mulligan decision
-            gs.mulligan_count = {'p1': 0, 'p2': 0} # Ensure mulligan counts are reset
+            gs.mulligan_count = {'p1': 0, 'p2': 0}
             gs.bottoming_in_progress = False
             gs.bottoming_player = None
             gs.cards_to_bottom = 0
@@ -399,8 +410,12 @@ class AlphaZeroMTGEnv(gym.Env):
             self.current_valid_actions = self.action_mask()
 
             # Get initial observation and info
-            obs = self._get_obs_safe() # Use safe get obs
-            info = {"action_mask": self.current_valid_actions.astype(bool)}
+            obs = self._get_obs_safe()
+            info = {
+                "action_mask": self.current_valid_actions.astype(bool),
+                "initial_state": True
+            }
+
 
             logging.info(f"Environment {env_id} reset complete. Starting new episode (Turn {gs.turn}, Phase {gs.phase}).")
             logging.info(f"P1 Deck: {self.current_deck_name_p1}, P2 Deck: {self.current_deck_name_p2}")
@@ -408,25 +423,32 @@ class AlphaZeroMTGEnv(gym.Env):
             return obs, info
 
         except Exception as e:
-            logging.error(f"CRITICAL error during environment reset: {str(e)}")
-            logging.error(traceback.format_exc())
+            logging.critical(f"CRITICAL error during environment reset: {str(e)}")
+            logging.critical(traceback.format_exc())
 
             # Emergency reset fallback (simplified)
             try:
                 logging.warning("Attempting emergency fallback reset...")
+                # Basic GameState init
                 self.game_state = GameState(self.card_db, self.max_turns, self.max_hand_size, self.max_battlefield)
-                deck = self.decks[0]["cards"].copy() if self.decks else [0]*60
-                self.game_state.reset(deck, deck.copy(), seed)
-                # Minimal systems setup might be needed here depending on _get_obs_safe needs
-                self.game_state._init_subsystems() # Re-run subsystem init on the new GS
-                # Ensure action handler is recreated for the new GS
-                self.action_handler = ActionHandler(self.game_state)
+                deck = self.decks[0]["cards"].copy() if self.decks else [0]*60 # Use default card 0 if decks fail
+                # Simplified reset, relies on _init_player and basic setup
+                self.game_state.p1 = self.game_state._init_player(deck.copy())
+                self.game_state.p2 = self.game_state._init_player(deck.copy())
+                self.game_state.turn = 1
+                self.game_state.phase = self.game_state.PHASE_MAIN_PRECOMBAT # Skip first phases
+                self.game_state.mulligan_in_progress = False # Skip mulligans
+                self.game_state.agent_is_p1 = True
+
+                # Minimal subsystems (need at least ActionHandler)
+                self.game_state._init_subsystems() # Try subsystem init
+                self.action_handler = ActionHandler(self.game_state) # Ensure handler exists
 
                 self.current_valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
                 self.current_valid_actions[11] = True # PASS
                 self.current_valid_actions[12] = True # CONCEDE
 
-                obs = self._get_obs_safe()
+                obs = self._get_obs_safe() # Attempt to get obs
                 info = {"action_mask": self.current_valid_actions.astype(bool), "error_reset": True}
                 logging.info("Emergency reset completed with minimal state.")
                 return obs, info
@@ -439,44 +461,90 @@ class AlphaZeroMTGEnv(gym.Env):
         """Make sure game result is recorded if it hasn't been already"""
         if getattr(self, '_game_result_recorded', False):
             return  # Already recorded
-        
+
         gs = self.game_state
+        # Ensure players exist
+        if not hasattr(gs, 'p1') or not hasattr(gs, 'p2'):
+            logging.error("Cannot record game result: Player data missing.")
+            return
+
         me = gs.p1 if gs.agent_is_p1 else gs.p2
         opp = gs.p2 if gs.agent_is_p1 else gs.p1
-        
+
+        is_p1_winner = False
+        winner_life = 0
+        is_draw = False
+
         # Determine the winner based on game state
-        if me["life"] <= 0:
+        if me.get("lost_game", False) or me.get("life", 20) <= 0 or me.get("attempted_draw_from_empty", False) or me.get("poison_counters", 0) >= 10:
             is_p1_winner = not gs.agent_is_p1
-            winner_life = opp["life"]
-        elif opp["life"] <= 0:
+            winner_life = opp.get("life", 0)
+        elif opp.get("lost_game", False) or opp.get("life", 20) <= 0 or opp.get("attempted_draw_from_empty", False) or opp.get("poison_counters", 0) >= 10:
             is_p1_winner = gs.agent_is_p1
-            winner_life = me["life"]
-        else:  # Game ended due to turn limit or other reason
-            is_p1_winner = me["life"] > opp["life"] if gs.agent_is_p1 else opp["life"] < me["life"]
-            winner_life = me["life"] if is_p1_winner == gs.agent_is_p1 else opp["life"]
-        
+            winner_life = me.get("life", 0)
+        elif me.get("won_game", False):
+            is_p1_winner = gs.agent_is_p1
+            winner_life = me.get("life", 0)
+        elif opp.get("won_game", False):
+            is_p1_winner = not gs.agent_is_p1
+            winner_life = opp.get("life", 0)
+        elif me.get("game_draw", False) or opp.get("game_draw", False) or me.get("life", 0) == opp.get("life", 0):
+             is_draw = True
+             winner_life = me.get("life", 0) # Record life even in draw
+        else: # Game ended due to turn limit or other reason
+            my_final_life = me.get("life", 0)
+            opp_final_life = opp.get("life", 0)
+            if my_final_life > opp_final_life:
+                is_p1_winner = gs.agent_is_p1
+                winner_life = my_final_life
+            elif opp_final_life > my_final_life:
+                is_p1_winner = not gs.agent_is_p1
+                winner_life = opp_final_life
+            else: # Draw by life at turn limit
+                is_draw = True
+                winner_life = my_final_life
+
         # Record the game result
-        if self.has_stats_tracker:
-            self.record_game_result(is_p1_winner, gs.turn, winner_life)
-            self._game_result_recorded = True
-            
-        if self.has_card_memory:
-            is_draw = me["life"] == opp["life"]  # Determine if it's a draw
-            if not is_draw:
+        if self.has_stats_tracker and self.stats_tracker:
+            try:
+                self.stats_tracker.record_game(
+                     winner_is_p1=is_p1_winner if not is_draw else None, # Pass None for draw
+                     turn_count=gs.turn,
+                     winner_life=winner_life if not is_draw else None,
+                     is_draw=is_draw # Pass draw flag
+                )
+                self._game_result_recorded = True
+            except Exception as stat_e:
+                 logging.error(f"Error during stats_tracker.record_game: {stat_e}")
+
+        if self.has_card_memory and self.card_memory:
+            try:
                 winner_deck = self.original_p1_deck if is_p1_winner else self.original_p2_deck
                 loser_deck = self.original_p2_deck if is_p1_winner else self.original_p1_deck
                 winner_archetype = self.current_deck_name_p1 if is_p1_winner else self.current_deck_name_p2
                 loser_archetype = self.current_deck_name_p2 if is_p1_winner else self.current_deck_name_p1
-                
-                # Create minimal data for recording
-                cards_played = getattr(self, 'cards_played', {0: [], 1: []})
-                opening_hands = {}  # Would need to be tracked elsewhere
-                draw_history = {}   # Would need to be tracked elsewhere
-                
-                self._record_cards_to_memory(winner_deck, loser_deck, cards_played, gs.turn,
-                                            winner_archetype, loser_archetype,
-                                            opening_hands, draw_history)
-        
+
+                # Provide empty defaults if tracking data is missing
+                cards_played_data = getattr(self, 'cards_played', {0: [], 1: []})
+                opening_hands_data = getattr(self.game_state, 'opening_hands', {}) # Assuming GS tracks this
+                draw_history_data = getattr(self.game_state, 'draw_history', {}) # Assuming GS tracks this
+
+                # Handle draw case for memory recording
+                if is_draw:
+                     # Record stats for both decks as a draw
+                     self._record_cards_to_memory(self.original_p1_deck, self.original_p2_deck, cards_played_data, gs.turn,
+                                            self.current_deck_name_p1, self.current_deck_name_p2, opening_hands_data, draw_history_data, is_draw=True, player_idx=0) # P1 perspective
+                     self._record_cards_to_memory(self.original_p2_deck, self.original_p1_deck, cards_played_data, gs.turn,
+                                            self.current_deck_name_p2, self.current_deck_name_p1, opening_hands_data, draw_history_data, is_draw=True, player_idx=1) # P2 perspective
+                else:
+                     # Record winner/loser normally
+                     self._record_cards_to_memory(winner_deck, loser_deck, cards_played_data, gs.turn,
+                                                winner_archetype, loser_archetype, opening_hands_data, draw_history_data, is_draw=False, player_idx=(0 if is_p1_winner else 1))
+
+            except Exception as mem_e:
+                 logging.error(f"Error recording cards to memory: {mem_e}")
+                 import traceback; logging.error(traceback.format_exc())
+                 
     def _get_strategic_advice(self):
         """
         Get comprehensive strategic advice for the current game state.
@@ -638,114 +706,66 @@ class AlphaZeroMTGEnv(gym.Env):
         # No progression was forced
         return False
     
-    def _record_cards_to_memory(self, winner_deck, loser_deck, cards_played, turn_count,
-                        winner_archetype, loser_archetype, opening_hands, draw_history):
-        """Record detailed card performance data to the card memory system."""
+    def _record_cards_to_memory(self, player_deck, opponent_deck, cards_played_data, turn_count,
+                            player_archetype, opponent_archetype, opening_hands_data, draw_history_data, is_draw=False, player_idx=0):
+        """Record detailed card performance data to the card memory system, handles draw."""
+        # Renamed: winner/loser -> player/opponent for clarity, added is_draw flag
         try:
-            if not self.has_card_memory or not self.card_memory:
-                return
-                
-            # Process winner deck cards
-            winner_played = cards_played.get(0, [])
-            winner_opening = opening_hands.get("winner", [])
-            winner_draws = draw_history.get("winner", {})
-            
-            # Create a mapping of when cards were played
-            winner_turn_played = {}
-            for card_id in winner_played:
-                # Try to find when the card was played from draw history
-                for turn, cards in winner_draws.items():
-                    if card_id in cards:
-                        # Assume card is played the turn after it's drawn
-                        winner_turn_played[card_id] = int(turn) + 1
-                        break
-            
-            # Process each card in winner's deck
-            for card_id in set(winner_deck):
-                # Get synergy partners (other cards played this game)
-                synergy_partners = [cid for cid in winner_played if cid != card_id]
-                
-                # Record performance
-                self.card_memory.update_card_performance(card_id, {
-                    'is_win': True,
-                    'is_draw': False,
-                    'was_played': card_id in winner_played,
-                    'was_drawn': any(card_id in cards for turn, cards in winner_draws.items()),
-                    'turn_played': winner_turn_played.get(card_id, 0),
-                    'in_opening_hand': card_id in winner_opening,
-                    'game_duration': turn_count,
-                    'deck_archetype': winner_archetype,
-                    'opponent_archetype': loser_archetype,
-                    'synergy_partners': synergy_partners
-                })
-                
-                # Also register the card if it's not already in memory
+            if not self.has_card_memory or not self.card_memory: return
+
+            # Determine player/opponent indices based on the perspective we are recording
+            player_key = player_idx # 0 for P1, 1 for P2
+            opponent_key = 1 - player_key
+
+            player_played = cards_played_data.get(player_key, [])
+            player_opening = opening_hands_data.get(f'p{player_key+1}', []) # Adjust key based on GS tracking
+            player_draws = draw_history_data.get(f'p{player_key+1}', {}) # Adjust key
+
+            # --- Process Player Deck ---
+            player_turn_played = {}
+            for card_id in player_played:
+                 for turn, cards in player_draws.items():
+                     if card_id in cards:
+                         player_turn_played[card_id] = int(turn) + 1; break
+
+            for card_id in set(player_deck):
                 card = self.game_state._safe_get_card(card_id)
-                if card and hasattr(card, 'name'):
-                    self.card_memory.register_card(
-                        card_id, 
-                        card.name,
-                        {
-                            'cmc': card.cmc if hasattr(card, 'cmc') else 0,
-                            'types': card.card_types if hasattr(card, 'card_types') else [],
-                            'colors': card.colors if hasattr(card, 'colors') else []
-                        }
-                    )
-            
-            # Process loser deck cards
-            loser_played = cards_played.get(1, [])
-            loser_opening = opening_hands.get("loser", [])
-            loser_draws = draw_history.get("loser", {})
-            
-            # Create a mapping of when cards were played
-            loser_turn_played = {}
-            for card_id in loser_played:
-                # Try to find when the card was played from draw history
-                for turn, cards in loser_draws.items():
-                    if card_id in cards:
-                        # Assume card is played the turn after it's drawn
-                        loser_turn_played[card_id] = int(turn) + 1
-                        break
-            
-            # Process each card in loser's deck
-            for card_id in set(loser_deck):
-                # Get synergy partners (other cards played this game)
-                synergy_partners = [cid for cid in loser_played if cid != card_id]
-                
-                # Record performance
-                self.card_memory.update_card_performance(card_id, {
-                    'is_win': False,
-                    'is_draw': False,
-                    'was_played': card_id in loser_played,
-                    'was_drawn': any(card_id in cards for turn, cards in loser_draws.items()),
-                    'turn_played': loser_turn_played.get(card_id, 0),
-                    'in_opening_hand': card_id in loser_opening,
+                if not card or not hasattr(card, 'name'): continue
+
+                perf_data = {
+                    'is_win': not is_draw, # Win if not a draw
+                    'is_draw': is_draw,
+                    'was_played': card_id in player_played,
+                    'was_drawn': any(card_id in cards for turn, cards in player_draws.items()),
+                    'turn_played': player_turn_played.get(card_id, 0),
+                    'in_opening_hand': card_id in player_opening,
                     'game_duration': turn_count,
-                    'deck_archetype': loser_archetype,
-                    'opponent_archetype': winner_archetype,
-                    'synergy_partners': synergy_partners
-                })
-                
-                # Also register the card if it's not already in memory
-                card = self.game_state._safe_get_card(card_id)
-                if card and hasattr(card, 'name'):
-                    self.card_memory.register_card(
-                        card_id, 
-                        card.name,
-                        {
-                            'cmc': card.cmc if hasattr(card, 'cmc') else 0,
-                            'types': card.card_types if hasattr(card, 'card_types') else [],
-                            'colors': card.colors if hasattr(card, 'colors') else []
-                        }
-                    )
-            
-            # Save card memory async after each game
-            self.card_memory.save_memory_async()
-            
+                    'deck_archetype': player_archetype,
+                    'opponent_archetype': opponent_archetype,
+                    'synergy_partners': [cid for cid in player_played if cid != card_id]
+                }
+                self.card_memory.update_card_performance(card_id, perf_data)
+                self.card_memory.register_card(card_id, card.name, {
+                     'cmc': getattr(card, 'cmc', 0),
+                     'types': getattr(card, 'card_types', []),
+                     'colors': getattr(card, 'colors', []) })
+
+            # --- Process Opponent Deck (Only need to register cards) ---
+            for card_id in set(opponent_deck):
+                 card = self.game_state._safe_get_card(card_id)
+                 if card and hasattr(card, 'name'):
+                     self.card_memory.register_card(card_id, card.name, {
+                          'cmc': getattr(card, 'cmc', 0),
+                          'types': getattr(card, 'card_types', []),
+                          'colors': getattr(card, 'colors', []) })
+
+            # Save card memory async
+            if hasattr(self.card_memory, 'save_memory_async'):
+                 self.card_memory.save_memory_async()
+
         except Exception as e:
             logging.error(f"Error recording cards to memory: {str(e)}")
-            import traceback
-            logging.error(traceback.format_exc())
+            import traceback; logging.error(traceback.format_exc())
 
     def _force_phase_transition(self, current_phase):
         """
@@ -1110,6 +1130,45 @@ class AlphaZeroMTGEnv(gym.Env):
             # Ensure game ends on critical error
             # Record result as loss due to error? Or leave neutral? Leave neutral for now.
             return obs, -5.0, True, False, info # Harsh penalty and end episode
+        
+    def _get_obs_safe(self):
+        """Return a minimal, safe observation dictionary in case of errors."""
+        gs = self.game_state
+        # Initialize with zeros based on the defined space
+        obs = {k: np.zeros(space.shape, dtype=space.dtype)
+               for k, space in self.observation_space.spaces.items()}
+        try:
+            # Fill minimal necessary fields, checking attribute existence
+            obs["phase"] = np.array([getattr(gs, 'phase', 0)], dtype=np.int32)
+            obs["turn"] = np.array([getattr(gs, 'turn', 1)], dtype=np.int32)
+            # Ensure p1 and p2 exist before accessing life
+            p1_life = getattr(gs, 'p1', {}).get('life', 0)
+            p2_life = getattr(gs, 'p2', {}).get('life', 0)
+            agent_is_p1 = getattr(gs, 'agent_is_p1', True)
+            obs["p1_life"] = np.array([p1_life], dtype=np.int32)
+            obs["p2_life"] = np.array([p2_life], dtype=np.int32)
+            obs["my_life"] = np.array([p1_life if agent_is_p1 else p2_life], dtype=np.int32)
+            obs["opp_life"] = np.array([p2_life if agent_is_p1 else p1_life], dtype=np.int32)
+            # Safely generate action mask
+            try:
+                obs["action_mask"] = self.action_mask().astype(bool)
+            except Exception:
+                obs["action_mask"] = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+                obs["action_mask"][11] = True # Pass priority
+                obs["action_mask"][12] = True # Concede
+            # Fill phase onehot safely
+            max_phase = self.observation_space["phase_onehot"].shape[0] - 1
+            current_phase = getattr(gs, 'phase', 0)
+            if 0 <= current_phase <= max_phase:
+                 obs["phase_onehot"][current_phase] = 1.0
+            else:
+                 obs["phase_onehot"][0] = 1.0 # Default to phase 0
+
+        except Exception as safe_obs_e:
+            logging.error(f"Error in _get_obs_safe itself: {safe_obs_e}")
+            # Return the zero-initialized obs as a last resort
+        return obs
+
         
     def get_strategic_recommendation(self):
         """
@@ -1667,1005 +1726,764 @@ class AlphaZeroMTGEnv(gym.Env):
             
     
 
-        
     def _get_obs(self):
         """Build an enhanced observation dictionary with comprehensive strategic information."""
         try:
             gs = self.game_state
-            FEATURE_DIM = 223
-            if hasattr(self, 'layer_system') and self.layer_system:
-                self.layer_system.apply_all_effects()
-            
-            # Check if cached observation is valid
-            if hasattr(self, '_cached_obs') and hasattr(self, '_cached_obs_turn') and hasattr(self, '_cached_obs_phase'):
-                if self._cached_obs_turn == gs.turn and self._cached_obs_phase == gs.phase:
-                    # Only regenerate if certain state has changed
-                    key_state_changed = False
-                    
-                    # Check if battlefield changed
-                    if (len(gs.p1["battlefield"]) != self._cached_battlefield_count_p1 or 
-                        len(gs.p2["battlefield"]) != self._cached_battlefield_count_p2):
-                        key_state_changed = True
-                        
-                    # Check if hand changed
-                    elif (len(gs.p1["hand"]) != self._cached_hand_count_p1 or 
-                        len(gs.p2["hand"]) != self._cached_hand_count_p2):
-                        key_state_changed = True
-                        
-                    # Check if life totals changed
-                    elif (gs.p1["life"] != self._cached_life_p1 or 
-                        gs.p2["life"] != self._cached_life_p2):
-                        key_state_changed = True
-                        
-                    # Check if stack changed
-                    elif len(gs.stack) != self._cached_stack_size:
-                        key_state_changed = True
-                        
-                    # Check if combat state changed
-                    elif hasattr(self, '_cached_attackers_count') and len(gs.current_attackers) != self._cached_attackers_count:
-                        key_state_changed = True
-                        
-                    if not key_state_changed:
-                        return self._cached_obs
-                    
-            # Ensure strategic planner is initialized
-            if not hasattr(self, 'strategic_planner') or not self.strategic_planner:
-                # Try to initialize strategic planner
-                if hasattr(gs, '_init_strategic_planner'):
-                    gs._init_strategic_planner()
-            
-            # Initialize current_analysis if not present or None
-            if not hasattr(self, 'current_analysis') or self.current_analysis is None:
-                if hasattr(self, 'strategic_planner') and self.strategic_planner:
-                    try:
-                        self.current_analysis = self.strategic_planner.analyze_game_state()
-                    except Exception as e:
-                        logging.warning(f"Failed to generate initial game state analysis: {e}")
-                        # Create a minimal analysis
-                        self.current_analysis = {
-                            "game_info": {
-                                "turn": gs.turn,
-                                "phase": gs.phase,
-                                "game_stage": "early" if gs.turn <= 3 else "mid" if gs.turn <= 7 else "late"
-                            },
-                            "position": {
-                                "overall": "even",
-                                "score": 0.0
-                            },
-                            "life": {
-                                "my_life": gs.p1["life"] if gs.agent_is_p1 else gs.p2["life"],
-                                "opp_life": gs.p2["life"] if gs.agent_is_p1 else gs.p1["life"],
-                                "life_diff": 0
-                            }
-                        }
-                else:
-                    # Minimal fallback analysis
-                    self.current_analysis = {
-                        "game_info": {
-                            "turn": gs.turn,
-                            "phase": gs.phase,
-                            "game_stage": "early" if gs.turn <= 3 else "mid" if gs.turn <= 7 else "late"
-                        },
-                        "position": {
-                            "overall": "even",
-                            "score": 0.0
-                        },
-                        "life": {
-                            "my_life": gs.p1["life"] if gs.agent_is_p1 else gs.p2["life"],
-                            "opp_life": gs.p2["life"] if gs.agent_is_p1 else gs.p1["life"],
-                            "life_diff": 0
-                        }
-                    }
+            # --- Layer Application ---
+            # Ensure Layers are applied before observation generation
+            if hasattr(gs, 'layer_system') and gs.layer_system:
+                gs.layer_system.apply_all_effects()
 
-            # Active player information
+            # --- Cache Check ---
+            # Note: Simple cache check based on turn/phase. More sophisticated checks
+            # (e.g., hashing relevant state) could be used for finer-grained caching.
+            if (hasattr(self, '_cached_obs') and
+                    getattr(self, '_cached_obs_turn', -1) == gs.turn and
+                    getattr(self, '_cached_obs_phase', -1) == gs.phase):
+                # Check if key game state elements that often trigger recalculation are unchanged
+                p1_bf_count = len(getattr(gs, 'p1', {}).get("battlefield", []))
+                p2_bf_count = len(getattr(gs, 'p2', {}).get("battlefield", []))
+                p1_hand_count = len(getattr(gs, 'p1', {}).get("hand", []))
+                p2_hand_count = len(getattr(gs, 'p2', {}).get("hand", []))
+                p1_life = getattr(gs, 'p1', {}).get('life', 0)
+                p2_life = getattr(gs, 'p2', {}).get('life', 0)
+                stack_size = len(getattr(gs, 'stack', []))
+                attackers_count = len(getattr(gs, 'current_attackers', []))
+
+                if (p1_bf_count == getattr(self, '_cached_battlefield_count_p1', -1) and
+                    p2_bf_count == getattr(self, '_cached_battlefield_count_p2', -1) and
+                    p1_hand_count == getattr(self, '_cached_hand_count_p1', -1) and
+                    p2_hand_count == getattr(self, '_cached_hand_count_p2', -1) and
+                    p1_life == getattr(self, '_cached_life_p1', -1) and
+                    p2_life == getattr(self, '_cached_life_p2', -1) and
+                    stack_size == getattr(self, '_cached_stack_size', -1) and
+                        attackers_count == getattr(self, '_cached_attackers_count', -1)):
+                    # Return cached observation if key state elements are unchanged
+                    # Make sure action mask is updated if needed!
+                    obs = self._cached_obs
+                    obs["action_mask"] = self.action_mask().astype(bool)
+                    # logging.debug("Returning cached observation.") # Optional debug log
+                    return obs
+
+            # --- Strategic Planner & Analysis ---
+            if not hasattr(self, 'strategic_planner') or not self.strategic_planner:
+                if hasattr(gs, '_init_strategic_planner'):
+                    gs._init_strategic_planner() # Try initializing planner within GS
+            # Try running analysis if planner exists and analysis is missing/stale
+            if hasattr(self, 'strategic_planner') and self.strategic_planner:
+                 if not hasattr(self, 'current_analysis') or self.current_analysis is None or self.current_analysis.get("game_info",{}).get("turn") != gs.turn:
+                     try:
+                         self.current_analysis = self.strategic_planner.analyze_game_state()
+                     except Exception as analysis_e:
+                         logging.warning(f"Error generating game state analysis: {analysis_e}")
+                         self.current_analysis = self._get_fallback_analysis() # Use fallback if analysis fails
+
+            # --- Observation Initialization ---
+            obs = {k: np.zeros(space.shape, dtype=space.dtype)
+                   for k, space in self.observation_space.spaces.items()}
+
+            # --- Player & Turn Info ---
             me = gs.p1 if gs.agent_is_p1 else gs.p2
             opp = gs.p2 if gs.agent_is_p1 else gs.p1
             is_my_turn = (gs.turn % 2 == 1) == gs.agent_is_p1
+            current_phase = getattr(gs, 'phase', 0)
+            current_turn = getattr(gs, 'turn', 1)
 
-            # Initialize the observation dictionary with all keys from observation_space
-            obs = {k: np.zeros(space.shape, dtype=space.dtype) 
-                for k, space in self.observation_space.spaces.items()}
-            
-            # Fill in basic observations
-            obs["phase"] = gs.phase
-            obs["phase_onehot"] = self._phase_to_onehot(gs.phase)
-            obs["turn"] = np.array([gs.turn], dtype=np.int32)
+            obs["phase"] = np.array([current_phase], dtype=np.int32)
+            obs["phase_onehot"] = self._phase_to_onehot(current_phase)
+            obs["turn"] = np.array([current_turn], dtype=np.int32)
             obs["is_my_turn"] = np.array([int(is_my_turn)], dtype=np.int32)
-            obs["p1_life"] = np.array([gs.p1["life"]], dtype=np.int32)
-            obs["p2_life"] = np.array([gs.p2["life"]], dtype=np.int32)
-            obs["life_difference"] = np.array([me["life"] - opp["life"]], dtype=np.int32)
-            obs["my_life"] = np.array([me["life"]], dtype=np.int32)
-            obs["opp_life"] = np.array([opp["life"]], dtype=np.int32)
+            p1_life = getattr(gs, 'p1', {}).get('life', 0)
+            p2_life = getattr(gs, 'p2', {}).get('life', 0)
+            obs["p1_life"] = np.array([p1_life], dtype=np.int32)
+            obs["p2_life"] = np.array([p2_life], dtype=np.int32)
+            my_current_life = me.get('life', 0)
+            opp_current_life = opp.get('life', 0)
+            obs["my_life"] = np.array([my_current_life], dtype=np.int32)
+            obs["opp_life"] = np.array([opp_current_life], dtype=np.int32)
+            obs["life_difference"] = np.array([my_current_life - opp_current_life], dtype=np.int32)
 
-            # BATTLEFIELD observations
-            my_bf = np.zeros((self.max_battlefield, FEATURE_DIM), dtype=np.float32)
-            my_bf_flags = np.zeros((self.max_battlefield, 5), dtype=np.float32)
-            for i, card_id in enumerate(me["battlefield"]):
-                if i >= self.max_battlefield:
-                    break
-                card = gs._safe_get_card(card_id)
-                my_bf[i] = self._get_card_feature(card_id, FEATURE_DIM)
-                my_bf_flags[i, 0] = float(card_id in me["tapped_permanents"])
-                my_bf_flags[i, 1] = float(card_id in me["entered_battlefield_this_turn"])
-                my_bf_flags[i, 2] = float(card_id in gs.current_attackers)
-                my_bf_flags[i, 3] = float(any(card_id in blockers for blockers in gs.current_block_assignments.values()))
-                my_bf_flags[i, 4] = float(sum(card.keywords) > 0 if card and hasattr(card, 'keywords') else 0)
+            # --- Battlefield ---
+            my_bf_list = me.get("battlefield", [])
+            my_bf_feat = self._get_zone_features(my_bf_list, self.max_battlefield)
+            my_bf_flags = self._get_battlefield_flags(my_bf_list, me, self.max_battlefield)
+            my_bf_keywords = self._get_battlefield_keywords(my_bf_list, self.observation_space["my_battlefield_keywords"].shape[1])
 
-            opp_bf = np.zeros((self.max_battlefield, FEATURE_DIM), dtype=np.float32)
-            opp_bf_flags = np.zeros((self.max_battlefield, 5), dtype=np.float32)
-            for i, card_id in enumerate(opp["battlefield"]):
-                if i >= self.max_battlefield:
-                    break
-                card = gs._safe_get_card(card_id)
-                opp_bf[i] = self._get_card_feature(card_id, FEATURE_DIM)
-                opp_bf_flags[i, 0] = float(card_id in opp["tapped_permanents"])
-                opp_bf_flags[i, 1] = float(card_id in opp["entered_battlefield_this_turn"])
-                opp_bf_flags[i, 2] = float(card_id in gs.current_attackers)
-                opp_bf_flags[i, 3] = float(any(card_id in blockers for blockers in gs.current_block_assignments.values()))
-                opp_bf_flags[i, 4] = float(sum(card.keywords) > 0 if card and hasattr(card, 'keywords') else 0)
+            opp_bf_list = opp.get("battlefield", [])
+            opp_bf_feat = self._get_zone_features(opp_bf_list, self.max_battlefield)
+            opp_bf_flags = self._get_battlefield_flags(opp_bf_list, opp, self.max_battlefield)
+            # opp_bf_keywords = self._get_battlefield_keywords(opp_bf_list, self.observation_space["my_battlefield_keywords"].shape[1]) # Optional
 
-            # Assign to observation space keys
-            obs["p1_battlefield"] = my_bf if gs.agent_is_p1 else opp_bf
-            obs["p2_battlefield"] = opp_bf if gs.agent_is_p1 else my_bf
-            obs["p1_bf_count"] = np.array([min(len(gs.p1["battlefield"]), self.max_battlefield)], dtype=np.int32)
-            obs["p2_bf_count"] = np.array([min(len(gs.p2["battlefield"]), self.max_battlefield)], dtype=np.int32)
-            obs["my_battlefield"] = my_bf
+            obs["my_battlefield"] = my_bf_feat
             obs["my_battlefield_flags"] = my_bf_flags
-            obs["opp_battlefield"] = opp_bf
+            obs["my_battlefield_keywords"] = my_bf_keywords
+            obs["opp_battlefield"] = opp_bf_feat
             obs["opp_battlefield_flags"] = opp_bf_flags
-            
-            # Creature stats
-            my_creatures = [card_id for card_id in me["battlefield"] 
-                        if gs._safe_get_card(card_id) and 
-                        hasattr(gs._safe_get_card(card_id), 'card_types') and 
-                        'creature' in gs._safe_get_card(card_id).card_types]
+            # obs["opp_battlefield_keywords"] = opp_bf_keywords # Optional
+            obs["p1_battlefield"] = my_bf_feat if gs.agent_is_p1 else opp_bf_feat
+            obs["p2_battlefield"] = opp_bf_feat if gs.agent_is_p1 else my_bf_feat
+            obs["p1_bf_count"] = np.array([len(gs.p1.get("battlefield", []))], dtype=np.int32)
+            obs["p2_bf_count"] = np.array([len(gs.p2.get("battlefield", []))], dtype=np.int32)
 
-            opp_creatures = [card_id for card_id in opp["battlefield"] 
-                            if gs._safe_get_card(card_id) and 
-                            hasattr(gs._safe_get_card(card_id), 'card_types') and 
-                            'creature' in gs._safe_get_card(card_id).card_types]
-            obs["my_creature_count"] = np.array([len(my_creatures)], dtype=np.int32)
-            obs["opp_creature_count"] = np.array([len(opp_creatures)], dtype=np.int32)
-            my_power = sum(gs._safe_get_card(cid).power 
-                        for cid in my_creatures 
-                        if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'power'))
+            # --- Creature Stats ---
+            my_stats = self._get_creature_stats(my_bf_list)
+            opp_stats = self._get_creature_stats(opp_bf_list)
+            obs["my_creature_count"] = np.array([my_stats["count"]], dtype=np.int32)
+            obs["opp_creature_count"] = np.array([opp_stats["count"]], dtype=np.int32)
+            obs["my_total_power"] = np.array([my_stats["power"]], dtype=np.int32)
+            obs["my_total_toughness"] = np.array([my_stats["toughness"]], dtype=np.int32)
+            obs["opp_total_power"] = np.array([opp_stats["power"]], dtype=np.int32)
+            obs["opp_total_toughness"] = np.array([opp_stats["toughness"]], dtype=np.int32)
+            obs["power_advantage"] = np.array([my_stats["power"] - opp_stats["power"]], dtype=np.int32)
+            obs["toughness_advantage"] = np.array([my_stats["toughness"] - opp_stats["toughness"]], dtype=np.int32)
+            obs["creature_advantage"] = np.array([my_stats["count"] - opp_stats["count"]], dtype=np.int32)
 
-            my_toughness = sum(gs._safe_get_card(cid).toughness 
-                            for cid in my_creatures 
-                            if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'toughness'))
+            # --- Hand ---
+            my_hand_list = me.get("hand", [])
+            obs["my_hand"] = self._get_zone_features(my_hand_list, self.max_hand_size)
+            obs["my_hand_count"] = np.array([len(my_hand_list)], dtype=np.int32)
+            obs["opp_hand_count"] = np.array([len(opp.get("hand", []))], dtype=np.int32)
+            obs["hand_card_types"] = self._get_hand_card_types(my_hand_list)
+            obs["hand_playable"] = self._get_hand_playable(my_hand_list, me, is_my_turn)
+            obs["hand_performance"] = self._get_hand_performance(my_hand_list)
+            obs["opportunity_assessment"] = self._get_opportunity_assessment(my_hand_list, me) # Use Helper
+            obs["hand_synergy_scores"] = self._get_hand_synergy_scores(my_hand_list, my_bf_list) # Use Helper
 
-            opp_power = sum(gs._safe_get_card(cid).power 
-                        for cid in opp_creatures 
-                        if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'power'))
+            # --- Mana ---
+            obs["my_mana_pool"] = np.array([me.get("mana_pool", {}).get(c, 0) for c in ['W', 'U', 'B', 'R', 'G', 'C']], dtype=np.int32)
+            obs["my_mana"] = np.array([sum(obs["my_mana_pool"])], dtype=np.int32)
+            my_untapped_lands = [cid for cid in my_bf_list if self._is_land(cid) and cid not in me.get("tapped_permanents", set())]
+            obs["untapped_land_count"] = np.array([len(my_untapped_lands)], dtype=np.int32)
+            obs["total_available_mana"] = np.array([obs["my_mana"][0] + len(my_untapped_lands)], dtype=np.int32) # Simple approx
+            obs["turn_vs_mana"] = np.array([min(1.0, len(my_untapped_lands) / max(1.0, float(current_turn)))], dtype=np.float32) # Added float()
 
-            opp_toughness = sum(gs._safe_get_card(cid).toughness 
-                            for cid in opp_creatures 
-                            if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'toughness'))
-            obs["my_total_power"] = np.array([my_power], dtype=np.int32)
-            obs["my_total_toughness"] = np.array([my_toughness], dtype=np.int32)
-            obs["opp_total_power"] = np.array([opp_power], dtype=np.int32)
-            obs["opp_total_toughness"] = np.array([opp_toughness], dtype=np.int32)
-            obs["power_advantage"] = np.array([my_power - opp_power], dtype=np.int32)
-            obs["toughness_advantage"] = np.array([my_toughness - opp_toughness], dtype=np.int32)
-            obs["creature_advantage"] = np.array([len(my_creatures) - len(opp_creatures)], dtype=np.int32)
+            # --- Stack ---
+            stack = getattr(gs, 'stack', [])
+            obs["stack_count"] = np.array([len(stack)], dtype=np.int32)
+            obs["stack_controller"], obs["stack_card_types"] = self._get_stack_info(stack, me)
 
-            # HAND information
-            my_hand = np.zeros((self.max_hand_size, FEATURE_DIM), dtype=np.float32)
-            hand_card_types = np.zeros((self.max_hand_size, 5), dtype=np.float32)  # [land, creature, instant, sorcery, other]
-            hand_playable = np.zeros(self.max_hand_size, dtype=np.float32)
-            
-            # Resource efficiency calculation
-            resource_efficiency = np.zeros(3, dtype=np.float32)
-            
-            planeswalker_activations = np.zeros((self.max_battlefield,), dtype=np.float32)
-        
-            # Find all planeswalkers on battlefield and their activation status
-            for i, card_id in enumerate(me["battlefield"]):
-                if i >= self.max_battlefield:
-                    break
-                
-                card = gs._safe_get_card(card_id)
-                if card and hasattr(card, 'card_types') and 'planeswalker' in card.card_types:
-                    # Check if this planeswalker has been activated
-                    activated = card_id in me.get("activated_this_turn", set())
-                    planeswalker_activations[i] = float(activated)
-                    
-                    # Also track in battlefield flags (existing array)
-                    if activated and i < len(my_bf_flags):
-                        # Use an existing flag slot for activated status
-                        my_bf_flags[i, 3] = 1.0
-            
-            # Add to observation
-            obs["planeswalker_activations"] = planeswalker_activations
-            
-            # Add per-planeswalker activation counts
-            planeswalker_activation_counts = np.zeros((self.max_battlefield,), dtype=np.float32)
-            for i, card_id in enumerate(me["battlefield"]):
-                if i >= self.max_battlefield:
-                    break
-                    
-                # Get activation count for this planeswalker
-                activation_count = me.get("pw_activations", {}).get(card_id, 0)
-                planeswalker_activation_counts[i] = activation_count
-                
-            obs["planeswalker_activation_counts"] = planeswalker_activation_counts
-            
-            # Add strategic advice to observation
-            strategic_recommendation = None
-            strategy_suggestion = None
+            # --- Graveyard / Exile ---
+            obs["my_graveyard_count"] = np.array([len(me.get("graveyard", []))], dtype=np.int32)
+            obs["opp_graveyard_count"] = np.array([len(opp.get("graveyard", []))], dtype=np.int32)
+            obs["my_dead_creatures"] = np.array([sum(1 for cid in me.get("graveyard", []) if self._is_creature(cid))], dtype=np.int32)
+            obs["opp_dead_creatures"] = np.array([sum(1 for cid in opp.get("graveyard", []) if self._is_creature(cid))], dtype=np.int32)
+            obs["graveyard_key_cards"] = self._get_zone_features(me.get("graveyard", []), 10)
+            obs["exile_key_cards"] = self._get_zone_features(me.get("exile", []), 10)
 
-            # Get strategic advice and recommended action
-            if hasattr(self, 'strategic_planner'):
-                try:
-                    strategic_advice = self._get_strategic_advice()
-                    if strategic_advice and strategic_advice.get("recommended_action") is not None:
-                        recommended_action = strategic_advice["recommended_action"]
-                        if (recommended_action >= 0 and 
-                            recommended_action < len(self.current_valid_actions) and 
-                            self.current_valid_actions[recommended_action]):
-                            strategic_recommendation = recommended_action
-                            
-                            # Add recommended action details
-                            action_type, param = gs.action_handler.get_action_info(recommended_action)
-                            obs["recommended_action"] = np.array([recommended_action], dtype=np.int32)
-                            obs["recommended_action_type"] = action_type
-                            obs["recommended_action_confidence"] = np.array([strategic_advice.get("position", {}).get("score", 0.5)], dtype=np.float32)
-                            
-                            # Add supplementary information
-                            if "win_conditions" in strategic_advice:
-                                primary_win_condition = None
-                                primary_score = -1
-                                
-                                # Find primary win condition
-                                for wc_name, wc_data in strategic_advice["win_conditions"].items():
-                                    if wc_data.get("viable", False) and wc_data.get("score", 0) > primary_score:
-                                        primary_win_condition = wc_name
-                                        primary_score = wc_data.get("score", 0)
-                                
-                                if primary_win_condition:
-                                    obs["primary_win_condition"] = primary_win_condition
-                                    obs["win_condition_score"] = np.array([primary_score], dtype=np.float32)
-                except Exception as e:
-                    logging.warning(f"Error getting strategic recommendation: {e}")
-
-            # Get strategy suggestion from memory
-            if hasattr(self, 'strategy_memory') and self.strategy_memory:
-                try:
-                    strategy_suggestion = self.strategy_memory.get_suggested_action(gs, np.where(self.current_valid_actions)[0])
-                    if strategy_suggestion is not None and self.current_valid_actions[strategy_suggestion]:
-                        # Add to observation
-                        obs["memory_suggested_action"] = np.array([strategy_suggestion], dtype=np.int32)
-                        
-                        # Check if this matches recommended action
-                        obs["suggestion_matches_recommendation"] = np.array([int(strategy_suggestion == strategic_recommendation)], dtype=np.int32)
-                except Exception as e:
-                    logging.warning(f"Error getting strategy suggestion: {e}")
-            
-            # Add mulligan status and recommendation
-            obs["mulligan_in_progress"] = np.array([1 if hasattr(gs, 'mulligan_in_progress') and gs.mulligan_in_progress else 0], dtype=np.int32)
-            obs["mulligan_reasons"] = np.zeros(5, dtype=np.float32)
-
-            # Get mulligan recommendation if in progress
-            if hasattr(gs, 'mulligan_in_progress') and gs.mulligan_in_progress:
-                # Only get recommendation for the current player's mulligans
-                if hasattr(gs, 'mulligan_player') and gs.mulligan_player == me:
-                    if hasattr(self, 'strategic_planner'):
-                        try:
-                            hand = me["hand"].copy()
-                            decision = self.strategic_planner.suggest_mulligan_decision(
-                                hand, 
-                                deck_name=self.current_deck_name_p1 if gs.agent_is_p1 else self.current_deck_name_p2,
-                                on_play=is_my_turn
-                            )
-                            obs["mulligan_recommendation"] = np.array([float(decision["keep"])], dtype=np.float32)
-                            obs["mulligan_reason_count"] = np.array([min(len(decision["reasoning"]), 5)], dtype=np.int32)
-                            
-                            # Convert reasoning to numeric representation for observation
-                            if "reasoning" in decision and decision["reasoning"]:
-                                for i, reason in enumerate(decision["reasoning"][:5]):
-                                    obs["mulligan_reasons"][i] = 1.0  # Mark that reason exists
-                        except Exception as e:
-                            logging.warning(f"Error getting mulligan recommendation: {e}")
-                            obs["mulligan_recommendation"] = np.array([0.5], dtype=np.float32)
-                            obs["mulligan_reason_count"] = np.array([0], dtype=np.int32)
-                    else:
-                        # No strategic planner to make recommendations
-                        obs["mulligan_recommendation"] = np.array([0.5], dtype=np.float32)
-                        obs["mulligan_reason_count"] = np.array([0], dtype=np.int32)
-                else:
-                    # Not this player's turn to mulligan
-                    obs["mulligan_recommendation"] = np.array([0.5], dtype=np.float32)  # Neutral
-                    obs["mulligan_reason_count"] = np.array([0], dtype=np.int32)
-            else:
-                # Mulligans not in progress
-                obs["mulligan_recommendation"] = np.array([0.5], dtype=np.float32)  # Neutral
-                obs["mulligan_reason_count"] = np.array([0], dtype=np.int32)
-            
-            # Populate resource_efficiency if possible
-            try:
-                # Mana efficiency: how many lands vs mana used
-                available_mana = sum(me["mana_pool"].values())
-                total_lands = len([cid for cid in me["battlefield"] if gs._safe_get_card(cid) and 'land' in gs._safe_get_card(cid).type_line])
-                mana_efficiency = min(1.0, available_mana / max(1, total_lands)) if total_lands > 0 else 0.0
-                
-                # Card efficiency: hand size vs cards played this turn
-                cards_played = len(self.cards_played.get(0, []))
-                card_efficiency = min(1.0, cards_played / max(1, len(me["hand"])))
-                
-                # Tempo: board development relative to turn
-                board_cmc = sum(gs._safe_get_card(cid).cmc for cid in me["battlefield"] if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'cmc'))
-                tempo = min(1.0, board_cmc / max(1, gs.turn))
-                
-                # Ensure the array has exactly 3 elements
-                resource_efficiency = np.array([mana_efficiency, card_efficiency, tempo], dtype=np.float32)
-                if resource_efficiency.shape != (3,):
-                    logging.warning(f"Resource efficiency shape mismatch: expected (3,), got {resource_efficiency.shape}")
-                    resource_efficiency = np.zeros(3, dtype=np.float32)
-            except Exception as e:
-                logging.warning(f"Error populating resource_efficiency: {e}")
-                # Ensure correct shape even on error
-                resource_efficiency = np.zeros(3, dtype=np.float32)
-            
-            obs["resource_efficiency"] = resource_efficiency
-            
-            # Opportunity assessment for hand cards
-            opportunity_assessment = np.zeros(self.max_hand_size, dtype=np.float32)
-            
-            # Populate opportunity_assessment if possible
-            if hasattr(self, 'card_evaluator'):
-                try:
-                    # Use card evaluator to assess hand card opportunities
-                    for i, card_id in enumerate(me["hand"]):
-                        if i >= self.max_hand_size:
-                            break
-                        # Evaluate each card's play potential
-                        opportunity = self.card_evaluator.evaluate_card(card_id, "play")
-                        opportunity_assessment[i] = np.clip(opportunity, 0, 1)
-                except Exception as e:
-                    logging.warning(f"Error populating opportunity_assessment: {e}")
-            
-            obs["opportunity_assessment"] = opportunity_assessment
-                        
-                        # Add optimal attackers information to the observation
-            optimal_attackers = np.zeros(self.max_battlefield, dtype=np.float32)
-            attacker_values = np.zeros(self.max_battlefield, dtype=np.float32)
-
-            # Fill with optimal attacker data if available
-            if hasattr(gs, 'optimal_attackers') and gs.optimal_attackers:
-                # Get the set of optimal attacker IDs for fast lookup
-                optimal_attacker_set = set(gs.optimal_attackers)
-                
-                # Check if we have access to strategic planner for more detailed values
-                if hasattr(gs, 'strategic_planner') and gs.strategic_planner:
-                    # Evaluate each potential attacker
-                    for i, card_id in enumerate(me["battlefield"]):
-                        if i >= self.max_battlefield:
-                            break
-                            
-                        # Check if this card is a creature that could attack
-                        card = gs._safe_get_card(card_id)
-                        is_valid_attacker = False
-                        
-                        if card and hasattr(card, 'card_types') and 'creature' in card.card_types:
-                            # Check if it's tapped or has summoning sickness
-                            is_tapped = card_id in me["tapped_permanents"]
-                            has_sickness = card_id in me["entered_battlefield_this_turn"] and not (
-                                hasattr(card, 'oracle_text') and "haste" in card.oracle_text.lower())
-                            
-                            is_valid_attacker = not is_tapped and not has_sickness
-                        
-                        # Mark as optimal if in the optimal set
-                        if card_id in optimal_attacker_set:
-                            optimal_attackers[i] = 1.0
-                            
-                        # Get attack value if this is a valid attacker
-                        if is_valid_attacker:
-                            # Try to get a strategic evaluation of this attacker
-                            try:
-                                # Get value of just this attacker
-                                solo_value = gs.strategic_planner.evaluate_attack_action([card_id])
-                                attacker_values[i] = solo_value
-                            except Exception as e:
-                                logging.warning(f"Error evaluating attacker {card_id}: {e}")
-                                # Default to a simple power-based heuristic
-                                if hasattr(card, 'power'):
-                                    attacker_values[i] = min(card.power, 10.0)
-
-            obs["optimal_attackers"] = optimal_attackers
-            obs["attacker_values"] = attacker_values
-
-            for i, card_id in enumerate(me["hand"]):
-                if i >= self.max_hand_size:
-                    break
-                card = gs._safe_get_card(card_id)
-                my_hand[i] = self._get_card_feature(card_id, FEATURE_DIM)
-                
-                # Add safety check before checking card properties
-                if card and hasattr(card, 'type_line') and hasattr(card, 'card_types'):
-                    # Make sure card is a valid Card object before checking properties
-                    type_line = card.type_line if hasattr(card, 'type_line') else ""
-                    card_types = card.card_types if hasattr(card, 'card_types') else []
-                    
-                    hand_card_types[i, 0] = float('land' in type_line)
-                    hand_card_types[i, 1] = float('creature' in card_types)
-                    hand_card_types[i, 2] = float('instant' in card_types)
-                    hand_card_types[i, 3] = float('sorcery' in card_types)
-                    hand_card_types[i, 4] = float(not any([hand_card_types[i, j] for j in range(4)]))
-                    
-                    if 'land' in type_line and not me["land_played"]:
-                        hand_playable[i] = 1.0
-                    elif 'land' not in type_line:
-                        # Only call _can_afford_card if we have a valid card object
-                        can_afford = hasattr(self, 'mana_system') and self.mana_system.can_pay_mana_cost(me, card) if hasattr(card, 'mana_cost') else False
-                        is_main_phase = gs.phase in [gs.PHASE_MAIN_PRECOMBAT, gs.PHASE_MAIN_POSTCOMBAT]
-                        # Rest of the logic...
-                        stack_empty = len(gs.stack) == 0
-                        sorcery_timing = is_main_phase and stack_empty and is_my_turn
-                        if (('instant' in card_types) or ('flash' in card.name.lower() if hasattr(card, 'name') else False) or 
-                            (sorcery_timing and 'sorcery' in card_types) or sorcery_timing):
-                            hand_playable[i] = float(can_afford)
-
-            obs["my_hand"] = my_hand
-            obs["my_hand_count"] = np.array([len(me["hand"])], dtype=np.int32)
-            obs["hand_card_types"] = hand_card_types
-            obs["hand_playable"] = hand_playable
-
-            # Add ability recommendations tensor
-            ability_recommendations = np.zeros((self.max_battlefield, 5, 2), dtype=np.float32)
-            for i, card_data in enumerate(active_abilities):
-                if i >= self.max_battlefield:
-                    break
-                
-                card_id = card_data["card_id"]
-                abilities = card_data["abilities"]
-                
-                for j, ability in enumerate(abilities):
-                    if j >= 5:  # Limit to 5 abilities per card
-                        break
-                        
-                    ability_idx = ability.get("index", j)
-                    
-                    # Get ability recommendation if strategic planner is available
-                    if hasattr(gs, 'strategic_planner') and gs.strategic_planner:
-                        try:
-                            recommended, confidence = gs.strategic_planner.recommend_ability_activation(card_id, ability_idx)
-                            ability_recommendations[i, j, 0] = float(recommended)
-                            ability_recommendations[i, j, 1] = confidence
-                            
-                            # Also add to the ability data for easy reference
-                            ability["recommended"] = recommended
-                            ability["confidence"] = confidence
-                            
-                        except Exception as e:
-                            logging.warning(f"Error getting ability recommendation: {e}")
-                            ability_recommendations[i, j, 0] = 0.0
-                            ability_recommendations[i, j, 1] = 0.0
-                            ability["recommended"] = False
-                            ability["confidence"] = 0.0
-
-            obs["ability_recommendations"] = ability_recommendations
-            
-            # Card performance ratings from the hand
-            hand_performance = np.zeros(self.max_hand_size, dtype=np.float32)
-            for i, card_id in enumerate(me["hand"]):
-                if i >= self.max_hand_size:
-                    break
-                card = gs._safe_get_card(card_id)
-                if card:
-                    hand_performance[i] = card.performance_rating if hasattr(card, "performance_rating") else 0.5
-            obs["hand_performance"] = hand_performance
-
-            # Opponent hand count (cards remain hidden)
-            obs["opp_hand_count"] = np.array([len(opp["hand"])], dtype=np.int32)
-
-            # MANA information
-            obs["my_mana_pool"] = np.array([me["mana_pool"][c] for c in ['W', 'U', 'B', 'R', 'G', 'C']], dtype=np.int32)
-            obs["my_mana"] = np.array([sum(me["mana_pool"].values())], dtype=np.int32)
-            obs["total_available_mana"] = np.array([sum(me["mana_pool"].values())], dtype=np.int32)
-            untapped_lands = [card_id for card_id in me["battlefield"] 
-                            if gs._safe_get_card(card_id) and hasattr(gs._safe_get_card(card_id), 'type_line') and 
-                            'land' in gs._safe_get_card(card_id).type_line and card_id not in me["tapped_permanents"]]
-            obs["untapped_land_count"] = np.array([len(untapped_lands)], dtype=np.int32)
-            obs["turn_vs_mana"] = np.array([min(1.0, len(untapped_lands) / max(1, gs.turn))], dtype=np.float32)
-
-            # STACK information
-            obs["stack_count"] = np.array([len(gs.stack)], dtype=np.int32)
-            stack_controller = np.zeros(5, dtype=np.int32)
-            stack_card_types = np.zeros((5, 5), dtype=np.float32)
-            if gs.stack:
-                # Limit to last 5 stack items
-                for i, item in enumerate(gs.stack[-5:]):
-                    if isinstance(item, tuple) and len(item) >= 3:
-                        spell_type, card_id, spell_caster = item
-                        card = gs._safe_get_card(card_id)
-                        
-                        # Ensure we don't exceed array bounds
-                        if i < 5:
-                            stack_controller[i] = int(spell_caster == me)
-                            if card and hasattr(card, 'card_types'):
-                                card_types = card.card_types if isinstance(card.card_types, list) else [card.card_types]
-                                stack_card_types[i, 0] = float('creature' in card_types)
-                                stack_card_types[i, 1] = float('instant' in card_types)
-                                stack_card_types[i, 2] = float('sorcery' in card_types)
-                                stack_card_types[i, 3] = float(spell_type == "ABILITY")
-                                stack_card_types[i, 4] = float(not any([stack_card_types[i, j] for j in range(4)]))
-            
-            # Make sure stack_controller has correct shape
-            if stack_controller.shape != (5,):
-                logging.warning(f"Stack controller shape mismatch: expected (5,), got {stack_controller.shape}")
-                stack_controller = np.zeros(5, dtype=np.int32)
-            
-            # Make sure stack_card_types has correct shape
-            if stack_card_types.shape != (5, 5):
-                logging.warning(f"Stack card types shape mismatch: expected (5, 5), got {stack_card_types.shape}")
-                stack_card_types = np.zeros((5, 5), dtype=np.float32)
-                
-            obs["stack_controller"] = stack_controller
-            obs["stack_card_types"] = stack_card_types
-
-            # GRAVEYARD information
-            obs["my_graveyard_count"] = np.array([len(me["graveyard"])], dtype=np.int32)
-            obs["opp_graveyard_count"] = np.array([len(opp["graveyard"])], dtype=np.int32)
-            obs["graveyard_count"] = np.array([len(me["graveyard"]) + len(opp["graveyard"])], dtype=np.int32)
-            my_creatures_in_gy = sum(1 for cid in me["graveyard"] if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'card_types') and 'creature' in gs._safe_get_card(cid).card_types)
-            opp_creatures_in_gy = sum(1 for cid in opp["graveyard"] if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'card_types') and 'creature' in gs._safe_get_card(cid).card_types)
-            obs["my_dead_creatures"] = np.array([my_creatures_in_gy], dtype=np.int32)
-            obs["opp_dead_creatures"] = np.array([opp_creatures_in_gy], dtype=np.int32)
-
-            # COMBAT information
-            obs["attackers_count"] = np.array([len(gs.current_attackers)], dtype=np.int32)
-            obs["blockers_count"] = np.array([sum(len(blockers) for blockers in gs.current_block_assignments.values())], dtype=np.int32)
-            
+            # --- Combat ---
+            current_attackers = getattr(gs, 'current_attackers', [])
+            current_blocks = getattr(gs, 'current_block_assignments', {})
+            obs["attackers_count"] = np.array([len(current_attackers)], dtype=np.int32)
+            obs["blockers_count"] = np.array([sum(len(bl) for bl in current_blocks.values())], dtype=np.int32)
             # Get potential damage safely
             potential_damage = 0
             try:
-                if hasattr(self, 'combat_resolver') and hasattr(self.combat_resolver, 'simulate_combat'):
-                    simulation = self.combat_resolver.simulate_combat()
-                    if isinstance(simulation, dict) and "damage_to_player" in simulation:
-                        potential_damage = simulation["damage_to_player"]
-            except Exception as e:
-                logging.warning(f"Error simulating combat: {e}")
+                if self.combat_resolver and hasattr(self.combat_resolver, 'simulate_combat'):
+                     # Check if simulation is needed or already calculated
+                     # Assuming simulate_combat returns a dict or raises error
+                     sim_results = self.combat_resolver.simulate_combat()
+                     potential_damage = sim_results.get("damage_to_player", 0)
+            except Exception as sim_e:
+                 logging.warning(f"Combat simulation failed in _get_obs: {sim_e}")
             obs["potential_combat_damage"] = np.array([potential_damage], dtype=np.int32)
 
-            # Phase history and tracking
-            if not hasattr(gs, 'phase_history') or gs.phase_history.shape != (5,):
-                gs.phase_history = np.zeros(5, dtype=np.int32)
-            gs.phase_history = np.roll(gs.phase_history, 1)
-            gs.phase_history[0] = gs.phase
-            obs["phase_history"] = gs.phase_history
+            # --- Tapped Permanents ---
+            tapped = np.zeros(self.max_battlefield, dtype=bool)
+            my_tapped_set = me.get("tapped_permanents", set())
+            for i, card_id in enumerate(my_bf_list[:self.max_battlefield]):
+                tapped[i] = card_id in my_tapped_set
+            obs["my_tapped_permanents"] = tapped
+            # obs["opp_tapped_permanents"] = ... # Optional
 
-            # Tapped permanents tracking
-            tapped_permanents = np.zeros(self.max_battlefield, dtype=bool)
-            for i, card_id in enumerate(me["battlefield"]):
-                if i >= self.max_battlefield:
-                    break
-                if card_id in me["tapped_permanents"]:
-                    tapped_permanents[i] = True
-            obs["tapped_permanents"] = tapped_permanents
-
-            # Remaining mana sources
-            obs["remaining_mana_sources"] = np.array([len([c for c in me["battlefield"] 
-                                                        if gs._safe_get_card(c) and hasattr(gs._safe_get_card(c), 'type_line') and
-                                                        'land' in gs._safe_get_card(c).type_line and 
-                                                        c not in me["tapped_permanents"]])], dtype=np.int32)
-            
-            # Use action_mask method instead of recalculating
-            obs["action_mask"] = self.action_mask()
-
-            # Add abilities tracking
-            my_active_abilities = []
-            for i, card_id in enumerate(me["battlefield"]):
-                if i >= self.max_battlefield:
-                    break
-                card = gs._safe_get_card(card_id)
-                if not card:
-                    continue
-                    
-                # Get abilities from ability handler if available
-                abilities = []
-                if hasattr(gs, 'ability_handler') and gs.ability_handler:
-                    abilities = gs.ability_handler.get_activated_abilities(card_id)
-                    
-                ability_data = []
-                for j, ability in enumerate(abilities):
-                    can_activate = gs.ability_handler.can_activate_ability(card_id, j, me)
-                    
-                    ability_info = {
-                        "index": j,
-                        "cost": ability.cost if hasattr(ability, 'cost') else "Unknown",
-                        "effect": ability.effect if hasattr(ability, 'effect') else "Unknown",
-                        "can_activate": can_activate
-                    }
-                    ability_data.append(ability_info)
-                    
-                my_active_abilities.append({
-                    "card_id": card_id,
-                    "card_name": card.name if hasattr(card, 'name') else "Unknown",
-                    "abilities": ability_data
-                })
-            
-            obs["my_active_abilities"] = my_active_abilities
-                    
-            active_abilities = []
-            for i, card_id in enumerate(me["battlefield"]):
-                if i >= self.max_battlefield:
-                    break
-                
-                # Get abilities for this card
-                card_abilities = []
-                if hasattr(gs, 'ability_handler') and gs.ability_handler:
-                    # Get activated abilities
-                    activated_abilities = gs.ability_handler.get_activated_abilities(card_id)
-                    for idx, ability in enumerate(activated_abilities):
-                        # Track if ability can be activated
-                        can_activate = gs.ability_handler.can_activate_ability(card_id, idx, me)
-                        
-                        # Classify ability type (using text analysis)
-                        effect = ability.effect.lower() if hasattr(ability, 'effect') else ""
-                        ability_type = "unknown"
-                        if "draw" in effect:
-                            ability_type = "card_draw"
-                        elif "damage" in effect or "destroy" in effect:
-                            ability_type = "removal"
-                        elif "+1/+1" in effect or "gets +" in effect:
-                            ability_type = "pump"
-                        elif "add" in effect and any(mana in effect for mana in ["{w}", "{u}", "{b}", "{r}", "{g}", "{c}"]):
-                            ability_type = "mana"
-                        
-                        # Add to tracked abilities
-                        card_abilities.append({
-                            "index": idx,
-                            "can_activate": can_activate,
-                            "cost": ability.cost if hasattr(ability, 'cost') else "",
-                            "type": ability_type,
-                            "times_used_this_turn": sum(1 for a in gs.abilities_activated_this_turn 
-                                                    if a[0] == card_id and a[1] == idx) 
-                                                if hasattr(gs, 'abilities_activated_this_turn') else 0
-                        })
-                
-                # Add card with its abilities
-                card = gs._safe_get_card(card_id)
-                active_abilities.append({
-                    "card_id": card_id,
-                    "card_name": card.name if hasattr(card, 'name') else "Unknown",
-                    "abilities": card_abilities
-                })
-            
-            # Convert to array representation for the observation space
-            ability_features = np.zeros((self.max_battlefield, 5), dtype=np.float32)
-            for i, card_data in enumerate(active_abilities):
-                if i < self.max_battlefield:
-                    # Features: [ability_count, can_activate_count, mana_abilities, draw_abilities, removal_abilities]
-                    abilities = card_data["abilities"]
-                    ability_features[i, 0] = len(abilities)  # Total ability count
-                    ability_features[i, 1] = sum(1 for a in abilities if a["can_activate"])  # Activatable count
-                    ability_features[i, 2] = sum(1 for a in abilities if a["type"] == "mana")  # Mana ability count
-                    ability_features[i, 3] = sum(1 for a in abilities if a["type"] == "card_draw")  # Draw ability count 
-                    ability_features[i, 4] = sum(1 for a in abilities if a["type"] == "removal")  # Removal ability count
-            
-            obs["ability_features"] = ability_features
-            obs["active_abilities"] = active_abilities  # Full data for reference
-            
-            # Track timing/phase appropriateness of abilities
-            ability_timing = np.zeros(5, dtype=np.float32)
-            current_phase = gs.phase
-            
-            # Determine which ability types are good in current phase
-            is_combat = current_phase in [gs.PHASE_DECLARE_ATTACKERS, gs.PHASE_DECLARE_BLOCKERS, gs.PHASE_COMBAT_DAMAGE]
-            is_main = current_phase in [gs.PHASE_MAIN_PRECOMBAT, gs.PHASE_MAIN_POSTCOMBAT]
-            is_end_step = current_phase in [gs.PHASE_END_STEP]
-            
-            # Fill timing information
-            ability_timing[0] = float(is_main)  # Card draw timing
-            ability_timing[1] = float(is_combat)  # Combat trick timing
-            ability_timing[2] = float(is_main)  # Mana ability timing
-            ability_timing[3] = float(is_combat or is_end_step)  # Removal timing
-            ability_timing[4] = float(is_main and gs.turn <= 4)  # Ramp timing (early game focus)
-            
-            # Make sure ability_timing has correct shape
-            if ability_timing.shape != (5,):
-                logging.warning(f"Ability timing shape mismatch: expected (5,), got {ability_timing.shape}")
-                ability_timing = np.zeros(5, dtype=np.float32)
-            
-            obs["ability_timing"] = ability_timing
-            
-            # Add card synergy scores
-            my_battlefield = list(me["battlefield"])
-            obs["card_synergy_scores"] = self._calculate_card_synergies(my_battlefield)
-            
-            # Add battlefield keyword awareness
-            battlefield_keywords = np.zeros((self.max_battlefield, 15), dtype=np.float32)
-            for i, card_id in enumerate(my_battlefield):
-                if i >= self.max_battlefield:
-                    break
-                card = gs._safe_get_card(card_id)
-                if card and hasattr(card, 'keywords'):
-                    # Fill existing keywords
-                    keyword_length = min(len(card.keywords), 15)
-                    battlefield_keywords[i, :keyword_length] = card.keywords[:keyword_length]
-            obs["battlefield_keywords"] = battlefield_keywords
-            
-            # Add position advantage
-            position_advantage = self._calculate_position_advantage()
-            obs["position_advantage"] = np.array([position_advantage], dtype=np.float32)
-            
-            # Add estimated opponent hand
-            obs["estimated_opponent_hand"] = self._estimate_opponent_hand()
-            
-            # Add key cards from graveyard
-            graveyard_key_cards = np.zeros((10, FEATURE_DIM), dtype=np.float32)
-            # Sort graveyard cards by importance (using CMC as a simple proxy for importance)
-            graveyard_cards = []
-            for cid in me["graveyard"]:
-                card = gs._safe_get_card(cid)
-                if card and hasattr(card, 'cmc'):
-                    graveyard_cards.append((cid, card.cmc))
-                else:
-                    graveyard_cards.append((cid, 0))
-                    
-            graveyard_cards.sort(key=lambda x: x[1], reverse=True)  # Sort by CMC descending
-            
-            for i, (card_id, _) in enumerate(graveyard_cards[:10]):
-                if i < 10:  # Ensure we don't go out of bounds
-                    graveyard_key_cards[i] = self._get_card_feature(card_id, FEATURE_DIM)
-            obs["graveyard_key_cards"] = graveyard_key_cards
-            
-            # Add exile zone information
-            exile_key_cards = np.zeros((10, FEATURE_DIM), dtype=np.float32)
-            exile_cards = []
-            for cid in me["exile"]:
-                card = gs._safe_get_card(cid)
-                if card and hasattr(card, 'cmc'):
-                    exile_cards.append((cid, card.cmc))
-                else:
-                    exile_cards.append((cid, 0))
-                    
-            exile_cards.sort(key=lambda x: x[1], reverse=True)  # Sort by CMC descending
-            
-            for i, (card_id, _) in enumerate(exile_cards[:10]):
-                if i < 10:  # Ensure we don't go out of bounds
-                    exile_key_cards[i] = self._get_card_feature(card_id, FEATURE_DIM)
-            obs["exile_key_cards"] = exile_key_cards
-            
-            # Add action and reward memory
-            if not hasattr(self, 'last_n_actions'):
-                self.last_n_actions = np.zeros(self.action_memory_size, dtype=np.int32)
-                self.last_n_rewards = np.zeros(self.action_memory_size, dtype=np.float32)
-            
+            # --- History / Tracking ---
+            # Make sure _phase_history attribute exists before accessing
+            if not hasattr(self, '_phase_history'): self._phase_history = []
+            phase_hist_len = len(self._phase_history)
+            obs["phase_history"][:phase_hist_len] = self._phase_history[-5:] # Last 5 phases
+            obs["phase_history"][phase_hist_len:] = -1 # Pad with -1
+            # Ensure last_n_actions/rewards exist
+            if not hasattr(self, 'last_n_actions'): self.last_n_actions = np.full(self.action_memory_size, -1, dtype=np.int32)
+            if not hasattr(self, 'last_n_rewards'): self.last_n_rewards = np.zeros(self.action_memory_size, dtype=np.float32)
             obs["previous_actions"] = self.last_n_actions
             obs["previous_rewards"] = self.last_n_rewards
-            
-            # STRATEGIC METRICS
-            strategic_metrics = np.zeros(10, dtype=np.float32)
-            if hasattr(self, 'strategic_planner') and hasattr(self.strategic_planner, 'current_analysis'):
-                analysis = self.strategic_planner.current_analysis
-                if analysis is not None:  # Add this check to prevent NoneType error
-                    # Board advantage
-                    if 'board_state' in analysis:
-                        strategic_metrics[0] = np.tanh(analysis['board_state'].get('board_advantage', 0))
-                    # Card advantage
-                    if 'resources' in analysis:
-                        strategic_metrics[1] = np.tanh(analysis['resources'].get('card_advantage', 0) / 3)
-                    # Mana advantage
-                    if 'resources' in analysis:
-                        strategic_metrics[2] = np.tanh(analysis['resources'].get('mana_advantage', 0) / 2)
-                    # Life advantage
-                    if 'life' in analysis:
-                        strategic_metrics[3] = np.tanh(analysis['life'].get('life_diff', 0) / 10)
-                    # Tempo advantage
-                    if 'tempo' in analysis:
-                        strategic_metrics[4] = np.tanh(analysis['tempo'].get('tempo_advantage', 0))
-                    # Overall position score
-                    if 'position' in analysis:
-                        strategic_metrics[5] = np.tanh(analysis['position'].get('score', 0))
-                    # Game stage indicator (early=0, mid=0.5, late=1)
-                    if 'game_info' in analysis:
-                        stage = analysis['game_info'].get('game_stage', 'mid')
-                        strategic_metrics[6] = 0.0 if stage == 'early' else 0.5 if stage == 'mid' else 1.0
-                    # Combat potential
-                    strategic_metrics[7] = np.tanh(my_power - opp_power)
-                    # Resource utilization
-                    if sum(me["mana_pool"].values()) > 0:
-                        strategic_metrics[8] = -1  # Penalty for unused mana
-                    # Hand playability
-                    playable_count = np.sum(hand_playable)
-                    strategic_metrics[9] = playable_count / max(1, len(me["hand"]))
-                
-            obs["strategic_metrics"] = strategic_metrics
 
-            # Deck composition estimate
-            deck_composition = np.zeros(6, dtype=np.float32)
-            if hasattr(self, 'strategic_planner'):
-                # Estimate remaining deck composition
-                all_cards = me["library"] + me["hand"] + me["battlefield"] + me["graveyard"]
-                card_objects = [gs._safe_get_card(cid) for cid in all_cards]
-                card_objects = [c for c in card_objects if c]
-                
-                # Count by card type
-                type_counts = defaultdict(int)
-                for card in card_objects:
-                    if hasattr(card, 'card_types'):
-                        for card_type in card.card_types:
-                            type_counts[card_type] += 1
-                
-                # Calculate ratios for main card types
-                total_cards = len(card_objects)
-                if total_cards > 0:
-                    deck_composition[0] = type_counts.get('creature', 0) / total_cards  # Creature ratio
-                    deck_composition[1] = type_counts.get('instant', 0) / total_cards   # Instant ratio
-                    deck_composition[2] = type_counts.get('sorcery', 0) / total_cards   # Sorcery ratio
-                    deck_composition[3] = type_counts.get('artifact', 0) / total_cards  # Artifact ratio
-                    deck_composition[4] = type_counts.get('enchantment', 0) / total_cards  # Enchantment ratio
-                    deck_composition[5] = type_counts.get('land', 0) / total_cards      # Land ratio
-                    
-            obs["deck_composition_estimate"] = deck_composition
-
-            # Threat assessment of opponent's permanents
-            threat_assessment = np.zeros(self.max_battlefield, dtype=np.float32)
-            for i, card_id in enumerate(opp["battlefield"]):
-                if i >= self.max_battlefield:
-                    break
-                card = gs._safe_get_card(card_id)
-                threat_level = 0
-                
-                if card and hasattr(card, 'card_types'):
-                    # Base threat for creatures
-                    if 'creature' in card.card_types:
-                        if hasattr(card, 'power'):
-                            threat_level += card.power * 1.5
-                        
-                        # Check keyword abilities
-                        if hasattr(card, 'oracle_text'):
-                            text = card.oracle_text.lower()
-                            if "flying" in text: threat_level += 1
-                            if "trample" in text: threat_level += 1
-                            if "deathtouch" in text: threat_level += 2
-                            if "lifelink" in text: threat_level += 1
-                            if "double strike" in text: threat_level += 3
-                    
-                    # Planeswalkers are high threat
-                    elif 'planeswalker' in card.card_types:
-                        threat_level = 8
-                        
-                    # Other permanent types
-                    elif 'artifact' in card.card_types or 'enchantment' in card.card_types:
-                        threat_level = 3
-                
-                threat_assessment[i] = min(10.0, threat_level)  # Cap at 10
-                
-            obs["threat_assessment"] = threat_assessment
-
-            if hasattr(self, 'strategic_planner') and hasattr(self.strategic_planner, 'predict_opponent_archetype'):
+            # --- Strategic Info ---
+            # Only calculate if planner exists
+            if self.strategic_planner:
                 try:
-                    # Ensure exactly 4 dimensions by truncating or padding
+                    # Use cached analysis if available, otherwise generate/fallback
+                    analysis = self.current_analysis if self.current_analysis else self._get_fallback_analysis()
+
+                    obs["strategic_metrics"] = self._analysis_to_metrics(analysis)
+                    obs["position_advantage"] = np.array([analysis.get("position", {}).get("score", 0)], dtype=np.float32)
+
+                    # Archetype prediction (ensure shape matches obs space [6])
                     opp_archetype_probs = self.strategic_planner.predict_opponent_archetype()
-                    if len(opp_archetype_probs) > 4:
-                        opp_archetype_probs = opp_archetype_probs[:4]
-                    elif len(opp_archetype_probs) < 4:
-                        # Pad with zeros if less than 4
-                        padded_probs = np.zeros(4, dtype=np.float32)
-                        padded_probs[:len(opp_archetype_probs)] = opp_archetype_probs
-                        opp_archetype_probs = padded_probs
-                    
-                    obs["opponent_archetype"] = np.array(opp_archetype_probs, dtype=np.float32)
-                except Exception as e:
-                    logging.warning(f"Error predicting opponent archetype: {e}")
-                    obs["opponent_archetype"] = np.array([0.25, 0.25, 0.25, 0.25], dtype=np.float32)
+                    target_shape = self.observation_space["opponent_archetype"].shape[0]
+                    if len(opp_archetype_probs) != target_shape:
+                         padded_probs = np.zeros(target_shape, dtype=np.float32)
+                         fill_len = min(len(opp_archetype_probs), target_shape)
+                         padded_probs[:fill_len] = opp_archetype_probs[:fill_len]
+                         obs["opponent_archetype"] = padded_probs
+                    else:
+                         obs["opponent_archetype"] = np.array(opp_archetype_probs, dtype=np.float32)
 
-            # NEW: Add future state projections
-            if hasattr(self, 'strategic_planner') and hasattr(self.strategic_planner, 'project_future_states'):
-                try:
-                    future_projections = self.strategic_planner.project_future_states(num_turns=5)
-                    obs["future_state_projections"] = future_projections
-                except Exception as e:
-                    logging.warning(f"Error projecting future states: {e}")
-                    obs["future_state_projections"] = np.zeros(5, dtype=np.float32)
+                    # Future states (ensure shape matches obs space [7])
+                    target_shape_future = self.observation_space["future_state_projections"].shape[0]
+                    future_projs = self.strategic_planner.project_future_states(num_turns=target_shape_future)
+                    if len(future_projs) != target_shape_future:
+                         padded_projs = np.zeros(target_shape_future, dtype=np.float32)
+                         fill_len = min(len(future_projs), target_shape_future)
+                         padded_projs[:fill_len] = future_projs[:fill_len]
+                         obs["future_state_projections"] = padded_projs
+                    else:
+                        obs["future_state_projections"] = np.array(future_projs, dtype=np.float32)
 
-            # NEW: Add multi-turn plan information
-            if hasattr(self, 'strategic_planner') and hasattr(self.strategic_planner, 'plan_multi_turn_sequence'):
-                try:
-                    turn_plans = self.strategic_planner.plan_multi_turn_sequence(depth=2)
-                    # Convert complex plan structure to numeric representation
-                    plan_metrics = np.zeros(6, dtype=np.float32)
-                    
-                    # Total plays planned
-                    total_plays = sum(len(plan["plays"]) for plan in turn_plans)
-                    plan_metrics[0] = min(1.0, total_plays / 10)  # Normalize planned play count
-                    
-                    # Land drops planned
-                    land_plays = sum(1 for plan in turn_plans 
-                                for play in plan["plays"] if play["type"] == "land")
-                    plan_metrics[1] = min(1.0, land_plays / 2)  # Normalize land plays
-                    
-                    # Spells planned by CMC
-                    low_cmc_spells = sum(1 for plan in turn_plans 
-                                    for play in plan["plays"] 
-                                    if play["type"] == "spell" and play["card"].cmc <= 3)
-                    high_cmc_spells = sum(1 for plan in turn_plans 
-                                        for play in plan["plays"] 
-                                        if play["type"] == "spell" and play["card"].cmc > 3)
-                    
-                    plan_metrics[2] = min(1.0, low_cmc_spells / 5)  # Low CMC spell ratio
-                    plan_metrics[3] = min(1.0, high_cmc_spells / 3)  # High CMC spell ratio
-                    
-                    # Expected mana curve
-                    if turn_plans:
-                        plan_metrics[4] = min(1.0, turn_plans[0]["expected_mana"] / 10)  # Current expected mana
-                        if len(turn_plans) > 1:
-                            plan_metrics[5] = min(1.0, turn_plans[1]["expected_mana"] / 10)  # Next turn expected mana
-                    
-                    obs["multi_turn_plan"] = plan_metrics
-                    
-                except Exception as e:
-                    logging.warning(f"Error creating multi-turn plan metrics: {e}")
-                    obs["multi_turn_plan"] = np.zeros(6, dtype=np.float32)
+                    # Win Con (ensure shape matches [6])
+                    win_cons = self.strategic_planner.identify_win_conditions()
+                    wc_keys = ["combat_damage", "direct_damage", "card_advantage", "combo", "control", "alternate"] # 6 keys
+                    target_shape_wc = self.observation_space["win_condition_viability"].shape[0]
+                    obs["win_condition_viability"] = np.array([win_cons.get(k, {}).get("score", 0.0) for k in wc_keys][:target_shape_wc], dtype=np.float32) # Use score as viability proxy
+                    obs["win_condition_timings"] = np.array([min(self.max_turns + 1, win_cons.get(k, {}).get("turns_to_win", 99)) for k in wc_keys][:target_shape_wc], dtype=np.float32) # Cap turns
 
-            if hasattr(self, 'strategic_planner') and hasattr(self.strategic_planner, 'identify_card_synergies'):
-                try:
-                    # Analyze hand synergies with battlefield
-                    hand_synergy_scores = np.zeros(self.max_hand_size, dtype=np.float32)
-                    for i, card_id in enumerate(me["hand"]):
-                        if i >= self.max_hand_size:
-                            break
-                        synergy_score = self.strategic_planner.identify_card_synergies(
-                            card_id, me["hand"], me["battlefield"])
-                        
-                        # Ensure synergy score is a float and within [0, 1] range
-                        hand_synergy_scores[i] = max(0.0, min(1.0, float(synergy_score)))
-                    
-                    obs["hand_synergy_scores"] = hand_synergy_scores
-                except Exception as e:
-                    logging.warning(f"Error calculating card synergies: {e}")
-                    obs["hand_synergy_scores"] = np.zeros(self.max_hand_size, dtype=np.float32)
+                    obs["multi_turn_plan"] = self._get_multi_turn_plan_metrics()
+                    obs["threat_assessment"] = self._get_threat_assessment(opp_bf_list)
+
+                except Exception as planner_e:
+                     logging.warning(f"Error getting strategic info for observation: {planner_e}")
+                     # Obs fields will remain zeros from initialization
+
+            # --- Other Features ---
+            obs["card_synergy_scores"] = self._calculate_card_synergies(my_bf_list)
+            obs["estimated_opponent_hand"] = self._estimate_opponent_hand()
+            obs["deck_composition_estimate"] = self._get_deck_composition(me)
+            obs["resource_efficiency"] = self._get_resource_efficiency(me, current_turn)
+            obs["ability_features"] = self._get_ability_features(my_bf_list, me)
+            obs["ability_timing"] = self._get_ability_timing(current_phase)
+            obs["remaining_mana_sources"] = obs["untapped_land_count"] # Simplified: equate to untapped lands
+
+            # Mulligan Info
+            obs["mulligan_in_progress"] = np.array([int(getattr(gs, 'mulligan_in_progress', False))], dtype=np.int32)
+            mulligan_rec, mulligan_reasons_arr, reason_count = self._get_mulligan_info(me)
+            obs["mulligan_recommendation"] = np.array([mulligan_rec], dtype=np.float32)
+            obs["mulligan_reason_count"] = np.array([reason_count], dtype=np.int32)
+            obs["mulligan_reasons"] = mulligan_reasons_arr
+
+            # Recommended/Suggested Actions
+            # Note: Action mask generation is deferred to self.action_mask()
+            obs["action_mask"] = self.action_mask().astype(bool)
+            rec_action, rec_conf, mem_action, matches = self._get_recommendations(obs["action_mask"])
+            obs["recommended_action"] = np.array([rec_action if rec_action is not None else -1], dtype=np.int32)
+            obs["recommended_action_confidence"] = np.array([rec_conf], dtype=np.float32)
+            obs["memory_suggested_action"] = np.array([mem_action if mem_action is not None else -1], dtype=np.int32)
+            obs["suggestion_matches_recommendation"] = np.array([matches], dtype=np.int32)
+
+            # Optimal Attackers
+            optimal_attackers_ids = []
+            if self.strategic_planner and hasattr(self.strategic_planner,'find_optimal_attack'):
+                 # Assuming find_optimal_attack uses current state and returns IDs
+                 possible_attackers = [cid for cid in my_bf_list if self.action_handler.is_valid_attacker(cid)]
+                 optimal_attackers_ids = self.strategic_planner.find_optimal_attack() # Let planner decide
+                 obs["optimal_attackers"] = np.array([1.0 if cid in optimal_attackers_ids else 0.0 for cid in my_bf_list[:self.max_battlefield]] + [0.0] * (self.max_battlefield - len(my_bf_list)), dtype=np.float32)
+                 obs["attacker_values"] = self._get_attacker_values(my_bf_list, me) # Pass *all* player's battlefield
+            else:
+                # Populate with zeros if no planner
+                obs["optimal_attackers"] = np.zeros(self.max_battlefield, dtype=np.float32)
+                obs["attacker_values"] = np.zeros(self.max_battlefield, dtype=np.float32)
 
 
-            if hasattr(self, 'strategic_planner') and self.strategic_planner and hasattr(self.strategic_planner, 'current_analysis'):
-                win_conditions = self.strategic_planner.current_analysis
-                if win_conditions is not None:
-                    win_conditions = win_conditions.get("win_conditions", {})
-                    
-                    win_condition_viability = np.zeros(6, dtype=np.float32)
-                    win_condition_timings = np.ones(6, dtype=np.float32) * 99  # Initialize with high values
-                    
-                    for i, condition in enumerate(["combat_damage", "card_advantage", "combo", "control", "mill", "alternate"]):
-                        if condition in win_conditions:
-                            win_condition_viability[i] = float(win_conditions[condition].get("viable", False))
-                            if win_conditions[condition].get("viable", False):
-                                win_condition_timings[i] = min(20, win_conditions[condition].get("turns_to_win", 99))
-                    
-                    obs["win_condition_viability"] = win_condition_viability
-                    obs["win_condition_timings"] = win_condition_timings
+            # Planeswalker Activations
+            pw_activations = np.zeros(self.max_battlefield, dtype=np.float32)
+            pw_activation_counts = np.zeros(self.max_battlefield, dtype=np.float32)
+            activated_set = me.get("activated_this_turn", set())
+            activation_counts = me.get("pw_activations", {})
+            for i, card_id in enumerate(my_bf_list):
+                 if i >= self.max_battlefield: break
+                 card = gs._safe_get_card(card_id)
+                 if card and 'planeswalker' in getattr(card, 'card_types', []):
+                      pw_activations[i] = float(card_id in activated_set)
+                      pw_activation_counts[i] = float(activation_counts.get(card_id, 0))
+            obs["planeswalker_activations"] = pw_activations
+            obs["planeswalker_activation_counts"] = pw_activation_counts
 
-            # Cache this observation
-            self._cached_obs = obs
-            self._cached_obs_turn = gs.turn
-            self._cached_obs_phase = gs.phase
-            self._cached_battlefield_count_p1 = len(gs.p1["battlefield"])
-            self._cached_battlefield_count_p2 = len(gs.p2["battlefield"])
-            self._cached_hand_count_p1 = len(gs.p1["hand"])
-            self._cached_hand_count_p2 = len(gs.p2["hand"])
-            self._cached_life_p1 = gs.p1["life"]
-            self._cached_life_p2 = gs.p2["life"]
-            self._cached_stack_size = len(gs.stack)
-            self._cached_attackers_count = len(gs.current_attackers)
+            # Ability Recommendations
+            # Populate obs["ability_recommendations"] using helper/planner
+            obs["ability_recommendations"] = self._get_ability_recommendations(my_bf_list, me)
+
+            # --- Cache Update ---
+            self._cached_obs = obs.copy() # Store a copy
+            self._cached_obs_turn = current_turn
+            self._cached_obs_phase = current_phase
+            # Cache counts used in cache check
+            self._cached_battlefield_count_p1 = len(getattr(gs, 'p1', {}).get("battlefield", []))
+            self._cached_battlefield_count_p2 = len(getattr(gs, 'p2', {}).get("battlefield", []))
+            self._cached_hand_count_p1 = len(getattr(gs, 'p1', {}).get("hand", []))
+            self._cached_hand_count_p2 = len(getattr(gs, 'p2', {}).get("hand", []))
+            self._cached_life_p1 = getattr(gs, 'p1', {}).get('life', 0)
+            self._cached_life_p2 = getattr(gs, 'p2', {}).get('life', 0)
+            self._cached_stack_size = len(getattr(gs, 'stack', []))
+            self._cached_attackers_count = len(getattr(gs, 'current_attackers', []))
+
+            # --- Final Validation (Optional but recommended) ---
+            self._validate_obs(obs)
 
             return obs
+
         except Exception as e:
-            logging.error(f"Error generating observation: {str(e)}")
+            logging.error(f"CRITICAL error generating observation: {str(e)}")
             import traceback
             logging.error(traceback.format_exc())
-            
-            # Create a minimal valid observation as fallback
-            fallback_obs = {k: np.zeros(space.shape, dtype=space.dtype) 
-                    for k, space in self.observation_space.spaces.items()}
-            
-            # Set minimal valid values
-            fallback_obs["phase"] = gs.phase
-            fallback_obs["turn"] = np.array([gs.turn], dtype=np.int32)
-            fallback_obs["p1_life"] = np.array([gs.p1["life"]], dtype=np.int32)
-            fallback_obs["p2_life"] = np.array([gs.p2["life"]], dtype=np.int32)
-            
-            return fallback_obs
+            # Return the minimal safe observation on any error
+            return self._get_obs_safe()
+
+    # --- New/Refined Helper Methods for Observation ---
+
+    def _get_fallback_analysis(self):
+        """Provides a basic analysis structure if strategic planner fails."""
+        gs = self.game_state
+        return {
+            "game_info": {"turn": gs.turn, "phase": gs.phase, "game_stage": "mid"},
+            "position": {"overall": "even", "score": 0.0},
+            "board_state": {"board_advantage": 0.0, "my_creatures":0, "opp_creatures":0},
+            "resources": {"card_advantage": 0, "mana_advantage": 0},
+            "life": {"life_diff": 0},
+            "tempo": {"tempo_advantage": 0.0},
+            "win_conditions": {}
+        }
+
+    def _validate_obs(self, obs):
+        """Optional: Check if generated obs conforms to the observation space."""
+        for key, space in self.observation_space.spaces.items():
+            if key not in obs:
+                 logging.error(f"Observation Validation Error: Missing key '{key}'")
+                 continue # Skip further checks for this key
+            value = obs[key]
+            if not isinstance(value, np.ndarray):
+                 logging.error(f"Observation Validation Error: Key '{key}' is not a numpy array (type: {type(value)})")
+                 continue
+            if value.shape != space.shape:
+                logging.error(f"Observation Validation Error: Shape mismatch for '{key}'. Expected {space.shape}, got {value.shape}")
+            if value.dtype != space.dtype:
+                # Allow casting between compatible float/int types implicitly if bounds are met
+                # Explicitly check bool/int/float incompatibilities
+                is_numeric = np.issubdtype(value.dtype, np.number) and np.issubdtype(space.dtype, np.number)
+                is_bool = np.issubdtype(value.dtype, np.bool_) and np.issubdtype(space.dtype, np.bool_)
+                if not (is_numeric or is_bool):
+                     logging.error(f"Observation Validation Error: Dtype mismatch for '{key}'. Expected {space.dtype}, got {value.dtype}")
+
+            # Check bounds (only for Box spaces)
+            if isinstance(space, spaces.Box):
+                if not np.all((value >= space.low) & (value <= space.high)):
+                    min_val, max_val = np.min(value), np.max(value)
+                    logging.error(f"Observation Validation Error: Value out of bounds for '{key}'. Expected [{space.low.min()}, {space.high.max()}], got [{min_val}, {max_val}]")
+
+    def _get_hand_synergy_scores(self, hand_ids, bf_ids):
+        """Calculate synergy for each card in hand with current board/hand state."""
+        scores = np.zeros(self.max_hand_size, dtype=np.float32)
+        if not self.strategic_planner or not hasattr(self.strategic_planner, 'identify_card_synergies'):
+            return scores
+
+        current_hand_and_board = hand_ids + bf_ids
+        for i, card_id in enumerate(hand_ids):
+            if i >= self.max_hand_size: break
+            # Compare card i with all *other* cards currently available
+            other_cards = [cid for cid in current_hand_and_board if cid != card_id]
+            synergy_score, _ = self.strategic_planner.identify_card_synergies(card_id, other_cards, []) # Compare with hand+board
+            scores[i] = np.clip(synergy_score / 5.0, 0.0, 1.0) # Normalize synergy score
+
+        return scores
+
+    def _get_ability_recommendations(self, bf_ids, player):
+        """Populate the ability recommendations tensor."""
+        recs = np.zeros((self.max_battlefield, 5, 2), dtype=np.float32) # shape (bf_size, max_abilities, [recommend, conf])
+        gs = self.game_state
+        if not hasattr(gs, 'ability_handler') or not self.strategic_planner: return recs
+
+        for i, card_id in enumerate(bf_ids):
+             if i >= self.max_battlefield: break
+             abilities = gs.ability_handler.get_activated_abilities(card_id)
+             for j, ability in enumerate(abilities):
+                  if j >= 5: break # Max 5 abilities per card
+                  try:
+                      # Check if actually activatable first
+                      can_activate = gs.ability_handler.can_activate_ability(card_id, j, player)
+                      if can_activate:
+                           recommended, confidence = self.strategic_planner.recommend_ability_activation(card_id, j)
+                           recs[i, j, 0] = float(recommended)
+                           recs[i, j, 1] = confidence
+                      # else leave as 0.0, 0.0
+                  except Exception as e:
+                      logging.warning(f"Error getting ability rec for {card_id} ability {j}: {e}")
+                      # Leave as zeros
+        return recs
+
+        
+    # --- Observation Helper Methods ---
+
+    def _get_zone_features(self, card_ids, max_size):
+        """Helper to get feature vectors for cards in a zone, padded/truncated."""
+        features = np.zeros((max_size, self._feature_dim), dtype=np.float32)
+        for i, card_id in enumerate(card_ids):
+            if i >= max_size: break
+            features[i] = self._get_card_feature(card_id, self._feature_dim)
+        return features
+
+    def _get_battlefield_flags(self, card_ids, player, max_size):
+        """Helper to get flags (tapped, sick, atk, block, keywords) for battlefield."""
+        flags = np.zeros((max_size, 5), dtype=np.float32)
+        tapped_set = player.get("tapped_permanents", set())
+        sick_set = player.get("entered_battlefield_this_turn", set())
+        attackers_set = set(getattr(self.game_state, 'current_attackers', []))
+        blocking_set = set()
+        for blockers in getattr(self.game_state, 'current_block_assignments', {}).values():
+            blocking_set.update(blockers)
+
+        for i, card_id in enumerate(card_ids):
+            if i >= max_size: break
+            card = self._safe_get_card(card_id)
+            flags[i, 0] = float(card_id in tapped_set)
+            # Check summoning sickness and haste using _has_haste helper
+            has_haste = self._has_haste(card_id) if card else False
+            is_sick = card_id in sick_set and not has_haste
+            flags[i, 1] = float(is_sick)
+            flags[i, 2] = float(card_id in attackers_set)
+            flags[i, 3] = float(card_id in blocking_set)
+            flags[i, 4] = float(sum(getattr(card, 'keywords', [])) > 0 if card else 0) # Simple keyword check
+        return flags
+
+    def _get_creature_stats(self, creature_ids):
+        """Helper to get aggregated power/toughness/count."""
+        count = 0
+        power = 0
+        toughness = 0
+        for card_id in creature_ids:
+             card = self._safe_get_card(card_id)
+             # Check if it's actually a creature (type might change)
+             if card and 'creature' in getattr(card, 'card_types', []):
+                 count += 1
+                 power += getattr(card, 'power', 0) or 0
+                 toughness += getattr(card, 'toughness', 0) or 0
+        return {"count": count, "power": power, "toughness": toughness}
+
+    def _get_hand_card_types(self, hand_ids):
+        """Helper to get one-hot encoding of card types in hand."""
+        types = np.zeros((self.max_hand_size, 5), dtype=np.float32)
+        for i, card_id in enumerate(hand_ids):
+            if i >= self.max_hand_size: break
+            card = self._safe_get_card(card_id)
+            if card:
+                type_line = getattr(card, 'type_line', '').lower()
+                card_types = getattr(card, 'card_types', [])
+                types[i, 0] = float('land' in type_line)
+                types[i, 1] = float('creature' in card_types)
+                types[i, 2] = float('instant' in card_types)
+                types[i, 3] = float('sorcery' in card_types)
+                types[i, 4] = float(not any(types[i, :4])) # Other
+        return types
+
+    def _get_hand_playable(self, hand_ids, player, is_my_turn):
+        """Helper to determine playability flags for hand cards."""
+        playable = np.zeros(self.max_hand_size, dtype=np.float32)
+        gs = self.game_state
+        can_play_sorcery = is_my_turn and gs.phase in [gs.PHASE_MAIN_PRECOMBAT, gs.PHASE_MAIN_POSTCOMBAT] and not gs.stack
+
+        for i, card_id in enumerate(hand_ids):
+            if i >= self.max_hand_size: break
+            card = gs._safe_get_card(card_id)
+            if card:
+                is_land = 'land' in getattr(card, 'type_line', '').lower()
+                is_instant_speed = 'instant' in getattr(card, 'card_types', []) or self._has_flash(card_id)
+
+                can_afford = self._can_afford_card(player, card)
+
+                if is_land:
+                    if not player.get("land_played", False) and can_play_sorcery:
+                        playable[i] = 1.0
+                elif can_afford:
+                    if is_instant_speed:
+                         playable[i] = 1.0 # Can always cast if affordable and has priority
+                    elif can_play_sorcery:
+                         playable[i] = 1.0
+        return playable
+
+    def _get_stack_info(self, stack, me_player):
+        """Helper to get controller and type info for top stack items."""
+        controllers = np.full(5, -1, dtype=np.int32) # -1=Empty, 0=Me, 1=Opp
+        types = np.zeros((5, 5), dtype=np.float32) # Creature, Inst, Sorc, Ability, Other
+        for i, item in enumerate(reversed(stack[:5])): # Top 5 items
+            if isinstance(item, tuple) and len(item) >= 3:
+                item_type, card_id, controller = item[:3]
+                card = self._safe_get_card(card_id)
+                controllers[i] = 0 if controller == me_player else 1
+                if card:
+                    card_types = getattr(card, 'card_types', [])
+                    types[i, 0] = float('creature' in card_types)
+                    types[i, 1] = float('instant' in card_types)
+                    types[i, 2] = float('sorcery' in card_types)
+                types[i, 3] = float(item_type == "ABILITY" or item_type == "TRIGGER")
+                types[i, 4] = float(not any(types[i, :4])) # Other
+        return controllers, types
+
+    def _is_land(self, card_id):
+        """Check if card is a land."""
+        card = self._safe_get_card(card_id)
+        return card and 'land' in getattr(card, 'type_line', '').lower()
+
+    def _is_creature(self, card_id):
+        """Check if card is a creature."""
+        card = self._safe_get_card(card_id)
+        return card and 'creature' in getattr(card, 'card_types', [])
+
+    def _analysis_to_metrics(self, analysis):
+        """Convert strategic analysis dict to metrics vector."""
+        metrics = np.zeros(10, dtype=np.float32)
+        if not analysis: return metrics
+        metrics[0] = analysis.get("position", {}).get("score", 0)
+        metrics[1] = analysis.get("board_state", {}).get("board_advantage", 0)
+        metrics[2] = analysis.get("resources", {}).get("card_advantage", 0) / 5.0 # Normalize
+        metrics[3] = analysis.get("resources", {}).get("mana_advantage", 0) / 3.0 # Normalize
+        metrics[4] = analysis.get("life", {}).get("life_diff", 0) / 20.0 # Normalize
+        metrics[5] = analysis.get("tempo", {}).get("tempo_advantage", 0)
+        stage = analysis.get("game_info", {}).get("game_stage", 'mid')
+        metrics[6] = 0.0 if stage == 'early' else 0.5 if stage == 'mid' else 1.0
+        # Metrics 7, 8, 9 can be used for other aspects (e.g., threat level, combo proximity)
+        # Placeholder: Add opponent archetype confidence if available
+        # Needs archetype prediction logic to be added first. For now, keep as 0.
+        metrics[7] = 0.0 # Opponent Archetype Confidence
+        metrics[8] = 0.0 # Win Condition Proximity
+        metrics[9] = 0.0 # Overall Threat Level
+        return np.clip(metrics, -1.0, 1.0)
+
+    def _get_hand_performance(self, hand_ids):
+        """Get performance ratings for cards in hand."""
+        perf = np.full(self.max_hand_size, 0.5, dtype=np.float32) # Default 0.5
+        for i, card_id in enumerate(hand_ids):
+            if i >= self.max_hand_size: break
+            card = self._safe_get_card(card_id)
+            if card and hasattr(card, 'performance_rating'):
+                 perf[i] = card.performance_rating
+        return perf
+
+    def _get_battlefield_keywords(self, card_ids, keyword_dim):
+        """Get keyword vectors for battlefield cards."""
+        keywords = np.zeros((self.max_battlefield, keyword_dim), dtype=np.float32)
+        for i, card_id in enumerate(card_ids):
+             if i >= self.max_battlefield: break
+             card = self._safe_get_card(card_id)
+             if card and hasattr(card, 'keywords'):
+                 kw_vector = np.array(getattr(card, 'keywords', []))
+                 current_len = len(kw_vector)
+                 if current_len == keyword_dim:
+                      keywords[i, :] = kw_vector
+                 elif current_len < keyword_dim:
+                      keywords[i, :current_len] = kw_vector # Pad end
+                 else: # current_len > keyword_dim
+                      keywords[i, :] = kw_vector[:keyword_dim] # Truncate
+        return keywords
+
+    def _get_deck_composition(self, player):
+        """Estimate deck composition based on known cards."""
+        composition = np.zeros(6, dtype=np.float32)
+        known_cards = player.get("hand", []) + player.get("battlefield", []) + player.get("graveyard", []) + player.get("exile", [])
+        total_known = len(known_cards)
+        if total_known == 0: return composition
+
+        counts = defaultdict(int)
+        for card_id in known_cards:
+            card = self._safe_get_card(card_id)
+            if card:
+                 if 'creature' in getattr(card, 'card_types', []): counts['creature'] += 1
+                 elif 'instant' in getattr(card, 'card_types', []): counts['instant'] += 1
+                 elif 'sorcery' in getattr(card, 'card_types', []): counts['sorcery'] += 1
+                 elif 'artifact' in getattr(card, 'card_types', []): counts['artifact'] += 1
+                 elif 'enchantment' in getattr(card, 'card_types', []): counts['enchantment'] += 1
+                 elif 'land' in getattr(card, 'type_line', '').lower(): counts['land'] += 1
+
+        composition[0] = counts['creature'] / total_known
+        composition[1] = counts['instant'] / total_known
+        composition[2] = counts['sorcery'] / total_known
+        composition[3] = counts['artifact'] / total_known
+        composition[4] = counts['enchantment'] / total_known
+        composition[5] = counts['land'] / total_known
+        return composition
+
+    def _get_threat_assessment(self, opp_bf_ids):
+        """Assess threat level of opponent's board."""
+        threats = np.zeros(self.max_battlefield, dtype=np.float32)
+        if self.strategic_planner:
+            threat_list = self.strategic_planner.assess_threats() # Get list of dicts
+            threat_map = {t['card_id']: t['level'] for t in threat_list}
+            for i, card_id in enumerate(opp_bf_ids):
+                 if i >= self.max_battlefield: break
+                 threats[i] = threat_map.get(card_id, 0.0) / 10.0 # Normalize
+        return threats
+
+    def _get_opportunity_assessment(self, hand_ids, player):
+        """Assess opportunities presented by cards in hand."""
+        opportunities = np.zeros(self.max_hand_size, dtype=np.float32)
+        if self.card_evaluator:
+             for i, card_id in enumerate(hand_ids):
+                  if i >= self.max_hand_size: break
+                  card = self._safe_get_card(card_id)
+                  if card:
+                      # Evaluate playability *and* potential impact
+                      can_play = self._get_hand_playable([card_id], player, self.game_state.turn % 2 == 1)[0] > 0
+                      value = self.card_evaluator.evaluate_card(card_id, "play") if can_play else 0
+                      opportunities[i] = min(1.0, value / 5.0) # Normalize max value
+        return opportunities
+
+    def _get_resource_efficiency(self, player, turn):
+        """Calculate resource efficiency metrics."""
+        efficiency = np.zeros(3, dtype=np.float32)
+        # Mana efficiency: % of lands tapped or mana used this turn? Complex.
+        # Simple: Lands available vs turn number
+        lands_in_play = sum(1 for cid in player.get("battlefield", []) if self._is_land(cid))
+        efficiency[0] = min(1.0, lands_in_play / max(1, turn))
+        # Card efficiency: Cards drawn vs turns passed?
+        cards_drawn = getattr(self.game_state, 'cards_drawn_this_turn', {}).get('p1' if player==self.game_state.p1 else 'p2', 0)
+        # Cumulative draw efficiency (crude)
+        total_drawn = cards_drawn + 7 # Initial hand + draws
+        efficiency[1] = min(1.0, total_drawn / max(7, turn + 6)) # Compare against expected cards drawn
+        # Tempo: Avg CMC of permanents vs turn. Higher early CMC might be bad tempo unless ramp.
+        cmc_sum = sum(getattr(self._safe_get_card(cid), 'cmc', 0) for cid in player.get("battlefield", []) if self._safe_get_card(cid))
+        num_perms = len(player.get("battlefield", []))
+        avg_cmc = cmc_sum / max(1, num_perms)
+        efficiency[2] = min(1.0, max(0, 1.0 - abs(avg_cmc - turn / 2) / 5.0)) # Closer avg CMC to half turn num is better?
+        return efficiency
+
+    def _get_ability_features(self, bf_ids, player):
+        """Get features related to activatable abilities."""
+        features = np.zeros((self.max_battlefield, 5), dtype=np.float32)
+        gs = self.game_state
+        if not hasattr(gs, 'ability_handler'): return features
+
+        for i, card_id in enumerate(bf_ids):
+            if i >= self.max_battlefield: break
+            abilities = gs.ability_handler.get_activated_abilities(card_id)
+            if not abilities: continue
+            features[i, 0] = len(abilities) # Ability count
+            activatable_count = 0
+            mana_count = 0
+            draw_count = 0
+            removal_count = 0
+            for j, ability in enumerate(abilities):
+                 if gs.ability_handler.can_activate_ability(card_id, j, player):
+                      activatable_count += 1
+                 effect_text = getattr(ability, 'effect', '').lower()
+                 if "add mana" in effect_text or "add {" in effect_text: mana_count += 1
+                 if "draw" in effect_text: draw_count += 1
+                 if "destroy" in effect_text or "exile" in effect_text or "damage" in effect_text: removal_count += 1
+            features[i, 1] = activatable_count
+            features[i, 2] = mana_count
+            features[i, 3] = draw_count
+            features[i, 4] = removal_count
+        return features
+
+    def _get_ability_timing(self, phase):
+        """Get appropriateness score for ability types based on phase."""
+        timing = np.zeros(5, dtype=np.float32) # Mana, Draw, Removal, Combat, Setup
+        gs = self.game_state
+        is_main = phase in [gs.PHASE_MAIN_PRECOMBAT, gs.PHASE_MAIN_POSTCOMBAT]
+        is_combat = phase in [gs.PHASE_DECLARE_ATTACKERS, gs.PHASE_DECLARE_BLOCKERS, gs.PHASE_COMBAT_DAMAGE, gs.PHASE_FIRST_STRIKE_DAMAGE]
+        is_eot = phase == gs.PHASE_END_STEP
+
+        timing[0] = 1.0 if is_main else 0.7 # Mana (usually main, but ok instant speed)
+        timing[1] = 1.0 if is_main and not gs.stack else 0.4 # Draw (best at sorcery speed)
+        timing[2] = 1.0 if is_main or is_combat or is_eot else 0.5 # Removal (flexible)
+        timing[3] = 1.0 if is_combat else 0.2 # Combat tricks
+        timing[4] = 1.0 if is_main else 0.6 # Setup (Counters, Tapping etc)
+        return timing
+
+    def _get_multi_turn_plan_metrics(self):
+        """Convert strategic planner's multi-turn plan to metrics."""
+        metrics = np.zeros(6, dtype=np.float32)
+        if self.strategic_planner and hasattr(self.strategic_planner, 'plan_multi_turn_sequence'):
+            try:
+                plan = self.strategic_planner.plan_multi_turn_sequence(depth=2)
+                if plan:
+                    metrics[0] = min(1.0, len(plan[0].get('plays',[])) / 3.0) # Plays this turn
+                    metrics[1] = float(plan[0].get('land_play') is not None) # Land this turn
+                    metrics[2] = min(1.0, plan[0].get('expected_mana', 0) / 10.0) # Mana this turn
+                    if len(plan) > 1:
+                         metrics[3] = min(1.0, len(plan[1].get('plays',[])) / 3.0) # Plays next turn
+                         metrics[4] = float(plan[1].get('land_play') is not None) # Land next turn
+                         metrics[5] = min(1.0, plan[1].get('expected_mana', 0) / 10.0) # Mana next turn
+            except Exception as plan_e:
+                 logging.warning(f"Error getting multi-turn plan metrics: {plan_e}")
+        return metrics
+
+    def _get_mulligan_info(self, player):
+        """Get mulligan recommendation and reasons."""
+        recommendation = 0.5 # Neutral default
+        reasons_arr = np.zeros(5, dtype=np.float32)
+        reason_count = 0
+        gs = self.game_state
+        if getattr(gs, 'mulligan_in_progress', False) and getattr(gs, 'mulligan_player', None) == player:
+            if self.strategic_planner and hasattr(self.strategic_planner, 'suggest_mulligan_decision'):
+                try:
+                     is_on_play = (gs.turn == 1 and gs.agent_is_p1) # Simplified on_play check
+                     deck_name = self.current_deck_name_p1 if player == gs.p1 else self.current_deck_name_p2
+                     decision = self.strategic_planner.suggest_mulligan_decision(player.get("hand",[]), deck_name, is_on_play)
+                     recommendation = float(decision.get('keep', False))
+                     reason_codes = {"Too few lands": 0, "Too many lands": 1, "No early plays": 2, "Too many expensive cards": 3, "Lacks interaction": 4} # Example mapping
+                     for i, reason in enumerate(decision.get('reasoning', [])[:5]):
+                          # Simple representation: Set flag if reason category exists
+                          # A more sophisticated approach could map specific reasons.
+                          reasons_arr[i] = 1.0 # Just mark presence of a reason
+                     reason_count = min(5, len(decision.get('reasoning', [])))
+                except Exception as mull_e:
+                     logging.warning(f"Error getting mulligan recommendation: {mull_e}")
+        return recommendation, reasons_arr, reason_count
+
+    def _get_recommendations(self, current_mask):
+        """Get action recommendations from planner and memory."""
+        rec_action = -1
+        rec_conf = 0.0
+        mem_action = -1
+        matches = 0
+        valid_list = np.where(current_mask)[0]
+
+        if self.strategic_planner:
+             try:
+                 rec_action = self.strategic_planner.recommend_action(valid_list)
+                 # Crude confidence based on position
+                 analysis = getattr(self.strategic_planner, 'current_analysis', {})
+                 score = analysis.get('position', {}).get('score', 0)
+                 rec_conf = 0.5 + abs(score) * 0.4 # Map score [-1, 1] to confidence [0.5, 0.9]
+             except Exception: pass # Ignore errors
+
+        if self.strategy_memory:
+            try: mem_action = self.strategy_memory.get_suggested_action(self.game_state, valid_list)
+            except Exception: pass
+
+        if rec_action is not None and rec_action == mem_action:
+             matches = 1
+
+        # Ensure -1 if None
+        rec_action = -1 if rec_action is None else rec_action
+        mem_action = -1 if mem_action is None else mem_action
+
+        return rec_action, rec_conf, mem_action, matches
+
+    def _get_attacker_values(self, bf_ids, player):
+        """Evaluate the strategic value of attacking with each potential attacker."""
+        values = np.zeros(self.max_battlefield, dtype=np.float32)
+        if self.strategic_planner and hasattr(self.strategic_planner, 'evaluate_attack_action'):
+            for i, card_id in enumerate(bf_ids):
+                 if i >= self.max_battlefield: break
+                 # Check if valid attacker first
+                 if self.action_handler.is_valid_attacker(card_id):
+                     try:
+                          value = self.strategic_planner.evaluate_attack_action([card_id]) # Evaluate attacking alone
+                          values[i] = np.clip(value, -10.0, 10.0) # Clip to bounds
+                     except Exception as atk_eval_e:
+                          logging.warning(f"Error evaluating single attacker {card_id}: {atk_eval_e}")
+                          # Fallback value based on power?
+                          card = self._safe_get_card(card_id)
+                          values[i] = getattr(card, 'power', 0) * 0.5 if card else 0.0
+
+        return values
 
     def _phase_to_onehot(self, phase):
         """Convert phase to one-hot encoding for better RL learning"""

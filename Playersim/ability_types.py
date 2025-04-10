@@ -113,34 +113,78 @@ class Ability:
 
 class ActivatedAbility(Ability):
     """Ability that can be activated by paying a cost"""
-    def __init__(self, card_id, cost, effect, effect_text=""):
+    def __init__(self, card_id, cost=None, effect=None, effect_text=""):
         super().__init__(card_id, effect_text)
-        self.cost = cost
-        self.effect = effect
+        # Allow parsing from effect_text if cost/effect not provided
+        parsed_cost, parsed_effect = None, None
+        if cost is None and effect is None and effect_text:
+             parsed_cost, parsed_effect = self._parse_cost_effect(effect_text)
+        self.cost = cost if cost is not None else parsed_cost
+        self.effect = effect if effect is not None else parsed_effect
+
+        # Validation after potential parsing
+        if not self.cost or not self.effect:
+            raise ValueError(f"ActivatedAbility requires cost and effect. Got cost='{self.cost}', effect='{self.effect}' from text='{effect_text}'")
+
+        # Store original text if not provided
+        if not effect_text:
+            self.effect_text = f"{self.cost}: {self.effect}"
         
-    def resolve(self, game_state, controller):
+    def _parse_cost_effect(self, text):
+        """Attempt to parse 'Cost: Effect' format."""
+        match = re.match(r'^\s*([^:]+?)\s*:\s*(.+)\s*$', text.strip())
+        if match:
+            cost_part = match.group(1).strip()
+            effect_part = match.group(2).strip()
+            # Basic validation: Cost should contain '{' or keyword like 'Tap'
+            if '{' in cost_part or re.search(r'\b(tap|sacrifice|discard|pay)\b', cost_part.lower()):
+                 return cost_part, effect_part
+        # Check for keyword costs without colon (e.g., Cycling {2}, Equip {1})
+        match_keyword_cost = re.match(r"^(cycling|equip|flashback|kicker|level up|morph|unearth|reconfigure|fortify|channel|adapt|monstrosity)\s*(.*?)(?::|$)", text.lower().strip())
+        if match_keyword_cost:
+            keyword = match_keyword_cost.group(1)
+            # Extract cost from the rest of the text
+            rest_of_text = match_keyword_cost.group(2).strip()
+            cost_match = re.search(r"(\{[^}]+\}|[0-9]+)", rest_of_text)
+            cost_part = cost_match.group(1) if cost_match else "{0}" # Default free? Risky.
+            if cost_part.isdigit(): cost_part = f"{{{cost_part}}}"
+            # Effect is derived from the keyword action itself
+            effect_map = {
+                "cycling": "Discard this card: Draw a card.",
+                "equip": "Attach to target creature.",
+                "flashback": "Cast from graveyard, then exile.",
+                "level up": "Put a level counter on this.",
+                "morph": "Turn this face up.",
+                # Add more keyword effects
+            }
+            effect_part = effect_map.get(keyword, f"Perform {keyword} effect.")
+            return cost_part, effect_part
+
+        # Assume no cost found if no ':' or keyword pattern matched
+        logging.debug(f"Could not parse Cost: Effect from '{text}'")
+        return None, text # Assume entire text is the effect if cost not found
+
+    def resolve(self, game_state, controller, targets=None):
         """Resolve this activated ability using effect classes."""
         # Check if ability requires targeting
-        requires_target = "target" in self.effect.lower() if hasattr(self, 'effect') else False
-        targets = None
-        
-        # Handle targeting
-        if requires_target:
-            # Use targeting system if available
-            if hasattr(game_state, 'ability_handler') and hasattr(game_state.ability_handler, 'targeting_system'):
-                targets = game_state.ability_handler.targeting_system.resolve_targeting_for_ability(
-                    self.card_id, self.effect, controller)
+        requires_target = "target" in getattr(self, 'effect', '').lower()
+        resolved_targets = targets # Use provided targets first
+
+        # Resolve targets if needed and not already provided
+        if requires_target and (resolved_targets is None or not any(resolved_targets.values())):
+            logging.debug(f"Activated ability '{self.effect_text}' requires targets, resolving...")
+            if hasattr(game_state, 'targeting_system'):
+                 resolved_targets = game_state.targeting_system.resolve_targeting(self.card_id, controller, self.effect)
             else:
-                # Simplified targeting
-                targets = self._resolve_simple_targeting(game_state, controller, self.effect)
-            
+                resolved_targets = self._resolve_simple_targeting(game_state, controller, self.effect)
+
             # Check if targeting failed
-            if not targets or (isinstance(targets, dict) and not any(targets.values())):
-                logging.debug(f"Targeting failed for ability: {self.effect_text}")
+            if resolved_targets is None or not any(resolved_targets.values()):
+                logging.debug(f"Targeting failed for activated ability: {self.effect_text}")
                 return False
-        
-        # Use common resolution logic
-        return self._resolve_ability_effect(game_state, controller, targets)
+
+        # Use common resolution logic with resolved targets
+        return self._resolve_ability_effect(game_state, controller, resolved_targets)
 
     def resolve_with_targets(self, game_state, controller, targets=None):
         """Resolve this ability with specific targets."""
@@ -415,11 +459,41 @@ class ActivatedAbility(Ability):
 
 class TriggeredAbility(Ability):
     """Ability that triggers on certain game events"""
-    def __init__(self, card_id, trigger_condition, effect, effect_text="", additional_condition=None):
+    def __init__(self, card_id, trigger_condition=None, effect=None, effect_text="", additional_condition=None):
         super().__init__(card_id, effect_text)
-        self.trigger_condition = trigger_condition.lower()
-        self.effect = effect.lower()
+        # Allow parsing from effect_text if condition/effect not provided
+        parsed_condition, parsed_effect = None, None
+        if trigger_condition is None and effect is None and effect_text:
+            parsed_condition, parsed_effect = self._parse_condition_effect(effect_text)
+        self.trigger_condition = (trigger_condition if trigger_condition is not None else parsed_condition or "Unknown").lower()
+        self.effect = (effect if effect is not None else parsed_effect or "Unknown").lower()
         self.additional_condition = additional_condition  # Extra condition beyond the trigger
+
+        # Validation after potential parsing
+        if not self.trigger_condition or self.trigger_condition == "unknown":
+             raise ValueError(f"TriggeredAbility requires trigger_condition. Got text='{effect_text}'")
+        if not self.effect or self.effect == "unknown":
+             raise ValueError(f"TriggeredAbility requires effect. Got text='{effect_text}'")
+
+        # Store original text if not provided
+        if not effect_text:
+            self.effect_text = f"{self.trigger_condition.capitalize()}, {self.effect.capitalize()}."
+            
+    def _parse_condition_effect(self, text):
+        """Attempt to parse 'When/Whenever/At..., Effect.' format."""
+        # More robust regex to handle variations and potential intervening text
+        match = re.match(r'^\s*(when|whenever|at)\s+([^,]+?),?\s*(.+)\s*$', text.strip(), re.IGNORECASE | re.DOTALL)
+        if match:
+             # Combine trigger parts
+             trigger_part = f"{match.group(1)} {match.group(2)}".strip()
+             effect_part = match.group(3).strip()
+             # Simple validation: effect shouldn't contain trigger keywords unless nested
+             if not re.match(r'^(when|whenever|at)\b', effect_part.lower()):
+                 # Remove trailing period if present
+                 if effect_part.endswith('.'): effect_part = effect_part[:-1]
+                 return trigger_part, effect_part
+        logging.debug(f"Could not parse Trigger, Effect from '{text}'")
+        return None, None
         
     def can_trigger(self, event_type, context=None):
         """Check if the ability should trigger based on an event and additional conditions with improved pattern matching."""
@@ -592,50 +666,48 @@ class TriggeredAbility(Ability):
         if not self.additional_condition: return True
         return self._evaluate_condition(self.additional_condition, context)
     
-    def resolve(self, game_state, controller):
+
+    def resolve(self, game_state, controller, targets=None):
         """Resolve this triggered ability using effect classes."""
         card = game_state._safe_get_card(self.card_id)
         if not card:
             logging.warning(f"Cannot resolve ability: card {self.card_id} not found")
             return
-            
+
         try:
-            # Convert effect text to lowercase for easier parsing
             effect = self.effect.lower() if hasattr(self, 'effect') else ""
-            
             # Check if ability requires targeting
             requires_target = "target" in effect
-            targets = None
-            
-            # Handle targeting
-            if requires_target:
-                # Use targeting system if available
-                if hasattr(game_state, 'ability_handler') and hasattr(game_state.ability_handler, 'targeting_system'):
-                    targets = game_state.ability_handler.targeting_system.resolve_targeting_for_ability(
-                        self.card_id, self.effect_text, controller)
-                    
-                    # Check if targeting failed
-                    if not targets or (isinstance(targets, dict) and not any(targets.values())):
-                        logging.debug(f"Targeting failed for triggered ability: {self.effect_text}")
-                        return
-                else:
-                    # Simplified targeting
-                    targets = self._resolve_simple_targeting(game_state, controller, effect)
-            
-            # Create and apply appropriate effects
-            effects = self._create_ability_effects(effect, targets)
-            
+            resolved_targets = targets # Use provided targets first
+
+            # Resolve targets if needed and not already provided
+            if requires_target and (resolved_targets is None or not any(resolved_targets.values())):
+                 logging.debug(f"Triggered ability '{self.effect_text}' requires targets, resolving...")
+                 if hasattr(game_state, 'targeting_system'):
+                     # Pass the effect text to the targeting system
+                      resolved_targets = game_state.targeting_system.resolve_targeting(self.card_id, controller, self.effect)
+                 else:
+                      resolved_targets = self._resolve_simple_targeting(game_state, controller, self.effect)
+
+                 # Check if targeting failed
+                 if resolved_targets is None or not any(resolved_targets.values()):
+                     logging.debug(f"Targeting failed for triggered ability: {self.effect_text}")
+                     return # Fizzle
+
+            # Create and apply appropriate effects using resolved targets
+            effects = self._create_ability_effects(effect, resolved_targets)
+
             for effect_obj in effects:
-                effect_obj.apply(game_state, self.card_id, controller, targets)
-                
+                # Apply effect using the specific resolved targets for this trigger
+                effect_obj.apply(game_state, self.card_id, controller, resolved_targets)
+
             logging.debug(f"Resolved triggered ability: {self.effect_text}")
-                
+
         except Exception as e:
             logging.error(f"Error resolving triggered ability: {str(e)}")
             import traceback
             logging.error(traceback.format_exc())
-        
-    # Using the base class implementation from Ability for _create_ability_effects and _resolve_simple_targeting
+
 
 class StaticAbility(Ability):
     """Continuous ability that affects the game state"""
@@ -1158,118 +1230,125 @@ class GainLifeEffect(AbilityEffect):
         return True
 
 
+
 class DamageEffect(AbilityEffect):
     """Effect that deals damage to targets."""
     def __init__(self, amount, target_type="any", condition=None):
-        super().__init__(f"Deal {amount} damage to target {target_type}", condition)
+        # Ensure target_type is a string before lowercasing
+        target_type_str = str(target_type).lower() if target_type is not None else "any"
+        super().__init__(f"Deal {amount} damage to target {target_type_str}", condition)
         self.amount = amount
-        self.target_type = target_type # e.g., "creature", "player", "any target", "each opponent"
+        self.target_type = target_type_str # e.g., "creature", "player", "any target", "each opponent"
+        # Recalculate requires_target based on refined target_type
+        self.requires_target = "target" in self.target_type or "any" in self.target_type
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         """Apply damage effect with proper targeting and keywords (Lifelink, Deathtouch)."""
         if self.amount <= 0: return True # No damage to deal
 
         source_card = game_state._safe_get_card(source_id)
-        # CONSOLIDATION: Use AbilityHandler for keyword checks
         has_lifelink = False
         has_deathtouch = False
+
+        # --- Use GameState's check_keyword method ---
         if hasattr(game_state, 'ability_handler') and game_state.ability_handler:
-             # Use the internal check method
-             has_lifelink = game_state.ability_handler._check_keyword_internal(source_card, "lifelink")
-             has_deathtouch = game_state.ability_handler._check_keyword_internal(source_card, "deathtouch")
-        elif source_card and hasattr(source_card, 'oracle_text'): # Fallback
+            # ability_handler needs check_keyword or a link to it
+            # Assuming check_keyword is accessible via ability_handler
+             if hasattr(game_state.ability_handler, 'check_keyword'):
+                 has_lifelink = game_state.ability_handler.check_keyword(source_id, "lifelink")
+                 has_deathtouch = game_state.ability_handler.check_keyword(source_id, "deathtouch")
+             else: # Fallback if method missing
+                  has_lifelink = game_state.ability_handler._check_keyword_internal(source_card, "lifelink")
+                  has_deathtouch = game_state.ability_handler._check_keyword_internal(source_card, "deathtouch")
+        elif source_card and hasattr(source_card, 'oracle_text'): # Last resort fallback
              has_lifelink = "lifelink" in source_card.oracle_text.lower()
              has_deathtouch = "deathtouch" in source_card.oracle_text.lower()
+        # --- End Keyword Check ---
 
         if not targets or not any(targets.values()):
              # Re-resolve if targets became empty or invalid *before* applying
              if self.requires_target:
                  logging.debug(f"DamageEffect: Re-resolving targets for '{self.effect_text}' as none provided or valid.")
                  resolved_targets = None
+                 # Use GameState's targeting_system if available
                  if hasattr(game_state, 'targeting_system') and game_state.targeting_system:
                      resolved_targets = game_state.targeting_system.resolve_targeting(source_id, controller, self.effect_text)
-                 elif hasattr(game_state, 'ability_handler') and hasattr(game_state.ability_handler, 'targeting_system'):
-                      resolved_targets = game_state.ability_handler.targeting_system.resolve_targeting_for_ability(source_id, self.effect_text, controller)
-                 else: # Fallback
-                      resolved_targets = resolve_simple_targeting(game_state, source_id, controller, self.effect_text)
+                 # Fallback checks removed - rely on targeting_system
 
                  if not resolved_targets or not any(resolved_targets.values()):
                       logging.warning(f"DamageEffect: Re-resolving targets failed for '{self.effect_text}'.")
                       return False # Fizzle if targets are required and resolution fails
                  targets = resolved_targets # Use newly resolved targets
-             # Handle effects that don't strictly require targets (e.g., "deals 1 damage to each opponent")
              elif "each opponent" in self.target_type:
                  opponent = game_state.p2 if controller == game_state.p1 else game_state.p1
                  opp_id = "p2" if opponent == game_state.p2 else "p1"
                  targets["players"] = [opp_id] # Create target list
-             else: # No target provided/resolved, and not 'each opponent' -> fizzle or warning
-                 logging.warning(f"DamageEffect: No targets provided or resolved for '{self.effect_text}'.")
+             # Handle 'each creature', 'each player' etc. if needed here
+             # Example:
+             elif "each creature" in self.target_type:
+                  targets["creatures"] = game_state.get_all_creatures()
+             elif "each player" in self.target_type:
+                 targets["players"] = ["p1", "p2"]
+
+             else: # No target provided/resolved, and not handled above -> fizzle or warning
+                 logging.warning(f"DamageEffect: No targets provided or resolved for '{self.effect_text}'. Targets: {targets}")
                  return False
 
         targets_to_damage = [] # List of (target_id, target_obj, target_owner, is_player_target)
+        processed_ids = set() # Prevent double-processing
 
         # --- Target Collection from potentially multiple categories ---
-        target_categories = { # Map internal names to targeting system categories
-             "creature": "creatures", "player": "players", "planeswalker": "planeswalkers",
-             "battle": "battles", "any": "any_target", # Assuming 'any_target' combines relevant categories
-             "opponent": "players", # Target opponent is handled via player selection usually
-             "each opponent": "players"
+        target_categories = {
+            "creature": "creatures", "player": "players", "planeswalker": "planeswalkers",
+            "battle": "battles", "any target": ["creatures", "players", "planeswalkers", "battles"],
+            "opponent": "players", # Further filtered below
+            "permanent": "permanents",
+            # Handle 'each' variations during initial target gathering if possible
         }
 
         # Get relevant category keys based on target_type
         relevant_keys = []
-        specific_category = target_categories.get(self.target_type)
-        if specific_category:
-            relevant_keys.append(specific_category)
-        if self.target_type == "any": # "any target" can hit multiple types
-             relevant_keys.extend(["creatures", "players", "planeswalkers", "battles"])
-        elif self.target_type == "opponent": # If target_type is "opponent", ensure we only look at the opponent player
-             relevant_keys = ["players"]
+        if self.target_type in target_categories:
+             cat_or_list = target_categories[self.target_type]
+             if isinstance(cat_or_list, list): relevant_keys.extend(cat_or_list)
+             else: relevant_keys.append(cat_or_list)
+        elif self.target_type.startswith("each "): # Handled during target dict creation above
+             pass # Targets dict should already contain the 'each' list
+        else: # Fallback if type not directly mapped
+             relevant_keys.append("permanents") # Assume generic permanent if type unknown
+             relevant_keys.append("players")
 
-        processed_ids = set() # Prevent double-processing if an ID appears in multiple target lists
-
+        # Populate targets_to_damage list
         for category in relevant_keys:
             if category in targets and targets[category]:
                 is_player_cat = category == "players"
                 for target_id in targets[category]:
                     if target_id in processed_ids: continue
 
-                    target_obj = None
-                    target_owner = None
-                    is_player_target = is_player_cat
+                    # Filter for "opponent" if specified
+                    if self.target_type == "opponent" and is_player_cat:
+                        opp_id = "p2" if controller == game_state.p1 else "p1"
+                        if target_id != opp_id: continue # Skip if not the opponent
 
+                    # Get target object and owner
+                    target_obj, target_owner, is_player_target = None, None, is_player_cat
                     if is_player_target:
-                        if self.target_type == "opponent": # Specific check for target opponent
-                            opp_id = "p2" if controller == game_state.p1 else "p1"
-                            if target_id == opp_id: # Only target the actual opponent
-                                target_obj = game_state.p1 if target_id == "p1" else game_state.p2
-                                target_owner = target_obj
-                            else: continue # Skip if targeting self when "opponent" was specified
-                        else: # Target player (could be self or opponent)
-                            target_obj = game_state.p1 if target_id == "p1" else game_state.p2
-                            target_owner = target_obj
-                    else: # Assume permanent ID
+                        target_obj = game_state.p1 if target_id == "p1" else game_state.p2
+                        target_owner = target_obj
+                    else: # Permanent ID
                          location_info = game_state.find_card_location(target_id)
                          if location_info:
-                              target_owner = location_info[0] # Use find_card_location which returns (owner, zone)
-                              target_obj = game_state._safe_get_card(target_id)
-                         else: # Fallback if not found (e.g., just left battlefield?)
-                              target_obj = game_state._safe_get_card(target_id) # Still get card if possible
+                              target_owner, target_zone = location_info
+                              if target_zone == 'battlefield': # Damage usually hits battlefield
+                                   target_obj = game_state._safe_get_card(target_id)
+                              # else: Card is not on battlefield, cannot be damaged this way
+                         else: target_obj = game_state._safe_get_card(target_id) # Try getting card anyway
 
                     if target_obj:
                           targets_to_damage.append((target_id, target_obj, target_owner, is_player_target))
                           processed_ids.add(target_id)
                     else:
-                          logging.warning(f"Could not find target object for ID: {target_id}")
-
-
-        # Handle "each opponent" separately if no specific target given
-        if "each opponent" in self.target_type and not targets_to_damage:
-             opponent = game_state.p2 if controller == game_state.p1 else game_state.p1
-             opp_id = "p2" if opponent == game_state.p2 else "p1"
-             if opp_id not in processed_ids:
-                 targets_to_damage.append((opp_id, opponent, opponent, True))
-
+                          logging.warning(f"DamageEffect: Could not find target object for ID: {target_id}")
 
         if not targets_to_damage:
             logging.warning(f"DamageEffect: No valid targets collected for '{self.effect_text}'. Targets received: {targets}")
@@ -1281,73 +1360,70 @@ class DamageEffect(AbilityEffect):
         for target_id, target_obj, target_owner, is_player in targets_to_damage:
             # Apply damage replacement effects (e.g., prevention)
             damage_context = { "source_id": source_id, "source_card": source_card, "target_id": target_id, "target_obj": target_obj,
-                               "target_is_player": is_player, "damage_amount": self.amount, "is_combat_damage": False } # Assume non-combat by default
-            # Use replacement effect system if available
-            actual_damage = self.amount
-            if hasattr(game_state, 'replacement_effects') and game_state.replacement_effects:
-                # Pass target object in context for easier effect evaluation
-                modified_context, _ = game_state.replacement_effects.apply_replacements("DAMAGE", damage_context)
-                actual_damage = modified_context.get("damage_amount", 0)
-                # Re-check target if redirection occurred
-                if modified_context.get('target_id') != target_id:
-                    target_id = modified_context.get('target_id')
-                    target_obj = game_state._safe_get_card(target_id) if not modified_context.get('target_is_player') else (game_state.p1 if target_id == 'p1' else game_state.p2)
-                    target_owner = game_state.get_card_controller(target_id) if not modified_context.get('target_is_player') else target_obj
-                    is_player = modified_context.get('target_is_player', is_player)
+                               "target_is_player": is_player, "damage_amount": self.amount, "is_combat_damage": False }
+            # --- Use GameState's apply_replacement_effect ---
+            modified_context, replaced = game_state.apply_replacement_effect("DAMAGE", damage_context)
+            actual_damage = modified_context.get("damage_amount", 0)
 
-            if actual_damage <= 0:
-                 logging.debug(f"Damage to {target_id} prevented or reduced to 0.")
-                 continue # Damage prevented/redirected to non-damaging target
+            # Check if damage was prevented entirely or redirected
+            if actual_damage <= 0 or modified_context.get("prevented", False):
+                logging.debug(f"Damage to {target_id} prevented or reduced to 0 by replacement.")
+                continue # Skip damage application
 
+            # Check if target was redirected
+            new_target_id = modified_context.get('target_id', target_id)
+            if new_target_id != target_id:
+                # Find new target info
+                new_target_is_player = modified_context.get('target_is_player', False)
+                new_target_obj = game_state.p1 if new_target_id == 'p1' else game_state.p2 if new_target_id == 'p2' else game_state._safe_get_card(new_target_id)
+                new_target_owner = new_target_obj if new_target_is_player else game_state.get_card_controller(new_target_id)
+                logging.debug(f"Damage redirected from {target_id} to {new_target_id}.")
+                # Update loop variables (be careful if modifying list being iterated)
+                # Re-applying damage within the loop might be cleaner
+                target_id, target_obj, target_owner, is_player = new_target_id, new_target_obj, new_target_owner, new_target_is_player
+                if not target_obj:
+                     logging.warning(f"Damage redirected to invalid target {target_id}.")
+                     continue # Skip this redirected damage
+
+
+            # Apply the actual damage using GameState methods
+            damage_applied_successfully = False
             if is_player:
-                player_obj = target_obj
-                if player_obj:
-                    player_obj["life"] -= actual_damage
-                    logging.debug(f"DamageEffect: {source_card.name if source_card else source_id} dealt {actual_damage} damage to {player_obj['name']}.")
-                    total_damage_dealt += actual_damage
-                    success = True
-                    # Trigger damage to player event
-                    if hasattr(game_state, 'trigger_ability'):
-                        game_state.trigger_ability(target_id, "PLAYER_DAMAGED", {"amount": actual_damage, "source_id": source_id})
+                if target_obj and 'life' in target_obj:
+                    target_obj["life"] -= actual_damage
+                    damage_applied_successfully = True
+                    logging.debug(f"DamageEffect: {source_card.name if source_card else source_id} dealt {actual_damage} damage to {target_obj['name']}.")
+                    # Trigger damage to player event (via GS?)
+                    game_state.trigger_ability(target_id, "PLAYER_DAMAGED", {"amount": actual_damage, "source_id": source_id})
+
             elif isinstance(target_obj, Card):
-                 # Handle damage to creatures/planeswalkers/battles using GameState methods
-                 if 'creature' in getattr(target_obj, 'card_types', []):
-                     # Use GameState method to apply damage which marks it
-                     if game_state.apply_damage_to_permanent(target_id, actual_damage, source_id, is_combat_damage=False, has_deathtouch=has_deathtouch):
-                         total_damage_dealt += actual_damage
-                         success = True
-                 elif 'planeswalker' in getattr(target_obj, 'card_types', []):
-                     # Use GameState method to remove loyalty counters
-                     if game_state.damage_planeswalker(target_id, actual_damage, source_id):
-                         total_damage_dealt += actual_damage
-                         success = True
-                 elif 'battle' in getattr(target_obj, 'type_line', ''):
-                      # Use GameState method to remove defense counters
-                     if game_state.damage_battle(target_id, actual_damage, source_id):
-                          total_damage_dealt += actual_damage
-                          success = True
+                if 'creature' in getattr(target_obj, 'card_types', []):
+                    damage_applied_successfully = game_state.apply_damage_to_permanent(target_id, actual_damage, source_id, is_combat_damage=False, has_deathtouch=has_deathtouch)
+                elif 'planeswalker' in getattr(target_obj, 'card_types', []):
+                    damage_applied_successfully = game_state.damage_planeswalker(target_id, actual_damage, source_id)
+                elif 'battle' in getattr(target_obj, 'type_line', ''):
+                    damage_applied_successfully = game_state.damage_battle(target_id, actual_damage, source_id)
+                else: # Cannot damage other permanent types directly
+                     logging.debug(f"DamageEffect: Cannot apply damage to permanent type {getattr(target_obj, 'card_types', ['unknown'])}.")
+
+            if damage_applied_successfully:
+                 total_damage_dealt += actual_damage
+                 success = True
+
 
         # Apply lifelink AFTER all damage events for this effect are processed
         if has_lifelink and total_damage_dealt > 0:
              # Check for life gain replacement effects
              gain_context = {'player': controller, 'life_amount': total_damage_dealt, 'source_type': 'lifelink', 'source_id': source_id}
-             final_life_gain = total_damage_dealt
-             if hasattr(game_state, 'replacement_effects') and game_state.replacement_effects:
-                  modified_gain_context, _ = game_state.replacement_effects.apply_replacements("LIFE_GAIN", gain_context)
-                  final_life_gain = modified_gain_context.get('life_amount', 0)
+             modified_gain_context, gain_replaced = game_state.apply_replacement_effect("LIFE_GAIN", gain_context)
+             final_life_gain = modified_gain_context.get('life_amount', 0)
 
              if final_life_gain > 0:
                   controller["life"] += final_life_gain
                   logging.debug(f"Lifelink triggered for {source_card.name if source_card else source_id}, gained {final_life_gain} life.")
-                  # Trigger gain life events
-                  if hasattr(game_state, 'trigger_ability'):
-                       game_state.trigger_ability(source_id, "LIFE_GAINED", {"amount": final_life_gain, "controller": controller})
+                  game_state.trigger_ability(source_id, "LIFE_GAINED", {"amount": final_life_gain, "controller": controller})
 
-        # Important: Trigger SBAs AFTER applying all damage from this instance of the effect
-        # GameState's check_state_based_actions() should handle deaths resulting from damage
-        # Let the main game loop call SBAs after the effect fully resolves.
-        # game_state.check_state_based_actions() # Moved to main loop
-
+        # SBAs are checked in the main game loop after the full action resolves.
         return success
 
 class AddCountersEffect(AbilityEffect):
@@ -1400,7 +1476,9 @@ class BuffEffect(AbilityEffect):
         sign_p = '+' if power_mod >= 0 else ''
         sign_t = '+' if toughness_mod >= 0 else ''
         duration_text = f" until {duration.replace('_', ' ')}" if duration != 'permanent' else ""
-        super().__init__(f"Target {target_type} gets {sign_p}{power_mod}/{sign_t}{toughness_mod}{duration_text}", condition)
+        # Determine target description carefully
+        target_desc = f"target {target_type}" if "target" in target_type else target_type # Handle cases like "Creatures you control"
+        super().__init__(f"{target_desc} get {sign_p}{power_mod}/{sign_t}{toughness_mod}{duration_text}", condition)
         self.power_mod = power_mod
         self.toughness_mod = toughness_mod
         self.duration = duration
@@ -1413,15 +1491,25 @@ class BuffEffect(AbilityEffect):
              return False
 
         target_ids_to_process = []
-        # Extract target creature IDs (adjust categories as needed)
-        valid_target_keys = [self.target_type, "creatures", "permanents", "any"]
-        for key in valid_target_keys:
-            if key in targets and targets[key]:
-                target_ids_to_process.extend(targets[key])
-                break # Usually target only one category
+
+        # --- Determine affected IDs based on target_type and provided targets ---
+        if "target" in self.target_type: # Effect explicitly targets
+            target_base_type = self.target_type.replace("target ","").strip()
+            # Map base type to expected categories
+            cat_map = {"creature": ["creatures"], "permanent": ["permanents", "creatures", "artifacts", "enchantments", "lands", "planeswalkers"]}
+            categories_to_check = cat_map.get(target_base_type, [target_base_type]) # Get potential categories
+            for category in categories_to_check:
+                if category in targets and targets[category]:
+                    target_ids_to_process.extend(targets[category])
+                    break # Usually only targets one specific thing
+        elif "creatures you control" in self.target_type:
+            target_ids_to_process.extend([cid for cid in controller.get("battlefield",[]) if game_state._is_creature(cid)])
+        elif "all creatures" in self.target_type:
+            target_ids_to_process.extend(game_state.get_all_creatures())
+        # Add more non-targeted clauses ("equipment you control", etc.)
 
         if not target_ids_to_process:
-            logging.warning(f"BuffEffect: No valid targets found for '{self.effect_text}'. Targets provided: {targets}")
+            logging.warning(f"BuffEffect: No valid targets found/determined for '{self.effect_text}'. Targets provided: {targets}")
             return False
 
         success_count = 0
@@ -1430,27 +1518,29 @@ class BuffEffect(AbilityEffect):
                 'source_id': source_id,
                 'layer': 7,
                 'sublayer': 'c', # Standard P/T modification layer
-                'affected_ids': [target_id],
+                'affected_ids': [target_id], # Apply to this specific target ID
                 'effect_type': 'modify_pt',
                 'effect_value': (self.power_mod, self.toughness_mod),
-                'duration': self.duration, # Pass duration to LayerSystem
-                 # Store start turn if duration needs it
+                'duration': self.duration,
                 'start_turn': game_state.turn if self.duration != 'permanent' else None,
-                # Condition can be added if needed, e.g., 'only if attacking'
+                'controller_id': controller # Store who controls the effect source
             }
+            # Register effect with LayerSystem
             effect_id = game_state.layer_system.register_effect(effect_data)
             if effect_id:
-                 card_name = game_state._safe_get_card(target_id).name or target_id
-                 logging.debug(f"Applied temporary buff ({self.power_mod:+}/{self.toughness_mod:+}) to {card_name} from {source_id}.")
+                 card_name = game_state._safe_get_card(target_id).name if game_state._safe_get_card(target_id) else target_id
+                 logging.debug(f"Registered temporary buff ({self.power_mod:+}/{self.toughness_mod:+}) to {card_name} from {source_id}.")
                  success_count += 1
             else:
                  logging.warning(f"Failed to register buff effect for target {target_id}")
 
         # Trigger layer update if any effects were successfully registered
         if success_count > 0:
-            game_state.layer_system.apply_all_effects()
+            # No need to call apply_all_effects here, main loop handles it
+            game_state.layer_system.invalidate_cache() # Just invalidate cache
             return True
         return False
+    
 class CreateTokenEffect(AbilityEffect):
     """Effect that creates token creatures."""
     def __init__(self, power, toughness, creature_type="Creature", count=1, keywords=None, controller_gets=True, condition=None):
@@ -1548,36 +1638,65 @@ class CreateTokenEffect(AbilityEffect):
         return keyword_indices.get(keyword.lower(), -1)
 
 
+
 class DestroyEffect(AbilityEffect):
     """Effect that destroys permanents."""
     def __init__(self, target_type="permanent", can_target_indestructible=False, condition=None):
-        super().__init__(f"Destroy target {target_type}", condition)
-        self.target_type = target_type.lower() # Normalize
+        # Ensure target_type is a string before lowercasing
+        target_type_str = str(target_type).lower() if target_type is not None else "permanent"
+        super().__init__(f"Destroy target {target_type_str}", condition)
+        self.target_type = target_type_str # e.g., "creature", "artifact", "nonland permanent"
         self.can_target_indestructible = can_target_indestructible
+        self.requires_target = "target" in self.effect_text.lower()
 
     def _apply_effect(self, game_state, source_id, controller, targets):
-        # ... (collect targets logic - can be refined like DamageEffect) ...
+        """Apply destroy effect, considering keywords and replacements."""
+        if self.requires_target and (not targets or not any(targets.values())):
+             logging.warning(f"DestroyEffect: Re-resolving targets for '{self.effect_text}' as none provided or valid.")
+             resolved_targets = None
+             if hasattr(game_state, 'targeting_system') and game_state.targeting_system:
+                 resolved_targets = game_state.targeting_system.resolve_targeting(source_id, controller, self.effect_text)
+             elif hasattr(game_state, 'ability_handler') and hasattr(game_state.ability_handler, 'targeting_system'):
+                  resolved_targets = game_state.ability_handler.targeting_system.resolve_targeting_for_ability(source_id, self.effect_text, controller)
+             else: resolved_targets = resolve_simple_targeting(game_state, source_id, controller, self.effect_text)
+
+             if not resolved_targets or not any(resolved_targets.values()):
+                  logging.warning(f"DestroyEffect: Re-resolving targets failed for '{self.effect_text}'.")
+                  return False
+             targets = resolved_targets
+
         destroyed_count = 0
         target_ids_to_process = []
 
-        # --- Improved Target Collection ---
-        for category, target_list in targets.items():
-            if category in ["creatures", "artifacts", "enchantments", "planeswalkers", "lands", "permanents"]:
-                target_ids_to_process.extend(target_list)
+        # --- Target Collection (Combine logic) ---
+        target_categories = {"creatures", "artifacts", "enchantments", "planeswalkers", "lands", "permanents", "battles"}
+        relevant_cats = set()
+        if "nonland" in self.target_type: relevant_cats = target_categories - {"lands"}
+        elif self.target_type == "permanent": relevant_cats = target_categories
+        else: relevant_cats.add(self.target_type + "s") # pluralize basic type
+
+        for category in relevant_cats:
+             if category in targets and targets[category]:
+                 target_ids_to_process.extend(targets[category])
+        # Handle "each" type effects if needed
+        # Example:
+        if "each creature" in self.target_type: target_ids_to_process.extend(game_state.get_all_creatures())
+        target_ids_to_process = list(set(target_ids_to_process)) # Remove duplicates
 
         if not target_ids_to_process:
-             logging.warning(f"DestroyEffect: No valid targets provided/resolved for '{self.effect_text}'. Targets: {targets}")
+             logging.warning(f"DestroyEffect: No valid target IDs collected for '{self.effect_text}'. Targets: {targets}")
              return False
 
         for target_id in target_ids_to_process:
             target_card = game_state._safe_get_card(target_id)
-            target_owner = game_state.get_card_controller(target_id) # Use helper
-            if not target_card or not target_owner: continue
+            target_owner, target_zone = game_state.find_card_location(target_id)
+            if not target_card or target_zone != "battlefield": continue
 
-            # Indestructible Check (using ability handler if possible)
+            # Check Indestructible
             is_indestructible = False
-            if hasattr(game_state, 'ability_handler') and hasattr(game_state.ability_handler, '_has_keyword_check'):
-                 is_indestructible = game_state.ability_handler._has_keyword_check(target_card, "indestructible")
+            # Use central keyword check
+            if hasattr(game_state, 'ability_handler') and game_state.ability_handler:
+                 is_indestructible = game_state.ability_handler.check_keyword(target_id, "indestructible")
             elif hasattr(target_card, 'oracle_text'): # Fallback
                  is_indestructible = "indestructible" in target_card.oracle_text.lower()
 
@@ -1586,24 +1705,29 @@ class DestroyEffect(AbilityEffect):
                 continue
 
             # Check Replacement Effects (Regeneration, Totem Armor, etc.)
-            destroy_context = {"card_id": target_id, "controller": target_owner, "to_zone": "graveyard", "cause": "destroy_effect"}
+            destroy_context = {
+                 "card_id": target_id, "card": target_card, "controller": target_owner,
+                 "to_zone": "graveyard", "cause": "destroy_effect", "source_id": source_id
+            }
             modified_context, replaced = game_state.apply_replacement_effect("DIES", destroy_context)
 
             if replaced and modified_context.get('prevented', False):
                  logging.debug(f"DestroyEffect: Destruction of {target_card.name} prevented (e.g., regeneration).")
-                 # Ensure side effects of replacement (like tapping for regen) are handled by the replacement effect itself
+                 # Ensure regeneration taps/removes damage - This should be handled *by* the replacement effect implementation.
                  continue # Destruction prevented
 
             final_dest_zone = modified_context.get('to_zone', 'graveyard')
+            # Add source info to context for move_card triggers
+            move_context = {"source_id": source_id}
 
-            # Move card
-            if game_state.move_card(target_id, target_owner, "battlefield", target_owner, final_dest_zone, cause="destroy_effect", context={"source_id": source_id}):
-                destroyed_count += 1
+            # Perform the move
+            if game_state.move_card(target_id, target_owner, "battlefield", target_owner, final_dest_zone, cause="destroy_effect", context=move_context):
+                 destroyed_count += 1
+                 logging.debug(f"Destroyed {target_card.name}, moved to {final_dest_zone}.")
             else:
                  logging.warning(f"DestroyEffect: Failed to move {target_card.name} to {final_dest_zone}.")
 
-        # Call SBAs *after* processing all targets for this effect
-        if destroyed_count > 0: game_state.check_state_based_actions()
+        # SBAs are checked in the main loop.
         return destroyed_count > 0
 
 class CounterSpellEffect(AbilityEffect):

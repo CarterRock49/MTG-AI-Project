@@ -651,12 +651,11 @@ class LayerSystem:
                 if len(self.layers[layer_num]) < initial_len: found = True
 
         if found:
-            # Remove from timestamps and dependencies if found
+            # Remove from timestamps
             if effect_id in self.timestamps: del self.timestamps[effect_id]
-            self.dependencies.pop(effect_id, None)
-            # Remove from others' dependency lists
-            for dep_list in self.dependencies.values():
-                 if effect_id in dep_list: dep_list.remove(effect_id)
+            # Dependency cleanup removed:
+            # self.dependencies.pop(effect_id, None)
+            # for dep_list in self.dependencies.values(): ...
             self.invalidate_cache() # Invalidate cache on removal
             logging.debug(f"Removed effect {effect_id}")
         else:
