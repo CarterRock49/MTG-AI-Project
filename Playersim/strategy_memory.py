@@ -410,71 +410,71 @@ class StrategyMemory:
             # Fall back to synchronous save
             return self.save_memory()
 
+        
     def _save_memory_worker(self):
-        """Worker function for asynchronous memory saving."""
-        try:
-            # Periodically enhance memory before saving
-            if random.random() < 0.2:  # 20% chance of enhancement
-                self._enhance_strategy_memory()
-            
-            # Create a copy of the data to avoid modification during saving
-            import copy
-            data = {
-                'strategies': copy.deepcopy(self.strategies),
-                'action_sequences': copy.deepcopy(self.action_sequences)
-            }
-            
-            # Ensure save directory exists
-            import os  # Add local import here
-            dir_name = os.path.dirname(self.memory_file) 
-            if dir_name:
-                os.makedirs(dir_name, exist_ok=True)
-            
-            # Try different approaches to save the file
+            """Worker function for asynchronous memory saving."""
             try:
-                # First try: direct write to the file
-                with open(self.memory_file, 'wb') as f:
-                    pickle.dump(data, f)
-                logging.info(f"Direct save completed: {len(self.strategies)} strategy patterns to {self.memory_file}")
-                return True
-            except PermissionError:
-                # If direct write fails due to permission issues, try using a temp file first
-                import tempfile
-                import shutil
-                temp_dir = tempfile.gettempdir()
-                temp_file = os.path.join(temp_dir, f"strategy_memory_temp_{int(time.time())}.pkl")
-                
+                # Periodically enhance memory before saving
+                if random.random() < 0.2:  # 20% chance of enhancement
+                    self._enhance_strategy_memory()
+
+                # Create a copy of the data to avoid modification during saving
+                import copy
+                data = {
+                    'strategies': copy.deepcopy(self.strategies),
+                    'action_sequences': copy.deepcopy(self.action_sequences)
+                }
+
+                # Ensure save directory exists
+                import os
+                dir_name = os.path.dirname(self.memory_file)
+                if dir_name:
+                    os.makedirs(dir_name, exist_ok=True)
+
+                # Try different approaches to save the file
+                temp_file = None # Initialize temp_file
                 try:
-                    # Write to temp file
-                    with open(temp_file, 'wb') as f:
+                    # First try: use temp file for atomicity/permissions
+                    import tempfile
+                    import shutil
+                    with tempfile.NamedTemporaryFile(mode='wb', delete=False, dir=dir_name, suffix=".pkl.tmp") as f:
+                        temp_file = f.name
                         pickle.dump(data, f)
-                    
-                    # Try to copy from temp to actual location
+                    # Rename/replace atomically if possible, fallback to copy+remove
                     try:
+                        os.replace(temp_file, self.memory_file) # Atomic rename/replace if supported
+                    except OSError: # Fallback for cross-device links or other errors
                         shutil.copy2(temp_file, self.memory_file)
-                        logging.info(f"Save completed via temp file: {len(self.strategies)} patterns")
-                        # Clean up temp file after successful copy
-                        try:
-                            os.remove(temp_file)
-                        except:
-                            pass
+                        try: os.remove(temp_file) # Clean up temp file
+                        except OSError: pass # Ignore if removal fails
+                    logging.info(f"Save completed via temp file: {len(self.strategies)} strategy patterns to {self.memory_file}")
+                    return True
+                except PermissionError as pe:
+                    # Log specific permission error
+                    logging.error(f"Permission error saving to {self.memory_file}: {pe}. Attempting direct save...")
+                    # Second try: direct write (less safe)
+                    try:
+                        with open(self.memory_file, 'wb') as f:
+                            pickle.dump(data, f)
+                        logging.info(f"Direct save completed after permission issue: {len(self.strategies)} strategy patterns to {self.memory_file}")
                         return True
-                    except PermissionError:
-                        # If we still can't access the target, keep the temp file and log the location
-                        logging.warning(f"Saved to temporary location: {temp_file} due to persistent permission issues")
-                        logging.warning(f"You may need to manually copy this file to {self.memory_file}")
-                        return True
+                    except Exception as direct_save_e:
+                        logging.error(f"Direct save failed after permission issue: {str(direct_save_e)}")
+                        if temp_file and os.path.exists(temp_file):
+                            logging.warning(f"Data saved to temporary file: {temp_file}. Manual copy to {self.memory_file} might be needed.")
+                            # Keep the temp file if direct save also fails
+                        return False
                 except Exception as e:
-                    logging.error(f"Failed to save even to temp file: {str(e)}")
+                    logging.error(f"Error during temp file save: {str(e)}")
+                    if temp_file and os.path.exists(temp_file): # Clean up temp file on other errors
+                        try: os.remove(temp_file)
+                        except OSError: pass
                     return False
             except Exception as e:
-                logging.error(f"Error during direct save: {str(e)}")
+                logging.error(f"Error in async memory save worker: {str(e)}")
+                import traceback
+                logging.error(traceback.format_exc())
                 return False
-        except Exception as e:
-            logging.error(f"Error in async memory save: {str(e)}")
-            import traceback
-            logging.error(traceback.format_exc())
-            return False
     
     def extract_strategy_pattern(self, game_state, detailed=False):
         """

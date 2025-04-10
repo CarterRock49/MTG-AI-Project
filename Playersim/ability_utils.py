@@ -207,6 +207,17 @@ def resolve_simple_targeting(game_state, card_id, controller, effect_text):
     
     return targets
 
+def safe_int(value, default=0):
+    """Safely convert a value to int, handling None and non-numeric strings."""
+    if value is None: return default
+    if isinstance(value, int): return value
+    if isinstance(value, float): return int(value) # Allow floats
+    if isinstance(value, str):
+        if value.isdigit() or (value.startswith('-') and value[1:].isdigit()):
+            return int(value)
+    # Return default for non-convertible types or values like '*'
+    return default
+
 def resolve_targeting(game_state, card_id, controller, effect_text):
     """Enhanced targeting resolution that uses TargetingSystem if available, otherwise falls back to simple targeting."""
     # Try to use TargetingSystem if available
@@ -226,165 +237,131 @@ class EffectFactory:
     @staticmethod
     def _extract_target_description(effect_text):
         """Helper to find the most specific target description."""
-        match = re.search(r"target (.*?)(?:\.|$|,|:| gains| gets| has| deals| draws| is)", effect_text)
+        # Pattern tries to find "target [adjective(s)] [type]"
+        match = re.search(r"target\s+(?:(up to \w+)\s+)?(?:((?:[\w\-]+\s+)*?)(\w+))?", effect_text)
         if match:
-            return match.group(1).strip()
-        elif "each opponent" in effect_text:
-            return "each opponent"
-        elif "each player" in effect_text:
-            return "each player"
-        elif "controller" in effect_text: # Less reliable, 'creatures you control' etc.
-             return "controller" # Very rough guess
+            count_mod, adjectives, noun = match.groups()
+            desc = ""
+            if count_mod: desc += count_mod + " "
+            if adjectives: desc += adjectives.strip() + " "
+            if noun: desc += noun
+            return desc.strip() if desc else "target" # Fallback to generic 'target' if parts missing
+        elif "each opponent" in effect_text: return "each opponent"
+        elif "each player" in effect_text: return "each player"
+        elif "you" == effect_text.split()[0]: return "controller" # Simple "You draw a card"
+        elif re.search(r"(creatures?|permanents?) you control", effect_text): return "permanents you control" # Group targets
         return None # No target description found
 
     @staticmethod
-    def create_effects(effect_text, targets=None):
+    def create_effects(effect_text, targets=None): # targets arg currently unused here
         """Create appropriate AbilityEffect objects based on the effect text."""
-        if not effect_text:
-            return []
+        if not effect_text: return []
 
         effects = []
-        effect_text_lower = effect_text.lower()
-
-        # --- Split text into clauses more reliably ---
-        # Split by periods, semicolons, or "then" not preceded by "if" or similar conditional markers
-        clauses = re.split(r'(?<!if)(?<!unless)(?<!until)(?<!while)[.;]\s*|\b(then|and then|also)\b', effect_text_lower)
         processed_clauses = []
-        for i, part in enumerate(clauses):
-            if part is None: continue # Skip None parts from split
-            part = part.strip()
-            # Check if the split was caused by 'then', 'and then', 'also' - skip these connectors
-            if i > 0 and clauses[i-1] and clauses[i-1].lower() in ["then", "and then", "also"]:
-                continue
-            if part:
-                processed_clauses.append(part)
-
-        # --- Improved Effect Parsing Logic ---
-        # We can simplify this by using keyword detection and mapping to Effect classes
-        # This replaces the very specific regex matching which is brittle.
+        # Basic clause splitting (commas, 'and', 'then') - needs improvement for complex sentences
+        parts = re.split(r'\s*,\s+|\s+and\s+|\s+then\s+', effect_text.lower().strip('. '))
+        processed_clauses.extend(p.strip() for p in parts if p.strip())
+        if not processed_clauses: processed_clauses = [effect_text.lower()] # Use full text if split fails
 
         for clause in processed_clauses:
-            created_effect = False
-            # Determine primary action verb/keyword
-            if re.search(r"\bdraw\b", clause):
-                match = re.search(r"draw (\d+|a|an|\w+) cards?", clause)
-                count = match.group(1) if match else 'a'
+            created_effect = None
+            # Draw Card
+            match = re.search(r"\b(draw(?:s)?)\b\s+(a|an|one|two|three|four|\d+)\s+cards?", clause)
+            if match:
+                count = text_to_number(match.group(2))
                 target_desc = EffectFactory._extract_target_description(clause) or "controller"
-                effects.append(DrawCardEffect(text_to_number(count), target=target_desc))
-                created_effect = True
-            elif re.search(r"\bgain\b.*\blife\b", clause):
-                match = re.search(r"gain (\d+|a|an|\w+) life", clause)
-                amount = match.group(1) if match else '1'
+                created_effect = DrawCardEffect(count, target=target_desc)
+
+            # Gain Life
+            elif re.search(r"\b(gain(?:s)?)\b\s+(\d+|x)\s+life", clause):
+                amount_str = re.search(r"gain(?:s)?\s+(\d+|x)\s+life", clause).group(1)
+                amount = text_to_number(amount_str) if amount_str != 'x' else 1 # Default X=1 for now
                 target_desc = EffectFactory._extract_target_description(clause) or "controller"
-                effects.append(GainLifeEffect(text_to_number(amount), target=target_desc))
-                created_effect = True
-            elif re.search(r"\bdeals?\b.*\bdamage\b", clause):
-                # Basic amount parsing
-                amount_match = re.search(r"deals? (\d+|x) damage", clause)
-                amount = 1 # Default if no number found
-                if amount_match: amount = text_to_number(amount_match.group(1)) if amount_match.group(1) != 'x' else 1 # Default X=1
+                created_effect = GainLifeEffect(amount, target=target_desc)
 
-                # Target type parsing
-                target_type = "any" # Default
-                if "target creature or player" in clause or "any target" in clause: target_type="any"
-                elif "target creature" in clause: target_type="creature"
-                elif "target player" in clause or "target opponent" in clause: target_type="player"
-                elif "target planeswalker" in clause: target_type="planeswalker"
-                elif "target battle" in clause: target_type="battle"
-                elif "each opponent" in clause: target_type="each opponent"
-                elif "each creature" in clause: target_type="each creature" # Needs handling multiple targets
-                elif "each player" in clause: target_type="each player"
+            # Damage
+            elif re.search(r"\b(deals?)\b.*\bdamage\b", clause):
+                amount_match = re.search(r"deals?\s+(\d+|x)\s+damage", clause)
+                amount = 1
+                if amount_match: amount = text_to_number(amount_match.group(1)) if amount_match.group(1) != 'x' else 1
+                target_desc = EffectFactory._extract_target_description(clause) or "any target" # Default 'any target'
+                # Extract target type more reliably
+                target_type = "any"
+                if "target creature or player" in target_desc or "any target" in target_desc: target_type="any target"
+                elif "target creature" in target_desc: target_type="creature"
+                elif "target player" in target_desc or "target opponent" in target_desc: target_type="player"
+                elif "target planeswalker" in target_desc: target_type="planeswalker"
+                elif "target battle" in target_desc: target_type="battle"
+                elif "each opponent" in target_desc: target_type="each opponent"
+                created_effect = DamageEffect(amount, target_type=target_type)
 
-                effects.append(DamageEffect(amount, target_type=target_type))
-                created_effect = True
-            elif re.search(r"\bcounter target\b", clause):
-                target_spell_type = "spell" # Default
-                match = re.search(r"counter target (.*?) spell", clause)
-                if match: target_spell_type = match.group(1).strip() + " spell"
-                effects.append(CounterSpellEffect(target_spell_type))
-                created_effect = True
-            elif re.search(r"\bcreate\b.*\btoken\b", clause):
-                 match = re.search(r"create (\w+|a|an|\d+) (?:(\d+/\d+)\s+)?(?:([\w\s\-]+?)\s+)?(artifact|creature|enchantment|land|planeswalker)?\s*tokens?(?: with (.*?))?(?=[.;]|$)", clause)
-                 if match:
-                     count_str, pt_str, colors_and_type, main_type, keywords_str = match.groups()
-                     count = text_to_number(count_str) if count_str not in ('a', 'an') else 1
-                     power, toughness = (1, 1)
-                     if pt_str: p, t = pt_str.split('/'); power, toughness = int(p), int(t)
-
-                     creature_type = "Token"
-                     token_colors = [0]*5
-                     if colors_and_type:
-                         parts = colors_and_type.strip().split()
-                         color_map = {'white':0,'blue':1,'black':2,'red':3,'green':4}
-                         type_parts = []
-                         for p in parts:
-                             if p in color_map: token_colors[color_map[p]] = 1
-                             else: type_parts.append(p)
-                         if type_parts: creature_type = " ".join(type_parts).capitalize()
-
-                     keywords = keywords_str.split(',') if keywords_str else []
-                     keywords = [k.strip() for k in keywords if k.strip()]
-
-                     effects.append(CreateTokenEffect(power, toughness, creature_type, count, keywords, controller_gets=("opponent controls" not in clause)))
-                     created_effect = True
-            elif re.search(r"\bdestroy target\b", clause):
+            # Destroy
+            elif re.search(r"\b(destroy(?:s)?)\b\s+target", clause):
                  target_desc = EffectFactory._extract_target_description(clause) or "permanent"
-                 effects.append(DestroyEffect(target_desc))
-                 created_effect = True
-            elif re.search(r"\bexile target\b", clause):
-                 target_desc = EffectFactory._extract_target_description(clause) or "permanent"
-                 zone = "battlefield" # Default
-                 match_zone = re.search(r"from (?:the|a|your|an opponent's) (\w+)", clause)
-                 if match_zone: zone = match_zone.group(1)
-                 effects.append(ExileEffect(target_desc, zone=zone))
-                 created_effect = True
-            elif re.search(r"\bdiscards?\b.*\bcards?\b", clause):
-                 match = re.search(r"discards? (\d+|a|an|\w+) cards?", clause)
-                 count = match.group(1) if match else 'a'
-                 target_desc = EffectFactory._extract_target_description(clause) or "opponent"
-                 effects.append(DiscardEffect(text_to_number(count), target=target_desc))
-                 created_effect = True
-            elif re.search(r"\bmills?\b|\bput(?:s)? the top\b.*\bcards?\b.*\bgraveyard\b", clause):
-                match = re.search(r"(?:mills?|put(?:s)? the top) (\d+|a|an|\w+) cards?", clause)
-                count = match.group(1) if match else 'a'
-                target_desc = EffectFactory._extract_target_description(clause) or "opponent"
-                effects.append(MillEffect(text_to_number(count), target=target_desc))
-                created_effect = True
-            elif re.search(r"\b(tap|untap) target\b", clause):
-                 match = re.search(r"(tap|untap) target (.*?)(?=[.;]|$)", clause)
-                 action = match.group(1)
-                 target_desc = match.group(2).strip()
-                 if action == "tap": effects.append(TapEffect(target_desc))
-                 else: effects.append(UntapEffect(target_desc))
-                 created_effect = True
-            elif re.search(r"\bgets ([+\-]\d+/[+\-]\d+) until end of turn", clause):
-                 match = re.search(r"gets ([+\-]\d+)/([+\-]\d+) until end of turn", clause)
-                 p_mod, t_mod = int(match.group(1)), int(match.group(2))
-                 # Need BuffEffect defined properly
-                 # effects.append(BuffEffect(p_mod, t_mod)) # Assuming BuffEffect exists
-                 logging.warning("BuffEffect parsing/class needs implementation.") # Placeholder warning
-                 created_effect = True
-            elif re.search(r"\bsearch your library for\b", clause):
-                 match = re.search(r"search your library for (?:up to (\w+|a|an) )?(.*?) cards?", clause)
-                 count_str = match.group(1) or "a"
-                 criteria = match.group(2).replace(" card","").strip()
-                 count = text_to_number(count_str) if count_str not in ('a', 'an') else 1
-                 destination = "hand"
-                 if "put onto the battlefield" in clause: destination = "battlefield"
-                 elif "put into your graveyard" in clause: destination = "graveyard"
-                 effects.append(SearchLibraryEffect(criteria, target="controller", destination=destination, count=count))
-                 created_effect = True
-            # --- Add more sophisticated clause parsing here ---
+                 target_type = "permanent" # Determine from desc
+                 if "creature" in target_desc: target_type = "creature"
+                 elif "artifact" in target_desc: target_type = "artifact"
+                 elif "enchantment" in target_desc: target_type = "enchantment"
+                 # Add more types...
+                 created_effect = DestroyEffect(target_type=target_type)
 
-            if not created_effect:
-                 # If no specific effect matched this clause, add a generic one
+            # Exile
+            elif re.search(r"\b(exile(?:s)?)\b\s+target", clause):
+                 target_desc = EffectFactory._extract_target_description(clause) or "permanent"
+                 target_type = "permanent"
+                 if "creature" in target_desc: target_type = "creature"
+                 # ... add more types ...
+                 zone_match = re.search(r"from (?:the )?(\w+)", clause)
+                 zone = zone_match.group(1) if zone_match else "battlefield"
+                 created_effect = ExileEffect(target_type=target_type, zone=zone)
+
+            # Create Token
+            elif re.search(r"\b(create(?:s)?)\b", clause) and "token" in clause:
+                 count_match = re.search(r"create(?:s)?\s+(a|an|one|two|three|\d+)", clause)
+                 count = text_to_number(count_match.group(1)) if count_match else 1
+                 pt_match = re.search(r"(\d+)/(\d+)", clause)
+                 power, toughness = (pt_match.group(1), pt_match.group(2)) if pt_match else (1, 1)
+                 power, toughness = int(power), int(toughness)
+                 # Extract type (simple color + type word)
+                 type_match = re.search(r"(\d+/\d+)\s+(?:([\w\-]+)\s+)?(\w+)\s+creature token", clause) # Needs refinement
+                 color = "Colorless"
+                 creature_type = "Token"
+                 if type_match:
+                      color = type_match.group(2).capitalize() if type_match.group(2) else "Colorless" # Example only
+                      creature_type = type_match.group(3).capitalize()
+                 # Parse keywords (simple split)
+                 keywords = []
+                 if "with" in clause:
+                     kw_part = clause.split(" with ")[-1]
+                     keywords = [k.strip() for k in kw_part.split(',')]
+                 # controller_gets = "opponent controls" not in clause
+                 created_effect = CreateTokenEffect(power, toughness, creature_type, count, keywords)
+
+            # Buff (+X/+Y)
+            elif re.search(r"\b(get(?:s)?)\b\s+([+\-]\d+)/([+\-]\d+)", clause):
+                match = re.search(r"get(?:s)?\s+([+\-]\d+)/([+\-]\d+)", clause)
+                p_mod, t_mod = int(match.group(1)), int(match.group(2))
+                duration = "end_of_turn" if "until end of turn" in clause else "permanent"
+                target_desc = EffectFactory._extract_target_description(clause) or "creatures you control" # Assume target if specified, else group buff
+                # Determine target type more robustly
+                target_type = "creature"
+                if "target creature" in target_desc: target_type = "target creature"
+                elif "creatures you control" in target_desc: target_type = "creatures you control"
+                created_effect = BuffEffect(p_mod, t_mod, duration=duration, target_type=target_type)
+
+
+            if created_effect:
+                effects.append(created_effect)
+            else:
+                 # Add generic effect if specific parsing fails for this clause
                  logging.debug(f"Adding generic AbilityEffect for clause: '{clause}'")
                  effects.append(AbilityEffect(clause))
 
-        # Fallback if parsing yielded nothing for the entire text
+        # Final fallback if no clauses yielded effects
         if not effects and effect_text:
-            logging.warning(f"Could not parse effect text into any specific effects: '{effect_text}'. Adding as generic effect.")
-            return [AbilityEffect(effect_text)]
+            logging.warning(f"Could not parse effect text into specific effects: '{effect_text}'. Adding as generic effect.")
+            effects.append(AbilityEffect(effect_text))
 
         return effects
     

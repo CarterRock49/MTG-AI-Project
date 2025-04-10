@@ -1,128 +1,135 @@
 import random
 import logging
 import numpy as np
+import copy
 
-from Playersim.ability_utils import EffectFactory
+from Playersim.ability_utils import EffectFactory # Import copy for deepcopy
+
+# (Keep existing imports)
 from .card import Card
 from .debug import DEBUG_MODE
 import re
 from .ability_types import StaticAbility, TriggeredAbility
 from collections import defaultdict
 
+
 class GameState:
-    
+
+    # (Keep existing class variables like PHASE_ constants and __slots__)
     __slots__ = ["card_db", "max_turns", "max_hand_size", "max_battlefield", "day_night_checked_this_turn",
-                "phase_history", "stack", "priority_pass_count", "last_stack_size", 
-                "turn", "phase", "agent_is_p1", "combat_damage_dealt", "day_night_state",
-                "current_attackers", "current_block_assignments", 'mulligan_data',
-                "current_spell_requires_target", "current_spell_card_id",
-                "optimal_attackers", "attack_suggestion_used", 'cards_played',
-                "p1", "p2", "ability_handler", "damage_dealt_this_turn",
-                "previous_priority_phase", "layer_system", "until_end_of_turn_effects",
-                "mana_system", "replacement_effects", "cards_drawn_this_turn",
-                "combat_resolver", "temp_control_effects", "abilities_activated_this_turn",
-                "card_evaluator", "spells_cast_this_turn", "_phase_history", "card_db",
-                "strategic_planner", "attackers_this_turn", 'strategy_memory',
-                "_logged_card_ids", "_logged_errors", "targeting_system",
-                "_phase_action_count", "priority_player", "stats_tracker",
-                # New slot variables for special card types
-                "adventure_cards", "saga_counters", "mdfc_cards", "battle_cards",
-                "cards_castable_from_exile", "cast_as_back_face",
-                # Additional slots for various tracking variables
-                "phased_out", "suspended_cards", "kicked_cards", "evoked_cards",
-                "foretold_cards", "blitz_cards", "dash_cards", "unearthed_cards",
-                "jump_start_cards", "buyback_cards", "flashback_cards",
-                "life_gained_this_turn", "damage_this_turn", "exile_at_end_of_combat",
-                "haste_until_eot", "has_haste_until_eot", "progress_was_forced",
-                "_turn_limit_checked", "miracle_card", "miracle_cost", "miracle_player",
-                # New tracking variables
-                "split_second_active", "rebounded_cards", "banding_creatures",
-                "crewed_vehicles", "morphed_cards", "cards_to_graveyard_this_turn",
-                "boast_activated", "forecast_used", "epic_spells", "city_blessing",
-                "myriad_tokens", "persist_returned", "undying_returned", "gravestorm_count"]
-            
-    # Phase constants
-    PHASE_UNTAP = 0
-    PHASE_UPKEEP = 1
-    PHASE_DRAW = 2
-    PHASE_MAIN_PRECOMBAT = 3
-    PHASE_BEGIN_COMBAT = 4
-    PHASE_DECLARE_ATTACKERS = 5
-    PHASE_DECLARE_BLOCKERS = 6
-    PHASE_COMBAT_DAMAGE = 7
-    PHASE_END_COMBAT = 8
-    PHASE_MAIN_POSTCOMBAT = 9
-    PHASE_END_STEP = 10
-    PHASE_PRIORITY = 11
-    PHASE_TARGETING = 12
-    PHASE_BEGINNING_OF_COMBAT = 13
-    PHASE_END_OF_COMBAT = 14
-    PHASE_CLEANUP = 15
-    PHASE_FIRST_STRIKE_DAMAGE = 16
-    PHASE_TARGETING = 17 # New phase for target selection
-    PHASE_SACRIFICE = 18 # New phase for sacrifice selection
-    PHASE_CHOOSE = 19    # New phase for generic choices (Scry, Surveil, Mode, X, Color)
+                 "phase_history", "stack", "priority_pass_count", "last_stack_size",
+                 "turn", "phase", "agent_is_p1", "combat_damage_dealt", "day_night_state",
+                 "current_attackers", "current_block_assignments", 'mulligan_data',
+                 "current_spell_requires_target", "current_spell_card_id",
+                 "optimal_attackers", "attack_suggestion_used", 'cards_played',
+                 "p1", "p2", "ability_handler", "damage_dealt_this_turn",
+                 "previous_priority_phase", "layer_system", "until_end_of_turn_effects",
+                 "mana_system", "replacement_effects", "cards_drawn_this_turn",
+                 "combat_resolver", "temp_control_effects", "abilities_activated_this_turn",
+                 "card_evaluator", "spells_cast_this_turn", "_phase_history",
+                 "strategic_planner", "attackers_this_turn", 'strategy_memory',
+                 "_logged_card_ids", "_logged_errors", "targeting_system",
+                 "_phase_action_count", "priority_player", "stats_tracker",
+                 "card_memory", # Added from env
+                 # New slot variables for special card types
+                 "adventure_cards", "saga_counters", "mdfc_cards", "battle_cards",
+                 "cards_castable_from_exile", "cast_as_back_face",
+                 # Additional slots for various tracking variables
+                 "phased_out", "suspended_cards", "kicked_cards", "evoked_cards",
+                 "foretold_cards", "blitz_cards", "dash_cards", "unearthed_cards",
+                 "jump_start_cards", "buyback_cards", "flashback_cards",
+                 "life_gained_this_turn", "damage_this_turn", "exile_at_end_of_combat",
+                 "haste_until_eot", "has_haste_until_eot", "progress_was_forced",
+                 "_turn_limit_checked", "miracle_card", "miracle_cost", "miracle_player",
+                 "miracle_active", "miracle_card_id", "miracle_cost_parsed", # Added miracle state
+                 # New tracking variables
+                 "split_second_active", "rebounded_cards", "banding_creatures",
+                 "crewed_vehicles", "morphed_cards", "manifested_cards", # Added manifested
+                 "cards_to_graveyard_this_turn",
+                 "boast_activated", "forecast_used", "epic_spells", "city_blessing",
+                 "myriad_tokens", "persist_returned", "undying_returned", "gravestorm_count",
+                 # Context slots
+                 "targeting_context", "sacrifice_context", "choice_context",
+                 "mulligan_in_progress", "mulligan_player", "mulligan_count",
+                 "bottoming_in_progress", "bottoming_player", "cards_to_bottom", "bottoming_count",
+                 "spree_context", "dredge_pending", "pending_spell_context", "clash_context", # Added more contexts
+                 "surveil_in_progress", "cards_being_surveiled", "surveiling_player", # Surveil state
+                 "scry_in_progress", "scrying_cards", "scrying_player", "scrying_tops", "scrying_bottoms" # Scry state
+                 ]
+
+
+    # Define phase names consistently within the class
+    _PHASE_NAMES = {
+        0: "UNTAP", 1: "UPKEEP", 2: "DRAW", 3: "MAIN_PRECOMBAT",
+        4: "BEGIN_COMBAT", 5: "DECLARE_ATTACKERS", 6: "DECLARE_BLOCKERS",
+        7: "COMBAT_DAMAGE", 8: "END_OF_COMBAT", 9: "MAIN_POSTCOMBAT",
+        10: "END_STEP", 11: "PRIORITY", 12: "TARGETING", # Note: Adding TARGETING, SACRIFICE, CHOOSE for completeness
+        13: "BEGIN_COMBAT", 14: "END_OF_COMBAT", # Keep legacy names if needed
+        15: "CLEANUP", 16: "FIRST_STRIKE_DAMAGE", 17: "TARGETING", # Explicitly map 17 again
+        18: "SACRIFICE", 19: "CHOOSE"
+    }
 
     def __init__(self, card_db, max_turns=20, max_hand_size=7, max_battlefield=20):
-        """
-        Initialize GameState with consolidated subsystem initialization.
-        
-        Args:
-            card_db: Dictionary or list of card objects
-            max_turns: Maximum number of turns before game ends
-            max_hand_size: Maximum hand size
-            max_battlefield: Maximum battlefield size
-        """
-        # Basic game parameters
+        # ... (Keep basic param init) ...
+        self.card_db = card_db
         self.max_turns = max_turns
         self.max_hand_size = max_hand_size
         self.max_battlefield = max_battlefield
-        
+
         # Initialize base variables
         self.turn = 1
-        self.phase = self.PHASE_UNTAP
+        self.phase = self.PHASE_UNTAP # Start at UNTAP
         self.agent_is_p1 = True
         self.combat_damage_dealt = False
         self.stack = []
         self.priority_pass_count = 0
         self.last_stack_size = 0
-        self.phase_history = np.zeros(3, dtype=np.int32)
-        self._phase_history = []
+        self._phase_history = [] # Use internal list for history
         self._phase_action_count = 0
-        
+        self.priority_player = None # Will be set during reset or first phase
+
         # Combat state initialization
         self.current_attackers = []
         self.current_block_assignments = {}
-        self.current_spell_requires_target = False
-        self.current_spell_card_id = None
+        # Remove these? Targeting/spell context handles this better.
+        # self.current_spell_requires_target = False
+        # self.current_spell_card_id = None
+
+        # Combat optimization variables
         self.optimal_attackers = None
         self.attack_suggestion_used = False
-        
-        # Initialize system references as None (will be created by _init_subsystems)
+
+        # Player states (will be initialized in reset)
+        self.p1 = None
+        self.p2 = None
+
+        # Initialize system references as None
         self.mana_system = None
         self.combat_resolver = None
         self.card_evaluator = None
         self.strategic_planner = None
         self.strategy_memory = None
         self.stats_tracker = None
+        self.card_memory = None # Added from environment
         self.ability_handler = None
         self.layer_system = None
         self.replacement_effects = None
         self.targeting_system = None
-        
+
         # Process card_db properly
         if isinstance(card_db, list):
-            self.card_db = {i: card for i, card in enumerate(card_db)}
+            self.card_db = {getattr(card, 'card_id', i): card for i, card in enumerate(card_db) if card}
         elif isinstance(card_db, dict):
-            self.card_db = card_db
+            # Ensure values are Card objects
+            self.card_db = {k:v for k,v in card_db.items() if isinstance(v, Card)}
         else:
             self.card_db = {}
             logging.error(f"Invalid card database format: {type(card_db)}")
-        
-        # Add contexts for multi-step actions
-        self.targeting_context = None # Stores {source_id, required_type, required_count, selected_targets}
-        self.sacrifice_context = None # Stores {source_id, required_type, required_count, selected_permanents}
-        self.choice_context = None    # Stores {type:"scry/surveil/etc", player, cards, other_data}
+
+        # Contexts for multi-step actions
+        self.targeting_context = None
+        self.sacrifice_context = None
+        self.choice_context = None
         self.mulligan_in_progress = False
         self.mulligan_player = None
         self.mulligan_count = {}
@@ -130,9 +137,25 @@ class GameState:
         self.bottoming_player = None
         self.cards_to_bottom = 0
         self.bottoming_count = 0
+        self.spree_context = None
+        self.dredge_pending = None
+        self.pending_spell_context = None
+        self.clash_context = None
 
-        # Initialize all subsystems
+        # Surveil/Scry state
+        self.surveil_in_progress = False
+        self.cards_being_surveiled = []
+        self.surveiling_player = None
+        self.scry_in_progress = False
+        self.scrying_cards = []
+        self.scrying_player = None
+        self.scrying_tops = []
+        self.scrying_bottoms = []
+
+
+        # Initialize all subsystems (called AFTER self.card_db is set)
         self._init_subsystems()
+        logging.info("GameState initialized.")
         
     def _init_subsystems(self):
         """
@@ -1000,74 +1023,43 @@ class GameState:
         return self.check_priority(player)
 
     def _pass_priority(self):
-        """Enhanced priority handling with full APNAP (Active Player, Non-Active Player) support."""
         self.priority_pass_count += 1
-        
-        active_player = self._get_active_player()
-        non_active_player = self._get_non_active_player()
-        
-        # Track who has priority
-        if not hasattr(self, 'priority_player'):
-            self.priority_player = active_player
-        
-        # First priority always goes to active player
-        # When stack changes, priority goes back to active player
-        if self.last_stack_size != len(self.stack):
-            self.priority_player = active_player
-            self.priority_pass_count = 0
-            self.last_stack_size = len(self.stack)
-            logging.debug(f"Stack changed: Priority passed to {active_player['name']}")
-            
-            # Check if the top spell has Split Second
-            if self.stack:
-                top_item = self.stack[-1]
-                spell_type, card_id, caster = top_item
-                card = self._safe_get_card(card_id)
-                if card and hasattr(card, 'oracle_text') and "split second" in card.oracle_text.lower():
-                    self.split_second_active = True
-                    logging.debug(f"Split Second active: {card.name} prevents responses")
-            return
-        
-        # Switch priority between players
-        current_priority_player = self.priority_player
-        next_priority_player = non_active_player if current_priority_player == active_player else active_player
-        self.priority_player = next_priority_player
-        
-        # Log the priority passing
-        if self.stack:
-            top_item = self.stack[-1]
-            spell_type, card_id, caster = top_item
-            card_name = self._safe_get_card(card_id).name if self._safe_get_card(card_id) else "Unknown"
-            logging.debug(f"Priority passed from {current_priority_player['name']} to {next_priority_player['name']}. {card_name} on stack.")
-        else:
-            logging.debug(f"Priority passed from {current_priority_player['name']} to {next_priority_player['name']} with empty stack.")
-        
-        # Check if both players have passed in succession
+        current_prio_player = self.priority_player
+
+        if getattr(self, 'split_second_active', False):
+             # Only mana abilities or special actions allowed. Passing implicitly does nothing yet.
+             logging.debug("Split Second: Passing priority, no non-mana actions allowed.")
+             # Check if both passed to resolve split second spell? No, spell resolves automatically.
+             # For now, just toggle priority until spell resolves.
+             if self.priority_player == self._get_active_player(): self.priority_player = self._get_non_active_player()
+             else: self.priority_player = self._get_active_player()
+             return # Do not advance phase or resolve stack
+
+        # Priority passes to the other player
+        if self.priority_player == self._get_active_player(): self.priority_player = self._get_non_active_player()
+        else: self.priority_player = self._get_active_player()
+        logging.debug(f"Priority passed from {current_prio_player['name']} to {self.priority_player['name']}")
+
+        # Check if both players passed in succession
         if self.priority_pass_count >= 2:
             if self.stack:
-                # Process any triggered abilities before resolving stack
-                if hasattr(self, 'ability_handler') and self.ability_handler:
-                    self.ability_handler.process_triggered_abilities()
-                
-                # Resolve top of stack
-                logging.debug(f"Both players passed priority. Resolving top of stack.")
-                self.resolve_top_of_stack()  # Changed from self._resolve_top_of_stack()
-                
-                # Reset split_second_active after resolving the spell
-                if hasattr(self, 'split_second_active') and self.split_second_active:
-                    self.split_second_active = False
-                    logging.debug("Split Second effect has ended")
-                    
-                # Reset priority count and give priority to active player
-                self.priority_pass_count = 0
-                self.priority_player = active_player
-            else:
-                # Move to next phase
-                prev_phase = self.phase
+                 # Process triggers *before* resolving stack item
+                 if self.ability_handler: self.ability_handler.process_triggered_abilities()
+                 # If triggers were added, AP gets priority again, reset pass count
+                 if len(self.stack) > self.last_stack_size:
+                      self.priority_player = self._get_active_player()
+                      self.priority_pass_count = 0
+                      self.last_stack_size = len(self.stack)
+                      logging.debug("Triggers added to stack, priority back to AP.")
+                 else: # No triggers, resolve top item
+                      logging.debug("Both passed, resolving stack...")
+                      resolved = self.resolve_top_of_stack()
+                      # Priority automatically returns to AP after resolution
+                      # resolve_top_of_stack should handle resetting priority_pass_count and player
+            else: # Stack is empty, advance phase/step
+                logging.debug("Both passed with empty stack, advancing phase.")
                 self._advance_phase()
-                logging.debug(f"Both players passed with empty stack. Moving from {prev_phase} to {self.phase}")
-                self.priority_pass_count = 0
-                self.priority_player = active_player
+                # _advance_phase resets priority_player and pass_count
 
     
     def move_card(self, card_id, from_player, from_zone, to_player, to_zone, cause=None, context=None):
@@ -1531,98 +1523,142 @@ class GameState:
             return self.ability_handler.trigger_ability(card_id, event_type, context)
         return []
         
-    def add_to_stack(self, item_type, card_id, controller, context=None):
-        """Add an item to the stack with context."""
-        if context is None: context = {}
-        # Store item with context
-        stack_item = (item_type, card_id, controller, context)
-        self.stack.append(stack_item)
-        card_name = self._safe_get_card(card_id).name if self._safe_get_card(card_id) else item_id
-        logging.debug(f"Added to stack: {item_type} {card_name} ({card_id}) with context {context}")
 
-        # Reset priority system for new stack item ONLY IF NOT in a targeting/choice sequence
-        if self.phase != self.PHASE_TARGETING and self.phase != self.PHASE_SACRIFICE and self.phase != self.PHASE_CHOOSE:
+    def add_to_stack(self, item_type, source_id, controller, context=None):
+        """Add an item to the stack with context. (Revised Priority Reset)"""
+        if context is None: context = {}
+        # Ensure source_id is valid
+        card = self._safe_get_card(source_id)
+        card_name = getattr(card, 'name', source_id) if card else source_id
+
+        stack_item = (item_type, source_id, controller, context)
+        self.stack.append(stack_item)
+        logging.debug(f"Added to stack: {item_type} {card_name} ({source_id}) with context keys: {context.keys()}")
+
+        # Reset priority ONLY IF NOT in a special choice phase.
+        # Priority automatically goes to the active player after something is added.
+        if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
             self.priority_pass_count = 0
             self.last_stack_size = len(self.stack)
-            self.phase = self.PHASE_PRIORITY  # Enter priority phase
-            self.priority_player = self._get_active_player() # Priority goes to active player
+            self.priority_player = self._get_active_player()
+            # If not already in priority phase, enter it
+            if self.phase != self.PHASE_PRIORITY:
+                 self.previous_priority_phase = self.phase # Store where we came from
+                 self.phase = self.PHASE_PRIORITY
+            logging.debug(f"Stack changed, priority to AP ({self.priority_player['name']})")
         else:
-             # If in targeting/choice, priority might not shift immediately
-             self.last_stack_size = len(self.stack) # Still update stack size
+             # Still update stack size even if not resetting priority
+             self.last_stack_size = len(self.stack)
+             logging.debug("Added to stack during special choice phase, priority maintained.")
     
+
     def cast_spell(self, card_id, player, targets=None, context=None):
-        """
-        Cast a spell from a source zone (default hand) to the stack, handling costs and targeting.
-        """
+        """Cast a spell: Pay costs -> Move to Stack -> Set up Targeting/Choices."""
         if context is None: context = {}
         card = self._safe_get_card(card_id)
-        if not card: return False
+        if not card:
+             logging.error(f"Cannot cast spell: Invalid card_id {card_id}")
+             return False
 
-        source_zone = context.get("source_zone", "hand") # Default to hand
-
-        # Check if card exists in source zone
-        if source_zone not in player or card_id not in player[source_zone]:
-            logging.warning(f"Spell {card.name} ({card_id}) not found in {source_zone}")
+        source_zone = context.get("source_zone", "hand")
+        source_list = player.get(source_zone)
+        if not source_list or card_id not in source_list:
+            logging.warning(f"Cannot cast {card.name}: Not found in {player['name']}'s {source_zone}.")
             return False
 
-        # Check if it's a valid phase to cast this spell type
-        if not self._can_cast_now(card_id, player):
-            logging.warning(f"Cannot cast {card.name} during current phase ({self.phase}) or stack state.")
+        if not self._can_cast_now(card_id, player): # Includes priority and timing check
+            logging.warning(f"Cannot cast {card.name}: Invalid timing (Phase: {self.phase}, Priority: {self.priority_player['name']}).")
             return False
 
-        # 1. Determine Final Cost (including alternative/additional costs from context)
+        # --- Determine Final Cost ---
+        # Alternative/Additional Costs handled via context: use_alt_cost, kicked, pay_additional etc.
         base_cost_str = getattr(card, 'mana_cost', '')
-        parsed_cost = self.mana_system.parse_mana_cost(base_cost_str)
+        if context.get("cast_as_adventure"): base_cost_str = card.get_adventure_data().get('cost', '')
+        elif context.get("cast_back_face"): base_cost_str = getattr(card, 'back_face', {}).get('mana_cost', '')
+        elif context.get("use_alt_cost"):
+            # Let ManaSystem handle fetching the correct alt cost string if needed
+            # Or pass alt cost directly in context if known by handler
+            alt_cost = self.mana_system.calculate_alternative_cost(card_id, player, context["use_alt_cost"], context)
+            if alt_cost: base_cost_str = None # Use parsed alt_cost dict instead of string
+            else: # Invalid alt cost type or context
+                 logging.warning(f"Invalid alternative cost '{context['use_alt_cost']}' for {card.name}")
+                 return False
+            parsed_cost = alt_cost # Use the dict directly
+        else: # Use base cost string
+            parsed_cost = self.mana_system.parse_mana_cost(base_cost_str)
+
+        # Apply modifiers AFTER selecting base/alt cost
         final_cost = self.mana_system.apply_cost_modifiers(player, parsed_cost, card_id, context)
 
-        # 2. Check if cost can be paid (including non-mana costs potentially handled by mana system)
+        # --- Check Affordability ---
         if not self.mana_system.can_pay_mana_cost(player, final_cost, context):
-            logging.warning(f"Cannot pay cost {final_cost} for {card.name}")
+            logging.warning(f"Cannot cast {card.name}: Cannot afford final cost.")
             return False
 
-        # 3. Pay Cost (mana system handles mana, life, sacrifice, exile, tap etc. based on context)
-        # The mana system's pay_mana_cost needs to be robust enough to handle this.
-        if not self.mana_system.pay_mana_cost(player, final_cost, context):
-            logging.warning(f"Failed to pay cost {final_cost} for {card.name}")
-            # TODO: Rollback any partial non-mana costs paid (e.g., untap convoke creatures)
-            return False
-
-        # 4. Move spell from source zone to stack
-        player[source_zone].remove(card_id)
-        # Ensure context has basic info if not passed
-        if "targets" not in context: context["targets"] = targets or {}
-        if "source_zone" not in context: context["source_zone"] = source_zone
-        self.add_to_stack("SPELL", card_id, player, context) # Add context to stack item
-
-        # 5. Handle Targeting Requirement
+        # --- Targeting Requirement Check (BEFORE Paying Costs) ---
+        # This prevents paying costs for a spell that has no valid targets right now.
+        # Note: Targets can still become invalid *before resolution*.
         requires_target = "target" in getattr(card, 'oracle_text', '').lower()
-        num_targets = getattr(card, 'num_targets', 1) if requires_target else 0 # Needs num_targets property on Card
+        num_targets = getattr(card, 'num_targets', 1) if requires_target else 0
+        if requires_target and num_targets > 0:
+             if self.targeting_system:
+                 valid_targets_map = self.targeting_system.get_valid_targets(card_id, player)
+                 total_valid_targets = sum(len(v) for v in valid_targets_map.values())
+                 # Rule 601.2c: Must be able to choose required number of targets.
+                 # Exception: "up to N targets". Needs better parsing. Simple check for now:
+                 if total_valid_targets < num_targets:
+                      logging.warning(f"Cannot cast {card.name}: Not enough valid targets available ({total_valid_targets}/{num_targets}).")
+                      return False
+             else: logging.warning("No targeting system, cannot verify target availability before casting.")
 
+        # --- Pay Costs ---
+        # Non-mana costs paid first (handled by pay_mana_cost using context)
+        if not self.mana_system.pay_mana_cost(player, final_cost, context):
+            logging.warning(f"Failed to pay cost for {card.name}.")
+            # TODO: Need robust rollback for partially paid non-mana costs (e.g., sacrifice).
+            return False
+
+        # --- Move Card and Add to Stack ---
+        # Move from source *before* adding to stack
+        source_list.remove(card_id)
+        # If cast from GY for flashback etc., move to exile conceptually first? No, rules say stack first.
+        # Destination is stack. `add_to_stack` handles priority.
+        # Update context with necessary casting info before adding to stack
+        context["source_zone"] = source_zone # Ensure source is tracked
+        # Add basic targeting info if needed immediately (optional targets might be skipped)
+        if requires_target: context["requires_target"] = True
+        context["final_paid_cost"] = final_cost # Store the cost actually paid
+        self.add_to_stack("SPELL", card_id, player, context)
+
+        # --- Set up Targeting Phase if needed ---
         if requires_target:
             logging.debug(f"{card.name} requires target(s). Entering TARGETING phase.")
             self.phase = self.PHASE_TARGETING
             self.targeting_context = {
                 "source_id": card_id,
                 "controller": player,
-                "required_type": getattr(card, 'target_type', 'target'), # Needs target_type on Card
+                "required_type": getattr(card, 'target_type', 'target'),
                 "required_count": num_targets,
                 "selected_targets": [],
-                "effect_text": getattr(card, 'oracle_text', '') # For TargetingSystem
+                "effect_text": getattr(card, 'oracle_text', '')
             }
+            # Agent will provide target choices via SELECT_TARGET actions
+            # The spell sits on stack until targets finalized
         else:
-            # If no target needed, proceed directly to priority
-            self.phase = self.PHASE_PRIORITY
-            self.priority_pass_count = 0 # Reset priority
-            self.last_stack_size = len(self.stack)
-            self.priority_player = self._get_active_player() # Priority to active player
+            # No targets, priority passes normally via add_to_stack
+            pass
 
-        # Track spell cast for triggers
+        # --- Track Cast & Trigger ---
+        # Use helper to ensure tracking consistency
+        self.track_card_played(card_id, player_idx = 0 if player == self.p1 else 1) # Track spell play
+        # Track for storm/cast triggers
         if not hasattr(self, 'spells_cast_this_turn'): self.spells_cast_this_turn = []
         self.spells_cast_this_turn.append((card_id, player))
-        # Handle cast triggers
-        self.trigger_ability(card_id, "SPELL_CAST", {"controller": player, "context": context})
+        # Trigger "when cast" abilities
+        self.handle_cast_trigger(card_id, player, context=context)
 
-        logging.debug(f"Cast spell: {card.name} ({card_id}) added to stack.")
+
+        logging.debug(f"Cast spell: {card.name} ({card_id}) moved from {source_zone} to stack.")
         return True
 
     def _can_cast_now(self, card_id, player):
@@ -1789,82 +1825,65 @@ class GameState:
              return True
 
     def resolve_top_of_stack(self):
-        """Resolve the top item of the stack, retrieving targets from context."""
         if not self.stack: return False
         top_item = self.stack.pop()
         try:
             if isinstance(top_item, tuple) and len(top_item) >= 3:
                 item_type, item_id, controller = top_item[:3]
                 context = top_item[3] if len(top_item) > 3 else {}
-                # Retrieve targets from context if they exist
-                targets = context.get("targets", {}) # Changed from None to {}
+                targets_on_stack = context.get("targets", {}) # Targets chosen when added
 
-                logging.debug(f"Resolving stack item: {item_type} {item_id} with targets: {targets}")
+                logging.debug(f"Resolving stack item: {item_type} {item_id} with targets: {targets_on_stack}")
                 card = self._safe_get_card(item_id)
-                card_name = card.name if card else f"Item {item_id}"
+                card_name = getattr(card, 'name', f"Item {item_id}") if card else f"Item {item_id}"
 
-                # Resolve based on item type
+                # *** TARGET VALIDATION STEP (Rule 608.2b) ***
+                if not self._validate_targets_on_resolution(item_id, controller, targets_on_stack):
+                    logging.info(f"Stack Item {item_type} {card_name} fizzled: All targets invalid.")
+                    # If it was a spell and not a copy, move it to GY
+                    if item_type == "SPELL" and not context.get("is_copy", False) and not context.get("skip_default_movement", False):
+                        # Ensure source zone removal already happened in cast_spell/move_card
+                        controller["graveyard"].append(item_id)
+                    return True # Action completed (fizzled)
+
+                # Delegate resolution based on type
+                resolution_handled = False
                 if item_type == "SPELL":
-                    # Ensure targets are valid upon resolution (Rule 608.2b)
-                    if not self._validate_targets_on_resolution(item_id, controller, targets):
-                         logging.debug(f"Spell {card_name} fizzled due to invalid targets.")
-                         if not context.get("is_copy", False): # Move original to GY
-                              controller["graveyard"].append(item_id)
-                         return True # Resolution attempt happened
-
-                    # Handle different spell types
-                    if card and hasattr(card, 'is_spree') and card.is_spree:
-                         self._resolve_spree_spell(item_id, controller, context) # Pass context
-                    elif card and hasattr(card, 'modal') and card.modal:
-                        mode = context.get("selected_modes", [0])[0] # Default to mode 0 if needed
-                        self._resolve_modal_spell(item_id, controller, mode, context) # Pass context
-                    elif card and 'creature' in getattr(card, 'card_types', []):
-                        self._resolve_creature_spell(item_id, controller, context) # Pass context
-                    elif card and 'planeswalker' in getattr(card, 'card_types', []):
-                        self._resolve_planeswalker_spell(item_id, controller, context) # Pass context
-                    elif card and any(t in getattr(card, 'card_types', []) for t in ['artifact', 'enchantment']):
-                        self._resolve_permanent_spell(item_id, controller, context) # Pass context
-                    elif card and 'land' in getattr(card, 'card_types', []):
-                         # Lands aren't usually cast, but maybe through effects
-                        self._resolve_land_spell(item_id, controller, context) # Pass context
-                    elif card and any(t in getattr(card, 'card_types', []) for t in ['instant', 'sorcery']):
-                         self._resolve_instant_sorcery_spell(item_id, controller, context) # Pass context
-                    else:
-                         logging.warning(f"Unknown card type for spell {card_name}: {getattr(card, 'card_types', [])}")
-                         if not context.get("is_copy", False): controller["graveyard"].append(item_id)
-
-                elif item_type == "ABILITY":
-                     # Use ability_handler for resolution, passing targets from context
-                     if self.ability_handler:
-                          self.ability_handler.resolve_ability("ACTIVATED", item_id, controller, context) # Pass full context
-                     else:
-                         logging.warning("Ability handler not available to resolve ability.")
-                elif item_type == "TRIGGER":
+                    # Use the _resolve_spell helper for consistency
+                    self._resolve_spell(item_id, controller, context)
+                    resolution_handled = True
+                elif item_type == "ABILITY" or item_type == "TRIGGER":
                     if self.ability_handler:
-                          self.ability_handler.resolve_ability("TRIGGERED", item_id, controller, context) # Pass full context
+                        # Pass context which includes the ability object and targets
+                        self.ability_handler.resolve_ability(item_type, item_id, controller, context)
+                        resolution_handled = True
                     else:
-                         logging.warning("Ability handler not available to resolve triggered ability.")
+                        logging.warning(f"Ability handler not available to resolve {item_type}.")
                 else:
-                    logging.warning(f"Unknown stack item type: {item_type}")
-                    return False
+                    logging.warning(f"Unknown stack item type during resolution: {item_type}")
 
-                # Post-resolution checks
-                self.check_state_based_actions()
-                if self.ability_handler: self.ability_handler.process_triggered_abilities()
-                return True
-            else:
+                # Post-resolution checks IF resolution was attempted
+                if resolution_handled:
+                    self.check_state_based_actions()
+                    # Triggered abilities are handled by the main loop check, no need to process here
+                return resolution_handled # Return True if attempt was made (even if it did nothing)
+
+            else: # Invalid item format
                  logging.warning(f"Invalid stack item format: {top_item}")
                  return False
         except Exception as e:
-             logging.error(f"Error resolving stack item: {str(e)}")
-             import traceback
-             logging.error(traceback.format_exc())
-             return False
+            logging.error(f"Error resolving stack item: {str(e)}", exc_info=True)
+            return False # Indicate resolution failure
         finally:
-            # Reset priority ONLY if not entering another choice/targeting phase
-            if self.phase != self.PHASE_TARGETING and self.phase != self.PHASE_SACRIFICE and self.phase != self.PHASE_CHOOSE:
-                self.priority_pass_count = 0
-                self.priority_player = self._get_active_player() # Priority goes back to active player
+            # Reset priority after stack resolves OR if an error occurred
+            # Ensure phase isn't a choice phase before resetting to PRIORITY
+            current_phase_is_choice = self.phase in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]
+            if not current_phase_is_choice:
+                 self.priority_pass_count = 0
+                 # Priority usually goes to AP, unless stack resolution causes triggers etc.
+                 self.priority_player = self._get_active_player()
+                 # If stack resolution caused triggers, the next check_abilities/process_triggers
+                 # might change priority again. This reset ensures AP gets first chance if nothing triggered.
         
     def _resolve_ability(self, ability_id, controller, context=None):
         """
@@ -2404,258 +2423,303 @@ class GameState:
     
     def _advance_phase(self):
         """Advance to the next phase in the turn sequence with improved progress detection and handling."""
-        # Call our progress monitoring function
-        progress_forced = self._check_phase_progress()
-        if progress_forced:
-            # Signal that progress was forced (this can be used to apply a penalty in the environment)
-            self.progress_was_forced = True
-            return
-        
+
+        # Phase sequence definition
         phase_sequence = [
             self.PHASE_UNTAP,
             self.PHASE_UPKEEP,
             self.PHASE_DRAW,
             self.PHASE_MAIN_PRECOMBAT,
-            self.PHASE_BEGIN_COMBAT,  # Beginning of combat step
+            self.PHASE_BEGIN_COMBAT,
             self.PHASE_DECLARE_ATTACKERS,
             self.PHASE_DECLARE_BLOCKERS,
-            self.PHASE_FIRST_STRIKE_DAMAGE,  # First strike damage step
-            self.PHASE_COMBAT_DAMAGE,        # Regular combat damage
-            self.PHASE_END_OF_COMBAT,        # End of combat step
+            self.PHASE_FIRST_STRIKE_DAMAGE,
+            self.PHASE_COMBAT_DAMAGE,
+            self.PHASE_END_OF_COMBAT,
             self.PHASE_MAIN_POSTCOMBAT,
             self.PHASE_END_STEP,
-            self.PHASE_CLEANUP               # Cleanup step
+            self.PHASE_CLEANUP
         ]
-        
-        # Phase names for better logging
-        phase_names = {
-            self.PHASE_UNTAP: "UNTAP",
-            self.PHASE_UPKEEP: "UPKEEP",
-            self.PHASE_DRAW: "DRAW",
-            self.PHASE_MAIN_PRECOMBAT: "MAIN_PRECOMBAT",
-            self.PHASE_BEGIN_COMBAT: "BEGINNING_OF_COMBAT",
-            self.PHASE_DECLARE_ATTACKERS: "DECLARE_ATTACKERS",
-            self.PHASE_DECLARE_BLOCKERS: "DECLARE_BLOCKERS",
-            self.PHASE_FIRST_STRIKE_DAMAGE: "FIRST_STRIKE_DAMAGE",
-            self.PHASE_COMBAT_DAMAGE: "COMBAT_DAMAGE",
-            self.PHASE_END_OF_COMBAT: "END_OF_COMBAT",
-            self.PHASE_MAIN_POSTCOMBAT: "MAIN_POSTCOMBAT",
-            self.PHASE_END_STEP: "END_STEP",
-            self.PHASE_PRIORITY: "PRIORITY",
-            self.PHASE_TARGETING: "TARGETING",
-            self.PHASE_CLEANUP: "CLEANUP"
-        }
-        
+
         old_phase = self.phase
-        old_phase_name = phase_names.get(old_phase, f"UNKNOWN({old_phase})")
-        
-        # Special case for PHASE_PRIORITY (11)
-        if self.phase == self.PHASE_PRIORITY:
-            # If stack is empty, return to previous phase
-            if not self.stack:
-                # Find the previous phase from which priority was called
-                previous_phase = getattr(self, 'previous_priority_phase', self.PHASE_MAIN_PRECOMBAT)
-                self.phase = previous_phase
-                new_phase_name = phase_names.get(self.phase, f"UNKNOWN({self.phase})")
-                logging.debug(f"Returning from PRIORITY phase to {new_phase_name}")
-                self._phase_action_count = 0
-                return
-            # Otherwise stay in PRIORITY until stack resolves
-            return
-        
-        # Handle direct transition from END_STEP to CLEANUP
-        if self.phase == self.PHASE_END_STEP:
-            # Process end of turn triggers
+        old_phase_name = self._PHASE_NAMES.get(old_phase, f"UNKNOWN({old_phase})")
+
+        # --- Handle Special Phase Exits ---
+        if old_phase in [self.PHASE_PRIORITY, self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+            # If stack is now empty (or choice is complete), return to the phase *before* priority/choice was entered
+            if not self.stack and not self.targeting_context and not self.sacrifice_context and not self.choice_context:
+                # Retrieve the phase we were in before entering the special phase
+                if hasattr(self, 'previous_priority_phase') and self.previous_priority_phase is not None:
+                    self.phase = self.previous_priority_phase
+                    # Prevent immediately re-entering priority if returning to a phase end where stack was just resolved
+                    # If returning to a main phase, AP gets priority. If combat/end step, AP gets priority.
+                    # The only edge case is if returning from resolving the *last* item that moved to cleanup.
+                    if self.phase != self.PHASE_CLEANUP: # Don't reset priority player if moving *to* cleanup naturally
+                        self.priority_player = self._get_active_player()
+                        self.priority_pass_count = 0
+                        self.last_stack_size = len(self.stack) # Should be 0 here
+                else: # Fallback if previous phase wasn't tracked
+                    logging.warning(f"No previous_priority_phase tracked when exiting {old_phase_name}. Defaulting.")
+                    # Safe default depends on when this could happen. Often post-combat main.
+                    self.phase = self.PHASE_MAIN_POSTCOMBAT if self.combat_damage_dealt else self.PHASE_MAIN_PRECOMBAT
+                    self.priority_player = self._get_active_player()
+                    self.priority_pass_count = 0
+                new_phase_name = self._PHASE_NAMES.get(self.phase, '?')
+                logging.debug(f"Returning from special phase {old_phase_name} to {new_phase_name}")
+                return # Phase transition handled
+            else:
+                 # Stay in the current special phase if stack/context still active
+                 # (e.g., multiple spells on stack, or waiting for another player's choice)
+                 # Priority should have been set correctly when the item was added or resolved.
+                 logging.debug(f"Staying in special phase {old_phase_name} (Stack/Context still active).")
+                 return # No phase advancement
+
+        # --- Cleanup Step Logic ---
+        if old_phase == self.PHASE_CLEANUP:
             active_player = self._get_active_player()
-            
-            # Check for day/night cycle transitions at end step
-            if hasattr(self, 'day_night_state'):
-                self.check_day_night_transition()
-            
-            # Check for end step triggers from all permanents
-            for player in [self._get_active_player(), self._get_non_active_player()]:
-                for card_id in player["battlefield"]:
-                    # Skip cards that entered during end step (they trigger next turn)
-                    if card_id in player.get("skip_end_step_trigger", set()):
-                        continue
-                        
-                    card = self._safe_get_card(card_id)
-                    if not card or not hasattr(card, 'oracle_text'):
-                        continue
-                        
-                    if "at the beginning of the end step" in card.oracle_text.lower():
-                        # Trigger the ability
-                        self.trigger_ability(card_id, "END_STEP", {"controller": player})
-            
-            # Go directly to cleanup
-            self.phase = self.PHASE_CLEANUP
-            logging.debug(f"Direct transition from END_STEP to CLEANUP")
-            
-            # Perform cleanup actions
-            active_player = self._get_active_player()
-            self._end_phase(active_player)
-            
-            self._phase_action_count = 0
-            return
-        
-        # Check for first strike damage step
-        if self.phase == self.PHASE_DECLARE_BLOCKERS:
-            has_first_or_double_strike = False
-            
-            # Check attackers for first/double strike
-            for attacker_id in self.current_attackers:
-                attacker = self._safe_get_card(attacker_id)
-                if not attacker:
-                    continue
-                    
-                # Check keywords array for first/double strike
-                if hasattr(attacker, 'keywords') and len(attacker.keywords) > 3:
-                    if attacker.keywords[1] or attacker.keywords[3]:  # First strike or double strike
-                        has_first_or_double_strike = True
-                        break
-                        
-                # Also check oracle text for first/double strike
-                if hasattr(attacker, 'oracle_text') and any(ks in attacker.oracle_text.lower() 
-                                                        for ks in ["first strike", "double strike"]):
-                    has_first_or_double_strike = True
-                    break
-            
-            # Also check blockers for first/double strike
-            if not has_first_or_double_strike:
-                for blockers in self.current_block_assignments.values():
-                    for blocker_id in blockers:
-                        blocker = self._safe_get_card(blocker_id)
-                        if not blocker:
-                            continue
-                            
-                        # Check keywords array for first/double strike
-                        if hasattr(blocker, 'keywords') and len(blocker.keywords) > 3:
-                            if blocker.keywords[1] or blocker.keywords[3]:  # First strike or double strike
-                                has_first_or_double_strike = True
-                                break
-                                
-                        # Also check oracle text for first/double strike
-                        if hasattr(blocker, 'oracle_text') and any(ks in blocker.oracle_text.lower() 
-                                                                for ks in ["first strike", "double strike"]):
-                            has_first_or_double_strike = True
-                            break
-                            
-                    if has_first_or_double_strike:
-                        break
-            
-            # Skip first strike damage if no first/double strike creatures involved
-            if not has_first_or_double_strike:
-                # Find the indices to skip past first strike damage
-                try:
-                    current_idx = phase_sequence.index(self.phase)
-                    first_strike_idx = phase_sequence.index(self.PHASE_FIRST_STRIKE_DAMAGE)
-                    combat_damage_idx = phase_sequence.index(self.PHASE_COMBAT_DAMAGE)
-                    
-                    # Store current phase before changing it (for priority system)
-                    self.previous_priority_phase = self.phase
-                    
-                    # Jump directly to combat damage
-                    self.phase = phase_sequence[combat_damage_idx]
-                    new_phase_name = phase_names.get(self.phase, f"UNKNOWN({self.phase})")
-                    logging.debug(f"Skipping FIRST_STRIKE_DAMAGE phase (no first strike creatures)")
-                    
-                    # Reset phase action counter
-                    self._phase_action_count = 0
-                    return
-                except ValueError:
-                    # Fallback if phase not found
-                    logging.error(f"Could not find phase in sequence: {self.phase}")
-        
+            non_active_player = self._get_non_active_player()
+            # 1. Discard down to hand size (Active player first)
+            if len(active_player['hand']) > self.max_hand_size:
+                 # Set up a discard choice state - This needs a specific phase or context handling
+                 # For now, log and potentially auto-discard (simplification)
+                 num_to_discard = len(active_player['hand']) - self.max_hand_size
+                 logging.info(f"Player {active_player['name']} must discard {num_to_discard} cards in cleanup.")
+                 # Auto-discard highest CMC? Needs logic.
+                 # For now, skip discard and proceed, but flag this state.
+                 pass # TODO: Implement cleanup discard choice/action
+
+            # 2. Remove damage from creatures
+            for player in [active_player, non_active_player]:
+                player['damage_counters'] = {}
+                player['deathtouch_damage'] = set() # Use setdefault in SBA instead? Set better.
+
+            # 3. End "until end of turn" and "this turn" effects
+            # LayerSystem cleanup needs careful handling. Call helper?
+            if self.layer_system and hasattr(self.layer_system, 'cleanup_expired_effects'):
+                self.layer_system.cleanup_expired_effects()
+            if self.replacement_effects and hasattr(self.replacement_effects, 'cleanup_expired_effects'):
+                self.replacement_effects.cleanup_expired_effects()
+            # Clear simple tracking flags/dicts
+            self.haste_until_eot.clear() if hasattr(self, 'haste_until_eot') else None
+            self.exile_at_end_of_combat.clear() if hasattr(self, 'exile_at_end_of_combat') else None
+            # Reset 'has_haste_until_eot' tracking set
+            self.has_haste_until_eot = set() if hasattr(self, 'has_haste_until_eot') else set()
+
+            # Revert temporary control effects
+            self._revert_temporary_control()
+
+            logging.debug("Cleanup step actions completed.")
+            # Check if state-based actions or triggered abilities happened during cleanup
+            sbas_happened = self.check_state_based_actions()
+            triggers_queued = False
+            if self.ability_handler:
+                triggers_were_present = bool(self.ability_handler.active_triggers)
+                self.ability_handler.process_triggered_abilities() # Put on stack
+                triggers_queued = bool(self.ability_handler.active_triggers) or triggers_were_present or len(self.stack) > 0
+
+            # If anything happened, players get priority again *in the cleanup step*
+            if sbas_happened or triggers_queued:
+                 logging.debug("SBAs/Triggers occurred during Cleanup. Players receive priority.")
+                 self.phase = self.PHASE_CLEANUP # Stay in Cleanup
+                 self.priority_player = active_player # AP gets priority first
+                 self.priority_pass_count = 0
+                 self.last_stack_size = len(self.stack)
+                 return # Do not advance to next turn yet
+            # Else, if nothing happened, proceed to next turn
+
+        # --- Regular Phase Advancement ---
+        # Find current phase index
         try:
-            current_idx = phase_sequence.index(self.phase)
-            next_idx = (current_idx + 1) % len(phase_sequence)
-            
-            # Handle turn transition (CLEANUP to UNTAP)
-            if self.phase == self.PHASE_CLEANUP and next_idx == 0:
-                prev_turn = self.turn
-                self.turn += 1
-                self.combat_damage_dealt = False  # Reset for new turn
-                
-                # Reset day/night transition check for the new turn
-                if hasattr(self, 'day_night_checked_this_turn'):
-                    self.day_night_checked_this_turn = False
-                
-                # Reset turn-based tracking for both players
-                for player in [self.p1, self.p2]:
-                    player["land_played"] = False
-                    player["entered_battlefield_this_turn"] = set()
-                    
-                    # Reset player-specific turn tracking
-                    if hasattr(player, "activated_this_turn"):
-                        player["activated_this_turn"] = set()
-                        
-                    if hasattr(player, "skip_end_step_trigger"):
-                        player["skip_end_step_trigger"] = set()
-                
-                # Reset game-state tracking
-                self.spells_cast_this_turn = []
-                self.attackers_this_turn = set()
-                self.damage_dealt_this_turn = {}
-                self.cards_drawn_this_turn = {"p1": 0, "p2": 0}
-                
-                # Clear effects that say "this turn"
-                self.until_end_of_turn_effects = {}
-                
-                # Reset ability handler tracking
-                if hasattr(self, 'ability_handler') and self.ability_handler:
-                    if hasattr(self.ability_handler, 'initialize_turn_tracking'):
-                        self.ability_handler.initialize_turn_tracking()
-                
-                logging.info(f"=== ADVANCING FROM TURN {prev_turn} TO TURN {self.turn} ===")
-                
-                # Check if turn limit exceeded
-                if self.turn > self.max_turns:
-                    logging.info(f"Turn limit reached! Current turn: {self.turn}, Max turns: {self.max_turns}")
-                    # Set game end flags based on life totals
-                    if self.p1["life"] > self.p2["life"]:
-                        self.p1["won_game"] = True
-                        self.p2["lost_game"] = True
-                    elif self.p2["life"] > self.p1["life"]:
-                        self.p2["won_game"] = True
-                        self.p1["lost_game"] = True
-                    else:
-                        # Draw
-                        self.p1["game_draw"] = True
-                        self.p2["game_draw"] = True
-                    
-                    # Force state-based actions check
-                    self.check_state_based_actions()
-            
-            # Store current phase before changing it (for priority system)
-            self.previous_priority_phase = self.phase
-            
-            # Move to next phase
-            self.phase = phase_sequence[next_idx]
-            new_phase_name = phase_names.get(self.phase, f"UNKNOWN({self.phase})")
-            logging.debug(f"Advancing from phase {old_phase_name} to {new_phase_name}")
-            
-            # Reset phase action counter
-            self._phase_action_count = 0
-            
-            # Cleanup "until end of turn" effects during end step or cleanup
-            if self.phase == self.PHASE_END_STEP or self.phase == self.PHASE_CLEANUP:
-                if hasattr(self, 'layer_system') and self.layer_system:
-                    self.layer_system.cleanup_expired_effects()
-                if hasattr(self, 'replacement_effects') and self.replacement_effects:
-                    self.replacement_effects.cleanup_expired_effects()
-        
+            current_idx = phase_sequence.index(old_phase)
         except ValueError:
-            logging.error(f"Current phase {old_phase_name} not found in sequence")
-            # Fallback to a safe phase
+            logging.error(f"Current phase {old_phase_name} not found in standard sequence.")
+            # Force to a known state
             self.phase = self.PHASE_MAIN_PRECOMBAT
+            self.priority_player = self._get_active_player()
+            self.priority_pass_count = 0
             self._phase_action_count = 0
-            
-            # Signal that progress was forced
-            self.progress_was_forced = True
-            
-            logging.debug(f"Phase error - falling back to MAIN_PRECOMBAT")
-            
-    
+            self.progress_was_forced = True # Indicate forced progression
+            return
+
+        next_idx = current_idx + 1
+
+        # Determine next phase, potentially skipping First Strike
+        new_phase = phase_sequence[next_idx % len(phase_sequence)]
+
+        if new_phase == self.PHASE_FIRST_STRIKE_DAMAGE and not self._combat_has_first_strike():
+            logging.debug("Skipping First Strike Damage phase.")
+            next_idx += 1
+            new_phase = phase_sequence[next_idx % len(phase_sequence)]
+
+        # Handle turn transition (triggered after Cleanup resolution if no triggers occurred)
+        if old_phase == self.PHASE_CLEANUP and new_phase == self.PHASE_UNTAP: # Checks if we are wrapping around
+             prev_turn = self.turn
+             self.turn += 1
+             logging.info(f"=== ADVANCING FROM TURN {prev_turn} TO TURN {self.turn} ===")
+             # Reset turn-based flags/tracking
+             self.combat_damage_dealt = False
+             self.day_night_checked_this_turn = False
+             self.spells_cast_this_turn = []
+             self.attackers_this_turn = set()
+             self.cards_to_graveyard_this_turn = {self.turn: []} # Reset for new turn
+             self.gravestorm_count = 0
+             self.boast_activated = set()
+             self.forecast_used = set()
+             # Reset player flags
+             for player in [self.p1, self.p2]:
+                 player["land_played"] = False
+                 player["entered_battlefield_this_turn"] = set()
+                 player["activated_this_turn"] = set()
+                 player["lost_life_this_turn"] = False
+                 player["damage_counters"] = {} # Also clear damage here? Yes. Rule 514.2
+                 player["deathtouch_damage"] = set() # Reset deathtouch marks
+             # Clear 'this turn' effects (already done above?) Double check.
+             self.until_end_of_turn_effects = {} # Clear here seems correct.
+
+             # Reset mana pools (happens during Untap phase itself)
+             # Reset other turn-specific counters/states
+             self.life_gained_this_turn = {}
+             self.damage_this_turn = {}
+             self.cards_drawn_this_turn = {p['name']: 0 for p in [self.p1, self.p2]} # Reset draw counts
+
+             # Check for game end due to turn limit AFTER incrementing turn
+             if self.turn > self.max_turns and not getattr(self, '_turn_limit_checked', False):
+                 logging.info(f"Turn limit ({self.max_turns}) reached! Ending game.")
+                 self._turn_limit_checked = True
+                 # Game result decided by life totals
+                 if self.p1["life"] > self.p2["life"]: self.p1["won_game"] = True; self.p2["lost_game"] = True
+                 elif self.p2["life"] > self.p1["life"]: self.p2["won_game"] = True; self.p1["lost_game"] = True
+                 else: self.p1["game_draw"] = True; self.p2["game_draw"] = True
+                 self.check_state_based_actions() # SBAs check loss conditions
+                 # Game end is handled by the main loop checking player lost_game flags
+
+        # Set the new phase
+        self.phase = new_phase
+        new_phase_name = self._PHASE_NAMES.get(self.phase, f"UNKNOWN({self.phase})")
+        logging.debug(f"Advanced from {old_phase_name} to {new_phase_name}")
+        self._phase_action_count = 0 # Reset counter for new phase
+
+        # --- Phase Start Actions & Trigger Checks ---
+        # Note: Priority is only given *after* these turn-based actions and triggers resolve.
+        active_player = self._get_active_player()
+        non_active_player = self._get_non_active_player()
+
+        if self.phase == self.PHASE_UNTAP:
+             self._untap_phase(active_player)
+             # Phasing happens before other untap actions (Rule 502.1)
+             if hasattr(self, 'phase_in_permanents'): self.phase_in_permanents(active_player)
+             # SBAs are checked (Rule 502.4)
+             self.check_state_based_actions()
+             # NO player gets priority in Untap step (Rule 502.3)
+             # Auto-advance to Upkeep
+             self.phase = self.PHASE_UPKEEP
+             new_phase_name = self._PHASE_NAMES.get(self.phase, '?')
+             logging.debug(f"Auto-advanced from UNTAP to UPKEEP")
+             # Fall through to Upkeep logic
+
+        if self.phase == self.PHASE_UPKEEP:
+             # Trigger "at the beginning of upkeep" (Rule 503.1a)
+             # Check all permanents for triggers (APNAP order matters if multiple trigger)
+             # Collect triggers first
+             ap_triggers = []
+             nap_triggers = []
+             for p_trigger in [active_player, non_active_player]:
+                 for card_id in p_trigger.get("battlefield", []):
+                      # Check for "at the beginning of upkeep" and similar text
+                      card = self._safe_get_card(card_id)
+                      if card and hasattr(card, 'oracle_text'):
+                           text = card.oracle_text.lower()
+                           if "at the beginning of" in text and ("upkeep" in text or "each upkeep" in text):
+                                # Add to appropriate list based on controller
+                                if p_trigger == active_player: ap_triggers.append(card_id)
+                                else: nap_triggers.append(card_id)
+             # Queue triggers using AbilityHandler (handles APNAP ordering)
+             for card_id in ap_triggers + nap_triggers:
+                  self.trigger_ability(card_id, "BEGINNING_OF_UPKEEP", {"controller": self.get_card_controller(card_id)}) # Event origin is the card
+             # Process Saga counters (also beginning of step, Rule 714.2b - usually precombat main, but check card text)
+             # Saga counter add moved to _start_of_precombat_main logic
+
+
+        elif self.phase == self.PHASE_DRAW:
+             # Draw step turn-based action (Rule 504.1)
+             self._draw_phase(active_player)
+             # SBAs checked (Rule 504.2)
+             self.check_state_based_actions()
+             # "At the beginning of draw step" triggers (Rule 504.3) - APNAP order
+             ap_triggers = []
+             nap_triggers = []
+             for p_trigger in [active_player, non_active_player]:
+                  for card_id in p_trigger.get("battlefield",[]):
+                       card = self._safe_get_card(card_id)
+                       if card and hasattr(card, 'oracle_text'):
+                            text = card.oracle_text.lower()
+                            if "at the beginning of" in text and ("draw step" in text or "each draw step" in text):
+                                 if p_trigger == active_player: ap_triggers.append(card_id)
+                                 else: nap_triggers.append(card_id)
+             # Queue triggers
+             for card_id in ap_triggers + nap_triggers:
+                 self.trigger_ability(card_id, "BEGINNING_OF_DRAW", {"controller": self.get_card_controller(card_id)})
+
+        elif self.phase == self.PHASE_MAIN_PRECOMBAT:
+            # Saga counter addition (Rule 714.2b - after draw step, before main phase actions)
+            if hasattr(self, 'advance_saga_counters'): self.advance_saga_counters(active_player)
+
+
+        elif self.phase == self.PHASE_BEGIN_COMBAT:
+            # Trigger "at beginning of combat" (Rule 506.1a) - APNAP
+            ap_triggers = []
+            nap_triggers = []
+            for p_trigger in [active_player, non_active_player]:
+                 for card_id in p_trigger.get("battlefield",[]):
+                      card = self._safe_get_card(card_id)
+                      if card and hasattr(card, 'oracle_text'):
+                            text = card.oracle_text.lower()
+                            if "at the beginning of" in text and ("combat" in text or "each combat" in text):
+                                if p_trigger == active_player: ap_triggers.append(card_id)
+                                else: nap_triggers.append(card_id)
+            # Queue triggers
+            for card_id in ap_triggers + nap_triggers:
+                self.trigger_ability(card_id, "BEGINNING_OF_COMBAT", {"controller": self.get_card_controller(card_id)})
+
+
+        elif self.phase == self.PHASE_END_STEP:
+             # Trigger "at the beginning of the end step" (Rule 513.1a) - APNAP
+             # Use turn tracking set `skip_end_step_trigger` (created in SBA check)
+             skip_set = active_player.get("skip_end_step_trigger", set())
+             ap_triggers = []
+             nap_triggers = []
+             for p_trigger in [active_player, non_active_player]:
+                  for card_id in p_trigger.get("battlefield",[]):
+                      if card_id in skip_set: continue # Skip if marked by SBA 704.5u
+                      card = self._safe_get_card(card_id)
+                      if card and hasattr(card, 'oracle_text'):
+                            text = card.oracle_text.lower()
+                            if "at the beginning of" in text and ("end step" in text or "each end step" in text):
+                                if p_trigger == active_player: ap_triggers.append(card_id)
+                                else: nap_triggers.append(card_id)
+             # Clear skip set after checking
+             if hasattr(active_player, "skip_end_step_trigger"): active_player["skip_end_step_trigger"] = set()
+             # Queue triggers
+             for card_id in ap_triggers + nap_triggers:
+                 self.trigger_ability(card_id, "BEGINNING_OF_END_STEP", {"controller": self.get_card_controller(card_id)})
+
+
+        # After handling phase start actions and queuing triggers:
+        self.priority_player = active_player
+        self.priority_pass_count = 0
+        self.last_stack_size = len(self.stack) # Update stack size for priority logic
+
+        # Process any triggers that were just added to the queue
+        if self.ability_handler: self.ability_handler.process_triggered_abilities()
+
+        # If triggers were added, priority stays with AP
+        if len(self.stack) > self.last_stack_size:
+             self.last_stack_size = len(self.stack)
+             # Priority player already set to AP
+             # Priority pass count already reset
+
+        # Otherwise, AP has priority to start the new phase/step
+
     def _get_active_player(self):
         """Returns the active player (whose turn it is)."""
         return self.p1 if (self.turn % 2 == 1) == self.agent_is_p1 else self.p2
@@ -2685,71 +2749,126 @@ class GameState:
         
         return False
     
+
+    
     def clone(self):
-        """
-        Create a deep copy of the game state for lookahead simulation.
-        
-        Returns:
-            GameState: A copy of the current game state
-        """
-        import copy
-        
-        # Create a new game state with the same parameters
-        new_state = GameState(self.card_db, self.max_turns, self.max_hand_size, self.max_battlefield)
-        
-        # Copy basic attributes
-        new_state.turn = self.turn
-        new_state.phase = self.phase
-        new_state.agent_is_p1 = self.agent_is_p1
-        new_state.combat_damage_dealt = self.combat_damage_dealt
-        
-        # Deep copy player states
-        new_state.p1 = copy.deepcopy(self.p1)
-        new_state.p2 = copy.deepcopy(self.p2)
-        
-        # Copy combat state
-        new_state.current_attackers = self.current_attackers.copy()
-        new_state.current_block_assignments = copy.deepcopy(self.current_block_assignments)
-        
-        # Copy stack
-        new_state.stack = copy.deepcopy(self.stack)
-        new_state.priority_pass_count = self.priority_pass_count
-        new_state.last_stack_size = self.last_stack_size
-        
-        # Copy special card tracking
-        new_state.adventure_cards = self.adventure_cards.copy() if hasattr(self, 'adventure_cards') else set()
-        new_state.saga_counters = copy.deepcopy(self.saga_counters) if hasattr(self, 'saga_counters') else {}
-        new_state.mdfc_cards = self.mdfc_cards.copy() if hasattr(self, 'mdfc_cards') else set()
-        new_state.battle_cards = copy.deepcopy(self.battle_cards) if hasattr(self, 'battle_cards') else {}
-        new_state.cards_castable_from_exile = self.cards_castable_from_exile.copy() if hasattr(self, 'cards_castable_from_exile') else set()
-        new_state.cast_as_back_face = self.cast_as_back_face.copy() if hasattr(self, 'cast_as_back_face') else set()
-        
-        # Copy turn tracking
-        new_state.spells_cast_this_turn = self.spells_cast_this_turn.copy() if hasattr(self, 'spells_cast_this_turn') else []
-        new_state.attackers_this_turn = self.attackers_this_turn.copy() if hasattr(self, 'attackers_this_turn') else set()
-        new_state.damage_dealt_this_turn = copy.deepcopy(self.damage_dealt_this_turn) if hasattr(self, 'damage_dealt_this_turn') else {}
-        new_state.cards_drawn_this_turn = copy.deepcopy(self.cards_drawn_this_turn) if hasattr(self, 'cards_drawn_this_turn') else {"p1": 0, "p2": 0}
-        new_state.until_end_of_turn_effects = copy.deepcopy(self.until_end_of_turn_effects) if hasattr(self, 'until_end_of_turn_effects') else {}
-        
-        # Copy subsystem references (to ensure they're initialized with the same objects)
-        new_state.card_evaluator = self.card_evaluator if hasattr(self, 'card_evaluator') else None
-        new_state.combat_resolver = self.combat_resolver if hasattr(self, 'combat_resolver') else None
-        
-        # Initialize ability handler for the cloned state
-        new_state._init_ability_handler()
-        
-        # Initialize rules systems (layer system, replacement effects, mana system)
-        new_state._init_rules_systems()
-        
-        # Initialize a new action handler for the copied state
-        from .actions import ActionHandler
-        new_state.action_handler = ActionHandler(new_state)
-        
-        # Copy strategy memory if available
-        if hasattr(self, 'strategy_memory') and self.strategy_memory:
-            new_state.strategy_memory = self.strategy_memory  # Usually just a reference is enough
-        
-        return new_state
+        """Create a deep copy of the game state for lookahead simulation."""
+        # 1. Create a new instance with basic parameters (card_db is shared reference)
+        cloned_state = GameState(self.card_db, self.max_turns, self.max_hand_size, self.max_battlefield)
+
+        # 2. Copy simple attributes
+        cloned_state.turn = self.turn
+        cloned_state.phase = self.phase
+        cloned_state.agent_is_p1 = self.agent_is_p1
+        cloned_state.combat_damage_dealt = self.combat_damage_dealt
+        cloned_state.priority_pass_count = self.priority_pass_count
+        cloned_state.last_stack_size = self.last_stack_size
+        cloned_state._phase_action_count = self._phase_action_count
+        cloned_state._phase_history = self._phase_history[:] # Shallow copy is okay for list of primitives
+        cloned_state.priority_player = self.priority_player # Reference to player dict (will be deep copied below)
+
+        # Day/Night
+        cloned_state.day_night_state = self.day_night_state
+        cloned_state.day_night_checked_this_turn = self.day_night_checked_this_turn
+
+        # Combat State
+        cloned_state.current_attackers = self.current_attackers[:]
+        cloned_state.current_block_assignments = copy.deepcopy(self.current_block_assignments) # Needs deep copy
+
+        # Player States (Deep Copy)
+        cloned_state.p1 = copy.deepcopy(self.p1)
+        cloned_state.p2 = copy.deepcopy(self.p2)
+        # Ensure priority_player reference points to the *copied* player objects
+        if self.priority_player == self.p1: cloned_state.priority_player = cloned_state.p1
+        elif self.priority_player == self.p2: cloned_state.priority_player = cloned_state.p2
+        else: cloned_state.priority_player = None
+
+        # Stack (Deep copy, assuming stack items are tuples with potentially mutable context dicts)
+        cloned_state.stack = copy.deepcopy(self.stack)
+
+        # Tracking Variables (Use deepcopy where appropriate)
+        cloned_state.cards_played = copy.deepcopy(self.cards_played)
+        cloned_state.mulligan_data = self.mulligan_data.copy() # Shallow copy likely okay
+        cloned_state.spells_cast_this_turn = copy.deepcopy(self.spells_cast_this_turn)
+        cloned_state.attackers_this_turn = self.attackers_this_turn.copy() # Copy set
+        cloned_state.damage_dealt_this_turn = copy.deepcopy(self.damage_dealt_this_turn)
+        cloned_state.cards_drawn_this_turn = copy.deepcopy(self.cards_drawn_this_turn)
+        cloned_state.life_gained_this_turn = copy.deepcopy(self.life_gained_this_turn)
+        # ... copy other tracking vars using deepcopy or shallow copy as needed ...
+        cloned_state.adventure_cards = self.adventure_cards.copy() if hasattr(self, 'adventure_cards') else set()
+        cloned_state.saga_counters = copy.deepcopy(self.saga_counters) if hasattr(self, 'saga_counters') else {}
+        # ... copy all other relevant slots declared ...
+        cloned_state.split_second_active = getattr(self, 'split_second_active', False)
+
+        # Contexts (Assume they might contain complex objects)
+        cloned_state.targeting_context = copy.deepcopy(self.targeting_context)
+        cloned_state.sacrifice_context = copy.deepcopy(self.sacrifice_context)
+        cloned_state.choice_context = copy.deepcopy(self.choice_context)
+        # ... copy other contexts ...
+        cloned_state.mulligan_in_progress = self.mulligan_in_progress
+        cloned_state.mulligan_player = cloned_state.p1 if self.mulligan_player == self.p1 else cloned_state.p2 if self.mulligan_player == self.p2 else None
+        cloned_state.mulligan_count = self.mulligan_count.copy()
+
+        # 3. Re-initialize Subsystems pointing to the *cloned* state
+        # Need to import locally to avoid circular dependency at module level if defined in __init__
+        try: from .enhanced_mana_system import EnhancedManaSystem
+        except ImportError: EnhancedManaSystem = None
+        try: from .enhanced_combat import ExtendedCombatResolver
+        except ImportError: ExtendedCombatResolver = None
+        try: from .enhanced_card_evaluator import EnhancedCardEvaluator
+        except ImportError: EnhancedCardEvaluator = None
+        try: from .strategic_planner import MTGStrategicPlanner
+        except ImportError: MTGStrategicPlanner = None
+        try: from .ability_handler import AbilityHandler
+        except ImportError: AbilityHandler = None
+        try: from .layer_system import LayerSystem
+        except ImportError: LayerSystem = None
+        try: from .replacement_effects import ReplacementEffectSystem
+        except ImportError: ReplacementEffectSystem = None
+        try: from .targeting import TargetingSystem
+        except ImportError: TargetingSystem = None
+
+        if EnhancedManaSystem: cloned_state.mana_system = EnhancedManaSystem(cloned_state)
+        if LayerSystem: cloned_state.layer_system = LayerSystem(cloned_state) # Needs deepcopy of registered effects? Or re-register? Re-register might be safer.
+        if ReplacementEffectSystem: cloned_state.replacement_effects = ReplacementEffectSystem(cloned_state) # Re-register effects.
+        if TargetingSystem: cloned_state.targeting_system = TargetingSystem(cloned_state) # Stateless mostly
+        if AbilityHandler:
+             cloned_state.ability_handler = AbilityHandler(cloned_state) # Re-registers abilities
+             # Copy registered abilities? Or let AbilityHandler re-parse? Re-parsing is safer.
+             # If deepcopying, ability instances need their 'game_state' ref updated.
+             # Let AbilityHandler(cloned_state) handle re-initialization/re-parsing.
+        if ExtendedCombatResolver: cloned_state.combat_resolver = ExtendedCombatResolver(cloned_state) # Re-init
+        if EnhancedCardEvaluator: cloned_state.card_evaluator = EnhancedCardEvaluator(cloned_state) # Re-init
+        if MTGStrategicPlanner: cloned_state.strategic_planner = MTGStrategicPlanner(cloned_state, cloned_state.card_evaluator, cloned_state.combat_resolver) # Re-init
+
+        # Deep copy layer/replacement effects if re-registration isn't feasible
+        # This is complex as effects contain functions/lambdas referencing old state.
+        # Safer to re-register based on current permanents in the cloned state.
+        # AbilityHandler init should re-register functional abilities.
+        # Static/Replacement effects need re-registration.
+        if cloned_state.ability_handler:
+            cloned_state.ability_handler._initialize_abilities() # Re-parse all abilities in db (can be slow?)
+            # OR: Iterate permanents and register their abilities:
+            # for p in [cloned_state.p1, cloned_state.p2]:
+            #     for card_id in p.get("battlefield",[]):
+            #         cloned_state.ability_handler.register_card_abilities(card_id, p) # Needs to handle static/replacement registration too
+
+        # Note: StrategyMemory, StatsTracker, CardMemory are usually *shared* references, not cloned.
+        cloned_state.strategy_memory = self.strategy_memory # Reference
+        cloned_state.stats_tracker = self.stats_tracker # Reference
+        cloned_state.card_memory = self.card_memory # Reference
+
+
+        # 4. Action Handler (Needs re-initialization with the cloned state)
+        # Must be done after all other subsystems are linked to cloned_state
+        try:
+            from .actions import ActionHandler
+            cloned_state.action_handler = ActionHandler(cloned_state)
+        except ImportError: cloned_state.action_handler = None
+        except Exception as e: logging.error(f"Error initializing ActionHandler in clone: {e}"); cloned_state.action_handler = None
+
+
+        return cloned_state
         
     def _safe_get_card(self, card_id, default_value=None):
         """Safely get a card with proper error handling and type checking"""

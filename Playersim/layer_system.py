@@ -36,168 +36,156 @@ class LayerSystem:
         gs = self.game_state
         affected_card_ids = self._get_affected_card_ids()
         if not affected_card_ids:
-            # logging.debug("LayerSystem: No affected cards, skipping application.")
-            return # No effects to apply
+            return
 
-        # Optimization: Check if significant game state affecting layers has changed
-        # This hash needs to be carefully constructed to include relevant state.
-        # Simple version: Hash based on card IDs on battlefield and effect registry count.
+        # Optimization Hash Check (remains the same)
         current_state_tuple = (
             tuple(sorted(gs.p1.get("battlefield", []))),
             tuple(sorted(gs.p2.get("battlefield", []))),
-            self.effect_counter # Track if effects were added/removed
+            self.effect_counter
         )
         current_state_hash = hash(current_state_tuple)
 
         if current_state_hash == self._last_applied_state_hash:
-             # logging.debug("LayerSystem: Skipping recalculation, relevant state unchanged.")
-             return # State hasn't changed enough to warrant recalculation
+             return
 
         logging.debug(f"LayerSystem: Recalculating effects for {len(affected_card_ids)} cards.")
+        calculated_characteristics = {}
 
-        # Store calculated characteristics temporarily
-        calculated_characteristics = {} # { card_id: { characteristic_name: value } }
-
-        # 1. Initialize: Get base characteristics from card_db for affected cards
+        # 1. Initialize: Get base characteristics
         for card_id in affected_card_ids:
-            # CRITICAL: Fetch the *original* definition from card_db
             original_card = gs.card_db.get(card_id)
-            # Get the current *live* card object from GameState to access current counters etc.
-            # Important for Layer 7b. Also used to set the final state.
             live_card = gs._safe_get_card(card_id)
 
             if not original_card or not live_card:
                 logging.warning(f"LayerSystem: Could not find original or live card for ID {card_id}. Skipping.")
                 continue
 
-            # Initialize with base characteristics from ORIGINAL card definition
+            # *** CHANGE: Initialize with copy.deepcopy for mutable attributes ***
             import copy
             base_chars = {
                 'name': getattr(original_card, 'name', 'Unknown'),
                 'mana_cost': getattr(original_card, 'mana_cost', ''),
-                'colors': copy.deepcopy(getattr(original_card, 'colors', [0]*5)),
-                'card_types': copy.deepcopy(getattr(original_card, 'card_types', [])),
-                'subtypes': copy.deepcopy(getattr(original_card, 'subtypes', [])),
-                'supertypes': copy.deepcopy(getattr(original_card, 'supertypes', [])),
+                'colors': copy.deepcopy(getattr(original_card, 'colors', [0]*5)), # Deep copy
+                'card_types': copy.deepcopy(getattr(original_card, 'card_types', [])), # Deep copy
+                'subtypes': copy.deepcopy(getattr(original_card, 'subtypes', [])), # Deep copy
+                'supertypes': copy.deepcopy(getattr(original_card, 'supertypes', [])), # Deep copy
                 'oracle_text': getattr(original_card, 'oracle_text', ''),
-                'keywords': copy.deepcopy(getattr(original_card, 'keywords', [])), # Base keywords
-                'power': getattr(original_card, 'power', 0), # Base P/T
+                 # Start with base keywords array (ensure correct length)
+                'keywords': copy.deepcopy(getattr(original_card, 'keywords', [0]*len(Card.ALL_KEYWORDS))),
+                'power': getattr(original_card, 'power', 0),
                 'toughness': getattr(original_card, 'toughness', 0),
                 'loyalty': getattr(original_card, 'loyalty', 0),
                 'cmc': getattr(original_card, 'cmc', 0),
                 'type_line': getattr(original_card, 'type_line', ''),
-                '_base_power': getattr(original_card, 'power', 0), # Store true base P/T
+                # Base P/T tracked separately
+                '_base_power': getattr(original_card, 'power', 0),
                 '_base_toughness': getattr(original_card, 'toughness', 0),
-                '_granted_abilities': set(), # Track added abilities
-                '_removed_abilities': set(), # Track removed abilities
-                '_controller': gs.get_card_controller(card_id), # Store current controller for context
-                '_live_card_ref': live_card # Keep reference to live card for Layer 7b counters
+                '_inherent_abilities': self._approximate_keywords_set(getattr(original_card, 'oracle_text', '')), # Store inherent keywords
+                '_granted_abilities': set(),
+                '_removed_abilities': set(),
+                '_controller': gs.get_card_controller(card_id),
+                '_live_card_ref': live_card
             }
+            # Ensure base keywords array has correct dimension
+            if len(base_chars['keywords']) != len(Card.ALL_KEYWORDS):
+                base_chars['keywords'] = [0] * len(Card.ALL_KEYWORDS)
+
             calculated_characteristics[card_id] = base_chars
 
-        # 2. Apply Layers Sequentially (Logic for applying layers remains the same)
-        # --- Layer 1: Copy Effects ---
+        # 2. Apply Layers Sequentially
+        # --- Layer 1: Copy ---
         sorted_layer1 = self._sort_layer_effects(1, self.layers[1])
         for _, effect_data in sorted_layer1:
              self._calculate_layer1_copy(effect_data, calculated_characteristics)
 
-        # --- Layer 2: Control-Changing Effects ---
+        # --- Layer 2: Control ---
         sorted_layer2 = self._sort_layer_effects(2, self.layers[2])
         for _, effect_data in sorted_layer2:
              self._calculate_layer2_control(effect_data, calculated_characteristics)
 
-        # --- Layer 3: Text-Changing Effects ---
+        # --- Layer 3: Text ---
         sorted_layer3 = self._sort_layer_effects(3, self.layers[3])
         for _, effect_data in sorted_layer3:
              self._calculate_layer3_text(effect_data, calculated_characteristics)
+             # Re-calculate inherent abilities after text change
+             target_ids = effect_data.get('affected_ids', [])
+             for target_id in target_ids:
+                 if target_id in calculated_characteristics:
+                     chars = calculated_characteristics[target_id]
+                     chars['_inherent_abilities'] = self._approximate_keywords_set(chars['oracle_text'])
 
-        # --- Layer 4: Type-Changing Effects ---
+
+        # --- Layer 4: Type ---
         sorted_layer4 = self._sort_layer_effects(4, self.layers[4])
         for _, effect_data in sorted_layer4:
              self._calculate_layer4_type(effect_data, calculated_characteristics)
 
-        # --- Layer 5: Color-Changing Effects ---
-        # Base colors are set initially. This layer modifies them.
+        # --- Layer 5: Color ---
         sorted_layer5 = self._sort_layer_effects(5, self.layers[5])
         for _, effect_data in sorted_layer5:
              self._calculate_layer5_color(effect_data, calculated_characteristics)
 
-        # --- Layer 6: Ability Adding/Removing Effects ---
-        # Reset inherent abilities based on potentially modified text before applying layer 6
-        for card_id in calculated_characteristics:
-            char_dict = calculated_characteristics[card_id]
-            inherent_abilities = self._approximate_keywords_set(char_dict['oracle_text']) # Get abilities from current text
-            char_dict['_inherent_abilities'] = inherent_abilities # Store for final calculation
-
+        # --- Layer 6: Abilities ---
+        # Inherents calculated after Layer 3, granted/removed applied now
         sorted_layer6 = self._sort_layer_effects(6, self.layers[6])
         for _, effect_data in sorted_layer6:
-            self._calculate_layer6_abilities(effect_data, calculated_characteristics) # Updates _granted/_removed
-
-        # Update final keywords list after all layer 6 effects for *each card*
+            self._calculate_layer6_abilities(effect_data, calculated_characteristics)
+        # *** CHANGE: Finalize keywords AFTER all layer 6 effects ***
         for card_id in calculated_characteristics:
              self._update_final_keywords(calculated_characteristics[card_id])
 
-        # --- Layer 7: Power/Toughness Changing Effects ---
-        # Initialize P/T based on base values (already set, possibly modified by layer 1)
-        # Layer 7a: Set P/T to specific values (Overrides base)
+        # --- Layer 7: P/T ---
+        # Apply in sublayer order
         sorted_layer7a = self._sort_layer_effects(7, self.layers[7]['a'], sublayer='a')
         for _, effect_data in sorted_layer7a:
              self._calculate_layer7a_set(effect_data, calculated_characteristics)
 
-        # Layer 7b: Modify P/T based on counters (Reads from LIVE card state)
+        # *** CHANGE: Moved Layer 7b to apply after 7a ***
         for card_id in calculated_characteristics:
-             self._calculate_layer7b_counters(card_id, calculated_characteristics[card_id])
+            self._calculate_layer7b_counters(card_id, calculated_characteristics[card_id])
 
-        # Layer 7c: Modify P/T (other static effects like anthems)
         sorted_layer7c = self._sort_layer_effects(7, self.layers[7]['c'], sublayer='c')
         for _, effect_data in sorted_layer7c:
              self._calculate_layer7c_modify(effect_data, calculated_characteristics)
 
-        # Layer 7d: P/T switching effects
         sorted_layer7d = self._sort_layer_effects(7, self.layers[7]['d'], sublayer='d')
         for _, effect_data in sorted_layer7d:
              self._calculate_layer7d_switch(effect_data, calculated_characteristics)
 
         # 3. Update GameState LIVE Card Objects
         for card_id, final_chars in calculated_characteristics.items():
-            live_card = final_chars.get('_live_card_ref') # Use stored reference
+            live_card = final_chars.get('_live_card_ref')
             if not live_card: continue
 
-            # Update attributes based on final calculated values
             for attr, value in final_chars.items():
-                # Skip internal tracking attributes
                 if attr.startswith('_'): continue
-                try:
-                    # Skip setting if value is None (e.g., power/toughness for non-creatures)
+                if hasattr(live_card, attr):
+                    # *** CHANGE: Handle None P/T by setting to 0 ***
                     if value is None and attr in ['power', 'toughness', 'loyalty']:
-                        # Ensure attribute exists but set to default if None not allowed
-                        if hasattr(live_card, attr):
-                            setattr(live_card, attr, 0) # Default to 0 if None
+                        setattr(live_card, attr, 0)
                         continue
-
-                    # Only set attribute if it exists on the live card object
-                    if hasattr(live_card, attr):
-                        # Type check/conversion might be needed for safety
-                        current_type = type(getattr(live_card, attr, None))
-                        if value is not None and not isinstance(value, current_type):
-                             try:
-                                  # Attempt conversion (e.g., int from float)
-                                  if current_type == int and isinstance(value, float): value = int(value)
-                                  # Add other necessary conversions
-                             except (TypeError, ValueError):
-                                  logging.warning(f"LayerSystem: Type mismatch for '{attr}' on {card_id}. Expected {current_type}, got {type(value)}. Skipping set.")
-                                  continue
-
+                    # Type checking/conversion attempt
+                    current_type = type(getattr(live_card, attr, None))
+                    if value is not None and not isinstance(value, current_type):
+                        try:
+                            if current_type == int and isinstance(value, float): value = int(value)
+                            elif current_type == float and isinstance(value, int): value = float(value)
+                            # Add more safe conversions if needed
+                        except (TypeError, ValueError):
+                             logging.warning(f"LayerSystem Update: Type mismatch for '{attr}' on {card_id}. Expected {current_type}, got {type(value)}. Skipping set.")
+                             continue
+                    try:
                         setattr(live_card, attr, value)
-                except Exception as e: # Catch broader exceptions during setattr
-                    logging.error(f"LayerSystem: Error setting attribute '{attr}' on card {card_id}. Value: {value}. Error: {e}")
+                    except Exception as e:
+                        logging.error(f"LayerSystem Update: Error setting attribute '{attr}' on card {card_id}. Value: {value}. Error: {e}")
+                # else: logging.warning(f"LayerSystem Update: Live card {card_id} missing attribute '{attr}'") # Optional warning
 
-            # Final sanity check for P/T (optional, depends on rules)
-            # if 'creature' not in getattr(live_card, 'card_types', []):
-            #      live_card.power = 0
-            #      live_card.toughness = 0
+            # Final check for non-creature P/T
+            if 'creature' not in getattr(live_card, 'card_types', []):
+                 live_card.power = 0
+                 live_card.toughness = 0
 
-        # Update the state hash cache
         self._last_applied_state_hash = current_state_hash
         logging.debug(f"LayerSystem: Finished applying effects.")
         
@@ -255,24 +243,9 @@ class LayerSystem:
 
         
     def _sort_layer_effects(self, layer_num, effects, sublayer=None):
-        """Sorts effects for a given layer/sublayer."""
-        # Sort by timestamp first
-        key = (layer_num, sublayer) if sublayer else layer_num
-        # Using timestamp sort as a primary, slightly simplified approach here.
-        sorted_by_timestamp = sorted(effects, key=lambda x: self.timestamps.get(x[0], 0))
-
-        # Attempt dependency sort (may need further refinement)
-        try:
-            # Need the card_id from the effect_data for dependency check
-            # Dependency check now needs to work with calculated characteristics perhaps?
-            # Keeping simplified timestamp sort for now. Dependency needs more work.
-            # sorted_effects = self._sort_with_dependencies(sorted_by_timestamp)
-            sorted_effects = sorted_by_timestamp
-        except Exception as e:
-            logging.warning(f"Dependency sort failed for layer {key}: {e}. Falling back to timestamp order.")
-            sorted_effects = sorted_by_timestamp
-
-        return sorted_effects
+        """Sorts effects for a given layer/sublayer based primarily on timestamps."""
+        # Simple timestamp sort for now. Dependency implementation deferred.
+        return sorted(effects, key=lambda x: self.timestamps.get(x[0], 0))
     
     def _calculate_layer1_copy(self, effect_data, calculated_characteristics):
         source_to_copy_id = effect_data.get('effect_value')
@@ -330,64 +303,115 @@ class LayerSystem:
          for target_id in effect_data.get('affected_ids', []):
              if target_id in calculated_characteristics:
                  chars = calculated_characteristics[target_id]
-                 if effect_type == 'add_type' and type_val not in chars['card_types']: chars['card_types'].append(type_val)
-                 elif effect_type == 'remove_type' and type_val in chars['card_types']: chars['card_types'].remove(type_val)
-                 elif effect_type == 'add_subtype' and type_val not in chars['subtypes']: chars['subtypes'].append(type_val)
-                 elif effect_type == 'remove_subtype' and type_val in chars['subtypes']: chars['subtypes'].remove(type_val)
-                 elif effect_type == 'set_type': chars['card_types'] = [type_val] # Assumes setting removes others
-                 # Update derived type line
-                 chars['type_line'] = self.game_state._build_type_line(chars) # Assume GS helper
-                 logging.debug(f"Layer 4: Type/Subtype of {target_id} modified by {effect_type}:{type_val}")
+                 # Ensure lists exist and make copies to modify
+                 current_types = chars['card_types'][:]
+                 current_subtypes = chars['subtypes'][:]
+
+                 if effect_type == 'add_type':
+                     if isinstance(type_val, list): # Handle list of types
+                         for t in type_val:
+                              if t not in current_types: current_types.append(t)
+                     elif isinstance(type_val, str) and type_val not in current_types:
+                         current_types.append(type_val)
+                 elif effect_type == 'set_type':
+                      chars['card_types'] = list(type_val) if isinstance(type_val, list) else [type_val]
+                      # Rule 613.1d: Setting type removes previous card types but not supertypes/subtypes initially.
+                      # However, new type might make subtypes invalid. Check needed?
+                      # For simplicity, we keep subtypes unless explicitly removed or set.
+                 elif effect_type == 'remove_type':
+                     if isinstance(type_val, list):
+                         current_types = [t for t in current_types if t not in type_val]
+                     elif isinstance(type_val, str) and type_val in current_types:
+                          current_types.remove(type_val)
+                 elif effect_type == 'add_subtype':
+                     if isinstance(type_val, list):
+                         for s in type_val:
+                             if s not in current_subtypes: current_subtypes.append(s)
+                     elif isinstance(type_val, str) and type_val not in current_subtypes:
+                          current_subtypes.append(type_val)
+                 elif effect_type == 'set_subtype': # Non-standard, but useful
+                      chars['subtypes'] = list(type_val) if isinstance(type_val, list) else [type_val]
+                 elif effect_type == 'remove_subtype':
+                     if isinstance(type_val, list):
+                         current_subtypes = [s for s in current_subtypes if s not in type_val]
+                     elif isinstance(type_val, str) and type_val in current_subtypes:
+                         current_subtypes.remove(type_val)
+                 elif effect_type == 'lose_all_subtypes': # Often type-specific, e.g., lose all creature types
+                      type_to_lose = type_val # Expecting 'creature', 'artifact', etc.
+                      # This is complex. If it loses 'creature', does it lose 'Goblin'? Yes.
+                      # We need a mapping of subtypes to major types. For now, simple remove all.
+                      # TODO: Implement subtype removal more precisely based on 'type_to_lose'.
+                      current_subtypes = []
+
+                 # Apply changes back to characteristics dict
+                 chars['card_types'] = current_types
+                 chars['subtypes'] = current_subtypes
+
+                 # Rebuild type line based on updated characteristics
+                 try:
+                     chars['type_line'] = self.game_state._build_type_line(chars) # Assume GS has helper
+                 except Exception as e:
+                     logging.error(f"Error rebuilding type line for {target_id}: {e}")
+
+                 logging.debug(f"Layer 4: {effect_type} {type_val} applied to {target_id}. New types: {chars['card_types']}, subtypes: {chars['subtypes']}")
 
 
     def _calculate_layer5_color(self, effect_data, calculated_characteristics):
          effect_type = effect_data.get('effect_type')
-         color_val = effect_data.get('effect_value')
+         color_val = effect_data.get('effect_value') # Should be [W,U,B,R,G] list
          for target_id in effect_data.get('affected_ids', []):
              if target_id in calculated_characteristics:
                  chars = calculated_characteristics[target_id]
-                 current_colors = chars['colors'] # This is the [W,U,B,R,G] array
+                 current_colors = chars['colors'] # Get mutable list reference
+
                  if effect_type == 'set_color' and isinstance(color_val, list) and len(color_val) == 5:
-                     chars['colors'] = color_val[:] # Use copy
+                     chars['colors'] = color_val[:] # Set to a copy of the new value
+                     logging.debug(f"Layer 5: Set color of {target_id} to {chars['colors']}")
                  elif effect_type == 'add_color' and isinstance(color_val, list) and len(color_val) == 5:
+                     modified = False
                      for i in range(5):
-                         if color_val[i]: chars['colors'][i] = 1
-                 elif effect_type == 'remove_color': # Assumes makes colorless
-                     chars['colors'] = [0,0,0,0,0]
-                 logging.debug(f"Layer 5: Color of {target_id} modified by {effect_type}")
+                         if color_val[i] == 1 and current_colors[i] == 0:
+                             current_colors[i] = 1
+                             modified = True
+                     if modified: logging.debug(f"Layer 5: Added color to {target_id}. New colors: {chars['colors']}")
+                 # Add 'remove_color' if needed
 
     def _calculate_layer6_abilities(self, effect_data, calculated_characteristics):
         effect_type = effect_data.get('effect_type')
-        ability_val = effect_data.get('effect_value') # Usually string name of keyword/ability
+        ability_val = effect_data.get('effect_value') # Usually string name
         for target_id in effect_data.get('affected_ids', []):
             if target_id in calculated_characteristics:
                  chars = calculated_characteristics[target_id]
-                 # Use internal tracking sets
-                 if effect_type == 'add_ability':
-                      chars['_granted_abilities'].add(ability_val)
-                      chars['_removed_abilities'].discard(ability_val) # Adding overrides removal
-                 elif effect_type == 'remove_ability':
-                      chars['_removed_abilities'].add(ability_val)
-                      chars['_granted_abilities'].discard(ability_val) # Removing overrides grant
-                 elif effect_type == 'remove_all_abilities':
-                      chars['_removed_abilities'].update(self._get_all_inherent_abilities(target_id)) # Need helper
-                      chars['_granted_abilities'].clear()
-                 elif effect_type == 'cant_attack': chars['_granted_abilities'].add('cant_attack')
-                 elif effect_type == 'cant_block': chars['_granted_abilities'].add('cant_block')
-                 # ... other specific ability modifications
-                 logging.debug(f"Layer 6: Ability '{ability_val}' {effect_type} for {target_id}")
+                 ability_val_lower = str(ability_val).lower() # Normalize
 
-        # Update the final 'keywords' array based on _granted/_removed AFTER processing all layer 6 effects for the card
-        # This needs to happen *after* the loop finishes for each card. Best place is maybe during the final GameState update?
-        # For now, let's put a placeholder update here (will update after loop completion):
-        for target_id in effect_data.get('affected_ids', []):
-            if target_id in calculated_characteristics:
-                self._update_final_keywords(calculated_characteristics[target_id])
+                 if effect_type == 'add_ability':
+                      chars['_granted_abilities'].add(ability_val_lower)
+                      # Removing from removed set ensures grant takes precedence if simultaneous
+                      chars['_removed_abilities'].discard(ability_val_lower)
+                      logging.debug(f"Layer 6: Granted '{ability_val_lower}' to {target_id}")
+                 elif effect_type == 'remove_ability':
+                      chars['_removed_abilities'].add(ability_val_lower)
+                      chars['_granted_abilities'].discard(ability_val_lower) # Removing takes precedence
+                      logging.debug(f"Layer 6: Removed '{ability_val_lower}' from {target_id}")
+                 elif effect_type == 'remove_all_abilities':
+                      # Mark all inherent abilities for removal
+                      # Use inherent set calculated after Layer 3
+                      chars['_removed_abilities'].update(chars.get('_inherent_abilities', set()))
+                      # Also remove any currently granted abilities
+                      chars['_removed_abilities'].update(chars['_granted_abilities'])
+                      # Clear the granted set itself
+                      chars['_granted_abilities'].clear()
+                      logging.debug(f"Layer 6: Marked all abilities for removal from {target_id}")
+                 elif effect_type in ['cant_attack', 'cant_block', 'must_attack', 'must_block']:
+                      # Treat these as adding a specific ability keyword
+                      chars['_granted_abilities'].add(effect_type)
+                      chars['_removed_abilities'].discard(effect_type)
+                      logging.debug(f"Layer 6: Applied '{effect_type}' to {target_id}")
 
     def _update_final_keywords(self, char_dict):
-         """ Recalculates the 'keywords' array based on inherent, granted, and removed abilities. """
-         # 1. Start with inherent keywords (from potentially copied/text-changed state)
-         inherent_keywords_set = self._approximate_keywords_set(char_dict.get('oracle_text', ''))
+         """ Recalculates the 'keywords' array based on inherent, granted, and removed abilities. (Implemented) """
+         # 1. Start with inherent keywords (from potentially text-changed state)
+         inherent_keywords_set = char_dict.get('_inherent_abilities', set())
 
          # 2. Add granted abilities/keywords
          granted_set = char_dict.get('_granted_abilities', set())
@@ -395,20 +419,21 @@ class LayerSystem:
          # 3. Remove removed abilities/keywords
          removed_set = char_dict.get('_removed_abilities', set())
 
-         # Calculate final set of active keywords
+         # Calculate final set of active keywords (handle "can't attack/block" separately if needed)
          final_keywords_set = (inherent_keywords_set.union(granted_set)) - removed_set
 
          # 4. Convert back to array/list format expected
          final_keyword_list = [0] * len(Card.ALL_KEYWORDS)
          for i, kw in enumerate(Card.ALL_KEYWORDS):
-              # Normalize keyword from ALL_KEYWORDS for comparison
+              # Check if the normalized keyword exists in the final set
               if kw.lower() in final_keywords_set:
                    final_keyword_list[i] = 1
 
          char_dict['keywords'] = final_keyword_list
-         # Log the final keywords for debugging if needed
-         # active_kws = [kw for i, kw in enumerate(Card.ALL_KEYWORDS) if final_keyword_list[i] == 1]
-         # logging.debug(f"Final keywords for {char_dict.get('name', 'Unknown')}: {active_kws}")
+
+         # Debugging log: show active keywords
+         active_kws = [kw for i, kw in enumerate(Card.ALL_KEYWORDS) if final_keyword_list[i] == 1]
+         if active_kws: logging.debug(f"Final keywords for {char_dict.get('name', 'Unknown')}: {active_kws}")
 
     def _get_all_inherent_abilities(self, card_id):
         """ Helper to get the set of inherent abilities/keywords from a card's (potentially modified) text. """
@@ -419,29 +444,34 @@ class LayerSystem:
         # return self._approximate_keywords_set(text)
         return set() # Placeholder
 
+
     def _approximate_keywords_set(self, oracle_text):
-         """ Helper to get a set of keywords found in text. """
+         """ Helper to get a set of keywords found in text. (Refined) """
          found_keywords = set()
          if not oracle_text: return found_keywords
          text_lower = oracle_text.lower()
-         # Improved check using word boundaries for some keywords
+
+         # Check canonical keywords
          for kw in Card.ALL_KEYWORDS:
               kw_lower = kw.lower()
-              # Use word boundaries for single-word keywords prone to false positives
-              if ' ' not in kw_lower and kw_lower in ["flash", "haste", "reach", "ward", "fear", "band"]:
-                   if re.search(r'\b' + re.escape(kw_lower) + r'\b', text_lower):
-                        found_keywords.add(kw_lower)
-              # Use simple substring check for multi-word or less ambiguous keywords
-              elif kw_lower in text_lower:
-                    # Add specific checks for variations if needed
-                    if kw_lower == 'protection' and 'protection from' in text_lower: found_keywords.add(kw_lower)
-                    elif kw_lower == 'landwalk' and 'walk' in text_lower: found_keywords.add(kw_lower) # Simple check
-                    elif kw_lower not in ['protection', 'landwalk']: # Avoid double adding
-                         found_keywords.add(kw_lower)
+              # More precise matching to avoid substrings ("linking" != "lifelink")
+              # Regex with word boundaries for single words, simple check for multi-word
+              pattern = r'\b' + re.escape(kw_lower) + r'\b' if ' ' not in kw_lower else re.escape(kw_lower)
+              if re.search(pattern, text_lower):
+                    # Specific exclusions (e.g., don't match "haste" in "afterhaste") are handled by word boundaries mostly.
+                    # Handle parametrized keywords - mark the base keyword only
+                    if kw_lower == "protection from": found_keywords.add("protection")
+                    elif kw_lower == "landwalk": # Specific landwalk types imply 'landwalk'
+                        found_keywords.add("landwalk")
+                    elif kw_lower.endswith("walk") and kw_lower != "landwalk": found_keywords.add("landwalk")
+                    else: found_keywords.add(kw_lower)
 
-         # Special case for "can't be blocked"
-         if "can't be blocked" in text_lower:
-              found_keywords.add("unblockable")
+         # Handle common phrases not in keyword list exactly
+         if "can't be blocked" in text_lower: found_keywords.add("unblockable")
+         if "can't block" in text_lower: found_keywords.add("cant_block") # Treat as ability
+         if "attacks each combat if able" in text_lower: found_keywords.add("must_attack")
+         if "blocks each combat if able" in text_lower: found_keywords.add("must_block")
+
 
          return found_keywords
 
@@ -452,46 +482,93 @@ class LayerSystem:
          for target_id in effect_data.get('affected_ids', []):
              if target_id in calculated_characteristics:
                   chars = calculated_characteristics[target_id]
-                  # Handle effects that set P/T directly (overrides base)
-                  if effect_type == 'set_pt' and isinstance(value, (tuple, list)) and len(value)==2:
+                  # CDA Effect: Base P/T determined by some condition
+                  if effect_type == 'set_pt_cda':
+                      cda_type = value # e.g., 'graveyard_count_self'
+                      # Actual value calculation happens here based on current game state
+                      if cda_type == 'graveyard_count_self':
+                          controller = chars.get('_controller')
+                          if controller:
+                               count = len(controller.get("graveyard", []))
+                               chars['power'] = count; chars['toughness'] = count
+                               logging.debug(f"Layer 7a (CDA): Set P/T of {target_id} based on GY count ({count})")
+                      elif cda_type == 'creature_count_self':
+                           controller = chars.get('_controller')
+                           if controller:
+                                count = sum(1 for cid in controller.get("battlefield", []) if 'creature' in getattr(self.game_state._safe_get_card(cid),'card_types',[]))
+                                chars['power'] = count; chars['toughness'] = count
+                                logging.debug(f"Layer 7a (CDA): Set P/T of {target_id} based on creature count ({count})")
+                      # Add more CDA calculations
+                  # Set Base P/T (from copy effects, etc.)
+                  elif effect_type == 'set_base_pt' and isinstance(value, (tuple, list)) and len(value)==2:
                        p, t = value
+                       # This UPDATES the base P/T tracker, and sets current P/T
+                       chars['_base_power'] = p; chars['_base_toughness'] = t
                        chars['power'], chars['toughness'] = p, t
-                       logging.debug(f"Layer 7a: Set P/T of {target_id} to {p}/{t}")
-                  # TODO: Handle CDA P/T setting (very complex)
+                       logging.debug(f"Layer 7a: Set Base P/T of {target_id} to {p}/{t}")
+                  # Set P/T (usually from effects like "becomes 1/1")
+                  elif effect_type == 'set_pt' and isinstance(value, (tuple, list)) and len(value)==2:
+                       p, t = value
+                       # This sets current P/T but doesn't change the _base_ P/T
+                       chars['power'], chars['toughness'] = p, t
+                       logging.debug(f"Layer 7b: Set P/T of {target_id} to {p}/{t}")
 
     def _calculate_layer7b_counters(self, card_id, char_dict):
         # Layer 7b application - uses LIVE card's counters, affects calculated characteristics
-        live_card = self.game_state._safe_get_card(card_id)
-        if live_card and hasattr(live_card, 'counters'):
-            plus_counters = live_card.counters.get('+1/+1', 0)
-            minus_counters = live_card.counters.get('-1/-1', 0)
-            net_change = plus_counters - minus_counters
-            if net_change != 0:
-                char_dict['power'] += net_change
-                char_dict['toughness'] += net_change
-                logging.debug(f"Layer 7b: Applied {net_change} P/T from counters to {card_id}")
+        live_card = char_dict.get('_live_card_ref')
+        # Check if it's a creature at this point in layer application
+        if live_card and 'creature' in char_dict.get('card_types', []):
+            if hasattr(live_card, 'counters') and live_card.counters:
+                plus_counters = live_card.counters.get('+1/+1', 0)
+                minus_counters = live_card.counters.get('-1/-1', 0)
 
+                # Annihilation should have already happened in SBAs if P/T is checked there.
+                # Recalculate net change based on potentially cleaned counters.
+                net_change = plus_counters - minus_counters
+                if net_change != 0:
+                    # Check if power/toughness exist before modifying
+                    if 'power' in char_dict: char_dict['power'] += net_change
+                    if 'toughness' in char_dict: char_dict['toughness'] += net_change
+                    logging.debug(f"Layer 7b: Applied {net_change:+} P/T from counters to {card_id} (P/T now {char_dict.get('power')}/{char_dict.get('toughness')})")
+                    
     def _calculate_layer7c_modify(self, effect_data, calculated_characteristics):
         effect_type = effect_data.get('effect_type')
         value = effect_data.get('effect_value')
         for target_id in effect_data.get('affected_ids', []):
             if target_id in calculated_characteristics:
                 chars = calculated_characteristics[target_id]
-                if effect_type == 'modify_pt' and isinstance(value, (tuple, list)) and len(value)==2:
-                    p_mod, t_mod = value
-                    chars['power'] += p_mod
-                    chars['toughness'] += t_mod
-                    logging.debug(f"Layer 7c: Modified P/T of {target_id} by {p_mod:+}/{t_mod:+}")
+                # Only apply P/T mods if it's a creature
+                if 'creature' in chars.get('card_types', []):
+                    if effect_type == 'modify_pt' and isinstance(value, (tuple, list)) and len(value)==2:
+                        p_mod, t_mod = value
+                        # Check if power/toughness exist before modifying
+                        if 'power' in chars: chars['power'] += p_mod
+                        if 'toughness' in chars: chars['toughness'] += t_mod
+                        logging.debug(f"Layer 7c: Modified P/T of {target_id} by {p_mod:+}/{t_mod:+}. New P/T: {chars.get('power')}/{chars.get('toughness')}")
+                    # Add variable P/T modification logic here
+                    elif effect_type == 'modify_pt_variable':
+                        count_type = value # e.g., 'artifact'
+                        controller = chars.get('_controller')
+                        if controller:
+                            count = sum(1 for cid in controller.get("battlefield", []) if count_type in getattr(self.game_state._safe_get_card(cid),'card_types',[]))
+                            # Check if power/toughness exist before modifying
+                            if 'power' in chars: chars['power'] += count
+                            if 'toughness' in chars: chars['toughness'] += count
+                            logging.debug(f"Layer 7c (Var): Modified P/T of {target_id} by +{count}/+{count} based on {count_type}. New P/T: {chars.get('power')}/{chars.get('toughness')}")
 
     def _calculate_layer7d_switch(self, effect_data, calculated_characteristics):
          effect_type = effect_data.get('effect_type')
          for target_id in effect_data.get('affected_ids', []):
               if target_id in calculated_characteristics:
                   chars = calculated_characteristics[target_id]
-                  if effect_type == 'switch_pt':
-                       p, t = chars['power'], chars['toughness']
-                       chars['power'], chars['toughness'] = t, p
-                       logging.debug(f"Layer 7d: Switched P/T of {target_id} to {t}/{p}")
+                  # Only switch if it's a creature
+                  if 'creature' in chars.get('card_types', []):
+                      if effect_type == 'switch_pt':
+                           # Check if power/toughness exist before switching
+                           if 'power' in chars and 'toughness' in chars:
+                               p, t = chars['power'], chars['toughness']
+                               chars['power'], chars['toughness'] = t, p
+                               logging.debug(f"Layer 7d: Switched P/T of {target_id} to {t}/{p}")
         
     def register_effect(self, effect_data):
         """

@@ -2,6 +2,8 @@ import re
 import logging
 from collections import Counter
 from collections import defaultdict
+
+from Playersim.card import Card
 class EnhancedManaSystem:
     """Advanced mana handling system that properly implements MTG mana rules."""
     
@@ -168,328 +170,205 @@ class EnhancedManaSystem:
 
     def _get_cost_effects_from_permanent(self, permanent_id, controller, target_card, is_controller):
         """
-        Extract cost modification effects from a permanent.
-        
+        Extract cost modification effects from a permanent. (Enhanced Parsing & Validation)
+
         Args:
             permanent_id: ID of the permanent to check
             controller: The player who controls the permanent
             target_card: The card whose cost might be modified
             is_controller: Whether the permanent's controller is casting the spell
-            
+
         Returns:
             list: List of cost modification effect dictionaries
         """
         gs = self.game_state
         permanent = gs._safe_get_card(permanent_id)
         effects = []
-        
-        if not permanent or not hasattr(permanent, 'oracle_text'):
+
+        # Ensure necessary objects and attributes exist
+        if not permanent or not hasattr(permanent, 'oracle_text') or not target_card:
             return effects
-        
-        oracle_text = permanent.oracle_text.lower()
-        target_card_types = target_card.card_types if hasattr(target_card, 'card_types') else []
-        target_card_subtypes = target_card.subtypes if hasattr(target_card, 'subtypes') else []
-        target_card_colors = target_card.colors if hasattr(target_card, 'colors') else [0, 0, 0, 0, 0]
-        
-        # Get permanent name for logging
-        perm_name = permanent.name if hasattr(permanent, 'name') else f"Card {permanent_id}"
-        
-        # =========================================================================
-        # Part 1: Handle standard cost reduction effects
-        # =========================================================================
-        
-        # Check for cost reduction effects that apply to controller's spells
-        if is_controller and "spells you cast cost" in oracle_text and "less" in oracle_text:
-            # Parse amount of reduction
-            import re
-            match = re.search(r"cost \{(\d+)\} less", oracle_text)
-            if match:
-                reduction = int(match.group(1))
-                
-                # Check for targeting restrictions
-                applies = True
-                if "creature spells" in oracle_text and 'creature' not in target_card_types:
-                    applies = False
-                elif "artifact spells" in oracle_text and 'artifact' not in target_card_types:
-                    applies = False
-                elif "instant spells" in oracle_text and 'instant' not in target_card_types:
-                    applies = False
-                elif "sorcery spells" in oracle_text and 'sorcery' not in target_card_types:
-                    applies = False
-                elif "enchantment spells" in oracle_text and 'enchantment' not in target_card_types:
-                    applies = False
-                elif "planeswalker spells" in oracle_text and 'planeswalker' not in target_card_types:
-                    applies = False
-                
-                # Color restrictions
-                color_words = ["white", "blue", "black", "red", "green"]
-                for i, color in enumerate(color_words):
-                    if f"{color} spells" in oracle_text and not target_card_colors[i]:
-                        applies = False
-                
-                # Subtype restrictions
-                for subtype in ["spirit", "goblin", "elf", "wizard", "dragon", "zombie", "vampire", "merfolk", "angel"]:
-                    if f"{subtype} spells" in oracle_text and subtype not in target_card_subtypes:
-                        applies = False
-                
-                if applies:
-                    effects.append({
-                        'type': 'reduction',
-                        'amount': reduction,
-                        'applies_to': 'generic',
-                        'source': perm_name
-                    })
-                    logging.debug(f"Found cost reduction of {reduction} from {perm_name}")
-        
-        # =========================================================================
-        # Part 2: Handle standard cost increase effects
-        # =========================================================================
-        
-        # Check for cost increase effects
-        if "spells cost" in oracle_text and "more" in oracle_text:
-            # Parse amount of increase
-            import re
-            match = re.search(r"cost \{(\d+)\} more", oracle_text)
-            if match:
-                increase = int(match.group(1))
-                
-                # Check for targeting restrictions
-                applies = True
-                
-                # Check if it applies to opponent's spells only
-                if "spells your opponents cast" in oracle_text and is_controller:
-                    applies = False
-                
-                # Check for specific spell types
-                if "creature spells" in oracle_text and 'creature' not in target_card_types:
-                    applies = False
-                elif "noncreature spells" in oracle_text and 'creature' in target_card_types:
-                    applies = False
-                elif "artifact spells" in oracle_text and 'artifact' not in target_card_types:
-                    applies = False
-                elif "instant spells" in oracle_text and 'instant' not in target_card_types:
-                    applies = False
-                elif "sorcery spells" in oracle_text and 'sorcery' not in target_card_types:
-                    applies = False
-                elif "enchantment spells" in oracle_text and 'enchantment' not in target_card_types:
-                    applies = False
-                elif "planeswalker spells" in oracle_text and 'planeswalker' not in target_card_types:
-                    applies = False
-                
-                # Color restrictions
-                color_words = ["white", "blue", "black", "red", "green"]
-                for i, color in enumerate(color_words):
-                    if f"{color} spells" in oracle_text and not target_card_colors[i]:
-                        applies = False
-                
-                # Subtype restrictions
-                for subtype in ["spirit", "goblin", "elf", "wizard", "dragon", "zombie", "vampire", "merfolk", "angel"]:
-                    if f"{subtype} spells" in oracle_text and subtype not in target_card_subtypes:
-                        applies = False
-                
-                if applies:
-                    effects.append({
-                        'type': 'increase',
-                        'amount': increase,
-                        'applies_to': 'generic',
-                        'source': perm_name
-                    })
-                    logging.debug(f"Found cost increase of {increase} from {perm_name}")
-        
-        # =========================================================================
-        # Part 3: Handle targeting-specific cost increases
-        # =========================================================================
-        
-        # Spells that target specific permanents cost more
-        if "spells that target" in oracle_text and "cost" in oracle_text and "more" in oracle_text:
-            target_context = None
-            if hasattr(target_card, 'targeting') and target_card.targeting:
-                target_context = target_card.targeting
-            elif hasattr(gs, 'current_spell_targets') and gs.current_spell_targets:
-                target_context = gs.current_spell_targets
-            
-            if target_context:
-                # Parse amount of increase
-                import re
-                match = re.search(r"cost \{(\d+)\} more", oracle_text)
-                if match:
-                    increase = int(match.group(1))
-                    applies = False
-                    
-                    # Check if the spell targets specific permanent types
-                    target_patterns = [
-                        ("you or a permanent you control", lambda tid: controller == gs._find_card_controller(tid)),
-                        ("a creature", lambda tid: gs._safe_get_card(tid) and hasattr(gs._safe_get_card(tid), 'card_types') and 'creature' in gs._safe_get_card(tid).card_types),
-                        ("a permanent", lambda tid: gs._safe_get_card(tid) and hasattr(gs._safe_get_card(tid), 'card_types') and any(t in gs._safe_get_card(tid).card_types for t in ['creature', 'artifact', 'enchantment', 'planeswalker', 'land']))
-                    ]
-                    
-                    for pattern, check_func in target_patterns:
-                        if pattern in oracle_text:
-                            for target_id in target_context:
-                                if check_func(target_id):
-                                    applies = True
-                                    break
-                    
-                    if applies:
-                        effects.append({
-                            'type': 'increase',
-                            'amount': increase,
-                            'applies_to': 'generic',
-                            'source': perm_name,
-                            'reason': 'targeting'
-                        })
-                        logging.debug(f"Found targeting cost increase of {increase} from {perm_name}")
-        
-        # =========================================================================
-        # Part 4: Handle dynamic cost reductions (based on game state)
-        # =========================================================================
-        
-        # Cards that reduce cost based on number of specific permanents
-        dynamic_patterns = [
-            # Format: (pattern, get_count_function, controller_only)
-            (r"costs \{(\d+)\} less to cast for each (\w+) you control", 
-            lambda ptype: sum(1 for cid in controller["battlefield"] 
-                            if gs._safe_get_card(cid) and 
-                            hasattr(gs._safe_get_card(cid), 'card_types') and 
-                            ptype in gs._safe_get_card(cid).card_types), 
-            True),
-            
-            # Cost reductions based on graveyard
-            (r"costs \{(\d+)\} less to cast for each card in your graveyard", 
-            lambda _: len(controller["graveyard"]), 
-            True),
-            
-            # Cost reductions based on specific card types in graveyard
-            (r"costs \{(\d+)\} less to cast for each (\w+) card in your graveyard", 
-            lambda ptype: sum(1 for cid in controller["graveyard"] 
-                            if gs._safe_get_card(cid) and 
-                            hasattr(gs._safe_get_card(cid), 'card_types') and 
-                            ptype in gs._safe_get_card(cid).card_types), 
-            True)
-        ]
-        
-        for pattern, count_func, controller_check in dynamic_patterns:
-            if controller_check and not is_controller:
-                continue  # Skip if effect should only apply to controller's spells
-                
-            import re
-            match = re.search(pattern, oracle_text)
-            if match:
-                reduction_per_item = int(match.group(1))
-                item_type = match.group(2) if len(match.groups()) > 1 else None
-                
-                # Calculate the count of relevant items
-                count = count_func(item_type) if item_type else count_func(None)
-                total_reduction = reduction_per_item * count
-                
-                if total_reduction > 0:
-                    effects.append({
-                        'type': 'reduction',
-                        'amount': total_reduction,
-                        'applies_to': 'generic',
-                        'source': perm_name,
-                        'dynamic': True,
-                        'reason': f"based on {count} {item_type or 'items'}"
-                    })
-                    logging.debug(f"Found dynamic cost reduction of {total_reduction} from {perm_name} ({count} {item_type or 'items'})")
-        
-        # =========================================================================
-        # Part 5: Handle cost reductions for specific colors of mana
-        # =========================================================================
-        
-        # Reduce specific colors of mana in costs
-        color_matches = {
-            "white": ('W', 0),
-            "blue": ('U', 1),
-            "black": ('B', 2),
-            "red": ('R', 3),
-            "green": ('G', 4)
-        }
-        
-        for color_word, (color_symbol, color_idx) in color_matches.items():
-            if f"{color_word} mana" in oracle_text and "costs" in oracle_text and "less" in oracle_text:
-                # Check if spell has that color in its cost
-                has_color = False
-                if hasattr(target_card, 'mana_cost'):
-                    cost = self.parse_mana_cost(target_card.mana_cost)
-                    has_color = cost[color_symbol] > 0
-                
-                # Also check card color
-                if hasattr(target_card, 'colors') and target_card.colors[color_idx]:
-                    has_color = True
-                    
-                if has_color:
-                    # Parse amount of reduction
-                    import re
-                    match = re.search(r"\{(\d+)\} less", oracle_text)
-                    if match:
-                        reduction = int(match.group(1))
-                        
-                        effects.append({
-                            'type': 'reduction',
-                            'amount': reduction,
-                            'applies_to': 'specific_color',
-                            'color': color_symbol,
-                            'source': perm_name
-                        })
-                        logging.debug(f"Found {color_word} mana cost reduction of {reduction} from {perm_name}")
-        
+
+        # Get info for conditional checks - use getattr for safety
+        oracle_text = getattr(permanent, 'oracle_text', '').lower()
+        target_card_types = getattr(target_card, 'card_types', [])
+        target_card_subtypes = getattr(target_card, 'subtypes', [])
+        target_card_colors = getattr(target_card, 'colors', [0, 0, 0, 0, 0]) # Default to colorless if missing
+        perm_name = getattr(permanent, 'name', f"Card {permanent_id}")
+
+        # --- Regex to find cost modifications ---
+        # Pattern: "(Qualifier) spells (Scope)? cost {Amount} (less|more)"
+        # Qualifier examples: "Creature", "Red", "Artifact", "" (any spell)
+        # Scope examples: "you cast", "your opponents cast", "" (applies to all)
+        # Amount: N or Color Symbol (WUBRGC)
+        cost_pattern = r"(?:^|\n|;|\.)\s*([a-zA-Z\s\-,]+?)?\s*spells?\s*(you cast|your opponents cast)?\s*cost\s+\{(\w+)\}\s+(less|more)"
+        # Example non-spell cost pattern (Needs more specific rules context)
+        # ability_cost_pattern = r"activated abilities cost ... less/more"
+
+        matches = re.finditer(cost_pattern, oracle_text)
+        for match in matches:
+            qualifier, subject_scope, amount_str, direction = match.groups()
+            qualifier = qualifier.strip() if qualifier else "any"
+            subject_scope = subject_scope.strip() if subject_scope else ""
+            amount_str = amount_str.strip().upper() # Normalize amount
+
+            # Check if effect applies based on who is casting
+            if subject_scope == "you cast" and not is_controller: continue
+            if subject_scope == "your opponents cast" and is_controller: continue
+
+            # Validate amount and determine if it's generic or colored
+            amount = 0
+            color_specific = None
+            is_generic_modifier = False
+            if amount_str.isdigit():
+                 amount = int(amount_str)
+                 is_generic_modifier = True
+            elif amount_str in self.mana_symbols: # W, U, B, R, G, C
+                 color_specific = amount_str
+                 amount = 1 # e.g., {W} less means 1 less W required
+            else:
+                 logging.warning(f"Invalid amount '{amount_str}' in cost mod from {perm_name}. Skipping.")
+                 continue # Skip if amount isn't number or single color symbol
+
+            # --- Check qualifier against target card ---
+            applies = True
+            qualifier_lower = qualifier.lower()
+
+            # Handle common qualifiers more precisely
+            color_words = ["white", "blue", "black", "red", "green", "colorless", "multicolored"]
+            card_type_words = Card.ALL_CARD_TYPES
+            all_qualifiers = qualifier_lower.split() # Handle multi-word qualifiers like "artifact creature"
+
+            found_match_for_qualifier = False
+            is_negation = False # e.g., "noncreature"
+            effective_qualifier = qualifier_lower
+
+            if qualifier_lower == "any" or qualifier_lower == "spells":
+                found_match_for_qualifier = True # Applies to any spell
+            else:
+                 if qualifier_lower.startswith("non"):
+                      is_negation = True
+                      effective_qualifier = qualifier_lower[3:] # e.g., "creature" from "noncreature"
+
+                 # Check Colors
+                 matched_color = False
+                 color_map = {'white': 0, 'blue': 1, 'black': 2, 'red': 3, 'green': 4}
+                 if effective_qualifier == "colorless":
+                      matched_color = sum(target_card_colors) == 0
+                 elif effective_qualifier == "multicolored":
+                      matched_color = sum(target_card_colors) > 1
+                 elif effective_qualifier in color_map:
+                      matched_color = bool(target_card_colors[color_map[effective_qualifier]])
+
+                 if is_negation: matched_color = not matched_color
+                 if matched_color: found_match_for_qualifier = True
+
+                 # Check Card Types (if not already matched by color)
+                 if not found_match_for_qualifier:
+                      matched_type = effective_qualifier in target_card_types
+                      if is_negation: matched_type = not matched_type
+                      if matched_type: found_match_for_qualifier = True
+
+                 # Check Subtypes (if not already matched by color or type)
+                 # Simple check - assumes qualifier is a single subtype word
+                 if not found_match_for_qualifier:
+                     matched_subtype = effective_qualifier in target_card_subtypes
+                     # Negation doesn't typically apply to subtypes like this.
+                     if matched_subtype: found_match_for_qualifier = True
+
+
+            # If no match found for the specific qualifier, the effect doesn't apply
+            if not found_match_for_qualifier and qualifier_lower not in ["any", "spells"]:
+                 applies = False
+
+            # Construct and add effect if it applies
+            if applies:
+                 effect = {'type': 'reduction' if direction == 'less' else 'increase', 'amount': amount, 'source': perm_name}
+                 if color_specific:
+                     # Rule 609.4b: Cannot reduce colored costs below zero.
+                     # Rule 609.4a: Cost increases add to the cost.
+                     # Reducing specific colors is complex. Simpler: Apply reduction to generic if possible, else ignore.
+                     # Let's assume reduction ONLY applies if that color pip exists.
+                     # Increasing adds generic for now (simpler than adding pips).
+                     if effect['type'] == 'reduction':
+                          effect['applies_to'] = 'specific_color_pip' # Signal it reduces pips
+                     else: # Increase
+                          effect['applies_to'] = 'generic' # Increase adds generic cost for simplicity
+                          effect['amount'] = amount # Generic amount is 1 for a colored increase {W}
+                     effect['color'] = color_specific
+                 else: # Generic modifier amount
+                     effect['applies_to'] = 'generic'
+                 effects.append(effect)
+                 logging.debug(f"Found cost effect: {direction} {amount_str} ({qualifier} spells) from {perm_name}")
+
         return effects
 
     def _get_self_cost_modification_effects(self, card, player, context=None):
         """
-        Get cost modification effects from the card itself.
-        
+        Get cost modification effects from the card itself. (Enhanced Context Handling)
+
         Args:
             card: The card being cast
             player: The player casting the card
-            context: Optional context for special cases
-            
+            context: Optional context for special cases (e.g., Convoke, Delve choices)
+
         Returns:
             list: List of cost modification effect dictionaries
         """
         effects = []
         if not card or not hasattr(card, 'oracle_text'):
             return effects
-        
+        if context is None: context = {}
+
         oracle_text = card.oracle_text.lower()
-        
+        card_name = getattr(card, 'name', 'Unknown Card')
+
         # Check for affinity
-        if "affinity for artifacts" in oracle_text:
-            artifact_count = sum(1 for cid in player["battlefield"] 
-                            if self.game_state._safe_get_card(cid) and 
-                            hasattr(self.game_state._safe_get_card(cid), 'card_types') and 
-                            'artifact' in self.game_state._safe_get_card(cid).card_types)
-            
-            if artifact_count > 0:
-                effects.append({
-                    'type': 'reduction',
-                    'amount': artifact_count,
-                    'applies_to': 'generic'
-                })
-        
-        # Check for convoke
-        if "convoke" in oracle_text and context and "convoke_creatures" in context:
-            convoke_creatures = context["convoke_creatures"]
-            if isinstance(convoke_creatures, list):
-                effects.append({
-                    'type': 'reduction',
-                    'amount': len(convoke_creatures),
-                    'applies_to': 'generic'
-                })
-        
-        # Check for delve
-        if "delve" in oracle_text and context and "delve_cards" in context:
-            delve_cards = context["delve_cards"]
-            if isinstance(delve_cards, list):
-                effects.append({
-                    'type': 'reduction',
-                    'amount': len(delve_cards),
-                    'applies_to': 'generic'
-                })
-        
-        # Add more self-cost modifications as needed
-        
+        affinity_match = re.search(r"affinity for (\w+)", oracle_text)
+        if affinity_match:
+            affinity_type = affinity_match.group(1) # e.g., 'artifacts', 'planeswalkers'
+            count = 0
+            if affinity_type == "artifacts":
+                count = sum(1 for cid in player["battlefield"]
+                              if 'artifact' in getattr(self.game_state._safe_get_card(cid), 'card_types', []))
+            # Add other affinity types if needed (islands, planeswalkers...)
+            if count > 0:
+                effects.append({'type': 'reduction', 'amount': count, 'applies_to': 'generic', 'source': f'{card_name} Affinity'})
+                logging.debug(f"Applying Affinity reduction: {count} generic for {card_name}")
+
+
+        # Check for convoke - USE context['convoke_creatures'] which should be list of IDs/indices
+        if "convoke" in oracle_text and context.get("convoke_creatures"):
+            convoke_list = context["convoke_creatures"]
+            # ManaSystem doesn't know creature colors/types here. Assume GameState/ActionHandler validated.
+            # Simple version: Reduce generic by count. Full version needs color handling during payment.
+            convoke_reduction = len(convoke_list)
+            if convoke_reduction > 0:
+                 # The *effect* is reducing the cost now, actual tapping happens during payment.
+                 effects.append({'type': 'reduction', 'amount': convoke_reduction, 'applies_to': 'generic', 'source': f'{card_name} Convoke'})
+                 logging.debug(f"Applying Convoke cost reduction: {convoke_reduction} generic for {card_name}")
+                 # We need to signal mana system how much of each *color* can be paid via convoke during payment phase
+                 # Adding this info to the effect is one way.
+                 # This is complex. Let's defer colored cost reduction via convoke to the payment step for now.
+
+        # Check for delve - USE context['delve_cards'] which should be list of GY indices/IDs
+        if "delve" in oracle_text and context.get("delve_cards"):
+            delve_list = context["delve_cards"]
+            delve_reduction = len(delve_list)
+            if delve_reduction > 0:
+                effects.append({'type': 'reduction', 'amount': delve_reduction, 'applies_to': 'generic', 'source': f'{card_name} Delve'})
+                logging.debug(f"Applying Delve cost reduction: {delve_reduction} generic for {card_name}")
+                # Actual exiling happens during payment step based on context.
+
+        # Check for Improvise - USE context['improvise_artifacts']
+        if "improvise" in oracle_text and context.get("improvise_artifacts"):
+             improvise_list = context["improvise_artifacts"]
+             improvise_reduction = len(improvise_list)
+             if improvise_reduction > 0:
+                 effects.append({'type': 'reduction', 'amount': improvise_reduction, 'applies_to': 'generic', 'source': f'{card_name} Improvise'})
+                 logging.debug(f"Applying Improvise cost reduction: {improvise_reduction} generic for {card_name}")
+                 # Actual tapping happens during payment step based on context.
+
         return effects
 
     def _apply_cost_effect(self, cost, effect):
@@ -1864,38 +1743,36 @@ class EnhancedManaSystem:
         """
         Enhanced method to pay a mana cost from a player's mana pool with all effects,
         including handling non-mana costs like tapping creatures or exiling cards based on context.
-        Now handles non-mana costs first and includes rollback.
+        Now handles non-mana costs first and includes rollback. (Complete Implementation)
         """
         if context is None: context = {}
-        gs = self.game_state # Alias for easier access
+        gs = self.game_state
 
         # Track payment details - EXPANDED
         payment = {
             'colors': defaultdict(int), 'conditional': defaultdict(lambda: defaultdict(int)),
+            'phase_restricted': defaultdict(int),
             'life': 0, 'snow': 0,
-            'tapped_creatures': [], # For Convoke, Improvise
-            'exiled_cards': [], # For Delve, Escape
-            'sacrificed_perms': [], # For Emerge, Additional Costs
-            'discarded_cards': [], # For Jump-Start, Additional Costs
-            'phase_restricted': defaultdict(int) # Track phase restricted mana used
+            'tapped_creatures': [], 'exiled_cards': [],
+            'sacrificed_perms': [], 'discarded_cards': [],
         }
+        card_id = context.get('card_id') # Optional: ID of card being cast/activated
 
         # --- Determine Final Mana Cost ---
         try:
             if hasattr(cost, 'mana_cost'): # Card Object
-                card_id = cost.card_id if hasattr(cost, 'card_id') else None
-                parsed_cost = self.parse_mana_cost(cost.mana_cost)
-                if card_id: parsed_cost = self.apply_cost_modifiers(player, parsed_cost, card_id, context)
-                else: parsed_cost = self.apply_cost_modifiers(player, parsed_cost, None, context) # Apply generic mods
+                card_obj = cost # Keep reference if needed
+                card_id = getattr(cost, 'card_id', card_id) # Get/update card_id
+                parsed_cost_base = self.parse_mana_cost(cost.mana_cost)
+                final_cost = self.apply_cost_modifiers(player, parsed_cost_base, card_id, context)
             elif isinstance(cost, str): # String Cost
-                card_id = context.get('card_id')
-                parsed_cost = self.parse_mana_cost(cost)
-                parsed_cost = self.apply_cost_modifiers(player, parsed_cost, card_id, context) # Apply mods if card_id available
+                parsed_cost_base = self.parse_mana_cost(cost)
+                final_cost = self.apply_cost_modifiers(player, parsed_cost_base, card_id, context)
             elif isinstance(cost, dict): # Pre-parsed/Modified Cost Dict
-                parsed_cost = cost.copy() # Use a copy to avoid modifying original
-                card_id = context.get('card_id')
-                # Re-apply mods ensures context changes (like chosen X) are reflected
-                parsed_cost = self.apply_cost_modifiers(player, parsed_cost, card_id, context)
+                # Ensure all keys are present
+                default_keys = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0, 'generic': 0, 'X': 0, 'hybrid': [], 'phyrexian': [], 'snow': 0}
+                cost_dict_checked = {**default_keys, **cost}
+                final_cost = self.apply_cost_modifiers(player, cost_dict_checked.copy(), card_id, context)
             else:
                 logging.error(f"Invalid cost type provided to pay_mana_cost: {type(cost)}")
                 return False
@@ -1903,253 +1780,266 @@ class EnhancedManaSystem:
              logging.error(f"Error calculating final cost: {cost_calc_e}", exc_info=True)
              return False
 
-        # Verify affordability *before* attempting payment of non-mana costs
-        can_afford_check_cost = parsed_cost.copy() # Use a copy for the check
-        # Temporarily adjust for context costs that reduce mana needed *before* check
-        if context.get("convoke_creatures") and len(context["convoke_creatures"]) > 0:
-            can_afford_check_cost['generic'] = max(0, can_afford_check_cost['generic'] - len(context["convoke_creatures"]))
-        if context.get("delve_cards") and len(context["delve_cards"]) > 0:
-            can_afford_check_cost['generic'] = max(0, can_afford_check_cost['generic'] - len(context["delve_cards"]))
-        # Add other similar non-mana costs here that directly reduce mana needed (Improvise)
+        # --- Affordability Check (Before Paying Anything) ---
+        # Create a temporary cost dict reflecting context costs that reduce mana needs
+        cost_for_check = final_cost.copy()
+        check_context_costs = 0
+        if "convoke_creatures" in context: check_context_costs += len(context["convoke_creatures"])
+        if "delve_cards" in context: check_context_costs += len(context["delve_cards"])
+        if "improvise_artifacts" in context: check_context_costs += len(context["improvise_artifacts"])
+        cost_for_check['generic'] = max(0, cost_for_check['generic'] - check_context_costs)
 
-        if not self.can_pay_mana_cost(player, can_afford_check_cost, context):
-            cost_str = self._format_mana_cost_for_logging(parsed_cost, context.get('X', 0) if 'X' in parsed_cost else 0)
-            logging.warning(f"Cannot afford final mana cost {cost_str} for {getattr(gs._safe_get_card(card_id),'name', 'spell')}")
+        if not self.can_pay_mana_cost(player, cost_for_check, context):
+            cost_str = self._format_mana_cost_for_logging(final_cost, context.get('X', 0) if 'X' in final_cost else 0)
+            card_name_log = getattr(gs._safe_get_card(card_id), 'name', 'spell/ability') if card_id else 'spell/ability'
+            logging.warning(f"Cannot afford final cost {cost_str} for {card_name_log}")
             return False
 
         # --- Execute Non-Mana Costs specified in context FIRST ---
         non_mana_costs_paid_successfully = True
         try:
-            # Convoke: Tap creatures provided in context
-            if context.get("convoke_creatures"):
-                tapped_for_convoke = []
-                for creature_idx_or_id in context["convoke_creatures"]:
-                    convoke_id = gs._resolve_permanent_identifier(player, creature_idx_or_id)
-                    if not convoke_id:
-                         logging.warning(f"Invalid creature identifier for Convoke: {creature_idx_or_id}")
-                         non_mana_costs_paid_successfully = False; break
-                    # Use GameState's method; ensure it returns bool for success
-                    if hasattr(gs, 'tap_permanent') and gs.tap_permanent(convoke_id, player):
-                        tapped_for_convoke.append(convoke_id)
-                    else:
-                        logging.warning(f"Failed to tap {gs._safe_get_card(convoke_id).name} for Convoke.")
-                        non_mana_costs_paid_successfully = False; break
-                if non_mana_costs_paid_successfully: payment['tapped_creatures'] = tapped_for_convoke
-                else: raise ValueError("Convoke payment failed.") # Trigger rollback
+            # Convoke/Improvise: Tap creatures/artifacts provided in context
+            tapped_for_cost = []
+            convoke_list = context.get("convoke_creatures", [])
+            improvise_list = context.get("improvise_artifacts", [])
+            for identifier in convoke_list + improvise_list:
+                perm_id = gs._resolve_permanent_identifier(player, identifier) # Assumes GS has this helper
+                if not perm_id or perm_id in player.get("tapped_permanents", set()): # Cannot tap invalid or already tapped
+                     reason = "already tapped" if perm_id and perm_id in player.get("tapped_permanents", set()) else "invalid identifier"
+                     raise ValueError(f"Convoke/Improvise payment failed: {perm_id} ({reason}).")
+                if hasattr(gs, 'tap_permanent') and gs.tap_permanent(perm_id, player):
+                    tapped_for_cost.append(perm_id)
+                else:
+                    raise ValueError(f"Convoke/Improvise payment failed: Could not tap {perm_id}.")
+            if tapped_for_cost: payment['tapped_creatures'] = tapped_for_cost # Record successful taps
 
-            # Delve: Exile cards from GY provided in context
-            if context.get("delve_cards"):
-                exiled_for_delve = []
-                # Assume list of indices, needs validation
-                gy_indices_to_exile = context["delve_cards"]
-                valid_indices = [idx for idx in gy_indices_to_exile if isinstance(idx, int) and 0 <= idx < len(player["graveyard"])]
-                if len(valid_indices) != len(gy_indices_to_exile):
-                    logging.warning("Invalid graveyard indices provided for Delve.")
-                    non_mana_costs_paid_successfully = False; raise ValueError("Delve payment failed.")
-                # Remove from graveyard (safer: iterate sorted indices descending)
-                gy_cards_to_exile = [player["graveyard"][idx] for idx in sorted(valid_indices, reverse=True)]
-                for card_to_exile in gy_cards_to_exile:
-                    # Use move_card for robustness (handles triggers/replacements if any)
-                    if not gs.move_card(card_to_exile, player, "graveyard", player, "exile", cause="delve_cost"):
-                        logging.warning(f"Failed to exile {gs._safe_get_card(card_to_exile).name} for Delve.")
-                        non_mana_costs_paid_successfully = False; break
-                    exiled_for_delve.append(card_to_exile) # Track successfully exiled
-                if non_mana_costs_paid_successfully: payment['exiled_cards'] = exiled_for_delve
-                else: raise ValueError("Delve payment failed.")
 
-            # Emerge Sacrifice: Handled by AbilityHandler/GameState via context before mana payment typically.
-            # Check context for already sacrificed permanent.
+            # Delve/Escape: Exile cards from GY provided in context
+            exiled_for_cost = []
+            delve_indices = context.get("delve_cards", []) # Expect list of GY indices
+            escape_indices = context.get("escape_cards", []) # Expect list of GY indices
+            all_indices_to_exile = sorted(list(set(delve_indices + escape_indices)), reverse=True) # Unique indices, descending
+
+            valid_indices = [idx for idx in all_indices_to_exile if isinstance(idx, int) and 0 <= idx < len(player["graveyard"])]
+            if len(valid_indices) != len(all_indices_to_exile):
+                raise ValueError("Delve/Escape payment failed: Invalid GY indices provided.")
+
+            # Check if enough cards *remain* in GY if indices overlap (unlikely but possible)
+            if len(valid_indices) > len(player.get("graveyard",[])):
+                raise ValueError("Delve/Escape payment failed: Not enough cards in graveyard after index validation.")
+
+            gy_cards_to_exile_ids = [player["graveyard"][idx] for idx in valid_indices]
+            temp_gy = player["graveyard"][:] # Operate on a copy temporarily
+            exiled_this_step = []
+
+            for idx in valid_indices:
+                try:
+                     exile_id = temp_gy.pop(idx) # Remove from copy based on original index
+                     # Use move_card for robustness (e.g., Leyline of the Void)
+                     if not gs.move_card(exile_id, player, "graveyard_implicit", player, "exile", cause="cost_exile"):
+                          raise ValueError(f"Delve/Escape payment failed: Could not exile {exile_id}.")
+                     exiled_this_step.append(exile_id) # Track successfully exiled
+                except IndexError:
+                     # This might happen if indices weren't unique or GY changed unexpectedly
+                     raise ValueError(f"Delve/Escape payment failed: Index {idx} became invalid during removal.")
+
+            if exiled_this_step:
+                 payment['exiled_cards'] = exiled_this_step
+                 player["graveyard"] = temp_gy # Commit removal from actual GY list
+
+            # Emerge Sacrifice (Check context for ID already sacrificed by game logic)
             if context.get("emerge_sacrificed_id"):
-                 payment['sacrificed_perms'].append(context["emerge_sacrificed_id"]) # Record sacrifice
+                 payment['sacrificed_perms'].append(context["emerge_sacrificed_id"]) # Record
 
-            # Additional Sacrifice (from card text "As an additional cost...")
-            if context.get("sacrifice_additional"):
-                sacrificed_for_add = []
-                for sac_ident in context["sacrifice_additional"]:
-                    sac_id = gs._resolve_permanent_identifier(player, sac_ident)
-                    if not sac_id:
-                        logging.warning(f"Invalid sacrifice identifier: {sac_ident}")
-                        non_mana_costs_paid_successfully = False; break
-                    # Use move_card for robustness
-                    if not gs.move_card(sac_id, player, "battlefield", player, "graveyard", cause="additional_cost_sacrifice"):
-                         logging.warning(f"Failed to sacrifice {gs._safe_get_card(sac_id).name} as additional cost.")
-                         non_mana_costs_paid_successfully = False; break
-                    sacrificed_for_add.append(sac_id)
-                if non_mana_costs_paid_successfully: payment['sacrificed_perms'].extend(sacrificed_for_add)
-                else: raise ValueError("Additional Sacrifice payment failed.")
+            # Additional Costs (Sacrifice, Discard) from context
+            # Assume these lists contain identifiers (indices or card IDs)
+            sac_additional = context.get("sacrifice_additional", [])
+            discard_additional = context.get("discard_additional", [])
 
-            # Additional Discard (from card text)
-            if context.get("discard_additional"):
-                discarded_for_add = []
-                discard_indices = context["discard_additional"] # Assume list of hand indices
-                if not isinstance(discard_indices, list):
-                    logging.warning("Invalid discard_additional context.")
-                    non_mana_costs_paid_successfully = False; raise ValueError("Additional Discard context invalid.")
+            for identifier in sac_additional:
+                 sac_id = gs._resolve_permanent_identifier(player, identifier)
+                 if not sac_id or sac_id not in player.get("battlefield",[]):
+                      raise ValueError(f"Additional Sacrifice payment failed: Invalid/missing permanent {identifier}.")
+                 # Use move_card; if it fails, raise error
+                 if not gs.move_card(sac_id, player, "battlefield", player, "graveyard", cause="additional_cost_sacrifice"):
+                      raise ValueError(f"Additional Sacrifice payment failed: move_card failed for {sac_id}.")
+                 payment['sacrificed_perms'].append(sac_id)
 
-                if len(discard_indices) > len(player["hand"]):
-                    logging.warning("Not enough cards in hand for additional discard cost.")
-                    non_mana_costs_paid_successfully = False; raise ValueError("Additional Discard payment failed.")
+            # Process discard indices descending to avoid index issues
+            discard_ids_to_discard = []
+            valid_discard_indices = [idx for idx in sorted(discard_additional, reverse=True) if isinstance(idx, int) and 0 <= idx < len(player.get("hand",[]))]
+            if len(valid_discard_indices) != len(discard_additional):
+                 raise ValueError(f"Additional Discard payment failed: Invalid hand indices {discard_additional}.")
 
-                # Validate indices before proceeding
-                valid_indices = [idx for idx in discard_indices if isinstance(idx, int) and 0 <= idx < len(player["hand"])]
-                if len(valid_indices) != len(discard_indices):
-                    logging.warning("Invalid hand indices for additional discard.")
-                    non_mana_costs_paid_successfully = False; raise ValueError("Additional Discard payment failed.")
-
-                # Discard from hand (sorted reverse index)
-                cards_to_discard = [player["hand"][idx] for idx in sorted(valid_indices, reverse=True)]
-                for card_to_discard in cards_to_discard:
-                    # Use move_card
-                    if not gs.move_card(card_to_discard, player, "hand", player, "graveyard", cause="additional_cost_discard"):
-                        logging.warning(f"Failed to discard {gs._safe_get_card(card_to_discard).name} as additional cost.")
-                        non_mana_costs_paid_successfully = False; break
-                    discarded_for_add.append(card_to_discard)
-                if non_mana_costs_paid_successfully: payment['discarded_cards'] = discarded_for_add
-                else: raise ValueError("Additional Discard payment failed.")
+            for idx in valid_discard_indices:
+                 discard_id = player["hand"].pop(idx) # Remove from hand
+                 # Use move_card to put into graveyard
+                 if not gs.move_card(discard_id, player, "hand_implicit", player, "graveyard", cause="additional_cost_discard"):
+                      # If move fails, try to put card back in hand - difficult state
+                      player["hand"].insert(idx, discard_id) # Put back at original index? Risky.
+                      raise ValueError(f"Additional Discard payment failed: move_card failed for {discard_id}.")
+                 payment['discarded_cards'].append(discard_id)
 
         except ValueError as non_mana_error:
              logging.warning(f"Failed to pay non-mana costs: {non_mana_error}")
-             self._refund_payment(player, payment) # Rollback what was paid
+             self._refund_payment(player, payment) # Rollback costs paid so far
              return False
         except Exception as non_mana_e:
              logging.error(f"Error paying non-mana costs: {non_mana_e}", exc_info=True)
              self._refund_payment(player, payment)
              return False
 
-
         # --- Pay Mana Costs ---
         mana_payment_successful = False
-        try:
-            # Use a mutable copy of the pool for payment attempt
-            current_pool = player["mana_pool"].copy()
-            conditional_pool = {k: v.copy() for k, v in player.get("conditional_mana", {}).items()}
-            phase_pool = player.get("phase_restricted_mana", {}).copy()
+        # Use a mutable copy of the pools for the payment attempt
+        current_pool = player["mana_pool"].copy()
+        conditional_pool = {k: v.copy() for k, v in player.get("conditional_mana", {}).items()}
+        phase_pool = player.get("phase_restricted_mana", {}).copy()
 
-            # Get usable conditional mana based on context
+        try:
             usable_conditional = self._get_usable_conditional_mana(conditional_pool, context)
 
-            # Pay colored mana
+            # Pay colored mana first (WUBRGC)
             for color in ['W', 'U', 'B', 'R', 'G', 'C']:
-                required = parsed_cost[color]
+                required = final_cost.get(color, 0)
                 if required <= 0: continue
                 paid_count = 0
                 # Priority: Regular -> Phase -> Conditional
-                can_pay_reg = min(required, current_pool.get(color, 0))
-                current_pool[color] = current_pool.get(color, 0) - can_pay_reg
-                paid_count += can_pay_reg
-                payment['colors'][color] += can_pay_reg
-
+                paid_reg = min(required, current_pool.get(color, 0))
+                if paid_reg > 0: current_pool[color] -= paid_reg; payment['colors'][color] += paid_reg; paid_count += paid_reg;
                 if paid_count < required:
-                    can_pay_phase = min(required - paid_count, phase_pool.get(color, 0))
-                    phase_pool[color] = phase_pool.get(color, 0) - can_pay_phase
-                    paid_count += can_pay_phase
-                    payment['phase_restricted'][color] += can_pay_phase
-
+                    paid_phase = min(required - paid_count, phase_pool.get(color, 0))
+                    if paid_phase > 0: phase_pool[color] -= paid_phase; payment['phase_restricted'][color] += paid_phase; paid_count += paid_phase;
                 if paid_count < required:
                     for r_key, pool_part in conditional_pool.items():
                         if paid_count >= required: break
-                        # Check usability (should be consistent with _get_usable_conditional_mana)
-                        if color in pool_part and self._can_use_conditional_mana(r_key, context):
-                            can_pay_cond = min(required - paid_count, pool_part.get(color, 0))
-                            pool_part[color] = pool_part.get(color, 0) - can_pay_cond
-                            paid_count += can_pay_cond
-                            payment['conditional'][r_key][color] += can_pay_cond
+                        if self._can_use_conditional_mana(r_key, context) and pool_part.get(color, 0) > 0:
+                            paid_cond = min(required - paid_count, pool_part[color])
+                            pool_part[color] -= paid_cond; payment['conditional'][r_key][color] += paid_cond; paid_count += paid_cond;
 
                 if paid_count < required:
-                    raise ValueError(f"Insufficient {color} mana during payment")
+                    raise ValueError(f"Insufficient {color} mana during payment (Needed {required}, Found {paid_count} usable)")
 
-            # Pay hybrid mana
-            if not self._pay_hybrid_mana_with_all_pools(player, parsed_cost['hybrid'], payment, current_pool, phase_pool, conditional_pool, usable_conditional, context):
+            # Pay hybrid mana (including 2-brid)
+            if not self._pay_hybrid_mana_with_all_pools(player, final_cost.get('hybrid', []), payment, current_pool, phase_pool, conditional_pool, usable_conditional, context):
                  raise ValueError("Failed to pay hybrid mana")
 
             # Pay Phyrexian mana
+            phy_colors_to_pay = list(final_cost.get('phyrexian', []))
             paid_phy_life = 0
             phy_success = True
-            phy_colors_to_pay = list(parsed_cost.get('phyrexian',[]))
-            mana_paid_for_phy = defaultdict(int)
-            cond_paid_for_phy = defaultdict(lambda: defaultdict(int))
-            phase_paid_for_phy = defaultdict(int)
-
-            # Try paying with mana first
-            temp_phy_colors = []
+            # Try mana first from all pools
+            remaining_phy_to_pay_life = []
             for color in phy_colors_to_pay:
-                paid_with_mana = False
-                if current_pool.get(color, 0) > 0: current_pool[color] -= 1; mana_paid_for_phy[color] += 1; paid_with_mana = True
-                elif phase_pool.get(color, 0) > 0: phase_pool[color] -= 1; phase_paid_for_phy[color] += 1; paid_with_mana = True
-                else:
-                    for r_key, pool_part in conditional_pool.items():
-                        if color in pool_part and pool_part.get(color, 0) > 0 and self._can_use_conditional_mana(r_key, context):
-                             pool_part[color] -= 1; cond_paid_for_phy[r_key][color] += 1; paid_with_mana = True; break
-                if not paid_with_mana:
-                    temp_phy_colors.append(color) # Add to list needing life payment
-            phy_colors_to_pay = temp_phy_colors
+                 paid_with_mana = False
+                 if current_pool.get(color, 0) > 0: current_pool[color] -= 1; payment['colors'][color] += 1; paid_with_mana = True; continue;
+                 if phase_pool.get(color, 0) > 0: phase_pool[color] -= 1; payment['phase_restricted'][color] += 1; paid_with_mana = True; continue;
+                 for r_key, pool_part in conditional_pool.items():
+                     if self._can_use_conditional_mana(r_key, context) and pool_part.get(color, 0) > 0:
+                         pool_part[color] -= 1; payment['conditional'][r_key][color] += 1; paid_with_mana = True; break;
+                 if not paid_with_mana: remaining_phy_to_pay_life.append(color)
 
             # Pay remaining with life
-            life_needed = len(phy_colors_to_pay) * 2
+            life_needed = len(remaining_phy_to_pay_life) * 2
             if player['life'] >= life_needed:
                  paid_phy_life = life_needed
+                 payment['life'] += paid_phy_life
+                 # COMMIT LIFE PAYMENT HERE
+                 player['life'] -= paid_phy_life
+                 if paid_phy_life > 0: logging.debug(f"Paid {paid_phy_life} life for Phyrexian mana.")
             else:
                 phy_success = False
-                raise ValueError("Cannot pay Phyrexian mana with life")
-
-            # If successful, record mana/life used
-            if phy_success:
-                payment['life'] += paid_phy_life
-                player['life'] -= paid_phy_life # Deduct life immediately after check
-                for color, count in mana_paid_for_phy.items(): payment['colors'][color] += count
-                for color, count in phase_paid_for_phy.items(): payment['phase_restricted'][color] += count
-                for r_key, colors in cond_paid_for_phy.items():
-                    for color, count in colors.items(): payment['conditional'][r_key][color] += count
-
+                raise ValueError(f"Cannot pay Phyrexian mana with life (Need {life_needed}, Have {player['life']})")
 
             # Pay snow mana
-            if parsed_cost['snow'] > 0:
-                # pay_snow_cost needs more complex integration or should return used sources
-                # Assuming pay_snow_cost deducts mana from pools if applicable and taps permanents
-                if not self.pay_snow_cost(player, parsed_cost['snow']): # This might interact with mana pools used above - CAUTION NEEDED
+            if final_cost.get('snow', 0) > 0:
+                # pay_snow_cost taps permanents and adds mana to pools. This needs integration.
+                # Simplified: Assume pay_snow_cost works if can_pay was true.
+                # Needs revision: Pay snow should consume specific mana from tapped snow sources.
+                if not self.pay_snow_cost(player, final_cost['snow']): # CAUTION: Modifies player state directly
                     raise ValueError("Failed to pay Snow mana cost")
-                payment['snow'] += parsed_cost['snow']
+                payment['snow'] += final_cost['snow'] # Track that snow was paid
 
-            # Pay generic mana
-            generic_required = parsed_cost['generic']
-            if parsed_cost['X'] > 0 and context and 'X' in context:
-                generic_required += context['X'] * parsed_cost['X']
+
+            # Pay generic mana (and X cost)
+            generic_required = final_cost.get('generic', 0)
+            x_value = context.get('X', 0) if final_cost.get('X',0) > 0 else 0
+            generic_required += x_value * final_cost.get('X',0)
 
             if generic_required > 0:
                 remaining_generic = self._pay_generic_mana_with_all_pools(player, generic_required, payment, current_pool, phase_pool, conditional_pool, usable_conditional, context)
                 if remaining_generic > 0:
-                    raise ValueError(f"Failed to pay generic mana cost. Required={generic_required}, Short={remaining_generic}")
+                    raise ValueError(f"Failed to pay generic mana cost. Required={generic_required}, Paid={generic_required-remaining_generic}, Short={remaining_generic}")
 
-            mana_payment_successful = True
+            mana_payment_successful = True # If no error thrown
 
         except ValueError as mana_error:
             logging.error(f"Failed to pay mana costs: {mana_error}")
-            self._refund_payment(player, payment) # Rollback EVERYTHING if mana payment fails
+            self._refund_payment(player, payment) # *** ROLLBACK EVERYTHING ***
             return False
         except Exception as mana_e:
              logging.error(f"Error paying mana costs: {mana_e}", exc_info=True)
-             self._refund_payment(player, payment)
+             self._refund_payment(player, payment) # *** ROLLBACK EVERYTHING ***
              return False
 
 
         # --- Finalize Payment ---
         if mana_payment_successful:
-            # Update player's pools with the final state from successful payment
+            # COMMIT CHANGES TO PLAYER STATE
             player["mana_pool"] = current_pool
             player["conditional_mana"] = conditional_pool
             player["phase_restricted_mana"] = phase_pool
+            # Life already deducted during phyrexian check
 
             # Log payment
-            cost_str = self._format_mana_cost_for_logging(parsed_cost, context.get('X', 0) if 'X' in parsed_cost else 0)
+            cost_str = self._format_mana_cost_for_logging(final_cost, context.get('X', 0) if 'X' in final_cost else 0)
             payment_str = self._format_payment_for_logging(payment)
-            logging.debug(f"Paid cost {cost_str} for {getattr(gs._safe_get_card(card_id),'name', 'spell')} with {payment_str}")
+            card_name_log = getattr(gs._safe_get_card(card_id), 'name', 'spell/ability') if card_id else 'spell/ability'
+            logging.debug(f"Paid cost {cost_str} for {card_name_log} with {payment_str}")
             self._cleanup_empty_conditional_mana(player)
             return True
         else:
-             # This path shouldn't be reached due to error handling above, but included for safety
-             logging.error("Reached end of pay_mana_cost with mana_payment_successful=False. Should have been caught earlier.")
-             self._refund_payment(player, payment)
+             # This path might be reached if non-mana costs failed. Rollback handled there.
+             logging.warning("pay_mana_cost reached end with mana_payment_successful=False.")
              return False
+         
+    def _pay_generic_mana_with_all_pools(self, player, amount, payment, current_pool, phase_pool, conditional_pool, usable_conditional, context):
+         """Pay generic mana optimally using all pools."""
+         # 1. Regular Colorless
+         used = min(amount, current_pool.get('C', 0))
+         if used > 0: current_pool['C'] -= used; payment['colors']['C'] += used; amount -= used;
+         # 2. Phase Colorless
+         used = min(amount, phase_pool.get('C', 0))
+         if used > 0: phase_pool['C'] -= used; payment['phase_restricted']['C'] += used; amount -= used;
+         # 3. Conditional Colorless
+         for r_key, pool_part in conditional_pool.items():
+             if amount <= 0: break
+             if self._can_use_conditional_mana(r_key, context) and pool_part.get('C', 0) > 0:
+                 used = min(amount, pool_part['C'])
+                 pool_part['C'] -= used; payment['conditional'][r_key]['C'] += used; amount -= used;
+
+         # Use colored mana pools if needed
+         # Prioritize colors with more mana first? Or least valuable? Let's use availability.
+         colors = sorted(['W', 'U', 'B', 'R', 'G'], key=lambda c: current_pool.get(c,0) + phase_pool.get(c,0) + usable_conditional.get(c,0), reverse=True)
+
+         for color in colors:
+             if amount <= 0: break
+             # Use Regular Color
+             used = min(amount, current_pool.get(color, 0))
+             if used > 0: current_pool[color] -= used; payment['colors'][color] += used; amount -= used;
+             if amount <= 0: break
+             # Use Phase Color
+             used = min(amount, phase_pool.get(color, 0))
+             if used > 0: phase_pool[color] -= used; payment['phase_restricted'][color] += used; amount -= used;
+             if amount <= 0: break
+             # Use Conditional Color
+             for r_key, pool_part in conditional_pool.items():
+                 if amount <= 0: break
+                 if self._can_use_conditional_mana(r_key, context) and pool_part.get(color, 0) > 0:
+                     used = min(amount, pool_part[color])
+                     pool_part[color] -= used; payment['conditional'][r_key][color] += used; amount -= used;
+
+         return amount # Return remaining unpaid amount
     
     def _pay_generic_mana(self, player, amount, payment_tracker):
         """

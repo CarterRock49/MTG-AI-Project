@@ -150,8 +150,6 @@ class TargetingSystem:
         final_valid_targets = {cat: list(ids) for cat, ids in processed_valid.items() if ids}
         return final_valid_targets
 
-    # *** REMOVED: _has_keyword_check (replaced by self._check_keyword) ***
-
     def resolve_targeting_for_ability(self, card_id, ability_text, controller):
         """
         Handle targeting for an ability using the unified targeting system.
@@ -187,6 +185,7 @@ class TargetingSystem:
 
         if not target_obj: return False
 
+        # ... (Zone Check logic remains the same) ...
         # 1. Zone Check
         req_zone = requirement.get("zone")
         if req_zone and target_zone != req_zone: return False
@@ -197,6 +196,7 @@ class TargetingSystem:
             elif target_type != "card": return False
 
 
+        # ... (Type Check logic remains the same) ...
         # 2. Type Check
         actual_types = set()
         if isinstance(target_obj, dict) and target_id in ["p1", "p2"]: # Player target
@@ -224,7 +224,6 @@ class TargetingSystem:
 
         if not valid_type: return False
 
-
         # 3. Protection / Hexproof / Shroud / Ward (Only for permanents, players, spells)
         if target_zone in ["battlefield", "stack", "player"]:
              source_card = gs._safe_get_card(source_id)
@@ -232,7 +231,7 @@ class TargetingSystem:
                   # TODO: Add player protection checks (e.g., Leyline of Sanctity)
                   pass
              elif isinstance(target_obj, Card): # Permanent or Spell
-                 # *** CHANGED: Use self._check_keyword for hexproof/shroud ***
+                 # *** Use self._check_keyword for hexproof/shroud ***
                  # Protection
                  if self._has_protection_from(target_obj, source_card, target_owner, caster): return False
                  # Hexproof (if targeted by opponent)
@@ -242,6 +241,7 @@ class TargetingSystem:
                  # Ward (Check handled separately - involves paying cost)
 
 
+        # ... (Rest of specific requirement checks remain the same) ...
         # 4. Specific Requirement Checks (applies mostly to battlefield permanents)
         if target_zone == "battlefield" and isinstance(target_obj, Card):
             # Owner/Controller
@@ -306,7 +306,7 @@ class TargetingSystem:
              source_card = gs._safe_get_card(source_id)
              if isinstance(target_obj, Card): # Spell target
                  # Can't be countered? (Only if source is a counter)
-                 if "counter target spell" in getattr(source_card, 'oracle_text', '').lower():
+                 if source_card and "counter target spell" in getattr(source_card, 'oracle_text', '').lower():
                      if "can't be countered" in getattr(target_obj, 'oracle_text', '').lower(): return False
                  # Spell Type
                  st_req = requirement.get("spell_type_restriction")
@@ -322,6 +322,36 @@ class TargetingSystem:
 
 
         return True # All checks passed
+    
+    def _check_keyword(self, card, keyword):
+        """Internal helper to check keywords, possibly delegating."""
+        gs = self.game_state
+        card_id = getattr(card, 'card_id', None)
+        if not card_id: return False
+
+        # Prefer using AbilityHandler's centralized check if available
+        if self.ability_handler and hasattr(self.ability_handler, 'check_keyword'):
+            return self.ability_handler.check_keyword(card_id, keyword)
+
+        # Fallback to GameState's check if no AbilityHandler reference
+        elif hasattr(gs, 'check_keyword') and callable(gs.check_keyword):
+            return gs.check_keyword(card_id, keyword)
+
+        # Ultimate fallback: basic check on the card object (less reliable)
+        logging.warning(f"Using basic card keyword fallback check in TargetingSystem for {keyword} on {getattr(card, 'name', 'Unknown')}")
+        if hasattr(card, 'has_keyword'): # Use card's own checker if it exists
+             return card.has_keyword(keyword)
+        elif hasattr(card, 'keywords') and isinstance(card.keywords, list): # Check keyword array directly
+             try:
+                 if not Card.ALL_KEYWORDS: return False
+                 idx = Card.ALL_KEYWORDS.index(keyword.lower())
+                 if idx < len(card.keywords): return bool(card.keywords[idx])
+             except ValueError: pass
+             except IndexError: pass
+        elif hasattr(card, 'oracle_text'): # Check oracle text as last resort
+             return keyword.lower() in getattr(card, 'oracle_text', '').lower()
+
+        return False
 
     def _has_color(self, card, color_name):
         """Check if a card has a specific color."""
@@ -480,16 +510,6 @@ class TargetingSystem:
             if protection_details == getattr(source_card, 'name', '').lower(): return True
 
         return False
-
-    # *** CHANGED: Use self._check_keyword ***
-    def _has_hexproof(self, card):
-        """Robust hexproof check using centralized check."""
-        return self._check_keyword(card, "hexproof")
-
-    # *** CHANGED: Use self._check_keyword ***
-    def _has_shroud(self, card):
-        """Check if card has shroud using centralized check."""
-        return self._check_keyword(card, "shroud")
 
     def resolve_targeting(self, source_id, controller, effect_text=None, target_types=None):
         """

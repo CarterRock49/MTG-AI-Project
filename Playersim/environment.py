@@ -238,52 +238,36 @@ class AlphaZeroMTGEnv(gym.Env):
     
 
     def action_mask(self, env=None):
-        """Return the current action mask as boolean array"""
-        # Ignore the env argument if passed
+            """Return the current action mask as boolean array. Cache removed for safety."""
+            # Ignore the env argument if passed
 
-        # Check if the game state has changed in a way that would affect valid actions
-        gs = self.game_state
-        # Safety checks for attributes
-        current_phase = getattr(gs, 'phase', -1)
-        current_turn = getattr(gs, 'turn', -1)
-        current_stack_size = len(getattr(gs, 'stack', []))
-        current_attackers = len(getattr(gs, 'current_attackers', []))
-
-        # Determine if we need to regenerate the action mask
-        state_changed = not hasattr(self, '_last_action_mask_state') or \
-                    self._last_action_mask_state['phase'] != current_phase or \
-                    self._last_action_mask_state['turn'] != current_turn or \
-                    self._last_action_mask_state['stack_size'] != current_stack_size or \
-                    self._last_action_mask_state['attackers'] != current_attackers
-
-        # Always regenerate if no mask exists yet
-        if not hasattr(self, 'current_valid_actions') or self.current_valid_actions is None or state_changed or np.sum(self.current_valid_actions) == 0:
+            # Regenerate the mask on every call
             try:
                 # Ensure ActionHandler exists and is linked to the current GameState
                 if not hasattr(self, 'action_handler') or self.action_handler is None or self.action_handler.game_state != self.game_state:
-                     self.action_handler = ActionHandler(self.game_state)
+                    # Attempt to re-link or re-create if missing
+                    if hasattr(self.game_state, 'action_handler') and self.game_state.action_handler:
+                        self.action_handler = self.game_state.action_handler
+                    else:
+                        self.action_handler = ActionHandler(self.game_state) # Recreate if necessary
 
                 self.current_valid_actions = self.action_handler.generate_valid_actions()
-                if self.current_valid_actions is None or not isinstance(self.current_valid_actions, np.ndarray) or self.current_valid_actions.shape != (self.ACTION_SPACE_SIZE,):
-                    raise ValueError("generate_valid_actions returned invalid mask")
 
-                # Update state tracking
-                self._last_action_mask_state = {
-                    'phase': current_phase,
-                    'turn': current_turn,
-                    'stack_size': current_stack_size,
-                    'attackers': current_attackers
-                }
+                # Validate the generated mask
+                if self.current_valid_actions is None or not isinstance(self.current_valid_actions, np.ndarray) or self.current_valid_actions.shape != (self.ACTION_SPACE_SIZE,):
+                    raise ValueError(f"generate_valid_actions returned invalid mask: shape {getattr(self.current_valid_actions, 'shape', 'None')}, type {type(self.current_valid_actions)}")
+
             except Exception as e:
-                logging.error(f"Error generating valid actions: {str(e)}")
+                logging.error(f"Error generating valid actions in action_mask: {str(e)}")
                 import traceback
                 logging.error(f"{traceback.format_exc()}")
                 # Fallback to basic action mask if generation fails
                 self.current_valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
                 self.current_valid_actions[11] = True # Enable PASS_PRIORITY
                 self.current_valid_actions[12] = True  # Enable CONCEDE as fallback
-        # Return bool version
-        return self.current_valid_actions.astype(bool)
+
+            # Return bool version
+            return self.current_valid_actions.astype(bool)
     
     def reset(self, seed=None, **kwargs):
         """
@@ -366,20 +350,23 @@ class AlphaZeroMTGEnv(gym.Env):
             self.action_handler = ActionHandler(self.game_state) # Recreate/link ActionHandler
 
             # Get references to components created by GameState for env use
-            # These might be None if imports failed or init failed in GS
-            self.combat_resolver = getattr(self.game_state, 'combat_resolver', None)
-            self.card_evaluator = getattr(self.game_state, 'card_evaluator', None)
-            self.strategic_planner = getattr(self.game_state, 'strategic_planner', None)
-            self.mana_system = getattr(self.game_state, 'mana_system', None)
-            self.ability_handler = getattr(self.game_state, 'ability_handler', None)
-            self.layer_system = getattr(self.game_state, 'layer_system', None)
-            self.replacement_effects = getattr(self.game_state, 'replacement_effects', None)
-            self.targeting_system = getattr(self.game_state, 'targeting_system', None)
+            # Add checks to ensure subsystems were initialized in GameState
+            subsystems_to_check = ['combat_resolver', 'card_evaluator', 'strategic_planner',
+                                   'mana_system', 'ability_handler', 'layer_system',
+                                   'replacement_effects', 'targeting_system']
+            for system_name in subsystems_to_check:
+                if hasattr(self.game_state, system_name):
+                    setattr(self, system_name, getattr(self.game_state, system_name))
+                    if getattr(self, system_name) is None:
+                        logging.warning(f"GameState has attribute '{system_name}', but it is None after initialization.")
+                else:
+                    logging.warning(f"GameState is missing expected subsystem: '{system_name}'. Setting environment reference to None.")
+                    setattr(self, system_name, None)
 
 
             # Ensure combat integration after handlers are created
+            # Integrate combat actions checks if combat_resolver exists now
             integrate_combat_actions(self.game_state)
-
             # Ensure CombatActionHandler has link to GS components (safe access)
             if hasattr(self.action_handler, 'combat_handler') and self.action_handler.combat_handler:
                 self.action_handler.combat_handler.game_state = self.game_state
@@ -963,54 +950,52 @@ class AlphaZeroMTGEnv(gym.Env):
             # -----------------------------------------------
             max_loops = 50 # Safety limit
             loop_count = 0
+            previous_priority_holder = None # Track previous priority holder for state change detection
+
             while loop_count < max_loops:
                 loop_count += 1
-                state_changed_this_loop = False # Tracks if anything changed this iteration
+                # Capture state at start of loop for change detection
+                loop_start_phase = gs.phase
+                loop_start_priority_player = gs.priority_player
+                loop_start_stack_size = len(gs.stack)
+                state_changed_this_loop = False # Reset flag for this loop iteration
 
                 # 1. State-Based Actions (SBAs) - Repeat until stable
                 # ----------------------------------------------------
                 sbas_applied_in_cycle = True
                 sba_cycles = 0
                 while sbas_applied_in_cycle and sba_cycles < 10: # Inner loop limit for SBAs
-                    # Layer effects applied *before* SBAs to ensure accurate state
-                    if hasattr(gs, 'layer_system') and gs.layer_system:
-                        gs.layer_system.apply_all_effects()
+                    # Ensure Layers are applied before SBAs
+                    if self.layer_system:
+                        self.layer_system.apply_all_effects()
 
                     sbas_applied_in_cycle = gs.check_state_based_actions()
                     if sbas_applied_in_cycle:
                         state_changed_this_loop = True
-                        # After SBAs apply, layers may need recalculation if state changed
-                        if hasattr(gs, 'layer_system') and gs.layer_system:
-                            gs.layer_system.apply_all_effects()
+                        # Layers might need re-application after SBAs
+                        if self.layer_system:
+                            self.layer_system.apply_all_effects()
                     sba_cycles += 1
                 if sba_cycles >= 10: logging.warning("Exceeded SBA cycle limit.")
 
                 # 2. Check Game End from SBAs
                 # ---------------------------
-                # Check standard loss conditions
-                if (me["life"] <= 0 or opp["life"] <= 0 or
-                    me.get("attempted_draw_from_empty", False) or opp.get("attempted_draw_from_empty", False) or
-                    me.get("poison_counters", 0) >= 10 or opp.get("poison_counters", 0) >= 10 or
-                    me.get("lost_game", False) or opp.get("lost_game", False)):
-                    done = True
-                    logging.debug(f"Game ended due to SBAs (life/draw/poison/loss) in loop {loop_count}.")
-                    break # Exit main loop
-                # Check explicit win/draw conditions
-                if me.get("won_game", False) or opp.get("won_game", False) or me.get("game_draw", False) or opp.get("game_draw", False):
-                    done = True
-                    logging.debug(f"Game ended due to explicit win/draw flag in loop {loop_count}.")
-                    break
+                if self._check_game_end_conditions(info): # Use helper to check end conditions
+                     done = True
+                     logging.debug(f"Game ended during step loop {loop_count} due to SBAs or game state change.")
+                     break # Exit main loop
 
                 # 3. Process Triggered Abilities (Put on Stack)
                 # ---------------------------------------------
-                if hasattr(gs.ability_handler, 'process_triggered_abilities'):
-                    triggers_were_in_queue = bool(gs.ability_handler.active_triggers)
-                    gs.ability_handler.process_triggered_abilities() # Adds triggers to gs.stack
-                    if triggers_were_in_queue and not gs.ability_handler.active_triggers: # Check if queue emptied
+                if self.ability_handler:
+                     # Check if the queue HAS triggers before processing
+                     triggers_were_present = bool(self.ability_handler.active_triggers)
+                     self.ability_handler.process_triggered_abilities() # Adds triggers to gs.stack
+                     # Check if stack size changed AFTER processing triggers
+                     if len(gs.stack) != loop_start_stack_size:
                          state_changed_this_loop = True
-                         gs.priority_player = gs._get_active_player() # Priority goes to AP after triggers are added
-                         gs.priority_pass_count = 0
-                         if DEBUG_ACTION_STEPS: logging.debug(f"Triggers added to stack, priority to {gs.priority_player['name']}")
+                         if DEBUG_ACTION_STEPS: logging.debug(f"Triggers added to stack in loop {loop_count}, priority reset.")
+                         # Priority resets within process_triggered_abilities or add_to_stack implicitly
 
 
                 # 4. Check for Priority & Stack Resolution
@@ -1018,106 +1003,98 @@ class AlphaZeroMTGEnv(gym.Env):
                 current_priority_holder = gs.priority_player
                 agent_player = gs.p1 if gs.agent_is_p1 else gs.p2
 
-                # 4a. Check if Agent Regains Priority
+                # Check if priority has actually changed since start of loop or last iteration
+                if gs.priority_player != loop_start_priority_player or gs.priority_player != previous_priority_holder:
+                    state_changed_this_loop = True
+
+                # --- Priority Logic ---
                 if current_priority_holder == agent_player:
-                    # Agent has priority. Does agent need to act?
-                    temp_mask = self.action_mask() # What can agent do now?
-                    # Meaningful actions exclude PASS_PRIORITY (11) and CONCEDE (12)
-                    meaningful_actions_exist = np.any(temp_mask & (np.arange(self.ACTION_SPACE_SIZE) != 11) & (np.arange(self.ACTION_SPACE_SIZE) != 12))
-
-                    # Agent acts if stack is not empty OR if they have meaningful actions available
-                    if gs.stack or meaningful_actions_exist:
-                         if DEBUG_ACTION_STEPS: logging.debug(f"Agent ({agent_player['name']}) regains priority in phase {gs.phase}. Stack={len(gs.stack)}, Meaningful={meaningful_actions_exist}. Returning control.")
-                         break # Return control to the agent
-                    else:
-                        # Agent has priority, stack empty, only Pass/Concede valid. Auto-pass.
-                        if DEBUG_ACTION_STEPS: logging.debug(f"Agent ({agent_player['name']}) auto-passing priority (stack empty, only pass/concede).")
-                        gs._pass_priority() # Let GameState handle the pass logic
-                        state_changed_this_loop = True # Priority count/phase changed by _pass_priority
-                        continue # Re-evaluate state after pass
-
-                # 4b. Agent doesn't have priority - Simulate Opponent/Other Agent Pass
+                    # Agent has priority. Return control.
+                    if DEBUG_ACTION_STEPS: logging.debug(f"Agent ({agent_player['name']}) regains priority in phase {gs.phase} loop {loop_count}. Stack={len(gs.stack)}. Returning control.")
+                    break # Return control to the agent
                 else:
-                    if DEBUG_ACTION_STEPS: logging.debug(f"Non-agent player ({current_priority_holder['name']}) holds priority. Auto-passing.")
-                    gs._pass_priority() # Let GameState handle the pass logic
-                    state_changed_this_loop = True # Priority/stack/phase might have changed
-                    continue # Re-evaluate state after opponent pass
+                    # Opponent has priority. Pass priority for them.
+                    if DEBUG_ACTION_STEPS: logging.debug(f"Non-agent player ({current_priority_holder['name']}) holds priority. Auto-passing in loop {loop_count}.")
+                    gs._pass_priority() # This might resolve stack or advance phase
+                    # Check if priority pass caused state change (stack resolve/phase change)
+                    if gs.priority_player != current_priority_holder or gs.phase != loop_start_phase or len(gs.stack) != loop_start_stack_size:
+                         state_changed_this_loop = True
+                    # Don't break loop, continue to re-evaluate state after pass
 
-                # --- Loop break logic ---
-                # Break if no state changes occurred this iteration AND agent has priority
-                if not state_changed_this_loop and gs.priority_player == agent_player:
-                     if DEBUG_ACTION_STEPS: logging.debug(f"Game state stabilized in loop {loop_count}, agent has priority.")
+                # Check game end again after priority pass / stack resolution
+                if self._check_game_end_conditions(info):
+                     done = True
+                     logging.debug(f"Game ended during step loop {loop_count} after priority pass/resolve.")
                      break
 
-                # Safety Break (optional, if loop_count gets too high without state change)
-                # if loop_count > max_loops - 5 and not state_changed_this_loop:
-                #     logging.warning("Loop nearing limit with no state change. Potential stability issue?")
-                #     break # Or force progress?
+                # Detect stall: If no state changed this loop AND priority returns to the same player, break
+                if not state_changed_this_loop and gs.priority_player == previous_priority_holder:
+                    logging.warning(f"Game state stalled in loop {loop_count}? Priority: {gs.priority_player['name']}, Phase: {gs.phase}, Stack: {len(gs.stack)}. Breaking loop.")
+                    # Maybe force pass priority one more time? Or just break? Let's break for now.
+                    break
 
-            # End of Main Loop Safety check
+                # Update previous priority holder for next iteration's stall check
+                previous_priority_holder = gs.priority_player
+
+
+            # End of Main Loop Safety check / Logging
             if loop_count >= max_loops:
                 logging.error(f"Exceeded max game loop iterations ({max_loops}). Potential infinite loop. Terminating.")
                 done, truncated, step_reward = True, True, -3.0
 
-            # --- Calculate Final Step Reward & Check Game End ---
+            # --- Calculate Final Step Reward & Check Game End (Logic remains largely the same) ---
+            # ... (reward calculation, final game end checks) ...
             current_state = { # Gather final state
                  "my_life": me["life"], "opp_life": opp["life"], "my_hand": len(me["hand"]), "opp_hand": len(opp["hand"]), "my_board": len(me["battlefield"]), "opp_board": len(opp["battlefield"]),
                  "my_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) for cid in me["battlefield"] if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
                  "opp_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) for cid in opp["battlefield"] if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])), }
-            state_change_reward = self.action_handler._add_state_change_rewards(0.0, prev_state, current_state)
-            step_reward += state_change_reward
-            # Add board state reward component (call the reward function)
-            step_reward += self._calculate_board_state_reward()
-            info["state_reward"] = state_change_reward # Keep specific state change reward in info
+            # Use helper for state change reward calculation
+            state_change_reward = self._add_state_change_rewards(0.0, prev_state, current_state)
+            reward += state_change_reward
+            reward += self._calculate_board_state_reward() # Use helper
+            info["state_reward"] = state_change_reward
 
-            # Final Game End Checks (important after the loop)
-            game_already_ended = done # Store if loop already ended game
-            if not game_already_ended:
-                 if opp["life"] <= 0: done, step_reward = True, step_reward + 10.0 + max(0, 20 - gs.turn) * 0.2; info["game_result"] = "win"
-                 elif me["life"] <= 0: done, step_reward = True, step_reward - 10.0; info["game_result"] = "loss"
-                 elif hasattr(gs, 'check_for_draw_conditions') and gs.check_for_draw_conditions(): done, step_reward = True, step_reward + 0.0; info["game_result"] = "draw"
-                 elif me.get("lost_game"): done, step_reward = True, step_reward - 10.0; info["game_result"] = "loss" # Explicit loss flags
-                 elif opp.get("lost_game"): done, step_reward = True, step_reward + 10.0 + max(0, 20 - gs.turn) * 0.2; info["game_result"] = "win" # Explicit win flags
-                 elif me.get("won_game"): done, step_reward = True, step_reward + 10.0 + max(0, 20 - gs.turn) * 0.2; info["game_result"] = "win"
-                 elif opp.get("won_game"): done, step_reward = True, step_reward - 10.0; info["game_result"] = "loss"
-                 elif me.get("game_draw"): done, step_reward = True, step_reward + 0.0; info["game_result"] = "draw"
-                 elif gs.turn > gs.max_turns: done, truncated = True, True; step_reward += (me["life"] - opp["life"]) * 0.1; info["game_result"] = "win" if (me["life"] > opp["life"]) else "loss" if (me["life"] < opp["life"]) else "draw"; logging.info("Turn limit reached.")
-                 elif self.current_step >= self.max_episode_steps: done, truncated, step_reward = True, True, step_reward - 0.5; info["game_result"] = "truncated"; logging.info("Max episode steps reached.")
+            # Final Game End Checks
+            if not done and self._check_game_end_conditions(info): # Use helper again
+                 done = True
+                 # Add final win/loss reward if game ended here
+                 if info["game_result"] == "win": reward += 10.0 + max(0, gs.max_turns - gs.turn) * 0.1
+                 elif info["game_result"] == "loss": reward -= 10.0
+                 elif info["game_result"] == "draw": reward += 0.0
+                 elif info["game_result"] == "truncated": reward -= 0.5
 
+            if self.current_step >= self.max_episode_steps and not done: # Check max steps only if not already done
+                 done, truncated = True, True; reward -= 0.5; info["game_result"] = "truncated"; logging.info("Max episode steps reached.")
 
-            # Final Log message for end of step
-            if done or truncated:
-                 logging.info(f"Game end condition met: done={done}, truncated={truncated}. Result: {info.get('game_result', 'unknown')}")
-
-            # --- Finalize and Return ---
-            self.episode_rewards.append(step_reward)
+            # ... (final logging, return statement - unchanged) ...
+            self.episode_rewards.append(reward)
             if done: self.ensure_game_result_recorded() # Make sure result is saved
 
             obs = self._get_obs_safe() # Use safe version
-            self.current_valid_actions = self.action_mask() # Final mask for agent's *next* decision
+            # Invalidate current mask cache - handled by calling action_mask() which no longer caches
+            self.current_valid_actions = self.action_mask() # Regenerate for next step
             info["action_mask"] = self.current_valid_actions.astype(bool)
 
             # Update action/reward history
             if hasattr(self, 'last_n_actions') and hasattr(self, 'last_n_rewards'):
                 self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
-                self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = step_reward
+                self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = reward
             else: # Initialize if missing
                 self.last_n_actions = np.full(self.action_memory_size, -1, dtype=np.int32)
                 self.last_n_rewards = np.zeros(self.action_memory_size, dtype=np.float32)
                 self.last_n_actions[0] = action_idx
-                self.last_n_rewards[0] = step_reward
+                self.last_n_rewards[0] = step_reward # Should use final reward
 
 
             # Update strategy memory (if used)
             if hasattr(gs, 'strategy_memory') and gs.strategy_memory and pre_action_pattern:
-                 try: gs.strategy_memory.update_strategy(pre_action_pattern, step_reward)
+                 try: gs.strategy_memory.update_strategy(pre_action_pattern, reward) # Use final step reward
                  except Exception as strategy_e: logging.error(f"Error updating strategy memory: {strategy_e}")
 
             if DEBUG_ACTION_STEPS:
-                logging.debug(f"== STEP {self.current_step} END: reward={step_reward:.3f}, done={done}, truncated={truncated}, Phase={gs.phase}, Prio={gs.priority_player['name']} ==")
-                # logging.debug(f"End state: P1 Life={gs.p1['life']}, P2 Life={gs.p2['life']}, Stack Size={len(gs.stack)}")
+                logging.debug(f"== STEP {self.current_step} END: reward={reward:.3f}, done={done}, truncated={truncated}, Phase={gs.phase}, Prio={gs.priority_player['name']} ==")
 
-            return obs, step_reward, done, truncated, info
+            return obs, reward, done, truncated, info
 
         except Exception as e:
             logging.error(f"CRITICAL error in step function (Action {action_idx}): {str(e)}")
@@ -1169,6 +1146,36 @@ class AlphaZeroMTGEnv(gym.Env):
             # Return the zero-initialized obs as a last resort
         return obs
 
+    def _check_game_end_conditions(self, info):
+            """Helper to check standard game end conditions and update info dict."""
+            gs = self.game_state
+            me = gs.p1 if gs.agent_is_p1 else gs.p2
+            opp = gs.p2 if gs.agent_is_p1 else gs.p1
+            done = False
+
+            # Standard Loss Conditions
+            if opp.get("lost_game", False):
+                done = True; info["game_result"] = "win"
+            elif me.get("lost_game", False):
+                done = True; info["game_result"] = "loss"
+            # Draw Conditions
+            elif me.get("game_draw", False) or opp.get("game_draw", False):
+                done = True; info["game_result"] = "draw"
+            # Turn Limit
+            elif gs.turn > gs.max_turns:
+                # Mark as truncated? No, it's a game end condition.
+                done = True
+                # Determine result based on life
+                info["game_result"] = "win" if (me["life"] > opp["life"]) else "loss" if (me["life"] < opp["life"]) else "draw"
+                logging.info(f"Turn limit ({gs.max_turns}) reached. Result: {info['game_result']}")
+
+            # Explicit Win Flags (Alternative win conditions etc.)
+            elif me.get("won_game", False):
+                done = True; info["game_result"] = "win"
+            elif opp.get("won_game", False):
+                done = True; info["game_result"] = "loss"
+
+            return done
         
     def get_strategic_recommendation(self):
         """

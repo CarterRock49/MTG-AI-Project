@@ -12,6 +12,12 @@ class Card:
     # Initialize as empty list instead of setting it externally
     SUBTYPE_VOCAB = []
     
+    ALL_CARD_TYPES = [
+        'creature', 'artifact', 'enchantment', 'land', 'planeswalker',
+        'instant', 'sorcery', 'battle', 'conspiracy', 'dungeon',
+        'phenomenon', 'plane', 'scheme', 'vanguard', 'class', 'room' # Add more if needed
+    ]
+    
     # List of all keywords for optimization
     ALL_KEYWORDS = [
         'flying', 'trample', 'hexproof', 'lifelink', 'deathtouch',
