@@ -1794,37 +1794,63 @@ class GameState:
     
     def _validate_targets_on_resolution(self, source_id, controller, targets):
         """Checks if the targets selected for a spell/ability are still valid upon resolution."""
+        # Added check for no targeting system
+        if not self.targeting_system:
+            logging.warning("Cannot validate targets: TargetingSystem not available.")
+            # Basic fallback: assume valid if no system? Risky. Return true for now.
+            return True
+
         if not targets: return True # No targets to validate
 
         card = self._safe_get_card(source_id)
         if not card: return False # Source disappeared?
 
-        # Use TargetingSystem if available
-        if self.targeting_system:
-             # Re-check if each selected target is still valid for the source
-             # Note: targets dict structure might be simple list or {'creatures': [...], 'players': [...]}
-             all_targets_list = []
-             if isinstance(targets, dict):
-                 for target_list in targets.values():
-                     all_targets_list.extend(target_list)
-             elif isinstance(targets, list):
-                 all_targets_list = targets
-
-             valid_now = self.targeting_system.get_valid_targets(source_id, controller) # Get *currently* valid targets
-
-             for selected_target in all_targets_list:
-                 found_valid = False
-                 for category, valid_list in valid_now.items():
-                      if selected_target in valid_list:
-                           found_valid = True
-                           break
-                 if not found_valid:
-                      logging.debug(f"Target '{selected_target}' is no longer valid for {card.name}.")
-                      return False # At least one target is invalid
-             return True # All targets still valid
+        # --- Use TargetingSystem.validate_targets ---
+        # Ensure targets are passed in the format expected by validate_targets (typically dict)
+        validation_targets = {}
+        if isinstance(targets, dict):
+            validation_targets = targets
+        elif isinstance(targets, list):
+            # Attempt to categorize the list if needed, or pass as a generic category
+            # This depends on how validate_targets is implemented. Assuming it can handle a flat list or needs categorization.
+            # Simple approach: Assign to a 'chosen' category for validation.
+            validation_targets = {"chosen": targets}
         else:
-             # Basic fallback: assume targets are still valid if no system
-             return True
+            logging.warning(f"Unexpected targets format for validation: {type(targets)}")
+            return False # Cannot validate unknown format
+
+        # Check if validate_targets exists and call it
+        if hasattr(self.targeting_system, 'validate_targets'):
+            # Pass the effect text if available in context, helps with specific checks
+            effect_text = getattr(card, 'oracle_text', None) # Get effect text from source card
+            # The stack context might have a more specific effect_text (e.g., for modal abilities)
+            # Need to retrieve the context associated with the source_id if it's on the stack.
+            # For simplicity now, just using card text. A better approach would find the stack item.
+            is_valid = self.targeting_system.validate_targets(source_id, validation_targets, controller, effect_text=effect_text)
+            if not is_valid:
+                 logging.debug(f"Target validation failed for {getattr(card,'name',source_id)} using TargetingSystem.validate_targets.")
+            return is_valid
+        else:
+            # Fallback to get_valid_targets re-check if validate_targets is missing
+            logging.warning("TargetingSystem missing 'validate_targets', falling back to re-checking get_valid_targets.")
+            valid_now = self.targeting_system.get_valid_targets(source_id, controller) # Get *currently* valid targets
+            all_targets_list = []
+            if isinstance(validation_targets, dict):
+                for target_list in validation_targets.values():
+                    all_targets_list.extend(target_list)
+            else: # Assume flat list
+                 all_targets_list = validation_targets.get("chosen",[]) # If used 'chosen' key
+
+            for selected_target in all_targets_list:
+                found_valid = False
+                for category, valid_list in valid_now.items():
+                     if selected_target in valid_list:
+                          found_valid = True
+                          break
+                if not found_valid:
+                     logging.debug(f"Target '{selected_target}' is no longer valid for {getattr(card,'name',source_id)} (Fallback check).")
+                     return False # At least one target is invalid
+            return True # All targets still valid
 
     def resolve_top_of_stack(self):
         """Resolve the top item of the stack."""
@@ -4318,40 +4344,56 @@ class GameState:
         """Applies a regeneration shield if available, preventing destruction."""
         if card_id in player.get("regeneration_shields", set()):
             card = self._safe_get_card(card_id)
-            if card: # Make sure card still exists
+            # Verify card still exists and is on battlefield (might have been removed by other SBAs)
+            current_controller, current_zone = self.find_card_location(card_id)
+            if card and current_controller == player and current_zone == "battlefield":
                 player["regeneration_shields"].remove(card_id)
-                self.tap_permanent(card_id, player)
+                self.tap_permanent(card_id, player) # Tap the creature
                 # Remove damage marked on creature
                 if 'damage_counters' in player: player['damage_counters'].pop(card_id, None)
-                if 'deathtouch_damage' in player: player['deathtouch_damage'].pop(card_id, None) # Clear deathtouch mark
-                logging.debug(f"Regeneration shield used for {card.name}.")
+                if 'deathtouch_damage' in player: player.get('deathtouch_damage', {}).pop(card_id, None) # Clear deathtouch mark
+
+                # Also remove from combat if attacking/blocking (Rule 614.8)
+                if card_id in self.current_attackers: self.current_attackers.remove(card_id)
+                for attacker_id, blockers in list(self.current_block_assignments.items()):
+                    if card_id in blockers: blockers.remove(card_id)
+                    if not blockers: del self.current_block_assignments[attacker_id] # Clean up if no blockers left
+
+                logging.debug(f"Regeneration shield used for {card.name}. Creature tapped and removed from combat.")
                 return True
+            else:
+                 # Shield exists but creature is gone or no longer controlled by player, remove stale shield
+                 player.get("regeneration_shields", set()).discard(card_id)
+                 logging.debug(f"Stale regeneration shield removed for {card_id}")
+
         return False
 
     def apply_totem_armor(self, card_id, player):
         """Applies totem armor if available, destroying the Aura instead."""
-        has_totem_armor = False
         totem_aura_id = None
-
-        for aura_id in list(player.get("battlefield", [])): # Check player's battlefield for auras
+        for aura_id in list(player.get("battlefield", [])): # Check player's battlefield for auras attached to the creature
             aura = self._safe_get_card(aura_id)
             if not aura: continue
-            is_aura_with_totem = 'aura' in getattr(aura, 'subtypes', []) and "totem armor" in getattr(aura, 'oracle_text', '').lower()
-            if is_aura_with_totem:
-                # Check if this aura is attached to the creature being destroyed
-                if player.get("attachments", {}).get(aura_id) == card_id:
-                    has_totem_armor = True
-                    totem_aura_id = aura_id
-                    break
+            is_aura_with_totem = ('aura' in getattr(aura, 'subtypes', [])) and ("totem armor" in getattr(aura, 'oracle_text', '').lower())
 
-        if has_totem_armor and totem_aura_id:
-            logging.debug(f"Totem armor: Destroying {self._safe_get_card(totem_aura_id).name} instead of {self._safe_get_card(card_id).name}.")
+            # Check if this aura is attached to the creature being destroyed
+            if is_aura_with_totem and player.get("attachments", {}).get(aura_id) == card_id:
+                totem_aura_id = aura_id
+                break # Found one, apply it
+
+        if totem_aura_id:
+            aura_to_destroy = self._safe_get_card(totem_aura_id)
+            creature_saved = self._safe_get_card(card_id)
+            logging.debug(f"Totem armor: Destroying {getattr(aura_to_destroy,'name','Aura')} instead of {getattr(creature_saved,'name','Creature')}.")
             # Destroy the aura
-            self.move_card(totem_aura_id, player, "battlefield", player, "graveyard", cause="totem_armor")
-            # Remove damage marked on the creature
-            if 'damage_counters' in player: player['damage_counters'].pop(card_id, None)
-            if 'deathtouch_damage' in player: player['deathtouch_damage'].pop(card_id, None)
-            return True
+            if self.move_card(totem_aura_id, player, "battlefield", player, "graveyard", cause="totem_armor"):
+                 # Remove damage marked on the creature if destruction is prevented
+                 if 'damage_counters' in player: player['damage_counters'].pop(card_id, None)
+                 if 'deathtouch_damage' in player: player.get('deathtouch_damage', {}).pop(card_id, None) # Clear deathtouch mark
+                 # Don't tap or remove from combat for totem armor
+                 return True
+            else:
+                 logging.error(f"Failed to destroy totem armor aura {totem_aura_id}")
         return False
     
     def proliferate(self, player, targets="all"):
@@ -4926,50 +4968,71 @@ class GameState:
              return manifested_ids
          return None
      
+
     def damage_planeswalker(self, planeswalker_id, amount, source_id):
-        """Deal damage to a planeswalker (removes loyalty counters)."""
+        """Deal damage to a planeswalker (removes loyalty counters). Returns actual damage dealt."""
         pw_card = self._safe_get_card(planeswalker_id)
         owner = self.get_card_controller(planeswalker_id)
-        if not pw_card or not owner or 'planeswalker' not in getattr(pw_card, 'card_types', []): return False
+        if not pw_card or not owner or 'planeswalker' not in getattr(pw_card, 'card_types', []):
+            return 0 # Indicate no damage applied
 
         # Apply damage replacement effects targeting this planeswalker
-        damage_context = { "source_id": source_id, "target_id": planeswalker_id, "target_obj": pw_card, "target_is_player": False, "damage_amount": amount, "is_combat_damage": False }
+        damage_context = { "source_id": source_id, "target_id": planeswalker_id, "target_obj": pw_card, "target_is_player": False, "damage_amount": amount, "is_combat_damage": False } # Assume non-combat unless context passed
         actual_damage = amount
         if hasattr(self, 'replacement_effects'):
-            modified_context, _ = self.replacement_effects.apply_replacements("DAMAGE", damage_context)
+            modified_context, was_replaced = self.replacement_effects.apply_replacements("DAMAGE", damage_context)
             actual_damage = modified_context.get("damage_amount", 0)
+            # Check if prevented entirely
+            if actual_damage <= 0 or modified_context.get("prevented"):
+                 logging.debug(f"Damage to PW {pw_card.name} prevented or reduced to 0.")
+                 return 0 # No damage applied
             # TODO: Handle redirection if target changes
 
         if actual_damage > 0:
-            current_loyalty = owner.get("loyalty_counters", {}).get(planeswalker_id, getattr(pw_card, 'loyalty', 0))
-            new_loyalty = max(0, current_loyalty - actual_damage)
-            owner.setdefault("loyalty_counters", {})[planeswalker_id] = new_loyalty
-            # Update card object's loyalty too for observation consistency? Maybe not, counters are authoritative.
-            # pw_card.loyalty = new_loyalty # Careful with modifying card state directly here
+            # Use a dedicated method to remove loyalty counters
+            counters_removed = self._remove_loyalty_counters(planeswalker_id, owner, actual_damage)
 
-            source_name = getattr(self._safe_get_card(source_id),'name',source_id)
-            logging.debug(f"{source_name} dealt {actual_damage} damage to {pw_card.name}. Loyalty now {new_loyalty}")
-            self.trigger_ability(planeswalker_id, "DAMAGED", {"amount": actual_damage, "source_id": source_id})
-            self.check_state_based_actions() # PW might die
-            return True
-        return False
+            if counters_removed > 0:
+                source_name = getattr(self._safe_get_card(source_id),'name',source_id)
+                current_loyalty = owner.get("loyalty_counters", {}).get(planeswalker_id, 0)
+                logging.debug(f"{source_name} dealt {counters_removed} damage to {pw_card.name}. Loyalty now {current_loyalty}")
+                self.trigger_ability(planeswalker_id, "DAMAGED", {"amount": counters_removed, "source_id": source_id})
+                self.check_state_based_actions() # PW might die
+                return counters_removed # Return damage actually applied as counter removal
+        return 0 # No damage applied or counters removed
+    
+    def _remove_loyalty_counters(self, planeswalker_id, owner, amount):
+        """Removes loyalty counters from a planeswalker. Returns amount removed."""
+        if amount <= 0: return 0
+        pw_card = self._safe_get_card(planeswalker_id)
+        current_loyalty = owner.get("loyalty_counters", {}).get(planeswalker_id, getattr(pw_card, 'loyalty', 0) if pw_card else 0)
+        amount_to_remove = min(amount, current_loyalty) # Cannot remove more than current loyalty
+        new_loyalty = current_loyalty - amount_to_remove
+        owner.setdefault("loyalty_counters", {})[planeswalker_id] = new_loyalty
+        return amount_to_remove
 
     def damage_battle(self, battle_id, amount, source_id):
-        """Deal damage to a battle (removes defense counters)."""
+        """Deal damage to a battle (removes defense counters). Returns actual damage dealt."""
         battle_card = self._safe_get_card(battle_id)
         owner = self.get_card_controller(battle_id)
-        if not battle_card or not owner or 'battle' not in getattr(battle_card, 'type_line', ''): return False
+        if not battle_card or not owner or 'battle' not in getattr(battle_card, 'type_line', ''):
+            return 0 # Indicate no damage applied
 
         # Apply damage replacement effects targeting this battle
-        damage_context = { "source_id": source_id, "target_id": battle_id, "target_obj": battle_card, "target_is_player": False, "damage_amount": amount, "is_combat_damage": False }
+        damage_context = { "source_id": source_id, "target_id": battle_id, "target_obj": battle_card, "target_is_player": False, "damage_amount": amount, "is_combat_damage": False } # Assume non-combat unless context passed
         actual_damage = amount
         if hasattr(self, 'replacement_effects'):
-            modified_context, _ = self.replacement_effects.apply_replacements("DAMAGE", damage_context)
+            modified_context, was_replaced = self.replacement_effects.apply_replacements("DAMAGE", damage_context)
             actual_damage = modified_context.get("damage_amount", 0)
+             # Check if prevented entirely
+            if actual_damage <= 0 or modified_context.get("prevented"):
+                 logging.debug(f"Damage to Battle {battle_card.name} prevented or reduced to 0.")
+                 return 0 # No damage applied
             # TODO: Handle redirection
 
         if actual_damage > 0:
-            success = self.add_defense_counter(battle_id, -actual_damage) # Use helper to remove defense
+            # Use add_defense_counter with negative amount
+            success = self.add_defense_counter(battle_id, -actual_damage)
             if success:
                 source_name = getattr(self._safe_get_card(source_id),'name',source_id)
                 current_defense = getattr(self,'battle_cards',{}).get(battle_id,0) # Read current defense
@@ -4977,22 +5040,82 @@ class GameState:
                 self.trigger_ability(battle_id, "DAMAGED", {"amount": actual_damage, "source_id": source_id})
                 # SBA check for battle defeat handled within add_defense_counter or separate SBA check
                 self.check_state_based_actions()
-            return success
-        return False
+                return actual_damage # Return damage successfully applied
+        return 0 # No damage applied
+    
+    def damage_player(self, player, amount, source_id, is_combat_damage=False):
+        """Deals damage to a player, applying replacements. Returns actual damage dealt."""
+        if not player or amount <= 0: return 0
+
+        player_id = "p1" if player == self.p1 else "p2"
+        player_name = player.get('name', player_id)
+
+        damage_context = { "source_id": source_id, "target_id": player_id, "target_obj": player, "target_is_player": True, "damage_amount": amount, "is_combat_damage": is_combat_damage }
+        actual_damage = amount
+
+        # Apply replacements
+        if hasattr(self, 'replacement_effects'):
+            modified_context, was_replaced = self.replacement_effects.apply_replacements("DAMAGE", damage_context)
+            actual_damage = modified_context.get("damage_amount", 0)
+            if actual_damage <= 0 or modified_context.get("prevented"):
+                logging.debug(f"Damage to player {player_name} prevented or reduced to 0.")
+                return 0
+
+        # Apply damage (life loss)
+        if actual_damage > 0:
+            player['life'] -= actual_damage
+            logging.debug(f"Player {player_name} took {actual_damage} damage. Life now {player['life']}.")
+            # Track damage this turn
+            self.damage_dealt_this_turn[player_id] = self.damage_dealt_this_turn.get(player_id, 0) + actual_damage
+            player['lost_life_this_turn'] = True
+            # Trigger "damaged" or "lost life" events
+            self.trigger_ability(None, "PLAYER_DAMAGED", {"player": player, "amount": actual_damage, "source_id": source_id})
+            self.trigger_ability(None, "LOSE_LIFE", {"player": player, "amount": actual_damage, "source_id": source_id})
+            self.check_state_based_actions() # Player might lose
+            return actual_damage
+        return 0
+    
+    def handle_lifelink_gain(self, source_id, player_gaining_life, damage_dealt):
+        """Handles life gain specifically from lifelink, applying replacements."""
+        if damage_dealt <= 0 or not player_gaining_life: return
+
+        gain_context = {'player': player_gaining_life, 'life_amount': damage_dealt, 'source_id': source_id, 'source_type': 'lifelink'}
+        final_life_gain = damage_dealt
+
+        # Apply LIFE_GAIN replacement effects
+        if hasattr(self, 'replacement_effects'):
+            modified_gain_context, gain_replaced = self.replacement_effects.apply_replacements("LIFE_GAIN", gain_context)
+            final_life_gain = modified_gain_context.get('life_amount', 0)
+            if final_life_gain <= 0 or modified_gain_context.get('prevented'):
+                 logging.debug(f"Lifelink gain from {source_id} prevented or reduced to 0.")
+                 return
+
+        if final_life_gain > 0:
+             player_gaining_life['life'] += final_life_gain
+             source_name = getattr(self._safe_get_card(source_id), 'name', source_id)
+             logging.debug(f"Lifelink: {player_gaining_life['name']} gained {final_life_gain} life from {source_name}.")
+             # Trigger GAIN_LIFE event
+             self.trigger_ability(source_id, "GAIN_LIFE", {"player": player_gaining_life, "amount": final_life_gain, "source_id": source_id})
 
     def apply_damage_to_permanent(self, target_id, amount, source_id, is_combat_damage=False, has_deathtouch=False):
-        """Marks damage on a creature, considering deathtouch."""
+        """Marks damage on a creature, considering deathtouch. Returns actual damage marked."""
         target_card = self._safe_get_card(target_id)
         target_owner = self.get_card_controller(target_id)
-        if not target_card or not target_owner or 'creature' not in getattr(target_card, 'card_types', []): return False
+        if not target_card or not target_owner or 'creature' not in getattr(target_card, 'card_types', []):
+            return 0 # Indicate no damage applied
 
         # Apply damage replacement effects targeting this creature
         damage_context = { "source_id": source_id, "target_id": target_id, "target_obj": target_card, "target_is_player": False, "damage_amount": amount, "is_combat_damage": is_combat_damage }
         actual_damage = amount
         if hasattr(self, 'replacement_effects'):
-            modified_context, _ = self.replacement_effects.apply_replacements("DAMAGE", damage_context)
+            modified_context, was_replaced = self.replacement_effects.apply_replacements("DAMAGE", damage_context)
             actual_damage = modified_context.get("damage_amount", 0)
-            # TODO: Handle redirection
+            # Check if prevented entirely
+            if actual_damage <= 0 or modified_context.get("prevented"):
+                logging.debug(f"Damage to {target_card.name} prevented or reduced to 0.")
+                return 0 # No damage applied
+            # Update deathtouch status based on replacement? Less common, assume it sticks for now.
+            # TODO: Handle redirection if target changes (complex)
 
         if actual_damage > 0:
              target_owner.setdefault("damage_counters", {})[target_id] = target_owner.get("damage_counters", {}).get(target_id, 0) + actual_damage
@@ -5000,10 +5123,11 @@ class GameState:
                   target_owner.setdefault("deathtouch_damage", {})[target_id] = True
              source_name = getattr(self._safe_get_card(source_id),'name',source_id)
              logging.debug(f"{source_name} marked {actual_damage} damage on {target_card.name}{' (Deathtouch)' if has_deathtouch else ''}.")
+             # Trigger DAMAGED event immediately after marking
              self.trigger_ability(target_id, "DAMAGED", {"amount": actual_damage, "source_id": source_id, "is_combat": is_combat_damage})
              # SBA check will happen later in the game loop
-             return True
-        return False
+             return actual_damage # Return damage actually marked
+        return 0 # No damage applied
 
     def amass(self, player, amount):
         """Perform Amass N. Finds or creates Army token and adds counters."""

@@ -473,43 +473,59 @@ class TargetingSystem:
         return requirements
 
     def _has_protection_from(self, target_card, source_card, target_owner, source_controller):
-        """Robust protection check using centralized keyword checking."""
+        """Robust protection check using centralized keyword checking and AbilityHandler details."""
         if not target_card or not source_card: return False
 
-        # Check specific "protection from X" grants first
-        protection_details = None
-        if self.ability_handler and hasattr(self.ability_handler, 'get_protection_details'): # Check if method exists
-             protection_details = self.ability_handler.get_protection_details(target_card.card_id)
+        # 1. Check static abilities granting protection directly via layer system/live object state
+        #    (check_keyword already does this)
+        if self.check_keyword(target_card.card_id, "protection"): # Check if the *general* keyword is active
+             # 2. Get specific protection details from AbilityHandler
+             #    This method should aggregate protection from static abilities, granted abilities etc.
+             protection_details = []
+             if self.ability_handler and hasattr(self.ability_handler, 'get_protection_details'):
+                 protection_details = self.ability_handler.get_protection_details(target_card.card_id) or [] # Expect list
 
-        if protection_details:
-            # Perform checks based on protection_details against source_card
-            source_colors = getattr(source_card, 'colors', [0]*5)
-            source_types = getattr(source_card, 'card_types', [])
-            source_subtypes = getattr(source_card, 'subtypes', [])
+             if protection_details:
+                 source_colors = getattr(source_card, 'colors', [0]*5)
+                 source_types = getattr(source_card, 'card_types', [])
+                 source_subtypes = getattr(source_card, 'subtypes', [])
+                 source_name = getattr(source_card, 'name', '').lower()
 
-            if protection_details == "everything": return True
-            if protection_details == "white" and source_colors[0]: return True
-            if protection_details == "blue" and source_colors[1]: return True
-            if protection_details == "black" and source_colors[2]: return True
-            if protection_details == "red" and source_colors[3]: return True
-            if protection_details == "green" and source_colors[4]: return True
-            if protection_details == "all colors" and any(source_colors): return True
-            if protection_details == "colorless" and not any(source_colors): return True
-            if protection_details == "multicolored" and sum(source_colors) > 1: return True
-            if protection_details == "monocolored" and sum(source_colors) == 1: return True
-            if protection_details == "creatures" and "creature" in source_types: return True
-            if protection_details == "artifacts" and "artifact" in source_types: return True
-            if protection_details == "enchantments" and "enchantment" in source_types: return True
-            if protection_details == "planeswalkers" and "planeswalker" in source_types: return True
-            if protection_details == "instants" and "instant" in source_types: return True
-            if protection_details == "sorceries" and "sorcery" in source_types: return True
-            if protection_details == "opponent" and target_owner != source_controller: return True # Opponent check
-            # Check specific subtypes
-            if protection_details in source_subtypes: return True
-            # Check specific named card? Needs name comparison.
-            if protection_details == getattr(source_card, 'name', '').lower(): return True
+                 for protection_detail in protection_details:
+                     protection_detail = protection_detail.lower() # Normalize
+                     # Basic Color Check
+                     if protection_detail == "white" and source_colors[0]: return True
+                     if protection_detail == "blue" and source_colors[1]: return True
+                     if protection_detail == "black" and source_colors[2]: return True
+                     if protection_detail == "red" and source_colors[3]: return True
+                     if protection_detail == "green" and source_colors[4]: return True
+                     # Broader Categories
+                     if protection_detail == "everything": return True
+                     if protection_detail == "all colors" and any(source_colors): return True
+                     if protection_detail == "colorless" and not any(source_colors): return True
+                     if protection_detail == "multicolored" and sum(source_colors) > 1: return True
+                     if protection_detail == "monocolored" and sum(source_colors) == 1: return True
+                     # Card Types
+                     if protection_detail == "creatures" and "creature" in source_types: return True
+                     if protection_detail == "artifacts" and "artifact" in source_types: return True
+                     if protection_detail == "enchantments" and "enchantment" in source_types: return True
+                     if protection_detail == "planeswalkers" and "planeswalker" in source_types: return True
+                     if protection_detail == "instants" and "instant" in source_types: return True
+                     if protection_detail == "sorceries" and "sorcery" in source_types: return True
+                     if protection_detail == "lands" and "land" in source_types: return True
+                     if protection_detail == "permanents" and any(t in source_types for t in ["creature", "artifact", "enchantment", "land", "planeswalker"]): return True # Basic permanent check
+                     # Player Relationship
+                     if protection_detail == "opponent" and target_owner != source_controller: return True
+                     # Subtypes (check against list)
+                     if protection_detail in [sub.lower() for sub in source_subtypes]: return True
+                     # Specific Name
+                     if protection_detail == source_name: return True
+                     # Add more protection types (cmc, etc.) if needed
 
-        return False
+                 # If general protection is active but no specific match found (unusual)
+                 # Default to false, specific protection is needed.
+
+        return False # No relevant protection found
 
     def resolve_targeting(self, source_id, controller, effect_text=None, target_types=None):
         """

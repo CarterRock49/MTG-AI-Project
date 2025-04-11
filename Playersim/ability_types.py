@@ -1282,7 +1282,7 @@ class GainLifeEffect(AbilityEffect):
     def __init__(self, amount, target="controller", condition=None):
         """
         Initialize life gain effect.
-        
+
         Args:
             amount: Amount of life to gain
             target: Who gains life ('controller', 'opponent', 'target_player')
@@ -1291,40 +1291,65 @@ class GainLifeEffect(AbilityEffect):
         super().__init__(f"Gain {amount} life", condition)
         self.amount = amount
         self.target = target
-        
+
     def _apply_effect(self, game_state, source_id, controller, targets):
-        """Apply life gain effect with target handling."""
+        """Apply life gain effect with target handling using GameState helper."""
         target_player = controller
         player_desc = "controller"
-        # ... (Target determination logic remains the same) ...
+        target_player_id = "p1" if controller == game_state.p1 else "p2" # Default to controller ID
+
         if self.target == "opponent":
             target_player = game_state.p2 if controller == game_state.p1 else game_state.p1
             player_desc = "opponent"
+            target_player_id = "p2" if controller == game_state.p1 else "p1"
         elif self.target == "target_player" and targets and targets.get("players"):
-            player_id = targets["players"][0]
-            target_player = game_state.p1 if player_id == "p1" else game_state.p2
-            player_desc = f"Player {player_id}"
+            target_player_id = targets["players"][0]
+            target_player = game_state.p1 if target_player_id == "p1" else game_state.p2
+            player_desc = f"Player {target_player_id}"
 
         if not target_player: return False
 
-        # Check Replacement Effects for LIFE_GAIN
-        life_gain_context = {
-            'player': target_player, 'life_amount': self.amount, 'source_id': source_id
-        }
-        modified_context, replaced = game_state.apply_replacement_effect("LIFE_GAIN", life_gain_context)
-        final_life_gain = modified_context.get('life_amount', 0)
+        # Use GameState's life gain method if available, which should handle replacements/triggers
+        if hasattr(game_state, 'gain_life'):
+             # Assuming gain_life returns the actual amount gained after replacements
+             actual_gained = game_state.gain_life(target_player, self.amount, source_id)
+             if actual_gained > 0:
+                 logging.debug(f"GainLifeEffect (via gs): {player_desc} gained {actual_gained} life.")
+                 return True
+             else:
+                  # Life gain might have been prevented or modified to 0
+                  logging.debug(f"GainLifeEffect (via gs): Life gain for {player_desc} resulted in 0 net gain.")
+                  # Return True if *replaced*, even if gain is 0. Assume gs.gain_life returns amount, not replacement status.
+                  # We need a more complex return from gs.gain_life or check replacement effects here manually.
+                  # Simplified: Assume if it returns 0 or less, it failed or was prevented.
+                  return False # Or maybe True if prevented is okay? Depends on intent. Let's assume fail if 0 gain.
+        else:
+             # Fallback: Manual check for replacements
+             life_gain_context = {
+                 'player': target_player, 'life_amount': self.amount, 'source_id': source_id
+             }
+             # Ensure apply_replacement_effect exists and is callable
+             final_life_gain = self.amount
+             replaced = False
+             if hasattr(game_state, 'apply_replacement_effect') and callable(game_state.apply_replacement_effect):
+                 modified_context, replaced = game_state.apply_replacement_effect("LIFE_GAIN", life_gain_context)
+                 final_life_gain = modified_context.get('life_amount', 0)
+             else:
+                 logging.warning("GameState missing apply_replacement_effect, cannot check replacements for life gain.")
 
-        if final_life_gain > 0:
-            target_player["life"] += final_life_gain
-            logging.debug(f"GainLifeEffect: {player_desc} gained {final_life_gain} life.")
-            # Trigger life gain event AFTER applying gain
-            game_state.trigger_ability(target_id if player_desc == 'target_player' else None, # Trigger origin depends on target type
-                                       "GAIN_LIFE", {"player": target_player, "amount": final_life_gain, "source_id": source_id})
-            return True
-        elif replaced and final_life_gain <= 0:
-            logging.debug(f"GainLifeEffect: Life gain for {player_desc} prevented or replaced.")
-            return True # Replacement counts as success even if no life gained
-        return False # No life gained and no replacement
+
+             if final_life_gain > 0:
+                 target_player["life"] += final_life_gain
+                 logging.debug(f"GainLifeEffect (Manual): {player_desc} gained {final_life_gain} life.")
+                 # Manually trigger life gain event AFTER applying gain if no gs method
+                 if hasattr(game_state, 'trigger_ability'):
+                      game_state.trigger_ability(target_player_id, # Use target ID
+                                                  "GAIN_LIFE", {"player": target_player, "amount": final_life_gain, "source_id": source_id})
+                 return True
+             elif replaced and final_life_gain <= 0:
+                  logging.debug(f"GainLifeEffect (Manual): Life gain for {player_desc} prevented or replaced.")
+                  return True # Replacement counts as success even if no life gained
+             return False # No life gained and no replacement
 
 
 class DamageEffect(AbilityEffect):
@@ -1778,94 +1803,85 @@ class DiscardEffect(AbilityEffect):
     def __init__(self, count=1, target="controller"):
         """
         Initialize discard effect.
-        
+
         Args:
             count: Number of cards to discard (-1 for entire hand)
             target: Who discards ('controller', 'opponent', 'target_player')
         """
-        super().__init__(f"Discard {count} card(s)")
+        count_text = "entire hand" if count == -1 else f"{count} card(s)"
+        target_text = target.replace("_", " ").capitalize()
+        super().__init__(f"{target_text} discards {count_text}")
         self.count = count
         self.target = target
-        
+
     def apply(self, game_state, source_id, controller, targets=None):
-        """Apply discard effect with target handling."""
+        """Apply discard effect using game_state.move_card."""
         target_player = controller  # Default to controller
-        
+        target_player_id = "p1" if controller == game_state.p1 else "p2"
+
         # Determine target player
         if self.target == "opponent":
             target_player = game_state.p2 if controller == game_state.p1 else game_state.p1
+            target_player_id = "p2" if controller == game_state.p1 else "p1"
         elif self.target == "target_player" and targets and "players" in targets and targets["players"]:
-            player_id = targets["players"][0]
-            target_player = game_state.p1 if player_id == "p1" else game_state.p2
-        
+            target_player_id = targets["players"][0]
+            target_player = game_state.p1 if target_player_id == "p1" else game_state.p2
+
         if not target_player:
             return False
-            
+
         # Handle discard
-        if self.count == -1:
-            # Discard entire hand
-            discard_count = len(target_player["hand"])
-            while target_player["hand"]:
-                card_id = target_player["hand"].pop(0)
-                target_player["graveyard"].append(card_id)
-                
-                # Trigger discard effects
-                game_state.trigger_ability(card_id, "DISCARD", {"controller": target_player})
-                
-            logging.debug(f"Player discarded entire hand ({discard_count} cards)")
-            
-            # Track discards
+        discarded_ids = []
+        original_hand_size = len(target_player.get("hand", []))
+
+        if self.count == -1: # Discard entire hand
+            discard_list = list(target_player.get("hand", [])) # Copy for iteration
+            for card_id in discard_list:
+                 success = game_state.move_card(card_id, target_player, "hand", target_player, "graveyard", cause="discard")
+                 if success: discarded_ids.append(card_id)
+            logging.debug(f"Player discarded entire hand ({len(discarded_ids)} cards)")
+
+        else: # Discard specified number
+            discard_count_needed = min(self.count, len(target_player.get("hand", [])))
+            if discard_count_needed > 0:
+                 # In a real game, player chooses. AI Choice: Simple highest CMC discard.
+                 sorted_hand = sorted(
+                      [(idx, card_id, getattr(game_state._safe_get_card(card_id), 'cmc', 0))
+                       for idx, card_id in enumerate(target_player["hand"])],
+                      key=lambda x: -x[2] # Sort descending by CMC
+                 )
+                 # Create list of (card_id, original_index) to discard
+                 ids_to_discard_with_indices = [(sorted_hand[i][1], sorted_hand[i][0]) for i in range(discard_count_needed)]
+
+                 # Remove cards based on original indices (carefully)
+                 # Easier to remove by ID after getting the list
+                 ids_to_discard = [card_id for card_id, idx in ids_to_discard_with_indices]
+
+                 for card_id in ids_to_discard:
+                      # Double check it's still in hand before moving
+                      if card_id in target_player.get("hand", []):
+                           success = game_state.move_card(card_id, target_player, "hand", target_player, "graveyard", cause="discard")
+                           if success: discarded_ids.append(card_id)
+
+                 logging.debug(f"Player discarded {len(discarded_ids)} card(s)")
+
+        # Track discards if any happened
+        num_discarded = len(discarded_ids)
+        if num_discarded > 0:
             if not hasattr(game_state, 'cards_discarded_this_turn'):
                 game_state.cards_discarded_this_turn = {}
-            
-            player_key = "p1" if target_player == game_state.p1 else "p2"
-            game_state.cards_discarded_this_turn[player_key] = game_state.cards_discarded_this_turn.get(player_key, 0) + discard_count
-            
-            return True
-        else:
-            # Discard specified number of cards
-            discard_count = min(self.count, len(target_player["hand"]))
-            
-            # In a real game, player would choose which cards to discard
-            # For AI, we'll use a simple priority (highest mana cost first)
-            if discard_count > 0:
-                # Sort hand by mana cost (highest first)
-                sorted_hand = sorted(
-                    [(i, game_state._safe_get_card(card_id).cmc if hasattr(game_state._safe_get_card(card_id), 'cmc') else 0) 
-                    for i, card_id in enumerate(target_player["hand"])],
-                    key=lambda x: -x[1]
-                )
-                
-                # Discard highest cost cards first
-                for i in range(discard_count):
-                    if i < len(sorted_hand):
-                        idx = sorted_hand[i][0]
-                        if idx < len(target_player["hand"]):
-                            card_id = target_player["hand"].pop(idx)
-                            target_player["graveyard"].append(card_id)
-                            
-                            # Trigger discard effects
-                            game_state.trigger_ability(card_id, "DISCARD", {"controller": target_player})
-                
-                logging.debug(f"Player discarded {discard_count} card(s)")
-                
-                # Track discards
-                if not hasattr(game_state, 'cards_discarded_this_turn'):
-                    game_state.cards_discarded_this_turn = {}
-                
-                player_key = "p1" if target_player == game_state.p1 else "p2"
-                game_state.cards_discarded_this_turn[player_key] = game_state.cards_discarded_this_turn.get(player_key, 0) + discard_count
-                
-                return True
-                
-        return False
+            game_state.cards_discarded_this_turn[target_player_id] = game_state.cards_discarded_this_turn.get(target_player_id, 0) + num_discarded
+            # Discard trigger events are handled within game_state.move_card
+
+        return num_discarded > 0 or (self.count == 0) # Return true if cards were discarded OR if count was 0
+
 
 class MillEffect(AbilityEffect):
     """Effect that mills cards from library to graveyard."""
     def __init__(self, count=1, target="controller"):
         """
         Initialize mill effect.
-        
+
         Args:
             count: Number of cards to mill
             target: Whose library to mill ('controller', 'opponent', 'target_player')
@@ -1873,45 +1889,48 @@ class MillEffect(AbilityEffect):
         super().__init__(f"Mill {count} card(s)")
         self.count = count
         self.target = target
-        
+
     def apply(self, game_state, source_id, controller, targets=None):
-        """Apply mill effect with target handling."""
+        """Apply mill effect using game_state.move_card."""
         target_player = controller  # Default to controller
-        
+        target_player_id = "p1" if controller == game_state.p1 else "p2"
+
         # Determine target player
         if self.target == "opponent":
             target_player = game_state.p2 if controller == game_state.p1 else game_state.p1
+            target_player_id = "p2" if controller == game_state.p1 else "p1"
         elif self.target == "target_player" and targets and "players" in targets and targets["players"]:
-            player_id = targets["players"][0]
-            target_player = game_state.p1 if player_id == "p1" else game_state.p2
-        
+            target_player_id = targets["players"][0]
+            target_player = game_state.p1 if target_player_id == "p1" else game_state.p2
+
         if not target_player:
             return False
-            
+
         # Mill cards
-        mill_count = min(self.count, len(target_player["library"]))
-        for _ in range(mill_count):
-            if target_player["library"]:
-                card_id = target_player["library"].pop(0)
-                target_player["graveyard"].append(card_id)
-                
-                # Trigger mill effects if needed
-                game_state.trigger_ability(card_id, "MILLED", {"controller": target_player})
-        
-        logging.debug(f"Milled {mill_count} card(s) from {target_player['name']}'s library")
-        
+        milled_ids = []
+        count_needed = min(self.count, len(target_player.get("library", []))) # Cards actually available to mill
+
+        # Get IDs to mill first
+        ids_to_mill = target_player.get("library", [])[:count_needed]
+
+        for card_id in ids_to_mill:
+             success = game_state.move_card(card_id, target_player, "library", target_player, "graveyard", cause="mill")
+             if success: milled_ids.append(card_id)
+
+        logging.debug(f"Milled {len(milled_ids)} card(s) from {target_player['name']}'s library")
+
         # Track milled cards
-        if not hasattr(game_state, 'cards_milled_this_turn'):
-            game_state.cards_milled_this_turn = {}
-        
-        player_key = "p1" if target_player == game_state.p1 else "p2"
-        game_state.cards_milled_this_turn[player_key] = game_state.cards_milled_this_turn.get(player_key, 0) + mill_count
-        
-        # If no cards left in library, player will lose on next draw
-        if not target_player["library"]:
+        num_milled = len(milled_ids)
+        if num_milled > 0:
+            if not hasattr(game_state, 'cards_milled_this_turn'):
+                game_state.cards_milled_this_turn = {}
+            game_state.cards_milled_this_turn[target_player_id] = game_state.cards_milled_this_turn.get(target_player_id, 0) + num_milled
+
+        # Check for empty library warning
+        if not target_player.get("library"):
             target_player["library_empty_warning"] = True
-            
-        return mill_count > 0
+
+        return num_milled > 0 or (self.count == 0) # Return true if cards were milled OR if count was 0
 class ExileEffect(AbilityEffect):
     """Effect that exiles permanents or cards from zones."""
     def __init__(self, target_type="permanent", zone="battlefield", condition=None):

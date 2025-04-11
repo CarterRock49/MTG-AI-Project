@@ -2411,21 +2411,14 @@ class ActionHandler:
 
          card_id = player["battlefield"][land_idx]
 
-         # Check if it's a land and untapped
-         card = gs._safe_get_card(card_id)
-         if not card or 'land' not in getattr(card, 'type_line', ''):
-             logging.warning(f"TAP_LAND_FOR_MANA: Card {card_id} is not a land.")
-             return -0.15, False
-         if card_id in player.get("tapped_permanents", set()):
-             logging.warning(f"TAP_LAND_FOR_MANA: Land {card.name} is already tapped.")
-             return -0.1, False # Already tapped
-
          # Use ManaSystem to handle tapping and mana addition
          if gs.mana_system and gs.mana_system.tap_land_for_mana(player, card_id):
              return 0.05, True # Mana is useful
          else:
-             logging.warning(f"TAP_LAND_FOR_MANA: Failed (handled by gs.mana_system). Card: {card_id}")
+             card_name = getattr(gs._safe_get_card(card_id), 'name', card_id)
+             logging.warning(f"TAP_LAND_FOR_MANA: Failed (handled by gs.mana_system). Card: {card_name}")
              return -0.1, False
+
 
     def _handle_tap_land_for_effect(self, param, **kwargs):
          # Similar to activate ability, but specific to land effects
@@ -2530,25 +2523,43 @@ class ActionHandler:
         return -0.2, False # Invalid index
 
     def _handle_discard_card(self, param, **kwargs):
-        gs = self.game_state; player = gs.p1 if gs.agent_is_p1 else gs.p2
+        gs = self.game_state
+        player = gs.p1 if gs.agent_is_p1 else gs.p2 # Should maybe be current_player or context['player']? Assumes agent player.
         hand_idx = param
-        if hand_idx < len(player["hand"]):
+        if hand_idx < len(player.get("hand", [])):
             card_id = player["hand"][hand_idx]
-            value = self.card_evaluator.evaluate_card(card_id, "discard") if self.card_evaluator else 0
-            # Check for Madness before moving to GY
             card = gs._safe_get_card(card_id)
-            has_madness = "madness" in getattr(card,'oracle_text','').lower()
+            card_name = getattr(card, 'name', card_id)
+            value = self.card_evaluator.evaluate_card(card_id, "discard") if self.card_evaluator else 0
+
+            # Check for Madness before moving to GY
+            has_madness = "madness" in getattr(card,'oracle_text','').lower() if card else False
             target_zone = "exile" if has_madness else "graveyard" # Move to exile first if madness
+
+            # Use move_card for the discard action
             success_move = gs.move_card(card_id, player, "hand", player, target_zone, cause="discard")
+
             if success_move and has_madness:
                 # Set up madness trigger/context
-                if not hasattr(gs, 'madness_trigger'): gs.madness_trigger = []
-                gs.madness_trigger.append({'card_id': card_id, 'player': player})
-                logging.debug(f"Discarded {card.name} with Madness, moved to exile.")
+                if not hasattr(gs, 'madness_trigger'): gs.madness_trigger = None # Use None or empty dict
+                # Ensure madness_trigger isn't overwritten if multiple discards happen before resolution
+                # Maybe queue triggers instead? Simple override for now.
+                gs.madness_trigger = {'card_id': card_id, 'player': player, 'cost': self._get_madness_cost_str(card)}
+                logging.debug(f"Discarded {card_name} with Madness, moved to exile.")
             elif success_move:
-                logging.debug(f"Discarded {card.name} to graveyard.")
-            return -0.05 + value * 0.2 if success_move else -0.15, success_move
+                logging.debug(f"Discarded {card_name} to graveyard.")
+
+            return -0.05 + value * 0.2 if success_move else -0.15, success_move # Reward negative because losing card
         return -0.2, False
+    
+    def _get_madness_cost_str(self, card):
+        if card and hasattr(card, 'oracle_text'):
+            match = re.search(r"madness (\{[^\}]+\}|[0-9]+)", card.oracle_text.lower())
+            if match:
+                 cost_str = match.group(1)
+                 if cost_str.isdigit(): return f"{{{cost_str}}}"
+                 return cost_str
+        return None
 
     def _handle_unlock_door(self, param, context, **kwargs):
         gs = self.game_state
@@ -3027,45 +3038,54 @@ class ActionHandler:
              return -0.05, False
 
 
-    def _handle_add_counter(self, param, action_type=None, **kwargs):
+    def _handle_add_counter(self, param, context, **kwargs):
         gs = self.game_state
-        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        player = gs.p1 if gs.agent_is_p1 else gs.p2 # Who performs the action (may not be owner)
         # Param 0-9 is target permanent index on combined battlefield? Or just player's?
-        # Let's assume combined battlefield for now.
+        # Assume combined battlefield for now.
         target_idx = param
         target_id, target_owner = gs.get_permanent_by_combined_index(target_idx)
         if not target_id: return -0.1, False
 
         # Need context for counter type and count
-        context = kwargs.get('context', {})
-        counter_type = context.get('counter_type', '+1/+1')
+        # context passed from kwargs
+        counter_type = context.get('counter_type', '+1/+1') # Default to +1/+1
         count = context.get('count', 1)
+        source_id = context.get('source_id', 'unknown_source') # Identify source if possible
 
+        # Call GameState method
         success = gs.add_counter(target_id, counter_type, count)
         if success:
             reward = 0.1 * count if counter_type == '+1/+1' else 0.05 * count
             return reward, True
         return -0.05, False
 
-    def _handle_remove_counter(self, param, action_type=None, **kwargs):
+    def _handle_remove_counter(self, param, context, **kwargs):
         gs = self.game_state
+        player = gs.p1 if gs.agent_is_p1 else gs.p2 # Who performs action
         # Param 0-9 target index
         target_idx = param
         target_id, target_owner = gs.get_permanent_by_combined_index(target_idx)
         if not target_id: return -0.1, False
 
         # Need context for counter type and count
-        context = kwargs.get('context', {})
+        # context passed from kwargs
         counter_type = context.get('counter_type') # Try to infer if None?
         count = context.get('count', 1)
+        source_id = context.get('source_id', 'unknown_source')
 
         target_card = gs._safe_get_card(target_id)
-        if not counter_type: # Simple inference
+        # Infer counter type if not provided
+        if not counter_type:
             if hasattr(target_card, 'counters') and target_card.counters:
-                 counter_type = list(target_card.counters.keys())[0]
-            else: return -0.1, False # No counters to remove
+                 # Prioritize removing -1/-1 if present? Or need context?
+                 counter_type = '-1/-1' if '-1/-1' in target_card.counters else list(target_card.counters.keys())[0]
+            else:
+                 logging.warning(f"Remove Counter: No counters found on {target_id} to remove.")
+                 return -0.1, False # No counters to remove
 
-        success = gs.add_counter(target_id, counter_type, -count) # Use negative count
+        # Call GameState method with negative count
+        success = gs.add_counter(target_id, counter_type, -count)
         if success:
             reward = 0.15 * count if counter_type == '-1/-1' else 0.05 * count # Removing bad counters is good
             return reward, True
@@ -3700,43 +3720,44 @@ class ActionHandler:
             return (-0.15, False)
     
     def _handle_equip(self, param, context, **kwargs):
-            """Handle equip action. Expects (equip_idx, target_idx) in context."""
-            gs = self.game_state
-            player = gs.p1 if gs.agent_is_p1 else gs.p2
-            # context passed from apply_action
+        gs = self.game_state
+        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        # Context MUST contain 'equip_idx' and 'target_idx'
+        # --- ADDED Context Checks ---
+        equip_idx = context.get('equip_idx')
+        target_idx = context.get('target_idx') # Target creature battlefield index
 
-            # --- CHANGED: Get indices from context ---
-            equip_idx = context.get('equip_idx')
-            target_idx = context.get('target_idx') # Target creature battlefield index
+        if equip_idx is None or target_idx is None:
+            logging.error(f"Equip context missing required indices ('equip_idx', 'target_idx'): {context}")
+            return -0.15, False
+        # --- END Checks ---
 
-            if equip_idx is not None and target_idx is not None:
-                # Ensure indices are integers
-                try: equip_idx, target_idx = int(equip_idx), int(target_idx)
-                except (ValueError, TypeError):
-                    logging.warning(f"Equip context has non-integer indices: {context}")
-                    return (-0.15, False)
+        if equip_idx is not None and target_idx is not None:
+            try: equip_idx, target_idx = int(equip_idx), int(target_idx)
+            except (ValueError, TypeError):
+                logging.error(f"Equip context has non-integer indices: {context}")
+                return -0.15, False
 
-                if 0 <= equip_idx < len(player["battlefield"]) and 0 <= target_idx < len(player["battlefield"]):
-                    equip_id = player["battlefield"][equip_idx]
-                    target_id = player["battlefield"][target_idx]
+            if 0 <= equip_idx < len(player["battlefield"]) and 0 <= target_idx < len(player["battlefield"]):
+                equip_id = player["battlefield"][equip_idx]
+                target_id = player["battlefield"][target_idx]
 
-                    # --- Check Equip Cost & Affordability ---
-                    equip_card = gs._safe_get_card(equip_id)
-                    equip_cost_str = self._get_equip_cost_str(equip_card)
-                    if not equip_cost_str or not self._can_afford_cost_string(player, equip_cost_str):
-                        logging.debug(f"Cannot afford equip cost {equip_cost_str} for {equip_id}")
-                        return (-0.05, False) # Cannot afford
+                # --- Check Equip Cost & Affordability ---
+                equip_card = gs._safe_get_card(equip_id)
+                equip_cost_str = self._get_equip_cost_str(equip_card) # Use internal helper
+                if not equip_cost_str or not self._can_afford_cost_string(player, equip_cost_str):
+                    logging.debug(f"Cannot afford equip cost {equip_cost_str} for {equip_id}")
+                    return -0.05, False
 
-                    # --- Perform Equip (includes validation & payment) ---
-                    # Assume gs.equip_permanent checks validity, pays cost, attaches
-                    if hasattr(gs, 'equip_permanent') and gs.equip_permanent(player, equip_id, target_id):
-                        return (0.25, True)
-                    else:
-                        logging.debug(f"Equip action failed validation or execution for {equip_id} -> {target_id}")
-                        return (-0.1, False) # Equip validation/execution failed
-                else: logging.warning(f"Equip indices out of bounds: E:{equip_idx}, T:{target_idx}")
-            else: logging.warning(f"Equip context missing indices: {context}")
-            return (-0.15, False)
+                # --- Perform Equip via GameState ---
+                if hasattr(gs, 'equip_permanent') and gs.equip_permanent(player, equip_id, target_id):
+                    return 0.25, True
+                else:
+                    logging.debug(f"Equip action failed validation or execution for {equip_id} -> {target_id}")
+                    return -0.1, False
+            else: logging.warning(f"Equip indices out of bounds: E:{equip_idx}, T:{target_idx}")
+        # else: logging error handled above
+        return -0.15, False
         
     def _handle_unequip(self, param, context, **kwargs):
             """Handle unequip action. Expects equip_idx in context."""
@@ -3783,39 +3804,37 @@ class ActionHandler:
                 return -0.15, False
 
     def _handle_fortify(self, param, context, **kwargs):
-            """Handle fortify action. Expects (fort_idx, target_idx) in context."""
-            gs = self.game_state
-            player = gs.p1 if gs.agent_is_p1 else gs.p2
-            # context passed from apply_action
-            fort_idx = context.get('fort_idx')
-            target_idx = context.get('target_idx') # Land battlefield index
+        gs = self.game_state
+        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        # Context must contain 'fort_idx' and 'target_idx'
+        # context passed from kwargs
+        fort_idx = context.get('fort_idx')
+        target_idx = context.get('target_idx') # Land battlefield index
 
-            if fort_idx is not None and target_idx is not None:
-                try: fort_idx, target_idx = int(fort_idx), int(target_idx)
-                except (ValueError, TypeError):
-                    logging.warning(f"Fortify context has non-integer indices: {context}")
-                    return (-0.15, False)
+        if fort_idx is not None and target_idx is not None:
+            try: fort_idx, target_idx = int(fort_idx), int(target_idx)
+            except (ValueError, TypeError): return -0.15, False
 
-                if 0 <= fort_idx < len(player["battlefield"]) and 0 <= target_idx < len(player["battlefield"]):
-                    fort_id = player["battlefield"][fort_idx]
-                    target_id = player["battlefield"][target_idx]
+            if 0 <= fort_idx < len(player["battlefield"]) and 0 <= target_idx < len(player["battlefield"]):
+                fort_id = player["battlefield"][fort_idx]
+                target_id = player["battlefield"][target_idx]
 
-                    # --- Check Cost & Affordability ---
-                    fort_card = gs._safe_get_card(fort_id)
-                    fort_cost_str = self._get_fortify_cost_str(fort_card)
-                    if not fort_cost_str or not self._can_afford_cost_string(player, fort_cost_str):
-                        logging.debug(f"Cannot afford fortify cost {fort_cost_str} for {fort_id}")
-                        return (-0.05, False)
+                # --- Check Cost & Affordability ---
+                fort_card = gs._safe_get_card(fort_id)
+                fort_cost_str = self._get_fortify_cost_str(fort_card) # Use internal helper
+                if not fort_cost_str or not self._can_afford_cost_string(player, fort_cost_str):
+                    logging.debug(f"Cannot afford fortify cost {fort_cost_str} for {fort_id}")
+                    return -0.05, False
 
-                    # --- Perform Fortify (includes validation, payment, attach) ---
-                    if hasattr(gs, 'fortify_land') and gs.fortify_land(player, fort_id, target_id):
-                        return (0.2, True)
-                    else:
-                        logging.debug(f"Fortify action failed validation or execution for {fort_id} -> {target_id}")
-                        return (-0.1, False)
-                else: logging.warning(f"Fortify indices out of bounds: F:{fort_idx}, T:{target_idx}")
-            else: logging.warning(f"Fortify context missing indices: {context}")
-            return (-0.15, False)
+                # --- Perform Fortify via GameState ---
+                if hasattr(gs, 'fortify_land') and gs.fortify_land(player, fort_id, target_id):
+                    return 0.2, True
+                else:
+                    logging.debug(f"Fortify action failed validation or execution for {fort_id} -> {target_id}")
+                    return -0.1, False
+            else: logging.warning(f"Fortify indices out of bounds: F:{fort_idx}, T:{target_idx}")
+        else: logging.warning(f"Fortify context missing indices: {context}")
+        return -0.15, False
      
     def _handle_reconfigure(self, param, context, **kwargs):
             """Handle reconfigure action. Expects battlefield_idx in context."""
@@ -3881,36 +3900,33 @@ class ActionHandler:
         opponent = gs.p2 if player == gs.p1 else gs.p1
         winner = gs.clash(player, opponent)
         return (0.1, True) if winner == player else (0.0, True)
-
-
       
+
     def _handle_conspire(self, param, context, **kwargs):
-            """Handle conspire. Expects (spell_stack_idx, c1_identifier, c2_identifier) in context."""
-            gs = self.game_state
-            player = gs.p1 if gs.agent_is_p1 else gs.p2
-            # context passed from apply_action
+        gs = self.game_state
+        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        # --- ADDED Context Checks ---
+        spell_stack_idx = context.get('spell_stack_idx')
+        c1_identifier = context.get('creature1_identifier') # Can be index or ID
+        c2_identifier = context.get('creature2_identifier') # Can be index or ID
 
-            # --- CHANGED: Get parameters from context ---
-            spell_stack_idx = context.get('spell_stack_idx')
-            c1_identifier = context.get('creature1_identifier') # Can be index or ID
-            c2_identifier = context.get('creature2_identifier') # Can be index or ID
+        if spell_stack_idx is None or c1_identifier is None or c2_identifier is None:
+             logging.error(f"Conspire context missing required indices: {context}")
+             return -0.15, False
+        # --- END Checks ---
 
-            if spell_stack_idx is not None and c1_identifier is not None and c2_identifier is not None:
-                try: spell_stack_idx = int(spell_stack_idx)
-                except (ValueError, TypeError):
-                    logging.warning(f"Conspire context has non-integer spell_stack_idx: {context}")
-                    return -0.15, False
+        if spell_stack_idx is not None and c1_identifier is not None and c2_identifier is not None:
+            try: spell_stack_idx = int(spell_stack_idx)
+            except (ValueError, TypeError): return -0.15, False
 
-                # GameState.conspire should perform validation (spell target, creatures valid/untapped/color) and tap
-                if hasattr(gs, 'conspire') and gs.conspire(player, spell_stack_idx, c1_identifier, c2_identifier):
-                    return 0.4, True
-                else:
-                    logging.debug("Conspire action failed validation or execution.")
-                    return -0.1, False
-            else: logging.warning(f"Conspire context missing required indices: {context}")
-            return -0.15, False
-
-    
+            # Call GameState conspire method
+            if hasattr(gs, 'conspire') and gs.conspire(player, spell_stack_idx, c1_identifier, c2_identifier):
+                return 0.4, True
+            else:
+                logging.debug("Conspire action failed validation or execution.")
+                return -0.1, False
+        # else: error logged above
+        return -0.15, False
       
     def _handle_grandeur(self, param, context, **kwargs):
             gs = self.game_state; player = gs.p1 if gs.agent_is_p1 else gs.p2
@@ -3958,9 +3974,14 @@ class ActionHandler:
     def _handle_select_spree_mode(self, param, context, **kwargs):
             gs = self.game_state
             player = gs.p1 if gs.agent_is_p1 else gs.p2
-            # Context has the relevant info
+            # --- ADDED Context Checks ---
             hand_idx = context.get('hand_idx')
             mode_idx = context.get('mode_idx')
+
+            if hand_idx is None or mode_idx is None:
+                logging.error(f"Spree Mode context missing required indices: {context}")
+                return -0.15, False
+            # --- END Checks ---
 
             if hand_idx is not None and mode_idx is not None:
                 try: hand_idx, mode_idx = int(hand_idx), int(mode_idx)
@@ -4005,7 +4026,7 @@ class ActionHandler:
                         return -0.1, False
                 else: # Invalid hand index
                     return -0.1, False
-            else: logging.warning(f"Spree Mode context missing indices: {context}")
+            # else: error logged above
             return -0.2, False # Invalid param
     
     def _handle_create_token(self, param, action_type=None, **kwargs):
@@ -4213,8 +4234,9 @@ class ActionHandler:
     
         # --- Specific Handler Implementations ---
 
+
     def _handle_alternative_casting(self, param, action_type, context=None, **kwargs):
-        """Generic handler for alternative casting methods. (Updated)"""
+        """Generic handler for alternative casting methods. (Updated Context Checks)"""
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
         # Context passed from kwargs overrides base context
@@ -4228,97 +4250,111 @@ class ActionHandler:
 
         # --- Determine card_id and source_zone ---
         if action_type == "CAST_FOR_MADNESS":
-            source_zone = "exile"
-            # Madness requires the card ID from the *game state's* madness trigger context
+            # --- ADDED Context Check ---
             if not hasattr(gs, 'madness_trigger') or not gs.madness_trigger or gs.madness_trigger.get('player') != player:
                  logging.warning("Madness cast action taken but no valid madness trigger found.")
                  return -0.1, False
             card_id = gs.madness_trigger.get("card_id")
+            # --- END Check ---
+            source_zone = "exile"
             if not card_id or card_id not in player[source_zone]:
                  logging.warning("Madness trigger card not found in exile.")
                  return -0.1, False
-        elif action_type in ["CAST_FOR_EMERGE", "CAST_FOR_DELVE"]:
+        elif action_type in ["CAST_FOR_EMERGE", "CAST_FOR_DELVE", "CAST_WITH_OVERLOAD"]: # Add others sourced from hand
             source_zone = "hand"
-            # Requires hand_idx from context, not param
-            if "hand_idx" not in context: return -0.1, False # Agent needs to provide this via context
+            # --- ADDED Context Check ---
+            if "hand_idx" not in context:
+                logging.error(f"{action_type} requires 'hand_idx' in context.")
+                return -0.1, False
+            # --- END Check ---
             hand_idx_param = context["hand_idx"]
             if hand_idx_param >= len(player[source_zone]): return -0.1, False
             card_id = player[source_zone][hand_idx_param]
 
             # Handle additional costs for Emerge/Delve
             if action_type == "CAST_FOR_EMERGE":
-                if "sacrifice_idx" not in context: return -0.1, False
+                # --- ADDED Context Check ---
+                if "sacrifice_idx" not in context:
+                    logging.error("Emerge requires 'sacrifice_idx' in context.")
+                    return -0.1, False
+                # --- END Check ---
                 sac_idx = context["sacrifice_idx"]
                 if sac_idx >= len(player["battlefield"]): return -0.1, False
                 sac_id = player["battlefield"][sac_idx]
                 sac_card = gs._safe_get_card(sac_id)
                 if not sac_card or 'creature' not in getattr(sac_card, 'card_types', []): return -0.1, False
-                gs.move_card(sac_id, player, "battlefield", player, "graveyard")
-                context["sacrificed_cmc"] = getattr(sac_card, 'cmc', 0)
+                # Don't actually sacrifice here, mark in context for pay_mana_cost
+                context["additional_cost_to_pay"] = {"type": "sacrifice", "target_id": sac_id}
+                context["sacrificed_cmc"] = getattr(sac_card, 'cmc', 0) # Pass for cost calc
             elif action_type == "CAST_FOR_DELVE":
-                if "gy_indices" not in context: return -0.1, False
-                gy_indices = context["gy_indices"]
-                actual_gy_indices = [idx for idx in gy_indices if idx < len(player["graveyard"])]
-                if len(actual_gy_indices) == 0 and len(gy_indices) > 0:
-                     logging.warning("No valid GY cards provided for Delve cost.")
-                     # Don't necessarily fail, might pay full cost. Delve count affects mana cost reduction.
-                     context["delve_count"] = 0
-                else:
-                     context["delve_cards"] = []
-                     for gy_idx in sorted(actual_gy_indices, reverse=True):
-                          exile_id = player["graveyard"].pop(gy_idx)
-                          player["exile"].append(exile_id)
-                          context["delve_cards"].append(exile_id)
-                     context["delve_count"] = len(context["delve_cards"])
+                 # --- ADDED Context Check ---
+                 if "gy_indices" not in context or not isinstance(context["gy_indices"], list):
+                     logging.error("Delve requires 'gy_indices' list in context.")
+                     return -0.1, False
+                 # --- END Check ---
+                 gy_indices = context["gy_indices"]
+                 actual_gy_indices = [idx for idx in gy_indices if idx < len(player["graveyard"])]
+                 context["delve_count"] = len(actual_gy_indices)
+                 context["additional_cost_to_pay"] = {"type": "delve", "gy_indices": actual_gy_indices}
 
-        else: # Flashback, Jump-Start, Escape, Aftermath
+        elif action_type == "CAST_WITH_JUMP_START":
+             source_zone_idx = param # GY index
+             if source_zone_idx is None or source_zone_idx >= len(player[source_zone]): return -0.1, False
+             card_id = player[source_zone][source_zone_idx]
+             # --- ADDED Context Check ---
+             if "discard_idx" not in context:
+                  logging.error("Jump-Start requires 'discard_idx' in context.")
+                  return -0.1, False
+             # --- END Check ---
+             discard_idx = context["discard_idx"]
+             if discard_idx >= len(player["hand"]): return -0.1, False # Cannot discard
+             # Mark discard requirement for pay_mana_cost
+             context["additional_cost_to_pay"] = {"type": "discard", "hand_idx": discard_idx}
+
+        elif action_type == "CAST_WITH_ESCAPE":
+             source_zone_idx = param # GY index
+             if source_zone_idx is None or source_zone_idx >= len(player[source_zone]): return -0.1, False
+             card_id = player[source_zone][source_zone_idx]
+             # --- ADDED Context Check ---
+             if "gy_indices_escape" not in context or not isinstance(context["gy_indices_escape"], list):
+                  logging.error("Escape requires 'gy_indices_escape' list in context.")
+                  return -0.1, False
+             # --- END Check ---
+             gy_indices_escape = context["gy_indices_escape"]
+             card = gs._safe_get_card(card_id) # Need card to check required exile count
+             required_exile_count = 0
+             # Basic parsing for "exile N other cards"
+             match = re.search(r"exile (\w+|\d+) other cards?", getattr(card, 'oracle_text','').lower())
+             if match: required_exile_count = self._word_to_number(match.group(1))
+
+             actual_gy_indices = [idx for idx in gy_indices_escape if idx < len(player["graveyard"])]
+             if len(actual_gy_indices) < required_exile_count:
+                 logging.warning(f"Not enough GY cards selected for Escape ({len(actual_gy_indices)}/{required_exile_count})")
+                 return -0.1, False # Cannot meet cost
+             context["additional_cost_to_pay"] = {"type": "escape_exile", "gy_indices": actual_gy_indices[:required_exile_count]} # Slice to exact required
+
+        else: # Flashback, Aftermath
+             source_zone = "graveyard" # Both from GY
              source_zone_idx = param # Param is the index in the source zone (GY)
              if source_zone_idx is None or source_zone_idx >= len(player[source_zone]): return -0.1, False
              card_id = player[source_zone][source_zone_idx]
-
-             if action_type == "CAST_WITH_JUMP_START":
-                  if "discard_idx" not in context: return -0.1, False # Context needs discard choice
-                  discard_idx = context["discard_idx"]
-                  if discard_idx >= len(player["hand"]): return -0.1, False
-                  discard_id = player["hand"].pop(discard_idx)
-                  player["graveyard"].append(discard_id)
-             elif action_type == "CAST_WITH_ESCAPE":
-                  if "gy_indices_escape" not in context: return -0.1, False
-                  gy_indices_escape = context["gy_indices_escape"]
-                  # Escape cost needs parsing to know required exile count
-                  card = gs._safe_get_card(card_id)
-                  required_exile_count = 0 # Placeholder - requires parsing card.escape_cost
-                  match = re.search(r"escape[^\n]*, exile (\w+|\d+)", getattr(card, 'oracle_text','').lower())
-                  if match:
-                       count_str = match.group(1)
-                       if count_str.isdigit(): required_exile_count = int(count_str)
-                       elif count_str == "one": required_exile_count = 1
-                       elif count_str == "two": required_exile_count = 2
-                       # ... add more word numbers
-                       else: required_exile_count = 1 # Default? Or fail?
-
-                  actual_gy_indices = [idx for idx in gy_indices_escape if idx < len(player["graveyard"])]
-                  if len(actual_gy_indices) < required_exile_count:
-                       logging.warning(f"Not enough GY cards selected for Escape ({len(actual_gy_indices)}/{required_exile_count})")
-                       # Rollback Jump-Start discard if applicable
-                       if action_type == "CAST_WITH_JUMP_START" and discard_id:
-                           player["graveyard"].remove(discard_id)
-                           player["hand"].append(discard_id)
-                       return -0.1, False
-
-                  context["escape_cards"] = []
-                  for gy_idx in sorted(actual_gy_indices, reverse=True):
-                      exile_id = player["graveyard"].pop(gy_idx)
-                      player["exile"].append(exile_id)
-                      context["escape_cards"].append(exile_id)
+             # Aftermath may need specific half selection if implemented differently
+             if action_type == "AFTERMATH_CAST":
+                  context["cast_right_half"] = True # Assume aftermath is always right half
 
         if not card_id: return -0.2, False
 
         # --- Prepare for casting (Remove from source) ---
-        # The cast_spell method handles this now if source_zone is provided in context
+        # cast_spell handles this using context["source_zone"]
         context["source_zone"] = source_zone
+        # Pass hand index if relevant
+        if hand_idx_param is not None: context['hand_idx'] = hand_idx_param
+        if source_zone_idx is not None: context['source_idx'] = source_zone_idx
+
 
         # --- Cast the spell ---
+        # cast_spell now needs to handle paying additional non-mana costs from context['additional_cost_to_pay']
+        # *before* paying the mana cost.
         success = gs.cast_spell(card_id, player, context=context)
 
         if success:
@@ -4326,14 +4362,8 @@ class ActionHandler:
             if action_type == "CAST_FOR_MADNESS": gs.madness_trigger = None
             return 0.25, True
         else:
-            # Rollback zone change and costs
-            # Note: cast_spell should ideally handle rollback on failure
             logging.warning(f"Alternative cast failed for {action_type} {card_id}")
-            # Minimal rollback attempt: put card back if cast_spell didn't
-            if not gs.find_card_location(card_id):
-                if source_zone == "hand" and hand_idx_param is not None: player["hand"].insert(hand_idx_param, card_id)
-                elif source_zone in player: player[source_zone].append(card_id)
-            # TODO: Rollback sacrifice/discard/exile more robustly
+            # Rollback handled by cast_spell ideally
             return -0.1, False
 
     def _handle_cast_split(self, param, action_type, **kwargs):

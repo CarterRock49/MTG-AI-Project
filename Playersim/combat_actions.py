@@ -690,9 +690,9 @@ class CombatActionHandler:
             return True
         return False
 
-    
+
     def handle_assign_multiple_blockers(self, param=None, context=None, **kwargs):
-        """Handle assigning multiple blockers. Attacker index from param, blocker indices from context."""
+        """Handle assigning multiple blockers. Attacker index from param, blocker identifiers from context."""
         gs = self.game_state
         if gs.phase != gs.PHASE_DECLARE_BLOCKERS: return False
         if context is None: context = {}
@@ -707,10 +707,12 @@ class CombatActionHandler:
         if not attacker_card: return False
 
         # --- Get Blocker Indices from Context ---
+        # --- ADDED Context Check ---
         blocker_identifiers = context.get('blocker_identifiers') # Use consistent key, expect a list
         if not blocker_identifiers or not isinstance(blocker_identifiers, list):
             logging.error("Missing or invalid 'blocker_identifiers' list in context for multi-block.")
             return False
+        # --- END Check ---
 
         # --- Validate Blockers ---
         player = gs.p1 if gs.agent_is_p1 else gs.p2 # Player controlling blockers
