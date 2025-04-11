@@ -17,7 +17,7 @@ class Ability:
         """Check if this ability should trigger"""
         return False
     def resolve(self, game_state, controller):
-        """Resolve the ability's effect with improved error handling"""
+        """Resolve the ability's effect with improved error handling and target validation."""
         card = game_state._safe_get_card(self.card_id)
         if not card:
             logging.warning(f"Cannot resolve ability: card {self.card_id} not found")
@@ -25,19 +25,21 @@ class Ability:
 
         try:
             # Check if ability requires targeting based on its effect text
-            requires_target = "target" in getattr(self, 'effect', getattr(self, 'effect_text', '')).lower()
-            targets = None # Targets will be resolved if needed
+            text_to_check = getattr(self, 'effect', getattr(self, 'effect_text', ''))
+            requires_target = "target" in text_to_check.lower() # Basic check
+            targets_resolved = {} # Targets resolved for this instance
 
-            # If targets are needed, resolve them
             if requires_target:
-                targets = self._handle_targeting(game_state, controller)
-                # Fizzle if targeting required but failed or yielded no targets
-                if targets is None or (isinstance(targets, dict) and not any(targets.values())):
-                    logging.debug(f"Targeting failed for ability: {self.effect_text}. Fizzling.")
-                    return False
+                targets_resolved = self._handle_targeting(game_state, controller)
+                # Validate targets just before resolution (they might have become invalid)
+                # Targets should be in a structured dict {cat:[id,...]} by now if resolved properly
+                if not game_state._validate_targets_on_resolution(self.card_id, controller, targets_resolved):
+                    logging.info(f"Ability {self.effect_text} fizzled: Targets became invalid before resolution.")
+                    return False # Fizzle (counts as resolved successfully technically)
 
             # Delegate to specific implementation, passing resolved targets
-            return self._resolve_ability_implementation(game_state, controller, targets)
+            return self._resolve_ability_implementation(game_state, controller, targets_resolved)
+
         except Exception as e:
             logging.error(f"Error resolving ability ({type(self).__name__}): {str(e)}")
             import traceback

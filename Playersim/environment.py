@@ -175,18 +175,18 @@ class AlphaZeroMTGEnv(gym.Env):
             "mulligan_recommendation": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
             "mulligan_reason_count": spaces.Box(low=0, high=5, shape=(1,), dtype=np.int32),
             "mulligan_reasons": spaces.Box(low=0, high=1, shape=(5,), dtype=np.float32),
-            # --- NEW FIELDS FOR CONTEXT BUILDING ---
             # Shape indicates max possible targets/options. Values are IDs or indices, padded with -1.
-            "targetable_permanents": spaces.Box(low=-1, high=100000, shape=(self.max_battlefield * 2,), dtype=np.int32), # IDs of potentially targetable battlefield permanents
-            "targetable_players": spaces.Box(low=-1, high=1, shape=(2,), dtype=np.int32), # Mask [P1, P2]
-            "targetable_spells_on_stack": spaces.Box(low=-1, high=100000, shape=(5,), dtype=np.int32), # IDs of targetable stack items
-            "targetable_cards_in_graveyards": spaces.Box(low=-1, high=100000, shape=(10 * 2,), dtype=np.int32), # Max 10 from each GY
-            "sacrificeable_permanents": spaces.Box(low=-1, high=100000, shape=(self.max_battlefield,), dtype=np.int32), # IDs of own perms that can be sacrificed
-            "selectable_modes": spaces.Box(low=-1, high=10, shape=(10,), dtype=np.int32), # Indices of selectable modes if in choice phase
-            "selectable_colors": spaces.Box(low=-1, high=4, shape=(5,), dtype=np.int32), # Indices [0-4] for WUBRG if choosing color
+            # High bound can be large, but realistically it's limited by battlefield/GY size. Set reasonably high or use -1 padding.
+            "targetable_permanents": spaces.Box(low=-1, high=500, shape=(self.max_battlefield * 2,), dtype=np.int32), # INDICES of potentially targetable battlefield permanents
+            "targetable_players": spaces.Box(low=-1, high=1, shape=(2,), dtype=np.int32), # INDICES [0,1] representing [P1, P2]
+            "targetable_spells_on_stack": spaces.Box(low=-1, high=20, shape=(5,), dtype=np.int32), # INDICES of targetable stack items
+            "targetable_cards_in_graveyards": spaces.Box(low=-1, high=200, shape=(10 * 2,), dtype=np.int32), # INDICES relative to combined graveyards? Or player's GY?
+            "sacrificeable_permanents": spaces.Box(low=-1, high=self.max_battlefield, shape=(self.max_battlefield,), dtype=np.int32), # INDICES of own perms that can be sacrificed
+            "selectable_modes": spaces.Box(low=-1, high=10, shape=(10,), dtype=np.int32), # INDICES of selectable modes if in choice phase
+            "selectable_colors": spaces.Box(low=-1, high=4, shape=(5,), dtype=np.int32), # INDICES [0-4] for WUBRG if choosing color
             "valid_x_range": spaces.Box(low=0, high=100, shape=(2,), dtype=np.int32), # [min_X, max_X] if choosing X
-            "bottomable_cards": spaces.Box(low=0, high=1, shape=(self.max_hand_size,), dtype=bool), # Mask for bottoming
-            "dredgeable_cards_in_gy": spaces.Box(low=-1, high=100000, shape=(6,), dtype=np.int32), # IDs of dredgeable cards (max 6 shown)
+            "bottomable_cards": spaces.Box(low=0, high=1, shape=(self.max_hand_size,), dtype=bool), # Mask for bottoming (Hand indices 0..N-1)
+            "dredgeable_cards_in_gy": spaces.Box(low=-1, high=100, shape=(6,), dtype=np.int32), # INDICES of dredgeable cards in own GY
         })
         # --- End Observation Space Update ---
 
@@ -1935,20 +1935,19 @@ class AlphaZeroMTGEnv(gym.Env):
     # --- Observation Helper Methods ---
     
     def _get_potential_targets_vector(self, target_kind):
-        """Helper to get IDs for targetable entities of a specific kind."""
+        """Helper to get INDICES for targetable entities of a specific kind. Returns np.array of indices padded with -1."""
         gs = self.game_state
         agent_player_obj = gs.p1 if gs.agent_is_p1 else gs.p2
-        target_ids = []
+        valid_targets_info = [] # Store tuples (target_id, index)
         max_size = 0
+        dtype_for_space = np.int32 # Use integers for indices
 
         # Determine max size based on observation space definition
         if target_kind == 'permanent': max_size = self.observation_space["targetable_permanents"].shape[0]
         elif target_kind == 'player': max_size = 2
         elif target_kind == 'spell': max_size = self.observation_space["targetable_spells_on_stack"].shape[0]
         elif target_kind == 'graveyard_card': max_size = self.observation_space["targetable_cards_in_graveyards"].shape[0]
-        else: return np.full(1, -1, dtype=np.int32) # Default if kind unknown
-
-        dtype_for_space = np.int32 # Default ID type
+        else: return np.full(1, -1, dtype=dtype_for_space) # Default if kind unknown
 
         # Only populate if targeting context is relevant
         if gs.phase == gs.PHASE_TARGETING and gs.targeting_context:
@@ -1960,55 +1959,82 @@ class AlphaZeroMTGEnv(gym.Env):
                      valid_targets_map = gs.targeting_system.get_valid_targets(source_id, controller)
                 else: logging.warning("Targeting system unavailable in _get_potential_targets")
 
+                # Flatten the map into a list of IDs while preserving order for indexing
+                flat_valid_target_ids = []
                 if target_kind == 'permanent':
                     for cat in ["creatures", "artifacts", "enchantments", "lands", "planeswalkers", "battles", "permanents"]:
-                        target_ids.extend(valid_targets_map.get(cat, []))
+                        flat_valid_target_ids.extend(valid_targets_map.get(cat, []))
                 elif target_kind == 'player':
-                    target_ids.extend([0 if p_id == "p1" else 1 for p_id in valid_targets_map.get("players", [])]) # Use 0/1 for player indices
-                    dtype_for_space = np.int32 # Keep int for player mask index
+                    # Represent players by index 0 (P1) and 1 (P2)
+                    player_indices = []
+                    if "p1" in valid_targets_map.get("players", []): player_indices.append(0)
+                    if "p2" in valid_targets_map.get("players", []): player_indices.append(1)
+                    flat_valid_target_ids.extend(player_indices)
                 elif target_kind == 'spell':
-                    target_ids.extend(valid_targets_map.get("spells", []))
+                     # Use stack index as the reference for spells/abilities
+                     for stack_idx, item in enumerate(gs.stack):
+                         if isinstance(item, tuple) and len(item) > 3 and item[0] == "SPELL":
+                              spell_id_on_stack = item[1]
+                              if spell_id_on_stack in valid_targets_map.get("spells",[]):
+                                  flat_valid_target_ids.append(stack_idx) # Add stack index
                 elif target_kind == 'graveyard_card':
-                    # Target list might just contain IDs, get them all if category is 'card'
-                    target_ids.extend(valid_targets_map.get("cards", []))
+                     # Use graveyard index relative to owner's graveyard
+                     p1_gy = gs.p1.get("graveyard", [])
+                     p2_gy = gs.p2.get("graveyard", [])
+                     valid_gy_cards = valid_targets_map.get("cards", [])
+                     for card_id in valid_gy_cards:
+                         gy_idx = -1
+                         if card_id in p1_gy: gy_idx = p1_gy.index(card_id)
+                         elif card_id in p2_gy: gy_idx = p2_gy.index(card_id)
+                         if gy_idx != -1: flat_valid_target_ids.append(gy_idx) # Add graveyard index
+                else: # Other specific types
+                    cat_key = target_kind + "s" if not target_kind.endswith('s') else target_kind
+                    flat_valid_target_ids.extend(valid_targets_map.get(cat_key,[]))
 
-        # Encode IDs (pad/truncate)
-        # Ensure IDs are integers where possible (string IDs are ok too but need padding logic adjustment)
-        encoded_targets = np.full(max_size, -1, dtype=dtype_for_space)
-        unique_target_ids = list(set(target_ids)) # Avoid duplicates
-        for i, target_id in enumerate(unique_target_ids[:max_size]):
-            # Try converting string IDs to ints if possible, otherwise keep as is (if space allows)
-            # Or, map string IDs to internal integers. Simpler: Pad with -1.
-            # Space requires int32, string IDs are problematic. Map to int or use special encoding.
-            # For now, assume IDs are strings or ints. Will error if space is int only and gets strings.
-            # If target IDs are guaranteed ints (or map to ints):
-             if isinstance(target_id, (str, int)): encoded_targets[i] = int(target_id) if isinstance(target_id, int) else i # Placeholder mapping
-        return encoded_targets
+                # Assign indices based on the flattened list order
+                for i, target_identifier in enumerate(list(set(flat_valid_target_ids))): # Use unique IDs
+                    valid_targets_info.append((target_identifier, i))
+
+        # Encode Indices (pad/truncate)
+        encoded_indices = np.full(max_size, -1, dtype=dtype_for_space)
+        for i, (target_id, index) in enumerate(valid_targets_info):
+             if i >= max_size: break
+             # Use the calculated index `i` which corresponds to the agent's choice parameter
+             encoded_indices[i] = i
+
+        return encoded_indices
 
 
     def _get_potential_sacrifices(self):
-        """Helper to get IDs of permanents the agent can sacrifice."""
+        """Helper to get INDICES of permanents the agent can sacrifice. Returns np.array padded with -1."""
         gs = self.game_state
         agent_player_obj = gs.p1 if gs.agent_is_p1 else gs.p2
-        sacrificeable_ids = []
+        sacrificeable_indices = []
         max_size = self.observation_space["sacrificeable_permanents"].shape[0]
 
         if gs.phase == gs.PHASE_SACRIFICE and gs.sacrifice_context:
             controller = gs.sacrifice_context["controller"]
             if controller == agent_player_obj: # Only if it's agent's turn
                 req_type = gs.sacrifice_context.get('required_type')
-                for card_id in controller.get("battlefield", []):
-                    card = gs._safe_get_card(card_id)
-                    if not card: continue
-                    if not req_type or req_type == "permanent" or req_type in getattr(card, 'card_types', []):
-                         sacrificeable_ids.append(card_id) # Append the actual ID (can be string)
+                for i, perm_id in enumerate(controller.get("battlefield", [])):
+                    if i >= max_size: break # Stop if exceeding observation space size
+                    perm_card = gs._safe_get_card(perm_id)
+                    if not perm_card: continue
+                    # Check type requirement
+                    type_match = not req_type or req_type == "permanent" or req_type in getattr(perm_card, 'card_types', [])
+                    # TODO: Add checks for "can't be sacrificed" effects if needed
+                    if type_match:
+                         sacrificeable_indices.append(i) # Append the battlefield index
 
-        # Pad/truncate the list of IDs
-        encoded_ids = np.full(max_size, -1, dtype=np.int32)
-        for i, s_id in enumerate(sacrificeable_ids[:max_size]):
-            # Simple index mapping for now - agent needs to map back
-             if isinstance(s_id, (str, int)): encoded_ids[i] = i # Map to index, agent needs to lookup actual ID via index
-        return encoded_ids
+        # Pad/truncate the list of INDICES
+        encoded_indices = np.full(max_size, -1, dtype=np.int32)
+        for k, bf_index in enumerate(sacrificeable_indices):
+             # The action param corresponds to the index within the list of valid sacrifices.
+             # The observation stores the battlefield index `bf_index` at position `k`.
+             # The agent needs to know that taking action param `k` means sacrificing the permanent at `encoded_indices[k]`.
+             if k >= max_size: break
+             encoded_indices[k] = bf_index # Store the battlefield index at position k
+        return encoded_indices
 
 
     def _get_available_choice_options(self, choice_kind):
