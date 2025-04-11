@@ -1,5 +1,7 @@
 import logging
 from collections import defaultdict
+
+from Playersim.ability_utils import safe_int
 from .card import Card
 import re
 class LayerSystem:

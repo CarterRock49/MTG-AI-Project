@@ -2104,13 +2104,14 @@ class ReplacementEffectSystem:
         # Default to generic replacement
         return 'GENERIC_REPLACEMENT'
         
-    # Cleanup method
     def cleanup_expired_effects(self):
         """Remove effects that have expired."""
         current_turn = self.game_state.turn
         # Need to know active player to handle 'until_my_next_turn'
         active_player = self.game_state._get_active_player() # Get current active player
         active_player_is_p1 = (active_player == self.game_state.p1)
+        # Get current phase from game state
+        current_phase = self.game_state.phase
 
         expired_ids = []
         for effect_data in list(self.active_effects): # Iterate over a copy
