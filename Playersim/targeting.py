@@ -179,6 +179,7 @@ class TargetingSystem:
         """
         return self.resolve_targeting(spell_id, controller)
 
+
     def _is_valid_target(self, source_id, target_id, caster, target_info, requirement):
         """Unified check for any target type."""
         gs = self.game_state
@@ -249,8 +250,6 @@ class TargetingSystem:
                  if self._check_keyword(target_obj, "shroud"): return False
                  # Ward (Check handled separately - involves paying cost)
 
-
-        # ... (Rest of specific requirement checks remain the same) ...
         # 4. Specific Requirement Checks (applies mostly to battlefield permanents)
         if target_zone == "battlefield" and isinstance(target_obj, Card):
             # Owner/Controller
@@ -316,9 +315,21 @@ class TargetingSystem:
              if isinstance(target_obj, Card): # Spell target
                  # Can't be countered? (Only if source is a counter)
                  if source_card and "counter target spell" in getattr(source_card, 'oracle_text', '').lower():
-                     # Use central keyword check (although "can't be countered" isn't a standard keyword array item)
-                     # Check oracle text for this specific rule modification
-                     if "can't be countered" in getattr(target_obj, 'oracle_text', '').lower(): return False
+                     # --- MODIFIED: Use central rule/keyword check for 'cant_be_countered' ---
+                     cannot_be_countered = False
+                     if hasattr(gs, 'check_rule'): # Check if GameState has a specific rule check method
+                          # Pass target card object or ID to check rule
+                          cannot_be_countered = gs.check_rule('cant_be_countered', {'target_card_id': target_id, 'target_card': target_obj})
+                     elif self._check_keyword(target_obj, "cant_be_countered"): # Fallback to keyword check if rule check unavailable
+                          # Note: "cant_be_countered" needs to be defined as a keyword for this to work
+                          cannot_be_countered = True
+                     elif "can't be countered" in getattr(target_obj, 'oracle_text', '').lower(): # Ultimate fallback to text
+                          cannot_be_countered = True
+
+                     if cannot_be_countered:
+                          logging.debug(f"Spell {target_obj.name} can't be countered.")
+                          return False
+                     # --- END MODIFICATION ---
                  # Spell Type
                  st_req = requirement.get("spell_type_restriction")
                  if st_req == "instant" and 'instant' not in actual_types: return False

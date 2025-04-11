@@ -937,168 +937,296 @@ class ReplacementEffectSystem:
 
     def _create_enhanced_replacement_function(self, event_type, replacement_text, controller, source_name):
         """
-        Create a more sophisticated replacement function based on event type and replacement text.
-        
+        Create a sophisticated replacement function based on event type and replacement text.
+
         Args:
-            event_type: The type of event being replaced
-            replacement_text: Text describing what happens instead
-            controller: The player who controls the replacement effect
-            source_name: Name of the card/effect source for logging
-            
+            event_type: The type of event being replaced (e.g., 'DRAW', 'DAMAGE').
+            replacement_text: Text describing what happens instead (e.g., "draw two cards", "prevent that damage").
+            controller: The player who controls the replacement effect source.
+            source_name: Name of the card/effect source for logging.
+
         Returns:
-            function: A function that modifies the event context appropriately
+            function: A function that takes the event context dictionary (ctx) as input
+                      and returns the modified context dictionary.
         """
         gs = self.game_state
         replacement_text = replacement_text.lower() if replacement_text else ""
-        
-        # DRAW event replacements
+        # Helper function to safely parse numbers
+        def parse_num(text, default=1):
+            match = re.search(r'\d+', text)
+            if match: return int(match.group(0))
+            mapping = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+            for word, num in mapping.items():
+                 if word in text: return num
+            return default
+
+        # --- DRAW Replacements ---
         if event_type == 'DRAW':
-            if 'draw twice that many' in replacement_text or 'instead draw twice that many' in replacement_text:
+            if 'draw twice that many' in replacement_text or 'draw two cards instead' in replacement_text: # Handle specific "two"
+                is_specific_two = 'draw two cards instead' in replacement_text
                 def double_draw_replacement(ctx):
-                    draw_count = ctx.get('draw_count', 1) 
-                    new_count = draw_count * 2
-                    logging.debug(f"{source_name}: Doubling draw from {draw_count} to {new_count} cards")
-                    return {**ctx, 'draw_count': new_count}
+                    draw_count = ctx.get('draw_count', 1)
+                    new_count = 2 if is_specific_two else (draw_count * 2)
+                    logging.debug(f"{source_name}: Replacing draw of {draw_count} with draw {new_count} cards.")
+                    ctx['draw_count'] = new_count
+                    return ctx
                 return double_draw_replacement
-                
-            elif 'draw that many plus' in replacement_text:
-                match = re.search(r'plus (\d+)', replacement_text)
+
+            elif 'draw that many plus' in replacement_text or 'draw an additional card' in replacement_text:
+                match = re.search(r'(?:plus|additional)\s+(\w+|\d+)', replacement_text)
                 bonus = 1
-                if match:
-                    bonus = int(match.group(1))
-                    
+                if match: bonus = self._word_to_number(match.group(1))
+
                 def bonus_draw_replacement(ctx):
                     draw_count = ctx.get('draw_count', 1)
                     new_count = draw_count + bonus
-                    logging.debug(f"{source_name}: Adding {bonus} to draw, from {draw_count} to {new_count} cards")
-                    return {**ctx, 'draw_count': new_count}
+                    logging.debug(f"{source_name}: Adding {bonus} to draw, from {draw_count} to {new_count} cards.")
+                    ctx['draw_count'] = new_count
+                    return ctx
                 return bonus_draw_replacement
-                
-            elif "doesn't draw" in replacement_text or "draw no cards" in replacement_text:
+
+            elif "skip that draw" in replacement_text or "doesn't draw" in replacement_text or "draw no cards" in replacement_text:
                 def prevent_draw_replacement(ctx):
                     draw_count = ctx.get('draw_count', 1)
-                    logging.debug(f"{source_name}: Preventing draw of {draw_count} cards")
-                    return {**ctx, 'draw_count': 0, 'prevented': True}
+                    logging.debug(f"{source_name}: Preventing draw of {draw_count} cards.")
+                    ctx['draw_count'] = 0
+                    ctx['prevented'] = True
+                    return ctx
                 return prevent_draw_replacement
-        
-        # DAMAGE event replacements
+
+            # Example: "...instead reveal it and put it into your hand." (Handled by Draw already, but could be modified)
+            # Example: "...instead mill N cards."
+            elif "mill" in replacement_text:
+                 mill_count = parse_num(replacement_text, 1)
+                 def mill_instead_of_draw(ctx):
+                     logging.debug(f"{source_name}: Replacing draw with mill {mill_count}.")
+                     ctx['prevented'] = True # Prevent original draw
+                     ctx['side_effect'] = ('mill', mill_count, ctx.get('player')) # Need to handle side effect application
+                     return ctx
+                 return mill_instead_of_draw
+
+            # Add other draw replacements like Scry, Look at top N, etc.
+
+        # --- DAMAGE Replacements ---
         elif event_type == 'DAMAGE':
-            if 'prevent' in replacement_text or 'is prevented' in replacement_text:
+            if 'prevent all' in replacement_text or 'prevent that damage' in replacement_text:
                 def prevent_damage_replacement(ctx):
                     damage = ctx.get('damage_amount', 0)
-                    logging.debug(f"{source_name}: Preventing {damage} damage")
-                    return {**ctx, 'damage_amount': 0, 'prevented': True}
+                    logging.debug(f"{source_name}: Preventing {damage} damage.")
+                    ctx['damage_amount'] = 0
+                    ctx['prevented'] = True
+                    return ctx
                 return prevent_damage_replacement
-                
-            elif 'double' in replacement_text or 'twice' in replacement_text:
+
+            elif 'prevent the next' in replacement_text:
+                amount_to_prevent = parse_num(replacement_text, 1)
+                # Note: This creates a stateful replacement, usually requires removing the effect after one use.
+                def prevent_next_damage_replacement(ctx):
+                     original_damage = ctx.get('damage_amount', 0)
+                     prevented = min(original_damage, amount_to_prevent)
+                     new_damage = original_damage - prevented
+                     logging.debug(f"{source_name}: Preventing next {prevented} damage. Remaining: {new_damage}")
+                     ctx['damage_amount'] = new_damage
+                     # Need mechanism to track/remove this shield - often done by removing the registered effect
+                     ctx['used_prevention_shield'] = True # Flag for caller to handle removal
+                     return ctx
+                return prevent_next_damage_replacement
+
+            elif 'double' in replacement_text or 'twice that much' in replacement_text:
                 def double_damage_replacement(ctx):
                     damage = ctx.get('damage_amount', 0)
                     new_damage = damage * 2
-                    logging.debug(f"{source_name}: Doubling damage from {damage} to {new_damage}")
-                    return {**ctx, 'damage_amount': new_damage}
+                    logging.debug(f"{source_name}: Doubling damage from {damage} to {new_damage}.")
+                    ctx['damage_amount'] = new_damage
+                    return ctx
                 return double_damage_replacement
-                
-            elif 'deal that much damage to' in replacement_text:
-                # Redirect damage to a different target
-                def redirect_damage_replacement(ctx):
-                    damage = ctx.get('damage_amount', 0)
-                    original_target = ctx.get('target_id')
-                    original_is_player = ctx.get('target_is_player', False)
-                    
-                    # Determine new target based on replacement text
-                    new_target = None
-                    new_is_player = False
-                    
-                    if 'to its controller' in replacement_text:
-                        # Find controller of original source
-                        source_id = ctx.get('source_id')
-                        for p in [gs.p1, gs.p2]:
-                            if source_id in p.get('battlefield', []):
-                                new_target = p
-                                new_is_player = True
-                                break
-                    elif 'to you' in replacement_text:
-                        new_target = controller
-                        new_is_player = True
-                    elif 'to each opponent' in replacement_text:
-                        # This would need special handling to hit all opponents
-                        new_target = gs.p2 if controller == gs.p1 else gs.p1
-                        new_is_player = True
-                    
-                    if new_target:
-                        # Apply damage to new target and prevent it to original target
-                        if new_is_player:
-                            new_target['life'] -= damage
-                            logging.debug(f"{source_name}: Redirected {damage} damage to {new_target.get('name', 'player')}")
-                        
-                        # Return modified context to prevent original damage
-                        return {**ctx, 'damage_amount': 0, 'redirected': True, 
-                                'redirected_to': new_target, 'redirected_is_player': new_is_player}
-                    
-                    return ctx  # Original context if no redirection happened
-                return redirect_damage_replacement
-        
-        # ENTERS_BATTLEFIELD event replacements
+
+            elif re.search(r'deals? that much (damage|\w+) plus (\d+)', replacement_text):
+                match = re.search(r'plus (\d+)', replacement_text)
+                bonus = int(match.group(1))
+                def bonus_damage_replacement(ctx):
+                     damage = ctx.get('damage_amount', 0)
+                     new_damage = damage + bonus
+                     logging.debug(f"{source_name}: Adding {bonus} to damage, from {damage} to {new_damage}.")
+                     ctx['damage_amount'] = new_damage
+                     return ctx
+                return bonus_damage_replacement
+
+            # Add redirection logic here if needed (complex due to target selection)
+
+        # --- ENTERS_BATTLEFIELD Replacements ---
         elif event_type == 'ENTERS_BATTLEFIELD':
             if 'enters the battlefield tapped' in replacement_text:
                 def etb_tapped_replacement(ctx):
-                    card_id = ctx.get('card_id')
-                    controller = ctx.get('controller')
-                    
-                    if controller and card_id:
-                        # Flag to tap the permanent once it enters
-                        return {**ctx, 'enters_tapped': True}
+                    logging.debug(f"{source_name}: Marking {ctx.get('card_id')} to enter tapped.")
+                    ctx['enters_tapped'] = True
                     return ctx
                 return etb_tapped_replacement
-                
-            elif 'enters the battlefield with' in replacement_text:
-                counter_match = re.search(r'with (\w+) (\w+) counters?', replacement_text)
+
+            elif 'enters the battlefield with' in replacement_text and 'counter' in replacement_text:
+                counter_match = re.search(r'with (a|an|one|two|three|four|five|\d+)\s+([\+\-\d/]+\s+)?([\w\-]+)\s+counters?', replacement_text)
                 if counter_match:
-                    count_word, counter_type = counter_match.groups()
-                    count = 1
-                    if count_word.isdigit():
-                        count = int(count_word)
-                    elif count_word == "a" or count_word == "an":
-                        count = 1
-                    
+                    count_word, _, counter_type = counter_match.groups()
+                    count = self._word_to_number(count_word)
+                    counter_type = counter_type.strip().replace('/','_').upper() # Normalize
+
                     def etb_with_counters_replacement(ctx):
-                        card_id = ctx.get('card_id')
-                        return {**ctx, 'enter_counters': {'type': counter_type, 'count': count}}
+                        logging.debug(f"{source_name}: Marking {ctx.get('card_id')} to enter with {count} {counter_type} counters.")
+                        # Ensure the structure matches how ETB counters are handled elsewhere
+                        if 'enter_counters' not in ctx: ctx['enter_counters'] = []
+                        ctx['enter_counters'].append({'type': counter_type, 'count': count})
+                        return ctx
                     return etb_with_counters_replacement
-        
-        # DIES event replacements
+            # Add 'As ~ enters choose...' effects if parsed here
+
+        # --- DIES Replacements ---
         elif event_type == 'DIES':
-            if 'exile' in replacement_text or 'instead exile it' in replacement_text:
+            if 'exile it instead' in replacement_text:
                 def exile_instead_replacement(ctx):
-                    logging.debug(f"{source_name}: Exiling card instead of putting it into graveyard")
-                    return {**ctx, 'to_zone': 'exile'}
+                    logging.debug(f"{source_name}: Replacing death with exile for {ctx.get('card_id')}.")
+                    ctx['to_zone'] = 'exile'
+                    return ctx
                 return exile_instead_replacement
-                
-            elif 'return' in replacement_text and 'hand' in replacement_text:
+
+            elif "return it to its owner's hand" in replacement_text:
                 def return_to_hand_replacement(ctx):
-                    logging.debug(f"{source_name}: Returning card to hand instead of putting it into graveyard")
-                    return {**ctx, 'to_zone': 'hand'}
+                    logging.debug(f"{source_name}: Replacing death with return to hand for {ctx.get('card_id')}.")
+                    ctx['to_zone'] = 'hand'
+                    return ctx
                 return return_to_hand_replacement
-        
-        # LIFE_GAIN event replacements        
+
+            elif 'shuffle it into its owner\'s library' in replacement_text:
+                def shuffle_into_library_replacement(ctx):
+                     logging.debug(f"{source_name}: Replacing death with shuffle into library for {ctx.get('card_id')}.")
+                     ctx['to_zone'] = 'library'
+                     ctx['shuffle_required'] = True # Flag for move_card logic
+                     return ctx
+                return shuffle_into_library_replacement
+
+            # Add Persist/Undying style returns here (may need counter check condition)
+
+        # --- LIFE_GAIN Replacements ---
         elif event_type == 'LIFE_GAIN':
-            if 'twice' in replacement_text or 'double' in replacement_text:
+            if 'gain twice that much' in replacement_text:
                 def double_life_gain_replacement(ctx):
                     amount = ctx.get('life_amount', 0)
                     new_amount = amount * 2
-                    logging.debug(f"{source_name}: Doubling life gain from {amount} to {new_amount}")
-                    return {**ctx, 'life_amount': new_amount}
+                    logging.debug(f"{source_name}: Doubling life gain from {amount} to {new_amount}.")
+                    ctx['life_amount'] = new_amount
+                    return ctx
                 return double_life_gain_replacement
-                
-            elif 'no life' in replacement_text or "doesn't gain life" in replacement_text:
+
+            elif 'gain that much plus' in replacement_text:
+                match = re.search(r'plus (\d+)', replacement_text)
+                bonus = int(match.group(1)) if match else 1
+                def plus_life_gain_replacement(ctx):
+                    amount = ctx.get('life_amount', 0)
+                    new_amount = amount + bonus
+                    logging.debug(f"{source_name}: Increasing life gain by {bonus}, from {amount} to {new_amount}.")
+                    ctx['life_amount'] = new_amount
+                    return ctx
+                return plus_life_gain_replacement
+
+            elif "gain no life" in replacement_text or "doesn't gain life" in replacement_text:
                 def prevent_life_gain_replacement(ctx):
                     amount = ctx.get('life_amount', 0)
-                    logging.debug(f"{source_name}: Preventing life gain of {amount}")
-                    return {**ctx, 'life_amount': 0, 'prevented': True}
+                    logging.debug(f"{source_name}: Preventing life gain of {amount}.")
+                    ctx['life_amount'] = 0
+                    ctx['prevented'] = True
+                    return ctx
                 return prevent_life_gain_replacement
-        
-        # Default replacement that just returns the original context
-        return lambda ctx: ctx
+
+            # Add opponent lose life effects
+
+        # --- LIFE_LOSS Replacements ---
+        elif event_type == 'LIFE_LOSS':
+             # Add prevent, double, plus logic similar to LIFE_GAIN
+             if "lose no life" in replacement_text:
+                  def prevent_life_loss(ctx):
+                       amount = ctx.get('life_amount', 0)
+                       logging.debug(f"{source_name}: Preventing life loss of {amount}.")
+                       ctx['life_amount'] = 0
+                       ctx['prevented'] = True
+                       return ctx
+                  return prevent_life_loss
+
+        # --- ADD_COUNTER Replacements ---
+        elif event_type == 'ADD_COUNTER':
+            if "twice that many" in replacement_text or "double the number" in replacement_text:
+                def double_counters_replacement(ctx):
+                    amount = ctx.get('count', 1)
+                    new_amount = amount * 2
+                    logging.debug(f"{source_name}: Doubling {ctx.get('counter_type')} counters from {amount} to {new_amount}.")
+                    ctx['count'] = new_amount
+                    return ctx
+                return double_counters_replacement
+
+            elif "one additional" in replacement_text or "plus one" in replacement_text:
+                 def plus_one_counter_replacement(ctx):
+                     amount = ctx.get('count', 1)
+                     new_amount = amount + 1
+                     logging.debug(f"{source_name}: Adding one additional {ctx.get('counter_type')} counter (total {new_amount}).")
+                     ctx['count'] = new_amount
+                     return ctx
+                 return plus_one_counter_replacement
+
+            elif "prevent putting counters" in replacement_text or "can't get counters" in replacement_text:
+                 def prevent_counters_replacement(ctx):
+                     logging.debug(f"{source_name}: Preventing {ctx.get('count')} {ctx.get('counter_type')} counters.")
+                     ctx['count'] = 0
+                     ctx['prevented'] = True
+                     return ctx
+                 return prevent_counters_replacement
+
+        # --- CREATE_TOKEN Replacements ---
+        elif event_type == 'CREATE_TOKEN':
+             if "twice that many" in replacement_text or "double the number" in replacement_text:
+                 def double_tokens_replacement(ctx):
+                     amount = ctx.get('token_count', 1)
+                     new_amount = amount * 2
+                     logging.debug(f"{source_name}: Doubling token creation from {amount} to {new_amount}.")
+                     ctx['token_count'] = new_amount
+                     return ctx
+                 return double_tokens_replacement
+             # Add create "that many plus N"
+
+             elif "create no tokens" in replacement_text or "doesn't create tokens" in replacement_text:
+                  def prevent_tokens_replacement(ctx):
+                     logging.debug(f"{source_name}: Preventing token creation.")
+                     ctx['token_count'] = 0
+                     ctx['prevented'] = True
+                     return ctx
+                  return prevent_tokens_replacement
+             # Add modify token type replacements
+
+        # --- DISCARD Replacements ---
+        elif event_type == 'DISCARD':
+             if "exile it instead" in replacement_text:
+                 def discard_to_exile(ctx):
+                     logging.debug(f"{source_name}: Replacing discard with exile for {ctx.get('card_id')}")
+                     ctx['to_zone'] = 'exile'
+                     return ctx
+                 return discard_to_exile
+
+        # --- MILL Replacements ---
+        elif event_type == 'MILL':
+             if "exile them instead" in replacement_text:
+                 def mill_to_exile(ctx):
+                     logging.debug(f"{source_name}: Replacing mill with exile")
+                     ctx['to_zone'] = 'exile' # Signal to move_card
+                     return ctx
+                 return mill_to_exile
+
+
+        # --- Default: Return Identity Function ---
+        # This function does nothing to the context if no specific pattern was matched.
+        # It should still log that no specific replacement was found.
+        def identity_replacement(ctx):
+            # Only log if the text wasn't empty or obviously simple like "prevented"
+            if replacement_text and replacement_text not in ["prevented", "exiled"]:
+                logging.debug(f"No specific replacement logic found for {event_type}: '{replacement_text}'. Event proceeds as modified or unmodified.")
+            return ctx
+        return identity_replacement
 
     def _create_condition_function(self, event_type, subject, controller):
         """Create a condition function based on event type and subject."""

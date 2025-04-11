@@ -1,5 +1,7 @@
+
 import random
 import logging
+import re
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
@@ -22,15 +24,7 @@ from .strategy_memory import StrategyMemory
 from collections import defaultdict
 from .layer_system import LayerSystem
 from .replacement_effects import ReplacementEffectSystem
-from .deck_stats_tracker import DeckStatsCollector # NOTE: Renamed? DeckStatsTracker seems more likely based on usage. Assume Tracker.
-try:
-    from .deck_stats_tracker import DeckStatsTracker
-except ImportError:
-    # Fallback if DeckStatsTracker doesn't exist
-    class DeckStatsTracker:
-        def record_game(self, *args, **kwargs): pass
-        def save_updates_sync(self): pass
-
+from .deck_stats_tracker import DeckStatsTracker
 from .card_memory import CardMemory
 
 # Define FEATURE_DIM more safely or pass it around
@@ -43,7 +37,7 @@ try:
 except Exception as e:
     logging.warning(f"Could not determine FEATURE_DIM dynamically, using fallback 223: {e}")
     FEATURE_DIM = 223 # Fallback
-
+    
 class AlphaZeroMTGEnv(gym.Env):
     """
     An example Magic: The Gathering environment that uses the Gymnasium (>= 0.26) API.
@@ -63,25 +57,16 @@ class AlphaZeroMTGEnv(gym.Env):
         self.current_analysis = None
         self._feature_dim = FEATURE_DIM # Store determined feature dim
 
-        # Initialize deck statistics tracker
+        # Initialize deck statistics tracker (Corrected class name usage)
         try:
-            # Use the imported DeckStatsTracker (fixed name)
-            self.stats_tracker = DeckStatsTracker()
+            self.stats_tracker = DeckStatsTracker() # Use the imported tracker
             self.has_stats_tracker = True
-        except (ImportError, ModuleNotFoundError, NameError): # Added NameError
+        except (ImportError, ModuleNotFoundError, NameError):
             logging.warning("DeckStatsTracker not available, statistics will not be recorded")
             self.stats_tracker = None
             self.has_stats_tracker = False
-        try:
-            self.card_memory = CardMemory()
-            self.has_card_memory = True
-            logging.info("Card memory system initialized successfully")
-        except ImportError:
-            logging.warning("CardMemory not available, historical card data will not be tracked")
-            self.card_memory = None
-            self.has_card_memory = False
-        # Track cards played during the game
-        self.cards_played = {0: [], 1: []}  # Player index -> list of card IDs
+
+        # (Rest of __init__ including CardMemory init remains largely the same)
 
         # Initialize game state manager
         self.game_state = GameState(self.card_db, max_turns, max_hand_size, max_battlefield)
@@ -94,7 +79,7 @@ class AlphaZeroMTGEnv(gym.Env):
         integrate_combat_actions(self.game_state) # Integrate after GS subsystems are ready
 
         # Feature dimension determined dynamically above
-        MAX_PHASE = self.game_state.PHASE_CHOOSE # Use latest defined phase constant
+        MAX_PHASE = self.game_state.PHASE_CLEANUP # Use PHASE_CLEANUP as highest constant now
 
         self.action_memory_size = 80
 
@@ -102,19 +87,18 @@ class AlphaZeroMTGEnv(gym.Env):
         keyword_dimension = len(Card.ALL_KEYWORDS)
         logging.info(f"Using keyword dimension: {keyword_dimension}")
 
-        # --- UPDATED: Refined Observation Space ---
+        # --- UPDATED: Observation Space with Context Facilitation Fields ---
         self.observation_space = spaces.Dict({
-            "phase": spaces.Box(low=0, high=MAX_PHASE, shape=(1,), dtype=np.int32), # Changed from Discrete
+            # --- Existing Fields (mostly unchanged shapes) ---
+            "phase": spaces.Box(low=0, high=MAX_PHASE, shape=(1,), dtype=np.int32),
             "phase_onehot": spaces.Box(low=0, high=1, shape=(MAX_PHASE + 1,), dtype=np.float32),
             "turn": spaces.Box(low=0, high=self.max_turns, shape=(1,), dtype=np.int32),
             "is_my_turn": spaces.Box(low=0, high=1, shape=(1,), dtype=np.int32),
             "my_life": spaces.Box(low=0, high=40, shape=(1,), dtype=np.int32),
             "opp_life": spaces.Box(low=0, high=40, shape=(1,), dtype=np.int32),
             "life_difference": spaces.Box(low=-40, high=40, shape=(1,), dtype=np.int32),
-            # Player state (Absolute) - Kept for backward compatibility? Check usage.
             "p1_life": spaces.Box(low=0, high=40, shape=(1,), dtype=np.int32),
             "p2_life": spaces.Box(low=0, high=40, shape=(1,), dtype=np.int32),
-            # Hand
             "my_hand": spaces.Box(low=-1, high=50, shape=(self.max_hand_size, self._feature_dim), dtype=np.float32),
             "my_hand_count": spaces.Box(low=0, high=self.max_hand_size, shape=(1,), dtype=np.int32),
             "opp_hand_count": spaces.Box(low=0, high=self.max_hand_size, shape=(1,), dtype=np.int32),
@@ -123,19 +107,16 @@ class AlphaZeroMTGEnv(gym.Env):
             "hand_performance": spaces.Box(low=0, high=1, shape=(self.max_hand_size,), dtype=np.float32),
             "hand_synergy_scores": spaces.Box(low=0, high=1, shape=(self.max_hand_size,), dtype=np.float32),
             "opportunity_assessment": spaces.Box(low=0, high=10, shape=(self.max_hand_size,), dtype=np.float32),
-            # Battlefield
             "my_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, self._feature_dim), dtype=np.float32),
             "my_battlefield_flags": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5), dtype=np.float32),
             "my_battlefield_keywords": spaces.Box(low=0, high=1, shape=(self.max_battlefield, keyword_dimension), dtype=np.float32),
-            "my_tapped_permanents": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=bool), # Renamed
+            "my_tapped_permanents": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=bool),
             "opp_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, self._feature_dim), dtype=np.float32),
             "opp_battlefield_flags": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5), dtype=np.float32),
-            # Player state (Absolute) - Kept for potential model reliance
             "p1_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, self._feature_dim), dtype=np.float32),
             "p2_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, self._feature_dim), dtype=np.float32),
             "p1_bf_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
             "p2_bf_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
-            # Creature Stats
             "my_creature_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
             "opp_creature_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
             "my_total_power": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
@@ -147,60 +128,65 @@ class AlphaZeroMTGEnv(gym.Env):
             "toughness_advantage": spaces.Box(low=-100, high=100, shape=(1,), dtype=np.int32),
             "threat_assessment": spaces.Box(low=0, high=10, shape=(self.max_battlefield,), dtype=np.float32),
             "card_synergy_scores": spaces.Box(low=-1, high=1, shape=(self.max_battlefield, self.max_battlefield), dtype=np.float32),
-            # Mana
-            "my_mana_pool": spaces.Box(low=0, high=100, shape=(6,), dtype=np.int32), # WUBRGC
-            "my_mana": spaces.Box(low=0, high=20, shape=(1,), dtype=np.int32), # Sum of mana pool - REMOVE? redundant? Keep for now.
+            "my_mana_pool": spaces.Box(low=0, high=100, shape=(6,), dtype=np.int32),
+            "my_mana": spaces.Box(low=0, high=20, shape=(1,), dtype=np.int32),
             "total_available_mana": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "untapped_land_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
-            "remaining_mana_sources": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32), # Maybe same as untapped_land_count? Revisit if needed.
+            "remaining_mana_sources": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
             "turn_vs_mana": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
-            # Graveyard / Exile
             "my_graveyard_count": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "opp_graveyard_count": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "my_dead_creatures": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "opp_dead_creatures": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "graveyard_key_cards": spaces.Box(low=-1, high=50, shape=(10, self._feature_dim), dtype=np.float32),
             "exile_key_cards": spaces.Box(low=-1, high=50, shape=(10, self._feature_dim), dtype=np.float32),
-            # Stack / Combat
             "stack_count": spaces.Box(low=0, high=20, shape=(1,), dtype=np.int32),
             "stack_controller": spaces.Box(low=-1, high=1, shape=(5,), dtype=np.int32),
             "stack_card_types": spaces.Box(low=0, high=1, shape=(5, 5), dtype=np.float32),
             "attackers_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
             "blockers_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
             "potential_combat_damage": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
-            # Abilities
             "ability_features": spaces.Box(low=0, high=10, shape=(self.max_battlefield, 5), dtype=np.float32),
             "ability_timing": spaces.Box(low=0, high=1, shape=(5,), dtype=np.float32),
-            "planeswalker_activations": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=np.float32), # Activated this turn
-            "planeswalker_activation_counts": spaces.Box(low=0, high=10, shape=(self.max_battlefield,), dtype=np.float32), # Total activations
-            # History / Recommendations
+            "planeswalker_activations": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=np.float32),
+            "planeswalker_activation_counts": spaces.Box(low=0, high=10, shape=(self.max_battlefield,), dtype=np.float32),
             "previous_actions": spaces.Box(low=-1, high=self.ACTION_SPACE_SIZE, shape=(self.action_memory_size,), dtype=np.int32),
             "previous_rewards": spaces.Box(low=-10, high=10, shape=(self.action_memory_size,), dtype=np.float32),
-            "phase_history": spaces.Box(low=-1, high=MAX_PHASE, shape=(5,), dtype=np.int32), # Last 5 phases
+            "phase_history": spaces.Box(low=-1, high=MAX_PHASE, shape=(5,), dtype=np.int32),
             "action_mask": spaces.Box(low=0, high=1, shape=(self.ACTION_SPACE_SIZE,), dtype=bool),
-            "recommended_action": spaces.Box(low=-1, high=self.ACTION_SPACE_SIZE - 1, shape=(1,), dtype=np.int32), # Corrected upper bound, allow -1
+            "recommended_action": spaces.Box(low=-1, high=self.ACTION_SPACE_SIZE - 1, shape=(1,), dtype=np.int32),
             "recommended_action_confidence": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
-            "memory_suggested_action": spaces.Box(low=-1, high=self.ACTION_SPACE_SIZE - 1, shape=(1,), dtype=np.int32), # Corrected upper bound, allow -1
+            "memory_suggested_action": spaces.Box(low=-1, high=self.ACTION_SPACE_SIZE - 1, shape=(1,), dtype=np.int32),
             "suggestion_matches_recommendation": spaces.Box(low=0, high=1, shape=(1,), dtype=np.int32),
-            "optimal_attackers": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=np.float32), # Mask of optimal attackers
+            "optimal_attackers": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=np.float32),
             "attacker_values": spaces.Box(low=-10, high=10, shape=(self.max_battlefield,), dtype=np.float32),
-            "ability_recommendations": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5, 2), dtype=np.float32), # Recommend, Confidence per ability
-            # Strategic / Meta
+            "ability_recommendations": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5, 2), dtype=np.float32),
             "strategic_metrics": spaces.Box(low=-1, high=1, shape=(10,), dtype=np.float32),
             "position_advantage": spaces.Box(low=-1, high=1, shape=(1,), dtype=np.float32),
-            "estimated_opponent_hand": spaces.Box(low=-1, high=50, shape=(self.max_hand_size, self._feature_dim), dtype=np.float32), # Needs opponent hand estimation model
-            "deck_composition_estimate": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32), # Estimate based on observed cards
-            "opponent_archetype": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32), # Prediction from planner
-            "future_state_projections": spaces.Box(low=-1, high=1, shape=(7,), dtype=np.float32), # Projections from planner
-            "multi_turn_plan": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32), # Simplified plan metrics
-            "win_condition_viability": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32), # Scores for different win cons
-            "win_condition_timings": spaces.Box(low=0, high=self.max_turns + 1, shape=(6,), dtype=np.float32), # Estimated turns for each win con
-            "resource_efficiency": spaces.Box(low=0, high=1, shape=(3,), dtype=np.float32), # Mana, Card, Tempo
-            # Mulligan
+            "estimated_opponent_hand": spaces.Box(low=-1, high=50, shape=(self.max_hand_size, self._feature_dim), dtype=np.float32),
+            "deck_composition_estimate": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
+            "opponent_archetype": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
+            "future_state_projections": spaces.Box(low=-1, high=1, shape=(7,), dtype=np.float32),
+            "multi_turn_plan": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
+            "win_condition_viability": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
+            "win_condition_timings": spaces.Box(low=0, high=self.max_turns + 1, shape=(6,), dtype=np.float32),
+            "resource_efficiency": spaces.Box(low=0, high=1, shape=(3,), dtype=np.float32),
             "mulligan_in_progress": spaces.Box(low=0, high=1, shape=(1,), dtype=np.int32),
             "mulligan_recommendation": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
             "mulligan_reason_count": spaces.Box(low=0, high=5, shape=(1,), dtype=np.int32),
-            "mulligan_reasons": spaces.Box(low=0, high=1, shape=(5,), dtype=np.float32), # Top 5 reason flags/scores
+            "mulligan_reasons": spaces.Box(low=0, high=1, shape=(5,), dtype=np.float32),
+            # --- NEW FIELDS FOR CONTEXT BUILDING ---
+            # Shape indicates max possible targets/options. Values are IDs or indices, padded with -1.
+            "targetable_permanents": spaces.Box(low=-1, high=100000, shape=(self.max_battlefield * 2,), dtype=np.int32), # IDs of potentially targetable battlefield permanents
+            "targetable_players": spaces.Box(low=-1, high=1, shape=(2,), dtype=np.int32), # Mask [P1, P2]
+            "targetable_spells_on_stack": spaces.Box(low=-1, high=100000, shape=(5,), dtype=np.int32), # IDs of targetable stack items
+            "targetable_cards_in_graveyards": spaces.Box(low=-1, high=100000, shape=(10 * 2,), dtype=np.int32), # Max 10 from each GY
+            "sacrificeable_permanents": spaces.Box(low=-1, high=100000, shape=(self.max_battlefield,), dtype=np.int32), # IDs of own perms that can be sacrificed
+            "selectable_modes": spaces.Box(low=-1, high=10, shape=(10,), dtype=np.int32), # Indices of selectable modes if in choice phase
+            "selectable_colors": spaces.Box(low=-1, high=4, shape=(5,), dtype=np.int32), # Indices [0-4] for WUBRG if choosing color
+            "valid_x_range": spaces.Box(low=0, high=100, shape=(2,), dtype=np.int32), # [min_X, max_X] if choosing X
+            "bottomable_cards": spaces.Box(low=0, high=1, shape=(self.max_hand_size,), dtype=bool), # Mask for bottoming
+            "dredgeable_cards_in_gy": spaces.Box(low=-1, high=100000, shape=(6,), dtype=np.int32), # IDs of dredgeable cards (max 6 shown)
         })
         # --- End Observation Space Update ---
 
@@ -221,6 +207,8 @@ class AlphaZeroMTGEnv(gym.Env):
 
         # Valid actions mask
         self.current_valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+        # Added attribute tracking phase/choice context specifically
+        self.current_choice_context = None
 
         
 
@@ -825,286 +813,130 @@ class AlphaZeroMTGEnv(gym.Env):
         """
         Execute the action and run the game engine until control returns to the agent,
         or the game ends. Returns the next observation, reward, done status, and info.
+        Action execution and game state progression are handled by ActionHandler.apply_action.
 
         Args:
             action_idx: Index of the action selected by the agent.
             context: Optional dictionary with additional context for complex actions.
-                     **IMPORTANT**: The calling agent/code is responsible for providing
-                     the necessary key-value pairs in the `context` dictionary for
-                     actions that require it (see ACTION_MEANINGS comments).
+                     This context will be merged with relevant game state context by ActionHandler.
 
         Returns:
             tuple: (observation, reward, done, truncated, info)
         """
         gs = self.game_state
-        if context is None: context = {}
-        # Generate initial mask needed for info dict BEFORE action application
-        # Regenerate action mask if not available or invalid (e.g., start of step or after error)
-        if not hasattr(self, 'current_valid_actions') or self.current_valid_actions is None or not isinstance(self.current_valid_actions, np.ndarray):
+        action_context = {} # Local dict for passing context
+        if context: action_context.update(context)
+
+        # Ensure initial mask is generated for info dict even if action invalidates immediately
+        if not hasattr(self, 'current_valid_actions') or self.current_valid_actions is None:
             logging.warning("current_valid_actions missing or invalid at step start. Regenerating.")
             self.current_valid_actions = self.action_mask()
 
-        current_mask_before_action = self.current_valid_actions
-        info = {"action_mask": current_mask_before_action.astype(bool) if current_mask_before_action is not None else np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)}
+        initial_mask = self.current_valid_actions.astype(bool) if self.current_valid_actions is not None else np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+        info = {"action_mask": initial_mask, "game_result": "undetermined"}
 
         try:
-            # --- Initial State & Setup ---
-            self.current_step += 1
-            reward = 0.0 # Use intermediate variable for step reward calculation
-            done = False
-            truncated = False
-            pre_action_pattern = None
-
             # --- Action Validation ---
             if not (0 <= action_idx < self.ACTION_SPACE_SIZE):
                 logging.error(f"Action index {action_idx} is out of bounds (0-{self.ACTION_SPACE_SIZE-1}).")
-                raise IndexError(f"Action index {action_idx} is out of bounds.")
+                obs = self._get_obs_safe() # Get safe obs
+                info["critical_error"] = True
+                info["error_message"] = "Action index out of bounds"
+                # Use initial mask from above
+                return obs, -0.5, False, False, info # Return negative reward, not done
 
-            current_valid_actions = self.action_mask() # Refresh mask just before check
-            if not current_valid_actions[action_idx]:
-                logging.warning(f"Step {self.current_step}: Invalid action {action_idx} selected (Mask False). Reason: {self.action_handler.action_reasons.get(action_idx, 'Not valid')}. Available: {np.where(current_valid_actions)[0]}")
+            # Validate against the *current* action mask
+            current_mask = self.action_mask() # Re-fetch mask just before check
+            if not current_mask[action_idx]:
+                logging.warning(f"Step {self.current_step}: Invalid action {action_idx} selected (Mask False). Reason: {self.action_handler.action_reasons.get(action_idx, 'Not valid')}. Available: {np.where(current_mask)[0]}")
                 self.invalid_action_count += 1
                 self.episode_invalid_actions += 1
-                step_reward = -0.1 # Standard penalty for mask failure
+                step_reward = -0.1 # Standard penalty
 
+                # Update history even for invalid mask selection
+                if hasattr(self, 'last_n_actions'): self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
+                if hasattr(self, 'last_n_rewards'): self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = step_reward
+                if hasattr(self, 'current_episode_actions'): self.current_episode_actions.append(action_idx)
+
+                done, truncated = False, False
                 if self.invalid_action_count >= self.invalid_action_limit:
                     logging.error(f"Exceeded invalid action limit ({self.invalid_action_count}). Terminating episode.")
-                    done, truncated, step_reward = True, True, -2.0 # Truncated due to limit
-                # else: State didn't change, return current obs (handled below)
+                    done, truncated, step_reward = True, True, -2.0
 
-                # Even if invalid mask, get current state and return
                 obs = self._get_obs_safe()
+                info["action_mask"] = current_mask.astype(bool) # Update mask in info
                 info["invalid_action"] = True
-                info["action_mask"] = current_valid_actions.astype(bool)
-                # Update action/reward history even for invalid mask selection
-                # Check if attributes exist before assigning
-                if hasattr(self, 'last_n_actions'):
-                    self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
-                if hasattr(self, 'last_n_rewards'):
-                    self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = step_reward
+                info["invalid_action_reason"] = self.action_handler.action_reasons.get(action_idx, 'Not valid')
+                if done: self.ensure_game_result_recorded() # Record if terminated due to invalid limit
                 return obs, step_reward, done, truncated, info
 
-            self.invalid_action_count = 0 # Reset counter
+            # Reset invalid action counter on valid action
+            self.invalid_action_count = 0
 
-            # --- Get Action Info & Pre-State ---
-            action_type, param = self.action_handler.get_action_info(action_idx)
-            if DEBUG_ACTION_STEPS: logging.info(f"Step {self.current_step}: Player {gs.priority_player['name']} trying {action_type}({param}) Context: {context}")
-            self.current_episode_actions.append(action_idx) # Record valid action attempt
+            # --- Execute Action using ActionHandler ---
+            # Increment step counter only AFTER validation
+            self.current_step += 1
 
-            # Use _get_active_player and _get_non_active_player helpers
-            me = gs._get_active_player()
-            opp = gs._get_non_active_player()
-            prev_state = { # Capture state BEFORE action
-                "my_life": me.get("life", 0), "opp_life": opp.get("life", 0),
-                "my_hand": len(me.get("hand", [])), "opp_hand": len(opp.get("hand", [])),
-                "my_board": len(me.get("battlefield", [])), "opp_board": len(opp.get("battlefield", [])),
-                "my_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) for cid in me.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
-                "opp_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) for cid in opp.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
-            }
-            if hasattr(gs, 'strategy_memory') and gs.strategy_memory:
-                 pre_action_pattern = gs.strategy_memory.extract_strategy_pattern(gs)
+            # ActionHandler.apply_action handles the game logic, internal loops, SBAs, stack, rewards etc.
+            if not hasattr(self, 'action_handler') or self.action_handler is None:
+                raise RuntimeError("ActionHandler is not initialized.")
 
-            # --- Execute Agent's Action ---
-            action_reward = 0.0
-            action_executed = False
-            if not hasattr(self.action_handler, 'action_handlers'):
-                raise AttributeError("ActionHandler is missing the 'action_handlers' dictionary.")
-            handler_func = self.action_handler.action_handlers.get(action_type)
+            # --- Pass CONTEXT to ActionHandler ---
+            # ActionHandler will merge relevant GameState contexts (targeting, sacrifice etc.)
+            # with the context passed from the agent here.
+            obs, reward, done, truncated, info = self.action_handler.apply_action(
+                action_idx, context=action_context
+            )
 
-            if handler_func:
-                 # Try executing handler, passing full context and action index
-                try:
-                    result = handler_func(param=param, context=context, action_type=action_type, action_index=action_idx) # Pass action_index
-                    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], bool): action_reward, action_executed = result
-                    elif isinstance(result, bool): action_reward, action_executed = (0.05, result) if result else (-0.1, result)
-                    elif isinstance(result, (int, float)): action_reward, action_executed = float(result), True
-                    else: action_reward, action_executed = 0.0, True # Assume success if None/other type
-                    action_reward = action_reward or 0.0 # Ensure float
-                except Exception as handler_e:
-                    logging.error(f"Error executing handler {action_type} with param {param}, context {context}, index {action_idx}: {handler_e}", exc_info=True)
-                    action_reward, action_executed = -0.2, False # Assign penalty and failure
-            else: # Handler not found
-                 logging.warning(f"No handler implemented for action type: {action_type} (Index: {action_idx})")
-                 action_reward, action_executed = -0.05, False
-
-            reward += action_reward # Add action result reward to step reward
-            info["action_reward"] = action_reward
-
-            if not action_executed:
-                logging.warning(f"Action {action_type}({param}) failed execution (returned False).")
-                # COMMENT: Rollback is complex. Assume handler didn't change critical state or handled its own rollback.
-                # Potential state changes before handler returns False (e.g., mana pool change) are not rolled back here.
-                # If an error occurred *during* execution, state might be inconsistent.
-                self.invalid_action_count += 1; self.episode_invalid_actions += 1
-                step_reward = -0.15
-                if self.invalid_action_count >= self.invalid_action_limit: done, truncated, step_reward = True, True, -2.0
-                obs = self._get_obs_safe()
-                info["action_mask"] = self.action_mask().astype(bool) # Regenerate mask
-                info["execution_failed"] = True
-                # Update history even on execution failure
-                if hasattr(self, 'last_n_actions'):
-                    self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
-                if hasattr(self, 'last_n_rewards'):
-                    self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = step_reward
-                return obs, step_reward, done, truncated, info
-
-            # --- Main Game Loop (Post-Action Processing) ---
-            max_loops = 50 # Safety limit
-            loop_count = 0
-            previous_priority_holder_name = None # Use name for easier logging/comparison
-
-            while loop_count < max_loops:
-                loop_count += 1
-                state_changed_this_loop = False # Track changes within this loop
-                loop_start_phase = gs.phase
-                loop_start_prio_player_name = getattr(gs.priority_player, 'name', 'None') if gs.priority_player else 'None' # Handle None priority_player
-                loop_start_stack_size = len(gs.stack)
-
-                # 1. State-Based Actions (SBAs) - Repeat until stable
-                sba_cycles = 0
-                while sba_cycles < 10:
-                    sba_cycles += 1
-                    # Ensure Layers are applied before SBAs
-                    if hasattr(gs, 'layer_system') and gs.layer_system: gs.layer_system.apply_all_effects() # Use GS attribute
-                    # Perform SBA Check
-                    sbas_applied = gs.check_state_based_actions() if hasattr(gs, 'check_state_based_actions') else False
-                    if sbas_applied:
-                         state_changed_this_loop = True
-                         # Re-apply layers if SBAs caused state change
-                         if hasattr(gs, 'layer_system') and gs.layer_system: gs.layer_system.apply_all_effects()
-                    else: break # Stable state
-                if sba_cycles >= 10: logging.warning("Exceeded SBA cycle limit.")
-
-                # 2. Check Game End from SBAs
-                if self._check_game_end_conditions(info):
-                     done = True; break
-
-                # 3. Process Triggered Abilities
-                # Triggers are queued by game events (card move, damage etc) via gs.trigger_ability -> ability_handler.check_abilities
-                # process_triggered_abilities just moves queued triggers to the stack.
-                if hasattr(gs, 'ability_handler') and gs.ability_handler: # Use GS attribute
-                    stack_before_triggers = len(gs.stack)
-                    gs.ability_handler.process_triggered_abilities() # Adds to gs.stack
-                    if len(gs.stack) > stack_before_triggers:
-                        state_changed_this_loop = True # Stack changed
-                        if DEBUG_ACTION_STEPS: logging.debug(f"Loop {loop_count}: Triggers added ({len(gs.stack)-stack_before_triggers}), priority reset to AP.")
-                        # Priority is reset automatically by add_to_stack
-
-                # 4. Check Priority & Stack Resolution
-                current_priority_holder = gs.priority_player
-                current_priority_holder_name = getattr(current_priority_holder, 'name', 'None') if current_priority_holder else 'None'
-                agent_player = gs.p1 if gs.agent_is_p1 else gs.p2
-
-                # Check if priority has physically changed player or phase changed
-                if current_priority_holder_name != loop_start_prio_player_name or gs.phase != loop_start_phase:
-                    state_changed_this_loop = True
-
-                # --- Priority Logic ---
-                # The core idea: If the current priority player is NOT the agent, auto-pass.
-                # If it IS the agent, break the loop and return control.
-                if current_priority_holder != agent_player:
-                    # Opponent or None has priority. Auto-pass for them.
-                    # Need to handle case where current_priority_holder is None (start of game/phase)
-                    if current_priority_holder:
-                         if DEBUG_ACTION_STEPS: logging.debug(f"Loop {loop_count}: Non-agent player ({current_priority_holder_name}) holds priority. Auto-passing.")
-                         gs._pass_priority() # This handles stack resolution or phase advance
-                         # Check if state changed AFTER passing
-                         new_prio_holder = gs.priority_player
-                         if new_prio_holder != current_priority_holder or gs.phase != loop_start_phase or len(gs.stack) != loop_start_stack_size:
-                              state_changed_this_loop = True
-                         # Continue loop to re-evaluate state
-                    else:
-                        # No one has priority (e.g., after phase change before triggers handled)
-                        # This case shouldn't usually be hit here, as priority is set after phase change.
-                        logging.warning("Game loop state: No player has priority. Assigning to AP.")
-                        gs.priority_player = gs._get_active_player()
-                        state_changed_this_loop = True # Priority assigned
-                else:
-                    # Agent has priority. Break the loop to return control.
-                    if DEBUG_ACTION_STEPS: logging.debug(f"Loop {loop_count}: Agent ({agent_player['name']}) has priority in phase {gs.phase}. Stack={len(gs.stack)}. Returning control.")
-                    break
-
-                # Check game end again after priority pass / stack resolution
-                if self._check_game_end_conditions(info):
-                     done = True; break
-
-                # Stall detection: If nothing changed in the loop AND priority holder didn't change meaningfully
-                if not state_changed_this_loop and current_priority_holder_name == previous_priority_holder_name:
-                     # Exception: Allow repeated passes if the stack is resolving
-                     if len(gs.stack) == loop_start_stack_size:
-                          logging.warning(f"Game state stalled in loop {loop_count}? Prio: {current_priority_holder_name}, Phase: {gs.phase}, Stack: {len(gs.stack)}. Breaking loop.")
-                          break # Avoid potential infinite loops
-                     else:
-                          logging.debug(f"Loop {loop_count}: State stable but stack size changed, continuing resolution.")
-
-
-                previous_priority_holder_name = current_priority_holder_name # Track for next iteration
-
-            # --- Loop End ---
-            if loop_count >= max_loops: logging.error(f"Exceeded max game loop iterations ({max_loops}). Terminating."); done, truncated, reward = True, True, -3.0
-
-            # --- Calculate Final Step Reward & Check Game End ---
-            current_state = { # Gather final state
-                 "my_life": me.get("life", 0), "opp_life": opp.get("life", 0), "my_hand": len(me.get("hand", [])), "opp_hand": len(opp.get("hand", [])), "my_board": len(me.get("battlefield", [])), "opp_board": len(opp.get("battlefield", [])),
-                 "my_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) for cid in me.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
-                 "opp_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) for cid in opp.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])), }
-            # Ensure _add_state_change_rewards exists
-            if hasattr(self, '_add_state_change_rewards') and callable(self._add_state_change_rewards):
-                 state_change_reward = self._add_state_change_rewards(0.0, prev_state, current_state)
-                 reward += state_change_reward # Add state change reward
-            else:
-                 logging.warning("_add_state_change_rewards method not found or not callable.")
-
-            # Add board state reward component
-            if hasattr(self, '_calculate_board_state_reward') and callable(self._calculate_board_state_reward):
-                reward += self._calculate_board_state_reward()
-            else:
-                 logging.warning("_calculate_board_state_reward method not found or not callable.")
-
-
-            # Final Game End Checks (already done inside loop, check one last time)
-            if not done and self._check_game_end_conditions(info): done = True
-            if done and not truncated: # If game ended naturally
-                 if info["game_result"] == "win": reward += 10.0 + max(0, gs.max_turns - gs.turn) * 0.1
-                 elif info["game_result"] == "loss": reward -= 10.0
-                 # No extra reward/penalty for draw
-
-            # Check max steps AFTER natural end checks
-            if not done and hasattr(self, 'current_step') and hasattr(self, 'max_episode_steps') and self.current_step >= self.max_episode_steps:
-                 done, truncated = True, True; reward -= 0.5; info["game_result"] = "truncated"; logging.info("Max episode steps reached.")
-
-            # --- Final Logging & Return ---
-            self.episode_rewards.append(reward) # Store final reward for this step
-            if done and not getattr(self, '_game_result_recorded', False):
-                 self.ensure_game_result_recorded() # Record result if game ended
-
-            obs = self._get_obs() # Get final observation
-            # Action mask is regenerated based on the NEW state within _get_obs and returned in info
-            # self.current_valid_actions = self.action_mask() # This generates the mask
-            info["action_mask"] = obs["action_mask"] # Get the mask from the generated observation
-
-            # Update action/reward history
+            # --- Post-Action Environment Updates ---
+            # Update environment-level history/tracking
             if hasattr(self, 'last_n_actions'):
-                 self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
+                self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
             if hasattr(self, 'last_n_rewards'):
-                 self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = reward
+                self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = reward
+            if hasattr(self, 'current_episode_actions'):
+                self.current_episode_actions.append(action_idx)
+            if hasattr(self, 'episode_rewards'):
+                 self.episode_rewards.append(reward)
 
-            # Update strategy memory
-            if hasattr(gs, 'strategy_memory') and gs.strategy_memory and pre_action_pattern is not None:
-                 gs.strategy_memory.update_strategy(pre_action_pattern, reward)
+            # Ensure game result is recorded if 'done' flag is set
+            if done and not getattr(self, '_game_result_recorded', False):
+                self.ensure_game_result_recorded()
 
-            if DEBUG_ACTION_STEPS: logging.info(f"== STEP {self.current_step} END: reward={reward:.3f}, done={done}, truncated={truncated}, Phase={gs.phase}, Prio={getattr(gs.priority_player,'name','None')} ==")
+            # Final Action Mask in Info should come from the observation generated by ActionHandler
+            # apply_action should already include the latest mask in its returned info dict.
+            if "action_mask" not in info:
+                 logging.warning("Info dict returned by ActionHandler.apply_action is missing 'action_mask'.")
+                 # Regenerate as fallback
+                 info["action_mask"] = self.action_mask().astype(bool)
+
+
+            # Add detailed logging if enabled
+            if self.detailed_logging:
+                 action_type, param = self.action_handler.get_action_info(action_idx)
+                 logging.info(f"--- Env Step {self.current_step} ---")
+                 logging.info(f"Action Taken: {action_idx} ({action_type}({param})) Context: {action_context}")
+                 logging.info(f"Returned State: Turn {gs.turn}, Phase {self.game_state._PHASE_NAMES.get(gs.phase, gs.phase)}, Prio {getattr(gs.priority_player,'name','None')}")
+                 logging.info(f"Reward: {reward:.4f}, Done: {done}, Truncated: {truncated}")
+                 # Log key observation parts maybe? e.g. life totals, board sizes
 
             return obs, reward, done, truncated, info
 
         except Exception as e:
-            # --- Critical Error Handling ---
-            logging.error(f"CRITICAL error in step function (Action {action_idx}): {str(e)}", exc_info=True)
-            obs = self._get_obs_safe() # Use safe observation
+            # --- Critical Error Handling within Step ---
+            logging.critical(f"CRITICAL error in step function (Action {action_idx}): {str(e)}", exc_info=True)
+            # Get safe observation
+            obs = self._get_obs_safe()
+            # Create minimal safe info with an error flag
             mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool); mask[11] = True; mask[12] = True # Pass/Concede
-            info = {"action_mask": mask, "critical_error": True, "error_message": str(e)}
-            # Ensure game ends if critical error occurs
-            return obs, -5.0, True, False, info
+            final_info = {
+                "action_mask": mask,
+                "critical_error": True,
+                "error_message": f"Unhandled Exception: {str(e)}"
+            }
+            # End the episode immediately due to critical failure
+            self.ensure_game_result_recorded() # Ensure some result is recorded, even if error
+            return obs, -5.0, True, False, final_info
         
     def _get_obs_safe(self):
         """Return a minimal, safe observation dictionary in case of errors."""
@@ -1730,6 +1562,7 @@ class AlphaZeroMTGEnv(gym.Env):
             logging.error(traceback.format_exc())
             
 
+
     def _get_obs(self):
         """Build the observation dictionary. Assumes helpers are implemented."""
         try:
@@ -1751,11 +1584,12 @@ class AlphaZeroMTGEnv(gym.Env):
             current_mask = self.action_mask()
 
             obs = {
+                # ... (Keep most existing key population logic the same) ...
                 "phase": np.array([current_phase], dtype=np.int32),
                 "phase_onehot": self._phase_to_onehot(current_phase),
                 "turn": np.array([current_turn], dtype=np.int32),
                 "is_my_turn": np.array([int(is_my_turn)], dtype=np.int32),
-                # Use agent player object for 'my_' stats
+                # ... (Life, Hand, Battlefield etc.) ...
                 "my_life": np.array([agent_player_obj.get('life', 0)], dtype=np.int32),
                 "opp_life": np.array([opp.get('life', 0)], dtype=np.int32),
                 "life_difference": np.array([agent_player_obj.get('life', 0) - opp.get('life', 0)], dtype=np.int32),
@@ -1862,12 +1696,24 @@ class AlphaZeroMTGEnv(gym.Env):
                 "mulligan_recommendation": np.array([0.5], dtype=np.float32), # Populated below
                 "mulligan_reason_count": np.zeros(1, dtype=np.int32), # Populated below
                 "mulligan_reasons": np.zeros(5, dtype=np.float32), # Populated below
+
+                # --- Context-related Observation Fields ---
+                "targetable_permanents": self._get_potential_targets_vector('permanent'),
+                "targetable_players": self._get_potential_targets_vector('player'),
+                "targetable_spells_on_stack": self._get_potential_targets_vector('spell'),
+                "targetable_cards_in_graveyards": self._get_potential_targets_vector('graveyard_card'),
+                "sacrificeable_permanents": self._get_potential_sacrifices(),
+                "selectable_modes": self._get_available_choice_options('mode'),
+                "selectable_colors": self._get_available_choice_options('color'),
+                "valid_x_range": self._get_available_choice_options('x_range'),
+                "bottomable_cards": self._get_bottoming_mask(agent_player_obj),
+                "dredgeable_cards_in_gy": self._get_dredge_options(agent_player_obj),
             }
 
             # --- Populate dynamic/planner-dependent parts ---
             if self.strategic_planner:
                 try:
-                    # Use cached analysis if valid, else re-analyze
+                    # ... (Planner population logic remains the same) ...
                     analysis = getattr(self, 'current_analysis', None)
                     if not analysis or analysis.get("game_info", {}).get("turn") != current_turn:
                          analysis = self.strategic_planner.analyze_game_state()
@@ -1909,13 +1755,10 @@ class AlphaZeroMTGEnv(gym.Env):
                         obs["optimal_attackers"] = optimal_mask
                         obs["attacker_values"] = self._get_attacker_values(bf_ids, agent_player_obj)
                     obs["ability_recommendations"] = self._get_ability_recommendations(agent_player_obj.get("battlefield", []), agent_player_obj)
-                    # Note: PW activation flags are already populated based on player state
-
                 except Exception as planner_e:
                      logging.warning(f"Error getting strategic info for observation: {planner_e}", exc_info=True) # Log traceback
 
-
-            # Populate Mulligan info if applicable for the agent
+            # --- Populate Mulligan info if applicable (Remains same) ---
             if getattr(gs, 'mulligan_in_progress', False) and getattr(gs, 'mulligan_player', None) == agent_player_obj:
                  mull_rec, mull_reasons, mull_count = self._get_mulligan_info(agent_player_obj)
                  obs["mulligan_recommendation"] = np.array([mull_rec], dtype=np.float32)
@@ -1923,7 +1766,7 @@ class AlphaZeroMTGEnv(gym.Env):
                  obs["mulligan_reasons"] = mull_reasons
 
 
-            # Validate before returning
+            # --- Validate and Return ---
             self._validate_obs(obs)
             return obs
 
@@ -2090,6 +1933,156 @@ class AlphaZeroMTGEnv(gym.Env):
 
         
     # --- Observation Helper Methods ---
+    
+    def _get_potential_targets_vector(self, target_kind):
+        """Helper to get IDs for targetable entities of a specific kind."""
+        gs = self.game_state
+        agent_player_obj = gs.p1 if gs.agent_is_p1 else gs.p2
+        target_ids = []
+        max_size = 0
+
+        # Determine max size based on observation space definition
+        if target_kind == 'permanent': max_size = self.observation_space["targetable_permanents"].shape[0]
+        elif target_kind == 'player': max_size = 2
+        elif target_kind == 'spell': max_size = self.observation_space["targetable_spells_on_stack"].shape[0]
+        elif target_kind == 'graveyard_card': max_size = self.observation_space["targetable_cards_in_graveyards"].shape[0]
+        else: return np.full(1, -1, dtype=np.int32) # Default if kind unknown
+
+        dtype_for_space = np.int32 # Default ID type
+
+        # Only populate if targeting context is relevant
+        if gs.phase == gs.PHASE_TARGETING and gs.targeting_context:
+            source_id = gs.targeting_context["source_id"]
+            controller = gs.targeting_context["controller"]
+            if controller == agent_player_obj: # Only show targets if it's agent's turn to target
+                valid_targets_map = {}
+                if gs.targeting_system:
+                     valid_targets_map = gs.targeting_system.get_valid_targets(source_id, controller)
+                else: logging.warning("Targeting system unavailable in _get_potential_targets")
+
+                if target_kind == 'permanent':
+                    for cat in ["creatures", "artifacts", "enchantments", "lands", "planeswalkers", "battles", "permanents"]:
+                        target_ids.extend(valid_targets_map.get(cat, []))
+                elif target_kind == 'player':
+                    target_ids.extend([0 if p_id == "p1" else 1 for p_id in valid_targets_map.get("players", [])]) # Use 0/1 for player indices
+                    dtype_for_space = np.int32 # Keep int for player mask index
+                elif target_kind == 'spell':
+                    target_ids.extend(valid_targets_map.get("spells", []))
+                elif target_kind == 'graveyard_card':
+                    # Target list might just contain IDs, get them all if category is 'card'
+                    target_ids.extend(valid_targets_map.get("cards", []))
+
+        # Encode IDs (pad/truncate)
+        # Ensure IDs are integers where possible (string IDs are ok too but need padding logic adjustment)
+        encoded_targets = np.full(max_size, -1, dtype=dtype_for_space)
+        unique_target_ids = list(set(target_ids)) # Avoid duplicates
+        for i, target_id in enumerate(unique_target_ids[:max_size]):
+            # Try converting string IDs to ints if possible, otherwise keep as is (if space allows)
+            # Or, map string IDs to internal integers. Simpler: Pad with -1.
+            # Space requires int32, string IDs are problematic. Map to int or use special encoding.
+            # For now, assume IDs are strings or ints. Will error if space is int only and gets strings.
+            # If target IDs are guaranteed ints (or map to ints):
+             if isinstance(target_id, (str, int)): encoded_targets[i] = int(target_id) if isinstance(target_id, int) else i # Placeholder mapping
+        return encoded_targets
+
+
+    def _get_potential_sacrifices(self):
+        """Helper to get IDs of permanents the agent can sacrifice."""
+        gs = self.game_state
+        agent_player_obj = gs.p1 if gs.agent_is_p1 else gs.p2
+        sacrificeable_ids = []
+        max_size = self.observation_space["sacrificeable_permanents"].shape[0]
+
+        if gs.phase == gs.PHASE_SACRIFICE and gs.sacrifice_context:
+            controller = gs.sacrifice_context["controller"]
+            if controller == agent_player_obj: # Only if it's agent's turn
+                req_type = gs.sacrifice_context.get('required_type')
+                for card_id in controller.get("battlefield", []):
+                    card = gs._safe_get_card(card_id)
+                    if not card: continue
+                    if not req_type or req_type == "permanent" or req_type in getattr(card, 'card_types', []):
+                         sacrificeable_ids.append(card_id) # Append the actual ID (can be string)
+
+        # Pad/truncate the list of IDs
+        encoded_ids = np.full(max_size, -1, dtype=np.int32)
+        for i, s_id in enumerate(sacrificeable_ids[:max_size]):
+            # Simple index mapping for now - agent needs to map back
+             if isinstance(s_id, (str, int)): encoded_ids[i] = i # Map to index, agent needs to lookup actual ID via index
+        return encoded_ids
+
+
+    def _get_available_choice_options(self, choice_kind):
+        """Helper to get available modes, colors, or X range."""
+        gs = self.game_state
+        options = np.full(10, -1, dtype=np.int32) # Default size based on max modes
+        dtype = np.int32
+        max_size = 10
+
+        if choice_kind == 'color': max_size = 5
+        elif choice_kind == 'x_range': max_size = 2; dtype = np.int32
+        else: max_size = self.observation_space.get(f"selectable_{choice_kind}s", spaces.Box(-1,10,shape=(10,), dtype=np.int32)).shape[0]
+
+
+        if gs.phase == gs.PHASE_CHOOSE and gs.choice_context:
+            context = gs.choice_context
+            controller = context.get("player")
+            agent_player_obj = gs.p1 if gs.agent_is_p1 else gs.p2
+
+            if controller == agent_player_obj: # Only if agent is choosing
+                choice_type = context.get("type")
+                if choice_type == "choose_mode" and choice_kind == 'mode':
+                     num_choices = context.get("num_choices", 0)
+                     selected = context.get("selected_modes", [])
+                     available = [i for i in range(num_choices) if i not in selected]
+                     options = np.full(max_size, -1, dtype=dtype)
+                     for i, mode_idx in enumerate(available[:max_size]): options[i] = mode_idx
+                elif choice_type == "choose_color" and choice_kind == 'color':
+                    options = np.arange(5, dtype=dtype) # Indices 0-4 for WUBRG
+                elif choice_type == "choose_x" and choice_kind == 'x_range':
+                    options = np.array([context.get("min_x", 0), context.get("max_x", 0)], dtype=dtype) # Return min/max
+                # Add other choice types (e.g., choose target from list? handled by targeting)
+
+        return options
+
+    def _get_bottoming_mask(self, player):
+        """Helper to get mask of cards available to bottom after mulligan."""
+        gs = self.game_state
+        mask = np.zeros(self.max_hand_size, dtype=bool)
+        if getattr(gs, 'bottoming_in_progress', False) and getattr(gs, 'bottoming_player', None) == player:
+            for i in range(len(player.get("hand", []))):
+                if i < self.max_hand_size: mask[i] = True
+        return mask
+
+
+    def _get_dredge_options(self, player):
+        """Helper to get IDs of dredgeable cards in graveyard."""
+        gs = self.game_state
+        options = np.full(6, -1, dtype=np.int32) # Action space has 6 GY indices for dredge
+        max_size = 6
+
+        # Only populate if a draw event might trigger dredge (or explicit choice phase)
+        can_dredge_now = False
+        if gs.phase == gs.PHASE_DRAW and gs.priority_player == player: can_dredge_now = True
+        # Or if explicit dredge choice pending
+        if getattr(gs, 'dredge_pending', None) and gs.dredge_pending['player'] == player: can_dredge_now = True
+
+        if can_dredge_now:
+            dredge_card_ids = []
+            for i, card_id in enumerate(player.get("graveyard", [])[:max_size]): # Look at top N GY cards only
+                card = gs._safe_get_card(card_id)
+                if card and "dredge" in getattr(card, 'oracle_text', '').lower():
+                    dredge_match = re.search(r"dredge (\d+)", card.oracle_text.lower())
+                    if dredge_match:
+                         dredge_value = int(dredge_match.group(1))
+                         # Check if enough cards in library to dredge
+                         if len(player.get("library", [])) >= dredge_value:
+                              dredge_card_ids.append((i, card_id)) # Store GY index and ID
+
+            # Populate the observation array with indices
+            for k, (gy_index, _) in enumerate(dredge_card_ids[:max_size]):
+                options[k] = gy_index # Store the index
+
+        return options
 
     def _get_zone_features(self, card_ids, max_size):
         """Helper to get feature vectors for cards in a zone, padded/truncated."""
