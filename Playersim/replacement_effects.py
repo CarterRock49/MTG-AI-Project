@@ -1,6 +1,8 @@
 import logging
 import re
 
+from numpy import copy
+
 class ReplacementEffectSystem:
     """
     System for handling replacement effects in MTG.
@@ -380,85 +382,176 @@ class ReplacementEffectSystem:
                              if effect.get('effect_id') != effect_id]
     
     def apply_replacements(self, event_type, event_context):
-        """Apply replacement effects with improved conflict resolution."""
-        modified_context = dict(event_context)
-        was_replaced = False
-        
-        # Get applicable effects from index
-        applicable_effects = self.effect_index.get(event_type, [])
-        
-        if not applicable_effects:
-            return modified_context, was_replaced
-        
-        # Filter by condition
-        valid_effects = []
-        for effect in applicable_effects:
-            condition_met = True
-            if 'condition' in effect:
-                if callable(effect['condition']):
-                    try:
-                        condition_met = effect['condition'](modified_context)
-                    except Exception as e:
-                        logging.error(f"Error in condition function: {str(e)}")
+            """Apply replacement effects with improved conflict resolution based on Rule 616.1."""
+            modified_context = dict(event_context)
+            was_replaced = False
+
+            # Get applicable effects from index
+            applicable_effects = self.effect_index.get(event_type, [])
+
+            if not applicable_effects:
+                return modified_context, was_replaced
+
+            # Filter by condition
+            valid_effects = []
+            for effect in applicable_effects:
+                # Check duration and remove expired (redundant if cleanup_expired_effects is run, but safe)
+                # (Simplified expiration check - primary check should be in cleanup)
+                if self._is_effect_expired(effect, self.game_state.turn, self.game_state.phase):
+                    # This suggests the main cleanup might be missing. Add logging here.
+                    logging.warning(f"Applying replacement effect {effect.get('effect_id')} that should potentially be expired.")
+                    # We won't remove it here, but let's not apply it if obviously expired based on turn/phase.
+                    # continue # Skip applying? Or let it apply and get cleaned later? Let it apply for now.
+
+                condition_met = True
+                if 'condition' in effect:
+                    if callable(effect['condition']):
+                        try:
+                            # Provide a deep copy of the context for safety, as conditions shouldn't modify it.
+                            condition_met = effect['condition'](copy.deepcopy(modified_context))
+                        except Exception as e:
+                            logging.error(f"Error evaluating condition for effect {effect.get('effect_id')}: {str(e)}")
+                            condition_met = False
+                    else:
+                        logging.warning(f"Condition is not callable for effect {effect.get('effect_id')}")
                         condition_met = False
+
+                if condition_met:
+                    valid_effects.append(effect)
+
+            if not valid_effects:
+                return modified_context, was_replaced
+
+            # Implement MTG rule 616.1 for replacement effect ordering
+            # Layer ordering (Self-Replacement > Control > Other)
+            # Affected Object/Player Choice (not implemented dynamically, uses timestamp)
+
+            # Determine the affected object/player (this can be complex)
+            affected_object_id = None
+            affected_player = None
+
+            # Common context keys indicating the affected entity
+            possible_keys = ['target_id', 'card_id', 'player', 'affected_id']
+            for key in possible_keys:
+                if key in modified_context:
+                    affected_object_id = modified_context[key]
+                    break
+
+            # Determine controller based on ID
+            if affected_object_id:
+                if isinstance(affected_object_id, dict) and 'name' in affected_object_id: # It's a player dict
+                    affected_player = affected_object_id
+                    affected_object_id = affected_player['name'] # Use name as ID marker for players
+                else: # Assume it's a card ID or other permanent ID
+                    # Need reliable way to get controller - use GameState method
+                    affected_player = self.game_state.get_card_controller(affected_object_id) \
+                                    if hasattr(self.game_state, 'get_card_controller') else None
+
+            # Group effects by relationship to affected object/player
+            # Note: Needs clear distinction between effect controller and affected object controller
+            self_effects = [e for e in valid_effects if e.get('source_id') == affected_object_id]
+            controller_effects = []
+            other_effects = []
+
+            for e in valid_effects:
+                # Skip self-effects already categorized
+                if e.get('source_id') == affected_object_id: continue
+
+                # Effect's controller (who owns the source of the replacement)
+                effect_controller = self.game_state.get_card_controller(e.get('source_id'))
+
+                # Check if the effect's controller is the same as the affected player/object's controller
+                if affected_player and effect_controller == affected_player:
+                    controller_effects.append(e)
                 else:
-                    logging.warning(f"Condition is not callable")
-                    condition_met = False
-            
-            if condition_met:
-                valid_effects.append(effect)
-        
-        if not valid_effects:
-            return modified_context, was_replaced
-        
-        # Implement MTG rule 616.1 for replacement effect ordering
-        # 1. Self-replacement effects first
-        # 2. Affected player choices (determined by affected object's controller)
-        # 3. Affecting player choices (determined by source's controller)
-        
-        # Determine the affected object and its controller
-        affected_id = modified_context.get('affected_id') or modified_context.get('target_id') or modified_context.get('card_id')
-        affected_controller = None
-        if affected_id:
-            affected_controller = self._find_card_controller(affected_id)
-        
-        # Group effects by relationship to affected object
-        self_effects = [e for e in valid_effects if e.get('source_id') == affected_id]
-        controller_effects = [e for e in valid_effects 
-                            if e.get('source_id') != affected_id and e.get('controller_id') == affected_controller]
-        other_effects = [e for e in valid_effects 
-                    if e.get('source_id') != affected_id and e.get('controller_id') != affected_controller]
-        
-        # Sort each group by timestamp (creation order)
-        self_effects.sort(key=lambda e: e.get('start_turn', 0))
-        controller_effects.sort(key=lambda e: e.get('start_turn', 0))
-        other_effects.sort(key=lambda e: e.get('start_turn', 0))
-        
-        # Combine groups in the correct order
-        ordered_effects = self_effects + controller_effects + other_effects
-        
-        # Apply replacements in sequence
-        for effect in ordered_effects:
-            if 'replacement' in effect and callable(effect['replacement']):
-                try:
-                    result = effect['replacement'](modified_context)
-                    if result is not None:
-                        modified_context = result
+                    other_effects.append(e)
+
+            # Sort each group by timestamp (creation order) - Rule 616.1e/f/g default
+            # TODO: Rule 616.1d (Player Choice) - Requires interactive choice if multiple effects in the same category apply.
+            # Currently uses timestamp as a deterministic fallback for non-interactive simulation.
+            get_timestamp = lambda e: self.game_state.card_db.get(e.get('source_id'), {}).get('_timestamp', e.get('start_turn', 0)) if hasattr(self.game_state, 'card_db') else e.get('start_turn', 0)
+
+            self_effects.sort(key=get_timestamp)
+            controller_effects.sort(key=get_timestamp)
+            other_effects.sort(key=get_timestamp)
+
+            # Combine groups in the correct order (Rule 616.1 ordering)
+            ordered_effects = self_effects + controller_effects + other_effects
+
+            # Apply replacements in sequence
+            logging.debug(f"Applying {len(ordered_effects)} replacements for {event_type} to {affected_object_id}")
+            active_effect_applied_in_loop = True # Flag to re-evaluate if context changes
+            applied_ids = set() # Track which effects have applied to prevent loops on the *exact same* effect ID
+
+            # Limit loops to prevent true infinite replacement loops (rare)
+            max_replacement_loops = 10
+            current_loop = 0
+
+            # Outer loop allows re-checking effects if the event context is modified by a replacement
+            while active_effect_applied_in_loop and current_loop < max_replacement_loops:
+                current_loop += 1
+                active_effect_applied_in_loop = False
+
+                # Filter effects again based on potentially modified context
+                # (This could be optimized, but ensures correctness)
+                valid_effects_for_loop = []
+                for effect in ordered_effects:
+                    # Don't re-apply the exact same effect instance in this pass
+                    if effect.get('effect_id') in applied_ids: continue
+
+                    condition_met = True
+                    if 'condition' in effect and callable(effect['condition']):
+                        try:
+                            condition_met = effect['condition'](copy.deepcopy(modified_context))
+                        except Exception as e:
+                            logging.error(f"Error re-evaluating condition for effect {effect.get('effect_id')}: {str(e)}")
+                            condition_met = False
+                    if condition_met:
+                        valid_effects_for_loop.append(effect)
+
+                if not valid_effects_for_loop: break # No more valid effects apply
+
+                # --- Player Choice Point (Not Implemented) ---
+                # If multiple effects from valid_effects_for_loop could apply now,
+                # Rule 616.1d says the affected player/controller chooses the order.
+                # Current approach: Apply first valid one based on the pre-sorted order.
+
+                # Apply the *first* applicable effect in the sorted order
+                effect_to_apply = valid_effects_for_loop[0]
+                effect_id_applying = effect_to_apply.get('effect_id')
+
+                if 'replacement' in effect_to_apply and callable(effect_to_apply['replacement']):
+                    source_id = effect_to_apply.get('source_id')
+                    source_name = getattr(self.game_state._safe_get_card(source_id), 'name', source_id)
+                    try:
+                        original_context_before_apply = copy.deepcopy(modified_context)
+                        result = effect_to_apply['replacement'](modified_context) # Modify context in-place
+
+                        if result is not None: # Some replacements might return the context explicitly
+                            modified_context = result
+
                         was_replaced = True
-                        
-                        source_id = effect.get('source_id')
-                        source_card = self.game_state._safe_get_card(source_id)
-                        source_name = source_card.name if source_card and hasattr(source_card, 'name') else "Unknown"
-                        logging.debug(f"Replacement effect from {source_name} applied to {event_type} event")
-                        
+                        active_effect_applied_in_loop = True # Re-check applicability after change
+                        applied_ids.add(effect_id_applying) # Mark this effect instance as applied
+
+                        logging.debug(f"Replacement effect '{effect_id_applying}' from {source_name} applied to {event_type} event.")
+                        logging.debug(f"Context change: {original_context_before_apply} -> {modified_context}")
+
                         # Handle one-time effects
-                        if effect.get('apply_once', False):
-                            self.remove_effect(effect['effect_id'])
-                            break
-                except Exception as e:
-                    logging.error(f"Error in replacement function: {str(e)}")
-        
-        return modified_context, was_replaced
+                        if effect_to_apply.get('apply_once', False):
+                            self.remove_effect(effect_id_applying)
+                            # Remove from the ordered list to prevent re-check
+                            ordered_effects = [e for e in ordered_effects if e.get('effect_id') != effect_id_applying]
+
+                    except Exception as e:
+                        logging.error(f"Error in replacement function for effect {effect_id_applying} from {source_name}: {str(e)}")
+                        # Skip this effect if error occurs during its application
+                        ordered_effects = [e for e in ordered_effects if e.get('effect_id') != effect_id_applying]
+
+            if current_loop >= max_replacement_loops:
+                logging.error(f"Exceeded max replacement loops for event {event_type}. Returning potentially intermediate state.")
+
+            return modified_context, was_replaced
     
     def _is_creature_controlled_by(self, card_id, player):
         """Check if a card is a creature controlled by a specific player."""

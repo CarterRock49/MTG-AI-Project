@@ -821,7 +821,6 @@ class AlphaZeroMTGEnv(gym.Env):
         logging.warning(f"Unknown phase {current_phase} in force_phase_transition, defaulting to MAIN_POSTCOMBAT")
         return gs.PHASE_MAIN_POSTCOMBAT
     
-
     def step(self, action_idx, context=None):
         """
         Execute the action and run the game engine until control returns to the agent,
@@ -830,6 +829,9 @@ class AlphaZeroMTGEnv(gym.Env):
         Args:
             action_idx: Index of the action selected by the agent.
             context: Optional dictionary with additional context for complex actions.
+                     **IMPORTANT**: The calling agent/code is responsible for providing
+                     the necessary key-value pairs in the `context` dictionary for
+                     actions that require it (see ACTION_MEANINGS comments).
 
         Returns:
             tuple: (observation, reward, done, truncated, info)
@@ -2059,18 +2061,23 @@ class AlphaZeroMTGEnv(gym.Env):
 
     def _get_ability_recommendations(self, bf_ids, player):
         """Populate the ability recommendations tensor."""
+        # Fallback: Return zeros if planner is not available
         recs = np.zeros((self.max_battlefield, 5, 2), dtype=np.float32) # shape (bf_size, max_abilities, [recommend, conf])
+        if not self.strategic_planner or not self.action_handler.game_state.ability_handler:
+            return recs
+
         gs = self.game_state
-        if not hasattr(gs, 'ability_handler') or not self.strategic_planner: return recs
+        ability_handler = gs.ability_handler
+        if not ability_handler: return recs # Double check handler exists
 
         for i, card_id in enumerate(bf_ids):
              if i >= self.max_battlefield: break
-             abilities = gs.ability_handler.get_activated_abilities(card_id)
+             abilities = ability_handler.get_activated_abilities(card_id)
              for j, ability in enumerate(abilities):
                   if j >= 5: break # Max 5 abilities per card
                   try:
                       # Check if actually activatable first
-                      can_activate = gs.ability_handler.can_activate_ability(card_id, j, player)
+                      can_activate = ability_handler.can_activate_ability(card_id, j, player)
                       if can_activate:
                            recommended, confidence = self.strategic_planner.recommend_ability_activation(card_id, j)
                            recs[i, j, 0] = float(recommended)
@@ -2201,6 +2208,10 @@ class AlphaZeroMTGEnv(gym.Env):
 
     def _analysis_to_metrics(self, analysis):
         """Convert strategic analysis dict to metrics vector."""
+        # Fallback: Return zeros if strategic planner is not available
+        if not self.strategic_planner:
+            return np.zeros(10, dtype=np.float32)
+
         metrics = np.zeros(10, dtype=np.float32)
         if not analysis: return metrics
         metrics[0] = analysis.get("position", {}).get("score", 0)
@@ -2212,8 +2223,6 @@ class AlphaZeroMTGEnv(gym.Env):
         stage = analysis.get("game_info", {}).get("game_stage", 'mid')
         metrics[6] = 0.0 if stage == 'early' else 0.5 if stage == 'mid' else 1.0
         # Metrics 7, 8, 9 can be used for other aspects (e.g., threat level, combo proximity)
-        # Placeholder: Add opponent archetype confidence if available
-        # Needs archetype prediction logic to be added first. For now, keep as 0.
         metrics[7] = 0.0 # Opponent Archetype Confidence
         metrics[8] = 0.0 # Win Condition Proximity
         metrics[9] = 0.0 # Overall Threat Level
@@ -2274,8 +2283,12 @@ class AlphaZeroMTGEnv(gym.Env):
 
     def _get_threat_assessment(self, opp_bf_ids):
         """Assess threat level of opponent's board."""
+        # Fallback: Return zeros if strategic planner is not available
+        if not self.strategic_planner:
+            return np.zeros(self.max_battlefield, dtype=np.float32)
+
         threats = np.zeros(self.max_battlefield, dtype=np.float32)
-        if self.strategic_planner:
+        if self.strategic_planner and hasattr(self.strategic_planner, 'assess_threats'):
             threat_list = self.strategic_planner.assess_threats() # Get list of dicts
             threat_map = {t['card_id']: t['level'] for t in threat_list}
             for i, card_id in enumerate(opp_bf_ids):
@@ -2285,6 +2298,10 @@ class AlphaZeroMTGEnv(gym.Env):
 
     def _get_opportunity_assessment(self, hand_ids, player):
         """Assess opportunities presented by cards in hand."""
+        # Fallback: Return zeros if card evaluator is not available
+        if not self.card_evaluator:
+            return np.zeros(self.max_hand_size, dtype=np.float32)
+
         opportunities = np.zeros(self.max_hand_size, dtype=np.float32)
         if self.card_evaluator:
              for i, card_id in enumerate(hand_ids):
@@ -2296,6 +2313,7 @@ class AlphaZeroMTGEnv(gym.Env):
                       value = self.card_evaluator.evaluate_card(card_id, "play") if can_play else 0
                       opportunities[i] = min(1.0, value / 5.0) # Normalize max value
         return opportunities
+
 
     def _get_resource_efficiency(self, player, turn):
         """Calculate resource efficiency metrics."""
@@ -2379,46 +2397,52 @@ class AlphaZeroMTGEnv(gym.Env):
 
     def _get_mulligan_info(self, player):
         """Get mulligan recommendation and reasons."""
+        # Fallback: Return defaults if planner is not available
         recommendation = 0.5 # Neutral default
         reasons_arr = np.zeros(5, dtype=np.float32)
         reason_count = 0
+        if not self.strategic_planner or not hasattr(self.strategic_planner, 'suggest_mulligan_decision'):
+             return recommendation, reasons_arr, reason_count
+
         gs = self.game_state
         if getattr(gs, 'mulligan_in_progress', False) and getattr(gs, 'mulligan_player', None) == player:
-            if self.strategic_planner and hasattr(self.strategic_planner, 'suggest_mulligan_decision'):
-                try:
-                     is_on_play = (gs.turn == 1 and gs.agent_is_p1) # Simplified on_play check
-                     deck_name = self.current_deck_name_p1 if player == gs.p1 else self.current_deck_name_p2
-                     decision = self.strategic_planner.suggest_mulligan_decision(player.get("hand",[]), deck_name, is_on_play)
-                     recommendation = float(decision.get('keep', False))
-                     reason_codes = {"Too few lands": 0, "Too many lands": 1, "No early plays": 2, "Too many expensive cards": 3, "Lacks interaction": 4} # Example mapping
-                     for i, reason in enumerate(decision.get('reasoning', [])[:5]):
-                          # Simple representation: Set flag if reason category exists
-                          # A more sophisticated approach could map specific reasons.
-                          reasons_arr[i] = 1.0 # Just mark presence of a reason
-                     reason_count = min(5, len(decision.get('reasoning', [])))
-                except Exception as mull_e:
-                     logging.warning(f"Error getting mulligan recommendation: {mull_e}")
+            try:
+                 is_on_play = (gs.turn == 1 and gs.agent_is_p1) # Simplified on_play check
+                 deck_name = self.current_deck_name_p1 if player == gs.p1 else self.current_deck_name_p2
+                 decision = self.strategic_planner.suggest_mulligan_decision(player.get("hand",[]), deck_name, is_on_play)
+                 recommendation = float(decision.get('keep', False))
+                 # Map reasons to indices
+                 reason_codes = {"Too few lands": 0, "Too many lands": 1, "No early plays": 2, "Too many expensive cards": 3, "Lacks interaction": 4}
+                 for i, reason in enumerate(decision.get('reasoning', [])[:5]):
+                     if reason in reason_codes:
+                          reasons_arr[reason_codes[reason]] = 1.0 # Set flag for this reason
+                     else: # If reason text not in map, use next available slot
+                          if i < len(reasons_arr): reasons_arr[i] = 0.5 # Generic reason marker
+                 reason_count = min(5, len(decision.get('reasoning', [])))
+            except Exception as mull_e:
+                 logging.warning(f"Error getting mulligan recommendation: {mull_e}")
         return recommendation, reasons_arr, reason_count
 
-    def _get_recommendations(self, current_mask):
+    def _get_recommendations(self, valid_actions_list): # Renamed argument
         """Get action recommendations from planner and memory."""
         rec_action = -1
         rec_conf = 0.0
         mem_action = -1
         matches = 0
-        valid_list = np.where(current_mask)[0]
 
-        if self.strategic_planner:
+        # Planner Recommendation (Check existence first)
+        if self.strategic_planner and hasattr(self.strategic_planner, 'recommend_action'):
              try:
-                 rec_action = self.strategic_planner.recommend_action(valid_list)
+                 rec_action = self.strategic_planner.recommend_action(valid_actions_list) # Pass the list
                  # Crude confidence based on position
                  analysis = getattr(self.strategic_planner, 'current_analysis', {})
                  score = analysis.get('position', {}).get('score', 0)
                  rec_conf = 0.5 + abs(score) * 0.4 # Map score [-1, 1] to confidence [0.5, 0.9]
              except Exception: pass # Ignore errors
 
-        if self.strategy_memory:
-            try: mem_action = self.strategy_memory.get_suggested_action(self.game_state, valid_list)
+        # Memory Recommendation (Check existence first)
+        if self.strategy_memory and hasattr(self.strategy_memory, 'get_suggested_action'):
+            try: mem_action = self.strategy_memory.get_suggested_action(self.game_state, valid_actions_list) # Pass list
             except Exception: pass
 
         if rec_action is not None and rec_action == mem_action:
@@ -2432,21 +2456,26 @@ class AlphaZeroMTGEnv(gym.Env):
 
     def _get_attacker_values(self, bf_ids, player):
         """Evaluate the strategic value of attacking with each potential attacker."""
-        values = np.zeros(self.max_battlefield, dtype=np.float32)
-        if self.strategic_planner and hasattr(self.strategic_planner, 'evaluate_attack_action'):
-            for i, card_id in enumerate(bf_ids):
-                 if i >= self.max_battlefield: break
-                 # Check if valid attacker first
-                 if self.action_handler.is_valid_attacker(card_id):
-                     try:
-                          value = self.strategic_planner.evaluate_attack_action([card_id]) # Evaluate attacking alone
-                          values[i] = np.clip(value, -10.0, 10.0) # Clip to bounds
-                     except Exception as atk_eval_e:
-                          logging.warning(f"Error evaluating single attacker {card_id}: {atk_eval_e}")
-                          # Fallback value based on power?
-                          card = self._safe_get_card(card_id)
-                          values[i] = getattr(card, 'power', 0) * 0.5 if card else 0.0
+        # Fallback: Return zeros if planner is not available
+        if not self.strategic_planner or not hasattr(self.strategic_planner, 'evaluate_attack_action'):
+             return np.zeros(self.max_battlefield, dtype=np.float32)
 
+        values = np.zeros(self.max_battlefield, dtype=np.float32)
+        # Use self.action_handler for attacker check
+        if not self.action_handler: return values # Need action handler for validation
+
+        for i, card_id in enumerate(bf_ids):
+             if i >= self.max_battlefield: break
+             # Check if valid attacker first
+             if self.action_handler.is_valid_attacker(card_id):
+                 try:
+                      value = self.strategic_planner.evaluate_attack_action([card_id]) # Evaluate attacking alone
+                      values[i] = np.clip(value, -10.0, 10.0) # Clip to bounds
+                 except Exception as atk_eval_e:
+                      logging.warning(f"Error evaluating single attacker {card_id}: {atk_eval_e}")
+                      # Fallback value based on power?
+                      card = self._safe_get_card(card_id)
+                      values[i] = getattr(card, 'power', 0) * 0.5 if card else 0.0
         return values
 
     def _phase_to_onehot(self, phase):

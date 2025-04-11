@@ -181,44 +181,51 @@ class ActivatedAbility(Ability):
         # Default implementation calls the main resolve logic.
         return self._resolve_ability_implementation(game_state, controller, targets)
 
-    def can_activate(self, game_state, controller):
-        """Check if this ability can be activated using EnhancedManaSystem."""
-        if hasattr(game_state, 'mana_system') and game_state.mana_system:
-            parsed_cost = game_state.mana_system.parse_mana_cost(self.cost)
-            return game_state.mana_system.can_pay_mana_cost(controller, parsed_cost)
-
-        # Fallback to basic cost check if mana_system is not available
-        return super().can_activate(game_state, controller)
 
     def pay_cost(self, game_state, controller):
         """Pay the activation cost of this ability with comprehensive cost handling."""
         cost_text = self.cost.lower()
         all_costs_paid = True
+        # --- Initialize rollback steps list ---
+        rollback_steps = []
 
         # --- Non-Mana Costs FIRST ---
         # Tap Cost
         if "{t}" in cost_text:
+             # Check if already tapped before attempting
+             if self.card_id in controller.get("tapped_permanents", set()):
+                 logging.debug(f"Cannot pay tap cost: {game_state._safe_get_card(self.card_id).name} already tapped.")
+                 return False
              if not game_state.tap_permanent(self.card_id, controller):
                  logging.debug(f"Cannot pay tap cost: {game_state._safe_get_card(self.card_id).name} couldn't be tapped.")
+                 self._perform_rollback(game_state, controller, rollback_steps)
                  return False
+             rollback_steps.append(("untap", self.card_id)) # Add untap step for rollback
              logging.debug(f"Paid tap cost for {game_state._safe_get_card(self.card_id).name}")
         # Untap Cost {Q} (Less common)
         if "{q}" in cost_text:
+             if self.card_id not in controller.get("tapped_permanents", set()):
+                 logging.debug(f"Cannot pay untap cost: {game_state._safe_get_card(self.card_id).name} already untapped.")
+                 return False
              if not game_state.untap_permanent(self.card_id, controller):
                  logging.debug(f"Cannot pay untap cost for {game_state._safe_get_card(self.card_id).name}")
+                 self._perform_rollback(game_state, controller, rollback_steps)
                  return False
+             rollback_steps.append(("tap", self.card_id)) # Add tap step for rollback
              logging.debug(f"Paid untap cost for {game_state._safe_get_card(self.card_id).name}")
 
         # Sacrifice Cost
         sac_match = re.search(r"sacrifice (a|an|another|\d*)?\s*([^:,{]+)", cost_text)
         if sac_match:
              sac_req = sac_match.group(0).replace("sacrifice ", "").strip() # Get the full requirement text
-             if game_state.ability_handler._can_sacrifice(game_state, controller, sac_req):
-                 if not game_state.ability_handler._pay_sacrifice_cost(game_state, controller, sac_req, self.card_id): # Pass source ID
-                     return False # Failed to pay sacrifice
-             else:
-                 logging.debug(f"Cannot meet sacrifice requirement: {sac_req}")
-                 return False
+             # Ensure ability handler exists and has the methods
+             # Delegate sacrifice logic, including rollback potential, to _pay_sacrifice_cost helper
+             sacrifice_paid, sacrificed_id = self._pay_sacrifice_cost_with_rollback(game_state, controller, sac_req, self.card_id, rollback_steps)
+             if not sacrifice_paid:
+                  self._perform_rollback(game_state, controller, rollback_steps)
+                  return False
+             # rollback_steps already appended by helper if successful
+
         # Discard Cost
         discard_match = re.search(r"discard (\w+|\d*) cards?", cost_text)
         if discard_match:
@@ -226,53 +233,162 @@ class ActivatedAbility(Ability):
              count = text_to_number(count_str)
              if len(controller["hand"]) < count:
                  logging.debug("Cannot pay discard cost: not enough cards.")
+                 self._perform_rollback(game_state, controller, rollback_steps)
                  return False
-             # TODO: Implement choice for discard if not random
-             # Simple: discard first N cards
-             for _ in range(count):
-                  if controller["hand"]:
-                       discard_id = controller["hand"][0]
-                       game_state.move_card(discard_id, controller, "hand", controller, "graveyard")
-             logging.debug(f"Paid discard cost ({count} cards).")
+
+             # Delegate discard logic to helper for better rollback handling
+             discard_paid, discarded_ids = self._pay_discard_cost_with_rollback(game_state, controller, count, rollback_steps)
+             if not discard_paid:
+                  self._perform_rollback(game_state, controller, rollback_steps)
+                  return False
+             # rollback_steps already appended by helper if successful
+
         # Pay Life Cost
         life_match = re.search(r"pay (\d+) life", cost_text)
         if life_match:
              amount = int(life_match.group(1))
              if controller["life"] < amount:
                  logging.debug("Cannot pay life cost: not enough life.")
+                 self._perform_rollback(game_state, controller, rollback_steps)
                  return False
              controller["life"] -= amount
+             rollback_steps.append(("gain_life", amount)) # Add gain life step for rollback
              logging.debug(f"Paid {amount} life.")
+             # TODO: Consider effects reducing life payment cost
+             # TODO: Consider triggering life loss events here if rules require
+
         # Remove Counters Cost
         counter_match = re.search(r"remove (\w+|\d*) ([\w\s\-]+) counters?", cost_text)
         if counter_match:
              count_str, counter_type = counter_match.groups()
              count = text_to_number(count_str)
-             counter_type = counter_type.strip()
-             if not game_state.add_counter(self.card_id, counter_type, -count): # Use add_counter with negative
-                 logging.debug(f"Cannot remove {count} {counter_type} counters.")
+             counter_type = counter_type.strip().upper().replace('_','/') # Normalize
+
+             # Check if enough counters exist *before* attempting removal
+             source_card = game_state._safe_get_card(self.card_id)
+             current_counter_count = 0
+             if source_card and hasattr(source_card, 'counters'):
+                  current_counter_count = source_card.counters.get(counter_type, 0)
+
+             if current_counter_count < count:
+                 logging.debug(f"Cannot pay remove counter cost: Only {current_counter_count}/{count} {counter_type} counters available.")
+                 self._perform_rollback(game_state, controller, rollback_steps)
                  return False
+
+             # Use add_counter with negative count for consistency
+             if not game_state.add_counter(self.card_id, counter_type, -count):
+                 logging.warning(f"Failed to remove {count} {counter_type} counters during cost payment.")
+                 self._perform_rollback(game_state, controller, rollback_steps) # Perform rollback if add_counter failed
+                 return False
+             rollback_steps.append(("add_counter", self.card_id, counter_type, count)) # Rollback: Add counters back
              logging.debug(f"Paid by removing {count} {counter_type} counters.")
 
         # --- Mana Costs LAST ---
+        mana_cost_paid = False
+        paid_mana_details = None
         if hasattr(game_state, 'mana_system') and game_state.mana_system:
-             mana_cost_str = re.sub(r"(?:\{[tq]\}|sacrifice.*?|discard.*?|pay \d+ life|remove.*?)(?:,|$)\s*", "", self.cost).strip()
-             if mana_cost_str: # Check if there's any mana cost left
-                 parsed_cost = game_state.mana_system.parse_mana_cost(mana_cost_str)
-                 if not game_state.mana_system.pay_mana_cost(controller, parsed_cost):
-                     logging.warning(f"Failed to pay mana cost '{mana_cost_str}' after non-mana costs.")
-                     # IMPORTANT: Rollback non-mana costs if mana payment fails
-                     # This is complex and not fully implemented here. Assume failure is final.
-                     return False
-                 logging.debug(f"Paid mana cost: {mana_cost_str}")
-        else:
-             # Basic mana check/payment if no system
-             if any(c in cost_text for c in "WUBRGC123456789X"):
-                 if sum(controller["mana_pool"].values()) == 0: return False # Simplistic check
-                 controller["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0} # Assume all mana used
+             mana_symbols = re.findall(r'\{[WUBRGCXSPMTQA0-9\/\.]+\}', self.cost)
+             if mana_symbols:
+                 mana_cost_str = "".join(mana_symbols)
+                 if mana_cost_str:
+                     parsed_cost = game_state.mana_system.parse_mana_cost(mana_cost_str)
+                     # Attempt to pay mana and get details of payment for rollback
+                     can_pay_mana = game_state.mana_system.can_pay_mana_cost(controller, parsed_cost)
+                     if can_pay_mana:
+                         paid_mana_details = game_state.mana_system.pay_mana_cost_get_details(controller, parsed_cost) # Use method that returns payment details
+                         if paid_mana_details:
+                             mana_cost_paid = True
+                             # Add mana refund to rollback steps
+                             rollback_steps.append(("refund_mana", paid_mana_details))
+                             logging.debug(f"Paid mana cost: {mana_cost_str}")
+                         else:
+                             logging.warning(f"Failed to pay mana cost '{mana_cost_str}' (pay_mana_cost_get_details returned None).")
+                     else:
+                         logging.warning(f"Cannot afford mana cost '{mana_cost_str}'.")
 
-        logging.debug(f"Successfully paid cost '{self.cost}' for {game_state._safe_get_card(self.card_id).name}")
-        return True
+                     if not mana_cost_paid: # Mana payment failed after non-mana costs paid
+                          logging.error(f"Rolling back non-mana costs due to failed mana payment for '{self.cost}'.")
+                          self._perform_rollback(game_state, controller, rollback_steps) # Perform rollback
+                          return False
+             else:
+                 mana_cost_paid = True # No mana cost part
+                 logging.debug("No mana symbols found in cost string.")
+        else:
+             # Basic mana check/payment fallback (less reliable for rollback)
+             if any(c in cost_text for c in "WUBRGC123456789X"):
+                 if sum(controller["mana_pool"].values()) == 0:
+                      logging.warning("Failed to pay mana cost (fallback): Mana pool empty.")
+                      self._perform_rollback(game_state, controller, rollback_steps)
+                      return False
+                 # Store original pool for basic rollback
+                 original_pool = controller["mana_pool"].copy()
+                 controller["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
+                 rollback_steps.append(("restore_mana_pool", original_pool))
+                 mana_cost_paid = True
+             else: # No mana cost symbols
+                 mana_cost_paid = True
+
+        # If all costs (including mana) were paid successfully
+        if all_costs_paid and mana_cost_paid:
+             logging.debug(f"Successfully paid cost '{self.cost}' for {game_state._safe_get_card(self.card_id).name}")
+             return True
+        else: # Should have been caught earlier, but safety check
+             logging.error("Cost payment reached end state incorrectly.")
+             self._perform_rollback(game_state, controller, rollback_steps)
+             return False
+         
+    def _pay_discard_cost_with_rollback(self, game_state, controller, count, rollback_steps):
+        """Helper to handle discard cost payment and potential rollback."""
+        # Logic assumes discarding first N cards. Need choice logic if not random.
+        discarded_ids = []
+        if len(controller["hand"]) < count: return False, None # Should be checked before calling
+
+        hand_copy = controller["hand"][:] # Work on copy
+        successfully_discarded = []
+        failed_to_discard = False
+
+        for _ in range(count):
+            if hand_copy:
+                discard_id = hand_copy.pop(0) # Take from front of copy
+                # Perform discard via move_card
+                if game_state.move_card(discard_id, controller, "hand", controller, "graveyard", cause="ability_cost"):
+                    successfully_discarded.append(discard_id)
+                else:
+                    # If move failed, abort cost payment immediately
+                    failed_to_discard = True
+                    break
+            else: # Should not happen if initial check passed
+                 failed_to_discard = True
+                 break
+
+        if failed_to_discard:
+             # Add rollback steps for successfully discarded cards *before* the failure
+             for success_id in successfully_discarded:
+                  rollback_steps.append(("return_from_graveyard_to_hand", success_id)) # Specific return
+             return False, None
+        else:
+             # Add rollback steps for all successfully discarded cards
+             for success_id in successfully_discarded:
+                 rollback_steps.append(("return_from_graveyard_to_hand", success_id))
+             logging.debug(f"Paid discard cost ({len(successfully_discarded)} cards).")
+             return True, successfully_discarded
+
+    def _perform_rollback(self, game_state, controller, rollback_steps):
+        """Performs rollback steps in reverse order."""
+        logging.warning(f"Performing cost payment rollback: {rollback_steps}")
+        for step in reversed(rollback_steps):
+            action = step[0]
+            try:
+                if action == "untap": game_state.untap_permanent(step[1], controller)
+                elif action == "tap": game_state.tap_permanent(step[1], controller)
+                elif action == "return_from_graveyard": game_state.move_card(step[1], controller, "graveyard", controller, "battlefield")
+                elif action == "return_from_graveyard_to_hand": game_state.move_card(step[1], controller, "graveyard", controller, "hand")
+                elif action == "gain_life": controller["life"] += step[1]
+                elif action == "add_counter": game_state.add_counter(step[1], step[2], step[3])
+                elif action == "refund_mana": game_state.mana_system.add_mana(controller, step[1]) # Assumes add_mana handles refunding specific details
+                elif action == "restore_mana_pool": controller["mana_pool"] = step[1] # Basic fallback
+            except Exception as e:
+                logging.error(f"Error during rollback step {step}: {e}")
     
     def _can_sacrifice(game_state, controller, sacrifice_req):
         """Basic check if controller can meet sacrifice requirements"""
@@ -581,24 +697,98 @@ class TriggeredAbility(Ability):
         """Resolve this ability with specific targets."""
         return self._resolve_ability_implementation(game_state, controller, targets)
 
-    def _extract_condition_clause(self, text):
-        """Extract a conditional clause from ability text (usually after 'if' or 'only if')"""
-        if not text:
-            return None
-            
-        # Common patterns for conditions in ability text
-        patterns = [
-            r'if ([^,.]+)',  # Match "if X"
-            r'only if ([^,.]+)',  # Match "only if X"
-            r'unless ([^,.]+)'  # Match "unless X"
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, text.lower())
-            if match:
-                return match.group(1).strip()
-                
-        return None
+
+    def _evaluate_condition(self, condition_text, context):
+        """Evaluate if a trigger's conditional clause is met. (Expanded Fallback)"""
+        if not condition_text or not context: return True
+        gs = context.get('game_state')
+        trigger_controller = context.get('controller') # Controller of the trigger source
+        source_card = context.get('source_card') # Card with the trigger
+        if not gs or not trigger_controller or not source_card: return True
+
+        # Use the card evaluator for condition checking if available
+        if hasattr(gs, 'card_evaluator') and gs.card_evaluator and hasattr(gs.card_evaluator, 'evaluate_condition'):
+            try:
+                # Pass context and condition text
+                return gs.card_evaluator.evaluate_condition(condition_text, context)
+            except NotImplementedError:
+                logging.warning(f"CardEvaluator does not implement condition: {condition_text}")
+            except Exception as e:
+                logging.error(f"Error evaluating condition via CardEvaluator: {e}")
+
+        # --- Basic Fallback Parsing ---
+        logging.debug(f"Evaluating basic trigger condition: '{condition_text}'")
+        condition_lower = condition_text.lower()
+        opponent = gs.p2 if trigger_controller == gs.p1 else gs.p1
+
+        # Check "if you control..."
+        control_match = re.search(r"if\s+(you control|an opponent controls)\s+(?:a|an|another|at least|exactly|\d+)?\s*([\w\s\-]+?)(?: with|$|,|\.|$)", condition_lower)
+        if control_match:
+            who_controls, required_type = control_match.group(1), control_match.group(2)
+            player_to_check = trigger_controller if who_controls == "you control" else opponent
+            required_type = required_type.strip()
+            return any(self._card_matches_criteria(gs._safe_get_card(cid), required_type)
+                       for cid in player_to_check.get("battlefield", []))
+
+        # Check life total comparison
+        life_match = re.search(r"if\s+(your life total is|you have)\s+(?:at least|exactly|less than|more than|\d+)\s+(\d+)", condition_lower)
+        comparison_match = re.search(r"(at least|exactly|less than|more than)", condition_lower)
+        if life_match and comparison_match:
+            threshold = int(life_match.group(2))
+            comparison = comparison_match.group(1)
+            current_life = trigger_controller.get("life", 0)
+            if comparison == "at least" or comparison == "more than": return current_life >= threshold
+            if comparison == "less than": return current_life < threshold
+            if comparison == "exactly": return current_life == threshold
+
+        # Check card count in hand/graveyard
+        card_count_match = re.search(r"if\s+you have\s+(?:at least|exactly|less than|more than|\d+)\s+(\d+)\s+cards?\s+in\s+(?:your|an opponent's)\s+(hand|graveyard)", condition_lower)
+        if card_count_match:
+            threshold = int(card_count_match.group(1))
+            zone_name = card_count_match.group(2)
+            player_to_check = trigger_controller # Assume 'your' for now
+            # TODO: Add logic for "opponent's" hand/graveyard check
+            comparison_match = re.search(r"(at least|exactly|less than|more than)", condition_lower)
+            comparison = comparison_match.group(1) if comparison_match else "at least" # Default
+            count_in_zone = len(player_to_check.get(zone_name, []))
+            if comparison == "at least" or comparison == "more than": return count_in_zone >= threshold
+            if comparison == "less than": return count_in_zone < threshold
+            if comparison == "exactly": return count_in_zone == threshold
+
+        # Check number of permanents controlled
+        permanent_count_match = re.search(r"if\s+(you control|an opponent controls)\s+(?:at least|exactly|less than|more than|\d+)\s+(\d+)\s+(creatures?|artifacts?|lands?|permanents?)", condition_lower)
+        if permanent_count_match:
+             who_controls, threshold_str, type_to_count = permanent_count_match.groups()
+             threshold = int(threshold_str)
+             player_to_check = trigger_controller if who_controls == "you control" else opponent
+             type_to_count = type_to_count.replace('s','') # Singularize
+             current_count = sum(1 for cid in player_to_check.get("battlefield", []) if self._card_matches_criteria(gs._safe_get_card(cid), type_to_count))
+             comparison_match = re.search(r"(at least|exactly|less than|more than)", condition_lower)
+             comparison = comparison_match.group(1) if comparison_match else "at least" # Default
+             if comparison == "at least" or comparison == "more than": return current_count >= threshold
+             if comparison == "less than": return current_count < threshold
+             if comparison == "exactly": return current_count == threshold
+
+        logging.warning(f"Could not parse trigger condition: '{condition_text}'. Assuming True.")
+        return True # Default to true if condition unparsed
+             
+
+    def _card_matches_criteria(self, card, criteria):
+         """Basic check if card matches simple criteria. (Helper)"""
+         if not card: return False
+         types = getattr(card, 'card_types', [])
+         subtypes = getattr(card, 'subtypes', [])
+         type_line = getattr(card, 'type_line', '').lower()
+         name = getattr(card, 'name', '').lower()
+
+         if criteria == "any": return True
+         if criteria == "basic land" and 'basic' in type_line and 'land' in type_line: return True
+         if criteria == "land" and 'land' in type_line: return True
+         if criteria in types: return True
+         if criteria in subtypes: return True
+         if criteria == name: return True
+         # Add checks for colors, CMC, P/T if needed for more complex searches
+         return False
 
     def _evaluate_condition(self, condition_text, context):
         """Evaluate if a trigger's conditional clause is met."""
@@ -701,7 +891,9 @@ class StaticAbility(Ability):
             'effect_text': self.effect_text, # Store original text for reference/debugging
             'duration': 'permanent', # Static effects are usually permanent while source is on battlefield
             # Condition: effect is active only if the source card is on the battlefield
-            'condition': lambda gs_check: self.card_id in gs_check.get_card_controller(self.card_id).get("battlefield", []) if gs_check.get_card_controller(self.card_id) else False,
+            # Corrected condition: lambda needs gs passed in, also check controller exists
+            'condition': lambda gs_check: (gs_check.get_card_controller(self.card_id) and
+                                         self.card_id in gs_check.get_card_controller(self.card_id).get("battlefield", [])),
             # Layer 7 specifics added by handlers below
         }
 
@@ -727,7 +919,21 @@ class StaticAbility(Ability):
             if parsed_data:
                 effect_data.update(parsed_data) # Adds 'effect_type', 'effect_value'
                 parsed = True
-        # ... add parsers for layers 3, 2, 1 if needed ...
+        elif layer == 3: # Added Layer 3
+            parsed_data = self._parse_layer3_effect(effect_lower)
+            if parsed_data:
+                 effect_data.update(parsed_data)
+                 parsed = True
+        elif layer == 2: # Added Layer 2
+             parsed_data = self._parse_layer2_effect(effect_lower)
+             if parsed_data:
+                  effect_data.update(parsed_data)
+                  parsed = True
+        elif layer == 1: # Added Layer 1
+             parsed_data = self._parse_layer1_effect(effect_lower)
+             if parsed_data:
+                  effect_data.update(parsed_data)
+                  parsed = True
 
         if parsed:
             effect_id = game_state.layer_system.register_effect(effect_data)
@@ -740,6 +946,69 @@ class StaticAbility(Ability):
         else:
             logging.warning(f"Static ability parser could not interpret effect: '{self.effect_text}'")
             return False
+        
+    def _parse_layer1_effect(self, effect_lower):
+        """Parse continuous copy effects for Layer 1 (Rare for static abilities)."""
+        # Examples: "Creatures you control are copies of X" (X needs context)
+        # Copy effects are usually established by spells/ETBs. Static abilities
+        # granting copy status continuously are very rare and hard to parse generically.
+        # This parser will look for simple markers but may not be fully functional
+        # without knowing the target of the copy effect.
+
+        copy_match = re.search(r"\b(is|are)\s+(a\s+)?copy of\s+(.+)", effect_lower)
+        if copy_match:
+            target_description = copy_match.group(3).strip()
+            # Problem: Need to resolve 'target_description' to a specific card ID
+            # which usually happens when the copy effect is created, not via static text.
+            # We can register a marker effect, but LayerSystem needs the target ID.
+            logging.warning(f"Layer 1 'copy' effect found ('{effect_lower}'), but target '{target_description}' cannot be resolved generically from static text. Effect may not apply correctly.")
+            # For now, return a placeholder or None, as LayerSystem copy needs a target ID.
+            # return {'effect_type': 'become_copy', 'effect_value': target_description} # Placeholder
+            return None
+
+        # Keyword "Changeling" is technically Layer 1-ish (sets types) but handled as Layer 4/6 usually.
+        # If "changeling" is the *only* effect text, it implies type/ability setting.
+        if effect_lower == "changeling":
+             # Let Layer 4 handle the type setting, Layer 6 handle ability implications.
+             return None
+
+        return None # No common static Layer 1 effect parsed
+
+    def _parse_layer2_effect(self, effect_lower):
+        """Parse continuous control-changing effects for Layer 2 (Very rare for static abilities)."""
+        # Examples: "You control target creature." (This is usually established by the effect resolution)
+        # An Aura like "Control Magic" establishes this, but it's tied to the Aura's attachment state.
+        # A static ability on Permanent A granting control of Permanent B continuously without targeting
+        # is almost non-existent.
+
+        gain_control_match = re.search(r"\b(gain|have)\s+control of\s+(.+)", effect_lower)
+        if gain_control_match:
+             target_description = gain_control_match.group(2).strip()
+             # Similar to Layer 1, static control gain needs a target defined elsewhere.
+             logging.warning(f"Layer 2 'control' effect found ('{effect_lower}'), but target '{target_description}' cannot be resolved generically from static text. Effect may not apply correctly.")
+             # Returning None as control changes are typically handled by the source effect's resolution.
+             return None
+
+        return None # No common static Layer 2 effect parsed
+
+    def _parse_layer3_effect(self, effect_lower):
+        """Parse continuous text-changing effects for Layer 3 (Extremely rare)."""
+        # Examples: "Creatures named X have text Y" (very specific and rare)
+        # Most text-implication effects (like losing abilities) are handled functionally in Layer 6.
+        # Literal text replacement is usually an activated/triggered ability (e.g., Mind Bend).
+
+        text_change_match = re.search(r"text becomes\s+['\"](.+)['\"]", effect_lower)
+        if text_change_match:
+            new_text = text_change_match.group(1).strip()
+            # Need to know the target subject of the text change.
+            logging.warning(f"Layer 3 'text becomes' effect found ('{effect_lower}'), but determining target/subject generically is complex. Effect may not apply correctly.")
+            # return {'effect_type': 'change_text', 'effect_value': new_text} # Placeholder
+            return None
+
+        # "Loses all abilities" implies text change but is handled functionally in Layer 6.
+        # We avoid double-registering it here.
+
+        return None # No common static Layer 3 effect parsed
         
     def _parse_layer7_effect(self, effect_lower):
         """Parse P/T effects for Layer 7."""
@@ -803,59 +1072,81 @@ class StaticAbility(Ability):
 
     def _parse_layer6_effect(self, effect_lower):
         """Parse ability adding/removing effects for Layer 6."""
-        # Add common abilities
-        common_keywords = [
-            "flying", "first strike", "double strike", "trample", "vigilance", "haste",
-            "lifelink", "deathtouch", "indestructible", "hexproof", "shroud", "reach",
-            "menace", "defender", "unblockable", "protection from", "ward" # Add others as needed
-        ]
-        for kw in common_keywords:
-            # Use word boundaries for single keywords to avoid partial matches (e.g., "linking" != "lifelink")
-            pattern = r"(?:have|has|gains|gain)\s+"
-            if ' ' not in kw and kw in ["flash", "haste", "reach", "ward", "band", "fear"]: # Use word boundary
-                pattern += r'\b' + re.escape(kw) + r'\b'
-            else: # Use substring check for multi-word or less ambiguous
-                pattern += re.escape(kw)
-
-            match = re.search(pattern, effect_lower)
-            if match:
-                 # Handle parametrized keywords
-                 if kw == "protection from":
-                     protected_from_match = re.search(r"protection from ([\w\s]+)", effect_lower)
-                     protected_from = protected_from_match.group(1).strip() if protected_from_match else "unknown"
-                     return {'effect_type': 'add_ability', 'effect_value': f"protection from {protected_from}"}
-                 elif kw == "ward":
-                     ward_cost_match = re.search(r"ward (\{.*?\})", effect_lower) or re.search(r"ward (\d+)", effect_lower)
-                     ward_cost = ward_cost_match.group(1).strip() if ward_cost_match else "{1}" # Default ward {1}
-                     if ward_cost.isdigit(): ward_cost = f"{{{ward_cost}}}" # Normalize
-                     return {'effect_type': 'add_ability', 'effect_value': f"ward {ward_cost}"}
-                 else:
-                      # Handle simple keywords directly
-                      # Normalize keyword to match Card.ALL_KEYWORDS if possible
-                      normalized_kw = kw # Placeholder
-                      for official_kw in Card.ALL_KEYWORDS:
-                           if kw == official_kw.lower():
-                               normalized_kw = official_kw
-                               break
-                      return {'effect_type': 'add_ability', 'effect_value': normalized_kw}
-
-
-        # Remove abilities
+        # Check for removal first (more specific patterns)
         if "lose all abilities" in effect_lower:
             return {'effect_type': 'remove_all_abilities', 'effect_value': True}
+
         # Simple "loses X" check
-        lose_match = re.search(r"loses (flying|trample|etc)", effect_lower) # Add keywords to check
+        lose_match = re.search(r"loses ([\w\s\-]+?)(?: and |,|$|\.)", effect_lower)
         if lose_match:
-            return {'effect_type': 'remove_ability', 'effect_value': lose_match.group(1).strip()}
+            ability_to_lose = lose_match.group(1).strip()
+            # Normalize: Check against canonical keywords
+            normalized_kw_lose = None
+            for official_kw in Card.ALL_KEYWORDS:
+                 if ability_to_lose == official_kw.lower():
+                     normalized_kw_lose = official_kw # Use canonical name
+                     break
+            if normalized_kw_lose:
+                 # Found a standard keyword being lost
+                 return {'effect_type': 'remove_ability', 'effect_value': normalized_kw_lose}
+            else:
+                # Handle non-keyword abilities being lost if necessary
+                # For now, log if it's not a standard keyword
+                logging.debug(f"Potential non-keyword ability loss detected: '{ability_to_lose}' (not standard)")
 
-        # Prevent attacking/blocking
-        if "can't attack" in effect_lower: return {'effect_type': 'cant_attack', 'effect_value': True}
-        if "can't block" in effect_lower: return {'effect_type': 'cant_block', 'effect_value': True}
-        if "attacks each combat if able" in effect_lower: return {'effect_type': 'must_attack', 'effect_value': True}
-        if "blocks each combat if able" in effect_lower: return {'effect_type': 'must_block', 'effect_value': True}
 
+        # Check for additions: "gains/has [ability list]"
+        gain_match = re.search(r"(?:have|has|gains?|gain)\s+(.*?)(?: and |,| until|\.|$)", effect_lower)
+        if gain_match:
+            gained_abilities_text = gain_match.group(1).strip()
+            # Split potential list by comma (cannot reliably split by 'and' due to keyword names)
+            potential_gains = gained_abilities_text.split(',')
+            # Further refinement for keywords like "protection from red and from blue"
+            # Need more robust parsing for multiple keywords in one phrase
+            for potential_kw_phrase in potential_gains:
+                potential_kw_phrase = potential_kw_phrase.strip()
+                if not potential_kw_phrase: continue
 
-        return None
+                # Handle parametrized keywords explicitly first
+                if "protection from" in potential_kw_phrase:
+                    # Regex to capture the full "protection from ..." text reliably
+                    protection_match = re.match(r"protection from ([\w\s]+)", potential_kw_phrase)
+                    if protection_match:
+                        protected_from_value = protection_match.group(1).strip()
+                        return {'effect_type': 'add_ability', 'effect_value': f"protection from {protected_from_value}"}
+                elif "ward" in potential_kw_phrase:
+                    # Regex for ward cost ({X}, N, Pay X life etc.)
+                    ward_cost_match = re.search(r"ward\s*(\{[^}]+\}|\d+|pay \d+ life|discard a card)", potential_kw_phrase)
+                    ward_cost = "{1}" # Default ward {1}
+                    if ward_cost_match:
+                         ward_cost = ward_cost_match.group(1).strip()
+                         if ward_cost.isdigit(): ward_cost = f"{{{ward_cost}}}" # Normalize N to {N}
+                    return {'effect_type': 'add_ability', 'effect_value': f"ward {ward_cost}"}
+                elif "landwalk" in potential_kw_phrase: # Handle various landwalks
+                    landwalk_type_match = re.match(r"(\w+)walk", potential_kw_phrase)
+                    if landwalk_type_match:
+                        walk_type = landwalk_type_match.group(1).strip()
+                        return {'effect_type': 'add_ability', 'effect_value': f"{walk_type}walk"}
+                    # Fallback for generic landwalk?
+                    return {'effect_type': 'add_ability', 'effect_value': 'Landwalk'}
+
+                # Match simple keywords against canonical list
+                found_match = False
+                for official_kw in Card.ALL_KEYWORDS:
+                    if potential_kw_phrase == official_kw.lower():
+                        # Return the canonical keyword name
+                        return {'effect_type': 'add_ability', 'effect_value': official_kw}
+
+        # Check specific "can't attack/block" / "must attack/block" phrases
+        # Use tuples for keyword consistency (match internal representation)
+        if "can't attack" in effect_lower: return {'effect_type': 'add_ability', 'effect_value': 'cant_attack'}
+        if "can't block" in effect_lower: return {'effect_type': 'add_ability', 'effect_value': 'cant_block'}
+        if "attacks each combat if able" in effect_lower or "must attack if able" in effect_lower:
+            return {'effect_type': 'add_ability', 'effect_value': 'must_attack'}
+        if "blocks each combat if able" in effect_lower or "must block if able" in effect_lower:
+            return {'effect_type': 'add_ability', 'effect_value': 'must_block'}
+
+        return None # No Layer 6 effect parsed
 
     def _parse_layer5_effect(self, effect_lower):
         """Parse color adding/removing effects for Layer 5."""
@@ -865,35 +1156,36 @@ class StaticAbility(Ability):
         effect_type = None
 
         # Check if SETTING specific colors (e.g., "is blue", "are white and black")
-        is_setting = False
-        found_colors_in_set = [0] * 5
-        if re.search(r"\bis\b|\bare\b", effect_lower) and not re.search(r"\bis also\b|\bare also\b", effect_lower):
+        # Matches "is [color]" or "are [color1] and [color2]" but NOT "is also"
+        if re.search(r"\b(is|are)\b(?!\s+also)", effect_lower):
+             is_setting = False
+             found_colors_in_set = [0] * 5
              for color_name, index in colors_map.items():
-                  if re.search(r'\b' + color_name + r'\b', effect_lower):
+                  if re.search(r'\b' + re.escape(color_name) + r'\b', effect_lower):
                        found_colors_in_set[index] = 1
                        is_setting = True
              # Check for "is colorless"
-             if "colorless" in effect_lower and not any(found_colors_in_set):
+             if re.search(r'\bis colorless\b', effect_lower):
                   found_colors_in_set = [0] * 5
-                  is_setting = True
+                  is_setting = True # Setting to colorless is a type of setting
 
              if is_setting:
                   effect_type = 'set_color'
                   target_colors = found_colors_in_set
 
         # Check if ADDING colors (e.g., "is also blue")
-        elif re.search(r"\bis also\b|\bare also\b", effect_lower):
+        elif re.search(r"\b(is also|are also)\b", effect_lower):
              added_colors = [0] * 5
              found_addition = False
              for color_name, index in colors_map.items():
-                  if re.search(r'\b' + color_name + r'\b', effect_lower):
+                  if re.search(r'\b' + re.escape(color_name) + r'\b', effect_lower):
                        added_colors[index] = 1
                        found_addition = True
              if found_addition:
                   effect_type = 'add_color'
                   target_colors = added_colors
 
-        # Check if removing colors / becoming colorless
+        # Check if removing colors / becoming colorless (if not caught by "is colorless")
         elif "loses all colors" in effect_lower or "becomes colorless" in effect_lower:
              effect_type = 'set_color'
              target_colors = [0,0,0,0,0]
@@ -907,40 +1199,39 @@ class StaticAbility(Ability):
     def _parse_layer4_effect(self, effect_lower):
         """Parse type/subtype adding/removing effects for Layer 4."""
         # Patterns to detect type/subtype changes
-        set_type_match = re.search(r"becomes? a(?:n)? ([\w\s]+?) (?:in addition|until|$)", effect_lower) # e.g., "becomes an artifact creature"
-        add_type_match = re.search(r"is also a(?:n)? (\w+)", effect_lower) # e.g., "is also an artifact"
-        set_subtype_match = re.search(r"becomes? a(?:n)? ([\w\s]+?) creature", effect_lower) # Specific case: "becomes a Goblin creature" implies subtype change
-        add_subtype_match = re.search(r"(?:is|are) also ([\w\s]+)", effect_lower) # e.g., "are also Saprolings"
+        set_type_match = re.search(r"becomes? a(?:n)? ([\w\s]+?)(?: in addition| that's still|$)", effect_lower) # Adjusted regex
+        add_type_match = re.search(r"(is|are) also a(?:n)? (\w+)", effect_lower)
+        set_subtype_match = re.search(r"becomes? a(?:n)? ([\w\s]+?) creature", effect_lower)
+        add_subtype_match = re.search(r"(?:is|are) also ([\w\s]+)", effect_lower)
         lose_type_match = re.search(r"loses all creature types", effect_lower) # Example removal
 
         # --- Process Type Setting/Adding ---
+        # Handle "becomes TYPE..." / "is TYPE..."
         if set_type_match:
              type_text = set_type_match.group(1).strip()
-             # Determine if it's setting or adding based on "in addition"
-             is_addition = "in addition" in set_type_match.group(0)
+             # Determine if it's setting or adding based on keywords
+             is_addition = "in addition" in set_type_match.group(0) or "also a" in set_type_match.group(0) or "still a" in set_type_match.group(0)
 
-             # Split into card types and potential subtypes
              parts = type_text.split()
              types = [p for p in parts if p in Card.ALL_CARD_TYPES] # Filter known card types
-             subtypes = [p for p in parts if p not in Card.ALL_CARD_TYPES and p.capitalize() in Card.SUBTYPE_VOCAB] # Check known subtypes
+             subtypes = [p.capitalize() for p in parts if p.capitalize() in Card.SUBTYPE_VOCAB] # Check known subtypes
 
              if types: # Change primary card types
                   effect_type = 'add_type' if is_addition else 'set_type'
                   logging.debug(f"Layer 4: Parsed {effect_type} with value {types}")
-                  # If setting type, also potentially clears subtypes? Rules check.
-                  # Let's assume set_type implies setting ONLY these types (clears old subtypes unless re-specified)
-                  if not is_addition: # Also setting subtypes if specified with type
+                  # set_type clears old types and subtypes unless specified together.
+                  if not is_addition:
                       return {'effect_type': 'set_type_and_subtype', 'effect_value': (types, subtypes)}
-                  else: # Just adding the type
-                       return {'effect_type': effect_type, 'effect_value': types} # Return list of types
-             # If no card types matched but parts exist, assume it might be adding subtypes implicitly
+                  else: # Just adding the type(s)
+                      return {'effect_type': effect_type, 'effect_value': types}
+             # If no main card types found, but parts exist, check subtypes
              elif subtypes and is_addition:
-                  logging.debug(f"Layer 4: Parsed add_subtype from 'becomes' clause: {subtypes}")
-                  return {'effect_type': 'add_subtype', 'effect_value': subtypes} # Return list
+                 logging.debug(f"Layer 4: Parsed add_subtype from 'becomes/is also' clause: {subtypes}")
+                 return {'effect_type': 'add_subtype', 'effect_value': subtypes}
 
-        # Handle "is also a [type]"
+        # Handle "is also a [type]" (Redundant with above, but safe fallback)
         elif add_type_match:
-             type_text = add_type_match.group(1).strip()
+             type_text = add_type_match.group(2).strip()
              if type_text in Card.ALL_CARD_TYPES:
                   logging.debug(f"Layer 4: Parsed add_type with value {[type_text]}")
                   return {'effect_type': 'add_type', 'effect_value': [type_text]}
@@ -949,60 +1240,54 @@ class StaticAbility(Ability):
                   return {'effect_type': 'add_subtype', 'effect_value': [type_text.capitalize()]}
 
         # --- Process Subtype Setting/Adding ---
-        elif add_subtype_match:
-             # "are also Saprolings"
+        elif add_subtype_match: # "are also Saprolings"
              subtype_text = add_subtype_match.group(1).strip()
-             # Check if the word(s) are known subtypes
              potential_subtypes = [s.capitalize() for s in subtype_text.split() if s.capitalize() in Card.SUBTYPE_VOCAB]
              if potential_subtypes:
                   logging.debug(f"Layer 4: Parsed add_subtype with value {potential_subtypes}")
-                  return {'effect_type': 'add_subtype', 'effect_value': potential_subtypes} # Return list of subtypes
+                  return {'effect_type': 'add_subtype', 'effect_value': potential_subtypes}
 
         # --- Process Type/Subtype Removal ---
-        elif lose_type_match:
+        elif lose_type_match: # "loses all creature types"
              logging.debug("Layer 4: Parsed lose_all_subtypes (Creature)")
-             return {'effect_type': 'lose_all_subtypes', 'effect_value': 'creature'} # Specify which subtypes to lose
-
-        # Add specific subtype removal if needed: re.search(r"is no longer a (\w+)", effect_lower) -> 'remove_subtype'
+             # This effect is complex: Removes subtypes associated with 'creature' type.
+             # Need better subtype mapping or specific LayerSystem handling.
+             # For now, return a generic marker or handle in LayerSystem application.
+             return {'effect_type': 'lose_subtype_by_type', 'effect_value': 'creature'}
 
         return None # No Layer 4 effect parsed
 
     # Add helper method to determine which layer an effect belongs to
-    def _determine_layer_for_effect(self, effect):
+    def _determine_layer_for_effect(self, effect_lower):
         """Determine the appropriate layer for an effect based on its text."""
         # Layer 1: Copy effects
-        if "copy" in effect or "becomes a copy" in effect:
-            return 1
-        
+        if "copy" in effect_lower or "becomes a copy" in effect_lower: return 1
         # Layer 2: Control-changing effects
-        if "gain control" in effect or "exchange control" in effect:
-            return 2
-        
+        if "gain control" in effect_lower or "exchange control" in effect_lower: return 2
         # Layer 3: Text-changing effects
-        if "text becomes" in effect or "lose all abilities" in effect:
-            return 3
-        
+        if "text becomes" in effect_lower: return 3
         # Layer 4: Type-changing effects
-        if "become" in effect and any(type_word in effect for type_word in 
-                                    ["artifact", "creature", "enchantment", "land", "planeswalker"]):
-            return 4
-        
+        if re.search(r"\bbecomes?\b.*\b(artifact|creature|enchantment|land|planeswalker)\b", effect_lower) or \
+           re.search(r"\bis also\b.*\b(artifact|creature|enchantment|land|planeswalker)\b", effect_lower) or \
+           "loses all creature types" in effect_lower: return 4
         # Layer 5: Color-changing effects
-        if "becomes" in effect and any(color in effect for color in 
-                                    ["white", "blue", "black", "red", "green", "colorless"]):
-            return 5
-        
-        # Layer 6: Ability-adding/removing effects
-        if "gain" in effect or "have" in effect or "lose" in effect:
-            if any(keyword in effect for keyword in 
-                ["flying", "trample", "vigilance", "haste", "hexproof", "deathtouch", "lifelink"]):
-                return 6
-        
-        # Layer 7: Power/toughness
-        if "get +" in effect or "+1/+1" in effect or "-1/-1" in effect:
-            return 7
-        
-        # Default to no specific layer
+        if re.search(r"\b(is|are|becomes?)\b.*\b(white|blue|black|red|green|colorless)\b", effect_lower) or \
+           "loses all colors" in effect_lower: return 5
+        # Layer 6: Ability adding/removing effects
+        # Use a more comprehensive check against ALL_KEYWORDS
+        for kw in Card.ALL_KEYWORDS:
+            if re.search(rf"\b(gains?|has|lose|loses)\b.*\b{re.escape(kw.lower())}\b", effect_lower):
+                 return 6
+        if "lose all abilities" in effect_lower: return 6
+        if any(kw in effect_lower for kw in ["can't attack", "can't block", "must attack", "must block"]): return 6
+        # Layer 7: Power/toughness changing effects
+        if re.search(r"(\+|-)\d+/\s*(\+|-)\d+", effect_lower) or \
+           re.search(r"base power and toughness are", effect_lower) or \
+           re.search(r"\b(is|are|becomes)\s+\d+/\d+", effect_lower) or \
+           re.search(r"power and toughness are each equal to", effect_lower) or \
+           re.search(r"switch.*power and toughness", effect_lower): return 7
+
+        # If unsure, maybe return None or a default? Layer 6 is common for misc static.
         return None
 
     def _find_all_battlefield_cards(self, game_state):
@@ -2014,78 +2299,554 @@ class UntapEffect(AbilityEffect):
 
         return untapped_count > 0
 
-# Remaining Effects - Assume placeholders for now or need specific implementation if used:
 class ScryEffect(AbilityEffect):
+    def __init__(self, count=1, condition=None):
+        super().__init__(f"Scry {count}", condition)
+        self.count = count
+
     def _apply_effect(self, game_state, source_id, controller, targets):
-        # TODO: Implement Scry logic (requires game state context setup)
-        logging.warning(f"ScryEffect._apply_effect not fully implemented.")
-        # Basic simulation: Peek at cards
-        count = getattr(self, 'count', 1)
-        top_cards = controller.get("library", [])[:count]
-        if top_cards: logging.debug(f"Simulated Scry: Looked at {len(top_cards)} card(s).")
-        # Need to trigger choice phase
-        return True # Assume effect applied for simulation
+        """Initiate the scry process."""
+        if not controller or "library" not in controller or not controller["library"]:
+            logging.debug(f"Cannot Scry: Player {controller.get('name', 'Unknown')} or library invalid.")
+            return False # Cannot scry with no library
+
+        # Use GameState method if it exists for cleaner handling
+        if hasattr(game_state, 'scry') and callable(game_state.scry):
+            return game_state.scry(controller, self.count)
+        else:
+            # Fallback basic logic (no actual choice phase) - Set state for external handling
+            logging.warning("ScryEffect: GameState.scry method not found, using basic fallback.")
+            count = min(self.count, len(controller["library"]))
+            if count <= 0: return True # Scry 0 is valid, does nothing
+
+            # Reveal cards temporarily (conceptually)
+            scried_cards = controller["library"][:count]
+            if not scried_cards: return False # Should not happen if count > 0 and library not empty
+
+            logging.debug(f"(Fallback) Scry: Player {controller['name']} looking at {count} cards.")
+
+            # --- Set up state for external AI/ActionHandler to make choices ---
+            # Assume gs.scry_in_progress exists from __slots__
+            game_state.scry_in_progress = True
+            game_state.scrying_player = controller
+            # Store cards being looked at (need temporary holding zone or tracking)
+            # Remove from library temporarily
+            controller["library"] = controller["library"][count:]
+            game_state.scrying_cards = scried_cards # Store IDs being scryed
+            game_state.scrying_tops = []
+            game_state.scrying_bottoms = []
+            # Set phase to Choice Phase to prompt action
+            game_state.previous_priority_phase = game_state.phase # Store current phase
+            game_state.phase = game_state.PHASE_CHOOSE
+            game_state.choice_context = {
+                'type': 'scry',
+                'player': controller,
+                'count': count, # Total to scry
+                'remaining': count, # Number yet to decide on
+                'cards': scried_cards[:], # Copy for modification
+                'source_id': source_id
+            }
+            # Clear priority passing
+            game_state.priority_pass_count = 0
+            game_state.priority_player = controller # Scrying player has priority to choose
+
+            logging.debug(f"Entered Scry choice phase for {controller['name']} ({count} cards).")
+            return True # Initiated scry choice process
 
 class LifeDrainEffect(AbilityEffect):
+    def __init__(self, amount=1, target="opponent", gain_target="controller", condition=None):
+        super().__init__(f"Target {target} loses {amount} life and you gain {amount} life", condition)
+        self.amount = amount
+        self.target = target # "opponent", "each opponent", "target player"
+        self.gain_target = gain_target # Usually "controller"
+        self.requires_target = "target" in target # Requires specific player target?
+
     def _apply_effect(self, game_state, source_id, controller, targets):
+        if self.amount <= 0: return True # No effect
+
+        life_lost_this_instance = 0 # Track life lost by this specific effect application
+
+        # --- Target(s) for Life Loss ---
+        target_players_loss = []
         opponent = game_state.p2 if controller == game_state.p1 else game_state.p1
-        amount = getattr(self, 'amount', 1)
-        # Apply damage/life loss using GameState methods for replacements/triggers
-        damage_dealt = game_state.damage_player(opponent, amount, source_id)
-        life_gained = game_state.gain_life(controller, amount, source_id)
-        return damage_dealt > 0 or life_gained > 0
+        if self.target == "opponent":
+            target_players_loss.append(opponent)
+        elif self.target == "each opponent":
+             # Assumes 2 players for now
+             target_players_loss.append(opponent)
+             # TODO: Extend for multi-player
+        elif self.target == "target player":
+             player_ids = targets.get("players", [])
+             if player_ids:
+                 p_target = game_state.p1 if player_ids[0] == "p1" else game_state.p2
+                 target_players_loss.append(p_target)
+             else:
+                 logging.warning("LifeDrainEffect: Target player missing for life loss.")
+                 return False # Needs target
+
+        if not target_players_loss: return False
+
+        # Apply life loss
+        for p_loss in target_players_loss:
+             # Life loss is different from damage
+             # Use GameState method if available
+             if hasattr(game_state, 'lose_life'):
+                 actual_loss = game_state.lose_life(p_loss, self.amount, source_id=source_id)
+                 life_lost_this_instance += actual_loss
+             else: # Fallback direct modification
+                 # Check for replacements manually (simplified)
+                 loss_context = {'player': p_loss, 'life_amount': self.amount, 'source_id': source_id}
+                 modified_context, replaced = game_state.apply_replacement_effect("LIFE_LOSS", loss_context)
+                 actual_loss = modified_context.get('life_amount', 0) if not modified_context.get('prevented') else 0
+
+                 if actual_loss > 0:
+                      p_loss['life'] -= actual_loss
+                      life_lost_this_instance += actual_loss
+                      p_loss['lost_life_this_turn'] = True # Flag for Spectacle etc.
+                      logging.debug(f"(Fallback) LifeDrainEffect: {p_loss['name']} lost {actual_loss} life.")
+                      game_state.trigger_ability(None, "LOSE_LIFE", {"player": p_loss, "amount": actual_loss, "source_id": source_id})
+
+
+        # --- Target for Life Gain ---
+        player_gaining_life = None
+        if self.gain_target == "controller":
+            player_gaining_life = controller
+        # TODO: Handle other gain targets if needed
+
+        # Apply life gain (Amount depends on specific card - usually amount drained OR fixed amount)
+        # Simple implementation: Gain amount equal to life lost *by this effect instance*.
+        amount_to_gain = life_lost_this_instance
+
+        if player_gaining_life and amount_to_gain > 0:
+             if hasattr(game_state, 'gain_life'):
+                 # gain_life handles logging and triggers
+                 game_state.gain_life(player_gaining_life, amount_to_gain, source_id=source_id)
+             else: # Fallback
+                  gain_context = {'player': player_gaining_life, 'life_amount': amount_to_gain, 'source_id': source_id}
+                  modified_gain_context, replaced = game_state.apply_replacement_effect("LIFE_GAIN", gain_context)
+                  actual_gain = modified_gain_context.get('life_amount', 0) if not modified_gain_context.get('prevented') else 0
+                  if actual_gain > 0:
+                      player_gaining_life['life'] += actual_gain
+                      logging.debug(f"(Fallback) LifeDrainEffect: {player_gaining_life['name']} gained {actual_gain} life.")
+                      game_state.trigger_ability(source_id, "GAIN_LIFE", {"player": player_gaining_life, "amount": actual_gain, "source_id": source_id})
+
+        # Check SBAs after life changes (done in main loop usually)
+        # game_state.check_state_based_actions() # Optional immediate check
+        return life_lost_this_instance > 0 # Return success if any life was lost
+
 
 class CopySpellEffect(AbilityEffect):
+    def __init__(self, target_type="spell", new_targets=True, condition=None):
+        super().__init__(f"Copy target {target_type}{' and you may choose new targets' if new_targets else ''}", condition)
+        self.target_type = target_type # spell, instant, sorcery
+        self.new_targets = new_targets # If the copy can choose new targets
+        self.requires_target = True
+
     def _apply_effect(self, game_state, source_id, controller, targets):
-        # TODO: Implement copy spell logic
-        logging.warning(f"CopySpellEffect._apply_effect not fully implemented.")
-        # Basic: Find target spell on stack, add copy with context
-        target_ids = targets.get("spells", [])
-        if not target_ids: return False
-        target_id = target_ids[0] # Assume first target
+        target_ids = targets.get("spells", []) # Expect spell target
+        if not target_ids:
+             logging.warning("CopySpellEffect: No spell target provided in targets dict.")
+             return False
+
+        original_spell_id = target_ids[0] # Assume first target
+
+        # Find the original spell on the stack
+        original_stack_item = None
+        original_stack_idx = -1
         for i, item in enumerate(game_state.stack):
-             if isinstance(item,tuple) and item[0]=="SPELL" and item[1]==target_id:
-                  item_type, spell_id, original_controller, context = item
-                  new_context = context.copy()
-                  new_context["is_copy"] = True
-                  new_context["copied_by"] = source_id
-                  new_context["needs_new_targets"] = True # Copy usually needs new targets
-                  game_state.add_to_stack("SPELL", spell_id, controller, new_context) # Copy controlled by effect controller
-                  return True
-        return False
+            if isinstance(item, tuple) and item[0] == "SPELL" and item[1] == original_spell_id:
+                 original_stack_item = item
+                 original_stack_idx = i
+                 break
+
+        if not original_stack_item:
+             logging.warning(f"CopySpellEffect: Target spell {original_spell_id} not found on stack.")
+             return False
+
+        spell_type, spell_id, original_controller, original_context = original_stack_item
+
+        # Check target type restriction if specified
+        spell_card = game_state._safe_get_card(spell_id)
+        if not spell_card: return False # Card vanished?
+        if self.target_type == "instant" and 'instant' not in getattr(spell_card, 'card_types', []): return False
+        if self.target_type == "sorcery" and 'sorcery' not in getattr(spell_card, 'card_types', []): return False
+
+        # --- Create Copy Context ---
+        import copy
+        new_context = copy.deepcopy(original_context)
+        new_context["is_copy"] = True
+        new_context["copied_by"] = source_id
+        new_context["original_caster"] = original_controller # Track original caster if needed
+        new_context["needs_new_targets"] = self.new_targets
+        # Reset choices/payments made for the original spell
+        new_context.pop("selected_modes", None)
+        new_context.pop("X", None) # Ensure X is re-chosen for copy if applicable
+        new_context.pop("chosen_color", None)
+        new_context.pop("targets", None) # Clear previous targets
+        new_context.pop("paid_kicker", None) # Don't inherit kicker payment status
+        new_context.pop("kicked", None) # Clear kicker flag
+        # Remove any cost payment details
+        new_context.pop("final_paid_cost", None)
+        # Add a unique ID for this copy instance
+        copy_instance_id = f"copy_{game_state.turn}_{len(game_state.stack)}_{random.randint(1000,9999)}"
+        new_context['copy_instance_id'] = copy_instance_id
+
+        # Add copy to stack (controlled by effect's controller)
+        game_state.add_to_stack("SPELL", spell_id, controller, new_context)
+        logging.debug(f"Created copy ({copy_instance_id}) of spell {spell_id} on stack, controlled by {controller['name']}.")
+
+        # --- Handle Target Selection for the Copy ---
+        original_requires_target = original_context.get("requires_target", False)
+        original_num_targets = original_context.get("num_targets", 1)
+
+        if self.new_targets and original_requires_target and original_num_targets > 0:
+            # Set up targeting phase specifically for the *copy*
+            logging.debug(f"Copy {copy_instance_id} needs new targets. Entering TARGETING phase.")
+            game_state.previous_priority_phase = game_state.phase # Store current phase
+            game_state.phase = game_state.PHASE_TARGETING
+            game_state.targeting_context = {
+                 "source_id": spell_id, # Refers to the spell card being copied
+                 "copy_instance_id": copy_instance_id, # Identify the specific copy
+                 "controller": controller, # Controller of the copy
+                 "required_type": getattr(spell_card, 'target_type', 'target'), # Guess from original if possible
+                 "required_count": original_num_targets,
+                 "min_targets": 0 if "up to" in getattr(spell_card, 'oracle_text','').lower() else original_num_targets,
+                 "max_targets": original_num_targets,
+                 "selected_targets": [],
+                 "effect_text": getattr(spell_card, 'oracle_text', '')
+             }
+            # Ensure priority is set correctly for the choice
+            game_state.priority_player = controller
+            game_state.priority_pass_count = 0
+        else:
+            # Copy uses original targets (if still valid) or resolves without targets
+            resolved_targets = {} # Default empty targets
+            if not self.new_targets and "targets" in original_context:
+                 # Check validity of original targets for the copy (controller = current player)
+                 if game_state._validate_targets_on_resolution(spell_id, controller, original_context["targets"]):
+                     resolved_targets = original_context["targets"] # Copy targets
+                     logging.debug(f"Copy {copy_instance_id} using original targets.")
+                 else:
+                     logging.debug(f"Original targets invalid for copy {copy_instance_id}, copy might fizzle.")
+                     # Mark as no valid targets
+            else:
+                logging.debug(f"Copy {copy_instance_id} either doesn't require targets or uses no targets.")
+
+            # Update the stack item with resolved targets context immediately
+            stack_idx_to_update = -1
+            for i, item in enumerate(reversed(game_state.stack)):
+                if isinstance(item, tuple) and item[3].get('copy_instance_id') == copy_instance_id:
+                     stack_idx_to_update = len(game_state.stack) - 1 - i
+                     break
+            if stack_idx_to_update != -1:
+                new_context_with_targets = game_state.stack[stack_idx_to_update][3]
+                new_context_with_targets["targets"] = resolved_targets
+                game_state.stack[stack_idx_to_update] = game_state.stack[stack_idx_to_update][:3] + (new_context_with_targets,)
+                logging.debug(f"Updated stack item {stack_idx_to_update} (Copy) with targets: {resolved_targets}")
+            else:
+                 logging.error("Could not find newly added copy on stack to update targets!")
+
+        return True
 
 class TransformEffect(AbilityEffect):
+    def __init__(self, condition=None):
+        super().__init__("Transform this permanent", condition)
+        self.requires_target = False # Usually affects self
+
     def _apply_effect(self, game_state, source_id, controller, targets):
-        # Effect targets the source card itself
-        target_ids = targets.get("self", [source_id]) # Default to source
-        if not target_ids: target_ids = [source_id]
-        target_id = target_ids[0]
-        target_owner = game_state.get_card_controller(target_id)
-        if not target_owner: return False # Check owner exists
-        card = game_state._safe_get_card(target_id)
-        if card and hasattr(card, 'transform') and card.can_transform(game_state):
-            card.transform()
-            return True
-        return False
+        # Transform usually targets the source itself
+        target_id = source_id
+        # Allow context to override target if necessary (e.g., specific instruction)
+        # Check if context provides a specific permanent target ID
+        target_id_from_context = None
+        if targets and isinstance(targets, dict) and "permanents" in targets and targets["permanents"]:
+             target_id_from_context = targets["permanents"][0] # Assume first permanent target
+        elif targets and isinstance(targets, list): # Handle flat list if passed by simple resolver
+             # Cannot determine if it's the intended target, default to source_id
+             pass
+
+        if target_id_from_context and target_id_from_context != source_id:
+             target_id = target_id_from_context
+             logging.debug(f"Transform effect targeting {target_id} instead of source {source_id} due to context.")
+
+        # Use GameState method to handle transformation and triggers
+        if hasattr(game_state, 'transform_card') and callable(game_state.transform_card):
+             # transform_card handles validation (is transformable, can transform now?)
+             success = game_state.transform_card(target_id)
+             if success:
+                 card = game_state._safe_get_card(target_id)
+                 logging.debug(f"Successfully triggered transform for {getattr(card,'name', target_id)}")
+                 return True
+             else:
+                 logging.debug(f"Transform failed for {target_id} (handled by game_state.transform_card).")
+                 return False
+        else:
+             logging.error("TransformEffect failed: GameState lacks 'transform_card' method.")
+             return False
 
 class FightEffect(AbilityEffect):
-    def _apply_effect(self, game_state, source_id, controller, targets):
-        # Assumes source_id is one fighter, targets["creatures"][0] is the other
-        if not targets or "creatures" not in targets or not targets["creatures"]: return False
-        target_id = targets["creatures"][0]
+    def __init__(self, target_type="creature", condition=None):
+        # Ensure effect text correctly reflects the source fighting the target
+        super().__init__(f"This creature fights target {target_type}", condition)
+        self.target_type = target_type # Usually creature
+        self.requires_target = True
 
-        source_card = game_state._safe_get_card(source_id)
-        target_card = game_state._safe_get_card(target_id)
-        if not source_card or 'creature' not in getattr(source_card, 'card_types', []) or \
-           not target_card or 'creature' not in getattr(target_card, 'card_types', []):
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        fighter1_id = source_id # The source of the fight effect
+        fighter2_id = None
+
+        # Expect target in creature list (most common) or permanents list
+        target_candidates = targets.get("creatures", []) + targets.get("permanents", [])
+        if target_candidates:
+            # Filter out the source if it was accidentally targeted
+            possible_targets = [tid for tid in target_candidates if tid != fighter1_id]
+            if possible_targets:
+                fighter2_id = possible_targets[0] # Assume first valid target
+            else:
+                 logging.warning(f"FightEffect from {fighter1_id}: No valid target provided other than self. Targets: {targets}")
+                 return False
+        else:
+             logging.warning(f"FightEffect from {fighter1_id}: No target creature/permanent provided. Targets: {targets}")
+             return False
+
+        fighter1 = game_state._safe_get_card(fighter1_id)
+        fighter2 = game_state._safe_get_card(fighter2_id)
+        f1_owner, f1_zone = game_state.find_card_location(fighter1_id)
+        f2_owner, f2_zone = game_state.find_card_location(fighter2_id)
+
+        # Both must be creatures on the battlefield currently
+        if not fighter1 or 'creature' not in getattr(fighter1, 'card_types', []) or f1_zone != 'battlefield':
+            logging.debug(f"FightEffect: Fighter1 ({fighter1_id}) is not a valid creature on the battlefield.")
+            return False
+        if not fighter2 or 'creature' not in getattr(fighter2, 'card_types', []) or f2_zone != 'battlefield':
+            logging.debug(f"FightEffect: Fighter2 ({fighter2_id}) is not a valid creature on the battlefield.")
             return False
 
-        source_power = getattr(source_card, 'power', 0)
-        target_power = getattr(target_card, 'power', 0)
-        # Apply damage simultaneously using GameState methods
-        if source_power > 0:
-             game_state.apply_damage_to_permanent(target_id, source_power, source_id, is_combat_damage=False)
-        if target_power > 0:
-             game_state.apply_damage_to_permanent(source_id, target_power, target_id, is_combat_damage=False)
-        # SBAs checked in main loop
+        # Get current power post-layers (Important!)
+        power1 = getattr(fighter1, 'power', 0) or 0 # Use 0 if power is None
+        power2 = getattr(fighter2, 'power', 0) or 0
+
+        logging.debug(f"Fight: {fighter1.name} ({power1} power) vs {fighter2.name} ({power2} power)")
+
+        # Deal damage simultaneously using GameState methods that handle replacements etc.
+        # Source of damage is the creature itself
+        damage_dealt_by_1 = 0
+        damage_dealt_by_2 = 0
+        if power1 > 0:
+             damage_dealt_by_1 = game_state.apply_damage_to_permanent(fighter2_id, power1, fighter1_id, is_combat_damage=False)
+        if power2 > 0:
+             damage_dealt_by_2 = game_state.apply_damage_to_permanent(fighter1_id, power2, fighter2_id, is_combat_damage=False)
+
+        # SBAs checked in main loop after resolution
+        game_state.trigger_ability(fighter1_id, "FIGHT_RESOLVED", {"opponent_id": fighter2_id, "damage_dealt": damage_dealt_by_1, "damage_taken": damage_dealt_by_2})
+        game_state.trigger_ability(fighter2_id, "FIGHT_RESOLVED", {"opponent_id": fighter1_id, "damage_dealt": damage_dealt_by_2, "damage_taken": damage_dealt_by_1})
+        # Return true if the fight happened (damage was attempted)
         return True
+    
+class BuffEffect(AbilityEffect):
+    """Effect that buffs power/toughness. Registers with LayerSystem."""
+    def __init__(self, power_mod, toughness_mod, target_type="creature", duration="end_of_turn", condition=None):
+        super().__init__(f"{target_type} gets {power_mod:+}/{toughness_mod:+}", condition)
+        self.power_mod = power_mod
+        self.toughness_mod = toughness_mod
+        self.target_type = target_type
+        self.duration = duration # 'end_of_turn' or 'permanent' (until source leaves)
+        self.requires_target = "target" in target_type # Check if it targets specifically
+
+    def apply(self, game_state, source_id, controller, targets=None):
+        """Register the buff with the Layer System."""
+        if not hasattr(game_state, 'layer_system') or not game_state.layer_system:
+             logging.warning("BuffEffect: LayerSystem not available.")
+             return False
+
+        if self.power_mod == 0 and self.toughness_mod == 0: return True # No change
+
+        # Determine affected IDs
+        affected_ids = []
+        if self.requires_target:
+            if targets and "creatures" in targets: affected_ids = targets["creatures"]
+            elif targets and "permanents" in targets: affected_ids = targets["permanents"] # Assume can buff non-creatures if type is permanent
+            # ... add other target types if needed
+        elif self.target_type == "creatures you control":
+             affected_ids = [cid for cid in controller.get("battlefield",[]) if game_state._is_creature(cid)]
+        elif self.target_type == "all creatures":
+             affected_ids.extend(game_state.get_all_creatures(game_state.p1))
+             affected_ids.extend(game_state.get_all_creatures(game_state.p2))
+        elif self.target_type == "self":
+             affected_ids.append(source_id)
+
+        if not affected_ids:
+            logging.debug("BuffEffect: No affected targets found.")
+            return False # No targets to buff
+
+        # Register with Layer System
+        effect_data = {
+             'source_id': source_id,
+             'layer': 7, 'sublayer': 'c', # Modifiers like +N/+N
+             'affected_ids': affected_ids,
+             'effect_type': 'modify_pt',
+             'effect_value': (self.power_mod, self.toughness_mod),
+             'duration': self.duration,
+             'controller_id': controller, # Store controller for conditional effects
+             'description': self.effect_text
+        }
+        # Add conditional logic if needed for the effect's activity
+        if self.duration == 'until_source_leaves':
+             effect_data['condition'] = lambda gs_check: source_id in gs_check.get_card_controller(source_id).get("battlefield", []) if gs_check.get_card_controller(source_id) else False
+        elif self.duration == 'permanent': # Static anthem etc. needs source condition
+            effect_data['condition'] = lambda gs_check: source_id in gs_check.get_card_controller(source_id).get("battlefield", []) if gs_check.get_card_controller(source_id) else False
+
+        effect_id = game_state.layer_system.register_effect(effect_data)
+        if effect_id:
+            logging.debug(f"Registered Buff effect {effect_id} ({self.power_mod:+}/{self.toughness_mod:+}) from {source_id} duration {self.duration}")
+            return True
+        else:
+            logging.warning(f"Failed to register Buff effect from {source_id}")
+            return False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        # This effect works by registering with LayerSystem during the 'apply' phase,
+        # so this direct application method shouldn't be called unless it's a one-shot buff
+        # which isn't standard. Assume registration handled by apply().
+        logging.warning("BuffEffect._apply_effect called directly. Buffs should be registered via LayerSystem.")
+        # Re-register for safety?
+        return self.apply(game_state, source_id, controller, targets)
+    
+class DestroyEffect(AbilityEffect):
+    """Effect that destroys permanents."""
+    def __init__(self, target_type="permanent", condition=None):
+        super().__init__(f"Destroy target {target_type}", condition)
+        self.target_type = target_type.lower() # e.g., "creature", "artifact", "nonland permanent", "all creatures"
+        self.requires_target = "target" in target_type
+
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        targets_to_destroy = []
+        # --- Target Collection ---
+        if "all " in self.target_type: # Handle board wipes
+            wipe_type = self.target_type.split("all ")[1].replace('s','') # 'creature', 'permanent' etc.
+            for p in [game_state.p1, game_state.p2]:
+                for card_id in list(p.get("battlefield",[])): # Iterate copy
+                     card = game_state._safe_get_card(card_id)
+                     if card:
+                          # Check if card matches type to wipe
+                          matches = False
+                          if wipe_type == "permanent": matches = True
+                          elif wipe_type == "creature" and 'creature' in getattr(card, 'card_types', []): matches = True
+                          elif wipe_type == "artifact" and 'artifact' in getattr(card, 'card_types', []): matches = True
+                          # Add more wipe types
+                          if matches: targets_to_destroy.append((card_id, p))
+        elif self.requires_target:
+            # Get target IDs from resolved targets dictionary
+            cats = []
+            if self.target_type == "creature": cats = ["creatures"]
+            elif self.target_type == "artifact": cats = ["artifacts"]
+            elif self.target_type == "enchantment": cats = ["enchantments"]
+            elif self.target_type == "land": cats = ["lands"]
+            elif self.target_type == "planeswalker": cats = ["planeswalkers"]
+            elif self.target_type == "permanent": cats = ["creatures", "artifacts", "enchantments", "lands", "planeswalkers", "battles", "permanents"]
+            elif self.target_type == "nonland permanent": cats = ["creatures", "artifacts", "enchantments", "planeswalkers", "battles", "permanents"]
+
+            ids_found = []
+            if targets:
+                for cat in cats:
+                    ids_found.extend(targets.get(cat, []))
+            # Filter nonland if necessary
+            if self.target_type == "nonland permanent":
+                 ids_found = [tid for tid in ids_found if 'land' not in getattr(game_state._safe_get_card(tid),'card_types',[])]
+
+            for target_id in set(ids_found): # Process unique targets
+                 target_owner, target_zone = game_state.find_card_location(target_id)
+                 if target_owner and target_zone == 'battlefield':
+                     targets_to_destroy.append((target_id, target_owner))
+        else: # Should not happen if requires_target is set correctly
+            logging.warning(f"DestroyEffect has requires_target={self.requires_target} but no targets resolved.")
+            return False
+
+        if not targets_to_destroy: return False
+
+        # --- Destruction ---
+        destroyed_count = 0
+        for card_id, owner in targets_to_destroy:
+            card = game_state._safe_get_card(card_id)
+            if not card: continue
+
+            # 1. Check Indestructible
+            if game_state.check_keyword(card_id, "indestructible"):
+                 logging.debug(f"Cannot destroy {card.name}: Indestructible.")
+                 continue
+
+            # 2. Check Regeneration/Replacement Effects
+            can_be_destroyed = True
+            # Regeneration
+            if game_state.apply_regeneration(card_id, owner):
+                logging.debug(f"DestroyEffect: {card.name} regenerated.")
+                can_be_destroyed = False
+            # Totem Armor
+            elif hasattr(game_state, 'apply_totem_armor') and game_state.apply_totem_armor(card_id, owner):
+                 logging.debug(f"DestroyEffect: {card.name} saved by Totem Armor.")
+                 can_be_destroyed = False
+            # Other Replacements
+            elif hasattr(game_state, 'replacement_effects'):
+                 destroy_context = {'card_id': card_id, 'controller': owner, 'cause': 'destroy_effect', 'source_id': source_id}
+                 modified_context, replaced = game_state.replacement_effects.apply_replacements("DESTROYED", destroy_context)
+                 if replaced:
+                      final_dest = modified_context.get('to_zone')
+                      if final_dest and final_dest != "battlefield":
+                          game_state.move_card(card_id, owner, "battlefield", owner, final_dest, cause="destroy_replaced")
+                      # Else prevented
+                      can_be_destroyed = False
+
+            # 3. Perform Destruction (Move to Graveyard)
+            if can_be_destroyed:
+                if game_state.move_card(card_id, owner, "battlefield", owner, "graveyard", cause="destroy_effect", context={"source_id": source_id}):
+                    destroyed_count += 1
+                    # Logging handled by move_card
+
+        # SBAs handled by main loop
+        return destroyed_count > 0
+    
+class ExileEffect(AbilityEffect):
+    """Effect that exiles permanents or cards from zones."""
+    def __init__(self, target_type="permanent", zone="battlefield", condition=None):
+        super().__init__(f"Exile target {target_type}" + (f" from {zone}" if zone != "battlefield" else ""), condition)
+        self.target_type = target_type.lower()
+        self.zone = zone.lower() # graveyard, hand, library, battlefield, stack
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        targets_to_exile = []
+        cats = []
+        if self.target_type == "creature": cats = ["creatures"]
+        elif self.target_type == "artifact": cats = ["artifacts"]
+        # Add more specific types
+        elif self.target_type == "permanent": cats = ["creatures", "artifacts", "enchantments", "lands", "planeswalkers", "battles", "permanents"]
+        elif self.target_type == "card": cats = ["cards"] # GY/Exile/Hand/Lib targets
+        elif self.target_type == "spell": cats = ["spells"] # Stack targets
+        else: cats.append(self.target_type+"s") # Basic plural
+
+        ids_found = []
+        if targets:
+            for cat in cats:
+                 ids_found.extend(targets.get(cat, []))
+
+        for target_id in set(ids_found):
+            target_owner, target_zone = game_state.find_card_location(target_id)
+            # Validate source zone specified in constructor matches current zone
+            if self.zone == 'any' or target_zone == self.zone:
+                 if target_owner: # Ensure target found
+                     targets_to_exile.append((target_id, target_owner, target_zone))
+            elif target_zone: # Found, but wrong zone
+                 logging.debug(f"Exile target {target_id} found in {target_zone}, expected {self.zone}. Skipping.")
+
+        if not targets_to_exile: return False
+
+        exiled_count = 0
+        for card_id, owner, current_zone in targets_to_exile:
+             # Use move_card to handle replacements (e.g., "If would be exiled, put in GY instead")
+             # Also handles triggers for leaving zone/entering exile
+             if game_state.move_card(card_id, owner, current_zone, owner, "exile", cause="exile_effect", context={"source_id": source_id}):
+                  exiled_count += 1
+                  # Logging handled by move_card
+
+        return exiled_count > 0

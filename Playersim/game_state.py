@@ -2812,6 +2812,8 @@ class GameState:
 
     def clone(self):
         """Create a deep copy of the game state for lookahead simulation."""
+        import copy # Ensure copy is imported
+
         # 1. Create a new instance with basic parameters (card_db is shared reference)
         cloned_state = GameState(self.card_db, self.max_turns, self.max_hand_size, self.max_battlefield)
 
@@ -2826,102 +2828,108 @@ class GameState:
         cloned_state.priority_pass_count = self.priority_pass_count
         cloned_state.last_stack_size = self.last_stack_size
         cloned_state.previous_priority_phase = self.previous_priority_phase
-        # Lists/Dicts need deepcopy or careful handling
-        cloned_state.current_attackers = self.current_attackers[:] # Shallow copy ok
-        cloned_state.current_block_assignments = copy.deepcopy(self.current_block_assignments)
-        cloned_state.stack = copy.deepcopy(self.stack)
-        cloned_state.until_end_of_turn_effects = copy.deepcopy(self.until_end_of_turn_effects)
-        cloned_state.temp_control_effects = copy.deepcopy(self.temp_control_effects)
-        cloned_state.abilities_activated_this_turn = copy.deepcopy(self.abilities_activated_this_turn)
-        cloned_state.spells_cast_this_turn = copy.deepcopy(self.spells_cast_this_turn)
-        cloned_state.attackers_this_turn = self.attackers_this_turn.copy() # Copy set
-        cloned_state.cards_played = copy.deepcopy(self.cards_played)
-        cloned_state.damage_dealt_this_turn = copy.deepcopy(self.damage_dealt_this_turn)
-        cloned_state.cards_drawn_this_turn = copy.deepcopy(self.cards_drawn_this_turn)
-        cloned_state.life_gained_this_turn = copy.deepcopy(self.life_gained_this_turn)
-        cloned_state.damage_this_turn = copy.deepcopy(self.damage_this_turn)
-        cloned_state.saga_counters = copy.deepcopy(self.saga_counters) if hasattr(self, 'saga_counters') else {}
-        # ... Copy other mutable tracking variables ...
-        cloned_state.phased_out = self.phased_out.copy() if hasattr(self, 'phased_out') else set()
-        cloned_state.suspended_cards = copy.deepcopy(self.suspended_cards) if hasattr(self, 'suspended_cards') else {}
-        # ... Add deep copies for other tracking dicts/sets as needed ...
-        cloned_state.morphed_cards = copy.deepcopy(self.morphed_cards) if hasattr(self, 'morphed_cards') else {}
-        cloned_state.manifested_cards = copy.deepcopy(self.manifested_cards) if hasattr(self, 'manifested_cards') else {}
+        # Copy other simple state variables
+        cloned_state.mulligan_in_progress = self.mulligan_in_progress
+        cloned_state.bottoming_in_progress = self.bottoming_in_progress
+        cloned_state.cards_to_bottom = self.cards_to_bottom
+        cloned_state.bottoming_count = self.bottoming_count
 
-        # Player States (Deep Copy is essential)
-        # Store original card_db references before deep copying players
-        p1_original_refs = {zone: self.p1[zone][:] for zone in ["library", "hand", "battlefield", "graveyard", "exile"] if zone in self.p1}
-        p2_original_refs = {zone: self.p2[zone][:] for zone in ["library", "hand", "battlefield", "graveyard", "exile"] if zone in self.p2}
-
+        # --- Deep Copy Complex Mutable Structures ---
+        # Player States (Critical to deep copy)
         cloned_state.p1 = copy.deepcopy(self.p1)
         cloned_state.p2 = copy.deepcopy(self.p2)
 
-        # Deep copy live card objects on battlefield and other zones? VERY COMPLEX.
-        # Alternative: Re-fetch from card_db and apply layers/counters/etc.
-        # For now, assume Card objects themselves are okay to be referenced if their mutable state (counters etc.) is part of player dicts.
-        # Let's stick with deepcopying player dicts, assuming Card instances within lists are handled okay.
+        # Combat state
+        cloned_state.current_attackers = self.current_attackers[:] # Shallow copy list ok
+        cloned_state.current_block_assignments = copy.deepcopy(self.current_block_assignments)
 
-        # Restore priority player reference correctly
-        if self.priority_player == self.p1: cloned_state.priority_player = cloned_state.p1
-        elif self.priority_player == self.p2: cloned_state.priority_player = cloned_state.p2
-        else: cloned_state.priority_player = None
+        # Stack needs deepcopy (context dicts can be complex)
+        cloned_state.stack = copy.deepcopy(self.stack)
+
+        # Effect tracking (Deep copy is safest)
+        cloned_state.until_end_of_turn_effects = copy.deepcopy(self.until_end_of_turn_effects) if hasattr(self, 'until_end_of_turn_effects') else {}
+        cloned_state.temp_control_effects = copy.deepcopy(self.temp_control_effects) if hasattr(self, 'temp_control_effects') else {}
+        cloned_state.abilities_activated_this_turn = copy.deepcopy(self.abilities_activated_this_turn) if hasattr(self, 'abilities_activated_this_turn') else []
+        cloned_state.spells_cast_this_turn = copy.deepcopy(self.spells_cast_this_turn) if hasattr(self, 'spells_cast_this_turn') else []
+        cloned_state.attackers_this_turn = self.attackers_this_turn.copy() if hasattr(self, 'attackers_this_turn') else set() # Copy set
+        cloned_state.cards_played = copy.deepcopy(self.cards_played) if hasattr(self, 'cards_played') else {}
+        cloned_state.damage_dealt_this_turn = copy.deepcopy(self.damage_dealt_this_turn) if hasattr(self, 'damage_dealt_this_turn') else {}
+        cloned_state.cards_drawn_this_turn = copy.deepcopy(self.cards_drawn_this_turn) if hasattr(self, 'cards_drawn_this_turn') else {}
+        cloned_state.life_gained_this_turn = copy.deepcopy(self.life_gained_this_turn) if hasattr(self, 'life_gained_this_turn') else {}
+        cloned_state.damage_this_turn = copy.deepcopy(self.damage_this_turn) if hasattr(self, 'damage_this_turn') else {}
+
+        # Saga counters and other special state tracking
+        cloned_state.saga_counters = copy.deepcopy(self.saga_counters) if hasattr(self, 'saga_counters') else {}
+        cloned_state.phased_out = self.phased_out.copy() if hasattr(self, 'phased_out') else set()
+        cloned_state.suspended_cards = copy.deepcopy(self.suspended_cards) if hasattr(self, 'suspended_cards') else {}
+        cloned_state.morphed_cards = copy.deepcopy(self.morphed_cards) if hasattr(self, 'morphed_cards') else {}
+        cloned_state.manifested_cards = copy.deepcopy(self.manifested_cards) if hasattr(self, 'manifested_cards') else {}
+        # Add deep copies for other mutable tracking dicts/sets (e.g., kicker, foretold, etc.)
 
         # Contexts (Deep Copy)
         cloned_state.targeting_context = copy.deepcopy(self.targeting_context)
         cloned_state.sacrifice_context = copy.deepcopy(self.sacrifice_context)
         cloned_state.choice_context = copy.deepcopy(self.choice_context)
-        cloned_state.mulligan_in_progress = self.mulligan_in_progress
-        cloned_state.mulligan_player = cloned_state.p1 if self.mulligan_player == self.p1 else cloned_state.p2 if self.mulligan_player == self.p2 else None
-        cloned_state.mulligan_count = self.mulligan_count.copy()
-        cloned_state.bottoming_in_progress = self.bottoming_in_progress
-        cloned_state.bottoming_player = cloned_state.p1 if self.bottoming_player == self.p1 else cloned_state.p2 if self.bottoming_player == self.p2 else None
-        cloned_state.cards_to_bottom = self.cards_to_bottom
-        cloned_state.bottoming_count = self.bottoming_count
-        # ... deepcopy other context dicts ...
+        cloned_state.spree_context = copy.deepcopy(self.spree_context)
+        cloned_state.dredge_pending = copy.deepcopy(self.dredge_pending)
+        cloned_state.pending_spell_context = copy.deepcopy(self.pending_spell_context)
+        cloned_state.clash_context = copy.deepcopy(self.clash_context)
+        cloned_state.surveil_in_progress = self.surveil_in_progress
+        cloned_state.cards_being_surveiled = self.cards_being_surveiled[:] if hasattr(self, 'cards_being_surveiled') else []
+        cloned_state.surveiling_player = cloned_state.p1 if self.surveiling_player == self.p1 else cloned_state.p2 if self.surveiling_player == self.p2 else None
+        cloned_state.scry_in_progress = self.scry_in_progress
+        cloned_state.scrying_cards = self.scrying_cards[:] if hasattr(self, 'scrying_cards') else []
+        cloned_state.scrying_player = cloned_state.p1 if self.scrying_player == self.p1 else cloned_state.p2 if self.scrying_player == self.p2 else None
+        cloned_state.scrying_tops = self.scrying_tops[:] if hasattr(self, 'scrying_tops') else []
+        cloned_state.scrying_bottoms = self.scrying_bottoms[:] if hasattr(self, 'scrying_bottoms') else []
 
-        # --- Re-initialize Subsystems ---
-        # Pass the *cloned_state* to the subsystem constructors
-        # Assume constructors correctly link to the provided game state.
-        cloned_state._init_subsystems()
+        # --- Restore priority player reference correctly ---
+        if self.priority_player == self.p1:
+             cloned_state.priority_player = cloned_state.p1
+        elif self.priority_player == self.p2:
+             cloned_state.priority_player = cloned_state.p2
+        else:
+             cloned_state.priority_player = None
 
-        # Re-register effects based on the cloned permanents
-        # This ensures effects reference the correct state
-        if cloned_state.layer_system:
-             cloned_state.layer_system.layers = { 1: [], 2: [], 3: [], 4: [], 5: [], 6: [], 7: {'a': [], 'b': [], 'c': [], 'd': []} } # Clear layers
-        if cloned_state.replacement_effects:
-             cloned_state.replacement_effects.active_effects = [] # Clear effects
-             cloned_state.replacement_effects.effect_index = {}
+        # --- Re-initialize Subsystems within the CLONED state ---
+        # Pass the *cloned_state* to the subsystem constructors/linkers
+        cloned_state._init_subsystems() # This should re-create fresh subsystem instances linked to the clone
 
+        # --- Re-register Effects based on Cloned State ---
+        # Layer system was already re-initialized by _init_subsystems.
+        # Clear old Ability Handler registrations and re-parse based on cloned state
         if cloned_state.ability_handler:
-            # Re-register effects for permanents in the cloned state
-            for p in [cloned_state.p1, cloned_state.p2]:
-                for card_id in p.get("battlefield",[]):
-                    card = cloned_state._safe_get_card(card_id) # Get card from cloned DB reference
-                    if card:
-                        # This function should register static/replacement effects too
-                        cloned_state.ability_handler._parse_and_register_abilities(card_id, card) # Register effects based on current card state
-                        # Register card effects (static/replacement) after parsing functional abilities
-                        cloned_state._register_card_effects(card_id, card, p)
+            cloned_state.ability_handler.registered_abilities = {} # Clear old dict
+            # Go through all cards *in the clone's state* and re-register their abilities/effects
+            for player in [cloned_state.p1, cloned_state.p2]:
+                # Battlefield is the most common place for static/replacement effects
+                for card_id in player.get("battlefield", []):
+                     card = cloned_state._safe_get_card(card_id) # Get card from cloned DB ref
+                     if card:
+                         # _parse_and_register_abilities handles parsing and registering static abilities with LayerSystem
+                         cloned_state.ability_handler._parse_and_register_abilities(card_id, card)
+                         # _register_card_effects specifically handles static/replacements if needed separately
+                         # Note: The call below might be redundant if _parse_and_register handles everything. Test this.
+                         cloned_state._register_card_effects(card_id, card, player) # Ensure static/replacements registered
+                # TODO: Consider if abilities/effects from other zones need re-registration (Graveyard? Hand?)
 
-
-        # Link External Systems (Shallow Copy/Reference)
+        # --- Link External Systems (Shallow Copy/Reference) ---
         cloned_state.strategy_memory = self.strategy_memory
         cloned_state.stats_tracker = self.stats_tracker
         cloned_state.card_memory = self.card_memory
 
-        # --- Ensure player dicts in the CLONED state still reference Card objects from the ORIGINAL card_db ---
-        # (If Card objects were accidentally deep copied)
-        # for player in [cloned_state.p1, cloned_state.p2]:
-        #    for zone, card_ids in p_original_refs.items(): # Use original refs to fix potentially broken cloned refs
-        #       if zone in player: player[zone] = card_ids[:] # Restore the list of IDs
+        # --- Final Reference Checks ---
+        # Verify priority player reference again after subsystem init
+        if cloned_state.priority_player not in [cloned_state.p1, cloned_state.p2, None]:
+             logging.warning("Cloned priority player reference mismatch after subsystem init. Resetting.")
+             cloned_state.priority_player = cloned_state.p1 if self.priority_player == self.p1 else cloned_state.p2 if self.priority_player == self.p2 else None
+        # Ensure players in subsystems reference the CLONED player objects
+        if cloned_state.mana_system: cloned_state.mana_system.game_state = cloned_state
+        if cloned_state.combat_resolver: cloned_state.combat_resolver.game_state = cloned_state
+        if cloned_state.card_evaluator: cloned_state.card_evaluator.game_state = cloned_state
+        # Add checks for other subsystems...
 
-
-        # Final check: ensure priority player reference is valid within the clone
-        if cloned_state.priority_player is not cloned_state.p1 and cloned_state.priority_player is not cloned_state.p2:
-            logging.warning("Cloned priority player reference mismatch, resetting.")
-            cloned_state.priority_player = cloned_state.p1 if self.priority_player == self.p1 else cloned_state.p2 if self.priority_player == self.p2 else None
-
-
+        logging.debug("GameState cloned successfully.")
         return cloned_state
         
     def _safe_get_card(self, card_id, default_value=None):
