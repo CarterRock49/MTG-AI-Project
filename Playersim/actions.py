@@ -2473,10 +2473,26 @@ class ActionHandler:
              logging.warning("ACTIVATE_ABILITY: AbilityHandler not found.")
              return -0.15, False # Handler missing
 
+
     def _handle_loyalty_ability(self, param, action_type, **kwargs):
          gs = self.game_state
          player = gs.p1 if gs.agent_is_p1 else gs.p2
-         # Param should be PW index on battlefield
+         # Param is PW index on battlefield
+         # action_index needs to be passed in kwargs by the caller in apply_action
+         action_idx = kwargs.get('action_index')
+         if action_idx is None:
+             logging.error(f"Action Index missing for loyalty ability: {action_type}")
+             return -0.2, False
+
+         # Param is derived from action_idx based on action mapping if needed, or passed directly
+         # Let's assume param is the battlefield index (derived if needed or passed)
+         if param is None:
+             # Recalculate param (battlefield_idx) if not passed explicitly
+             # This logic depends on how the agent calls apply_action for these actions
+             # Assume for now param IS the battlefield index based on ACTION_MEANINGS mapping logic
+             logging.error("Loyalty ability handler called without param (battlefield_idx).")
+             return -0.2, False # Needs the index
+
          if param < len(player["battlefield"]):
              card_id = player["battlefield"][param]
              card = gs._safe_get_card(card_id)
@@ -2493,16 +2509,25 @@ class ActionHandler:
                            if action_type == "ULTIMATE_ABILITY" and is_ultimate: ability_idx = idx; break
 
                  if ability_idx != -1:
-                      # Use activate_planeswalker_ability
+                      # Use activate_planeswalker_ability which now handles stack/targeting
                       if gs.activate_planeswalker_ability(card_id, ability_idx, player):
-                           # Evaluate effect
+                           # Evaluate ability value *after* successful activation (cost paid, on stack/target phase)
                            ability_value, _ = self.evaluate_ability_activation(card_id, ability_idx)
-                           return 0.15 + ability_value * 0.5
+                           # Reward is less immediate now, mostly for paying the cost and adding to stack
+                           # More reward comes from successful resolution later.
+                           return 0.05 + ability_value * 0.1, True # Small base reward + strategic value
                       else:
-                           return -0.1 # Failed activation
+                           logging.debug(f"Planeswalker ability activation failed for {card.name}, Index {ability_idx}")
+                           return -0.1, False # Failed activation (cost check etc.)
                  else:
-                      return -0.15 # Ability type not found
-         return -0.2 # Invalid index or not a planeswalker
+                      logging.warning(f"Could not find matching loyalty ability for action {action_type} on {card.name}")
+                      return -0.15, False # Ability type not found for action
+             else: # Not a planeswalker at this index
+                 logging.warning(f"Card at index {param} ({getattr(card, 'name', 'N/A')}) is not a planeswalker.")
+                 return -0.15, False
+         else: # Invalid battlefield index
+            logging.warning(f"Invalid battlefield index {param} for loyalty ability.")
+            return -0.2, False
      
     def evaluate_ability_activation(self, card_id, ability_idx):
         """Evaluate strategic value of activating an ability."""

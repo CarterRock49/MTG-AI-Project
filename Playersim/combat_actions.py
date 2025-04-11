@@ -965,30 +965,19 @@ class CombatActionHandler:
         if hasattr(gs, 'ability_handler') and gs.ability_handler:
             if hasattr(gs.ability_handler, 'check_keyword'):
                  try:
+                     # Use AbilityHandler's public method
                      return gs.ability_handler.check_keyword(card_id, keyword)
                  except Exception as e:
-                      logging.error(f"Error checking keyword via AbilityHandler: {e}")
-                      # Fall through on error
-
-        # 2. Fallback to TargetingSystem (might also check layers)
-        elif hasattr(gs, 'targeting_system') and gs.targeting_system:
-             if hasattr(gs.targeting_system, 'check_keyword'):
-                 try:
-                     return gs.targeting_system.check_keyword(card_id, keyword)
-                 except Exception as e:
-                      logging.error(f"Error checking keyword via TargetingSystem: {e}")
-                      # Fall through on error
-
-        # 3. Ultimate Fallback: Check card's own property (may be inaccurate)
-        logging.warning(f"Using basic card keyword fallback check in CombatActionHandler for {keyword} on {getattr(card, 'name', 'Unknown')}")
-        if hasattr(card, 'has_keyword') and callable(card.has_keyword):
-             return card.has_keyword(keyword) # Uses card's own logic
-        # Optional: Direct check of 'keywords' array if card doesn't have has_keyword method
-        elif hasattr(card, 'keywords') and isinstance(card.keywords, (list, np.ndarray)):
+                      logging.error(f"Error checking keyword via AbilityHandler in CombatActionHandler: {e}")
+                      # Fall through to GameState check on error
+            # else: Fall through if check_keyword doesn't exist on handler
+        # --- DELEGATION ADDED: Check GameState next ---
+        if hasattr(gs, 'check_keyword') and callable(gs.check_keyword):
             try:
-                 idx = Card.ALL_KEYWORDS.index(keyword.lower())
-                 if idx < len(card.keywords): return bool(card.keywords[idx])
-            except (ValueError, IndexError): pass
-
-        return False # Default to false if checks fail
+                return gs.check_keyword(card_id, keyword)
+            except Exception as e:
+                 logging.error(f"Error checking keyword via GameState in CombatActionHandler: {e}")
+                 
+        logging.warning(f"Keyword check failed in CombatActionHandler for {keyword} on {getattr(card, 'name', 'Unknown')}: Delegation methods failed or keyword not found.")
+        return False
      

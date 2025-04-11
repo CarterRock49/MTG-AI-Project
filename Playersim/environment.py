@@ -1731,7 +1731,6 @@ class AlphaZeroMTGEnv(gym.Env):
     def _get_obs(self):
         """Build the observation dictionary. Assumes helpers are implemented."""
         try:
-            # >>> ADDED: Apply layers before generating observation <<<
             if hasattr(self, 'layer_system') and self.layer_system:
                 self.layer_system.apply_all_effects()
 

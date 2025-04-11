@@ -1295,63 +1295,94 @@ class GameState:
         return success
 
     def activate_planeswalker_ability(self, card_id, ability_idx, controller):
-        """Activates a planeswalker ability if valid."""
+        """Activates a planeswalker ability: Pays cost, potentially enters targeting, adds ability to stack."""
         card = self._safe_get_card(card_id)
-        if not card or 'planeswalker' not in getattr(card, 'card_types', []) or card_id not in controller['battlefield']: return False
+        # Ensure card exists, is a planeswalker, and is on the controller's battlefield
+        if not card or 'planeswalker' not in getattr(card, 'card_types', []) or card_id not in controller.get('battlefield', []):
+            logging.warning(f"Invalid attempt to activate PW ability: Card {card_id} invalid or not controlled PW.")
+            return False
 
-        # Check activation limit
-        if card_id in controller.get("activated_this_turn", set()):
-            logging.debug(f"Planeswalker {card.name} already activated this turn.")
+        # Check activation limit (only once per turn per PW)
+        activated_this_turn_set = controller.setdefault("activated_this_turn", set())
+        if card_id in activated_this_turn_set:
+            logging.debug(f"Planeswalker {card.name} ({card_id}) already activated this turn.")
             return False
 
         abilities = getattr(card, 'loyalty_abilities', [])
-        if ability_idx < 0 or ability_idx >= len(abilities): return False
+        if not (0 <= ability_idx < len(abilities)):
+            logging.warning(f"Invalid ability index {ability_idx} for {card.name}")
+            return False
+
         ability = abilities[ability_idx]
         cost = ability.get('cost', 0)
+        effect_text = ability.get("effect", "")
 
-        # Check loyalty
+        # Check loyalty affordability (Rule 118.5)
         current_loyalty = controller.get("loyalty_counters", {}).get(card_id, getattr(card, 'loyalty', 0))
         if current_loyalty + cost < 0: # Rule 118.5: Cannot pay cost if loyalty would become < 0
-             logging.debug(f"Cannot activate PW ability: Loyalty {current_loyalty} + Cost {cost} < 0")
+             logging.debug(f"Cannot activate PW ability for {card.name}: Loyalty {current_loyalty} + Cost {cost} < 0")
              return False
 
+        # --- Costs are paid upon ACTIVATION (Rule 601.2h) ---
         # Pay loyalty cost
-        controller.setdefault("loyalty_counters", {})[card_id] = current_loyalty + cost
+        new_loyalty = current_loyalty + cost
+        controller.setdefault("loyalty_counters", {})[card_id] = new_loyalty
 
-        # Mark as activated
-        controller.setdefault("activated_this_turn", set()).add(card_id)
+        # Mark as activated this turn
+        activated_this_turn_set.add(card_id)
+        # Increment total activations if tracked
         controller.setdefault("pw_activations", {})[card_id] = controller.get("pw_activations", {}).get(card_id, 0) + 1
 
+        logging.debug(f"Paid loyalty cost ({cost:+}) for PW ability {ability_idx} on {card.name}. Loyalty now {new_loyalty}")
 
-        # Add ability effect to stack
-        context = {
-            "ability_index": ability_idx,
-            "ability_cost": cost,
-            "ability_effect_text": ability.get("effect", ""),
-            "targets": {} # Placeholder, need target selection phase if required
-        }
-
-        # Check if ability requires targets
-        if "target" in ability.get("effect", "").lower():
+        # --- Targeting Setup ---
+        requires_target = "target" in effect_text.lower()
+        if requires_target:
+             # Ability needs targets, set up targeting phase
              logging.debug(f"Planeswalker ability requires target. Entering TARGETING phase.")
+             self.previous_priority_phase = self.phase # Store current phase
              self.phase = self.PHASE_TARGETING
+             # Create targeting context
              self.targeting_context = {
                   "source_id": card_id,
                   "controller": controller,
-                  "ability_idx": ability_idx, # Store index for later
-                  "effect_text": ability.get("effect", ""),
-                  "required_type": self._get_target_type_from_text(ability.get("effect","")), # Helper needed
-                  "required_count": 1, # Assume 1 target for simplicity
+                  "ability_idx": ability_idx, # Store index if needed later
+                  "effect_text": effect_text,
+                  "required_type": self._get_target_type_from_text(effect_text), # Use helper
+                  "required_count": 1, # Assume 1 target unless text specifies more
+                  "min_targets": 1, # Assumes target is required if text says 'target'
                   "selected_targets": [],
-                  "stack_context_to_update": context # Store context to update later
+                  # Store info needed to put on stack AFTER targeting
+                  "stack_info": {
+                       "item_type": "ABILITY",
+                       "source_id": card_id,
+                       "controller": controller,
+                       "context": {
+                            "ability_index": ability_idx, # Include original index if needed
+                            "ability_cost": cost,
+                            "effect_text": effect_text,
+                            "targets": {} # To be filled by targeting resolution
+                       }
+                  }
              }
-             # We add to stack *after* targeting is complete
-        else:
-             # Add to stack directly
-             self.add_to_stack("ABILITY", card_id, controller, context)
+             # Do NOT add to stack yet. Targeting actions will lead to stack addition.
+             logging.debug(f"Set up targeting for PW ability: {effect_text}")
 
-        logging.debug(f"Activated PW ability {ability_idx} for {card.name}. Cost: {cost}. Loyalty: {controller['loyalty_counters'][card_id]}")
-        return True
+        else:
+             # No targets needed, add ability directly to stack
+             stack_context = {
+                  "ability_index": ability_idx,
+                  "ability_cost": cost,
+                  "effect_text": effect_text,
+                  "targets": {} # Empty targets dict
+             }
+             self.add_to_stack("ABILITY", card_id, controller, stack_context)
+             logging.debug(f"Added non-targeting PW ability {ability_idx} for {card.name} to stack.")
+
+        # Check SBAs immediately after paying cost (e.g., PW died from low loyalty)
+        self.check_state_based_actions()
+
+        return True # Activation successful (cost paid, targeting started or added to stack)
     
     def _get_target_type_from_text(self, text):
          """Simple helper to guess target type."""

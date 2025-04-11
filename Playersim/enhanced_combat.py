@@ -399,21 +399,34 @@ class ExtendedCombatResolver(EnhancedCombatResolver):
         return total_potential_damage
     
     def _has_keyword(self, card, keyword):
-        """Checks if a card has a keyword using the GameState's central checker."""
+        """Checks if a card has a keyword using the central AbilityHandler."""
         gs = self.game_state
         card_id = getattr(card, 'card_id', None)
         if not card_id: return False
 
-        # Delegate to GameState's central check method if available
+        # --- DELEGATED CHECK ---
+        # Always delegate to AbilityHandler or GameState's check_keyword method
+        if hasattr(gs, 'ability_handler') and gs.ability_handler:
+            if hasattr(gs.ability_handler, 'check_keyword'):
+                 try:
+                     # Use AbilityHandler's public method
+                     return gs.ability_handler.check_keyword(card_id, keyword)
+                 except Exception as e:
+                      logging.error(f"Error checking keyword via AbilityHandler in CombatResolver: {e}")
+                      # Fall through to GameState check on error
+            # else: Fall through if check_keyword doesn't exist on handler
         if hasattr(gs, 'check_keyword') and callable(gs.check_keyword):
-            return gs.check_keyword(card_id, keyword)
-        # Fallback if GameState check method missing (less reliable)
-        else:
-            logging.warning(f"Using basic card keyword fallback check for {keyword} on {getattr(card, 'name', 'Unknown')} because GameState.check_keyword is missing.")
-            # Fallback logic from original file, potentially using card.has_keyword or direct check
-            if hasattr(card, 'has_keyword'): return card.has_keyword(keyword)
-            # ... (consider adding other basic fallbacks if needed)
-            return False
+             try:
+                 return gs.check_keyword(card_id, keyword)
+             except Exception as e:
+                  logging.error(f"Error checking keyword via GameState in CombatResolver: {e}")
+                  # Fall through on error
+        # --- END DELEGATED CHECK ---
+
+        # --- REMOVED Fallback ---
+        # Basic check is unreliable here. Assume false if delegation fails.
+        logging.warning(f"Keyword check failed in CombatResolver for {keyword} on {getattr(card, 'name', 'Unknown')}: Neither AbilityHandler nor GameState check method succeeded.")
+        return False
     
     def _should_deal_damage_this_phase(self, card, is_first_strike_phase):
         """Check if a creature should deal damage in the current phase."""

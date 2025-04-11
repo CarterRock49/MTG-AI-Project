@@ -2,6 +2,8 @@
 import logging
 import re
 from collections import defaultdict
+
+import numpy as np
 from .card import Card # Need Card for keyword checks etc.
 from .ability_utils import is_beneficial_effect # Import helper
 
@@ -229,14 +231,21 @@ class TargetingSystem:
              source_card = gs._safe_get_card(source_id)
              if isinstance(target_obj, dict) and target_id in ["p1","p2"]: # Player
                   # TODO: Add player protection checks (e.g., Leyline of Sanctity)
-                  pass
+                  # Check for hexproof from players/opponents if a global effect grants it
+                  if caster != target_owner and self._check_keyword(target_obj, "hexproof from opponents"): return False # Requires player dict to have check_keyword/keywords?
+                  if self._check_keyword(target_obj, "shroud"): return False
              elif isinstance(target_obj, Card): # Permanent or Spell
-                 # *** Use self._check_keyword for hexproof/shroud ***
+                 target_card_id = getattr(target_obj, 'card_id', None)
+                 if not target_card_id: return False # Need ID to check keywords centrally
+
+                 # *** Use central check_keyword ***
                  # Protection
                  if self._has_protection_from(target_obj, source_card, target_owner, caster): return False
                  # Hexproof (if targeted by opponent)
+                 # Use central handler via self._check_keyword
                  if caster != target_owner and self._check_keyword(target_obj, "hexproof"): return False
                  # Shroud (if targeted by anyone)
+                 # Use central handler via self._check_keyword
                  if self._check_keyword(target_obj, "shroud"): return False
                  # Ward (Check handled separately - involves paying cost)
 
@@ -307,6 +316,8 @@ class TargetingSystem:
              if isinstance(target_obj, Card): # Spell target
                  # Can't be countered? (Only if source is a counter)
                  if source_card and "counter target spell" in getattr(source_card, 'oracle_text', '').lower():
+                     # Use central keyword check (although "can't be countered" isn't a standard keyword array item)
+                     # Check oracle text for this specific rule modification
                      if "can't be countered" in getattr(target_obj, 'oracle_text', '').lower(): return False
                  # Spell Type
                  st_req = requirement.get("spell_type_restriction")
@@ -324,33 +335,48 @@ class TargetingSystem:
         return True # All checks passed
     
     def _check_keyword(self, card, keyword):
-        """Internal helper to check keywords, possibly delegating."""
+        """Internal helper to check keywords, delegating to AbilityHandler/GameState."""
         gs = self.game_state
-        card_id = getattr(card, 'card_id', None)
-        if not card_id: return False
+        card_id = None
 
-        # Prefer using AbilityHandler's centralized check if available
+        # Handle checking keyword on player object (less common)
+        if isinstance(card, dict) and 'name' in card: # Player dict
+             # Check global effects granting hexproof/shroud to players? Hard.
+             # Simplification: Player objects don't inherently have keywords via AbilityHandler/LayerSystem yet.
+             # Return False unless a specific global check is implemented elsewhere.
+             logging.debug(f"Keyword check for Player {card['name']} not fully implemented.")
+             return False # Assume players don't have hexproof/shroud by default via this check.
+        elif isinstance(card, Card):
+             card_id = getattr(card, 'card_id', None)
+        else:
+            logging.warning(f"_check_keyword received invalid object type: {type(card)}")
+            return False
+
+        if not card_id:
+             # If card object passed without ID, try to find ID?
+             logging.warning(f"_check_keyword: Card object {card.name} missing card_id.")
+             return False
+
+        # 1. Prefer AbilityHandler (should use GameState.check_keyword or layer system)
         if self.ability_handler and hasattr(self.ability_handler, 'check_keyword'):
             return self.ability_handler.check_keyword(card_id, keyword)
 
-        # Fallback to GameState's check if no AbilityHandler reference
+        # 2. Fallback to GameState's check_keyword directly
         elif hasattr(gs, 'check_keyword') and callable(gs.check_keyword):
             return gs.check_keyword(card_id, keyword)
 
-        # Ultimate fallback: basic check on the card object (less reliable)
+        # 3. Ultimate fallback: Direct check on live card object's 'keywords' array (Layer result)
         logging.warning(f"Using basic card keyword fallback check in TargetingSystem for {keyword} on {getattr(card, 'name', 'Unknown')}")
-        if hasattr(card, 'has_keyword'): # Use card's own checker if it exists
-             return card.has_keyword(keyword)
-        elif hasattr(card, 'keywords') and isinstance(card.keywords, list): # Check keyword array directly
+        live_card = gs._safe_get_card(card_id)
+        if live_card and hasattr(live_card, 'keywords') and isinstance(live_card.keywords, (list, np.ndarray)):
              try:
                  if not Card.ALL_KEYWORDS: return False
                  idx = Card.ALL_KEYWORDS.index(keyword.lower())
-                 if idx < len(card.keywords): return bool(card.keywords[idx])
-             except ValueError: pass
-             except IndexError: pass
-        elif hasattr(card, 'oracle_text'): # Check oracle text as last resort
-             return keyword.lower() in getattr(card, 'oracle_text', '').lower()
+                 if idx < len(live_card.keywords): return bool(live_card.keywords[idx])
+             except ValueError: pass # Keyword not standard
+             except IndexError: pass # Index out of bounds
 
+        logging.debug(f"Keyword check failed in TargetingSystem fallback for {keyword} on {getattr(live_card, 'name', 'Unknown')}")
         return False
 
     def _has_color(self, card, color_name):
@@ -472,18 +498,26 @@ class TargetingSystem:
 
         return requirements
 
+
     def _has_protection_from(self, target_card, source_card, target_owner, source_controller):
         """Robust protection check using centralized keyword checking and AbilityHandler details."""
         if not target_card or not source_card: return False
+        target_card_id = getattr(target_card, 'card_id', None)
+        if not target_card_id: return False
 
-        # 1. Check static abilities granting protection directly via layer system/live object state
-        #    (check_keyword already does this)
-        if self.check_keyword(target_card.card_id, "protection"): # Check if the *general* keyword is active
-             # 2. Get specific protection details from AbilityHandler
-             #    This method should aggregate protection from static abilities, granted abilities etc.
+        # 1. Use central check_keyword for the general "protection" keyword
+        if self.check_keyword(target_card, "protection"): # Check if the *general* keyword is active
+             # 2. Get specific protection details (Needs reliable source like AbilityHandler/LayerSystem)
+             # Attempt to get details via AbilityHandler first
              protection_details = []
              if self.ability_handler and hasattr(self.ability_handler, 'get_protection_details'):
-                 protection_details = self.ability_handler.get_protection_details(target_card.card_id) or [] # Expect list
+                 protection_details = self.ability_handler.get_protection_details(target_card_id) or []
+             # Fallback: Check card's own properties if handler fails (Less reliable)
+             elif hasattr(target_card,'_granted_protection_details'): # Check for cached layer results directly?
+                  protection_details = target_card._granted_protection_details or []
+             else: # Last resort: parse text again (least reliable)
+                  matches = re.findall(r"protection from ([\w\s]+)(?:\s*where|\.|$|,|;)", getattr(target_card, 'oracle_text', '').lower())
+                  for match in matches: protection_details.append(match.strip())
 
              if protection_details:
                  source_colors = getattr(source_card, 'colors', [0]*5)
@@ -526,6 +560,7 @@ class TargetingSystem:
                  # Default to false, specific protection is needed.
 
         return False # No relevant protection found
+
 
     def resolve_targeting(self, source_id, controller, effect_text=None, target_types=None):
         """
@@ -767,28 +802,17 @@ class TargetingSystem:
         if self._has_protection_from(blocker, attacker, blocker_controller, attacker_controller): return False
 
         # --- Check Attacker's Evasion ---
-        # Absolute unblockable
-        # Note: Need careful text parsing. "Can't be blocked." vs "Can't be blocked except by..."
-        if self._check_keyword(attacker, "unblockable"): # Assuming keyword implies absolute
+        # Centralized checks via self._check_keyword (which delegates)
+        if self._check_keyword(attacker, "unblockable"):
+             # Check for exceptions if needed from oracle text
              if "except by" not in getattr(attacker, 'oracle_text', '').lower():
                   return False
 
-        # Flying
         if self._check_keyword(attacker, "flying") and not (self._check_keyword(blocker, "flying") or self._check_keyword(blocker, "reach")): return False
-
-        # Shadow
         if self._check_keyword(attacker, "shadow") and not self._check_keyword(blocker, "shadow"): return False
-
-        # Fear
         if self._check_keyword(attacker, "fear") and not (self._check_keyword(blocker, "artifact") or self._check_keyword(blocker, "black")): return False
-
-        # Intimidate
         if self._check_keyword(attacker, "intimidate") and not (self._check_keyword(blocker, "artifact") or self._share_color(attacker, blocker)): return False
-
-        # Skulk
         if self._check_keyword(attacker, "skulk") and getattr(blocker, 'power', 0) > getattr(attacker, 'power', 0): return False
-
-        # Horsemanship
         if self._check_keyword(attacker, "horsemanship") and not self._check_keyword(blocker, "horsemanship"): return False
 
         # Landwalk (if defender controls relevant land type)
@@ -808,6 +832,7 @@ class TargetingSystem:
             if not blocker_meets: return False # Does not meet exception criteria
 
         # --- Check Blocker's Restrictions ---
+        # Use central keyword check
         if self._check_keyword(blocker, "can't block"): return False
         if self._check_keyword(blocker, "decayed"): return False # Decayed can't block
 
@@ -815,6 +840,7 @@ class TargetingSystem:
         match_only = re.search(r"can block only creatures with ([\w\s]+)", getattr(blocker, 'oracle_text', '').lower())
         if match_only:
              required_ability = match_only.group(1).strip()
+             # Use central check_keyword for the attacker's ability
              if not self._check_keyword(attacker, required_ability): return False
 
         # Menace handled separately (requires >=2 blockers, this checks if ONE blocker is legal)

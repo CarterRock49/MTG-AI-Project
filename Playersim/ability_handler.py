@@ -1583,6 +1583,7 @@ class AbilityHandler:
                 if not Card.ALL_KEYWORDS:
                     logging.error("Card.ALL_KEYWORDS is not defined or empty.")
                     return False # Safety check
+                # Use the Card class static variable for consistency
                 kw_list = [k.lower() for k in Card.ALL_KEYWORDS] # Ensure lowercase list
                 idx = kw_list.index(keyword_lower)
                 if idx < len(live_card.keywords):
@@ -1602,13 +1603,9 @@ class AbilityHandler:
             except Exception as e:
                  logging.error(f"Error checking keyword array for {live_card.name}: {e}")
 
-        # 3. Fallback: Check inherent abilities from oracle text (least reliable)
-        if hasattr(live_card, 'oracle_text'):
-             # Use the approximated set from the live card's text (as potentially modified by layers)
-             inherent_set = self._approximate_keywords_set(getattr(live_card, 'oracle_text', ''))
-             result = keyword_lower in inherent_set
-             # logging.debug(f"Keyword Check Fallback (Text): '{keyword_lower}' in inherent set for '{live_card.name}' -> {result}")
-             return result
+        # 3. REMOVED Oracle Text Fallback: Base text check is unreliable due to layer effects.
+        #    The definitive state comes from the layered 'keywords' array.
+        #    If not found there, it shouldn't be considered active.
 
         # logging.debug(f"Keyword Check Fallback: Keyword '{keyword_lower}' not found via any method for '{getattr(live_card, 'name', card_id)}'.")
         return False
