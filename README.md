@@ -25,7 +25,7 @@ graph TD
 
 ## TODO
 
-- Current state: Doesn't work, kinda of a mess, working on version 3.00
+- Current state: Doesn't work, working on version 3.00
 
 - Add support for coin flips and dice rolls
 - Add support for {2/B} style mana
