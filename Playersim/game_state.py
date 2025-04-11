@@ -1106,15 +1106,34 @@ class GameState:
                     logging.debug("Both passed, resolving stack...")
                     resolved = gs.resolve_top_of_stack() # This resets priority to AP internally
                     # SBAs are checked after resolution within the main loop, not here
-                    # Check if stack is now empty - if so, and if we were in a special phase, return
-                    if not gs.stack and self.phase in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
-                         # Returning to previous phase handled by resolve_top_of_stack's finally block
-                         pass
+                    # --- MODIFIED: Check if choice context still needs handling ---
+                    if not gs.stack and (gs.targeting_context or gs.sacrifice_context or gs.choice_context):
+                         logging.debug("Stack resolved, but special context remains. Priority to choosing player.")
+                         if gs.targeting_context: gs.priority_player = gs.targeting_context.get("controller")
+                         elif gs.sacrifice_context: gs.priority_player = gs.sacrifice_context.get("controller")
+                         elif gs.choice_context: gs.priority_player = gs.choice_context.get("player")
+                         else: gs.priority_player = gs._get_active_player() # Fallback
+                         gs.priority_pass_count = 0 # Player needs to act on choice
+                         self.phase = gs.targeting_context and self.PHASE_TARGETING or \
+                                      gs.sacrifice_context and self.PHASE_SACRIFICE or \
+                                      gs.choice_context and self.PHASE_CHOOSE or self.PHASE_PRIORITY
+                    # --- END MODIFICATION ---
+                    # else: resolve_top_of_stack handled phase return if needed
             # --- Advance Phase ---
-            else: # Stack is empty
-                logging.debug("Both passed with empty stack, advancing phase.")
-                gs._advance_phase()
-                # _advance_phase handles resetting priority_player and pass_count
+            # --- ADDED CHECK FOR PENDING CHOICE BEFORE ADVANCING ---
+            elif not (gs.targeting_context or gs.sacrifice_context or gs.choice_context):
+            # --- END ADDED CHECK ---
+                 logging.debug("Both passed with empty stack, advancing phase.")
+                 gs._advance_phase()
+                 # _advance_phase handles resetting priority_player and pass_count
+            else:
+                logging.debug("Both passed, but choice context pending. Waiting for action.")
+                # Keep priority with the player who needs to choose
+                if gs.targeting_context: gs.priority_player = gs.targeting_context.get("controller")
+                elif gs.sacrifice_context: gs.priority_player = gs.sacrifice_context.get("controller")
+                elif gs.choice_context: gs.priority_player = gs.choice_context.get("player")
+                gs.priority_pass_count = 0 # Reset passes, player must act
+
         # else: # Only one pass, priority toggled, nothing else happens
 
     
@@ -1209,24 +1228,28 @@ class GameState:
 
         # 2. Handle "leaves the battlefield" cleanup
         if actual_from_zone == "battlefield" and from_player:
-             if card_id in from_player.get("tapped_permanents", set()): from_player["tapped_permanents"].remove(card_id)
-             if card_id in from_player.get("entered_battlefield_this_turn", set()): from_player["entered_battlefield_this_turn"].remove(card_id)
-             # Reset attachments (both ways)
-             if hasattr(from_player, "attachments"):
-                 # If card_id was attached to something, remove it
-                 if card_id in from_player["attachments"]: del from_player["attachments"][card_id]
-                 # If something was attached to card_id, remove that attachment
-                 items_attached_to_it = [att_id for att_id, target_id in from_player["attachments"].items() if target_id == card_id]
-                 for att_id in items_attached_to_it: del from_player["attachments"][att_id]
-             # Remove counters from the Card object itself
-             if card and hasattr(card, 'counters'): card.counters = {}
-             # Remove loyalty tracking
-             if hasattr(from_player, 'loyalty_counters') and card_id in from_player['loyalty_counters']: del from_player['loyalty_counters'][card_id]
-             # Remove effects originating from this card
-             if self.layer_system: self.layer_system.remove_effects_by_source(card_id)
-             if self.replacement_effects: self.replacement_effects.remove_effects_by_source(card_id)
-             # Reset specific card states
-             if card and hasattr(card, 'reset_state_on_zone_change'): card.reset_state_on_zone_change()
+            if card_id in from_player.get("tapped_permanents", set()): from_player["tapped_permanents"].remove(card_id)
+            if card_id in from_player.get("entered_battlefield_this_turn", set()): from_player["entered_battlefield_this_turn"].remove(card_id)
+            # Reset attachments (both ways)
+            if hasattr(from_player, "attachments"):
+                # If card_id was attached to something, remove it
+                if card_id in from_player["attachments"]: del from_player["attachments"][card_id]
+                # If something was attached to card_id, remove that attachment
+                items_attached_to_it = [att_id for att_id, target_id in from_player["attachments"].items() if target_id == card_id]
+                for att_id in items_attached_to_it: del from_player["attachments"][att_id]
+            # Remove counters from the Card object itself
+            # (Counters persist in GY/Exile etc. if card returns)
+            # --- ADDED ---
+            # Remove continuous effects originating from this card
+            if self.layer_system: self.layer_system.remove_effects_by_source(card_id)
+            if self.replacement_effects: self.replacement_effects.remove_effects_by_source(card_id)
+            # --- END ADDED ---
+            # Remove loyalty tracking
+            if hasattr(from_player, 'loyalty_counters') and card_id in from_player['loyalty_counters']: del from_player['loyalty_counters'][card_id]
+            # Reset specific card states (face-down, mutated etc.)
+            if card and hasattr(card, 'reset_state_on_zone_change'):
+                card.reset_state_on_zone_change()
+
 
         # 3. Add to destination zone
         destination_list = final_destination_player.get(final_destination_zone)
@@ -2607,24 +2630,21 @@ class GameState:
         old_phase_name = self._PHASE_NAMES.get(old_phase, f"UNKNOWN({old_phase})")
 
         # --- Handle Special Phase Exits ---
+        # --- ADDED CHECK FOR PENDING CHOICE ---
         if old_phase in [self.PHASE_PRIORITY, self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
-            # If stack is now empty (or choice is complete), return to the phase *before* priority/choice was entered
-            # Also ensure no further context requires staying in this phase (e.g. waiting for next choice)
+            # Only proceed if stack is empty AND no choice context is active
             if not self.stack and not self.targeting_context and not self.sacrifice_context and not self.choice_context:
+        # --- END ADDED CHECK ---
                 # Retrieve the phase we were in before entering the special phase
                 if hasattr(self, 'previous_priority_phase') and self.previous_priority_phase is not None:
                     self.phase = self.previous_priority_phase
                     self.previous_priority_phase = None # Clear after using
-                    # Prevent immediately re-entering priority if returning to a phase end where stack was just resolved
-                    # If returning to a main phase, AP gets priority. If combat/end step, AP gets priority.
-                    # The only edge case is if returning from resolving the *last* item that moved to cleanup.
-                    if self.phase != self.PHASE_CLEANUP: # Don't reset priority player if moving *to* cleanup naturally
+                    if self.phase != self.PHASE_CLEANUP:
                         self.priority_player = self._get_active_player()
                         self.priority_pass_count = 0
                         self.last_stack_size = len(self.stack) # Should be 0 here
                 else: # Fallback if previous phase wasn't tracked
                     logging.warning(f"No previous_priority_phase tracked when exiting {old_phase_name}. Defaulting.")
-                    # Safe default depends on when this could happen. Often post-combat main.
                     self.phase = self.PHASE_MAIN_POSTCOMBAT if self.combat_damage_dealt else self.PHASE_MAIN_PRECOMBAT
                     self.priority_player = self._get_active_player()
                     self.priority_pass_count = 0
@@ -2634,9 +2654,10 @@ class GameState:
                 return # Phase transition handled
             else:
                  # Stay in the current special phase if stack/context still active
-                 # (e.g., multiple spells on stack, or waiting for another player's choice, or multi-part choice)
-                 logging.debug(f"Staying in special phase {old_phase_name} (Stack/Context still active).")
+                 logging.debug(f"Staying in special phase {old_phase_name} (Stack/Choice Context still active).")
                  return # No phase advancement
+        # --- END CONSOLIDATED CHECK ---
+
 
         # --- Cleanup Step Logic ---
         if old_phase == self.PHASE_CLEANUP:

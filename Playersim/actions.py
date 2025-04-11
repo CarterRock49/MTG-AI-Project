@@ -569,7 +569,7 @@ class ActionHandler:
         return True, 0.6 # Default to recommend with medium confidence
  
     def generate_valid_actions(self):
-            """Return the current action mask as boolean array with reasoning. (Updated for New Phases)"""
+            """Return the current action mask as boolean array with reasoning. (Updated for New Phases and Delegation)"""
             gs = self.game_state
             try:
                 valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
@@ -599,6 +599,7 @@ class ActionHandler:
                     return True
 
                 # --- Check Special Phases FIRST ---
+                # Mulligan/Bottoming take absolute precedence
                 if getattr(gs, 'mulligan_in_progress', False):
                     if getattr(gs, 'mulligan_player', None) == current_player:
                         set_valid_action(6, "MULLIGAN")
@@ -613,100 +614,130 @@ class ActionHandler:
                             if i < 4: # Limit based on action indices 226-229
                                 set_valid_action(226 + i, f"BOTTOM_CARD index {i}")
                         # Always allow finishing bottoming once required number is chosen?
-                        # Need a "DONE_BOTTOMING" action or check if count is met?
-                        # For now, just offer bottoming choices until GS handles transition.
+                        # Check if enough cards have been selected to allow completion.
+                        required_to_bottom = gs.cards_to_bottom
+                        bottomed_count = gs.bottoming_count
+                        if bottomed_count >= required_to_bottom:
+                            # Need a DONE_BOTTOMING action or automatic transition.
+                            # For now, we implicitly allow passing priority to signal completion.
+                            set_valid_action(11, "PASS_PRIORITY (Finish Bottoming)") # Overload Pass Priority?
                     else: # Waiting for opponent bottom
                         set_valid_action(224, "NO_OP (Waiting for opponent bottom)")
                     self.action_reasons = action_reasons
                     return valid_actions
-                # --- Handle Targeting/Sacrifice/Choice/Scry/Surveil Phases ---
-                # These phases restrict actions to ONLY the relevant choices or passing (if allowed by rules).
-                if gs.phase == gs.PHASE_TARGETING:
-                    if gs.targeting_context and gs.targeting_context.get("controller") == current_player:
+
+                # Check for other special phases (Targeting, Sacrifice, Choice)
+                special_phase = None
+                if gs.phase == gs.PHASE_TARGETING: special_phase = "TARGETING"
+                elif gs.phase == gs.PHASE_SACRIFICE: special_phase = "SACRIFICE"
+                elif gs.phase == gs.PHASE_CHOOSE: special_phase = "CHOOSE"
+
+                if special_phase:
+                    logging.debug(f"Generating actions limited to {special_phase} phase.")
+                    player_is_acting = False
+                    if special_phase == "TARGETING" and hasattr(gs, 'targeting_context') and gs.targeting_context and gs.targeting_context.get("controller") == current_player:
                         self._add_targeting_actions(current_player, valid_actions, set_valid_action)
-                        # Allow passing only if minimum targets selected? Rules check. Assume must choose.
-                        # Maybe add PASS action only if selection complete? Add PASS if 0 targets needed.
-                        if gs.targeting_context.get("required_count", 1) == 0 or len(gs.targeting_context.get("selected_targets", [])) >= gs.targeting_context.get("required_count", 1):
-                            set_valid_action(11, "PASS_PRIORITY (Finish Targeting)")
-                    else: # Waiting for opponent target choice
-                        set_valid_action(11, "PASS_PRIORITY (Waiting Opponent Targeting)") # Can't NO_OP, must pass
-                    self.action_reasons = action_reasons
-                    return valid_actions
-                if gs.phase == gs.PHASE_SACRIFICE:
-                    if gs.sacrifice_context and gs.sacrifice_context.get("controller") == current_player:
+                        player_is_acting = True
+                        # Allow pass only if minimum targets selected
+                        min_targets = gs.targeting_context.get("min_targets", 1)
+                        selected_count = len(gs.targeting_context.get("selected_targets", []))
+                        if selected_count >= min_targets:
+                             set_valid_action(11, f"PASS_PRIORITY (Finish {special_phase})")
+                    elif special_phase == "SACRIFICE" and hasattr(gs, 'sacrifice_context') and gs.sacrifice_context and gs.sacrifice_context.get("controller") == current_player:
                         self._add_sacrifice_actions(current_player, valid_actions, set_valid_action)
-                        # Check if enough have been selected to allow finishing
-                        if len(gs.sacrifice_context.get("selected_permanents", [])) >= gs.sacrifice_context.get("required_count", 1):
-                            set_valid_action(11, "PASS_PRIORITY (Finish Sacrificing)")
-                    else: # Waiting for opponent sacrifice choice
-                        set_valid_action(11, "PASS_PRIORITY (Waiting Opponent Sacrifice)") # Pass
-                    self.action_reasons = action_reasons
-                    return valid_actions
-                # Consolidate CHOOSE phase logic here
-                if gs.phase == gs.PHASE_CHOOSE:
-                    if hasattr(gs, 'choice_context') and gs.choice_context and gs.choice_context.get("player") == current_player:
+                        player_is_acting = True
+                        # Allow pass only if minimum targets selected
+                        required_count = gs.sacrifice_context.get("required_count", 1)
+                        selected_count = len(gs.sacrifice_context.get("selected_permanents", []))
+                        if selected_count >= required_count:
+                            set_valid_action(11, f"PASS_PRIORITY (Finish {special_phase})")
+                    elif special_phase == "CHOOSE" and hasattr(gs, 'choice_context') and gs.choice_context and gs.choice_context.get("player") == current_player:
+                        # Logic for specific choice types is already within _add_special_choice_actions
                         self._add_special_choice_actions(current_player, valid_actions, set_valid_action)
-                        # Add PASS only if the choice is optional or completed
-                        choice_type = gs.choice_context.get("type")
-                        if choice_type == "dredge": set_valid_action(11, "PASS_PRIORITY (Skip Dredge)")
-                        if choice_type == "pay_kicker": pass # Choose via PAY/DONT actions
-                        if choice_type == "pay_additional": pass
-                        if choice_type == "pay_escalate": set_valid_action(11, "PASS_PRIORITY (Finish Escalate)")
-                        # Allow passing for Mode choice only after minimum selected
-                        if choice_type == "choose_mode" and len(gs.choice_context.get("selected_modes", [])) >= gs.choice_context.get("min_modes", 1):
-                            set_valid_action(11, "PASS_PRIORITY (Finish Mode Choice)")
-                        # X and Color choices don't allow passing, must choose
-                    else: # Waiting for opponent choice
-                        set_valid_action(11, "PASS_PRIORITY (Waiting Opponent Choice)") # Pass
+                        player_is_acting = True
+                        # PASS logic is handled within _add_special_choice_actions based on choice type
+
+                    # Always add Concede
+                    set_valid_action(12, "CONCEDE")
+                    # If it's not player's turn to act in special phase, only allow PASS/CONCEDE
+                    if not player_is_acting:
+                         set_valid_action(11, f"PASS_PRIORITY (Waiting Opponent {special_phase})")
+
+                    # Final check: if no actions besides Concede, add Pass as fallback
                     self.action_reasons = action_reasons
+                    if np.sum(valid_actions) == 1 and valid_actions[12]:
+                         set_valid_action(11, f"FALLBACK PASS (Special Phase {special_phase})")
+                    # --- Important: Return here, do not proceed to other action types ---
                     return valid_actions
+                # --- End Special Phase Handling ---
+
 
                 # --- Rest of the logic (Timing checks, standard actions) ---
-                # --- Always Available ---
-                set_valid_action(11, "PASS_PRIORITY")
-                set_valid_action(12, "CONCEDE")
-
-                # --- Timing-Based Actions ---
+                has_priority = (getattr(gs, 'priority_player', None) == current_player)
                 can_act_sorcery_speed = False
-                has_priority = (getattr(gs, 'priority_player', None) == current_player) # Use getattr
                 can_act_instant_speed = has_priority
+
+                # --- Always Available ---
+                if has_priority: # Only allow PASS if player has priority
+                    set_valid_action(11, "PASS_PRIORITY")
+                set_valid_action(12, "CONCEDE")
 
                 if is_my_turn and gs.phase in [gs.PHASE_MAIN_PRECOMBAT, gs.PHASE_MAIN_POSTCOMBAT] and not gs.stack and has_priority:
                     can_act_sorcery_speed = True
 
-                # Prevent actions during untap/cleanup (except triggered abilities managed by the loop)
+                # Prevent actions during untap/cleanup (except maybe mana for Split Second)
                 if gs.phase in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP]:
-                    can_act_instant_speed = False # Usually no actions here
+                    can_act_instant_speed = False # No actions here
                     can_act_sorcery_speed = False
 
-                # Prevent actions if Split Second is active, except mana abilities
-                if getattr(gs, 'split_second_active', False):
-                    can_act_instant_speed = False
-                    can_act_sorcery_speed = False
-                    self._add_mana_ability_actions(current_player, valid_actions, set_valid_action) # Only mana abilities
-                    logging.debug("Split Second active, limiting actions to mana abilities and PASS.")
-                else:
-                    # Add actions based on timing
+                # Handle Split Second
+                split_second_is_active = getattr(gs, 'split_second_active', False)
+                if split_second_is_active:
+                    logging.debug("Split Second active, limiting actions.")
+                    # Only mana abilities are allowed. Keep PASS and CONCEDE? Assume yes for now.
+                    # Create temporary filtered valid_actions
+                    temp_valid_actions = np.zeros_like(valid_actions)
+                    temp_reasons = {}
+                    # Add Pass and Concede back if they were valid
+                    if valid_actions[11]: temp_valid_actions[11] = True; temp_reasons[11] = action_reasons[11]
+                    if valid_actions[12]: temp_valid_actions[12] = True; temp_reasons[12] = action_reasons[12]
+
+                    def set_valid_mana_action(index, reason=""): # Helper for mana abilities
+                        if 0 <= index < self.ACTION_SPACE_SIZE:
+                            temp_valid_actions[index] = True
+                            temp_reasons[index] = reason
+                        return True
+
+                    self._add_mana_ability_actions(current_player, temp_valid_actions, set_valid_mana_action) # Populate mana actions
+
+                    # Replace original mask and reasons
+                    valid_actions = temp_valid_actions
+                    action_reasons = temp_reasons
+
+                else: # Not Split Second - add normal actions based on timing
                     if can_act_sorcery_speed:
                         self._add_sorcery_speed_actions(current_player, opponent, valid_actions, set_valid_action)
                     if can_act_instant_speed:
                         self._add_instant_speed_actions(current_player, opponent, valid_actions, set_valid_action)
 
-                # --- Phase-Specific Actions ---
-                # Basic phase progression should only be possible if player has priority AND stack is empty?
-                if has_priority and not gs.stack:
-                    self._add_basic_phase_actions(is_my_turn, valid_actions, set_valid_action)
+                    # --- Phase-Specific Actions ---
+                    if has_priority and not gs.stack:
+                        self._add_basic_phase_actions(is_my_turn, valid_actions, set_valid_action)
 
-                # Combat phase actions (Attacking/Blocking/Damage Assignment) - check phase AND priority
-                if has_priority:
-                    if is_my_turn and gs.phase == gs.PHASE_DECLARE_ATTACKERS:
-                        self._add_attack_declaration_actions(current_player, opponent, valid_actions, set_valid_action)
-                    # Non-active player gets priority during Declare Blockers
-                    elif not is_my_turn and gs.phase == gs.PHASE_DECLARE_BLOCKERS and getattr(gs, 'current_attackers', []):
-                        self._add_block_declaration_actions(current_player, valid_actions, set_valid_action)
-                    # Active player gets priority first during damage steps
-                    elif is_my_turn and gs.phase in [gs.PHASE_FIRST_STRIKE_DAMAGE, gs.PHASE_COMBAT_DAMAGE] and not getattr(gs, 'combat_damage_dealt', False):
-                        self._add_combat_damage_actions(current_player, valid_actions, set_valid_action)
+                    # --- Combat Phase Actions (Delegated) ---
+                    # Check combat_handler exists before calling delegated methods
+                    if has_priority and self.combat_handler:
+                        if is_my_turn and gs.phase == gs.PHASE_DECLARE_ATTACKERS:
+                            # Delegate to CombatActionHandler
+                            self.combat_handler._add_attack_declaration_actions(current_player, opponent, valid_actions, set_valid_action)
+                        elif not is_my_turn and gs.phase == gs.PHASE_DECLARE_BLOCKERS and getattr(gs, 'current_attackers', []):
+                             # Delegate to CombatActionHandler
+                             self.combat_handler._add_block_declaration_actions(current_player, valid_actions, set_valid_action)
+                        elif is_my_turn and gs.phase in [gs.PHASE_FIRST_STRIKE_DAMAGE, gs.PHASE_COMBAT_DAMAGE] and not getattr(gs, 'combat_damage_dealt', False):
+                             # Delegate to CombatActionHandler
+                             self.combat_handler._add_combat_damage_actions(current_player, valid_actions, set_valid_action)
+                    elif has_priority and not self.combat_handler:
+                         logging.warning("Combat phase actions cannot be generated: CombatActionHandler missing.")
 
                 # --- Final Checks ---
                 self.action_reasons = action_reasons
@@ -716,10 +747,8 @@ class ActionHandler:
                     set_valid_action(12, "FALLBACK - CONCEDE")
                 elif valid_count == 1 and valid_actions[12]: # Only concede is possible
                     pass # Okay state
-                elif valid_count == 2 and valid_actions[11] and valid_actions[12]: # Only pass/concede
-                    # Add check: If stack empty & nothing else to do, maybe hint phase end?
-                    # This requires more game state knowledge than just the mask provides.
-                    pass
+                elif valid_count == 2 and valid_actions[11] and valid_actions[12] and has_priority: # Only pass/concede available to priority player
+                     pass # Player must pass or concede
 
                 return valid_actions
 
@@ -729,6 +758,7 @@ class ActionHandler:
                 fallback_actions[11] = True
                 fallback_actions[12] = True
                 self.action_reasons = {11: "Critical Error Fallback", 12: "Critical Error Fallback"}
+                return fallback_actions
                 return fallback_actions
             
     def _add_mana_ability_actions(self, player, valid_actions, set_valid_action):
@@ -770,27 +800,6 @@ class ActionHandler:
                             action_idx = 68 + i
                             if action_idx < 88: # Check it's within TAP_LAND_FOR_MANA range
                                 set_valid_action(action_idx, f"TAP_LAND_FOR_MANA {card.name}")
-    
-    def _add_combat_damage_actions(self, player, valid_actions, set_valid_action):
-         """Adds actions for assigning combat damage order if needed."""
-         gs = self.game_state
-         # Check if damage assignment order is needed (multiple blockers)
-         needs_order_assignment = False
-         for attacker_id, blockers in gs.current_block_assignments.items():
-             if len(blockers) > 1:
-                 attacker_card = gs._safe_get_card(attacker_id)
-                 if attacker_card and hasattr(attacker_card, 'power') and attacker_card.power > 0:
-                     needs_order_assignment = True
-                     break
-         if needs_order_assignment:
-              # Allow action to confirm the damage assignment order (FIRST_STRIKE_ORDER)
-              # This action (430) currently requires context for the assignments.
-              # Agent needs to build this context.
-              set_valid_action(430, "Assign Combat Damage Order")
-
-         # Allow action to finalize damage resolution (ASSIGN_COMBAT_DAMAGE)
-         # This action (431) allows manual override or triggers auto-resolve.
-         set_valid_action(431, "Resolve Combat Damage")
         
     def _add_sorcery_speed_actions(self, player, opponent, valid_actions, set_valid_action):
         """Adds actions performable only at sorcery speed."""
@@ -957,77 +966,6 @@ class ActionHandler:
         if 'target opponent' in effect_text.lower(): return True
         # ... add more basic checks
         return True # Assume available if check is simple
-
-    def _add_attack_declaration_actions(self, player, opponent, valid_actions, set_valid_action):
-        """Adds actions specific to the Declare Attackers step."""
-        gs = self.game_state
-        # Declare Attackers
-        possible_attackers = []
-        for i in range(min(len(player["battlefield"]), 20)):
-            try:
-                card_id = player["battlefield"][i]
-                if self.is_valid_attacker(card_id):
-                     card = gs._safe_get_card(card_id)
-                     set_valid_action(28 + i, f"ATTACK with {getattr(card, 'name', 'Unknown')}")
-                     possible_attackers.append((i, card_id)) # Store index and ID
-            except IndexError:
-                 logging.warning(f"IndexError accessing battlefield for ATTACK at index {i}")
-                 break # Stop if index is out of bounds
-
-        # Declare targets for attackers (if applicable)
-        if possible_attackers:
-             self._add_attack_target_actions(player, opponent, valid_actions, set_valid_action, possible_attackers)
-
-        # Always allow finishing declaration
-        set_valid_action(433, "Finish Declaring Attackers")
-
-
-    def _add_block_declaration_actions(self, player, valid_actions, set_valid_action):
-         """Adds actions specific to the Declare Blockers step."""
-         gs = self.game_state
-         if gs.current_attackers: # Only allow blocking if there are attackers
-            # Declare Blockers
-            possible_blockers = []
-            for i in range(min(len(player["battlefield"]), 20)): # 'player' is the blocker now
-                try:
-                    card_id = player["battlefield"][i]
-                    card = gs._safe_get_card(card_id)
-                    if not card: continue
-
-                    # Basic creature & untap check
-                    if 'creature' not in getattr(card, 'card_types', []) or card_id in player.get("tapped_permanents", set()):
-                        continue
-
-                    # Check if this creature can block any current attacker
-                    can_block_anything = False
-                    for attacker_id in gs.current_attackers:
-                        if self._can_block(card_id, attacker_id):
-                            can_block_anything = True
-                            break
-                    if can_block_anything:
-                        # Check current block assignment - allows toggling
-                        is_currently_blocking = any(card_id in blockers for blockers in gs.current_block_assignments.values())
-                        action_text = "BLOCK" if not is_currently_blocking else "UNASSIGN BLOCK"
-                        set_valid_action(48 + i, f"{action_text} with {card.name}")
-                        possible_blockers.append((i, card_id)) # Store index and ID
-                except IndexError:
-                     logging.warning(f"IndexError accessing battlefield for BLOCK at index {i}")
-                     break # Stop if index is out of bounds
-
-            # Assign multiple blockers
-            # Enable this only if we have at least 2 possible blockers overall
-            if len(possible_blockers) >= 2:
-                 # Enable ASSIGN_MULTIPLE_BLOCKERS for each attacker (up to 10)
-                 for atk_idx, attacker_id in enumerate(gs.current_attackers[:10]):
-                     attacker_card = gs._safe_get_card(attacker_id)
-                     attacker_name = attacker_card.name if attacker_card else f"Attacker {atk_idx}"
-                     # Check if at least 2 possible blockers *can* block *this* attacker
-                     valid_multi_blockers_for_attacker = [b_id for _, b_id in possible_blockers if self._can_block(b_id, attacker_id)]
-                     if len(valid_multi_blockers_for_attacker) >= 2:
-                         set_valid_action(383 + atk_idx, f"ASSIGN_MULTIPLE_BLOCKERS to {attacker_name}")
-
-            # Always allow finishing block declaration
-            set_valid_action(434, "Finish Declaring Blockers")
                      
     
     def _add_special_choice_actions(self, player, valid_actions, set_valid_action):
@@ -1669,10 +1607,10 @@ class ActionHandler:
             """
             Execute the action and get the next observation, reward and done status.
             Overhauled for clarity, correctness, and better reward shaping.
+            Includes an internal game loop for SBAs, Triggers, and Stack resolution.
             """
             gs = self.game_state
             # Define player/opponent early for state access
-            # Need safety checks as p1/p2 might not be fully initialized yet
             me = None
             opp = None
             if hasattr(gs, 'p1') and gs.p1 and hasattr(gs, 'p2') and gs.p2:
@@ -1680,7 +1618,6 @@ class ActionHandler:
                 opp = gs.p2 if gs.agent_is_p1 else gs.p1
             else:
                 logging.error("Players not initialized in apply_action. Aborting step.")
-                # Return a safe state
                 obs = self._get_obs_safe() if hasattr(self, '_get_obs_safe') else {}
                 info = {"action_mask": np.zeros(self.ACTION_SPACE_SIZE, dtype=bool), "critical_error": True}
                 info["action_mask"][12] = True # Allow CONCEDE
@@ -1695,16 +1632,13 @@ class ActionHandler:
 
             # Regenerate action mask if not available (e.g., start of step)
             if not hasattr(self, 'current_valid_actions') or self.current_valid_actions is None or np.sum(self.current_valid_actions) == 0:
-                # Ensure action_mask method exists and call it
                 if hasattr(self, 'generate_valid_actions') and callable(self.generate_valid_actions):
                     self.current_valid_actions = self.generate_valid_actions()
                 else:
-                    # Fallback if action_mask generation fails
                     logging.error("Action mask generation method not found!")
                     self.current_valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
                     self.current_valid_actions[11] = True # Pass
                     self.current_valid_actions[12] = True # Concede
-
 
             # *** Get context from environment/pending state ***
             action_context = kwargs.get('context', {})
@@ -1712,7 +1646,6 @@ class ActionHandler:
             if hasattr(gs, 'phase'): # Check phase exists first
                 if gs.phase == gs.PHASE_TARGETING and hasattr(gs, 'targeting_context') and gs.targeting_context:
                     action_context.update(gs.targeting_context)
-                    # Add current selections if missing in explicit context
                     if 'selected_targets' not in action_context:
                         action_context['selected_targets'] = gs.targeting_context.get('selected_targets', [])
                 elif gs.phase == gs.PHASE_SACRIFICE and hasattr(gs, 'sacrifice_context') and gs.sacrifice_context:
@@ -1720,8 +1653,7 @@ class ActionHandler:
                     if 'selected_permanents' not in action_context:
                         action_context['selected_permanents'] = gs.sacrifice_context.get('selected_permanents', [])
                 elif gs.phase == gs.PHASE_CHOOSE and hasattr(gs, 'choice_context') and gs.choice_context:
-                    action_context.update(gs.choice_context) # Merge choice context
-                    # Explicitly handle specific choice types that need passing through
+                    action_context.update(gs.choice_context)
                     if gs.choice_context.get("type") == "scry" and "scrying_cards" not in action_context:
                         action_context['cards'] = gs.choice_context.get('cards', [])
                         action_context['kept_on_top'] = gs.choice_context.get('kept_on_top', [])
@@ -1751,14 +1683,12 @@ class ActionHandler:
                     info["invalid_action_reason"] = invalid_reason
                     return obs, reward, done, truncated, info
 
-                # Reset invalid action counter if needed (moved inside valid action path)
+                # Reset invalid action counter if needed (handled by environment)
                 # self.invalid_action_count = 0
 
                 # 3. Get Action Info
                 action_type, param = self.get_action_info(action_idx)
                 logging.info(f"Applying action: {action_idx} -> {action_type}({param}) with context: {action_context}")
-                # Record action if tracking is implemented
-                # self.current_episode_actions.append(action_idx)
 
                 # 4. Store Pre-Action State for Reward Shaping (check players exist)
                 prev_state = {}
@@ -1767,10 +1697,9 @@ class ActionHandler:
                         "my_life": me.get("life", 0), "opp_life": opp.get("life", 0),
                         "my_hand": len(me.get("hand", [])), "opp_hand": len(opp.get("hand", [])),
                         "my_board": len(me.get("battlefield", [])), "opp_board": len(opp.get("battlefield", [])),
-                        "my_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) for cid in me.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
-                        "opp_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) for cid in opp.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
+                        "my_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) or 0 for cid in me.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
+                        "opp_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) or 0 for cid in opp.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
                     }
-                # Extract pre-action pattern if needed for strategy memory
                 if hasattr(gs, 'strategy_memory') and gs.strategy_memory:
                     try: pre_action_pattern = gs.strategy_memory.extract_strategy_pattern(gs)
                     except Exception as e: logging.error(f"Error extracting pre-action strategy pattern: {e}")
@@ -1782,35 +1711,28 @@ class ActionHandler:
 
                 if handler_func:
                     try:
-                        # --- Pass relevant args to handler ---
-                        # Use inspect to determine required args for the specific handler
                         import inspect
                         sig = inspect.signature(handler_func)
                         handler_args = {}
                         if 'param' in sig.parameters: handler_args['param'] = param
                         if 'context' in sig.parameters: handler_args['context'] = action_context
                         if 'action_type' in sig.parameters: handler_args['action_type'] = action_type
-                        if 'action_index' in sig.parameters: handler_args['action_index'] = action_idx # Pass action index if handler needs it
+                        if 'action_index' in sig.parameters: handler_args['action_index'] = action_idx
 
-                        result = handler_func(**handler_args) # Call with determined args
+                        result = handler_func(**handler_args)
 
-                        # Process the result from the handler (unchanged)
                         if isinstance(result, tuple) and len(result) == 2: action_reward, action_executed = result
                         elif isinstance(result, (float, int)): action_reward = float(result); action_executed = True
                         elif isinstance(result, bool): action_reward = 0.05 if result else -0.1; action_executed = result
                         else: action_reward = 0.0; action_executed = True
                         if action_reward is None: action_reward = 0.0
 
-                    # --- Error Handling during Handler Execution ---
                     except TypeError as te:
-                        # Try calling without context/action_type if TypeError suggests it
                         if "unexpected keyword argument 'context'" in str(te) or "unexpected keyword argument 'action_type'" in str(te):
                             try:
-                                # Determine if handler needs param
                                 sig_param = inspect.signature(handler_func)
                                 args_fallback = {'param': param} if 'param' in sig_param.parameters else {}
-                                result = handler_func(**args_fallback) # Call with minimal args
-                                # Process result same as above...
+                                result = handler_func(**args_fallback)
                                 if isinstance(result, tuple) and len(result) == 2: action_reward, action_executed = result
                                 elif isinstance(result, (float, int)): action_reward, action_executed = float(result), True
                                 elif isinstance(result, bool): action_reward, action_executed = (0.05, True) if result else (-0.1, False)
@@ -1819,7 +1741,7 @@ class ActionHandler:
                             except Exception as handler_e:
                                 logging.error(f"Error executing handler {action_type} (param-only fallback call): {handler_e}", exc_info=True)
                                 action_reward, action_executed = -0.2, False
-                        else: # Other TypeError
+                        else:
                             logging.error(f"TypeError executing handler {action_type} with params {handler_args}: {te}", exc_info=True)
                             action_reward, action_executed = -0.2, False
                     except Exception as handler_e:
@@ -1832,117 +1754,136 @@ class ActionHandler:
 
                 # Add action-specific reward to total step reward
                 reward += action_reward
-                info["action_reward"] = action_reward # Add action reward to info
+                info["action_reward"] = action_reward
 
                 # Check if action failed to execute properly
                 if not action_executed:
                     logging.warning(f"Action {action_type}({param}) failed to execute (Handler returned False or error occurred).")
                     obs = self._get_obs_safe() if hasattr(self, '_get_obs_safe') else {}
+                    # Generate fresh mask if needed
+                    self.current_valid_actions = self.generate_valid_actions() if hasattr(self, 'generate_valid_actions') else np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
                     info["action_mask"] = self.current_valid_actions.astype(bool) # Return current mask
                     info["execution_failed"] = True
                     return obs, reward, done, truncated, info
 
-                # 6. Process State-Based Actions and Stack Resolution
-                if hasattr(gs, 'check_state_based_actions'):
-                    gs.check_state_based_actions()
-                # Process triggered abilities *after* SBAs resulting from the action
-                if hasattr(gs, 'ability_handler') and gs.ability_handler:
-                    triggered = gs.ability_handler.process_triggered_abilities() # Process triggers that queued up
-
-                # Loop to resolve stack if priority passes and stack isn't empty
-                # and split second isn't active
+                # --- BEGIN GAME LOOP ---
                 resolution_attempts = 0
-                max_resolution_attempts = 20 # Safety break for stack loops
-                while (not getattr(gs, 'split_second_active', False) and
-                    gs.priority_pass_count >= 2 and gs.stack and
-                    resolution_attempts < max_resolution_attempts):
+                max_resolution_attempts = 20 # Safety break
+                while resolution_attempts < max_resolution_attempts:
                     resolution_attempts += 1
-                    resolved = False
-                    if hasattr(gs, 'resolve_top_of_stack'):
-                        resolved = gs.resolve_top_of_stack() # This also resets priority_pass_count
 
-                    if resolved:
-                        if hasattr(gs, 'check_state_based_actions'):
-                            gs.check_state_based_actions()
-                        if hasattr(gs, 'ability_handler') and gs.ability_handler:
-                            # Re-process triggers that might have occurred due to resolution
-                            gs.ability_handler.process_triggered_abilities()
-                        # Note: resolve_top_of_stack should now reset priority_pass_count and priority_player
-                    else:
-                        logging.warning("Stack resolution failed for top item, breaking resolution loop.")
-                        break # Avoid infinite loop if resolution fails
+                    # a. Check State-Based Actions
+                    sba_performed = False
+                    if hasattr(gs, 'check_state_based_actions'):
+                        sba_performed = gs.check_state_based_actions()
+                        # Check game end immediately after SBAs (player loss)
+                        if (me and me.get("lost_game", False)) or (opp and opp.get("lost_game", False)):
+                            done = True; info["game_result"] = "loss" if me.get("lost_game", False) else "win"
+                            logging.debug(f"Game ended due to SBA during loop.")
+                            break # Exit loop if game ended via SBAs
 
+                    # b. Process Triggered Abilities
+                    triggers_queued = False
+                    initial_stack_size = len(gs.stack)
+                    if hasattr(gs, 'ability_handler') and gs.ability_handler:
+                        if hasattr(gs.ability_handler, 'process_triggered_abilities'):
+                             # Process triggers (which adds them to stack)
+                             gs.ability_handler.process_triggered_abilities()
+                             # Check if stack size increased
+                             if len(gs.stack) > initial_stack_size:
+                                  triggers_queued = True
+                                  gs.priority_pass_count = 0 # Reset priority passes
+                                  gs.priority_player = gs._get_active_player() # Priority goes to AP
+                                  gs.last_stack_size = len(gs.stack) # Update last stack size
+                                  logging.debug(f"Loop {resolution_attempts}: Triggers added to stack, priority reset to AP.")
+
+                    # c. Check if Stack Needs Resolution
+                    needs_resolution = (gs.priority_pass_count >= 2 and
+                                        gs.stack and
+                                        not getattr(gs, 'split_second_active', False))
+
+                    if needs_resolution:
+                        logging.debug(f"Loop {resolution_attempts}: Resolving stack (Passes: {gs.priority_pass_count}, Stack: {len(gs.stack)} items)")
+                        resolved = False
+                        if hasattr(gs, 'resolve_top_of_stack'):
+                           resolved = gs.resolve_top_of_stack() # Resolves ONE item and resets priority
+                        else:
+                           logging.error("GameState missing resolve_top_of_stack method!")
+
+                        if resolved:
+                            # Loop continues to check SBAs/Triggers again
+                            continue
+                        else:
+                            # Resolution failed for some reason (e.g., error, fizzle handled as success by resolve_top_of_stack)
+                            logging.error(f"Stack resolution failed for top item! Breaking loop.")
+                            break
+
+                    # d. Break Condition
+                    # State is stable if no SBAs performed, no new triggers added/resolved, and stack doesn't need resolving
+                    if not sba_performed and not triggers_queued and not needs_resolution:
+                        logging.debug(f"Loop {resolution_attempts}: State stable, exiting game loop.")
+                        break
+
+                    # Log continuation if state changed
+                    if resolution_attempts > 1 and (sba_performed or triggers_queued):
+                        logging.debug(f"Loop {resolution_attempts}: State changed (SBAs/Triggers), re-evaluating.")
+
+                # --- Check for loop limit ---
                 if resolution_attempts >= max_resolution_attempts:
-                    logging.error(f"Exceeded max stack resolution attempts ({max_resolution_attempts}). Potential loop.")
-                    # Consider ending the game or forcing state change
+                    logging.error(f"Exceeded max game loop iterations ({max_resolution_attempts}) after action {action_type}. Potential loop or complex interaction.")
+                    # Consider ending the game or forcing a state change here? For now, just log.
+                    # Setting done=True here could prevent true infinite loops in training.
+                    # done = True
+                    # info["game_result"] = "error_loop"
+
+                # --- END GAME LOOP ---
 
 
-                # Apply continuous effects after state changes
-                if hasattr(gs, 'layer_system'):
-                    gs.layer_system.apply_all_effects()
-                # Final SBA check after layers and stack resolution
-                if hasattr(gs, 'check_state_based_actions'):
-                    gs.check_state_based_actions()
-
-                # 7. Calculate State Change Reward (Only if players are valid)
-                if me and opp:
+                # 7. Calculate State Change Reward (Only if players are valid and game not already ended)
+                if not done and me and opp:
                     current_state = {
                         "my_life": me.get("life", 0), "opp_life": opp.get("life", 0),
                         "my_hand": len(me.get("hand", [])), "opp_hand": len(opp.get("hand", [])),
                         "my_board": len(me.get("battlefield", [])), "opp_board": len(opp.get("battlefield", [])),
-                        "my_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) for cid in me.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
-                        "opp_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) for cid in opp.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
+                        "my_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) or 0 for cid in me.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
+                        "opp_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) or 0 for cid in opp.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
                     }
-                    # Ensure _add_state_change_rewards exists
                     if hasattr(self, '_add_state_change_rewards') and callable(self._add_state_change_rewards):
                         state_change_reward = self._add_state_change_rewards(0.0, prev_state, current_state)
                         reward += state_change_reward
 
-                # 8. Check Game End Conditions
-                # Ensure player dictionaries have win/loss/draw flags set by SBAs
-                if opp and opp.get("lost_game"):
-                    done = True; reward += 10.0 + max(0, gs.max_turns - gs.turn) * 0.1; info["game_result"] = "win"
-                elif me and me.get("lost_game"):
-                    done = True; reward -= 10.0; info["game_result"] = "loss"
-                elif (me and me.get("game_draw")) or (opp and opp.get("game_draw")): # Check draw flags
-                    done = True; reward += 0.0; info["game_result"] = "draw"
-                elif gs.turn > gs.max_turns:
-                    done, truncated = True, True
-                    life_diff_reward = 0
-                    if me and opp: life_diff_reward = (me.get("life",0) - opp.get("life",0)) * 0.1
-                    reward += life_diff_reward
-                    # Set result based on life comparison if turn limit reached
-                    if me and opp:
-                        info["game_result"] = "win" if (me.get("life",0) > opp.get("life",0)) else "loss" if (me.get("life",0) < opp.get("life",0)) else "draw"
-                    else: info["game_result"] = "draw" # Draw if players invalid
-                    logging.info(f"Turn limit ({gs.max_turns}) reached. Result: {info['game_result']}")
-                # Check for max episode steps if applicable (assuming self.current_step exists on env)
-                # elif hasattr(self, 'current_step') and hasattr(self, 'max_episode_steps') and self.current_step >= self.max_episode_steps:
-                #     done, truncated = True, True
-                #     reward -= 0.5 # Small penalty for truncation
-                #     info["game_result"] = "truncated"
-                #     logging.info("Max episode steps reached.")
+                # 8. Check Game End Conditions (Re-check after loop)
+                if not done: # Only check if game didn't end during loop
+                    # Note: check_state_based_actions in the loop should have set loss flags already
+                    if opp and opp.get("lost_game"):
+                        done = True; reward += 10.0 + max(0, gs.max_turns - gs.turn) * 0.1; info["game_result"] = "win"
+                    elif me and me.get("lost_game"):
+                        done = True; reward -= 10.0; info["game_result"] = "loss"
+                    elif (me and me.get("game_draw")) or (opp and opp.get("game_draw")):
+                        done = True; reward += 0.0; info["game_result"] = "draw"
+                    elif gs.turn > gs.max_turns:
+                        # Ensure turn limit check wasn't already handled and flags set
+                        if not getattr(gs, '_turn_limit_checked', False):
+                            done, truncated = True, True
+                            life_diff_reward = 0
+                            if me and opp: life_diff_reward = (me.get("life",0) - opp.get("life",0)) * 0.1
+                            reward += life_diff_reward
+                            if me and opp:
+                                info["game_result"] = "win" if (me.get("life",0) > opp.get("life",0)) else "loss" if (me.get("life",0) < opp.get("life",0)) else "draw"
+                            else: info["game_result"] = "draw"
+                            gs._turn_limit_checked = True # Mark as checked
+                            logging.info(f"Turn limit ({gs.max_turns}) reached. Result: {info['game_result']}")
+
 
                 # Record results if game ended
                 if done and hasattr(self, 'ensure_game_result_recorded'):
                     self.ensure_game_result_recorded()
 
                 # 9. Finalize Step
-                # Record reward if tracking is implemented in env
-                # self.episode_rewards.append(reward)
-
-                # Get observation and next action mask
-                obs = self._get_obs() if hasattr(self, '_get_obs') else {} # Use actual observation method
-                # Invalidate current mask cache
-                self.current_valid_actions = None
-                # Regenerate for the info dict return value
+                obs = self._get_obs() if hasattr(self, '_get_obs') else {}
+                self.current_valid_actions = None # Invalidate cache
                 next_mask = self.generate_valid_actions().astype(bool)
                 info["action_mask"] = next_mask
-
-                # Update action/reward history if tracking
-                # if hasattr(self, 'last_n_actions') and hasattr(self, 'last_n_rewards'):
-                #      self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
-                #      self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = reward
 
                 # Update strategy memory if implemented
                 if hasattr(gs, 'strategy_memory') and gs.strategy_memory and pre_action_pattern is not None:
@@ -1952,10 +1893,9 @@ class ActionHandler:
                 return obs, reward, done, truncated, info
 
             except Exception as e:
-                # --- Critical Error Handling --- (Keep existing logic)
                 logging.error(f"CRITICAL error in apply_action (Action {action_idx}): {e}", exc_info=True)
-                obs = self._get_obs_safe() if hasattr(self, '_get_obs_safe') else {} # Use safe version
-                mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool); mask[11] = True; mask[12] = True # Pass/Concede
+                obs = self._get_obs_safe() if hasattr(self, '_get_obs_safe') else {}
+                mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool); mask[11] = True; mask[12] = True
                 info["action_mask"] = mask
                 info["critical_error"] = True
                 info["error_message"] = str(e)
@@ -2042,32 +1982,33 @@ class ActionHandler:
     def _handle_scry_choice(self, param, **kwargs):
         """Handle Scry choice: PUT_ON_BOTTOM"""
         gs = self.game_state
+        # ... (existing checks and logic) ...
         if hasattr(gs, 'choice_context') and gs.choice_context and gs.choice_context.get("type") == "scry":
             context = gs.choice_context
             player = context["player"]
             if not context.get("cards"):
-                logging.warning("PUT_ON_BOTTOM choice made but no cards left.")
-                gs.choice_context = None
-                gs.phase = gs.PHASE_PRIORITY
+                # ... (handle error) ...
+                gs.choice_context = None # --- ADD: Clear context ---
+                gs.phase = gs.PHASE_PRIORITY # --- ADD: Set Phase ---
                 return -0.1, False
 
             card_id = context["cards"].pop(0)
-            card = gs._safe_get_card(card_id)
-            card_name = card.name if card else card_id
-
-            if "put_on_bottom" not in context: context["put_on_bottom"] = []
-            context["put_on_bottom"].append(card_id)
-            logging.debug(f"Scry: Putting {card_name} on bottom.")
+            # ... (rest of logic for putting on bottom) ...
 
             # If done, finalize and return to priority
             if not context.get("cards"):
-                 # Put kept cards on top, bottomed cards on bottom
-                 player["library"] = context.get("kept_on_top", []) + player["library"] + context.get("put_on_bottom", [])
+                 # ... (logic to put cards back on library) ...
                  logging.debug("Scry finished.")
+                 # --- Phase Transition ---
                  gs.choice_context = None
-                 gs.phase = gs.PHASE_PRIORITY
-                 gs.priority_pass_count = 0
+                 if hasattr(gs, 'previous_priority_phase') and gs.previous_priority_phase is not None:
+                      gs.phase = gs.previous_priority_phase
+                      gs.previous_priority_phase = None
+                 else:
+                      gs.phase = gs.PHASE_PRIORITY
                  gs.priority_player = gs._get_active_player()
+                 gs.priority_pass_count = 0
+                 # --- End Phase Transition ---
             return 0.05, True
         logging.warning("PUT_ON_BOTTOM called outside of Scry context.")
         return -0.1, False
@@ -2185,7 +2126,7 @@ class ActionHandler:
         gs = self.game_state
         gs._pass_priority() # Let GameState handle the logic (priority toggle, stack/phase advance)
         # Passing priority itself is generally neutral reward; consequences come later.
-        return 0.0, True
+        return 0.0, True # Action execution succeeded
 
     def _handle_concede(self, param, **kwargs):
         # Handled directly in apply_action's main logic
@@ -2940,10 +2881,17 @@ class ActionHandler:
                                     break
                             if not found_stack_item: logging.error("Mode choice context active but couldn't find stack item!")
 
+                            # --- Phase Transition ---
                             gs.choice_context = None
-                            gs.phase = gs.PHASE_PRIORITY
-                            gs.priority_pass_count = 0
+                            # Return to phase before CHOOSE was entered
+                            if hasattr(gs, 'previous_priority_phase') and gs.previous_priority_phase is not None:
+                                 gs.phase = gs.previous_priority_phase
+                                 gs.previous_priority_phase = None
+                            else:
+                                 gs.phase = gs.PHASE_PRIORITY # Fallback
                             gs.priority_player = gs._get_active_player()
+                            gs.priority_pass_count = 0
+                            # --- End Phase Transition ---
                             logging.debug("Mode choice complete.")
                             return 0.05, True
                        else: return 0.02, True # Incremental success

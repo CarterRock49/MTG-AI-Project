@@ -845,7 +845,145 @@ class CombatActionHandler:
                 
                 set_valid_action(action_idx, 
                     f"{action_name} {battle_card.name}{battle_info} with {creature_card.name} ({damage_potential} damage)")
-    
+                
+    def _add_attack_declaration_actions(self, player, opponent, valid_actions, set_valid_action):
+        """Adds actions specific to the Declare Attackers step. (Called by ActionHandler)"""
+        gs = self.game_state # Use self.game_state
+        # Declare Attackers
+        possible_attackers = []
+        player_battlefield = player.get("battlefield", [])
+        for i in range(min(len(player_battlefield), 20)): # Indices 0-19 map to actions 28-47
+            try:
+                card_id = player_battlefield[i]
+                # Use internal validation which delegates back to GS/Layers etc.
+                if self.is_valid_attacker(card_id):
+                     card = gs._safe_get_card(card_id)
+                     card_name = getattr(card, 'name', f'Creature {i}')
+                     set_valid_action(28 + i, f"ATTACK with {card_name}")
+                     possible_attackers.append((i, card_id)) # Store index and ID
+            except IndexError:
+                 logging.warning(f"Combat Handler: IndexError accessing battlefield for ATTACK at index {i}")
+                 break
+
+        # Add actions for declaring targets for attackers (Planeswalkers, Battles)
+        # This logic relies on separate actions like ATTACK_PLANESWALKER / ATTACK_BATTLE
+        if possible_attackers:
+             # Add actions for attacking Planeswalkers (action indices 373-377)
+             opponent_planeswalkers = [(idx, card_id) for idx, card_id in enumerate(opponent.get("battlefield", []))
+                                        if gs._safe_get_card(card_id) and 'planeswalker' in getattr(gs._safe_get_card(card_id), 'card_types', [])]
+             for pw_rel_idx in range(min(len(opponent_planeswalkers), 5)): # PW relative index 0-4
+                 pw_abs_idx, pw_id = opponent_planeswalkers[pw_rel_idx]
+                 pw_card = gs._safe_get_card(pw_id)
+                 pw_name = getattr(pw_card, 'name', f'PW {pw_rel_idx}')
+                 # The ATTACK_PLANESWALKER action itself needs context later (which attacker targets it).
+                 # Here we just enable the target *selection* action.
+                 set_valid_action(373 + pw_rel_idx, f"Target PLANESWALKER: {pw_name}")
+
+             # Add actions for attacking Battles (action indices 460-464)
+             opponent_battles = [(idx, card_id) for idx, card_id in enumerate(opponent.get("battlefield", []))
+                                  if gs._safe_get_card(card_id) and 'battle' in getattr(gs._safe_get_card(card_id), 'type_line', '')]
+             for battle_rel_idx in range(min(len(opponent_battles), 5)): # Battle relative index 0-4
+                 battle_abs_idx, battle_id = opponent_battles[battle_rel_idx]
+                 battle_card = gs._safe_get_card(battle_id)
+                 battle_name = getattr(battle_card, 'name', f'Battle {battle_rel_idx}')
+                 # The ATTACK_BATTLE action needs context later.
+                 # Enable target *selection* action.
+                 set_valid_action(460 + battle_rel_idx, f"Target BATTLE: {battle_name}")
+
+        # Always allow finishing declaration if player has declared at least one action or no valid attacks
+        # Or always allow passing this step? Rules clarification needed. Assuming always possible to finish.
+        set_valid_action(433, "Finish Declaring Attackers")
+
+    def _add_block_declaration_actions(self, player, valid_actions, set_valid_action):
+         """Adds actions specific to the Declare Blockers step. (Called by ActionHandler)"""
+         gs = self.game_state # Use self.game_state
+         if not getattr(gs, 'current_attackers', []): return # Cannot block if no attackers
+
+         player_battlefield = player.get("battlefield", [])
+         possible_blockers = []
+         for i in range(min(len(player_battlefield), 20)): # Indices 0-19 map to actions 48-67
+             try:
+                 card_id = player_battlefield[i]
+                 card = gs._safe_get_card(card_id)
+                 if not card: continue
+
+                 # Basic creature & untap check
+                 if 'creature' not in getattr(card, 'card_types', []) or card_id in player.get("tapped_permanents", set()):
+                     continue
+
+                 # Check if this creature can block *any* current attacker
+                 can_block_anything = False
+                 for attacker_id in gs.current_attackers:
+                     # Use internal _can_block check which uses TargetingSystem etc.
+                     if self._can_block(card_id, attacker_id):
+                         can_block_anything = True
+                         break
+                 if can_block_anything:
+                     card_name = getattr(card, 'name', f'Blocker {i}')
+                     # Check current block assignment to allow toggling
+                     is_currently_blocking = any(card_id in blockers for blockers in gs.current_block_assignments.values())
+                     action_text = "Assign Block" if not is_currently_blocking else "Unassign Block"
+                     set_valid_action(48 + i, f"{action_text} with {card_name}")
+                     possible_blockers.append((i, card_id)) # Store index and ID
+             except IndexError:
+                  logging.warning(f"Combat Handler: IndexError accessing battlefield for BLOCK at index {i}")
+                  break # Stop if index is out of bounds
+
+         # Assign multiple blockers action
+         if len(possible_blockers) >= 2:
+              # Enable ASSIGN_MULTIPLE_BLOCKERS for each attacker (up to 10)
+              for atk_idx, attacker_id in enumerate(gs.current_attackers[:10]): # Indices 0-9 map to actions 383-392
+                  attacker_card = gs._safe_get_card(attacker_id)
+                  attacker_name = getattr(attacker_card, 'name', f"Attacker {atk_idx}") if attacker_card else f"Attacker {atk_idx}"
+                  # Check if at least 2 possible blockers *can* block *this* attacker
+                  valid_multi_blockers_for_attacker = [b_id for _, b_id in possible_blockers if self._can_block(b_id, attacker_id)]
+                  if len(valid_multi_blockers_for_attacker) >= 2:
+                      set_valid_action(383 + atk_idx, f"Assign Multiple Blockers to {attacker_name}")
+
+         # Defend Planeswalker/Battle actions
+         # These require choosing a *blocker* and a *target being attacked*
+         # Let's enable them if there are attacked PWs/Battles and valid blockers.
+         # The BLOCK action (48-67) implicitly handles blocking creatures attacking the player.
+
+         # Add PROTECT_PLANESWALKER if PWs are attacked and blockers exist
+         attacked_pws = getattr(gs, 'planeswalker_attack_targets', {}).values()
+         if attacked_pws and possible_blockers:
+              # Enable the generic PROTECT_PLANESWALKER action (439)
+              # Context needed: (pw_identifier, defender_identifier)
+              set_valid_action(439, "Assign Blocker to protect Planeswalker")
+
+         # Add DEFEND_BATTLE if Battles are attacked and blockers exist
+         attacked_battles = getattr(gs, 'battle_attack_targets', {}).values()
+         if attacked_battles and possible_blockers:
+             # Enable generic DEFEND_BATTLE action (204 - simplified, assumes index 0 maybe?)
+             # Need rework if action space requires mapping (battle_idx, defender_idx) -> action index.
+             # For now, use first mapped action index.
+             set_valid_action(204, "Assign Blocker to defend Battle") # Index 0 assumes battle 0, defender 0 - needs context
+
+         # Always allow finishing block declaration
+         set_valid_action(434, "Finish Declaring Blockers")
+
+
+    def _add_combat_damage_actions(self, player, valid_actions, set_valid_action):
+        """Adds actions for assigning combat damage order if needed. (Called by ActionHandler)"""
+        gs = self.game_state # Use self.game_state
+        # Check if damage assignment order is needed (multiple blockers assigned)
+        needs_order_assignment = False
+        for attacker_id, blockers in gs.current_block_assignments.items():
+            if len(blockers) > 1:
+                attacker_card = gs._safe_get_card(attacker_id)
+                # Check power to see if damage assignment matters
+                if attacker_card and (getattr(attacker_card, 'power', 0) or 0) > 0:
+                    needs_order_assignment = True
+                    break
+        if needs_order_assignment:
+            # Allow action to confirm the damage assignment order (FIRST_STRIKE_ORDER)
+            # Action 430 requires context with the order. Set as available.
+            set_valid_action(430, "Assign Combat Damage Order")
+
+        # Allow action to finalize damage resolution (ASSIGN_COMBAT_DAMAGE)
+        # Action 431 allows manual override or triggers auto-resolve. Context optional.
+        set_valid_action(431, "Resolve Combat Damage")
 
     def handle_protect_planeswalker(self, param=None, context=None, **kwargs):
         """Assign a creature to protect a planeswalker. Expects (pw_idx_or_id, defender_idx_or_id) in context."""
