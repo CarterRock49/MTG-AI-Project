@@ -35,6 +35,7 @@ graph TD
 - Add support for "Exhaust"
 - Overhaul DeckStats_Viewer to work with the current versions of the deck_stat_tracker and card_memory.py
 - General Bug fixing needs to be done, need to integrate other stuff
+- need to fix the clone function in gamestate
 
 ### Key Features
 
