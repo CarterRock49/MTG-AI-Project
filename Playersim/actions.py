@@ -345,101 +345,102 @@ class ActionHandler:
                 "ASSIGN_MULTIPLE_BLOCKERS": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ASSIGN_MULTIPLE_BLOCKERS", p, context=context),
                 "FIRST_STRIKE_ORDER": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "FIRST_STRIKE_ORDER", p, context=context),
                 "ASSIGN_COMBAT_DAMAGE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ASSIGN_COMBAT_DAMAGE", p, context=context),
-                "PROTECT_PLANESWALKER": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "PROTECT_PLANESWALKER", p, context=context), # Param p is actually None here based on meaning
+                "PROTECT_PLANESWALKER": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "PROTECT_PLANESWALKER", p, context=context),
                 "ATTACK_BATTLE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ATTACK_BATTLE", p, context=context),
-                "DEFEND_BATTLE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "DEFEND_BATTLE", p, context=context), # Param p is actually None here based on meaning
-                "NINJUTSU": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "NINJUTSU", p, context=context), # Param p is actually None here based on meaning
+                "DEFEND_BATTLE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "DEFEND_BATTLE", p, context=context),
+                "NINJUTSU": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "NINJUTSU", p, context=context),
                 # Abilities & Mana
                 "TAP_LAND_FOR_MANA": self._handle_tap_land_for_mana,
                 "TAP_LAND_FOR_EFFECT": self._handle_tap_land_for_effect,
-                "ACTIVATE_ABILITY": self._handle_activate_ability, # Expects context={'battlefield_idx':X, 'ability_idx':Y}
+                "ACTIVATE_ABILITY": self._handle_activate_ability, # Now expects action_index in kwargs
                 "LOYALTY_ABILITY_PLUS": lambda p=None, context=None, **k: self._handle_loyalty_ability(p, context=context, action_type="LOYALTY_ABILITY_PLUS", **k),
                 "LOYALTY_ABILITY_ZERO": lambda p=None, context=None, **k: self._handle_loyalty_ability(p, context=context, action_type="LOYALTY_ABILITY_ZERO", **k),
                 "LOYALTY_ABILITY_MINUS": lambda p=None, context=None, **k: self._handle_loyalty_ability(p, context=context, action_type="LOYALTY_ABILITY_MINUS", **k),
                 "ULTIMATE_ABILITY": lambda p=None, context=None, **k: self._handle_loyalty_ability(p, context=context, action_type="ULTIMATE_ABILITY", **k),
                 # Targeting & Choices
-                "SELECT_TARGET": self._handle_select_target,
-                "SACRIFICE_PERMANENT": self._handle_sacrifice_permanent,
-                "CHOOSE_MODE": self._handle_choose_mode,
-                "CHOOSE_X_VALUE": self._handle_choose_x,
-                "CHOOSE_COLOR": self._handle_choose_color,
-                "PUT_TO_GRAVEYARD": self._handle_surveil_choice,
-                "PUT_ON_TOP": self._handle_scry_surveil_choice,
-                "PUT_ON_BOTTOM": self._handle_scry_choice,
+                "SELECT_TARGET": self._handle_select_target, # Param is index into valid choices
+                "SACRIFICE_PERMANENT": self._handle_sacrifice_permanent, # Param is index into valid choices
+                "CHOOSE_MODE": self._handle_choose_mode, # Param is mode index
+                "CHOOSE_X_VALUE": self._handle_choose_x, # Param is X value
+                "CHOOSE_COLOR": self._handle_choose_color, # Param is color index 0-4
+                "PUT_TO_GRAVEYARD": self._handle_scry_surveil_choice, # Updated mapping for surveil GY choice
+                "PUT_ON_TOP": self._handle_scry_surveil_choice, # Updated mapping
+                "PUT_ON_BOTTOM": self._handle_scry_surveil_choice, # Updated mapping
                 # Library/Card Movement
-                "SEARCH_LIBRARY": self._handle_search_library,
-                "DREDGE": self._handle_dredge, # Expects context={'gy_idx':X}
+                "SEARCH_LIBRARY": self._handle_search_library, # Param is search type 0-4
+                "DREDGE": self._handle_dredge, # Param is GY index 0-5
                 # Counter Management
-                "ADD_COUNTER": self._handle_add_counter, # Expects context={'counter_type':X, 'count':Y}
-                "REMOVE_COUNTER": self._handle_remove_counter, # Expects context={'counter_type':X, 'count':Y}
+                "ADD_COUNTER": self._handle_add_counter, # Param is target index 0-9, context needed
+                "REMOVE_COUNTER": self._handle_remove_counter, # Param is target index 0-9, context needed
                 "PROLIFERATE": self._handle_proliferate,
                 # Zone Movement
-                "RETURN_FROM_GRAVEYARD": self._handle_return_from_graveyard,
-                "REANIMATE": self._handle_reanimate,
-                "RETURN_FROM_EXILE": self._handle_return_from_exile,
-                # Alternative Casting (Generic Handler)
-                "CAST_WITH_FLASHBACK": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_FLASHBACK", context=context, **k),
-                "CAST_WITH_JUMP_START": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_JUMP_START", context=context, **k),
-                "CAST_WITH_ESCAPE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_ESCAPE", context=context, **k),
-                "CAST_FOR_MADNESS": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_MADNESS", context=context, **k),
-                "CAST_WITH_OVERLOAD": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_OVERLOAD", context=context, **k),
-                "CAST_FOR_EMERGE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_EMERGE", context=context, **k),
-                "CAST_FOR_DELVE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_DELVE", context=context, **k),
-                "AFTERMATH_CAST": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="AFTERMATH_CAST", context=context, **k),
+                "RETURN_FROM_GRAVEYARD": self._handle_return_from_graveyard, # Param is GY index 0-5
+                "REANIMATE": self._handle_reanimate, # Param is GY index 0-5
+                "RETURN_FROM_EXILE": self._handle_return_from_exile, # Param is Exile index 0-5
+                # Alternative Casting
+                "CAST_WITH_FLASHBACK": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_FLASHBACK", context=context, **k), # Param is gy_idx
+                "CAST_WITH_JUMP_START": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_JUMP_START", context=context, **k), # Param is gy_idx, context needs discard_idx
+                "CAST_WITH_ESCAPE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_ESCAPE", context=context, **k), # Param is gy_idx, context needs gy_indices_escape
+                "CAST_FOR_MADNESS": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_MADNESS", context=context, **k), # Param is exile_idx
+                "CAST_WITH_OVERLOAD": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_OVERLOAD", context=context, **k), # Param is hand_idx
+                "CAST_FOR_EMERGE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_EMERGE", context=context, **k), # Param=None, context needs hand_idx, sacrifice_idx
+                "CAST_FOR_DELVE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_DELVE", context=context, **k), # Param=None, context needs hand_idx, gy_indices
+                "AFTERMATH_CAST": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="AFTERMATH_CAST", context=context, **k), # Param is gy_idx
                 # Informational Flags
-                "PAY_KICKER": self._handle_pay_kicker,
-                "PAY_ADDITIONAL_COST": self._handle_pay_additional_cost,
-                "PAY_ESCALATE": self._handle_pay_escalate, # Expects context={'num_extra_modes':X}
+                "PAY_KICKER": self._handle_pay_kicker, # Param=True/False
+                "PAY_ADDITIONAL_COST": self._handle_pay_additional_cost, # Param=True/False
+                "PAY_ESCALATE": self._handle_pay_escalate, # Param=count
                 # Token/Copy
-                "CREATE_TOKEN": self._handle_create_token,
-                "COPY_PERMANENT": self._handle_copy_permanent, # Expects context={'target_permanent_idx':X}
-                "COPY_SPELL": self._handle_copy_spell, # Expects context={'target_spell_idx':X}
-                "POPULATE": self._handle_populate, # Expects context={'target_token_idx':X}
+                "CREATE_TOKEN": self._handle_create_token, # Param is predefined token index 0-4
+                "COPY_PERMANENT": self._handle_copy_permanent, # Param=None, Context={'target_permanent_idx':X}
+                "COPY_SPELL": self._handle_copy_spell, # Param=None, Context={'target_spell_idx':X}
+                "POPULATE": self._handle_populate, # Param=None, Context={'target_token_idx':X}
                 # Specific Mechanics
                 "INVESTIGATE": self._handle_investigate,
-                "FORETELL": self._handle_foretell, # Expects context={'hand_idx':X}
-                "AMASS": self._handle_amass, # Expects context={'amount':X}
+                "FORETELL": self._handle_foretell, # Param=None, Context={'hand_idx':X}
+                "AMASS": self._handle_amass, # Param=None, Context={'amount':X}
                 "LEARN": self._handle_learn,
                 "VENTURE": self._handle_venture,
-                "EXERT": self._handle_exert, # Expects context={'creature_idx':X}
-                "EXPLORE": self._handle_explore, # Expects context={'creature_idx':X}
-                "ADAPT": self._handle_adapt, # Expects context={'creature_idx':X, 'amount':Y}
-                "MUTATE": self._handle_mutate, # Expects context={'hand_idx':X, 'target_idx':Y}
-                "CYCLING": self._handle_cycling, # Expects context={'hand_idx':X}
-                "GOAD": self._handle_goad, # Expects context={'target_creature_idx':X}
-                "BOAST": self._handle_boast, # Expects context={'creature_idx':X}
+                "EXERT": self._handle_exert, # Param=None, Context={'creature_idx':X}
+                "EXPLORE": self._handle_explore, # Param=None, Context={'creature_idx':X}
+                "ADAPT": self._handle_adapt, # Param=None, Context={'creature_idx':X, 'amount':Y}
+                "MUTATE": self._handle_mutate, # Param=None, Context={'hand_idx':X, 'target_idx':Y}
+                "CYCLING": self._handle_cycling, # Param=None, Context={'hand_idx':X}
+                "GOAD": self._handle_goad, # Param=None, Context={'target_creature_idx':X}
+                "BOAST": self._handle_boast, # Param=None, Context={'creature_idx':X}
                 # Response Actions
-                "COUNTER_SPELL": self._handle_counter_spell, # Expects context={'hand_idx':X, 'target_spell_idx':Y}
-                "COUNTER_ABILITY": self._handle_counter_ability, # Expects context={'hand_idx':X, 'target_ability_idx':Y}
-                "PREVENT_DAMAGE": self._handle_prevent_damage, # Expects context={'hand_idx':X, ...}
-                "REDIRECT_DAMAGE": self._handle_redirect_damage, # Expects context={'hand_idx':X, ...}
-                "STIFLE_TRIGGER": self._handle_stifle_trigger, # Expects context={'hand_idx':X, ...}
+                "COUNTER_SPELL": self._handle_counter_spell, # Param=None, Context={'hand_idx':X, 'target_spell_idx':Y}
+                "COUNTER_ABILITY": self._handle_counter_ability, # Param=None, Context={'hand_idx':X, 'target_ability_idx':Y}
+                "PREVENT_DAMAGE": self._handle_prevent_damage, # Param=None, Context={'hand_idx':X, ...}
+                "REDIRECT_DAMAGE": self._handle_redirect_damage, # Param=None, Context={'hand_idx':X, ...}
+                "STIFLE_TRIGGER": self._handle_stifle_trigger, # Param=None, Context={'hand_idx':X, 'target_trigger_idx':Y}
                 # Card Type Specific
-                "CAST_LEFT_HALF": lambda p=None, context=None, **k: self._handle_cast_split(p, context=context, action_type="CAST_LEFT_HALF", **k), # Needs context={'hand_idx':X}
-                "CAST_RIGHT_HALF": lambda p=None, context=None, **k: self._handle_cast_split(p, context=context, action_type="CAST_RIGHT_HALF", **k),# Needs context={'hand_idx':X}
-                "CAST_FUSE": lambda p=None, context=None, **k: self._handle_cast_split(p, context=context, action_type="CAST_FUSE", **k),# Needs context={'hand_idx':X}
-                "FLIP_CARD": self._handle_flip_card, # Expects context={'battlefield_idx':X}
-                "EQUIP": self._handle_equip, # Expects context={'equip_idx':X, 'target_idx':Y}
-                "UNEQUIP": self._handle_unequip, # Expects context={'equip_idx':X}
-                "ATTACH_AURA": self._handle_attach_aura, # Expects context={'aura_idx':X, 'target_idx':Y} - How is this different from casting? Maybe for abilities?
-                "FORTIFY": self._handle_fortify, # Expects context={'fort_idx':X, 'target_idx':Y}
-                "RECONFIGURE": self._handle_reconfigure, # Expects context={'battlefield_idx':X}
-                "MORPH": self._handle_morph, # Expects context={'battlefield_idx':X}
-                "MANIFEST": self._handle_manifest, # Expects context={'battlefield_idx':X}
+                "CAST_LEFT_HALF": lambda p=None, context=None, **k: self._handle_cast_split(p, context=context, action_type="CAST_LEFT_HALF", **k), # Param is hand_idx
+                "CAST_RIGHT_HALF": lambda p=None, context=None, **k: self._handle_cast_split(p, context=context, action_type="CAST_RIGHT_HALF", **k),# Param is hand_idx
+                "CAST_FUSE": lambda p=None, context=None, **k: self._handle_cast_split(p, context=context, action_type="CAST_FUSE", **k),# Param is hand_idx
+                "FLIP_CARD": self._handle_flip_card, # Param=None, Context={'battlefield_idx':X}
+                "EQUIP": self._handle_equip, # Param=None, Context={'equip_idx':X, 'target_idx':Y}
+                "FORTIFY": self._handle_fortify, # Param=None, Context={'fort_idx':X, 'target_idx':Y}
+                "RECONFIGURE": self._handle_reconfigure, # Param=None, Context={'battlefield_idx':X}
+                "MORPH": self._handle_morph, # Param=None, Context={'battlefield_idx':X}
+                "MANIFEST": self._handle_manifest, # Param=None, Context={'battlefield_idx':X}
                 "CLASH": self._handle_clash,
-                "CONSPIRE": self._handle_conspire, # Expects context={'spell_stack_idx':X, 'creature1_identifier':Y, 'creature2_identifier':Z}
-                "GRANDEUR": self._handle_grandeur, # Expects context={'hand_idx':X}
+                "CONSPIRE": self._handle_conspire, # Param=None, Context={'spell_stack_idx':X, 'creature1_identifier':Y, 'creature2_identifier':Z}
+                "GRANDEUR": self._handle_grandeur, # Param=None, Context={'hand_idx':X}
                 # Room/Class
-                "UNLOCK_DOOR": self._handle_unlock_door,
-                "LEVEL_UP_CLASS": self._handle_level_up_class,
+                "UNLOCK_DOOR": self._handle_unlock_door, # Param is room battlefield_idx
+                "LEVEL_UP_CLASS": self._handle_level_up_class, # Param is class battlefield_idx
                 # Discard / Spree
-                "DISCARD_CARD": self._handle_discard_card,
-                "SELECT_SPREE_MODE": self._handle_select_spree_mode, # Expects context={'hand_idx':X, 'mode_idx':Y}
+                "DISCARD_CARD": self._handle_discard_card, # Param is hand_idx
+                "SELECT_SPREE_MODE": self._handle_select_spree_mode, # Param=None, Context={'hand_idx':X, 'mode_idx':Y}
                 # Transform
                 "TRANSFORM": self._handle_transform, # Param is battlefield index
                 # NO_OP variants
                 "NO_OP": self._handle_no_op,
                 "NO_OP_SEARCH_FAIL": self._handle_no_op,
+                # Actions removed or repurposed to NO_OP
+                "UNEQUIP": self._handle_no_op,
+                "ATTACH_AURA": self._handle_no_op,
             }
 
     def _add_battle_attack_actions(self, player, valid_actions, set_valid_action):
@@ -1933,50 +1934,167 @@ class ActionHandler:
         logging.warning("PUT_TO_GRAVEYARD called outside of Surveil context.")
         return -0.1, False
 
-    def _handle_scry_surveil_choice(self, param, **kwargs):
-        """Handle Scry/Surveil choice: PUT_ON_TOP"""
+    def _handle_put_to_graveyard(self, param, context, **kwargs):
+        """Handle Surveil choice: PUT_TO_GRAVEYARD. Relies on context from _add_special_choice_actions."""
         gs = self.game_state
-        if hasattr(gs, 'choice_context') and gs.choice_context:
-            context = gs.choice_context
-            player = context["player"]
-            choice_type = context.get("type")
+        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        if not hasattr(gs, 'choice_context') or gs.choice_context is None or gs.choice_context.get("type") != "surveil":
+            logging.warning("PUT_TO_GRAVEYARD called outside of Surveil context.")
+            return -0.2, False
+        if gs.choice_context.get("player") != player:
+            logging.warning("Received PUT_TO_GRAVEYARD choice for non-active choice player.")
+            return -0.2, False # Wrong player
 
-            if choice_type not in ["scry", "surveil"] or not context.get("cards"):
-                logging.warning("PUT_ON_TOP choice made but no cards/context.")
-                gs.choice_context = None
-                gs.phase = gs.PHASE_PRIORITY
-                return -0.1, False
+        context = gs.choice_context
+        if not context.get("cards"):
+            logging.warning("Surveil choice PUT_TO_GRAVEYARD made but no cards left to process.")
+            gs.choice_context = None # Clear context
+            gs.phase = gs.PHASE_PRIORITY # Return to priority
+            return -0.1, False # Minor error, but invalid state
 
-            card_id = context["cards"].pop(0)
-            card = gs._safe_get_card(card_id)
-            card_name = card.name if card else card_id
+        card_id = context["cards"].pop(0) # Process first card in the list
+        card = gs._safe_get_card(card_id)
+        card_name = getattr(card, 'name', card_id)
 
-            if choice_type == "scry":
-                if "kept_on_top" not in context: context["kept_on_top"] = []
-                context["kept_on_top"].append(card_id)
-                logging.debug(f"Scry: Keeping {card_name} on top.")
-            else: # Surveil
-                 # Conceptually stays on top, just removed from choice list
-                logging.debug(f"Surveil: Keeping {card_name} on top.")
+        # Use move_card to handle replacements/triggers
+        success_move = gs.move_card(card_id, player, "library_implicit", player, "graveyard", cause="surveil")
+        if not success_move:
+            logging.error(f"Failed to move {card_name} to graveyard during surveil.")
+            # Put card back? State is potentially inconsistent. End choice phase.
+            gs.choice_context = None
+            gs.phase = gs.PHASE_PRIORITY
+            return -0.1, False
 
-            # If done, finalize and return to priority
-            if not context.get("cards"):
-                if choice_type == "scry":
-                     # Need AI to order the kept cards
-                     # Simple: Keep current order
-                     player["library"] = context["kept_on_top"] + player["library"]
-                     logging.debug("Scry finished.")
-                else: # Surveil
-                     logging.debug("Surveil finished.")
+        logging.debug(f"Surveil: Put {card_name} into graveyard.")
 
-                gs.choice_context = None
-                gs.phase = gs.PHASE_PRIORITY
-                gs.priority_pass_count = 0
-                gs.priority_player = gs._get_active_player()
+        # If done surveiling, clear context and return to previous phase
+        if not context.get("cards"):
+            logging.debug("Surveil finished.")
+            gs.choice_context = None
+            if hasattr(gs, 'previous_priority_phase') and gs.previous_priority_phase is not None:
+                 gs.phase = gs.previous_priority_phase
+                 gs.previous_priority_phase = None
+            else:
+                 gs.phase = gs.PHASE_PRIORITY # Fallback
+            gs.priority_pass_count = 0 # Reset priority
+            gs.priority_player = gs._get_active_player()
+        # Else, stay in CHOICE phase for next card
 
-            return 0.05, True
-        logging.warning("PUT_ON_TOP called outside of Scry/Surveil context.")
-        return -0.1, False
+        # Positive reward for making a valid choice
+        card_eval_score = 0
+        if self.card_evaluator and card:
+             # Evaluate card being put in GY (might be good for recursion)
+             card_eval_score = self.card_evaluator.evaluate_card(card_id, "general", context_details={"destination":"graveyard"})
+        # Reward higher if putting low-value card in GY
+        return 0.05 - card_eval_score * 0.05, True
+
+    def _handle_scry_surveil_choice(self, param, context, **kwargs):
+        """Unified handler for Scry/Surveil PUT_ON_TOP action."""
+        gs = self.game_state
+        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        action_index = kwargs.get('action_index')
+        # Determine destination based on action index
+        destination = "top" # Default for PUT_ON_TOP (306)
+
+        if action_index == 305: # PUT_TO_GRAVEYARD (Surveil specific)
+            destination = "graveyard"
+        elif action_index == 307: # PUT_ON_BOTTOM (Scry specific)
+             destination = "bottom"
+
+        # Get current context
+        if not hasattr(gs, 'choice_context') or gs.choice_context is None:
+            logging.warning(f"Scry/Surveil choice ({destination}) called outside of CHOOSE context.")
+            return -0.2, False
+
+        context = gs.choice_context
+        current_choice_type = context.get("type")
+
+        # Validate context type
+        if current_choice_type not in ["scry", "surveil"]:
+            logging.warning(f"Choice ({destination}) called during wrong context type: {current_choice_type}")
+            return -0.2, False
+        # Validate player
+        if context.get("player") != player:
+            logging.warning("Received Scry/Surveil choice for non-active choice player.")
+            return -0.2, False
+        # Validate card availability
+        if not context.get("cards"):
+            logging.warning(f"Choice ({destination}) made but no cards left to process.")
+            gs.choice_context = None
+            gs.phase = gs.PHASE_PRIORITY
+            return -0.1, False # Invalid state
+
+        # Validate action matches context type (e.g., cannot PUT_TO_GRAVEYARD during scry)
+        if current_choice_type == "scry" and destination == "graveyard":
+             logging.warning("Invalid action: Cannot PUT_TO_GRAVEYARD during Scry.")
+             return -0.1, False
+        if current_choice_type == "surveil" and destination == "bottom":
+             logging.warning("Invalid action: Cannot PUT_ON_BOTTOM during Surveil.")
+             return -0.1, False
+
+
+        # --- Process the Choice ---
+        card_id = context["cards"].pop(0) # Process first card
+        card = gs._safe_get_card(card_id)
+        card_name = getattr(card, 'name', card_id)
+
+        reward = 0.05 # Base reward for valid choice
+        card_eval_score = 0
+        if self.card_evaluator and card:
+             card_eval_score = self.card_evaluator.evaluate_card(card_id, "general", context_details={"destination": destination})
+
+
+        if destination == "top":
+             if current_choice_type == "scry":
+                  # Add to list to be ordered later (by AI/rules)
+                  context.setdefault("kept_on_top", []).append(card_id)
+                  logging.debug(f"Scry: Keeping {card_name} on top (pending order).")
+                  reward += card_eval_score * 0.05 # Reward keeping good cards
+             else: # Surveil
+                  # Put back onto library directly (no reordering for Surveil top choice)
+                  player["library"].insert(0, card_id)
+                  logging.debug(f"Surveil: Kept {card_name} on top.")
+                  reward += card_eval_score * 0.05
+        elif destination == "bottom": # Scry only
+             context.setdefault("put_on_bottom", []).append(card_id)
+             logging.debug(f"Scry: Putting {card_name} on bottom.")
+             reward -= card_eval_score * 0.05 # Penalize bottoming good cards
+        elif destination == "graveyard": # Surveil only
+             success_move = gs.move_card(card_id, player, "library_implicit", player, "graveyard", cause="surveil")
+             if not success_move:
+                 logging.error(f"Failed to move {card_name} to graveyard during surveil.")
+                 gs.choice_context = None; gs.phase = gs.PHASE_PRIORITY; return -0.1, False
+             logging.debug(f"Surveil: Put {card_name} into graveyard.")
+             reward -= card_eval_score * 0.03 # Smaller penalty for GY vs bottom? Depends.
+
+
+        # --- Check if Choice Phase Ends ---
+        if not context.get("cards"):
+            logging.debug(f"{current_choice_type.capitalize()} finished.")
+
+            # Finalize Scry: Put bottom cards, then ordered top cards back
+            if current_choice_type == "scry":
+                 bottom_cards = context.get("put_on_bottom", [])
+                 top_cards = context.get("kept_on_top", [])
+                 # AI needs to choose order for top_cards
+                 # Simple: keep original relative order
+                 ordered_top_cards = top_cards # Placeholder for ordering logic
+                 # Add cards back to library
+                 player["library"] = ordered_top_cards + player["library"] # Top first
+                 player["library"].extend(bottom_cards) # Then bottom
+                 logging.debug(f"Scry final: Top=[{','.join(ordered_top_cards)}], Bottom=[{','.join(bottom_cards)}]")
+
+            # Clear context and return to previous phase
+            gs.choice_context = None
+            if hasattr(gs, 'previous_priority_phase') and gs.previous_priority_phase is not None:
+                 gs.phase = gs.previous_priority_phase
+                 gs.previous_priority_phase = None
+            else:
+                 gs.phase = gs.PHASE_PRIORITY # Fallback
+            gs.priority_pass_count = 0 # Reset priority
+            gs.priority_player = gs._get_active_player()
+
+        return reward, True
 
 
     def _handle_scry_choice(self, param, **kwargs):
@@ -3021,253 +3139,390 @@ class ActionHandler:
         return search_map.get(param, None) # param would be 0-4 if derived from 299-303
 
 
-    def _handle_dredge(self, param, action_type=None, **kwargs):
+    def _handle_dredge(self, param, context=None, **kwargs):
+        """Handle DREDGE action. Param is GY index. (Updated for context clarity)"""
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
-        # Param should be GY index 0-5, representing the card to dredge
         gy_idx = param
+
+        # Ensure dredge is actually pending for this player
         if not hasattr(gs, 'dredge_pending') or not gs.dredge_pending or gs.dredge_pending['player'] != player:
-             logging.warning("DREDGE action called but no dredge pending.")
-             return -0.1, False # No valid dredge state
+             logging.warning("DREDGE action called but no dredge pending for this player.")
+             return -0.1, False
 
-        if gy_idx >= len(player["graveyard"]):
-            logging.warning(f"DREDGE invalid GY index {gy_idx}")
-            return -0.1, False # Invalid index
+        dredge_card_id = gs.dredge_pending.get('card_id')
+        # Verify the param (gy_idx) matches the card expected to be dredged
+        if gy_idx >= len(player.get("graveyard", [])) or player["graveyard"][gy_idx] != dredge_card_id:
+            logging.warning(f"DREDGE index {gy_idx} does not match pending dredge card {dredge_card_id}")
+            return -0.1, False
 
-        dredge_card_id = player["graveyard"][gy_idx]
-        if dredge_card_id != gs.dredge_pending['card_id']:
-            logging.warning(f"DREDGE selected card {dredge_card_id} does not match pending dredge card {gs.dredge_pending['card_id']}")
-            return -0.1, False # Wrong card selected
-
-        # Delegate to GameState's dredge handler which confirms the choice
+        # Perform dredge via GameState method
         if hasattr(gs, 'perform_dredge') and gs.perform_dredge(player, dredge_card_id):
-             return 0.3, True # Successful dredge is good value
+            return 0.3, True
         else:
-             # Perform dredge failed (e.g., not enough cards to mill)
-             gs.dredge_pending = None # Clear pending state on failure
-             return -0.05, False
+            gs.dredge_pending = None # Clear pending state on failure
+            logging.warning(f"Dredge failed (perform_dredge returned False).")
+            return -0.05, False
 
 
     def _handle_add_counter(self, param, context, **kwargs):
+        """Adds a counter to a target. Param is target index, context supplies counter info."""
         gs = self.game_state
-        player = gs.p1 if gs.agent_is_p1 else gs.p2 # Who performs the action (may not be owner)
-        # Param 0-9 is target permanent index on combined battlefield? Or just player's?
-        # Assume combined battlefield for now.
+        # Param 0-9 is target permanent index (assume combined battlefield)
         target_idx = param
         target_id, target_owner = gs.get_permanent_by_combined_index(target_idx)
-        if not target_id: return -0.1, False
+        if not target_id:
+            logging.warning(f"ADD_COUNTER: Invalid target index {target_idx}.")
+            return -0.1, False
 
         # Need context for counter type and count
-        # context passed from kwargs
-        counter_type = context.get('counter_type', '+1/+1') # Default to +1/+1
+        if context is None or 'counter_type' not in context:
+            logging.error(f"ADD_COUNTER context missing 'counter_type' for target {target_id}.")
+            return -0.15, False # Invalid action call without context
+
+        counter_type = context['counter_type']
         count = context.get('count', 1)
-        source_id = context.get('source_id', 'unknown_source') # Identify source if possible
 
         # Call GameState method
         success = gs.add_counter(target_id, counter_type, count)
         if success:
-            reward = 0.1 * count if counter_type == '+1/+1' else 0.05 * count
+            # Basic reward, could be refined by counter type/value
+            reward = 0.1 * count if '+1/+1' in counter_type else 0.05 * count
             return reward, True
-        return -0.05, False
+        return -0.05, False # add_counter failed validation
 
     def _handle_remove_counter(self, param, context, **kwargs):
+        """Removes a counter from a target. Param is target index, context supplies counter info."""
         gs = self.game_state
-        player = gs.p1 if gs.agent_is_p1 else gs.p2 # Who performs action
-        # Param 0-9 target index
         target_idx = param
         target_id, target_owner = gs.get_permanent_by_combined_index(target_idx)
-        if not target_id: return -0.1, False
+        if not target_id:
+             logging.warning(f"REMOVE_COUNTER: Invalid target index {target_idx}.")
+             return -0.1, False
 
-        # Need context for counter type and count
-        # context passed from kwargs
-        counter_type = context.get('counter_type') # Try to infer if None?
+        if context is None:
+            logging.error(f"REMOVE_COUNTER context missing for target {target_id}.")
+            return -0.15, False
+
+        counter_type = context.get('counter_type') # Optional: If specified
         count = context.get('count', 1)
-        source_id = context.get('source_id', 'unknown_source')
-
         target_card = gs._safe_get_card(target_id)
-        # Infer counter type if not provided
+
+        # Infer counter type if not provided (try to remove -1/-1 first)
         if not counter_type:
-            if hasattr(target_card, 'counters') and target_card.counters:
-                 # Prioritize removing -1/-1 if present? Or need context?
-                 counter_type = '-1/-1' if '-1/-1' in target_card.counters else list(target_card.counters.keys())[0]
-            else:
-                 logging.warning(f"Remove Counter: No counters found on {target_id} to remove.")
-                 return -0.1, False # No counters to remove
+             counters_on_card = getattr(target_card, 'counters', {}) if target_card else {}
+             if '-1/-1' in counters_on_card and counters_on_card['-1/-1'] >= count:
+                 counter_type = '-1/-1'
+             elif '+1/+1' in counters_on_card and counters_on_card['+1/+1'] >= count:
+                 counter_type = '+1/+1'
+             elif counters_on_card: # Take first available if others not present/sufficient
+                 counter_type = list(counters_on_card.keys())[0]
+                 if counters_on_card[counter_type] < count:
+                     logging.warning(f"Cannot remove {count} {counter_type}, only {counters_on_card[counter_type]} exist.")
+                     return -0.05, False # Cannot meet count requirement
+             else: # No counters found
+                 logging.warning(f"REMOVE_COUNTER: No counters found on {target_id} to remove.")
+                 return -0.1, False
 
         # Call GameState method with negative count
         success = gs.add_counter(target_id, counter_type, -count)
         if success:
-            reward = 0.15 * count if counter_type == '-1/-1' else 0.05 * count # Removing bad counters is good
+            reward = 0.15 * count if '-1/-1' in counter_type else 0.05 * count
             return reward, True
-        return -0.05, False
+        else:
+            logging.warning(f"REMOVE_COUNTER: gs.add_counter failed for {target_id}")
+            return -0.05, False # add_counter failed
 
-    def _handle_proliferate(self, param, action_type=None, **kwargs):
+    def _handle_proliferate(self, param, context=None, **kwargs):
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
-        success = gs.proliferate(player) # Target choice needs AI input/context
-        return 0.3 if success else 0.0, True
+        # Proliferate needs player choice context, but the action itself just triggers the process
+        if hasattr(gs, 'proliferate') and callable(gs.proliferate):
+            # Context might specify targets chosen by agent, otherwise proliferate does AI choice/affects all
+            chosen_targets = context.get('proliferate_targets') if context else None
+            success = gs.proliferate(player, targets=chosen_targets) # Pass chosen targets if provided
+            return 0.3 if success else 0.0, True # Action taken, reward based on outcome
+        else:
+             logging.error("Proliferate function missing in GameState.")
+             return -0.1, False
 
-    def _handle_return_from_graveyard(self, param, action_type=None, **kwargs):
+    def _handle_return_from_graveyard(self, param, context=None, **kwargs):
+        """Moves card from GY to Hand. Param is GY index."""
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
-        gy_idx = param # Param 0-5 is GY index
-        if gy_idx < len(player["graveyard"]):
+        gy_idx = param
+
+        if gy_idx < len(player.get("graveyard", [])):
+            card_id = player["graveyard"][gy_idx] # Index into current GY
+            card_value = self.card_evaluator.evaluate_card(card_id, "return_from_gy") if self.card_evaluator else 0.0
+            # GameState.move_card handles removals and triggers
+            success = gs.move_card(card_id, player, "graveyard", player, "hand", cause="return_from_gy_action")
+            return 0.2 + card_value * 0.2 if success else -0.1, success
+        else:
+             logging.warning(f"Invalid GY index {gy_idx} for RETURN_FROM_GRAVEYARD.")
+             return -0.15, False
+
+    def _handle_reanimate(self, param, context=None, **kwargs):
+        """Moves card from GY to Battlefield. Param is GY index."""
+        gs = self.game_state
+        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        gy_idx = param
+
+        if gy_idx < len(player.get("graveyard", [])):
             card_id = player["graveyard"][gy_idx]
-            success = gs.move_card(card_id, player, "graveyard", player, "hand") # Default to hand
-            card_value = self.card_evaluator.evaluate_card(card_id, "return_from_gy") if self.card_evaluator else 0
-            return 0.2 + card_value*0.2 if success else -0.1, success
-        return -0.15, False
+            card = gs._safe_get_card(card_id)
+            # Check if target is a valid permanent type to reanimate
+            valid_types = ["creature", "artifact", "enchantment", "planeswalker", "land", "battle"]
+            if card and any(t in getattr(card, 'card_types', []) or t in getattr(card, 'type_line','').lower() for t in valid_types):
+                card_value = self.card_evaluator.evaluate_card(card_id, "reanimate") if self.card_evaluator else 0.0
+                success = gs.move_card(card_id, player, "graveyard", player, "battlefield", cause="reanimate_action")
+                return 0.5 + card_value * 0.3 if success else -0.1, success
+            else:
+                 logging.warning(f"Cannot reanimate {getattr(card, 'name', card_id)}: Invalid type.")
+                 return -0.1, False
+        else:
+             logging.warning(f"Invalid GY index {gy_idx} for REANIMATE.")
+             return -0.15, False
 
-    def _handle_reanimate(self, param, action_type=None, **kwargs):
+    def _handle_return_from_exile(self, param, context=None, **kwargs):
+        """Moves card from Exile to Hand. Param is Exile index."""
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
-        gy_idx = param # Param 0-5 is GY index
-        if gy_idx < len(player["graveyard"]):
-             card_id = player["graveyard"][gy_idx]
-             card = gs._safe_get_card(card_id)
-             if card and any(t in getattr(card, 'card_types', []) for t in ["creature", "artifact", "enchantment", "planeswalker"]):
-                 success = gs.move_card(card_id, player, "graveyard", player, "battlefield")
-                 card_value = self.card_evaluator.evaluate_card(card_id, "reanimate") if self.card_evaluator else 0
-                 return 0.5 + card_value*0.3 if success else -0.1, success
-        return -0.15, False
+        exile_idx = param
 
-
-    def _handle_return_from_exile(self, param, action_type=None, **kwargs):
-        gs = self.game_state
-        player = gs.p1 if gs.agent_is_p1 else gs.p2
-        exile_idx = param # Param 0-5 is exile index
-        if exile_idx < len(player["exile"]):
+        if exile_idx < len(player.get("exile", [])):
             card_id = player["exile"][exile_idx]
-            success = gs.move_card(card_id, player, "exile", player, "hand") # Default to hand
-            card_value = self.card_evaluator.evaluate_card(card_id, "return_from_exile") if self.card_evaluator else 0
-            return 0.3 + card_value*0.1 if success else -0.1, success
-        return -0.15, False
+            card_value = self.card_evaluator.evaluate_card(card_id, "return_from_exile") if self.card_evaluator else 0.0
+            success = gs.move_card(card_id, player, "exile", player, "hand", cause="return_from_exile_action")
+            return 0.3 + card_value * 0.1 if success else -0.1, success
+        else:
+            logging.warning(f"Invalid Exile index {exile_idx} for RETURN_FROM_EXILE.")
+            return -0.15, False
     
-    def _handle_pay_kicker(self, param, **kwargs):
-        """Flag intent to pay kicker. param=True/False"""
-        context = kwargs.get('context', {}) # Get context
-        # Check if there's a spell being prepared to cast
+    def _handle_pay_kicker(self, param, context, **kwargs):
+        """Flag intent to pay kicker. param=True/False. Checks affordability."""
+        if context is None: context = {}
+        context.update(kwargs.get('context', {})) # Merge from kwargs
+
         pending_context = getattr(self.game_state, 'pending_spell_context', None)
-        if pending_context and 'card_id' in pending_context:
-             card_id = pending_context['card_id']
-             card = self.game_state._safe_get_card(card_id)
-             if card and "kicker" in getattr(card, 'oracle_text', '').lower():
-                  kicker_cost_str = self._get_kicker_cost_str(card)
-                  player = self.game_state._get_active_player() # Get player from GS
-                  # If trying to pay, check affordability now
-                  if param is True:
-                      if kicker_cost_str and self._can_afford_cost_string(player, kicker_cost_str, context=pending_context):
-                           pending_context['kicked'] = True
-                           logging.debug(f"Kicker context flag set to True for pending {card.name}")
-                           return 0.01, True
-                      else:
-                           logging.warning(f"Cannot afford kicker cost {kicker_cost_str} for {card.name}")
-                           return -0.05, False # Cannot set kicker=True if unaffordable
-                  else: # param is False
-                      pending_context['kicked'] = False
-                      logging.debug(f"Kicker context flag set to False for pending {card.name}")
-                      return 0.01, True
-             else: # Card not found or no kicker
-                 return -0.05, False
-        return -0.1, False # No spell context pending
+        if not pending_context or 'card_id' not in pending_context:
+            logging.warning("PAY_KICKER called but no spell context is pending.")
+            return -0.1, False # No spell context pending
+
+        card_id = pending_context['card_id']
+        card = self.game_state._safe_get_card(card_id)
+        if not card or "kicker" not in getattr(card, 'oracle_text', '').lower():
+             logging.warning(f"Cannot set kicker flag: Card {card_id} not found or has no kicker.")
+             return -0.05, False
+
+        kicker_cost_str = self._get_kicker_cost_str(card) # Use helper
+        player = self.game_state._get_active_player() # Get player from GS
+
+        # If trying to pay, check affordability now
+        if param is True:
+            if kicker_cost_str and self._can_afford_cost_string(player, kicker_cost_str, context=pending_context):
+                pending_context['kicked'] = True
+                # Store the cost string itself for ManaSystem to use later
+                pending_context['kicker_cost_to_pay'] = kicker_cost_str
+                logging.debug(f"Kicker context flag set to True for pending {card.name} (Cost: {kicker_cost_str})")
+                return 0.01, True
+            else:
+                logging.warning(f"Cannot afford kicker cost {kicker_cost_str or 'N/A'} for {card.name}")
+                return -0.05, False # Cannot set kicker=True if unaffordable or no cost
+        else: # param is False
+            pending_context['kicked'] = False
+            pending_context.pop('kicker_cost_to_pay', None) # Remove cost if not paying
+            logging.debug(f"Kicker context flag set to False for pending {card.name}")
+            return 0.01, True
     
     def _get_kicker_cost_str(self, card):
         """Helper to extract kicker cost string."""
         if card and hasattr(card, 'oracle_text'):
-            match = re.search(r"kicker (\{[^\}]+\}|[0-9]+)", card.oracle_text.lower())
-            if match:
-                 cost_str = match.group(1)
-                 if cost_str.isdigit(): return f"{{{cost_str}}}"
-                 return cost_str
+            # Prioritize kicker cost directly after the word 'kicker'
+            direct_match = re.search(r"\bkicker\s*(\{.*?\})\b", card.oracle_text.lower())
+            if direct_match: return direct_match.group(1)
+            # Fallback for kicker costs later in the text (less common format)
+            later_match = re.search(r"kicker (?:\{[^\}]+\}|[0-9]+)", card.oracle_text.lower()) # Original pattern as fallback
+            if later_match:
+                cost_str = later_match.group(1)
+                if cost_str.isdigit(): return f"{{{cost_str}}}"
+                return cost_str
         return None
 
-
-    def _handle_pay_additional_cost(self, param, **kwargs):
+    def _handle_pay_additional_cost(self, param, context, **kwargs):
         """Flag intent to pay additional costs. param=True/False"""
-        context = kwargs.get('context', {})
+        if context is None: context = {}
+        context.update(kwargs.get('context', {})) # Merge from kwargs
+
         pending_context = getattr(self.game_state, 'pending_spell_context', None)
-        if pending_context and 'card_id' in pending_context:
-             card_id = pending_context['card_id']
-             card = self.game_state._safe_get_card(card_id)
-             cost_info = self._get_additional_cost_info(card) if card else None
-             if cost_info:
-                 player = self.game_state._get_active_player()
-                 # If trying to pay, check if possible
-                 if param is True:
-                     if self._can_pay_specific_additional_cost(player, cost_info, pending_context):
-                         pending_context['pay_additional'] = True
-                         # Specific non-mana cost details need to be added to context by agent?
-                         # e.g., which creature to sacrifice, which card to discard
-                         # This action just flags intent. Agent needs follow-up if choice required.
-                         pending_context['additional_cost_info'] = cost_info # Store info for payment step
-                         logging.debug(f"Additional Cost context flag set to True for pending {card.name}")
-                         return 0.01, True
-                     else:
-                          logging.warning(f"Cannot meet additional cost requirement for {card.name}")
-                          return -0.05, False
-                 else: # param is False
-                      if cost_info.get("optional", True): # Can only choose not to pay if optional
-                           pending_context['pay_additional'] = False
-                           logging.debug(f"Additional Cost context flag set to False for pending {card.name}")
-                           return 0.01, True
-                      else:
-                           logging.warning("Cannot skip non-optional additional cost.")
-                           return -0.05, False
-             else: # No additional cost found
-                  return -0.05, False # Action inappropriate
-        return -0.1, False # No spell context pending
-         
-    
+        if not pending_context or 'card_id' not in pending_context:
+             logging.warning("PAY_ADDITIONAL_COST called but no spell context is pending.")
+             return -0.1, False
+
+        card_id = pending_context['card_id']
+        card = self.game_state._safe_get_card(card_id)
+        cost_info = self._get_additional_cost_info(card) if card else None # Use helper
+
+        if not cost_info:
+             logging.warning(f"PAY_ADDITIONAL_COST called, but no additional cost found on {card.name}")
+             return -0.05, False # Action inappropriate if no cost
+
+        player = self.game_state._get_active_player()
+
+        # If trying to pay, check if the non-mana part can be met (mana checked later)
+        if param is True:
+            # Pass pending context to check helper for costs like Escape
+            if self._can_pay_specific_additional_cost(player, cost_info, pending_context):
+                pending_context['pay_additional'] = True
+                # Store cost info for cast_spell/pay_mana_cost to handle actual payment/action
+                pending_context['additional_cost_info'] = cost_info
+                logging.debug(f"Additional Cost context flag set to True for pending {card.name}")
+                # Agent might need follow-up actions (e.g., SACRIFICE_PERMANENT) if choice is required
+                return 0.01, True
+            else:
+                 logging.warning(f"Cannot meet non-mana part of additional cost for {card.name}")
+                 return -0.05, False
+        else: # param is False
+             if cost_info.get("optional", True): # Can only choose not to pay if optional (Rule 601.2b)
+                 # Need to parse if cost is optional from text? Assume mandatory if pattern matched.
+                 logging.warning("Skipping mandatory additional cost is usually not allowed.")
+                 return -0.05, False # Cannot skip mandatory cost
+                 # If optional costs are added later, this needs refinement.
+             else:
+                  # Cost is mandatory, player *must* choose param=True if able
+                  logging.warning("Cannot choose not to pay a mandatory additional cost.")
+                  return -0.05, False
+
     def _can_pay_specific_additional_cost(self, player, cost_info, context):
+        """Check if the non-mana part of an additional cost can be met."""
+        gs = self.game_state
         cost_type = cost_info.get("type")
+
         if cost_type == "sacrifice":
             target_type = cost_info.get("target")
-            return any(target_type in getattr(self.game_state._safe_get_card(cid), 'card_types', [])
-                       for cid in player["battlefield"])
+            # Check if there's *at least one* valid permanent to sacrifice
+            return any(target_type == "permanent" or target_type in getattr(gs._safe_get_card(cid), 'card_types', [])
+                       for cid in player.get("battlefield", []))
         elif cost_type == "discard":
-             return len(player["hand"]) >= cost_info.get("count", 1)
-        # Add checks for mana, life etc.
-        return False # Default false
-         
-    # Placeholder helpers for additional costs (need detailed implementation)
-    def _get_additional_cost_info(self, card):
-        if card and hasattr(card, 'oracle_text'):
-             text = card.oracle_text.lower()
-             if "as an additional cost to cast this spell, sacrifice a creature" in text:
-                 return {"type": "sacrifice", "target": "creature", "optional": False}
-             if "as an additional cost to cast this spell, discard a card" in text:
-                 return {"type": "discard", "count": 1, "optional": False}
-             # Add more patterns for mana, life etc.
-        return None
+            return len(player.get("hand", [])) >= cost_info.get("count", 1)
+        elif cost_type == "pay_life":
+             return player.get("life", 0) >= cost_info.get("amount", 0)
+        elif cost_type == "tap_permanents":
+            count_needed = cost_info.get("count", 1)
+            target_type = cost_info.get("target_type")
+            untapped_matching = 0
+            tapped_set = player.get("tapped_permanents", set())
+            for cid in player.get("battlefield", []):
+                 if cid not in tapped_set:
+                      card = gs._safe_get_card(cid)
+                      if card and (target_type == "permanent" or target_type in getattr(card, 'card_types', []) or target_type in getattr(card, 'subtypes',[])):
+                           untapped_matching += 1
+            return untapped_matching >= count_needed
+        elif cost_type == "escape_exile": # Check if enough cards in GY are provided
+            gy_indices = context.get("gy_indices_escape", []) # indices provided by agent
+            valid_indices = [idx for idx in gy_indices if idx < len(player.get("graveyard",[]))]
+            # Need the required count from card text (assumed already parsed into context/cost_info?)
+            # Let's retrieve it again or assume it's implicitly checked by caller providing enough indices.
+            required_count = cost_info.get("count", 0) # Assume count is stored here if needed
+            if required_count == 0: # Re-parse if missing
+                match = re.search(r"exile (\w+|\d+) other cards?", cost_info.get('description','').lower())
+                if match: required_count = self._word_to_number(match.group(1))
+            return len(valid_indices) >= required_count
+        elif cost_type == "delve": # Just need *some* cards in GY
+            return len(player.get("graveyard",[])) > 0
 
-    def _handle_pay_escalate(self, param, **kwargs):
-        """Set number of extra modes chosen via escalate. param=count (e.g., 1 or 2)."""
-        context = kwargs.get('context', {})
+
+        # Assume true if type unknown or check not implemented, cast_spell will fail later if needed
+        logging.warning(f"Cannot validate non-mana additional cost type: {cost_type}")
+        return True
+         
+    def _get_additional_cost_info(self, card):
+        """Helper to identify additional costs (sacrifice, discard, pay life etc.)."""
+        if card and hasattr(card, 'oracle_text'):
+            text = card.oracle_text.lower()
+            # Pattern for "As an additional cost to cast..., [ACTION]"
+            # Handles variations like "to cast this spell" or "to cast ~"
+            match = re.search(r"as an additional cost to cast (?:this spell|.*?),\s+(.+?)(?:\.|$|,)", text)
+            if match:
+                cost_desc = match.group(1).strip()
+                # Sacrifice Creature
+                sac_match = re.search(r"sacrifice (a|an|\d*)?\s*(\w+)", cost_desc)
+                if sac_match and sac_match.group(2) in ["creature", "artifact", "enchantment", "land", "permanent", "planeswalker"]:
+                    return {"type": "sacrifice", "target": sac_match.group(2), "optional": False, "description": cost_desc}
+                # Discard Card
+                disc_match = re.search(r"discard (\w+|\d*) cards?", cost_desc)
+                if disc_match:
+                    count = self._word_to_number(disc_match.group(1))
+                    return {"type": "discard", "count": count, "optional": False, "description": cost_desc}
+                # Pay Life
+                life_match = re.search(r"pay (\d+) life", cost_desc)
+                if life_match:
+                    amount = int(life_match.group(1))
+                    return {"type": "pay_life", "amount": amount, "optional": False, "description": cost_desc}
+                # Tap Permanents
+                tap_match = re.search(r"tap (\w+|\d*) untapped ([\w\s]+?) you control", cost_desc)
+                if tap_match:
+                     count = self._word_to_number(tap_match.group(1))
+                     target_type = tap_match.group(2).strip().replace('s','') # Singularize
+                     return {"type": "tap_permanents", "count": count, "target_type": target_type, "optional": False, "description": cost_desc}
+
+                # Unrecognized additional cost type within the pattern
+                logging.debug(f"Unrecognized additional cost pattern: {cost_desc}")
+                return {"type": "unknown", "optional": False, "description": cost_desc} # Mark as unknown cost
+        return None
+    
+    def _word_to_number(self, word):
+        """Convert word representation of number to int."""
+        if isinstance(word, int): return word
+        if isinstance(word, str) and word.isdigit(): return int(word)
+        mapping = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                   "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+        return mapping.get(str(word).lower(), 1) # Default to 1 if word not found
+
+    def _handle_pay_escalate(self, param, context, **kwargs):
+        """Set number of extra modes chosen via escalate. param=count (e.g., 1 or 2). Checks affordability."""
+        if context is None: context = {}
+        context.update(kwargs.get('context', {})) # Merge from kwargs
+
         num_extra_modes = param if isinstance(param, int) and param >= 0 else 0
 
         pending_context = getattr(self.game_state, 'pending_spell_context', None)
-        if pending_context and 'card_id' in pending_context:
-             card_id = pending_context['card_id']
-             card = self.game_state._safe_get_card(card_id)
-             if card and "escalate" in getattr(card, 'oracle_text', '').lower():
-                 escalate_cost_str = self._get_escalate_cost_str(card) # Needs helper
-                 player = self.game_state._get_active_player()
-                 # Check affordability for *each* extra mode
-                 if escalate_cost_str:
-                      cost_per_mode = self.game_state.mana_system.parse_mana_cost(escalate_cost_str)
-                      total_escalate_cost = {k: v * num_extra_modes for k,v in cost_per_mode.items()}
-                      # Need to check mana affordability here relative to base cost? Complex.
-                      # Assume can_pay_mana_cost for *total* spell cost handles this.
-                      # For now, just store the number of extra modes.
-                      pending_context['escalate_count'] = num_extra_modes
-                      logging.debug(f"Escalate context flag set to {num_extra_modes} for pending {card.name}")
-                      return 0.01, True
-                 else:
-                      logging.warning(f"Cannot parse escalate cost for {card.name}")
-                      return -0.05, False
-             else: # Not an escalate card
-                 return -0.05, False
-        return -0.1, False # No spell context pending
+        if not pending_context or 'card_id' not in pending_context:
+             logging.warning("PAY_ESCALATE called but no spell context is pending.")
+             return -0.1, False
+
+        card_id = pending_context['card_id']
+        card = self.game_state._safe_get_card(card_id)
+        if not card or "escalate" not in getattr(card, 'oracle_text', '').lower():
+             logging.warning(f"PAY_ESCALATE called, but card {card_id} not found or has no Escalate.")
+             return -0.05, False
+
+        escalate_cost_str = self._get_escalate_cost_str(card) # Use helper
+        player = self.game_state._get_active_player()
+
+        # Check affordability for *each* extra mode
+        if not escalate_cost_str:
+             logging.warning(f"Cannot parse escalate cost for {card.name}")
+             return -0.05, False
+
+        # Check if *total* mana for escalate can be paid (relative to base cost affordability)
+        # This is complex. ManaSystem needs to verify combined cost later.
+        # Simple check: can afford escalate cost N times *in addition* to base? Hard to isolate.
+        # We will just store the intent here, and let ManaSystem check during payment.
+        # Basic affordability check of just the escalate cost:
+        if num_extra_modes > 0 and not self._can_afford_cost_string(player, escalate_cost_str, context=pending_context):
+             logging.warning(f"Cannot afford *one* instance of escalate cost {escalate_cost_str} for {card.name}")
+             # Note: This doesn't guarantee affordability for N instances + base cost.
+             # Maybe don't even check here and let cast_spell fail? Less informative.
+             # Let's allow setting intent, fail at cast if overall cost too high.
+
+        # TODO: Add check against number of modes available on the card vs. extra modes chosen.
+        # Needs mode parsing first.
+
+        pending_context['escalate_count'] = num_extra_modes
+        pending_context['escalate_cost_each'] = escalate_cost_str # Store cost per mode for ManaSystem
+        logging.debug(f"Escalate context flag set to {num_extra_modes} for pending {card.name}")
+        return 0.01, True
       
     def _handle_copy_permanent(self, param, context, **kwargs):
             """Handle COPY_PERMANENT action. Expects context={'target_permanent_idx':X}."""
@@ -4151,10 +4406,61 @@ class ActionHandler:
              return self.game_state.strategic_planner.evaluate_play_card_action(card_id, context=eval_context)
         return 0.5 # Fallback
     
+    def _handle_put_to_graveyard(self, param, context, **kwargs):
+        """Handle Surveil choice: PUT_TO_GRAVEYARD. Relies on context from _add_special_choice_actions."""
+        gs = self.game_state
+        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        if not hasattr(gs, 'choice_context') or gs.choice_context is None or gs.choice_context.get("type") != "surveil":
+            logging.warning("PUT_TO_GRAVEYARD called outside of Surveil context.")
+            return -0.2, False
+        if gs.choice_context.get("player") != player:
+            logging.warning("Received PUT_TO_GRAVEYARD choice for non-active choice player.")
+            return -0.2, False # Wrong player
+
+        context = gs.choice_context
+        if not context.get("cards"):
+            logging.warning("Surveil choice PUT_TO_GRAVEYARD made but no cards left to process.")
+            gs.choice_context = None # Clear context
+            gs.phase = gs.PHASE_PRIORITY # Return to priority
+            return -0.1, False # Minor error, but invalid state
+
+        card_id = context["cards"].pop(0) # Process first card in the list
+        card = gs._safe_get_card(card_id)
+        card_name = getattr(card, 'name', card_id)
+
+        # Use move_card to handle replacements/triggers
+        success_move = gs.move_card(card_id, player, "library_implicit", player, "graveyard", cause="surveil")
+        if not success_move:
+            logging.error(f"Failed to move {card_name} to graveyard during surveil.")
+            # Put card back? State is potentially inconsistent. End choice phase.
+            gs.choice_context = None
+            gs.phase = gs.PHASE_PRIORITY
+            return -0.1, False
+
+        logging.debug(f"Surveil: Put {card_name} into graveyard.")
+
+        # If done surveiling, clear context and return to previous phase
+        if not context.get("cards"):
+            logging.debug("Surveil finished.")
+            gs.choice_context = None
+            if hasattr(gs, 'previous_priority_phase') and gs.previous_priority_phase is not None:
+                 gs.phase = gs.previous_priority_phase
+                 gs.previous_priority_phase = None
+            else:
+                 gs.phase = gs.PHASE_PRIORITY # Fallback
+            gs.priority_pass_count = 0 # Reset priority
+            gs.priority_player = gs._get_active_player()
+        # Else, stay in CHOICE phase for next card
+
+        # Positive reward for making a valid choice
+        card_eval_score = 0
+        if self.card_evaluator and card:
+             # Evaluate card being put in GY (might be good for recursion)
+             card_eval_score = self.card_evaluator.evaluate_card(card_id, "general", context_details={"destination":"graveyard"})
+        # Reward higher if putting low-value card in GY
+        return 0.05 - card_eval_score * 0.05, True
+    
     def _handle_no_op_search_fail(self, param, **kwargs): return self._handle_no_op(param, **kwargs)
-    def _handle_put_to_graveyard(self, param, **kwargs): return self._handle_unimplemented(param, "PUT_TO_GRAVEYARD", **kwargs) # Need Scry/Surveil state
-    def _handle_put_on_top(self, param, **kwargs): return self._handle_unimplemented(param, "PUT_ON_TOP", **kwargs) # Need Scry/Surveil state
-    def _handle_put_on_bottom(self, param, **kwargs): return self._handle_unimplemented(param, "PUT_ON_BOTTOM", **kwargs) # Need Scry state
     def _handle_cast_with_flashback(self, param, **kwargs): return self._handle_alternative_casting(param, "CAST_WITH_FLASHBACK", **kwargs)
     def _handle_cast_with_jump_start(self, param, **kwargs): return self._handle_alternative_casting(param, "CAST_WITH_JUMP_START", **kwargs)
     def _handle_cast_with_escape(self, param, **kwargs): return self._handle_alternative_casting(param, "CAST_WITH_ESCAPE", **kwargs)
@@ -4293,136 +4599,146 @@ class ActionHandler:
     
         # --- Specific Handler Implementations ---
 
-
     def _handle_alternative_casting(self, param, action_type, context=None, **kwargs):
-        """Generic handler for alternative casting methods. (Updated Context Checks)"""
+        """Generic handler for alternative casting methods. (Updated Context Handling)"""
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
-        # Context passed from kwargs overrides base context
-        if context is None: context = {}
-        source_zone = "graveyard" # Default
+        if context is None: context = {} # Ensure context is a dict
+
+        # Merge environment/agent context with existing
+        if kwargs.get('context'): context.update(kwargs['context'])
+
         card_id = None
-        hand_idx_param = None # Track hand index if source is hand
+        source_zone = "graveyard" # Default for flashback/escape/aftermath/jumpstart
+        validation_ok = True
 
         alt_cost_name = action_type.replace('CAST_WITH_', '').replace('CAST_FOR_', '').replace('CAST_', '').replace('_',' ').lower()
-        context["use_alt_cost"] = alt_cost_name
+        context["use_alt_cost"] = alt_cost_name # Flag for mana/cost system
 
-        # --- Determine card_id and source_zone ---
+        # --- Identify Source Card and Zone based on Action Type & CONTEXT ---
+        # Source location and identifiers must now come from the provided CONTEXT dictionary
+        # The 'param' argument from ACTION_MEANINGS might be redundant if context is provided.
+
         if action_type == "CAST_FOR_MADNESS":
-            # --- ADDED Context Check ---
-            if not hasattr(gs, 'madness_trigger') or not gs.madness_trigger or gs.madness_trigger.get('player') != player:
-                 logging.warning("Madness cast action taken but no valid madness trigger found.")
-                 return -0.1, False
-            card_id = gs.madness_trigger.get("card_id")
-            # --- END Check ---
             source_zone = "exile"
-            if not card_id or card_id not in player[source_zone]:
-                 logging.warning("Madness trigger card not found in exile.")
-                 return -0.1, False
-        elif action_type in ["CAST_FOR_EMERGE", "CAST_FOR_DELVE", "CAST_WITH_OVERLOAD"]: # Add others sourced from hand
-            source_zone = "hand"
-            # --- ADDED Context Check ---
-            if "hand_idx" not in context:
-                logging.error(f"{action_type} requires 'hand_idx' in context.")
+            # Card ID should be in the context if madness trigger was processed
+            card_id = context.get('card_id')
+            if not card_id or card_id not in player.get(source_zone, []):
+                # Attempt to retrieve from gs.madness_trigger if context is missing it
+                if hasattr(gs, 'madness_trigger') and gs.madness_trigger and gs.madness_trigger.get('player') == player:
+                     card_id = gs.madness_trigger.get("card_id")
+                     context['card_id'] = card_id # Update context
+                     if not card_id or card_id not in player.get(source_zone, []):
+                         logging.error(f"Madness trigger card {card_id} not found in exile.")
+                         validation_ok = False
+                else:
+                    logging.error(f"Madness cast action, but no valid madness trigger context found: {context}")
+                    validation_ok = False
+
+        elif action_type in ["CAST_FOR_EMERGE", "CAST_FOR_DELVE", "CAST_WITH_OVERLOAD"]: # Originates from hand
+             source_zone = "hand"
+             if "hand_idx" not in context:
+                 logging.error(f"{action_type} requires 'hand_idx' in context.")
+                 validation_ok = False
+             else:
+                 hand_idx = context["hand_idx"]
+                 if hand_idx >= len(player.get(source_zone, [])):
+                     logging.error(f"Invalid hand_idx {hand_idx} in context for {action_type}.")
+                     validation_ok = False
+                 else:
+                     card_id = player[source_zone][hand_idx]
+                     context['source_idx'] = hand_idx # Store index
+
+        elif action_type in ["CAST_WITH_FLASHBACK", "CAST_WITH_JUMP_START", "CAST_WITH_ESCAPE", "AFTERMATH_CAST"]:
+             source_zone = "graveyard"
+             # GY Index must be in context now
+             if "gy_idx" not in context:
+                 logging.error(f"{action_type} requires 'gy_idx' in context. Param={param} is unused if context is missing.")
+                 # Fallback to param if gy_idx is missing in context? Risky. Fail for now.
+                 validation_ok = False
+             else:
+                 gy_idx = context['gy_idx']
+                 if gy_idx >= len(player.get(source_zone, [])):
+                     logging.error(f"Invalid gy_idx {gy_idx} in context for {action_type}.")
+                     validation_ok = False
+                 else:
+                     card_id = player[source_zone][gy_idx]
+                     context['source_idx'] = gy_idx # Store index
+
+        if not card_id or not validation_ok:
+            logging.error(f"Cannot determine valid card ID for {action_type} with context: {context}")
+            return -0.2, False
+
+        context["source_zone"] = source_zone # Pass source zone info to cast_spell
+
+        # --- Prepare Additional Cost Info (Validation happens in cast_spell/pay_cost) ---
+        if action_type == "CAST_WITH_JUMP_START":
+            if "discard_idx" not in context or context["discard_idx"] >= len(player.get("hand", [])):
+                logging.error(f"Jump-Start requires valid 'discard_idx' in context: {context}")
                 return -0.1, False
-            # --- END Check ---
-            hand_idx_param = context["hand_idx"]
-            if hand_idx_param >= len(player[source_zone]): return -0.1, False
-            card_id = player[source_zone][hand_idx_param]
-
-            # Handle additional costs for Emerge/Delve
-            if action_type == "CAST_FOR_EMERGE":
-                # --- ADDED Context Check ---
-                if "sacrifice_idx" not in context:
-                    logging.error("Emerge requires 'sacrifice_idx' in context.")
-                    return -0.1, False
-                # --- END Check ---
-                sac_idx = context["sacrifice_idx"]
-                if sac_idx >= len(player["battlefield"]): return -0.1, False
-                sac_id = player["battlefield"][sac_idx]
-                sac_card = gs._safe_get_card(sac_id)
-                if not sac_card or 'creature' not in getattr(sac_card, 'card_types', []): return -0.1, False
-                # Don't actually sacrifice here, mark in context for pay_mana_cost
-                context["additional_cost_to_pay"] = {"type": "sacrifice", "target_id": sac_id}
-                context["sacrificed_cmc"] = getattr(sac_card, 'cmc', 0) # Pass for cost calc
-            elif action_type == "CAST_FOR_DELVE":
-                 # --- ADDED Context Check ---
-                 if "gy_indices" not in context or not isinstance(context["gy_indices"], list):
-                     logging.error("Delve requires 'gy_indices' list in context.")
-                     return -0.1, False
-                 # --- END Check ---
-                 gy_indices = context["gy_indices"]
-                 actual_gy_indices = [idx for idx in gy_indices if idx < len(player["graveyard"])]
-                 context["delve_count"] = len(actual_gy_indices)
-                 context["additional_cost_to_pay"] = {"type": "delve", "gy_indices": actual_gy_indices}
-
-        elif action_type == "CAST_WITH_JUMP_START":
-             source_zone_idx = param # GY index
-             if source_zone_idx is None or source_zone_idx >= len(player[source_zone]): return -0.1, False
-             card_id = player[source_zone][source_zone_idx]
-             # --- ADDED Context Check ---
-             if "discard_idx" not in context:
-                  logging.error("Jump-Start requires 'discard_idx' in context.")
-                  return -0.1, False
-             # --- END Check ---
-             discard_idx = context["discard_idx"]
-             if discard_idx >= len(player["hand"]): return -0.1, False # Cannot discard
-             # Mark discard requirement for pay_mana_cost
-             context["additional_cost_to_pay"] = {"type": "discard", "hand_idx": discard_idx}
-
+            context["additional_cost_to_pay"] = {"type": "discard", "hand_idx": context["discard_idx"]}
+        elif action_type == "CAST_FOR_EMERGE":
+            if "sacrifice_idx" not in context or context["sacrifice_idx"] >= len(player.get("battlefield", [])):
+                logging.error(f"Emerge requires valid 'sacrifice_idx' in context: {context}")
+                return -0.1, False
+            # Get sacrificed creature info for cost reduction calculation
+            sac_idx = context["sacrifice_idx"]
+            sac_id = player["battlefield"][sac_idx]
+            sac_card = gs._safe_get_card(sac_id)
+            if not sac_card or 'creature' not in getattr(sac_card, 'card_types', []):
+                logging.error(f"Emerge sacrifice target index {sac_idx} is not a creature.")
+                return -0.1, False
+            context["additional_cost_to_pay"] = {"type": "sacrifice", "target_id": sac_id}
+            context["sacrificed_cmc"] = getattr(sac_card, 'cmc', 0) # Pass for cost calc
         elif action_type == "CAST_WITH_ESCAPE":
-             source_zone_idx = param # GY index
-             if source_zone_idx is None or source_zone_idx >= len(player[source_zone]): return -0.1, False
-             card_id = player[source_zone][source_zone_idx]
-             # --- ADDED Context Check ---
-             if "gy_indices_escape" not in context or not isinstance(context["gy_indices_escape"], list):
-                  logging.error("Escape requires 'gy_indices_escape' list in context.")
-                  return -0.1, False
-             # --- END Check ---
-             gy_indices_escape = context["gy_indices_escape"]
-             card = gs._safe_get_card(card_id) # Need card to check required exile count
-             required_exile_count = 0
-             # Basic parsing for "exile N other cards"
-             match = re.search(r"exile (\w+|\d+) other cards?", getattr(card, 'oracle_text','').lower())
-             if match: required_exile_count = self._word_to_number(match.group(1))
+            if "gy_indices_escape" not in context or not isinstance(context["gy_indices_escape"], list):
+                logging.error("Escape requires 'gy_indices_escape' list in context.")
+                return -0.1, False
+            card = gs._safe_get_card(card_id)
+            # Check required exile count
+            required_exile_count = 0
+            match = re.search(r"exile (\w+|\d+) other cards?", getattr(card, 'oracle_text','').lower())
+            if match: required_exile_count = self._word_to_number(match.group(1))
+            if required_exile_count <= 0: # Card doesn't define escape exile count?
+                 logging.warning(f"Could not determine required exile count for Escape on {card.name}. Assuming 1.")
+                 required_exile_count = 1
 
-             actual_gy_indices = [idx for idx in gy_indices_escape if idx < len(player["graveyard"])]
-             if len(actual_gy_indices) < required_exile_count:
-                 logging.warning(f"Not enough GY cards selected for Escape ({len(actual_gy_indices)}/{required_exile_count})")
-                 return -0.1, False # Cannot meet cost
-             context["additional_cost_to_pay"] = {"type": "escape_exile", "gy_indices": actual_gy_indices[:required_exile_count]} # Slice to exact required
+            # Validate provided indices against count and GY contents
+            actual_gy_indices = [idx for idx in context["gy_indices_escape"] if idx < len(player["graveyard"])]
+            if len(actual_gy_indices) < required_exile_count:
+                logging.warning(f"Not enough valid GY indices provided for Escape ({len(actual_gy_indices)}/{required_exile_count})")
+                return -0.1, False
+            # Pass *validated and sliced* indices for cost payment
+            context["additional_cost_to_pay"] = {"type": "escape_exile", "gy_indices": actual_gy_indices[:required_exile_count]}
+        elif action_type == "CAST_FOR_DELVE":
+             if "gy_indices" not in context or not isinstance(context["gy_indices"], list):
+                 logging.error("Delve requires 'gy_indices' list in context.")
+                 return -0.1, False
+             actual_gy_indices = [idx for idx in context["gy_indices"] if idx < len(player["graveyard"])]
+             context["additional_cost_to_pay"] = {"type": "delve", "gy_indices": actual_gy_indices}
+             context["delve_count"] = len(actual_gy_indices) # Pass for cost calculation
 
-        else: # Flashback, Aftermath
-             source_zone = "graveyard" # Both from GY
-             source_zone_idx = param # Param is the index in the source zone (GY)
-             if source_zone_idx is None or source_zone_idx >= len(player[source_zone]): return -0.1, False
-             card_id = player[source_zone][source_zone_idx]
-             # Aftermath may need specific half selection if implemented differently
-             if action_type == "AFTERMATH_CAST":
-                  context["cast_right_half"] = True # Assume aftermath is always right half
-
-        if not card_id: return -0.2, False
-
-        # --- Prepare for casting (Remove from source) ---
-        # cast_spell handles this using context["source_zone"]
-        context["source_zone"] = source_zone
-        # Pass hand index if relevant
-        if hand_idx_param is not None: context['hand_idx'] = hand_idx_param
-        if source_zone_idx is not None: context['source_idx'] = source_zone_idx
+        if action_type == "AFTERMATH_CAST":
+            context["cast_right_half"] = True # Assume Aftermath always casts right half
 
 
-        # --- Cast the spell ---
-        # cast_spell now needs to handle paying additional non-mana costs from context['additional_cost_to_pay']
-        # *before* paying the mana cost.
+        # --- Cast the spell using GameState ---
+        # cast_spell now handles paying additional non-mana costs from context['additional_cost_to_pay']
         success = gs.cast_spell(card_id, player, context=context)
 
         if success:
-            # Clear madness trigger state if successful
-            if action_type == "CAST_FOR_MADNESS": gs.madness_trigger = None
-            return 0.25, True
+            if action_type == "CAST_FOR_MADNESS":
+                gs.madness_trigger = None # Clear state if cast successfully
+            # Calculate reward
+            card_value = 0.25 # Base reward for successful alt cast
+            if self.card_evaluator:
+                 eval_context = {"situation": f"cast_{alt_cost_name}"}
+                 eval_context.update(context) # Pass cast context to evaluator
+                 card_value += self.card_evaluator.evaluate_card(card_id, "play", context_details=eval_context) * 0.2
+            return card_value, True
         else:
-            logging.warning(f"Alternative cast failed for {action_type} {card_id}")
-            # Rollback handled by cast_spell ideally
+            logging.warning(f"Alternative cast failed for {action_type} {card_id}. Handled by gs.cast_spell.")
+            # Rollback should be handled by cast_spell if payment failed partially
             return -0.1, False
 
     def _handle_cast_split(self, param, action_type, **kwargs):
@@ -4430,13 +4746,16 @@ class ActionHandler:
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
         hand_idx = param # Param is hand index
+        context = kwargs.get('context', {}) # Use context passed in
 
         if hand_idx < len(player["hand"]):
             card_id = player["hand"][hand_idx]
             card = gs._safe_get_card(card_id)
             if not card: return -0.2, False
 
-            context = {"source_zone": "hand"} # Provide source zone
+            # Update context based on action_type
+            context["source_zone"] = "hand"
+            context["hand_idx"] = hand_idx # Add hand_idx for clarity
             if action_type == "CAST_LEFT_HALF": context["cast_left_half"] = True
             elif action_type == "CAST_RIGHT_HALF": context["cast_right_half"] = True
             elif action_type == "CAST_FUSE": context["fuse"] = True
@@ -4448,8 +4767,9 @@ class ActionHandler:
             if gs.cast_spell(card_id, player, context=context):
                 return 0.15 + card_value * 0.2, True # Base reward + value mod
             else:
-                return -0.1, False
-        return -0.2, False
+                 logging.warning(f"Cast split failed ({action_type}) for {card_id}. Handled by gs.cast_spell.")
+                 return -0.1, False
+        return -0.2, False # Invalid hand index
 
     # --- Combat Handler Wrappers ---
     def _handle_declare_attackers_done(self, param, **kwargs):
@@ -4561,6 +4881,7 @@ class ActionHandler:
         return reward
     
     def _get_escalate_cost_str(self, card):
+        """Helper to extract escalate cost string."""
         if card and hasattr(card, 'oracle_text'):
              match = re.search(r"escalate\s*(\{.*?\})", card.oracle_text.lower())
              if match: return match.group(1)

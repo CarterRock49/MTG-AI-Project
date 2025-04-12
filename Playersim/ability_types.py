@@ -84,24 +84,59 @@ class Ability:
             return self._resolve_simple_targeting(game_state, controller, text_for_targeting)
 
     def _resolve_ability_implementation(self, game_state, controller, targets=None):
-        """Ability-specific implementation of resolution. Uses EffectFactory if not overridden."""
-        # logging.warning(f"Default ability resolution used for {self.effect_text}")
-        # Default: Create effects from the primary effect text and apply them
+        """Ability-specific implementation of resolution. Uses EffectFactory and handles sequences."""
         effect_text_to_use = getattr(self, 'effect', getattr(self, 'effect_text', None))
         if not effect_text_to_use:
-            logging.error(f"Cannot resolve ability implementation for {self.card_id}: Missing effect text.")
+            logging.error(f"Cannot resolve triggered ability implementation for {self.card_id}: Missing effect text.")
             return False
 
+        # Special handling for specific sequenced keywords like Living Weapon
+        if getattr(self, 'keyword', None) == 'living weapon':
+            # Sequence: Create Germ, then Attach
+            logging.debug(f"Resolving Living Weapon for {self.card_id}")
+            # 1. Create Germ Token
+            germ_token_data = {"name": "Phyrexian Germ", "power": 0, "toughness": 0, "card_types":["creature"], "subtypes":["Phyrexian", "Germ"], "colors":[0,0,1,0,0]} # Black
+            created_token_id = None
+            if hasattr(game_state, 'create_token'):
+                created_token_id = game_state.create_token(controller, germ_token_data)
+            else: # Fallback
+                token_id = f"TOKEN_Germ_{random.randint(1000,9999)}"
+                germ_token_data['is_token'] = True
+                new_token = Card(germ_token_data)
+                new_token.card_id = token_id
+                game_state.card_db[token_id] = new_token
+                controller.setdefault("tokens",[]).append(token_id)
+                controller["battlefield"].append(token_id)
+                created_token_id = token_id
+                game_state.trigger_ability(created_token_id, "ENTERS_BATTLEFIELD", {"controller": controller})
+
+            # 2. Attach Equipment (self.card_id) to the token
+            if created_token_id:
+                if hasattr(game_state, 'equip_permanent'):
+                     # No cost associated with Living Weapon attachment
+                     if game_state.equip_permanent(controller, self.card_id, created_token_id, bypass_cost=True):
+                          logging.debug(f"Living Weapon: Attached {self.card_id} to Germ token {created_token_id}.")
+                          return True
+                     else:
+                          logging.warning(f"Living Weapon: Failed to attach {self.card_id} to Germ token {created_token_id}.")
+                          return False # Attachment failed
+                else:
+                     logging.warning("Living Weapon: GameState missing 'equip_permanent' method.")
+                     return False
+            else:
+                logging.warning(f"Living Weapon: Failed to create Germ token for {self.card_id}.")
+                return False # Token creation failed
+
+        # Default: Use EffectFactory for other triggers
         effects = self._create_ability_effects(effect_text_to_use, targets)
         if not effects:
-            logging.warning(f"No effects created for ability: {effect_text_to_use}")
+            logging.warning(f"No effects created for triggered ability: {effect_text_to_use}")
             return False
 
         success = True
         for effect_obj in effects:
             if not effect_obj.apply(game_state, self.card_id, controller, targets):
                  success = False # Mark failure if any effect fails, but try others
-
         return success
 
 
@@ -2301,59 +2336,88 @@ class UntapEffect(AbilityEffect):
 
         return untapped_count > 0
 
+
 class ScryEffect(AbilityEffect):
     def __init__(self, count=1, condition=None):
         super().__init__(f"Scry {count}", condition)
         self.count = count
 
     def _apply_effect(self, game_state, source_id, controller, targets):
-        """Initiate the scry process."""
+        """Initiate the scry process by setting the game state."""
         if not controller or "library" not in controller or not controller["library"]:
             logging.debug(f"Cannot Scry: Player {controller.get('name', 'Unknown')} or library invalid.")
             return False # Cannot scry with no library
 
-        # Use GameState method if it exists for cleaner handling
-        if hasattr(game_state, 'scry') and callable(game_state.scry):
-            return game_state.scry(controller, self.count)
-        else:
-            # Fallback basic logic (no actual choice phase) - Set state for external handling
-            logging.warning("ScryEffect: GameState.scry method not found, using basic fallback.")
-            count = min(self.count, len(controller["library"]))
-            if count <= 0: return True # Scry 0 is valid, does nothing
+        count = min(self.count, len(controller["library"]))
+        if count <= 0: return True # Scry 0 is valid, does nothing
 
-            # Reveal cards temporarily (conceptually)
-            scried_cards = controller["library"][:count]
-            if not scried_cards: return False # Should not happen if count > 0 and library not empty
+        scried_cards = controller["library"][:count]
+        if not scried_cards: return False # Should not happen
 
-            logging.debug(f"(Fallback) Scry: Player {controller['name']} looking at {count} cards.")
+        # --- Set up state for external AI/ActionHandler to make choices ---
+        # Store previous phase if not already in a special choice phase
+        if game_state.phase not in [game_state.PHASE_CHOOSE, game_state.PHASE_TARGETING, game_state.PHASE_SACRIFICE]:
+            game_state.previous_priority_phase = game_state.phase
 
-            # --- Set up state for external AI/ActionHandler to make choices ---
-            # Assume gs.scry_in_progress exists from __slots__
-            game_state.scry_in_progress = True
-            game_state.scrying_player = controller
-            # Store cards being looked at (need temporary holding zone or tracking)
-            # Remove from library temporarily
-            controller["library"] = controller["library"][count:]
-            game_state.scrying_cards = scried_cards # Store IDs being scryed
-            game_state.scrying_tops = []
-            game_state.scrying_bottoms = []
-            # Set phase to Choice Phase to prompt action
-            game_state.previous_priority_phase = game_state.phase # Store current phase
-            game_state.phase = game_state.PHASE_CHOOSE
-            game_state.choice_context = {
-                'type': 'scry',
-                'player': controller,
-                'count': count, # Total to scry
-                'remaining': count, # Number yet to decide on
-                'cards': scried_cards[:], # Copy for modification
-                'source_id': source_id
-            }
-            # Clear priority passing
-            game_state.priority_pass_count = 0
-            game_state.priority_player = controller # Scrying player has priority to choose
+        game_state.phase = game_state.PHASE_CHOOSE
+        # Create context for the choice
+        game_state.choice_context = {
+            'type': 'scry',
+            'player': controller,
+            'count': count, # Original scry number
+            'cards': scried_cards[:], # Copy of cards being looked at (list can be modified)
+            'kept_on_top': [], # Store IDs player chooses to keep on top
+            'put_on_bottom': [], # Store IDs player chooses to put on bottom
+            'source_id': source_id,
+            'resolved': False # Flag to indicate choice processing is complete
+        }
+        # Clear priority passing and set priority to the choosing player
+        game_state.priority_pass_count = 0
+        game_state.priority_player = controller # Scrying player has priority to choose
 
-            logging.debug(f"Entered Scry choice phase for {controller['name']} ({count} cards).")
-            return True # Initiated scry choice process
+        logging.info(f"Entering Scry choice phase for {controller['name']} ({count} cards: {[getattr(game_state._safe_get_card(cid), 'name', cid) for cid in scried_cards]}).")
+        return True # Initiated scry choice process successfully
+
+class SurveilEffect(AbilityEffect):
+    def __init__(self, count=1, condition=None):
+        super().__init__(f"Surveil {count}", condition)
+        self.count = count
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        """Initiate the surveil process by setting the game state."""
+        if not controller or "library" not in controller or not controller["library"]:
+            logging.debug(f"Cannot Surveil: Player {controller.get('name', 'Unknown')} or library invalid.")
+            return False # Cannot surveil with no library
+
+        count = min(self.count, len(controller["library"]))
+        if count <= 0: return True # Surveil 0 is valid, does nothing
+
+        surveiled_cards = controller["library"][:count]
+        if not surveiled_cards: return False
+
+        # --- Set up state for external AI/ActionHandler to make choices ---
+        # Store previous phase
+        if game_state.phase not in [game_state.PHASE_CHOOSE, game_state.PHASE_TARGETING, game_state.PHASE_SACRIFICE]:
+            game_state.previous_priority_phase = game_state.phase
+
+        game_state.phase = game_state.PHASE_CHOOSE
+        # Create context
+        game_state.choice_context = {
+            'type': 'surveil',
+            'player': controller,
+            'count': count,
+            'cards': surveiled_cards[:], # Copy of cards to process
+            'kept_on_top': [], # Unused for surveil, kept for potential future compatibility?
+            'put_in_graveyard': [], # Track cards put in graveyard
+            'source_id': source_id,
+            'resolved': False
+        }
+        # Clear priority passing and set priority to the choosing player
+        game_state.priority_pass_count = 0
+        game_state.priority_player = controller
+
+        logging.info(f"Entering Surveil choice phase for {controller['name']} ({count} cards: {[getattr(game_state._safe_get_card(cid), 'name', cid) for cid in surveiled_cards]}).")
+        return True # Initiated surveil choice process successfully
 
 class LifeDrainEffect(AbilityEffect):
     def __init__(self, amount=1, target="opponent", gain_target="controller", condition=None):

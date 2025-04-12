@@ -553,38 +553,6 @@ class LayerSystem:
                     if ids and isinstance(ids, (list, set)):
                          affected_card_ids.update(ids)
         return affected_card_ids
-    
-    def _calculate_layer1_copy(self, effect_data, calculated_characteristics):
-        source_to_copy_id = effect_data.get('effect_value')
-        if not source_to_copy_id: return
-        source_to_copy_card = self.game_state._safe_get_card(source_to_copy_id)
-        if not source_to_copy_card: return
-
-        for target_id in effect_data.get('affected_ids', []):
-            if target_id in calculated_characteristics:
-                 logging.debug(f"Layer 1: Applying copy of {source_to_copy_card.name} to {target_id}")
-                 # Apply copyable values based on Rule 707.2
-                 import copy
-                 target_chars = calculated_characteristics[target_id]
-                 source_attrs = source_to_copy_card.__dict__ # Simple way, assumes no slots
-
-                 copyable_attrs = ['name', 'mana_cost', 'colors', 'card_types', 'subtypes', 'supertypes', 'oracle_text', 'power', 'toughness', 'loyalty']
-                 for attr in copyable_attrs:
-                     if hasattr(source_to_copy_card, attr):
-                         value = getattr(source_to_copy_card, attr)
-                         # Deep copy lists/dicts
-                         target_chars[attr] = copy.deepcopy(value) if isinstance(value, (list, dict)) else value
-
-                 # Reset non-copyable aspects implicit in the copy action
-                 # Note: Status (tapped, counters, etc.) aren't part of copy effect itself
-                 # But derived properties might change:
-                 target_chars['_base_power'] = target_chars.get('power', 0)
-                 target_chars['_base_toughness'] = target_chars.get('toughness', 0)
-                 # Recalculate type line potentially
-                 target_chars['type_line'] = self.game_state._build_type_line(target_chars) # Assume GS has helper
-                 target_chars['_granted_abilities'] = set()
-                 target_chars['_removed_abilities'] = set()
-
 
         
     def _sort_layer_effects(self, layer_num, effects, sublayer=None):
