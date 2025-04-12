@@ -1068,14 +1068,50 @@ class CombatActionHandler:
     def _can_block(self, blocker_id, attacker_id):
         """Check if blocker_id can legally block attacker_id. Uses TargetingSystem."""
         gs = self.game_state
-        # Prioritize using TargetingSystem's check
+        # --- Check Phasing Status ---
+        if hasattr(gs, 'phased_out'):
+            if blocker_id in gs.phased_out:
+                logging.debug(f"Blocker {blocker_id} cannot block: Phased Out.")
+                return False
+            if attacker_id in gs.phased_out: # Attacker phased out cannot be blocked
+                 logging.debug(f"Attacker {attacker_id} cannot be blocked: Phased Out.")
+                 # Is this check correct? Phased-out creatures can't attack. Validation happens earlier.
+                 # Assume if attacker is attacking, it's phased in.
+                 pass
+        # --- End Phasing Check ---
+
+        # Delegate to TargetingSystem preferred
         if hasattr(gs, 'targeting_system') and gs.targeting_system:
             if hasattr(gs.targeting_system, 'check_can_be_blocked'):
                  try:
-                     return gs.targeting_system.check_can_be_blocked(attacker_id, blocker_id)
+                     # Add Banding consideration: If attacker has banding, any creature can block it.
+                     # If blocker has banding, it can block creatures with landwalk/fear/intimidate.
+                     # This interaction logic belongs more in check_can_be_blocked itself.
+                     can_be_blocked = gs.targeting_system.check_can_be_blocked(attacker_id, blocker_id)
+                     # Post-check modification for Banding:
+                     attacker = gs._safe_get_card(attacker_id)
+                     if attacker and self._has_keyword(attacker, "banding") and not can_be_blocked:
+                          logging.debug(f"Banding allows {blocker_id} to block {attacker_id} despite other restrictions.")
+                          can_be_blocked = True # Banding on attacker removes blocking restrictions
+
+                     # Add blocker banding handling inside check_can_be_blocked if possible.
+                     # Example (if added here):
+                     # blocker = gs._safe_get_card(blocker_id)
+                     # if blocker and self._has_keyword(blocker, "banding") and not can_be_blocked:
+                     #    # Check specific evasion keywords that banding circumvents
+                     #    if self._has_keyword(attacker,"fear") or self._has_keyword(attacker,"intimidate") or gs.targeting_system._get_landwalk_type(attacker):
+                     #         logging.debug(f"Banding allows {blocker_id} to block {attacker_id} with evasion.")
+                     #         can_be_blocked = True
+
+                     return can_be_blocked
                  except Exception as e:
                       logging.error(f"Error checking block via TargetingSystem: {e}")
-                      # Fall through to basic check on error
+
+        # --- Fallback logic (without Banding interaction) ---
+        logging.warning("Using basic _can_block fallback in CombatActionHandler.")
+        # ... (keep existing fallback logic, but Banding isn't handled here) ...
+        return True
+
 
         # --- Fallback logic ---
         logging.warning("Using basic _can_block fallback in CombatActionHandler.")

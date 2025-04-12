@@ -35,36 +35,35 @@ class GameState:
                  "adventure_cards", "saga_counters", "mdfc_cards", "battle_cards",
                  "cards_castable_from_exile", "cast_as_back_face",
                  # Additional slots for various tracking variables
-                 "phased_out",
-                 "suspended_cards", # <-- Added Suspend tracking
+                 "phased_out", # Keep for Phasing
+                 "suspended_cards", # Keep for Suspend
                  "kicked_cards", "evoked_cards",
                  "foretold_cards", "blitz_cards", "dash_cards", "unearthed_cards",
                  "jump_start_cards", "buyback_cards", "flashback_cards",
                  "life_gained_this_turn", "damage_this_turn", "exile_at_end_of_combat",
                  "haste_until_eot", "has_haste_until_eot", "progress_was_forced",
                  "_turn_limit_checked", "miracle_card", "miracle_cost", "miracle_player",
-                 "miracle_active", "miracle_card_id", "miracle_cost_parsed", # Added miracle state
+                 "miracle_active", "miracle_card_id", "miracle_cost_parsed",
                  # New tracking variables
-                 "split_second_active", # <-- Added Split Second flag
-                 "rebounded_cards", # <-- Added Rebound tracking
-                 "banding_creatures",
+                 "split_second_active",
+                 "rebounded_cards", # Keep for Rebound
+                 "banding_creatures", # Keep for Banding (maybe handled differently)
                  "crewed_vehicles", "morphed_cards", "manifested_cards",
                  "cards_to_graveyard_this_turn",
                  "boast_activated", "forecast_used", "epic_spells", "city_blessing",
                  "myriad_tokens", "persist_returned", "undying_returned", "gravestorm_count",
+                 "madness_cast_available", # Keep for Madness
                  # Context slots
                  "targeting_context", "sacrifice_context", "choice_context",
                  "mulligan_in_progress", "mulligan_player", "mulligan_count",
                  "bottoming_in_progress", "bottoming_player", "cards_to_bottom", "bottoming_count",
                  "spree_context",
                  "dredge_pending",
-                 "madness_trigger", # <-- Added Madness trigger state
+                 "madness_trigger", # Keep for Madness
                  "pending_spell_context", "clash_context",
                  "surveil_in_progress", "cards_being_surveiled", "surveiling_player", # Surveil state
                  "scry_in_progress", "scrying_cards", "scrying_player", "scrying_tops", "scrying_bottoms" # Scry state
                  ]
-
-
     # Define phase names consistently within the class
     # Updated with missing phases and explicit mappings
     PHASE_UNTAP = 0
@@ -314,90 +313,61 @@ class GameState:
 
     def _init_tracking_variables(self):
         """Initialize all game state tracking variables with proper defaults."""
-        # Initialize turn tracking
-        self.spells_cast_this_turn = []
-        self.attackers_this_turn = set()
-        self.damage_dealt_this_turn = {}
-        self.cards_drawn_this_turn = {"p1": 0, "p2": 0}
-        self.life_gained_this_turn = {}
-        self.damage_this_turn = {}
-
-        # Initialize special card state tracking
-        self.adventure_cards = set()
-        self.saga_counters = {}
-        self.mdfc_cards = set()
-        self.battle_cards = {}
-        self.cards_castable_from_exile = set()
-        self.cast_as_back_face = set()
-
-        # Initialize effect tracking
-        self.until_end_of_turn_effects = {}
-        self.temp_control_effects = {}
-
-        # Initialize phase tracking
-        self._phase_history = []
-        self._phase_action_count = 0
-        self.progress_was_forced = False
-
-        # Initialize abilities activated tracking
-        self.abilities_activated_this_turn = []
-
-        # Initialize special state tracking
-        self.phased_out = set()
-        self.suspended_cards = {} # Initialize suspend tracking
+        # Player Independent Tracking
+        self.day_night_state = None
+        self.day_night_checked_this_turn = False
+        self.split_second_active = False
+        self.phased_out = set() # Stores IDs of phased-out permanents
+        self.suspended_cards = {} # {card_id: {'player': P, 'counters': N, 'cost': STR}}
+        self.rebounded_cards = {} # {card_id: {'owner': P, 'turn_exiled': T}}
+        self.madness_cast_available = None # {card_id: {'player': P, 'cost': STR}} - holds ONE opportunity
+        self.madness_trigger = None # Used internally during discard resolution
+        self.miracle_card_id = None
+        self.miracle_cost = None
+        self.miracle_player = None
+        self.miracle_active = False
+        self.miracle_cost_parsed = None
         self.kicked_cards = set()
         self.evoked_cards = set()
-        self.foretold_cards = set()
+        self.foretold_cards = {} # {card_id: {'turn': T}}
         self.blitz_cards = set()
         self.dash_cards = set()
         self.unearthed_cards = set()
         self.jump_start_cards = set()
         self.buyback_cards = set()
         self.flashback_cards = set()
+        self.adventure_cards = set()
         self.exile_at_end_of_combat = []
-        self.haste_until_eot = set()
-        self.has_haste_until_eot = set()
-        self._turn_limit_checked = False
-        self.miracle_card = None
-        self.miracle_cost = None
-        self.miracle_player = None
-        self.miracle_active = False
-        self.miracle_card_id = None
-        self.miracle_cost_parsed = None
-
-        # Initialize new tracking variables
-        self.split_second_active = False # Initialize split second flag
-        self.rebounded_cards = {} # Initialize rebound tracking
-        self.banding_creatures = set()
+        self.haste_until_eot = set() # Use only this one for consistency
         self.crewed_vehicles = set()
         self.morphed_cards = {}
-        self.manifested_cards = {} # Added reset
-        self.cards_to_graveyard_this_turn = {} # Reset here, populate on turn advance
-        self.boast_activated = set()
-        self.forecast_used = set()
+        self.manifested_cards = {}
         self.epic_spells = {}
-        self.city_blessing = {}
         self.myriad_tokens = []
         self.persist_returned = set()
         self.undying_returned = set()
-        self.gravestorm_count = 0
+        self.banding_creatures = set() # Track creatures currently in bands
 
-        # Context slots
+        # Turn-based tracking (resets each turn usually)
+        self.spells_cast_this_turn = []
+        self.attackers_this_turn = set()
+        self.damage_dealt_this_turn = {}
+        self.cards_drawn_this_turn = {} # Initialize as empty, will be populated like {'p1': 0, 'p2': 0}
+        self.life_gained_this_turn = {}
+        self.damage_this_turn = {}
+        self.cards_to_graveyard_this_turn = {} # {turn_num: [card_ids]}
+        self.gravestorm_count = 0
+        self.boast_activated = set()
+        self.forecast_used = set()
+
+        # Context slots (reset before action handling)
         self.targeting_context = None
         self.sacrifice_context = None
         self.choice_context = None
-        self.mulligan_in_progress = True # Assume true initially
-        self.mulligan_player = None # Set after players init
-        self.mulligan_count = {'p1': 0, 'p2': 0} # Reset
-        self.bottoming_in_progress = False
-        self.bottoming_player = None
-        self.cards_to_bottom = 0
-        self.bottoming_count = 0
-        self.spree_context = None
-        self.dredge_pending = None
-        self.madness_trigger = None # Initialize madness trigger state
         self.pending_spell_context = None
         self.clash_context = None
+        self.dredge_pending = None
+        self.spree_context = None
 
         # Surveil/Scry state
         self.surveil_in_progress = False
@@ -409,13 +379,68 @@ class GameState:
         self.scrying_tops = []
         self.scrying_bottoms = []
 
-        # Initialize logging trackers
-        if not hasattr(self, '_logged_card_ids'):
-            type(self)._logged_card_ids = set()
-        if not hasattr(self, '_logged_errors'):
-            type(self)._logged_errors = set()
+        # Game state flags (can be reset or carried over)
+        self.combat_damage_dealt = False
+        self.progress_was_forced = False
+        self._turn_limit_checked = False
 
-        logging.debug("Initialized all tracking variables")
+        # Internal tracking/logging flags (reset for new game)
+        self._logged_card_ids = set()
+        self._logged_errors = set()
+        self.previous_priority_phase = None
+
+        # Effect Tracking (can be reset)
+        self.until_end_of_turn_effects = {} # Tracking specific effects
+        self.temp_control_effects = {} # {card_id: original_controller}
+
+        # Saga and Battle counters
+        self.saga_counters = {} # {card_id: chapter_num}
+        self.battle_cards = {} # {card_id: defense_counters}
+
+        # Cast Tracking
+        self.cards_castable_from_exile = set()
+        self.cast_as_back_face = set()
+
+        # Other state tracking
+        self.mdfc_cards = set() # Tracks MDFCs on battlefield/stack?
+        self.abilities_activated_this_turn = [] # List of (card_id, ability_idx) tuples
+
+        # Player state based tracking (reset inside player dicts)
+        for player in [self.p1, self.p2]:
+            if player:
+                 player["land_played"] = False
+                 player["entered_battlefield_this_turn"] = set()
+                 player["activated_this_turn"] = set()
+                 player["pw_activations"] = {}
+                 player["lost_life_this_turn"] = False
+                 player["attempted_draw_from_empty"] = False
+                 player["poison_counters"] = 0
+                 player["experience_counters"] = 0
+                 player["energy_counters"] = 0
+                 player["city_blessing"] = False
+                 player["monarch"] = False
+                 player["damage_counters"] = {}
+                 player["deathtouch_damage"] = set()
+                 player["loyalty_counters"] = {}
+                 # player["saga_counters"] = {} # Moved to game level
+                 player["attachments"] = {}
+                 player["championed_cards"] = {}
+                 player["ciphered_spells"] = {}
+                 player["haunted_by"] = {}
+                 player["hideaway_cards"] = {}
+                 player["mutation_stacks"] = {}
+                 player["regeneration_shields"] = set()
+                 player["lost_game"] = False
+                 player["won_game"] = False
+                 player["game_draw"] = False
+                 player["skip_end_step_trigger"] = set()
+                 player["phased_out_permanents"] = set()
+                 # Reset mana pools
+                 player["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
+                 player["conditional_mana"] = {}
+                 player["phase_restricted_mana"] = {}
+
+        logging.debug("Initialized/Reset all tracking variables")
 
     def initialize_day_night_cycle(self):
         """Initialize the day/night cycle state and tracking."""
@@ -434,151 +459,78 @@ class GameState:
 
         # Reset basic game state
         self.turn = 1
-        self.phase = self.PHASE_UNTAP
+        self.phase = self.PHASE_UNTAP # Start at UNTAP phase
         self.combat_damage_dealt = False
         self.stack = []
         self.priority_pass_count = 0
         self.last_stack_size = 0
         self._phase_action_count = 0
         self._phase_history = [] # Explicit reset
-        self.initialize_day_night_cycle()
+        self.optimal_attackers = None
+        self.attack_suggestion_used = False
         self.cards_played = {0: [], 1: []} # Explicit reset
 
-        # Explicitly reset mutable tracking structures before player init
-        # Combat
-        self.current_attackers = []
-        self.current_block_assignments = {}
-        # Effect/State Tracking
-        self.adventure_cards = set()
-        self.saga_counters = {}
-        self.mdfc_cards = set()
-        self.battle_cards = {}
-        self.cards_castable_from_exile = set()
-        self.cast_as_back_face = set()
-        self.until_end_of_turn_effects = {}
-        self.temp_control_effects = {}
-        self.abilities_activated_this_turn = []
-        self.spells_cast_this_turn = []
-        self.attackers_this_turn = set()
-        self.cards_to_graveyard_this_turn = {} # Reset here, populate on turn advance
-        self.damage_dealt_this_turn = {}
-        self.cards_drawn_this_turn = {} # Reset here, populate on turn advance
-        self.life_gained_this_turn = {}
-        self.damage_this_turn = {}
-        self.phased_out = set()
-        self.suspended_cards = {}
-        self.kicked_cards = set()
-        self.evoked_cards = set()
-        self.foretold_cards = set()
-        self.blitz_cards = set()
-        self.dash_cards = set()
-        self.unearthed_cards = set()
-        self.jump_start_cards = set()
-        self.buyback_cards = set()
-        self.flashback_cards = set()
-        self.exile_at_end_of_combat = []
-        self.haste_until_eot = set()
-        self.has_haste_until_eot = set()
-        self.rebounded_cards = {}
-        self.banding_creatures = set()
-        self.crewed_vehicles = set()
-        self.morphed_cards = {}
-        self.manifested_cards = {} # Added reset
-        self.boast_activated = set()
-        self.forecast_used = set()
-        self.epic_spells = {}
-        self.city_blessing = {}
-        self.myriad_tokens = []
-        self.persist_returned = set()
-        self.undying_returned = set()
-        self.gravestorm_count = 0
-        self.split_second_active = False
+        # Initialize player states AFTER resetting other state
+        self.p1 = self._init_player(p1_deck)
+        self.p2 = self._init_player(p2_deck)
+        # Assign names after init
+        if self.p1: self.p1['name'] = 'Player 1'
+        if self.p2: self.p2['name'] = 'Player 2'
 
-        # Contexts
-        self.targeting_context = None
-        self.sacrifice_context = None
-        self.choice_context = None
-        self.spree_context = None
-        self.dredge_pending = None
-        self.pending_spell_context = None
-        self.clash_context = None
-        self.surveil_in_progress = False
-        self.cards_being_surveiled = []
-        self.surveiling_player = None
-        self.scry_in_progress = False
-        self.scrying_cards = []
-        self.scrying_player = None
-        self.scrying_tops = []
-        self.scrying_bottoms = []
+        # Set initial priority player and agent identity AFTER player init
+        self.priority_player = self.p1 # P1 starts with priority
+        self.agent_is_p1 = True # Assume agent is P1 by default unless configured otherwise
 
-        # Mulligan state
-        self.mulligan_in_progress = True
-        self.mulligan_player = None # Set after player init
-        self.mulligan_count = {'p1': 0, 'p2': 0} # Reset
-        self.mulligan_data = {'p1': 0, 'p2': 0} # Explicit reset
+        # Initialize all tracking variables using the helper
+        # This resets keyword states, contexts, turn trackers, etc.
+        self._init_tracking_variables()
+
+        # Initialize Day/Night Cycle
+        self.initialize_day_night_cycle() # Call after tracking vars init
+
+        # Initialize mulligan state correctly AFTER players exist
+        self.mulligan_in_progress = True # Start with mulligan phase
+        self.mulligan_player = self.p1 # P1 mulligans first
+        self.mulligan_count = {'p1': 0, 'p2': 0} # Reset counts
+        self.mulligan_data = {'p1': 0, 'p2': 0} # Reset separate tracker
         self.bottoming_in_progress = False
         self.bottoming_player = None
         self.cards_to_bottom = 0
         self.bottoming_count = 0
 
-        # Miracle State
-        self.miracle_card = None
-        self.miracle_cost = None
-        self.miracle_player = None
-        self.miracle_active = False
-        self.miracle_card_id = None
-        self.miracle_cost_parsed = None
+        # Initialize subsystems (must happen AFTER base state and players)
+        # Create fresh instances linked to 'self' (this GameState instance)
+        self._init_subsystems()
 
-        # Optimizations
-        self.optimal_attackers = None
-        self.attack_suggestion_used = False
-
-        # Other internal flags
-        self.progress_was_forced = False
-        self._turn_limit_checked = False
-        self._logged_card_ids = set()
-        self._logged_errors = set()
-
-        # Initialize player states AFTER resetting other state
-        self.p1 = self._init_player(p1_deck)
-        self.p2 = self._init_player(p2_deck)
-        self.mulligan_player = self.p1 # Set mulligan player after p1 exists
-
-        # Set initial priority player
-        self.priority_player = self.p1 # P1 starts with priority (or after mulligans)
-
-        # --- Subsystem Initialization ---
-        # Must happen AFTER base state and players are initialized
-        # Keep subsystems as None initially if they fail
-        self.mana_system = None
-        self.combat_resolver = None
-        self.card_evaluator = None
-        self.strategic_planner = None
-        # External systems (references only)
-        self.strategy_memory = getattr(self, 'strategy_memory', None) # Keep if already set
+        # Link external systems if they were passed or previously set
+        # Ensure subsystems have access to these if needed
+        self.strategy_memory = getattr(self, 'strategy_memory', None)
         self.stats_tracker = getattr(self, 'stats_tracker', None)
         self.card_memory = getattr(self, 'card_memory', None)
-        # Internal subsystems
-        self.ability_handler = None
-        self.layer_system = None
-        self.replacement_effects = None
-        self.targeting_system = None
+        if self.card_evaluator:
+             self.card_evaluator.stats_tracker = self.stats_tracker
+             self.card_evaluator.card_memory = self.card_memory
+        # Link Strategy Memory to Planner if both exist
+        if self.strategic_planner and self.strategy_memory:
+             self.strategic_planner.strategy_memory = self.strategy_memory
 
-        # Initialize subsystems which creates the instances
-        self._init_subsystems() # Now populates the attributes above
+        # Final setup calls if subsystems exist
+        if self.strategic_planner and hasattr(self.strategic_planner, 'init_after_reset'):
+            self.strategic_planner.init_after_reset()
 
-        # Initialize turn tracking specifically
-        self.initialize_turn_tracking() # Call after subsystems might be needed
+        if self.ability_handler and hasattr(self.ability_handler, '_initialize_abilities'):
+             logging.debug("Initializing card abilities via AbilityHandler.")
+             # Make sure card_db is properly set up before initializing abilities
+             if isinstance(self.card_db, dict) and self.card_db:
+                 self.ability_handler._initialize_abilities() # Parse abilities from DB
+             else:
+                 logging.error("Cannot initialize abilities: card_db is not a valid dictionary.")
 
-        # Final setup calls
-        if self.strategic_planner:
-            if hasattr(self.strategic_planner, 'init_after_reset'):
-                self.strategic_planner.init_after_reset()
-        # Re-register effects from permanents (if any were placed initially - rare)
-        # for player in [self.p1, self.p2]:
-        #     for card_id in player['battlefield']:
-        #         self._register_card_effects(card_id, self._safe_get_card(card_id), player)
-        # Logging moved to Environment level reset for better context
+        # Initial Layer application to set base characteristics correctly
+        if self.layer_system:
+            logging.debug("Applying initial layer effects after reset.")
+            self.layer_system.apply_all_effects()
+
         logging.debug("GameState reset complete.")
     
     def _init_player(self, deck):
@@ -682,13 +634,75 @@ class GameState:
             self.mulligan_data['p2'] += count
     
     def _untap_phase(self, player):
-        """Reset mana and untap all permanents at the beginning of turn."""
+        """Reset mana and untap all permanents, handling Phasing."""
+        # --- Phasing ---
+        # 1. Phase In Permanents that should return
+        if hasattr(self, 'phased_out'):
+            permanents_phasing_in = []
+            # Check player's phased-out permanents first
+            player_phased_out = player.get("phased_out_permanents", set())
+            for card_id in list(player_phased_out): # Iterate copy
+                 if card_id in self.phased_out: # Confirm it's in global set
+                      # Phase in logic: Remove from phased out, add to battlefield (untapped)
+                      self.phased_out.remove(card_id)
+                      player_phased_out.remove(card_id)
+                      if card_id not in player.get("battlefield", []): # Avoid duplicates if already there somehow
+                           player["battlefield"].append(card_id)
+                           # Remove from tapped state (enters untapped)
+                           player.get("tapped_permanents", set()).discard(card_id)
+                           card = self._safe_get_card(card_id)
+                           logging.debug(f"Phased in: {getattr(card, 'name', card_id)}")
+                           self.trigger_ability(card_id, "PHASED_IN", {"controller": player})
+                           permanents_phasing_in.append(card_id)
+
+        # 2. Check Permanents with Phasing on Battlefield
+        permanents_phasing_out = []
+        for card_id in list(player.get("battlefield",[])): # Iterate copy
+             card = self._safe_get_card(card_id)
+             # Check keyword via Layer System result preferred
+             if card and self.check_keyword(card_id, "phasing"):
+                 permanents_phasing_out.append(card_id)
+
+        # 3. Phase Out identified permanents
+        if permanents_phasing_out:
+            if not hasattr(self, 'phased_out'): self.phased_out = set() # Ensure set exists
+            player_phased_out = player.setdefault("phased_out_permanents", set())
+            for card_id in permanents_phasing_out:
+                if card_id in player["battlefield"]: # Ensure it's still there
+                    player["battlefield"].remove(card_id)
+                    self.phased_out.add(card_id)
+                    player_phased_out.add(card_id)
+                    # Store state if needed (tapped, counters etc.) - simplified for now
+                    card = self._safe_get_card(card_id)
+                    logging.debug(f"Phased out: {getattr(card, 'name', card_id)}")
+                    # Remove effects, etc.
+                    if self.layer_system: self.layer_system.remove_effects_by_source(card_id)
+                    if self.replacement_effects: self.replacement_effects.remove_effects_by_source(card_id)
+
+        # --- Standard Untap Actions ---
+        # Reset mana pools
         player["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
-        player["tapped_permanents"] = set()
-        player["entered_battlefield_this_turn"] = set()
+        player["conditional_mana"] = {}
+        player["phase_restricted_mana"] = {}
+
+        # Untap permanents *that did not phase out*
+        untapped_ids = set()
+        tapped_set = player.get("tapped_permanents", set())
+        for card_id in list(player.get("battlefield", [])): # Iterate copy, only those currently on BF
+            if card_id in tapped_set:
+                 tapped_set.remove(card_id)
+                 untapped_ids.add(card_id)
+                 card = self._safe_get_card(card_id)
+                 logging.debug(f"Untapped: {getattr(card, 'name', card_id)}")
+                 self.trigger_ability(card_id, "UNTAPPED", {"controller": player})
+
+        player["tapped_permanents"] = tapped_set # Update the set
+
+        player["entered_battlefield_this_turn"] = set() # Clear sickness status
         player["land_played"] = False
-        player["damage_counters"] = {}
-        logging.debug("Untap Phase: Reset land_played, cleared tapped permanents, and updated mana.")
+        player["damage_counters"] = {} # Damage removed in Cleanup usually, but safe reset here? Rule 514.2. Okay.
+        logging.debug(f"Untap Phase for {player['name']} complete.")
+
 
     def _draw_phase(self, player):
         """Draw a card from the library with replacement effect handling."""
@@ -1179,51 +1193,39 @@ class GameState:
 
     
     def move_card(self, card_id, from_player, from_zone, to_player, to_zone, cause=None, context=None):
-        """Move a card between zones, applying replacement effects and triggering abilities."""
+        """Move a card between zones, applying replacement effects and triggering abilities, handling Madness."""
         if context is None: context = {}
         card = self._safe_get_card(card_id)
         card_name = getattr(card, 'name', f"Card {card_id}") if card else f"Card {card_id}"
+        original_from_zone = from_zone # Keep original source for context
 
-        # 1. Validate Source Zone & Card Presence
+        # 1. Handle Implicit Zones & Validate Source
         source_list = None
-        actual_from_zone = from_zone # Track actual source if implicit
-        if from_zone == "stack_implicit":
-             # Assume card was on stack, remove implicitly - requires stack handler did this
-             actual_from_zone = "stack"
-             source_list = [] # Placeholder, don't remove from anywhere
-        elif from_zone == "library_implicit":
-             # Assume card was removed from library by search/reveal effect
-             actual_from_zone = "library"
-             source_list = []
-        elif from_zone == "nonexistent_zone":
-             # Used for creating tokens, card doesn't exist before entering BF
-             actual_from_zone = "nonexistent"
-             source_list = []
+        actual_from_zone = from_zone
+        if from_zone == "stack_implicit": actual_from_zone = "stack"; source_list = []
+        elif from_zone == "library_implicit": actual_from_zone = "library"; source_list = []
+        elif from_zone == "hand_implicit": actual_from_zone = "hand"; source_list = []
+        elif from_zone == "nonexistent_zone": actual_from_zone = "nonexistent"; source_list = []
         else:
-             source_list = from_player.get(from_zone) if from_player else None
-             if source_list is None or card_id not in source_list:
-                 # Maybe the card already moved due to a previous effect? Re-check location.
-                 current_location_player, current_location_zone = self.find_card_location(card_id)
-                 if current_location_player == from_player and current_location_zone == from_zone:
-                      # It's still there, proceed with removal attempt (maybe set logic failed?)
-                      source_list = current_location_player.get(current_location_zone)
-                      if card_id not in source_list: # Still not found after re-check
-                          logging.warning(f"Cannot move {card_name}: Confirmed not in {from_player['name']}'s {from_zone}.")
-                          return False
-                 elif current_location_zone is not None:
-                      # Card moved already, potentially okay if moving to same destination
-                      if current_location_player == to_player and current_location_zone == to_zone:
-                           logging.debug(f"Card {card_name} already moved to target zone {to_zone}.")
-                           return True # Already there
-                      else:
-                           logging.warning(f"Cannot move {card_name}: Found in unexpected location ({current_location_zone}) instead of source ({from_zone}).")
-                           return False
-                 else: # Card truly doesn't exist anywhere?
-                     logging.warning(f"Cannot move {card_name}: not found in {from_player['name']}'s {from_zone} or anywhere else.")
-                     return False
+             source_list = from_player.get(actual_from_zone) if from_player else None
+             if source_list is None:
+                 logging.warning(f"Cannot move {card_name}: Invalid source zone '{actual_from_zone}'.")
+                 return False
+             # Check if actually present (handle list/set)
+             is_present = False
+             if isinstance(source_list, list) and card_id in source_list: is_present = True
+             elif isinstance(source_list, set) and card_id in source_list: is_present = True
+             elif isinstance(source_list, dict) and card_id in source_list: is_present = True # For dict-based zones?
 
-        # --- Apply Replacement Effects ---
-        # These effects might change the destination, player, or prevent the move entirely.
+             if not is_present:
+                  current_location_player, current_location_zone = self.find_card_location(card_id)
+                  if current_location_zone:
+                      logging.warning(f"Cannot move {card_name}: Expected in {actual_from_zone} but found in {current_location_zone}.")
+                  else:
+                      logging.warning(f"Cannot move {card_name}: Not found in {from_player['name']}'s {actual_from_zone} or anywhere.")
+                  return False
+
+        # --- Apply Replacement Effects (including potential Madness redirect) ---
         final_destination_player = to_player
         final_destination_zone = to_zone
         event_context = {
@@ -1233,128 +1235,164 @@ class GameState:
              'cause': cause, **context
         }
         prevented = False
-        if hasattr(self, 'replacement_effects') and self.replacement_effects:
-             # Apply "leaves zone" replacements
-             modified_leave_ctx, replaced_leave = self.replacement_effects.apply_replacements(f"LEAVE_{actual_from_zone.upper()}", event_context)
-             if replaced_leave:
-                 event_context.update(modified_leave_ctx) # Update context with changes
-                 final_destination_player = event_context.get('to_player', to_player)
-                 final_destination_zone = event_context.get('to_zone', to_zone)
-                 prevented = event_context.get('prevented', False)
+        madness_applied = False
+        madness_cost_found = None
 
-             # Apply "enters zone" replacements (Only determines final destination)
-             if not prevented:
-                 # Update context for enter check
-                 event_context['to_player'] = final_destination_player
-                 event_context['to_zone'] = final_destination_zone
-                 modified_enter_ctx, replaced_enter = self.replacement_effects.apply_replacements(f"ENTER_{final_destination_zone.upper()}", event_context)
+        if hasattr(self, 'replacement_effects') and self.replacement_effects:
+            # --- MADNESS CHECK (DISCARD) ---
+            # Madness triggers on discard EVENT before destination check.
+            # We check it here *if* the *initial intended destination* is graveyard due to discard.
+            is_discard_event = (actual_from_zone == "hand" and to_zone == "graveyard" and cause == "discard")
+            has_madness = card and "madness" in getattr(card, 'oracle_text', '').lower()
+
+            if is_discard_event and has_madness:
+                 logging.debug(f"Discarding card {card_name} with Madness. Checking replacements...")
+                 # Rule 616.1: Player controlling the affected object (the card) chooses order.
+                 # If other replacements exist (e.g., Rest in Peace), player chooses.
+                 # If Madness applies, it changes the *destination* of the discard.
+                 # It should be checked along with other replacements.
+                 # Let's allow apply_replacements to handle the interaction by adding a potential
+                 # Madness effect if the player chooses it.
+                 # We already do this inside apply_replacements, so no extra logic needed here.
+
+            # --- Standard Leave/Enter Replacements ---
+            # Use specific events: LEAVE_<ZONE> and ENTER_<ZONE>
+            leave_event = f"LEAVE_{actual_from_zone.upper()}"
+            modified_leave_ctx, replaced_leave = self.replacement_effects.apply_replacements(leave_event, event_context.copy())
+            if replaced_leave:
+                 event_context.update(modified_leave_ctx)
+                 final_destination_player = event_context.get('to_player', final_destination_player)
+                 final_destination_zone = event_context.get('to_zone', final_destination_zone)
+                 prevented = event_context.get('prevented', False)
+                 logging.debug(f"Leave replacement applied: New Dest: {final_destination_zone}, Prevented: {prevented}")
+
+
+            # If not prevented, check enter replacements for the *potential* destination
+            if not prevented:
+                 enter_event = f"ENTER_{final_destination_zone.upper()}"
+                 # Pass the *current* event context state
+                 modified_enter_ctx, replaced_enter = self.replacement_effects.apply_replacements(enter_event, event_context.copy())
                  if replaced_enter:
                       final_destination_player = modified_enter_ctx.get('to_player', final_destination_player)
                       final_destination_zone = modified_enter_ctx.get('to_zone', final_destination_zone)
                       prevented = modified_enter_ctx.get('prevented', False)
-                      # Store ETB modifications like tapped status, counters
-                      context['enters_tapped'] = modified_enter_ctx.get('enters_tapped', False)
-                      context['enter_counters'] = modified_enter_ctx.get('enter_counters')
+                      # Merge ETB effects from context
+                      if 'enters_tapped' in modified_enter_ctx: context['enters_tapped'] = modified_enter_ctx['enters_tapped']
+                      if 'enter_counters' in modified_enter_ctx: context.setdefault('enter_counters', []).extend(modified_enter_ctx['enter_counters'])
+                      logging.debug(f"Enter replacement applied: Final Dest: {final_destination_zone}, Prevented: {prevented}")
 
 
+        # --- Final Prevention Check ---
         if prevented:
-             logging.debug(f"Movement of {card_name} from {actual_from_zone} to {final_destination_zone} prevented by replacement effect.")
-             # If prevention happened, does card stay in original zone? Rules check needed. Assume yes.
-             return False
+            logging.debug(f"Movement of {card_name} from {actual_from_zone} to {final_destination_zone} prevented by replacement effect.")
+            return False
 
-        # --- Perform Move ---
-        # 1. Remove from source (if not implicit zone)
-        if source_list is not None and card_id in source_list:
-             source_list.remove(card_id)
+        # --- Check if Madness was the outcome ---
+        # Madness replacement function (in ReplacementEffects) would have set the final_zone to 'exile'
+        # and potentially set up the 'madness_cast_available' state.
+        if is_discard_event and has_madness and final_destination_zone == 'exile':
+             madness_applied = True
+             # Ensure state was set (should have happened in replacement func)
+             madness_cost_found = getattr(self,'madness_cast_available', {}).get('cost') if getattr(self,'madness_cast_available', {}).get('card_id') == card_id else None
 
-        # 2. Handle "leaves the battlefield" cleanup
+        # --- Perform Actual Move ---
+        # 1. Remove from source zone
+        if source_list is not None:
+            removed = False
+            if isinstance(source_list, list) and card_id in source_list: source_list.remove(card_id); removed = True
+            elif isinstance(source_list, set) and card_id in source_list: source_list.discard(card_id); removed = True
+            elif isinstance(source_list, dict) and card_id in source_list: del source_list[card_id]; removed = True
+            # if not removed: Log warning only if removal failed unexpectedly (should have been caught earlier)
+
+        # 2. Handle "leaves the battlefield" cleanup & triggers
         if actual_from_zone == "battlefield" and from_player:
-            if card_id in from_player.get("tapped_permanents", set()): from_player["tapped_permanents"].remove(card_id)
-            if card_id in from_player.get("entered_battlefield_this_turn", set()): from_player["entered_battlefield_this_turn"].remove(card_id)
-            # Reset attachments (both ways)
+            ltb_trigger_context = {
+                'controller': from_player, # Controller when it left
+                'from_zone': actual_from_zone,
+                'to_zone': final_destination_zone,
+                'cause': cause, **context
+            }
+            # Trigger LTB first (603.6c)
+            self.trigger_ability(card_id, "LEAVE_BATTLEFIELD", ltb_trigger_context)
+            # Cleanup state AFTER LTB triggers resolve (conceptually - synchronous sim means we cleanup now)
+            from_player.get("tapped_permanents", set()).discard(card_id)
+            from_player.get("entered_battlefield_this_turn", set()).discard(card_id)
             if hasattr(from_player, "attachments"):
-                # If card_id was attached to something, remove it
                 if card_id in from_player["attachments"]: del from_player["attachments"][card_id]
-                # If something was attached to card_id, remove that attachment
-                items_attached_to_it = [att_id for att_id, target_id in from_player["attachments"].items() if target_id == card_id]
+                items_attached_to_it = [att_id for att_id, target_id in list(from_player["attachments"].items()) if target_id == card_id]
                 for att_id in items_attached_to_it: del from_player["attachments"][att_id]
-            # Remove counters from the Card object itself
-            # (Counters persist in GY/Exile etc. if card returns)
-            # --- ADDED ---
-            # Remove continuous effects originating from this card
+            if hasattr(from_player, 'loyalty_counters') and card_id in from_player['loyalty_counters']: del from_player['loyalty_counters'][card_id]
+            # Remove effects from source AFTER triggers resolve (Rule 611.3b applies?) - Do it now for simplicity
             if self.layer_system: self.layer_system.remove_effects_by_source(card_id)
             if self.replacement_effects: self.replacement_effects.remove_effects_by_source(card_id)
-            # --- END ADDED ---
-            # Remove loyalty tracking
-            if hasattr(from_player, 'loyalty_counters') and card_id in from_player['loyalty_counters']: del from_player['loyalty_counters'][card_id]
-            # Reset specific card states (face-down, mutated etc.)
+            # Reset card state
             if card and hasattr(card, 'reset_state_on_zone_change'):
                 card.reset_state_on_zone_change()
-
 
         # 3. Add to destination zone
         destination_list = final_destination_player.get(final_destination_zone)
         if destination_list is None:
              logging.error(f"Invalid destination zone '{final_destination_zone}' for player {final_destination_player['name']}.")
-             # Attempt to put card back in source zone? Difficult state to recover.
-             return False
-        destination_list.append(card_id)
+             return False # Cannot recover card state easily
+        if card_id not in destination_list: # Prevent duplicates
+            destination_list.append(card_id)
 
-        logging.debug(f"Moved {card_name} from {from_player['name'] if from_player else 'N/A'}'s {actual_from_zone} to {final_destination_player['name']}'s {final_destination_zone}")
+        logging.debug(f"Moved {card_name} from {from_player['name'] if from_player else 'N/A'}'s {actual_from_zone} to {final_destination_player['name']}'s {final_destination_zone}{' (via Madness)' if madness_applied else ''}")
 
-        # --- Trigger Abilities & Handle ETB ---
-        # Create trigger context containing details about the move
-        trigger_context = {
-            'controller': final_destination_player, # Who controls it *now*
+        # --- Trigger ENTER Abilities & Handle ETB Effects ---
+        enter_trigger_context = {
+            'controller': final_destination_player, # Controller *now*
             'from_zone': actual_from_zone,
             'to_zone': final_destination_zone,
-            'cause': cause,
-            **context # Pass along original context
+            'cause': cause, **context
         }
-
-        # 1. "Leaves the <Zone>" Triggers
-        self.trigger_ability(card_id, f"LEAVE_{actual_from_zone.upper()}", trigger_context)
-
-        # 2. "Enters the <Zone>" Triggers (Including ETB for battlefield)
         if final_destination_zone == "battlefield":
-             # Mark entered this turn
+             # ... (Existing ETB logic: entered this turn, tapped, counters, register effects, triggers) ...
              final_destination_player.setdefault("entered_battlefield_this_turn", set()).add(card_id)
-             # Apply enters tapped/counters from replacements/card text
              enters_tapped = context.get('enters_tapped', False) or (hasattr(card, 'oracle_text') and "enters the battlefield tapped" in card.oracle_text.lower())
-             if enters_tapped:
-                 final_destination_player.setdefault("tapped_permanents", set()).add(card_id)
-                 logging.debug(f"{card_name} entered tapped.")
-
-             enter_counters = context.get('enter_counters') # Counters from replacement effects
-             # Also check counters from card text (e.g., Sagas, Vanishing)
-             # TODO: Refine counter logic to handle precedence/interaction
+             if enters_tapped: final_destination_player.setdefault("tapped_permanents", set()).add(card_id)
+             enter_counters = context.get('enter_counters')
              if enter_counters and isinstance(enter_counters, list):
-                 for counter_info in enter_counters:
-                     self.add_counter(card_id, counter_info['type'], counter_info['count'])
-             # Add specific ETB counters from card itself (needs Card parsing logic)
-             # e.g., for Sagas: self.add_counter(card_id, "lore", 1) if card.is_saga()
+                 for counter_info in enter_counters: self.add_counter(card_id, counter_info['type'], counter_info['count'])
+             # Saga entry counters
+             if card and 'saga' in getattr(card,'subtypes',[]): self.add_counter(card_id, "lore", 1)
+             # Planeswalker entry loyalty
+             if card and 'planeswalker' in getattr(card,'card_types',[]):
+                  final_destination_player.setdefault("loyalty_counters", {})[card_id] = getattr(card, 'loyalty', 0)
 
-             # Register continuous/replacement effects *from this card*
-             # Note: Effects on *other* cards affecting this one should already be active via Layer system.
-             if card:
-                self._register_card_effects(card_id, card, final_destination_player)
+             if card: self._register_card_effects(card_id, card, final_destination_player) # Register effects now
+             self.trigger_ability(card_id, "ENTERS_BATTLEFIELD", enter_trigger_context) # Standard ETB
+             if card and 'land' in getattr(card,'card_types',[]): self.trigger_ability(card_id, "LANDFALL", enter_trigger_context)
+             # Special ETB-like handlers
+             if card and 'aura' in getattr(card, 'subtypes',[]): self._resolve_aura_attachment(card_id, final_destination_player, context)
 
 
-             # Trigger ETB (generic and specific like landfall)
-             self.trigger_ability(card_id, "ENTERS_BATTLEFIELD", trigger_context)
-             if card and 'land' in getattr(card,'card_types',[]):
-                 self.trigger_ability(card_id, "LANDFALL", trigger_context)
+        else: # Entering non-battlefield zone
+             self.trigger_ability(card_id, f"ENTER_{final_destination_zone.upper()}", enter_trigger_context)
+             # Track cards entering graveyard this turn
+             if final_destination_zone == "graveyard":
+                  turn_gy_list = self.cards_to_graveyard_this_turn.setdefault(self.turn, [])
+                  turn_gy_list.append(card_id)
+                  # Gravestorm count only increments for permanents going BF->GY? Check rules.
+                  # Rule 702.61a: Cast -> GY is NOT a permanent entering GY.
+                  # Assuming only BF->GY counts for Gravestorm for now.
+                  if actual_from_zone == "battlefield":
+                      self.gravestorm_count = self.gravestorm_count + 1 if hasattr(self, 'gravestorm_count') else 1
 
-        else: # Enters non-battlefield zone
-             self.trigger_ability(card_id, f"ENTER_{final_destination_zone.upper()}", trigger_context)
 
-        # 3. Handle Tokens Ceasing to Exist
+        # --- Post-Move Cleanup ---
+        # Handle Tokens Ceasing to Exist
         if card and hasattr(card, 'is_token') and card.is_token and actual_from_zone == "battlefield" and final_destination_zone != "battlefield":
             logging.debug(f"Token {card_name} ceased to exist after moving to {final_destination_zone}.")
-            if card_id in destination_list: destination_list.remove(card_id) # Remove from destination
-            if card_id in self.card_db: del self.card_db[card_id] # Remove from db
+            if card_id in destination_list: destination_list.remove(card_id)
+            if card_id in self.card_db: del self.card_db[card_id]
 
-        # SBAs checked in the main game loop after action/resolution completes
+        # Clear lingering Madness opportunity if card moved FROM exile for another reason
+        if actual_from_zone == "exile" and not madness_applied and getattr(self, 'madness_cast_available', None) and self.madness_cast_available.get('card_id') == card_id:
+            logging.debug(f"Clearing Madness opportunity for {card_name} as it moved from exile.")
+            self.madness_cast_available = None
+
+        # --- Trigger ability processing happens AFTER the action completes (in main loop) ---
         return True
     
     def _register_card_effects(self, card_id, card, player):
@@ -2645,8 +2683,9 @@ class GameState:
         return text_to_number(word)
     
     def _get_madness_cost_str_gs(self, card):
+        """Helper to extract madness cost string from GameState context."""
         if card and hasattr(card, 'oracle_text'):
-            match = re.search(r"madness (\{[^\}]+\}|[0-9]+)", card.oracle_text.lower())
+            match = re.search(r"madness\s+(\{[^\}]+\}|[0-9]+)", card.oracle_text.lower())
             if match:
                 cost_str = match.group(1)
                 if cost_str.isdigit(): return f"{{{cost_str}}}"
@@ -2873,40 +2912,41 @@ class GameState:
 
         # --- Re-trigger Upkeep Logic If we fell through from UNTAP ---
         if self.phase == self.PHASE_UPKEEP:
-             # Check Day/Night transition first if applicable (rules check needed - often here?)
-             if hasattr(self, 'check_day_night_transition') and not self.day_night_checked_this_turn:
-                  self.check_day_night_transition() # Checks spell counts and sets state
+            
+            # Check Day/Night transition first if applicable (rules check needed - often here?)
+            if hasattr(self, 'check_day_night_transition') and not self.day_night_checked_this_turn:
+                self.check_day_night_transition() # Checks spell counts and sets state
 
-             # Trigger "at the beginning of upkeep" (Rule 503.1a) - APNAP
-             # Collect triggers first
-             ap_triggers = []
-             nap_triggers = []
-             for p_trigger in [active_player, non_active_player]:
-                 if p_trigger: # Check player exists
-                     for card_id in p_trigger.get("battlefield", []):
-                         card = self._safe_get_card(card_id)
-                         if card and hasattr(self.ability_handler, 'registered_abilities'): # Ensure handler exists
-                              abilities = self.ability_handler.registered_abilities.get(card_id, [])
-                              for ability in abilities:
-                                  # Check if ability has the correct trigger condition
-                                  if isinstance(ability, TriggeredAbility):
-                                      cond = getattr(ability, 'trigger_condition', '').lower()
-                                      if "beginning of" in cond and "upkeep" in cond:
-                                          context = {"controller": self.get_card_controller(card_id)}
-                                          # Pre-check ability conditions if possible (optional optimization)
-                                          if ability.can_trigger("BEGINNING_OF_UPKEEP", context):
-                                              if p_trigger == active_player: ap_triggers.append((card_id, ability))
-                                              else: nap_triggers.append((card_id, ability))
-                                          break # Assume only one relevant trigger per card for simplicity
+            # Trigger "at the beginning of upkeep" (Rule 503.1a) - APNAP
+            # Collect triggers first
+            ap_triggers = []
+            nap_triggers = []
+            for p_trigger in [active_player, non_active_player]:
+                if p_trigger: # Check player exists
+                    for card_id in p_trigger.get("battlefield", []):
+                        card = self._safe_get_card(card_id)
+                        if card and hasattr(self.ability_handler, 'registered_abilities'): # Ensure handler exists
+                            abilities = self.ability_handler.registered_abilities.get(card_id, [])
+                            for ability in abilities:
+                                # Check if ability has the correct trigger condition
+                                if isinstance(ability, TriggeredAbility):
+                                    cond = getattr(ability, 'trigger_condition', '').lower()
+                                    if "beginning of" in cond and "upkeep" in cond:
+                                        context = {"controller": self.get_card_controller(card_id)}
+                                        # Pre-check ability conditions if possible (optional optimization)
+                                        if ability.can_trigger("BEGINNING_OF_UPKEEP", context):
+                                            if p_trigger == active_player: ap_triggers.append((card_id, ability))
+                                            else: nap_triggers.append((card_id, ability))
+                                        break # Assume only one relevant trigger per card for simplicity
 
-             # Queue triggers using AbilityHandler (handles APNAP ordering)
-             for card_id, ability_obj in ap_triggers + nap_triggers:
-                  # Pass ability object for efficiency
-                  context = {"controller": self.get_card_controller(card_id), "ability": ability_obj}
-                  self.trigger_ability(card_id, "BEGINNING_OF_UPKEEP", context) # Event origin is the card
+            # Queue triggers using AbilityHandler (handles APNAP ordering)
+            for card_id, ability_obj in ap_triggers + nap_triggers:
+                # Pass ability object for efficiency
+                context = {"controller": self.get_card_controller(card_id), "ability": ability_obj}
+                self.trigger_ability(card_id, "BEGINNING_OF_UPKEEP", context) # Event origin is the card
 
-             # SBAs checked (Rule 503.1b) after triggers added
-             self.check_state_based_actions()
+            # SBAs checked (Rule 503.1b) after triggers added
+            self.check_state_based_actions()
 
 
         elif self.phase == self.PHASE_DRAW:
@@ -3077,29 +3117,35 @@ class GameState:
         cloned_state.turn = self.turn
         cloned_state.phase = self.phase
         cloned_state.agent_is_p1 = self.agent_is_p1
-        cloned_state.combat_damage_dealt = self.combat_damage_dealt
-        cloned_state.day_night_state = self.day_night_state
-        cloned_state.day_night_checked_this_turn = self.day_night_checked_this_turn
-        cloned_state.priority_pass_count = self.priority_pass_count
-        cloned_state.last_stack_size = self.last_stack_size
-        cloned_state.previous_priority_phase = self.previous_priority_phase
+        cloned_state.combat_damage_dealt = self.combat_damage_dealt if hasattr(self, 'combat_damage_dealt') else False
+        cloned_state.day_night_state = self.day_night_state if hasattr(self, 'day_night_state') else None
+        cloned_state.day_night_checked_this_turn = self.day_night_checked_this_turn if hasattr(self, 'day_night_checked_this_turn') else False
+        cloned_state.priority_pass_count = self.priority_pass_count if hasattr(self, 'priority_pass_count') else 0
+        cloned_state.last_stack_size = self.last_stack_size if hasattr(self, 'last_stack_size') else 0
+        cloned_state.previous_priority_phase = self.previous_priority_phase if hasattr(self, 'previous_priority_phase') else None
         # Copy other simple state variables
-        cloned_state.mulligan_in_progress = self.mulligan_in_progress
-        cloned_state.bottoming_in_progress = self.bottoming_in_progress
-        cloned_state.cards_to_bottom = self.cards_to_bottom
-        cloned_state.bottoming_count = self.bottoming_count
+        cloned_state.mulligan_in_progress = self.mulligan_in_progress if hasattr(self, 'mulligan_in_progress') else False
+        cloned_state.bottoming_in_progress = self.bottoming_in_progress if hasattr(self, 'bottoming_in_progress') else False
+        cloned_state.cards_to_bottom = self.cards_to_bottom if hasattr(self, 'cards_to_bottom') else 0
+        cloned_state.bottoming_count = self.bottoming_count if hasattr(self, 'bottoming_count') else 0
+        cloned_state.split_second_active = self.split_second_active if hasattr(self, 'split_second_active') else False
+        cloned_state.gravestorm_count = self.gravestorm_count if hasattr(self, 'gravestorm_count') else 0
+        cloned_state.miracle_active = self.miracle_active if hasattr(self, 'miracle_active') else False
+        cloned_state.miracle_card_id = self.miracle_card_id if hasattr(self, 'miracle_card_id') else None
+        cloned_state.progress_was_forced = self.progress_was_forced if hasattr(self, 'progress_was_forced') else False
+        cloned_state._turn_limit_checked = self._turn_limit_checked if hasattr(self, '_turn_limit_checked') else False
 
         # --- Deep Copy Player States ---
-        # Player States (Critical to deep copy)
-        cloned_state.p1 = copy.deepcopy(self.p1)
-        cloned_state.p2 = copy.deepcopy(self.p2)
+        # Player States (Critical to deep copy) - Need to handle potential None
+        cloned_state.p1 = copy.deepcopy(self.p1) if self.p1 else None
+        cloned_state.p2 = copy.deepcopy(self.p2) if self.p2 else None
 
         # --- Deep Copy Combat State ---
-        cloned_state.current_attackers = self.current_attackers[:] # Shallow copy list ok
-        cloned_state.current_block_assignments = copy.deepcopy(self.current_block_assignments)
+        cloned_state.current_attackers = self.current_attackers[:] if hasattr(self, 'current_attackers') else [] # Shallow copy list ok
+        cloned_state.current_block_assignments = copy.deepcopy(self.current_block_assignments) if hasattr(self, 'current_block_assignments') else {}
 
         # --- Deep Copy Stack ---
-        cloned_state.stack = copy.deepcopy(self.stack)
+        cloned_state.stack = copy.deepcopy(self.stack) if hasattr(self, 'stack') else []
 
         # --- Deep Copy effect tracking ---
         cloned_state.until_end_of_turn_effects = copy.deepcopy(self.until_end_of_turn_effects) if hasattr(self, 'until_end_of_turn_effects') else {}
@@ -3112,6 +3158,7 @@ class GameState:
         cloned_state.cards_drawn_this_turn = copy.deepcopy(self.cards_drawn_this_turn) if hasattr(self, 'cards_drawn_this_turn') else {}
         cloned_state.life_gained_this_turn = copy.deepcopy(self.life_gained_this_turn) if hasattr(self, 'life_gained_this_turn') else {}
         cloned_state.damage_this_turn = copy.deepcopy(self.damage_this_turn) if hasattr(self, 'damage_this_turn') else {}
+        cloned_state.cards_to_graveyard_this_turn = copy.deepcopy(self.cards_to_graveyard_this_turn) if hasattr(self, 'cards_to_graveyard_this_turn') else {}
 
         # --- Deep Copy Special Card States ---
         cloned_state.adventure_cards = self.adventure_cards.copy() if hasattr(self, 'adventure_cards') else set()
@@ -3120,144 +3167,206 @@ class GameState:
         cloned_state.battle_cards = copy.deepcopy(self.battle_cards) if hasattr(self, 'battle_cards') else {}
         cloned_state.cards_castable_from_exile = self.cards_castable_from_exile.copy() if hasattr(self, 'cards_castable_from_exile') else set()
         cloned_state.cast_as_back_face = self.cast_as_back_face.copy() if hasattr(self, 'cast_as_back_face') else set()
-        
+
         # --- Deep Copy Special Status Tracking ---
         cloned_state.phased_out = self.phased_out.copy() if hasattr(self, 'phased_out') else set()
         cloned_state.suspended_cards = copy.deepcopy(self.suspended_cards) if hasattr(self, 'suspended_cards') else {}
+        cloned_state.rebounded_cards = copy.deepcopy(self.rebounded_cards) if hasattr(self, 'rebounded_cards') else {}
         cloned_state.kicked_cards = self.kicked_cards.copy() if hasattr(self, 'kicked_cards') else set()
         cloned_state.evoked_cards = self.evoked_cards.copy() if hasattr(self, 'evoked_cards') else set()
-        cloned_state.foretold_cards = self.foretold_cards.copy() if hasattr(self, 'foretold_cards') else set()
+        cloned_state.foretold_cards = copy.deepcopy(self.foretold_cards) if hasattr(self, 'foretold_cards') else {} # Deepcopy dict
         cloned_state.blitz_cards = self.blitz_cards.copy() if hasattr(self, 'blitz_cards') else set()
         cloned_state.dash_cards = self.dash_cards.copy() if hasattr(self, 'dash_cards') else set()
         cloned_state.unearthed_cards = self.unearthed_cards.copy() if hasattr(self, 'unearthed_cards') else set()
         cloned_state.jump_start_cards = self.jump_start_cards.copy() if hasattr(self, 'jump_start_cards') else set()
         cloned_state.buyback_cards = self.buyback_cards.copy() if hasattr(self, 'buyback_cards') else set()
         cloned_state.flashback_cards = self.flashback_cards.copy() if hasattr(self, 'flashback_cards') else set()
-        cloned_state.exile_at_end_of_combat = self.exile_at_end_of_combat.copy() if hasattr(self, 'exile_at_end_of_combat') else []
+        cloned_state.exile_at_end_of_combat = self.exile_at_end_of_combat[:] if hasattr(self, 'exile_at_end_of_combat') else []
         cloned_state.haste_until_eot = self.haste_until_eot.copy() if hasattr(self, 'haste_until_eot') else set()
-        cloned_state.has_haste_until_eot = self.has_haste_until_eot.copy() if hasattr(self, 'has_haste_until_eot') else set()
-        cloned_state.progress_was_forced = self.progress_was_forced if hasattr(self, 'progress_was_forced') else False
-        cloned_state._turn_limit_checked = self._turn_limit_checked if hasattr(self, '_turn_limit_checked') else False
-        
-        # --- Deep Copy New Tracking Attributes ---
-        cloned_state.split_second_active = self.split_second_active if hasattr(self, 'split_second_active') else False
-        cloned_state.rebounded_cards = copy.deepcopy(self.rebounded_cards) if hasattr(self, 'rebounded_cards') else {}
+        # Removed redundant haste tracker: cloned_state.has_haste_until_eot = self.has_haste_until_eot.copy() if hasattr(self, 'has_haste_until_eot') else set()
         cloned_state.banding_creatures = self.banding_creatures.copy() if hasattr(self, 'banding_creatures') else set()
         cloned_state.crewed_vehicles = self.crewed_vehicles.copy() if hasattr(self, 'crewed_vehicles') else set()
         cloned_state.morphed_cards = copy.deepcopy(self.morphed_cards) if hasattr(self, 'morphed_cards') else {}
         cloned_state.manifested_cards = copy.deepcopy(self.manifested_cards) if hasattr(self, 'manifested_cards') else {}
-        cloned_state.cards_to_graveyard_this_turn = copy.deepcopy(self.cards_to_graveyard_this_turn) if hasattr(self, 'cards_to_graveyard_this_turn') else {}
         cloned_state.boast_activated = self.boast_activated.copy() if hasattr(self, 'boast_activated') else set()
         cloned_state.forecast_used = self.forecast_used.copy() if hasattr(self, 'forecast_used') else set()
         cloned_state.epic_spells = copy.deepcopy(self.epic_spells) if hasattr(self, 'epic_spells') else {}
-        cloned_state.city_blessing = copy.deepcopy(self.city_blessing) if hasattr(self, 'city_blessing') else {}
-        cloned_state.myriad_tokens = self.myriad_tokens.copy() if hasattr(self, 'myriad_tokens') else []
+        # Note: city_blessing moved to player state
+        cloned_state.myriad_tokens = self.myriad_tokens[:] if hasattr(self, 'myriad_tokens') else []
         cloned_state.persist_returned = self.persist_returned.copy() if hasattr(self, 'persist_returned') else set()
         cloned_state.undying_returned = self.undying_returned.copy() if hasattr(self, 'undying_returned') else set()
-        cloned_state.gravestorm_count = self.gravestorm_count if hasattr(self, 'gravestorm_count') else 0
 
         # --- Deep Copy Miracle State ---
-        cloned_state.miracle_card = self.miracle_card
-        cloned_state.miracle_cost = self.miracle_cost
-        cloned_state.miracle_player = cloned_state.p1 if self.miracle_player == self.p1 else cloned_state.p2 if self.miracle_player == self.p2 else None
-        cloned_state.miracle_active = self.miracle_active if hasattr(self, 'miracle_active') else False
-        cloned_state.miracle_card_id = self.miracle_card_id
+        # Correctly link cloned player objects if original players existed
+        cloned_miracle_player = None
+        if hasattr(self, 'miracle_player') and self.miracle_player:
+            if self.miracle_player == self.p1: cloned_miracle_player = cloned_state.p1
+            elif self.miracle_player == self.p2: cloned_miracle_player = cloned_state.p2
+        cloned_state.miracle_player = cloned_miracle_player
+        cloned_state.miracle_cost = self.miracle_cost if hasattr(self, 'miracle_cost') else None
         cloned_state.miracle_cost_parsed = copy.deepcopy(self.miracle_cost_parsed) if hasattr(self, 'miracle_cost_parsed') else None
 
         # --- Deep Copy Context Objects (Crucial for multi-step actions) ---
         cloned_state.targeting_context = copy.deepcopy(self.targeting_context)
         if cloned_state.targeting_context and 'controller' in cloned_state.targeting_context:
-            # Fix controller references to point to cloned players
-            if cloned_state.targeting_context['controller'] == self.p1:
-                cloned_state.targeting_context['controller'] = cloned_state.p1
-            elif cloned_state.targeting_context['controller'] == self.p2:
-                cloned_state.targeting_context['controller'] = cloned_state.p2
-                
+            if cloned_state.targeting_context['controller'] == self.p1: cloned_state.targeting_context['controller'] = cloned_state.p1
+            elif cloned_state.targeting_context['controller'] == self.p2: cloned_state.targeting_context['controller'] = cloned_state.p2
+
         cloned_state.sacrifice_context = copy.deepcopy(self.sacrifice_context)
         if cloned_state.sacrifice_context and 'controller' in cloned_state.sacrifice_context:
-            # Fix controller references to point to cloned players
-            if cloned_state.sacrifice_context['controller'] == self.p1:
-                cloned_state.sacrifice_context['controller'] = cloned_state.p1
-            elif cloned_state.sacrifice_context['controller'] == self.p2:
-                cloned_state.sacrifice_context['controller'] = cloned_state.p2
-                
+            if cloned_state.sacrifice_context['controller'] == self.p1: cloned_state.sacrifice_context['controller'] = cloned_state.p1
+            elif cloned_state.sacrifice_context['controller'] == self.p2: cloned_state.sacrifice_context['controller'] = cloned_state.p2
+
         cloned_state.choice_context = copy.deepcopy(self.choice_context)
         if cloned_state.choice_context and 'player' in cloned_state.choice_context:
-            # Fix player references to point to cloned players
-            if cloned_state.choice_context['player'] == self.p1:
-                cloned_state.choice_context['player'] = cloned_state.p1
-            elif cloned_state.choice_context['player'] == self.p2:
-                cloned_state.choice_context['player'] = cloned_state.p2
-                
+            if cloned_state.choice_context['player'] == self.p1: cloned_state.choice_context['player'] = cloned_state.p1
+            elif cloned_state.choice_context['player'] == self.p2: cloned_state.choice_context['player'] = cloned_state.p2
+
         cloned_state.spree_context = copy.deepcopy(self.spree_context)
         cloned_state.dredge_pending = copy.deepcopy(self.dredge_pending)
         if cloned_state.dredge_pending and 'player' in cloned_state.dredge_pending:
-            if cloned_state.dredge_pending['player'] == self.p1:
-                cloned_state.dredge_pending['player'] = cloned_state.p1
-            elif cloned_state.dredge_pending['player'] == self.p2:
-                cloned_state.dredge_pending['player'] = cloned_state.p2
-                
+            if cloned_state.dredge_pending['player'] == self.p1: cloned_state.dredge_pending['player'] = cloned_state.p1
+            elif cloned_state.dredge_pending['player'] == self.p2: cloned_state.dredge_pending['player'] = cloned_state.p2
+
+        cloned_state.madness_cast_available = copy.deepcopy(self.madness_cast_available) if hasattr(self, 'madness_cast_available') else None
+        if cloned_state.madness_cast_available and 'player' in cloned_state.madness_cast_available:
+             if cloned_state.madness_cast_available['player'] == self.p1: cloned_state.madness_cast_available['player'] = cloned_state.p1
+             elif cloned_state.madness_cast_available['player'] == self.p2: cloned_state.madness_cast_available['player'] = cloned_state.p2
+
         cloned_state.pending_spell_context = copy.deepcopy(self.pending_spell_context)
         cloned_state.clash_context = copy.deepcopy(self.clash_context)
-        
+
         # --- Deep Copy Surveil State ---
-        cloned_state.surveil_in_progress = self.surveil_in_progress
+        cloned_state.surveil_in_progress = self.surveil_in_progress if hasattr(self, 'surveil_in_progress') else False
         cloned_state.cards_being_surveiled = self.cards_being_surveiled[:] if hasattr(self, 'cards_being_surveiled') else []
-        cloned_state.surveiling_player = cloned_state.p1 if self.surveiling_player == self.p1 else cloned_state.p2 if self.surveiling_player == self.p2 else None
-        
+        cloned_surveiling_player = None
+        if hasattr(self, 'surveiling_player') and self.surveiling_player:
+            if self.surveiling_player == self.p1: cloned_surveiling_player = cloned_state.p1
+            elif self.surveiling_player == self.p2: cloned_surveiling_player = cloned_state.p2
+        cloned_state.surveiling_player = cloned_surveiling_player
+
         # --- Deep Copy Scry State ---
-        cloned_state.scry_in_progress = self.scry_in_progress
+        cloned_state.scry_in_progress = self.scry_in_progress if hasattr(self, 'scry_in_progress') else False
         cloned_state.scrying_cards = self.scrying_cards[:] if hasattr(self, 'scrying_cards') else []
-        cloned_state.scrying_player = cloned_state.p1 if self.scrying_player == self.p1 else cloned_state.p2 if self.scrying_player == self.p2 else None
+        cloned_scrying_player = None
+        if hasattr(self, 'scrying_player') and self.scrying_player:
+             if self.scrying_player == self.p1: cloned_scrying_player = cloned_state.p1
+             elif self.scrying_player == self.p2: cloned_scrying_player = cloned_state.p2
+        cloned_state.scrying_player = cloned_scrying_player
         cloned_state.scrying_tops = self.scrying_tops[:] if hasattr(self, 'scrying_tops') else []
         cloned_state.scrying_bottoms = self.scrying_bottoms[:] if hasattr(self, 'scrying_bottoms') else []
 
         # --- Deep Copy Mulligan State ---
-        # Update player references in mulligan state
-        cloned_state.mulligan_player = cloned_state.p1 if self.mulligan_player == self.p1 else cloned_state.p2 if self.mulligan_player == self.p2 else None
-        cloned_state.bottoming_player = cloned_state.p1 if self.bottoming_player == self.p1 else cloned_state.p2 if self.bottoming_player == self.p2 else None
+        cloned_mulligan_player = None
+        if hasattr(self, 'mulligan_player') and self.mulligan_player:
+             if self.mulligan_player == self.p1: cloned_mulligan_player = cloned_state.p1
+             elif self.mulligan_player == self.p2: cloned_mulligan_player = cloned_state.p2
+        cloned_state.mulligan_player = cloned_mulligan_player
+        cloned_state.mulligan_count = copy.deepcopy(self.mulligan_count) if hasattr(self, 'mulligan_count') else {'p1':0, 'p2':0}
+        cloned_state.mulligan_data = copy.deepcopy(self.mulligan_data) if hasattr(self, 'mulligan_data') else {'p1':0, 'p2':0}
+
+        cloned_bottoming_player = None
+        if hasattr(self, 'bottoming_player') and self.bottoming_player:
+             if self.bottoming_player == self.p1: cloned_bottoming_player = cloned_state.p1
+             elif self.bottoming_player == self.p2: cloned_bottoming_player = cloned_state.p2
+        cloned_state.bottoming_player = cloned_bottoming_player
+
 
         # --- Restore priority player reference correctly ---
-        if self.priority_player == self.p1:
-            cloned_state.priority_player = cloned_state.p1
-        elif self.priority_player == self.p2:
-            cloned_state.priority_player = cloned_state.p2
-        else:
-            cloned_state.priority_player = None
+        cloned_priority_player = None
+        if hasattr(self, 'priority_player') and self.priority_player:
+             if self.priority_player == self.p1: cloned_priority_player = cloned_state.p1
+             elif self.priority_player == self.p2: cloned_priority_player = cloned_state.p2
+        cloned_state.priority_player = cloned_priority_player
 
         # --- Re-initialize Subsystems within the CLONED state ---
-        # Pass the *cloned_state* to the subsystem constructors/linkers
-        cloned_state._init_subsystems() # This should re-create fresh subsystem instances linked to the clone
+        # This step is crucial: create new instances of subsystems linked to the cloned GameState
+        cloned_state._init_subsystems() # Re-populates subsystems on cloned_state
 
-        # --- Re-register Effects based on Cloned State ---
-        # Layer system was already re-initialized by _init_subsystems.
-        # Clear old Ability Handler registrations and re-parse based on cloned state
+        # --- Deep Copy Ability Handler State (if needed) ---
+        # registered_abilities cache is large, potentially re-parse instead of deep copy
         if cloned_state.ability_handler:
-            cloned_state.ability_handler.registered_abilities = {} # Clear old dict
-            # Go through all cards *in the clone's state* and re-register their abilities/effects
+            # Option 1: Re-parse (Simpler, ensures links are correct, might be slow)
+            cloned_state.ability_handler.registered_abilities = {}
+            # We need to re-register static effects, replacements too
             for player in [cloned_state.p1, cloned_state.p2]:
-                if not player: continue
-                # Battlefield is the most common place for static/replacement effects
-                for card_id in player.get("battlefield", []):
-                    card = cloned_state._safe_get_card(card_id) # Get card from cloned DB ref
-                    if card:
-                        # _parse_and_register_abilities handles parsing and registering static abilities with LayerSystem
-                        cloned_state.ability_handler._parse_and_register_abilities(card_id, card)
-                        # _register_card_effects specifically handles static/replacements if needed separately
-                        cloned_state._register_card_effects(card_id, card, player) # Ensure static/replacements registered
+                if player:
+                    for card_id in list(player.get("battlefield", [])): # Check battlefield cards
+                        card = cloned_state._safe_get_card(card_id)
+                        if card:
+                            cloned_state.ability_handler._parse_and_register_abilities(card_id, card) # Re-parse and apply static
+                            if cloned_state.replacement_effects:
+                                cloned_state.replacement_effects.register_card_replacement_effects(card_id, player) # Re-register replacements
+            # Option 2: Attempt deep copy (Risky due to object references within Ability objects)
+            # cloned_state.ability_handler.registered_abilities = copy.deepcopy(self.ability_handler.registered_abilities)
+            # Fix source_card references in copied abilities (VERY complex)
+            cloned_state.ability_handler.active_triggers = copy.deepcopy(self.ability_handler.active_triggers) if hasattr(self.ability_handler,'active_triggers') else []
+            # Fix controller references in active_triggers
+            if hasattr(cloned_state.ability_handler,'active_triggers'):
+                for i in range(len(cloned_state.ability_handler.active_triggers)):
+                    ability, controller_orig = cloned_state.ability_handler.active_triggers[i]
+                    controller_cloned = cloned_state.p1 if controller_orig == self.p1 else cloned_state.p2 if controller_orig == self.p2 else None
+                    cloned_state.ability_handler.active_triggers[i] = (ability, controller_cloned)
+
+        # --- Deep Copy Layer System State ---
+        if cloned_state.layer_system:
+            # Need to deep copy the layers structure and update references in effect_data
+            cloned_state.layers = {}
+            for layer_num, effects_list_or_dict in self.layers.items():
+                if isinstance(effects_list_or_dict, dict): # Layer 7
+                    cloned_state.layers[layer_num] = {}
+                    for sublayer, effects_list in effects_list_or_dict.items():
+                        cloned_sublayer = []
+                        for eid, data in effects_list:
+                            copied_data = copy.deepcopy(data)
+                            # Fix controller reference if present
+                            if 'controller_id' in copied_data:
+                                ctrl_orig = copied_data['controller_id']
+                                ctrl_cloned = cloned_state.p1 if ctrl_orig == self.p1 else cloned_state.p2 if ctrl_orig == self.p2 else None
+                                copied_data['controller_id'] = ctrl_cloned
+                            # Fix condition reference (if it captures 'self') - Very hard
+                            # Assume condition functions don't rely on implicit self for now
+                            cloned_sublayer.append((eid, copied_data))
+                        cloned_state.layers[layer_num][sublayer] = cloned_sublayer
+                else: # Layers 1-6
+                    cloned_layer = []
+                    for eid, data in effects_list_or_dict:
+                         copied_data = copy.deepcopy(data)
+                         if 'controller_id' in copied_data:
+                             ctrl_orig = copied_data['controller_id']
+                             ctrl_cloned = cloned_state.p1 if ctrl_orig == self.p1 else cloned_state.p2 if ctrl_orig == self.p2 else None
+                             copied_data['controller_id'] = ctrl_cloned
+                         cloned_layer.append((eid, copied_data))
+                    cloned_state.layers[layer_num] = cloned_layer
+            cloned_state.timestamps = self.timestamps.copy()
+            cloned_state.effect_counter = self.effect_counter
+            cloned_state.dependencies = copy.deepcopy(self.dependencies) # Dependencies might be complex
+            cloned_state._last_applied_state_hash = self._last_applied_state_hash # Can copy hash
+
+        # --- Deep Copy Replacement Effects State ---
+        if cloned_state.replacement_effects:
+             cloned_state.replacement_effects.active_effects = []
+             cloned_state.replacement_effects.effect_index = defaultdict(list)
+             for data in self.replacement_effects.active_effects:
+                 copied_data = copy.deepcopy(data)
+                 # Fix player references
+                 if 'controller_id' in copied_data:
+                     ctrl_orig = copied_data['controller_id']
+                     ctrl_cloned = cloned_state.p1 if ctrl_orig == self.p1 else cloned_state.p2 if ctrl_orig == self.p2 else None
+                     copied_data['controller_id'] = ctrl_cloned
+                 cloned_state.replacement_effects.active_effects.append(copied_data)
+                 # Rebuild index
+                 event_type = copied_data.get('event_type')
+                 if event_type:
+                     cloned_state.replacement_effects.effect_index[event_type].append(copied_data)
+             cloned_state.replacement_effects.effect_counter = self.replacement_effects.effect_counter
 
         # --- Link External Systems (Shallow Copy/Reference) ---
         cloned_state.strategy_memory = self.strategy_memory  # Just reference
         cloned_state.stats_tracker = self.stats_tracker      # Just reference
         cloned_state.card_memory = self.card_memory          # Just reference
 
-        # --- Final Reference Checks ---
-        # Verify priority player reference again after subsystem init
-        if cloned_state.priority_player not in [cloned_state.p1, cloned_state.p2, None]:
-            logging.warning("Cloned priority player reference mismatch after subsystem init. Resetting.")
-            cloned_state.priority_player = cloned_state.p1 if self.priority_player == self.p1 else cloned_state.p2 if self.priority_player == self.p2 else None
-            
-        # Ensure players in subsystems reference the CLONED player objects
+        # --- Ensure internal subsystem references point to the cloned state ---
         if cloned_state.mana_system: cloned_state.mana_system.game_state = cloned_state
         if cloned_state.combat_resolver: cloned_state.combat_resolver.game_state = cloned_state
         if cloned_state.card_evaluator: cloned_state.card_evaluator.game_state = cloned_state
@@ -3266,6 +3375,9 @@ class GameState:
         if cloned_state.layer_system: cloned_state.layer_system.game_state = cloned_state
         if cloned_state.replacement_effects: cloned_state.replacement_effects.game_state = cloned_state
         if cloned_state.strategic_planner: cloned_state.strategic_planner.game_state = cloned_state
+        # Ensure ability_handler subsystems also point to cloned state subsystems
+        if cloned_state.ability_handler and cloned_state.targeting_system:
+            cloned_state.ability_handler.targeting_system = cloned_state.targeting_system
 
         logging.debug("GameState cloned successfully.")
         return cloned_state
