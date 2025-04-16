@@ -3,9 +3,14 @@ import logging
 from collections import Counter
 from collections import defaultdict
 
-from Playersim.card import Card
 class EnhancedManaSystem:
     """Advanced mana handling system that properly implements MTG mana rules."""
+        # Define card types and keywords directly here to avoid circular imports
+    ALL_CARD_TYPES = [
+        'creature', 'artifact', 'enchantment', 'land', 'planeswalker',
+        'instant', 'sorcery', 'battle', 'conspiracy', 'dungeon',
+        'phenomenon', 'plane', 'scheme', 'vanguard', 'class', 'room'
+    ]
     
     def __init__(self, game_state):
         self.game_state = game_state
@@ -22,7 +27,7 @@ class EnhancedManaSystem:
         # FIXED: Add lowercase variants with explicit assignment
         self.lowercase_symbols = {'w', 'u', 'b', 'r', 'g', 'c', 't'} 
         # Add tap symbol to a separate set of special symbols
-        self.special_symbols = {'t'}  # The tap symbol needs special handling 
+        self.special_symbols = {'t'}  # The tap symbol needs special handling
         
     def track_snow_sources(self, player):
         """
@@ -221,14 +226,14 @@ class EnhancedManaSystem:
             color_specific = None
             is_generic_modifier = False
             if amount_str.isdigit():
-                 amount = int(amount_str)
-                 is_generic_modifier = True
+                amount = int(amount_str)
+                is_generic_modifier = True
             elif amount_str in self.mana_symbols: # W, U, B, R, G, C
-                 color_specific = amount_str
-                 amount = 1 # e.g., {W} less means 1 less W required
+                color_specific = amount_str
+                amount = 1 # e.g., {W} less means 1 less W required
             else:
-                 logging.warning(f"Invalid amount '{amount_str}' in cost mod from {perm_name}. Skipping.")
-                 continue # Skip if amount isn't number or single color symbol
+                logging.warning(f"Invalid amount '{amount_str}' in cost mod from {perm_name}. Skipping.")
+                continue # Skip if amount isn't number or single color symbol
 
             # --- Check qualifier against target card ---
             applies = True
@@ -236,7 +241,8 @@ class EnhancedManaSystem:
 
             # Handle common qualifiers more precisely
             color_words = ["white", "blue", "black", "red", "green", "colorless", "multicolored"]
-            card_type_words = Card.ALL_CARD_TYPES
+            # Use our own constant instead of Card.ALL_CARD_TYPES
+            card_type_words = self.ALL_CARD_TYPES
             all_qualifiers = qualifier_lower.split() # Handle multi-word qualifiers like "artifact creature"
 
             found_match_for_qualifier = False

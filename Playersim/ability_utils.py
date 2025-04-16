@@ -1,10 +1,6 @@
 """Utility functions for ability processing."""
 import logging
 import re
-from .ability_types import AbilityEffect, DrawCardEffect, GainLifeEffect, DamageEffect, \
-    CounterSpellEffect, CreateTokenEffect, DestroyEffect, ExileEffect, \
-    DiscardEffect, MillEffect
-from .ability_types import TapEffect, UntapEffect, BuffEffect, SearchLibraryEffect, AddCountersEffect # Added AddCountersEffect too
 
 def is_beneficial_effect(effect_text):
     # (Keep existing implementation)

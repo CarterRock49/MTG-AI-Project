@@ -1,5 +1,5 @@
 # Virtual environment
-magic_env/
+MTGenv/
 venv/
 env/
 .env/
