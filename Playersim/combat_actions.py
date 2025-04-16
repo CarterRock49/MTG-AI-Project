@@ -719,57 +719,60 @@ class CombatActionHandler:
         return False
 
 
-    def handle_assign_multiple_blockers(self, param=None, context=None, **kwargs):
-        """Handle assigning multiple blockers. Attacker index from context, blocker identifiers from context."""
+    def handle_assign_multiple_blockers(self, param, context, **kwargs):
+        """Handle assigning multiple blockers. Attacker index from PARAM, blocker identifiers from CONTEXT."""
         gs = self.game_state
-        if gs.phase != gs.PHASE_DECLARE_BLOCKERS: return False
+        if gs.phase != gs.PHASE_DECLARE_BLOCKERS: return False, False # Ensure correct phase
         if context is None: context = {}
 
-        # --- Get Attacker Index from CONTEXT (more reliable than param) ---
-        # Param might still be the index passed from ACTION_MEANINGS, but context is preferred.
-        attacker_idx = context.get('attacker_index', param) # Check context first, fallback to param
+        attacker_idx = param # Param is the attacker index (0-9)
         if attacker_idx is None or not isinstance(attacker_idx, int) or not (0 <= attacker_idx < len(gs.current_attackers)):
-             logging.error(f"Invalid or missing attacker index for multi-block: {attacker_idx}")
-             return False
+            logging.error(f"Invalid or missing attacker index for multi-block: {attacker_idx}")
+            return -0.15, False
         attacker_id = gs.current_attackers[attacker_idx]
         attacker_card = gs._safe_get_card(attacker_id)
-        if not attacker_card: return False
+        if not attacker_card: return -0.15, False
 
         # --- Get Blocker Identifiers from Context ---
-        blocker_identifiers = context.get('blocker_identifiers') # Use consistent key, expect a list
+        blocker_identifiers = context.get('blocker_identifiers') # List of indices or IDs
         if not blocker_identifiers or not isinstance(blocker_identifiers, list):
             logging.error("Missing or invalid 'blocker_identifiers' list in context for multi-block.")
-            return False
+            return -0.15, False
 
         # --- Validate Blockers ---
-        player = gs.p1 if not gs.agent_is_p1 else gs.p2 # Correct: Player controlling blockers is NON-AGENT
+        player = gs._get_non_active_player() # Player controlling blockers
         valid_blocker_ids = []
         for identifier in blocker_identifiers:
-             blocker_id = self._find_permanent_id(player, identifier) # Find on blocking player's field
-             if not blocker_id:
-                  logging.warning(f"Invalid blocker identifier {identifier} for multi-block.")
-                  return False
-             if not self._can_block(blocker_id, attacker_id):
-                  logging.warning(f"Blocker {gs._safe_get_card(blocker_id).name} cannot block {attacker_card.name}")
-                  return False
-             valid_blocker_ids.append(blocker_id)
+            # Use helper to find ID from index or string ID
+            blocker_id = self._find_permanent_id(player, identifier)
+            if not blocker_id:
+                 logging.warning(f"Invalid blocker identifier {identifier} for multi-block.")
+                 return -0.1, False
+            blocker_card = gs._safe_get_card(blocker_id)
+            if not blocker_card: return -0.1, False
+
+            if not self._can_block(blocker_id, attacker_id):
+                 logging.warning(f"Blocker {blocker_card.name} cannot block {attacker_card.name}")
+                 return -0.1, False
+            valid_blocker_ids.append(blocker_id)
 
         if len(valid_blocker_ids) < 2:
-             logging.warning("Must assign at least 2 blockers for ASSIGN_MULTIPLE_BLOCKERS action.")
-             return False
+            logging.warning("Must assign at least 2 valid blockers for ASSIGN_MULTIPLE_BLOCKERS action.")
+            return -0.1, False
 
-        # --- Check Menace ---
+        # Check Menace explicitly if needed (though _can_block might implicitly handle)
         if self._has_keyword(attacker_card, "menace") and len(valid_blocker_ids) < 2:
-            logging.warning(f"Menace requires at least 2 blockers, only {len(valid_blocker_ids)} assigned.")
-            return False # Technically handled above, but good explicit check
+             logging.warning(f"Menace requires at least 2 blockers, only {len(valid_blocker_ids)} valid blockers assigned.")
+             return -0.1, False
 
         # --- Assign Block ---
         if not hasattr(gs, 'current_block_assignments'): gs.current_block_assignments = {}
-        gs.current_block_assignments[attacker_id] = valid_blocker_ids # Replace any existing blocks for this attacker
+        # Replace any existing single blocks for this attacker with the multi-block
+        gs.current_block_assignments[attacker_id] = valid_blocker_ids
 
-        blocker_names = [gs._safe_get_card(bid).name for bid in valid_blocker_ids if gs._safe_get_card(bid)]
+        blocker_names = [getattr(gs._safe_get_card(bid), 'name', bid) for bid in valid_blocker_ids]
         logging.info(f"Assigned multiple blockers ({', '.join(blocker_names)}) to {attacker_card.name}")
-        return True
+        return 0.15, True # Higher reward for complex block
     
 
     def handle_defend_battle(self, param=None, context=None, **kwargs):

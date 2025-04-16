@@ -31,19 +31,18 @@ ACTION_MEANINGS = {
     **{i: ("ATTACK", i-28) for i in range(28, 48)},
 
     # Block (48-67) = 20 actions (param=battlefield index 0-19)
-    # Context Required: {'target_attacker_id': int} (Optional, if agent specifies blocker target)
+    # Context Required (Optional): {'target_attacker_id': id_or_idx} (If agent specifies blocker target)
     **{i: ("BLOCK", i-48) for i in range(48, 68)},
 
     # Tap land for mana (68-87) = 20 actions (param=battlefield index 0-19)
     **{i: ("TAP_LAND_FOR_MANA", i-68) for i in range(68, 88)},
 
     # Tap land for effect (88-99) = 12 actions (param=battlefield index 0-11)
-    # Context Required: {'ability_idx': int} (Typically 0 for land effect)
+    # Context Required: {'ability_idx': int} (Typically 0 for land effect, handled by context if ambiguous)
     **{i: ("TAP_LAND_FOR_EFFECT", i-88) for i in range(88, 100)},
 
     # Activate Ability (100-159) = 60 actions
-    # Maps (battlefield_idx 0-19, ability_idx 0-2) -> action index
-    # Context Required: {'battlefield_idx': int, 'ability_idx': int} (Handler extracts this)
+    # Param=None. Handler expects {'battlefield_idx': int, 'ability_idx': int} in context.
     **{100 + (i * 3) + j: ("ACTIVATE_ABILITY", None) for i in range(20) for j in range(3)},
 
     # Transform (160-179) = 20 actions (param=battlefield index 0-19)
@@ -59,8 +58,7 @@ ACTION_MEANINGS = {
     **{i: ("PLAY_ADVENTURE", i-196) for i in range(196, 204)},
 
     # Defend Battle (204-223) = 20 actions
-    # Maps (battle_idx 0-4, defender_idx 0-3) -> action index
-    # Context Required: {'battle_identifier': id_or_idx, 'defender_identifier': id_or_idx} (Handler extracts this)
+    # Param=None. Handler expects {'battle_identifier': id_or_idx, 'defender_identifier': id_or_idx} in context.
     **{204 + (i * 4) + j: ("DEFEND_BATTLE", None) for i in range(5) for j in range(4)},
 
     # NO_OP (224)
@@ -68,219 +66,190 @@ ACTION_MEANINGS = {
 
     # Mulligan (225-229) = 5 actions
     225: ("KEEP_HAND", None),
-    **{226 + i: ("BOTTOM_CARD", i) for i in range(4)},  # param=card index 0-3
+    # Param is hand index (0-3) for card selection to bottom.
+    **{226 + i: ("BOTTOM_CARD", i) for i in range(4)},
 
-    # Cast from Exile (230-237) = 8 actions (param=exile index 0-7)
+    # Cast from Exile (230-237) = 8 actions (param=relative index 0-7 into castable exile list)
     **{i: ("CAST_FROM_EXILE", i-230) for i in range(230, 238)},
 
     # Discard (238-247) = 10 actions (param=hand index 0-9)
     **{238 + i: ("DISCARD_CARD", i) for i in range(10)},
 
     # Room/Class (248-257) = 10 actions
-    **{248 + i: ("UNLOCK_DOOR", i) for i in range(5)}, # param=battlefield index 0-4
-    **{253 + i: ("LEVEL_UP_CLASS", i) for i in range(5)}, # param=battlefield index 0-4
+    # Param=battlefield index 0-4
+    **{248 + i: ("UNLOCK_DOOR", i) for i in range(5)},
+    # Param=battlefield index 0-4
+    **{253 + i: ("LEVEL_UP_CLASS", i) for i in range(5)},
 
     # Spree Mode (258-273) = 16 actions
-    # Maps (hand_idx 0-7, mode_idx 0-1) -> action index
-    # Context Required: {'hand_idx': int, 'mode_idx': int} (Handler extracts this)
+    # Param=None. Handler expects {'hand_idx': int, 'mode_idx': int} in context.
     **{258 + (i * 2) + j: ("SELECT_SPREE_MODE", None) for i in range(8) for j in range(2)},
 
     # Targeting (274-293) = 20 actions
-    # Param is index into list of valid targets presented based on game state targeting_context.
-    # Context Required: {'targeting_context': game_state.targeting_context} (Needed by handler)
+    # Param is index (0-9) into list of valid targets. Handler uses param + targeting_context.
     **{274 + i: ("SELECT_TARGET", i) for i in range(10)},
-    # Param is index into list of valid sacrifice targets presented based on game state sacrifice_context.
-    # Context Required: {'sacrifice_context': game_state.sacrifice_context} (Needed by handler)
+    # Param is index (0-9) into list of valid sacrifice targets. Handler uses param + sacrifice_context.
     **{284 + i: ("SACRIFICE_PERMANENT", i) for i in range(10)},
 
     # Gaps filled with NO_OP (294-298) = 5 actions
     **{i: ("NO_OP", None) for i in range(294, 299)},
 
     # Library/Card Movement (299-308) = 10 actions
-    **{299 + i: ("SEARCH_LIBRARY", i) for i in range(5)}, # param=search type 0-4
+    # Param=search type index 0-4
+    **{299 + i: ("SEARCH_LIBRARY", i) for i in range(5)},
     304: ("NO_OP_SEARCH_FAIL", None),
-    # Context Required for Scry/Surveil: {'choice_context': game_state.choice_context} (Needed by handlers)
-    305: ("PUT_TO_GRAVEYARD", None), # param=choice index (usually 0) -> Surveil
-    306: ("PUT_ON_TOP", None),       # param=choice index (usually 0) -> Scry/Surveil
-    307: ("PUT_ON_BOTTOM", None),    # param=choice index (usually 0) -> Scry
-    # Context Required: {'dredge_pending': game_state.dredge_pending, 'gy_idx': int} (gy_idx derived from action param)
-    308: ("DREDGE", None), # Action param (0-5) likely maps to gy_idx
+    # Param implies choice index, Handler needs choice_context.
+    305: ("PUT_TO_GRAVEYARD", None), # Choice index 0 -> Surveil GY
+    306: ("PUT_ON_TOP", None),       # Choice index 0 -> Scry/Surveil Top
+    307: ("PUT_ON_BOTTOM", None),    # Choice index 0 -> Scry Bottom
+    # Param is graveyard index 0-5. Handler needs dredge_pending context.
+    **{i: ("DREDGE", i-308) for i in range(308, 314)}, # Corrected Dredge index to match space (6 slots)
+    # Gap from 314 to 318 needs filling if Dredge was only 1 slot previously (it was index 308). Revert to single DREDGE?
+    # Let's revert to a single DREDGE action and use context.
+    308: ("DREDGE", None), # Handler expects {'gy_idx': int} in context
+    # Gap filling (309-313)
+    **{i: ("NO_OP", None) for i in range(309, 314)}, # 5 NO_OPs
 
-    # Counter Management (309-329) = 21 actions
-    # Param is index relative to a list of valid targets.
-    # Context Required: {'counter_type': str, 'count': int, 'target_id': str_or_int}
-    **{309 + i: ("ADD_COUNTER", i) for i in range(10)},
-    # Param is index relative to a list of valid targets.
-    # Context Required: {'counter_type': str, 'count': int, 'target_id': str_or_int}
-    **{319 + i: ("REMOVE_COUNTER", i) for i in range(10)},
-    329: ("PROLIFERATE", None), # Context defines targets if needed by AI choice
+    # Counter Management (314-333 -> WAS 309-329 before fixing Dredge) = 20 actions + Prolif
+    # Param is index (0-9) into valid targets. Handler needs {'counter_type': str, 'count': int} in context.
+    **{314 + i: ("ADD_COUNTER", i) for i in range(10)},
+    # Param is index (0-9) into valid targets. Handler needs {'counter_type': str, 'count': int} in context.
+    **{324 + i: ("REMOVE_COUNTER", i) for i in range(10)},
+    334: ("PROLIFERATE", None), # Param=None. Context optional: {'proliferate_targets': [id,...]}
 
-    # Zone Movement (330-347) = 18 actions
-    # Param is graveyard index 0-5
-    **{330 + i: ("RETURN_FROM_GRAVEYARD", i) for i in range(6)},
-    # Param is graveyard index 0-5
-    **{336 + i: ("REANIMATE", i) for i in range(6)},
-    # Param is exile index 0-5
-    **{342 + i: ("RETURN_FROM_EXILE", i) for i in range(6)},
+    # Zone Movement (335-352 -> WAS 330-347) = 18 actions
+    # Param is graveyard index 0-5. Handler uses param to find card ID.
+    **{335 + i: ("RETURN_FROM_GRAVEYARD", i) for i in range(6)},
+    # Param is graveyard index 0-5. Handler uses param to find card ID.
+    **{341 + i: ("REANIMATE", i) for i in range(6)},
+    # Param is exile index 0-5. Handler uses param to find card ID.
+    **{347 + i: ("RETURN_FROM_EXILE", i) for i in range(6)},
 
-    # Modal/Choice (348-372) = 25 actions
-    # Param is mode index 0-9.
-    # Context Required: {'choice_context': game_state.choice_context} (Needed by handler)
-    **{348 + i: ("CHOOSE_MODE", i) for i in range(10)},
-    # Param is X value 1-10.
-    # Context Required: {'choice_context': game_state.choice_context} (Needed by handler)
-    **{358 + i: ("CHOOSE_X_VALUE", i+1) for i in range(10)},
-    # Param is WUBRG index 0-4.
-    # Context Required: {'choice_context': game_state.choice_context} (Needed by handler)
-    **{368 + i: ("CHOOSE_COLOR", i) for i in range(5)},
+    # Modal/Choice (353-377 -> WAS 348-372) = 25 actions
+    # Param is mode index 0-9. Handler uses param + choice_context.
+    **{353 + i: ("CHOOSE_MODE", i) for i in range(10)},
+    # Param is X value 1-10. Handler uses param + choice_context.
+    **{363 + i: ("CHOOSE_X_VALUE", i+1) for i in range(10)},
+    # Param is WUBRG index 0-4. Handler uses param + choice_context.
+    **{373 + i: ("CHOOSE_COLOR", i) for i in range(5)},
 
-    # Advanced Combat (373-377, 383-392) = 15 actions
-    # Param=opponent PW index 0-4. Assumes last declared attacker targets this.
-    **{373 + i: ("ATTACK_PLANESWALKER", i) for i in range(5)},
-    # Gap filled with NO_OP (378-382) = 5 actions
-    **{i: ("NO_OP", None) for i in range(378, 383)},
-    # Param=attacker index 0-9 (index within gs.current_attackers).
-    # Context Required: {'blocker_identifiers': [id_or_idx,...]} (List of blocker indices/IDs to assign)
-    **{383 + i: ("ASSIGN_MULTIPLE_BLOCKERS", i) for i in range(10)},
+    # Advanced Combat (378-382, 388-397 -> WAS 373-377, 383-392) = 15 actions
+    # Param=relative PW index 0-4. Handler uses param to identify target PW. Last declared attacker implicit.
+    **{378 + i: ("ATTACK_PLANESWALKER", i) for i in range(5)},
+    # Gap filled with NO_OP (383-387 -> WAS 378-382) = 5 actions
+    **{i: ("NO_OP", None) for i in range(383, 388)},
+    # Param=attacker index 0-9. Handler expects {'blocker_identifiers': [id_or_idx,...]} in context.
+    **{388 + i: ("ASSIGN_MULTIPLE_BLOCKERS", i) for i in range(10)},
 
-    # Alternative Casting (393-404) = 12 actions
-    # Context required by handlers, often needs gy_idx, hand_idx, exile_idx, etc.
-    # Context required: {'gy_idx': int}
-    393: ("CAST_WITH_FLASHBACK", None),
-    # Context required: {'gy_idx': int, 'discard_idx': int}
-    394: ("CAST_WITH_JUMP_START", None),
-    # Context required: {'gy_idx': int, 'gy_indices_escape': [int,...]}
-    395: ("CAST_WITH_ESCAPE", None),
-    # Context required: {'exile_idx': int} (card assumed to be in exile via discard)
-    396: ("CAST_FOR_MADNESS", None),
-    # Context required: {'hand_idx': int}
-    397: ("CAST_WITH_OVERLOAD", None),
-    # Context required: {'hand_idx': int, 'sacrifice_idx': int}
-    398: ("CAST_FOR_EMERGE", None),
-    # Context required: {'hand_idx': int, 'gy_indices': [int,...]}
-    399: ("CAST_FOR_DELVE", None),
-    # Context flag setting actions (param=True/False)
-    400: ("PAY_KICKER", True),
-    401: ("PAY_KICKER", False),
-    402: ("PAY_ADDITIONAL_COST", True),
-    403: ("PAY_ADDITIONAL_COST", False),
-    # Context required: {'num_extra_modes': int} (param likely maps to num_extra_modes)
-    404: ("PAY_ESCALATE", None),
+    # Alternative Casting (398-409 -> WAS 393-404) = 12 actions
+    # Handlers expect necessary identifiers (gy_idx, hand_idx, sacrifice_idx, etc.) in context. Param often unused.
+    398: ("CAST_WITH_FLASHBACK", None), # Context={'gy_idx': int}
+    399: ("CAST_WITH_JUMP_START", None), # Context={'gy_idx': int, 'discard_idx': int}
+    400: ("CAST_WITH_ESCAPE", None), # Context={'gy_idx': int, 'gy_indices_escape': [int,...]}
+    401: ("CAST_FOR_MADNESS", None), # Context={'card_id': str, 'exile_idx': int}
+    402: ("CAST_WITH_OVERLOAD", None), # Context={'hand_idx': int}
+    403: ("CAST_FOR_EMERGE", None), # Context={'hand_idx': int, 'sacrifice_idx': int}
+    404: ("CAST_FOR_DELVE", None), # Context={'hand_idx': int, 'gy_indices': [int,...]}
+    # Informational Flags
+    405: ("PAY_KICKER", True), # Param indicates choice
+    406: ("PAY_KICKER", False),# Param indicates choice
+    407: ("PAY_ADDITIONAL_COST", True), # Param indicates choice
+    408: ("PAY_ADDITIONAL_COST", False),# Param indicates choice
+    # Param=None. Handler expects {'num_extra_modes': int} in context.
+    409: ("PAY_ESCALATE", None),
 
-    # Token/Copy (405-412) = 8 actions
-    **{405 + i: ("CREATE_TOKEN", i) for i in range(5)}, # param=predefined token type index 0-4
-    # Context Required: {'target_permanent_idx': int} (combined index?)
-    410: ("COPY_PERMANENT", None),
-    # Context Required: {'target_spell_idx': int} (stack index)
-    411: ("COPY_SPELL", None),
-    # Context Required: {'target_token_idx': int} (index among player's tokens)
-    412: ("POPULATE", None),
+    # Token/Copy (410-417 -> WAS 405-412) = 8 actions
+    # Param=predefined token type index 0-4
+    **{410 + i: ("CREATE_TOKEN", i) for i in range(5)},
+    # Param=None. Handler expects {'target_permanent_identifier': id_or_idx} in context.
+    415: ("COPY_PERMANENT", None),
+    # Param=None. Handler expects {'target_stack_identifier': id_or_idx} in context.
+    416: ("COPY_SPELL", None),
+    # Param=None. Handler expects {'target_token_identifier': id_or_idx} in context.
+    417: ("POPULATE", None),
 
-    # Specific Mechanics (413-424) = 12 actions
-    413: ("INVESTIGATE", None),
-    # Context Required: {'hand_idx': int}
-    414: ("FORETELL", None),
-    # Context Required: {'amount': int}
-    415: ("AMASS", None),
-    416: ("LEARN", None), # Context might be needed if choosing Lesson
-    417: ("VENTURE", None), # Context might be needed for dungeon choice/path
-    # Context Required: {'creature_idx': int} (battlefield index)
-    418: ("EXERT", None),
-    # Context Required: {'creature_idx': int} (battlefield index)
-    419: ("EXPLORE", None),
-    # Context Required: {'creature_idx': int, 'amount': int}
-    420: ("ADAPT", None),
-    # Context Required: {'hand_idx': int, 'target_idx': int}
-    421: ("MUTATE", None),
-    # Context Required: {'hand_idx': int}
-    422: ("CYCLING", None),
-    # Context Required: {'target_creature_idx': int} (combined index?)
-    423: ("GOAD", None),
-    # Context Required: {'creature_idx': int} (battlefield index)
-    424: ("BOAST", None),
+    # Specific Mechanics (418-429 -> WAS 413-424) = 12 actions (Handlers mostly rely on context)
+    418: ("INVESTIGATE", None), # Context implies source
+    419: ("FORETELL", None), # Context={'hand_idx': int}
+    420: ("AMASS", None), # Context={'amount': int}
+    421: ("LEARN", None), # Context defines source
+    422: ("VENTURE", None), # Context defines source
+    423: ("EXERT", None), # Context={'creature_idx': int}
+    424: ("EXPLORE", None), # Context={'creature_idx': int}
+    425: ("ADAPT", None), # Context={'creature_idx': int, 'amount': int}
+    426: ("MUTATE", None), # Context={'hand_idx': int, 'target_idx': int}
+    427: ("CYCLING", None), # Context={'hand_idx': int}
+    428: ("GOAD", None), # Context={'target_creature_identifier': id_or_idx}
+    429: ("BOAST", None), # Context={'creature_idx': int}
 
-    # Response Actions (425-429) = 5 actions
-    # Context Required: {'hand_idx': int, 'target_spell_idx': int}
-    425: ("COUNTER_SPELL", None),
-    # Context Required: {'hand_idx': int, 'target_ability_idx': int}
-    426: ("COUNTER_ABILITY", None),
-    # Context Required: {'hand_idx': int, 'amount': int, 'target': id_or_idx}
-    427: ("PREVENT_DAMAGE", None),
-    # Context Required: {'hand_idx': int, 'new_target': id_or_idx}
-    428: ("REDIRECT_DAMAGE", None),
-    # Context Required: {'hand_idx': int, 'target_trigger_idx': int}
-    429: ("STIFLE_TRIGGER", None),
+    # Response Actions (430-434 -> WAS 425-429) = 5 actions (Handlers rely on context for targets/sources)
+    430: ("COUNTER_SPELL", None), # Context={'hand_idx': int, 'target_stack_identifier': id_or_idx}
+    431: ("COUNTER_ABILITY", None), # Context={'hand_idx': int, 'target_stack_identifier': id_or_idx}
+    432: ("PREVENT_DAMAGE", None), # Context={'hand_idx': int, ...}
+    433: ("REDIRECT_DAMAGE", None), # Context={'hand_idx': int, ...}
+    434: ("STIFLE_TRIGGER", None), # Context={'hand_idx': int, 'target_stack_identifier': id_or_idx}
 
-    # Combat Actions (Delegated via apply_combat_action) (430-439) = 10 actions
-    # Context Required (for handler): {'assignments': {attacker_id: [blocker_id,...],...}} (Damage order)
-    430: ("FIRST_STRIKE_ORDER", None),
-    # Context Required (optional for handler): {'assignments': {attacker_id: {target_id: damage,...},...}} (Manual assignment)
-    431: ("ASSIGN_COMBAT_DAMAGE", None),
-    # Context Required (for handler): {'ninja_identifier': id_or_idx, 'attacker_identifier': id_or_idx}
-    432: ("NINJUTSU", None),
-    433: ("DECLARE_ATTACKERS_DONE", None),
-    434: ("DECLARE_BLOCKERS_DONE", None),
-    # Context Required (for handler): {'battlefield_idx': int}
-    435: ("LOYALTY_ABILITY_PLUS", None),
-    436: ("LOYALTY_ABILITY_ZERO", None),
-    437: ("LOYALTY_ABILITY_MINUS", None),
-    438: ("ULTIMATE_ABILITY", None),
-    # Context Required (for handler): {'pw_identifier': id_or_idx, 'defender_identifier': id_or_idx}
-    439: ("PROTECT_PLANESWALKER", None),
+    # Combat Actions (435-444 -> WAS 430-439) = 10 actions (Handlers rely on context)
+    435: ("FIRST_STRIKE_ORDER", None), # Context={'assignments': {atk_id: [blk_id,...]}}
+    436: ("ASSIGN_COMBAT_DAMAGE", None), # Context=Optional({'assignments': {atk_id: {tgt_id: dmg,...}}})
+    437: ("NINJUTSU", None), # Context={'ninja_identifier': id_or_idx, 'attacker_identifier': id_or_idx}
+    438: ("DECLARE_ATTACKERS_DONE", None),
+    439: ("DECLARE_BLOCKERS_DONE", None),
+    # Param=battlefield index. Handler expects context={'battlefield_idx': int}. Action determines ability type.
+    440: ("LOYALTY_ABILITY_PLUS", None),
+    441: ("LOYALTY_ABILITY_ZERO", None),
+    442: ("LOYALTY_ABILITY_MINUS", None),
+    443: ("ULTIMATE_ABILITY", None),
+    # Param=None. Handler expects {'pw_identifier': id_or_idx, 'defender_identifier': id_or_idx} in context.
+    444: ("PROTECT_PLANESWALKER", None),
 
-    # Card Type Specific (440-453, 455) = 15 actions (plus 1 NO_OP)
-    # Context required: {'hand_idx': int}
-    440: ("CAST_LEFT_HALF", None),
-    441: ("CAST_RIGHT_HALF", None),
-    442: ("CAST_FUSE", None),
-    # Context required: {'gy_idx': int}
-    443: ("AFTERMATH_CAST", None),
-    # Context Required: {'battlefield_idx': int}
-    444: ("FLIP_CARD", None),
-    # Context Required: {'equip_idx': int, 'target_idx': int}
-    445: ("EQUIP", None),
-    # *** UPDATED: 446 is now NO_OP ***
-    446: ("NO_OP", None), # Changed from UNEQUIP
-    # *** UPDATED: 447 is now NO_OP ***
-    447: ("NO_OP", None), # Changed from ATTACH_AURA
-    # Context Required: {'fort_idx': int, 'target_idx': int}
-    448: ("FORTIFY", None),
-    # Context Required: {'battlefield_idx': int} (Target chosen by AI/logic)
-    449: ("RECONFIGURE", None),
-    # Context Required: {'battlefield_idx': int}
-    450: ("MORPH", None),
-    451: ("MANIFEST", None),
-    452: ("CLASH", None),
-    # Context Required: {'spell_stack_idx': int, 'creature1_identifier': id_or_idx, 'creature2_identifier': id_or_idx}
-    453: ("CONSPIRE", None),
-    454: ("NO_OP", None), # Replaced CONVOKE
-    # Context Required: {'hand_idx': int}
-    455: ("GRANDEUR", None),
-    456: ("NO_OP", None), # Replaced HELLBENT
+    # Card Type Specific (445-459 -> WAS 440-456) = 15 actions (plus NO_OPs)
+    # Param=None. Handler expects {'hand_idx': int} in context.
+    445: ("CAST_LEFT_HALF", None),
+    446: ("CAST_RIGHT_HALF", None),
+    447: ("CAST_FUSE", None),
+    # Param=None. Handler expects {'gy_idx': int} in context.
+    448: ("AFTERMATH_CAST", None),
+    # Param=None. Handler expects {'battlefield_idx': int} in context.
+    449: ("FLIP_CARD", None),
+    # Param=None. Handler expects {'equipment_identifier': id_or_idx, 'target_identifier': id_or_idx} in context.
+    450: ("EQUIP", None),
+    451: ("NO_OP", None), # Was UNEQUIP
+    452: ("NO_OP", None), # Was ATTACH_AURA
+    # Param=None. Handler expects {'fort_identifier': id_or_idx, 'target_identifier': id_or_idx} in context.
+    453: ("FORTIFY", None),
+    # Param=None. Handler expects {'card_identifier': id_or_idx, Optional 'target_identifier': id_or_idx} in context.
+    454: ("RECONFIGURE", None),
+    # Param=None. Handler expects {'battlefield_idx': int} in context.
+    455: ("MORPH", None),
+    456: ("MANIFEST", None), # Context implies source, usually top of library
+    457: ("CLASH", None), # Context defines source
+    # Param=None. Handler expects {'spell_stack_idx': int, 'creature1_identifier': id_or_idx, 'creature2_identifier': id_or_idx} in context.
+    458: ("CONSPIRE", None),
+    459: ("NO_OP", None), # Was CONVOKE
+    # Param=None. Handler expects {'hand_idx': int} in context.
+    460: ("GRANDEUR", None),
+    461: ("NO_OP", None), # Was HELLBENT
 
-    # Gap filled with NO_OP (457-459) = 3 actions
-    **{i: ("NO_OP", None) for i in range(457, 460)},
+    # Attack Battle (462-466 -> WAS 460-464) = 5 actions
+    # Param=relative battle index 0-4. Handler uses param to identify target battle. Last declared attacker implicit.
+    **{462 + i: ("ATTACK_BATTLE", i) for i in range(5)},
 
-    # Actions 460-464: Target Battle index 0-4
-    # Param = relative battle index 0-4
-    # Context Required: Implicit attacker assumed (last declared)
-    **{460 + i: ("ATTACK_BATTLE", i) for i in range(5)},
-    # Fill the remaining space (465-479) with No-Ops
-    **{i: ("NO_OP", None) for i in range(465, 480)}
+    # Fill the remaining space (467-479 -> WAS 465-479) with No-Ops
+    **{i: ("NO_OP", None) for i in range(467, 480)} # Fill up to 479
 }
 
-# Verify final size after changes
+# Final size verification (Important after re-indexing)
 required_size = 480
 if len(ACTION_MEANINGS) != required_size:
-    logging.warning(f"ACTION_MEANINGS size incorrect after update: {len(ACTION_MEANINGS)}, expected {required_size}. Re-adjusting...")
-    max_idx = max(ACTION_MEANINGS.keys()) if ACTION_MEANINGS else -1
-    for i in range(required_size):
-        if i not in ACTION_MEANINGS:
-            ACTION_MEANINGS[i] = ("NO_OP", None)
-    if len(ACTION_MEANINGS) > required_size:
-        keys_to_remove = [k for k in ACTION_MEANINGS if k >= required_size]
-        for k in keys_to_remove: del ACTION_MEANINGS[k]
-    logging.info(f"ACTION_MEANINGS size corrected to {len(ACTION_MEANINGS)}")
+     logging.error(f"ACTION_MEANINGS size INCORRECT after fixing: {len(ACTION_MEANINGS)}, expected {required_size}.")
+     # Manual correction if needed
+     for i in range(required_size):
+         if i not in ACTION_MEANINGS: ACTION_MEANINGS[i] = ("NO_OP", None)
+     keys_to_remove = [k for k in ACTION_MEANINGS if k >= required_size]
+     for k in keys_to_remove: del ACTION_MEANINGS[k]
+     if len(ACTION_MEANINGS) == required_size: logging.info("ACTION_MEANINGS size corrected.")
+     else: logging.critical("ACTION_MEANINGS size correction failed!")
 
 class ActionHandler:
     """Handles action validation and execution"""
@@ -385,7 +354,7 @@ class ActionHandler:
                 "CAST_WITH_OVERLOAD": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_OVERLOAD", context=context, **k), # Param is hand_idx
                 "CAST_FOR_EMERGE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_EMERGE", context=context, **k), # Param=None, context needs hand_idx, sacrifice_idx
                 "CAST_FOR_DELVE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_DELVE", context=context, **k), # Param=None, context needs hand_idx, gy_indices
-                "AFTERMATH_CAST": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="AFTERMATH_CAST", context=context, **k), # Param is gy_idx
+                "AFTERMATH_CAST": lambda p=None, context=None, **k: self._handle_handle_copy_permanent_alternative_casting(p, action_type="AFTERMATH_CAST", context=context, **k), # Param is gy_idx
                 # Informational Flags
                 "PAY_KICKER": self._handle_pay_kicker, # Param=True/False
                 "PAY_ADDITIONAL_COST": self._handle_pay_additional_cost, # Param=True/False
@@ -2562,21 +2531,21 @@ class ActionHandler:
                   return -0.1
          return -0.2
 
-      
-    def _handle_activate_ability(self, param, context, **kwargs):
+    def _handle_activate_ability(self, param, context, **kwargs): # Param (derived from ACTION_MEANINGS) is None here
         gs = self.game_state
         player = gs._get_active_player()
-        # Extract indices from context (based on ACTION_MEANING calculation)
-        # Example: action_idx 100 = bf_idx 0, ability_idx 0; action_idx 104 = bf_idx 1, ability_idx 1
-        action_idx_base = 100
-        total_bf_slots = 20
-        abilities_per_card = 3
-        bf_idx = (kwargs.get('action_index', 0) - action_idx_base) // abilities_per_card
-        ability_idx = (kwargs.get('action_index', 0) - action_idx_base) % abilities_per_card
+        # --- Get Indices from CONTEXT ---
+        bf_idx = context.get('battlefield_idx')
+        ability_idx = context.get('ability_idx')
 
-        # Update context with extracted indices for clarity
-        context['battlefield_idx'] = bf_idx
-        context['ability_idx'] = ability_idx
+        if bf_idx is None or ability_idx is None:
+             logging.error(f"ACTIVATE_ABILITY missing 'battlefield_idx' or 'ability_idx' in context: {context}")
+             return -0.15, False
+
+        if not isinstance(bf_idx, int) or not isinstance(ability_idx, int):
+             logging.error(f"ACTIVATE_ABILITY context indices are not integers: {context}")
+             return -0.15, False
+        # --- End Context Check ---
 
         if bf_idx >= len(player.get("battlefield", [])):
             logging.warning(f"ACTIVATE_ABILITY: Invalid battlefield index {bf_idx}")
@@ -2587,11 +2556,11 @@ class ActionHandler:
         # Evaluate ability value before activating
         ability_value = 0
         if self.card_evaluator:
-            ability_value, _ = self.evaluate_ability_activation(card_id, ability_idx)
+            ability_value, _ = self.evaluate_ability_activation(card_id, ability_idx) # Pass correct indices
 
         # Use AbilityHandler to activate
         if gs.ability_handler:
-            # Pass context which now includes indices
+            # Pass full context if needed by specific abilities
             success = gs.ability_handler.activate_ability(card_id, ability_idx, player, context=context)
             if success:
                 return 0.1 + ability_value * 0.4, True
@@ -2600,8 +2569,7 @@ class ActionHandler:
                 return -0.1, False
         else:
              logging.warning("ACTIVATE_ABILITY: AbilityHandler not found.")
-             return -0.15, False # Handler missing
-
+             return -0.15, False
 
     def _handle_loyalty_ability(self, param, action_type, **kwargs):
          gs = self.game_state
@@ -4212,23 +4180,24 @@ class ActionHandler:
             else: logging.warning(f"Flip Card context missing 'battlefield_idx'")
             return (-0.15, False)
     
-    def _handle_equip(self, param, context, **kwargs):
-        """Handle EQUIP action. Expects context={'equip_idx':X, 'target_idx':Y}."""
+
+    def _handle_equip(self, param, context, **kwargs): # Param is None
+        """Handle EQUIP action. Expects context={'equipment_identifier':X, 'target_identifier':Y}."""
         gs = self.game_state
         player = gs._get_active_player() # Equipping happens on your turn
-        # context should be populated by the environment based on agent's target selection
-        # or derived during action generation if targeting is simple.
-        # Use more descriptive keys: 'equipment_identifier' and 'target_identifier'
-        equip_identifier = context.get('equipment_identifier', context.get('equip_idx')) # Fallback for older context
-        target_identifier = context.get('target_identifier', context.get('target_idx')) # Fallback
+        if context is None: context = {}
+
+        # --- Get Identifiers from CONTEXT ---
+        equip_identifier = context.get('equipment_identifier')
+        target_identifier = context.get('target_identifier')
 
         if equip_identifier is None or target_identifier is None:
-            logging.error(f"Equip context missing required identifiers ('equipment_identifier', 'target_identifier'): {context}")
+            logging.error(f"Equip context missing required identifiers: {context}")
             return -0.15, False
+        # --- End Context Check ---
 
-        # Find IDs using helpers
-        equip_id = self.action_handler._find_permanent_id(player, equip_identifier) # Use handler's helper
-        target_id = self.action_handler._find_permanent_id(player, target_identifier) # Use handler's helper
+        equip_id = self._find_permanent_id(player, equip_identifier)
+        target_id = self._find_permanent_id(player, target_identifier) # Target creature
 
         if not equip_id or not target_id:
              logging.warning(f"Equip failed: Invalid identifiers. Equip: '{equip_identifier}' -> {equip_id}, Target: '{target_identifier}' -> {target_id}")
@@ -4236,27 +4205,24 @@ class ActionHandler:
 
         # --- Check Equip Cost & Affordability ---
         equip_card = gs._safe_get_card(equip_id)
-        # Delegate cost string retrieval to CombatActionHandler or ActionHandler
-        equip_cost_str = self.action_handler._get_equip_cost_str(equip_card) if hasattr(self.action_handler, '_get_equip_cost_str') else None
-        if equip_cost_str is None and hasattr(self.combat_handler, '_get_equip_cost_str'):
-            equip_cost_str = self.combat_handler._get_equip_cost_str(equip_card)
+        equip_cost_str = self._get_equip_cost_str(equip_card) # Use internal helper
 
-        if not equip_cost_str or not self.action_handler._can_afford_cost_string(player, equip_cost_str):
-            logging.debug(f"Cannot afford equip cost {equip_cost_str} for {equip_id}")
+        if not equip_cost_str or not self._can_afford_cost_string(player, equip_cost_str):
+            logging.debug(f"Cannot afford equip cost {equip_cost_str or 'N/A'} for {equip_id}")
             return -0.05, False
 
         # --- Perform Equip via GameState ---
-        # Cost payment must happen *before* the state change
-        if not hasattr(gs, 'mana_system') or not gs.mana_system.pay_mana_cost(player, equip_cost_str):
+        # Pay cost first
+        if not hasattr(gs, 'mana_system') or not gs.mana_system or not gs.mana_system.pay_mana_cost(player, equip_cost_str):
             logging.warning(f"Failed to pay equip cost {equip_cost_str}")
             return -0.05, False
 
-        # GameState.equip_permanent handles validation (is equipment, is creature, etc.)
+        # Attempt attachment
         if hasattr(gs, 'equip_permanent') and gs.equip_permanent(player, equip_id, target_id):
             return 0.25, True
         else:
             logging.debug(f"Equip action failed validation or execution for {equip_id} -> {target_id}")
-            # Need to refund mana? Assume cost wasted for now.
+            # Rollback mana? Assume cost wasted for now.
             return -0.1, False
         
     def _handle_unequip(self, param, context, **kwargs):
@@ -4303,19 +4269,23 @@ class ActionHandler:
                 logging.warning(f"ATTACH_AURA context missing aura_id or target_id: {context}")
                 return -0.15, False
 
-    def _handle_fortify(self, param, context, **kwargs):
+    def _handle_fortify(self, param, context, **kwargs): # Param is None
         """Handle FORTIFY action. Expects context={'fort_identifier':X, 'target_identifier':Y}."""
         gs = self.game_state
         player = gs._get_active_player()
-        fort_identifier = context.get('fort_identifier', context.get('fort_idx')) # Fallback for older context
-        target_identifier = context.get('target_identifier', context.get('target_idx')) # Fallback
+        if context is None: context = {}
+
+        # --- Get Identifiers from CONTEXT ---
+        fort_identifier = context.get('fort_identifier')
+        target_identifier = context.get('target_identifier') # Target Land identifier
 
         if fort_identifier is None or target_identifier is None:
-            logging.error(f"Fortify context missing required identifiers ('fort_identifier', 'target_identifier'): {context}")
+            logging.error(f"Fortify context missing required identifiers: {context}")
             return -0.15, False
+        # --- End Context Check ---
 
-        fort_id = self.action_handler._find_permanent_id(player, fort_identifier) # Use handler's helper
-        target_id = self.action_handler._find_permanent_id(player, target_identifier) # Target land
+        fort_id = self._find_permanent_id(player, fort_identifier)
+        target_id = self._find_permanent_id(player, target_identifier) # Target land
 
         if not fort_id or not target_id:
              logging.warning(f"Fortify failed: Invalid identifiers. Fort: '{fort_identifier}' -> {fort_id}, Target: '{target_identifier}' -> {target_id}")
@@ -4323,24 +4293,24 @@ class ActionHandler:
 
         # --- Check Cost & Affordability ---
         fort_card = gs._safe_get_card(fort_id)
-        # Delegate cost string retrieval
-        fort_cost_str = self.action_handler._get_fortify_cost_str(fort_card) if hasattr(self.action_handler, '_get_fortify_cost_str') else None
-        if fort_cost_str is None and hasattr(self.combat_handler, '_get_fortify_cost_str'):
-             fort_cost_str = self.combat_handler._get_fortify_cost_str(fort_card)
+        fort_cost_str = self._get_fortify_cost_str(fort_card) # Use internal helper
 
-        if not fort_cost_str or not self.action_handler._can_afford_cost_string(player, fort_cost_str):
-            logging.debug(f"Cannot afford fortify cost {fort_cost_str} for {fort_id}")
+        if not fort_cost_str or not self._can_afford_cost_string(player, fort_cost_str):
+            logging.debug(f"Cannot afford fortify cost {fort_cost_str or 'N/A'} for {fort_id}")
             return -0.05, False
 
         # --- Perform Fortify via GameState ---
-        if not hasattr(gs, 'mana_system') or not gs.mana_system.pay_mana_cost(player, fort_cost_str):
+        # Pay cost
+        if not hasattr(gs, 'mana_system') or not gs.mana_system or not gs.mana_system.pay_mana_cost(player, fort_cost_str):
             logging.warning(f"Failed to pay fortify cost {fort_cost_str}")
             return -0.05, False
 
+        # Attach
         if hasattr(gs, 'fortify_land') and gs.fortify_land(player, fort_id, target_id):
             return 0.2, True
         else:
             logging.debug(f"Fortify action failed validation or execution for {fort_id} -> {target_id}")
+            # Rollback cost?
             return -0.1, False
      
     def _handle_reconfigure(self, param, context, **kwargs):
@@ -4493,64 +4463,56 @@ class ActionHandler:
             else: logging.warning(f"Grandeur context missing 'hand_idx'")
             return -0.15, False
     
-      
-    def _handle_select_spree_mode(self, param, context, **kwargs):
-            gs = self.game_state
-            player = gs.p1 if gs.agent_is_p1 else gs.p2
-            # --- ADDED Context Checks ---
-            hand_idx = context.get('hand_idx')
-            mode_idx = context.get('mode_idx')
+    def _handle_select_spree_mode(self, param, context, **kwargs): # Param is None
+        gs = self.game_state
+        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        # --- Get Indices from CONTEXT ---
+        hand_idx = context.get('hand_idx')
+        mode_idx = context.get('mode_idx')
 
-            if hand_idx is None or mode_idx is None:
-                logging.error(f"Spree Mode context missing required indices: {context}")
-                return -0.15, False
-            # --- END Checks ---
+        if hand_idx is None or mode_idx is None:
+            logging.error(f"SELECT_SPREE_MODE missing 'hand_idx' or 'mode_idx' in context: {context}")
+            return -0.15, False
+        if not isinstance(hand_idx, int) or not isinstance(mode_idx, int):
+            logging.error(f"SELECT_SPREE_MODE context indices are not integers: {context}")
+            return -0.15, False
+        # --- End Context Check ---
 
-            if hand_idx is not None and mode_idx is not None:
-                try: hand_idx, mode_idx = int(hand_idx), int(mode_idx)
-                except (ValueError, TypeError):
-                    logging.warning(f"Spree Mode context has non-integer indices: {context}")
-                    return (-0.15, False)
+        if hand_idx < len(player["hand"]):
+            card_id = player["hand"][hand_idx]
+            card = gs._safe_get_card(card_id)
+            if card and hasattr(card, 'is_spree') and card.is_spree and mode_idx < len(getattr(card,'spree_modes',[])):
+                # --- Logic for managing pending spree context ---
+                if not hasattr(gs, 'pending_spell_context'): gs.pending_spell_context = {}
+                if gs.pending_spell_context.get('card_id') != card_id:
+                    gs.pending_spell_context = {
+                        'card_id': card_id, 'hand_idx': hand_idx, # Store index
+                        'selected_spree_modes': set(), 'spree_costs': {}, 'source_zone': 'hand'
+                    }
 
-                if hand_idx < len(player["hand"]):
-                    card_id = player["hand"][hand_idx]
-                    card = gs._safe_get_card(card_id)
-                    if card and hasattr(card, 'is_spree') and card.is_spree and mode_idx < len(getattr(card,'spree_modes',[])):
-                        # Use a consistent pending context on GameState
-                        if not hasattr(gs, 'pending_spell_context'): gs.pending_spell_context = {}
-                        # Check if we are preparing the same card or starting new
-                        if gs.pending_spell_context.get('card_id') != card_id:
-                            gs.pending_spell_context = {
-                                'card_id': card_id,
-                                'hand_idx': hand_idx, # Store hand index
-                                'selected_spree_modes': set(),
-                                'spree_costs': {} # Store costs paid per mode
-                            }
-
-                        # Add selected mode if not already chosen
-                        selected_modes = gs.pending_spell_context.get('selected_spree_modes', set())
-                        mode_cost_str = card.spree_modes[mode_idx].get('cost', '')
-                        if self._can_afford_cost_string(player, mode_cost_str):
-                            if mode_idx not in selected_modes:
-                                selected_modes.add(mode_idx)
-                                gs.pending_spell_context['selected_spree_modes'] = selected_modes
-                                # Conceptually pay cost or mark for payment
-                                gs.pending_spell_context['spree_costs'][mode_idx] = mode_cost_str
-                                logging.debug(f"Added Spree mode {mode_idx} (Cost: {mode_cost_str}) to pending cast for {card.name}")
-                                # Transition back to normal priority to allow casting or other actions?
-                                # Or stay in a 'selecting spree' sub-phase? Let's return to priority.
-                                gs.phase = gs.PHASE_PRIORITY # Allow normal play after selecting a mode
-                                return 0.05, True # Success in selecting mode
-                            else: # Mode already selected
-                                return -0.05, False
-                        else: # Cannot afford mode cost
-                            return -0.05, False
-                    else: # Invalid card or mode index
-                        return -0.1, False
-                else: # Invalid hand index
-                    return -0.1, False
-            # else: error logged above
-            return -0.2, False # Invalid param
+                selected_modes = gs.pending_spell_context.get('selected_spree_modes', set())
+                mode_cost_str = card.spree_modes[mode_idx].get('cost', '')
+                if self._can_afford_cost_string(player, mode_cost_str, context=context):
+                    if mode_idx not in selected_modes:
+                        selected_modes.add(mode_idx)
+                        gs.pending_spell_context['selected_spree_modes'] = selected_modes
+                        gs.pending_spell_context['spree_costs'][mode_idx] = mode_cost_str
+                        logging.debug(f"Added Spree mode {mode_idx} (Cost: {mode_cost_str}) to pending cast for {card.name}")
+                        # Stay in priority to allow selecting more modes or casting
+                        gs.phase = gs.PHASE_PRIORITY
+                        return 0.05, True
+                    else: # Mode already selected
+                        logging.warning(f"Spree mode {mode_idx} already selected for {card.name}")
+                        return -0.05, False
+                else: # Cannot afford mode cost
+                    logging.warning(f"Cannot afford Spree mode {mode_idx} cost {mode_cost_str} for {card.name}")
+                    return -0.05, False
+            else: # Invalid card or mode index
+                logging.warning(f"Invalid card or mode index for Spree: Hand:{hand_idx}, Mode:{mode_idx}")
+                return -0.1, False
+        else: # Invalid hand index
+             logging.warning(f"Invalid hand index {hand_idx} for SELECT_SPREE_MODE.")
+             return -0.2, False
     
     def _handle_create_token(self, param, action_type=None, **kwargs):
         gs = self.game_state

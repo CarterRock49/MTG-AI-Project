@@ -179,7 +179,6 @@ class TargetingSystem:
         """
         return self.resolve_targeting(spell_id, controller)
 
-
     def _is_valid_target(self, source_id, target_id, caster, target_info, requirement):
         """Unified check for any target type."""
         gs = self.game_state
@@ -188,7 +187,6 @@ class TargetingSystem:
 
         if not target_obj: return False
 
-        # ... (Zone Check logic remains the same) ...
         # 1. Zone Check
         req_zone = requirement.get("zone")
         if req_zone and target_zone != req_zone: return False
@@ -199,7 +197,6 @@ class TargetingSystem:
             elif target_type != "card": return False
 
 
-        # ... (Type Check logic remains the same) ...
         # 2. Type Check
         actual_types = set()
         if isinstance(target_obj, dict) and target_id in ["p1", "p2"]: # Player target
@@ -231,22 +228,26 @@ class TargetingSystem:
         if target_zone in ["battlefield", "stack", "player"]:
              source_card = gs._safe_get_card(source_id)
              if isinstance(target_obj, dict) and target_id in ["p1","p2"]: # Player
-                  # TODO: Add player protection checks (e.g., Leyline of Sanctity)
-                  # Check for hexproof from players/opponents if a global effect grants it
-                  if caster != target_owner and self._check_keyword(target_obj, "hexproof from opponents"): return False # Requires player dict to have check_keyword/keywords?
-                  if self._check_keyword(target_obj, "shroud"): return False
+                  # --- ADDED: Player Protection Checks ---
+                  # Assumes _check_keyword can delegate to GS for player checks
+                  # Check for hexproof (granted by effects like Leyline of Sanctity)
+                  if caster != target_owner and self._check_keyword(target_obj, "hexproof"):
+                       logging.debug(f"Targeting failed: Player {target_id} has hexproof from opponent.")
+                       return False
+                  # Check for shroud (less common on players, but possible)
+                  if self._check_keyword(target_obj, "shroud"):
+                       logging.debug(f"Targeting failed: Player {target_id} has shroud.")
+                       return False
+                  # --- END ADDED ---
              elif isinstance(target_obj, Card): # Permanent or Spell
                  target_card_id = getattr(target_obj, 'card_id', None)
                  if not target_card_id: return False # Need ID to check keywords centrally
 
-                 # *** Use central check_keyword ***
                  # Protection
                  if self._has_protection_from(target_obj, source_card, target_owner, caster): return False
                  # Hexproof (if targeted by opponent)
-                 # Use central handler via self._check_keyword
                  if caster != target_owner and self._check_keyword(target_obj, "hexproof"): return False
                  # Shroud (if targeted by anyone)
-                 # Use central handler via self._check_keyword
                  if self._check_keyword(target_obj, "shroud"): return False
                  # Ward (Check handled separately - involves paying cost)
 
@@ -271,8 +272,17 @@ class TargetingSystem:
             if requirement.get("must_be_tapped") and target_id not in target_owner.get("tapped_permanents", set()): return False
             if requirement.get("must_be_untapped") and target_id in target_owner.get("tapped_permanents", set()): return False
             if requirement.get("must_be_attacking") and target_id not in getattr(gs, 'current_attackers', []): return False
-            # Note: Blocking state needs better tracking than just the current assignments dict
-            # if requirement.get("must_be_blocking") and not is_blocking(target_id): return False
+            # --- MODIFIED: Blocking State Check ---
+            if requirement.get("must_be_blocking"):
+                 # Check the GameState's combat assignments
+                 is_blocker = False
+                 block_assignments = getattr(gs, 'current_block_assignments', {})
+                 for attacker, blockers_list in block_assignments.items():
+                     if target_id in blockers_list:
+                         is_blocker = True
+                         break
+                 if not is_blocker: return False # Must be blocking but isn't
+            # --- END MODIFICATION ---
             if requirement.get("must_be_face_down") and not getattr(target_obj, 'face_down', False): return False
 
             # Color Restriction
@@ -315,15 +325,13 @@ class TargetingSystem:
              if isinstance(target_obj, Card): # Spell target
                  # Can't be countered? (Only if source is a counter)
                  if source_card and "counter target spell" in getattr(source_card, 'oracle_text', '').lower():
-                     # --- MODIFIED: Use central rule/keyword check for 'cant_be_countered' ---
+                     # --- Use central rule/keyword check for 'cant_be_countered' ---
                      cannot_be_countered = False
-                     if hasattr(gs, 'check_rule'): # Check if GameState has a specific rule check method
-                          # Pass target card object or ID to check rule
+                     if hasattr(gs, 'check_rule'):
                           cannot_be_countered = gs.check_rule('cant_be_countered', {'target_card_id': target_id, 'target_card': target_obj})
-                     elif self._check_keyword(target_obj, "cant_be_countered"): # Fallback to keyword check if rule check unavailable
-                          # Note: "cant_be_countered" needs to be defined as a keyword for this to work
+                     elif self._check_keyword(target_obj, "cant_be_countered"):
                           cannot_be_countered = True
-                     elif "can't be countered" in getattr(target_obj, 'oracle_text', '').lower(): # Ultimate fallback to text
+                     elif "can't be countered" in getattr(target_obj, 'oracle_text', '').lower():
                           cannot_be_countered = True
 
                      if cannot_be_countered:
@@ -342,7 +350,6 @@ class TargetingSystem:
                  if ab_req == "activated" and item_type != "ABILITY": return False
                  if ab_req == "triggered" and item_type != "TRIGGER": return False
 
-
         return True # All checks passed
     
     def _check_keyword(self, card, keyword):
@@ -352,11 +359,18 @@ class TargetingSystem:
 
         # Handle checking keyword on player object (less common)
         if isinstance(card, dict) and 'name' in card: # Player dict
-             # Check global effects granting hexproof/shroud to players? Hard.
-             # Simplification: Player objects don't inherently have keywords via AbilityHandler/LayerSystem yet.
-             # Return False unless a specific global check is implemented elsewhere.
-             logging.debug(f"Keyword check for Player {card['name']} not fully implemented.")
-             return False # Assume players don't have hexproof/shroud by default via this check.
+             # --- ADDED: Delegate Player Keyword Check to GameState ---
+             player_id = card.get("player_id") # Assuming player dict has a unique ID ("p1", "p2")
+             if player_id and hasattr(gs, 'check_player_keyword') and callable(gs.check_player_keyword):
+                  # Let GameState determine if the player has the keyword based on global effects, etc.
+                  result = gs.check_player_keyword(player_id, keyword)
+                  logging.debug(f"Delegated player keyword check to GS for {player_id}/{keyword}: {result}")
+                  return result
+             else:
+                 logging.warning(f"Player keyword check for '{keyword}' on {card.get('name')} requires GameState.check_player_keyword method or player_id. Returning False.")
+                 # TODO: Implement GameState.check_player_keyword using LayerSystem results for players.
+                 return False
+             # --- END ADDED ---
         elif isinstance(card, Card):
              card_id = getattr(card, 'card_id', None)
         else:
@@ -365,11 +379,12 @@ class TargetingSystem:
 
         if not card_id:
              # If card object passed without ID, try to find ID?
-             logging.warning(f"_check_keyword: Card object {card.name} missing card_id.")
+             logging.warning(f"_check_keyword: Card object {getattr(card, 'name', 'Unknown')} missing card_id.")
              return False
 
         # 1. Prefer AbilityHandler (should use GameState.check_keyword or layer system)
-        if self.ability_handler and hasattr(self.ability_handler, 'check_keyword'):
+        # *** MODIFYING: Check if handler itself exists first ***
+        if hasattr(self, 'ability_handler') and self.ability_handler and hasattr(self.ability_handler, 'check_keyword'):
             return self.ability_handler.check_keyword(card_id, keyword)
 
         # 2. Fallback to GameState's check_keyword directly
@@ -381,7 +396,10 @@ class TargetingSystem:
         live_card = gs._safe_get_card(card_id)
         if live_card and hasattr(live_card, 'keywords') and isinstance(live_card.keywords, (list, np.ndarray)):
              try:
-                 if not Card.ALL_KEYWORDS: return False
+                 # Ensure Card.ALL_KEYWORDS is available
+                 if not hasattr(Card, 'ALL_KEYWORDS') or not Card.ALL_KEYWORDS:
+                     logging.error("Card.ALL_KEYWORDS not available for keyword check.")
+                     return False
                  idx = Card.ALL_KEYWORDS.index(keyword.lower())
                  if idx < len(live_card.keywords): return bool(live_card.keywords[idx])
              except ValueError: pass # Keyword not standard
