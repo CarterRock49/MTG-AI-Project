@@ -683,180 +683,281 @@ class TargetingSystem:
 
     def _select_targets_by_strategy(self, card, valid_targets, target_count, target_requirements, controller):
         """
-        Select targets strategically based on card type and effect. Enhanced logic.
+        Select targets strategically based on card type and effect.
+        Ensures mandatory target counts are met if possible.
         """
         gs = self.game_state
         selected_targets = defaultdict(list)
         opponent = gs.p2 if controller == gs.p1 else gs.p1
         total_selected = 0
+        num_targets_specified_in_text = getattr(card, 'num_targets', 1) # Get expected count if stored
+        target_is_optional = "up to" in getattr(card, 'oracle_text', '').lower() # Check "up to N"
+
+        # Check if target count passed matches card's internal count (if available)
+        # If target_count from parser differs from card schema, prioritize card schema?
+        # Let's use target_count passed from resolver, but maybe log discrepancy.
+        if hasattr(card,'num_targets') and card.num_targets != target_count:
+            logging.debug(f"Target count discrepancy for {card.name}: Resolver wants {target_count}, card schema expects {card.num_targets}.")
+            # Stick with target_count requested by resolver for now.
+
+        # Helper to select first available valid target from a list not already chosen
+        def select_first_available(candidates, current_selections):
+            for tid in candidates:
+                if tid not in current_selections:
+                    return tid
+            return None
 
         # Determine if beneficial (uses utility function)
         effect_text = getattr(card, 'oracle_text', '').lower()
         is_beneficial = is_beneficial_effect(effect_text)
 
-        # Group requirements by category if multiple targets needed
-        req_by_cat = defaultdict(list)
-        for req in target_requirements:
-            req_type = req.get("type", "target")
-            req_by_cat[req_type].append(req)
+        # Iterate through required target categories (based on parsed requirements)
+        # Prioritize more specific requirements first? (e.g., "target artifact creature")
+        target_requirements.sort(key=lambda r: len(r), reverse=True) # Simple sort by num restrictions
 
-        # Iterate through required target categories
-        # Prioritize stricter requirements? Or process in arbitrary order?
-        # For now, iterate through the requirements parsed
+        potential_targets_flat = []
+        for cat, ids in valid_targets.items():
+            potential_targets_flat.extend(ids)
+        potential_targets_flat = list(set(potential_targets_flat)) # Unique available targets
+
+        all_selected_ids_this_call = set() # Track selections within this call
+
+        # --- AI Target Selection Loop ---
+        # First pass: Select based on strategy/heuristics up to target_count
+        targets_remaining_to_select = target_count
         for req in target_requirements:
-            if total_selected >= target_count: break
+            if targets_remaining_to_select <= 0: break
 
             req_type = req.get("type", "target")
-            # Map common aliases
-            cat_map = {"creature": "creatures", "player": "players", "permanent": "permanents", "spell": "spells", "ability": "abilities", "card": "cards"}
-            target_cat = cat_map.get(req_type, req_type) # Use normalized category
+            target_cat = self._map_req_type_to_valid_targets_key(req_type)
 
             if target_cat not in valid_targets or not valid_targets[target_cat]:
-                 logging.debug(f"No valid targets for required type '{target_cat}' for {card.name}")
-                 continue # Skip if no valid targets for this requirement
+                continue # No valid targets for this specific requirement type
 
-            potential_targets_for_req = valid_targets[target_cat]
+            potential_targets_for_req = [tid for tid in valid_targets[target_cat] if tid not in all_selected_ids_this_call] # Exclude already selected
+            if not potential_targets_for_req: continue
+
             target_to_select = None
 
-            # --- AI Target Selection Logic ---
+            # --- Enhanced AI Target Selection Logic ---
+            priority_list = []
+            player_map = {"p1": gs.p1, "p2": gs.p2}
             if target_cat == "players":
-                 player_id = None
-                 if is_beneficial: player_id = "p1" if controller == gs.p1 else "p2"
-                 else: player_id = "p2" if controller == gs.p1 else "p1"
-                 if player_id in potential_targets_for_req:
-                      target_to_select = player_id
-            elif target_cat == "creatures":
-                priority_list = []
-                if is_beneficial: # Target own creatures
-                     own_creatures = [cid for cid in potential_targets_for_req if gs.get_card_controller(cid) == controller]
-                     # Sort by P/T desc
-                     priority_list = sorted(own_creatures, key=lambda cid: getattr(gs._safe_get_card(cid),'power',0)+getattr(gs._safe_get_card(cid),'toughness',0), reverse=True)
-                else: # Target opponent's creatures
-                     opp_creatures = [cid for cid in potential_targets_for_req if gs.get_card_controller(cid) == opponent]
-                     # Sort by P/T desc (target biggest threat)
-                     priority_list = sorted(opp_creatures, key=lambda cid: getattr(gs._safe_get_card(cid),'power',0)+getattr(gs._safe_get_card(cid),'toughness',0), reverse=True)
+                 player_ids = [p_id for p_id in potential_targets_for_req if p_id in player_map] # Filter valid player ids
+                 if is_beneficial: # Target self first if possible
+                     priority_list = [p_id for p_id in player_ids if player_map[p_id] == controller]
+                     priority_list.extend([p_id for p_id in player_ids if player_map[p_id] != controller])
+                 else: # Target opponent first if possible
+                     priority_list = [p_id for p_id in player_ids if player_map[p_id] == opponent]
+                     priority_list.extend([p_id for p_id in player_ids if player_map[p_id] == controller])
+            elif target_cat in ["creatures", "permanents", "artifacts", "enchantments", "lands", "planeswalkers"]:
+                # Sort candidates based on benefit/threat
+                # Benefit: Target own best, Harm: Target opponent best
+                potential_target_cards = [(tid, gs._safe_get_card(tid)) for tid in potential_targets_for_req]
+                if is_beneficial:
+                    potential_target_cards = [(tid,c) for tid,c in potential_target_cards if gs.get_card_controller(tid) == controller]
+                    priority_list = sorted(potential_target_cards, key=lambda x: (getattr(x[1],'power',0) or 0) + (getattr(x[1],'toughness',0) or 0), reverse=True) # Target strongest own
+                else:
+                    potential_target_cards = [(tid,c) for tid,c in potential_target_cards if gs.get_card_controller(tid) == opponent]
+                    priority_list = sorted(potential_target_cards, key=lambda x: (getattr(x[1],'power',0) or 0) + (getattr(x[1],'toughness',0) or 0), reverse=True) # Target strongest opponent
+                priority_list = [tid for tid, card in priority_list] # Extract IDs
+            elif target_cat == "cards": # Graveyard/Exile - harder to evaluate simply
+                if is_beneficial: # Target own cards
+                     priority_list = [tid for tid in potential_targets_for_req if self._get_card_owner_fallback(tid) == controller]
+                     priority_list.extend([tid for tid in potential_targets_for_req if self._get_card_owner_fallback(tid) != controller])
+                else: # Target opponent cards
+                     priority_list = [tid for tid in potential_targets_for_req if self._get_card_owner_fallback(tid) == opponent]
+                     priority_list.extend([tid for tid in potential_targets_for_req if self._get_card_owner_fallback(tid) != opponent])
+            else: # Spells, Abilities, Fallback
+                 priority_list = potential_targets_for_req[:] # Use original order or random?
 
-                # Select first available target not already selected for *this specific spell*
-                for tid in priority_list:
-                     if tid not in selected_targets[target_cat]:
-                          target_to_select = tid
-                          break
-            # Add logic for spells, abilities, permanents, cards (GY/Exile)
-            elif target_cat in ["spells", "abilities"]: # Counter targets
-                 # Target opponent's spells/abilities first
-                 priority_list = [tid for tid in potential_targets_for_req if gs.get_stack_item_controller(tid) == opponent]
-                 priority_list.extend([tid for tid in potential_targets_for_req if gs.get_stack_item_controller(tid) == controller]) # Self last
-                 for tid in priority_list:
-                     if tid not in selected_targets.get(target_cat, []): target_to_select = tid; break
-            elif target_cat in ["permanents", "artifacts", "enchantments", "lands", "planeswalkers"]:
-                 priority_list = []
-                 if is_beneficial: # Target own
-                     own_perms = [cid for cid in potential_targets_for_req if gs.get_card_controller(cid) == controller]
-                     priority_list = sorted(own_perms, key=lambda cid: getattr(gs._safe_get_card(cid),'cmc',0), reverse=True) # Target highest CMC?
-                 else: # Target opponent's
-                     opp_perms = [cid for cid in potential_targets_for_req if gs.get_card_controller(cid) == opponent]
-                     priority_list = sorted(opp_perms, key=lambda cid: getattr(gs._safe_get_card(cid),'cmc',0), reverse=True) # Target highest CMC threat
-                 for tid in priority_list:
-                     if tid not in selected_targets.get(target_cat, []): target_to_select = tid; break
-            elif target_cat == "cards": # Graveyard / Exile
-                priority_list = []
-                zone = req.get("zone", "graveyard")
-                if is_beneficial: # Target own
-                     own_cards = [cid for cid in potential_targets_for_req if cid in controller.get(zone, [])]
-                     priority_list = sorted(own_cards, key=lambda cid: getattr(gs._safe_get_card(cid),'cmc',0), reverse=True)
-                else: # Target opponent's
-                     opp_cards = [cid for cid in potential_targets_for_req if cid in opponent.get(zone, [])]
-                     priority_list = sorted(opp_cards, key=lambda cid: getattr(gs._safe_get_card(cid),'cmc',0), reverse=True)
-                for tid in priority_list:
-                     if tid not in selected_targets.get(target_cat, []): target_to_select = tid; break
-            else: # Fallback for "target" or unknown categories
-                 if potential_targets_for_req:
-                      target_to_select = potential_targets_for_req[0] # Just pick first valid
+            target_to_select = select_first_available(priority_list, all_selected_ids_this_call)
+            # --- End Enhanced AI Logic ---
 
             # --- Add Selected Target ---
             if target_to_select:
-                selected_targets[target_cat].append(target_to_select)
-                total_selected += 1
+                # Map back to the correct category key for the output dictionary
+                output_cat_key = self._map_req_type_to_valid_targets_key(req_type) # Use helper
+                selected_targets[output_cat_key].append(target_to_select)
+                all_selected_ids_this_call.add(target_to_select)
+                targets_remaining_to_select -= 1
 
-        # Check if minimum target count met
-        if total_selected < target_count:
-            logging.debug(f"Could only select {total_selected}/{target_count} targets for {card.name}.")
-            # Return None if required count not met (rules check needed - some spells allow fewer targets)
-            # Assume for now that exact count is required if target_count > 0
-            if target_count > 0: return None
+        # --- Mandatory Target Enforcement ---
+        current_selected_count = len(all_selected_ids_this_call)
+        # If target is NOT optional AND we selected fewer than required AND more valid targets EXIST
+        if not target_is_optional and current_selected_count < target_count and len(potential_targets_flat) >= target_count:
+            logging.debug(f"Strategically selected {current_selected_count}/{target_count} targets. Forcing selection of remaining.")
+            # Find remaining available targets
+            remaining_available = [tid for tid in potential_targets_flat if tid not in all_selected_ids_this_call]
+            needed_more = target_count - current_selected_count
+            # Select the first N available remaining targets
+            for i in range(min(needed_more, len(remaining_available))):
+                 forced_target = remaining_available[i]
+                 # Determine its category for output dict
+                 forced_cat = self._determine_target_category(forced_target)
+                 selected_targets[forced_cat].append(forced_target)
+                 all_selected_ids_this_call.add(forced_target)
+                 logging.debug(f"Forced selection of target: {forced_target}")
+        # --- End Mandatory Enforcement ---
+
+        final_selected_count = len(all_selected_ids_this_call)
+        # Final validation check (only if targets are mandatory)
+        if not target_is_optional and final_selected_count < target_count:
+             logging.warning(f"Could not select mandatory {target_count} targets for {card.name}. Only found/selected {final_selected_count}. Returning None.")
+             return None
 
         return dict(selected_targets) # Convert back to regular dict
-
+    
+    def _get_card_owner_fallback(self, card_id):
+        """Fallback to find card owner based on original deck assignment or DB."""
+        gs = self.game_state
+        if hasattr(gs, 'original_p1_deck') and card_id in gs.original_p1_deck: return gs.p1
+        if hasattr(gs, 'original_p2_deck') and card_id in gs.original_p2_deck: return gs.p2
+        return gs.p1 # Default
+    
+    def _determine_target_category(self, target_id):
+        """Determines the primary category ('creatures', 'players', etc.) for a given target ID."""
+        gs = self.game_state
+        owner, zone = gs.find_card_location(target_id)
+        if zone == 'player': return 'players'
+        if zone == 'stack':
+            # Check if spell or ability
+            for item in gs.stack:
+                 if isinstance(item, tuple) and item[1] == target_id:
+                      return 'spells' if item[0] == 'SPELL' else 'abilities'
+        if zone in ['graveyard', 'exile', 'library']: return 'cards'
+        if zone == 'battlefield':
+             card = gs._safe_get_card(target_id)
+             if card:
+                  if 'creature' in getattr(card, 'card_types',[]): return 'creatures'
+                  if 'planeswalker' in getattr(card, 'card_types',[]): return 'planeswalkers'
+                  if 'battle' in getattr(card, 'type_line','').lower(): return 'battles'
+                  if 'land' in getattr(card, 'card_types',[]): return 'lands'
+                  if 'artifact' in getattr(card, 'card_types',[]): return 'artifacts'
+                  if 'enchantment' in getattr(card, 'card_types',[]): return 'enchantments'
+                  return 'permanents' # Default for battlefield if specific type unclear
+        return 'other' # Fallback
+    
+    def _map_req_type_to_valid_targets_key(self, req_type):
+        """Maps parsed requirement types to the standard keys used in the valid_targets dict."""
+        type_map = {
+            "creature": "creatures", "player": "players", "permanent": "permanents",
+            "spell": "spells", "ability": "abilities", "land": "lands",
+            "artifact": "artifacts", "enchantment": "enchantments", "planeswalker": "planeswalkers",
+            "card": "cards", # Card targets often in GY/Exile
+            "target": "permanents", # Generic target defaults to permanent? Or needs context? Use permanent for now.
+            "any": "permanents", # 'Any target' can hit creatures, players, PWs. Store under permanent? Better to handle separately if possible.
+            "battle": "battles",
+        }
+        # If type has 's', assume it's already plural
+        return type_map.get(req_type, req_type + "s" if not req_type.endswith('s') else req_type)
 
     def check_can_be_blocked(self, attacker_id, blocker_id):
-        """
-        Check if an attacker can be blocked by this blocker considering all restrictions.
-        Uses centralized keyword checking.
-        """
-        gs = self.game_state
-        attacker = gs._safe_get_card(attacker_id)
-        blocker = gs._safe_get_card(blocker_id)
+            """
+            Check if an attacker can be blocked by this blocker considering all restrictions.
+            Uses centralized keyword checking and includes Banding logic.
+            """
+            gs = self.game_state
+            attacker = gs._safe_get_card(attacker_id)
+            blocker = gs._safe_get_card(blocker_id)
 
-        if not attacker or not blocker: return False
+            if not attacker or not blocker: return False
 
-        # Get controller info using GameState helper
-        attacker_controller = gs.get_card_controller(attacker_id)
-        blocker_controller = gs.get_card_controller(blocker_id)
-        if not attacker_controller or not blocker_controller: return False
+            # Get controller info using GameState helper
+            attacker_controller = gs.get_card_controller(attacker_id)
+            blocker_controller = gs.get_card_controller(blocker_id)
+            if not attacker_controller or not blocker_controller: return False
 
-        # Check if blocker is tapped
-        if blocker_id in blocker_controller.get("tapped_permanents", set()): return False
+            # --- Start Basic Checks ---
+            # Check if blocker is tapped
+            if blocker_id in blocker_controller.get("tapped_permanents", set()): return False
+            # Check blocker restrictions (can't block, decayed) - must be done before Banding overrides
+            if self._check_keyword(blocker, "can't block"): return False
+            if self._check_keyword(blocker, "decayed"): return False # Decayed can't block
+            # Conditional Blocking ("Can block only...")
+            match_only = re.search(r"can block only creatures with ([\w\s]+)", getattr(blocker, 'oracle_text', '').lower())
+            if match_only:
+                required_ability = match_only.group(1).strip()
+                if not self._check_keyword(attacker, required_ability): return False # Attacker doesn't have required ability
+            # --- End Basic Checks ---
 
-        # Check for protection (attacker has protection from blocker OR blocker has protection from attacker)
-        # Protection prevents blocking
-        if self._has_protection_from(attacker, blocker, attacker_controller, blocker_controller): return False
-        if self._has_protection_from(blocker, attacker, blocker_controller, attacker_controller): return False
 
-        # --- Check Attacker's Evasion ---
-        # Centralized checks via self._check_keyword (which delegates)
-        if self._check_keyword(attacker, "unblockable"):
-             # Check for exceptions if needed from oracle text
-             if "except by" not in getattr(attacker, 'oracle_text', '').lower():
-                  return False
+            # --- Banding Interactions (Rules 702.22) ---
+            # 702.22c: Creature with banding can block creatures with evasion that normally couldn't be blocked.
+            attacker_has_evasion_blocked_by_banding = False
+            if self._has_keyword(attacker,"fear") or self._has_keyword(attacker,"intimidate") or self._get_landwalk_type(attacker):
+                attacker_has_evasion_blocked_by_banding = True
 
-        if self._check_keyword(attacker, "flying") and not (self._check_keyword(blocker, "flying") or self._check_keyword(blocker, "reach")): return False
-        if self._check_keyword(attacker, "shadow") and not self._check_keyword(blocker, "shadow"): return False
-        if self._check_keyword(attacker, "fear") and not (self._check_keyword(blocker, "artifact") or self._check_keyword(blocker, "black")): return False
-        if self._check_keyword(attacker, "intimidate") and not (self._check_keyword(blocker, "artifact") or self._share_color(attacker, blocker)): return False
-        if self._check_keyword(attacker, "skulk") and getattr(blocker, 'power', 0) > getattr(attacker, 'power', 0): return False
-        if self._check_keyword(attacker, "horsemanship") and not self._check_keyword(blocker, "horsemanship"): return False
+            if self._check_keyword(blocker, "banding") and attacker_has_evasion_blocked_by_banding:
+                logging.debug(f"Blocker {blocker.name} with Banding can block {attacker.name} despite evasion.")
+                # It can block *if* no other restrictions apply. Don't return True yet, proceed to other checks.
+                pass # Banding allows block against Fear/Intimidate/Landwalk, other checks still apply
 
-        # Landwalk (if defender controls relevant land type)
-        landwalk_type = self._get_landwalk_type(attacker)
-        if landwalk_type and self._controls_land_type(blocker_controller, landwalk_type): return False
+            # 702.22f: Creature with banding attacking ignores most blocking restrictions on the blockers.
+            if self._check_keyword(attacker, "banding"):
+                # It bypasses flying/reach, shadow, landwalk, fear, intimidate restrictions ON THE BLOCKER
+                # It does NOT bypass "can't block", "can only block X", protection, conditional unblockable ("except by"), skulk, or basic unblockable.
+                logging.debug(f"Attacker {attacker.name} has Banding, ignoring most blocker evasion requirements.")
+                # We still need to check protection and other specific restrictions below. Don't return True yet.
+                pass # Banding attacker ignores *some* restrictions, continue checking others
 
-        # Conditional Unblockable ("Can't be blocked except by...")
-        match_except = re.search(r"can't be blocked except by ([\w\s]+)", getattr(attacker, 'oracle_text', '').lower())
-        if match_except:
-            exception_criteria = match_except.group(1).strip().split()
-            # Check if blocker meets criteria
-            blocker_meets = False
-            if 'artifacts' in exception_criteria and self._check_keyword(blocker, "artifact"): blocker_meets = True
-            elif 'walls' in exception_criteria and 'wall' in getattr(blocker, 'subtypes', []): blocker_meets = True
-            elif 'creatures with flying' in exception_criteria and self._check_keyword(blocker, "flying"): blocker_meets = True
-            # Add more common exceptions
-            if not blocker_meets: return False # Does not meet exception criteria
 
-        # --- Check Blocker's Restrictions ---
-        # Use central keyword check
-        if self._check_keyword(blocker, "can't block"): return False
-        if self._check_keyword(blocker, "decayed"): return False # Decayed can't block
+            # --- Remaining Checks (Protection, Evasion, Conditional) ---
+            # Protection (Prevents blocking - Rule 702.16e)
+            # Check both ways: Attacker protected from Blocker, Blocker protected from Attacker
+            if self._has_protection_from(attacker, blocker, attacker_controller, blocker_controller): return False
+            if self._has_protection_from(blocker, attacker, blocker_controller, attacker_controller): return False
 
-        # Conditional Blocking ("Can block only...")
-        match_only = re.search(r"can block only creatures with ([\w\s]+)", getattr(blocker, 'oracle_text', '').lower())
-        if match_only:
-             required_ability = match_only.group(1).strip()
-             # Use central check_keyword for the attacker's ability
-             if not self._check_keyword(attacker, required_ability): return False
+            # Attacker's Evasion (only if not overridden by Attacker's Banding)
+            if not self._check_keyword(attacker, "banding"):
+                if self._check_keyword(attacker, "unblockable"):
+                    if "except by" not in getattr(attacker, 'oracle_text', '').lower(): return False
 
-        # Menace handled separately (requires >=2 blockers, this checks if ONE blocker is legal)
+                if self._check_keyword(attacker, "flying") and not (self._check_keyword(blocker, "flying") or self._check_keyword(blocker, "reach")): return False
+                if self._check_keyword(attacker, "shadow") and not self._check_keyword(blocker, "shadow"): return False
+                # Landwalk (if defender controls relevant land type) - Blocked by Blocker Banding if applicable
+                landwalk_type = self._get_landwalk_type(attacker)
+                if landwalk_type and self._controls_land_type(blocker_controller, landwalk_type):
+                    if not self._check_keyword(blocker, "banding"): return False # Cannot block unless blocker has banding
 
-        return True # No restriction found preventing this block
+                # Fear (Blocked by Blocker Banding)
+                if self._check_keyword(attacker, "fear") and not (self._check_keyword(blocker, "artifact") or self._check_keyword(blocker, "black")):
+                    if not self._check_keyword(blocker, "banding"): return False
+
+                # Intimidate (Blocked by Blocker Banding)
+                if self._check_keyword(attacker, "intimidate") and not (self._check_keyword(blocker, "artifact") or self._share_color(attacker, blocker)):
+                    if not self._check_keyword(blocker, "banding"): return False
+
+                # Skulk (Not affected by Banding)
+                if self._check_keyword(attacker, "skulk") and (getattr(blocker, 'power', 0) or 0) > (getattr(attacker, 'power', 0) or 0): return False
+                # Horsemanship (Assume not affected by Banding unless rules specify)
+                if self._check_keyword(attacker, "horsemanship") and not self._check_keyword(blocker, "horsemanship"): return False
+
+            # Conditional Unblockable ("Can't be blocked except by...") - Not bypassed by Banding
+            match_except = re.search(r"can't be blocked except by ([\w\s]+)", getattr(attacker, 'oracle_text', '').lower())
+            if match_except:
+                exception_criteria = match_except.group(1).strip().lower().split()
+                blocker_meets = False
+                # Check blocker properties against criteria
+                if 'artifacts' in exception_criteria and self._check_keyword(blocker, "artifact"): blocker_meets = True
+                elif 'artifact creature' in exception_criteria and self._check_keyword(blocker, "artifact") and 'creature' in getattr(blocker, 'card_types',[]): blocker_meets = True
+                elif 'walls' in exception_criteria and 'wall' in getattr(blocker, 'subtypes', []): blocker_meets = True
+                elif 'creatures with flying' in exception_criteria and self._check_keyword(blocker, "flying"): blocker_meets = True
+                # Add color checks
+                elif 'white' in exception_criteria and self._has_color(blocker, 'white'): blocker_meets = True
+                elif 'blue' in exception_criteria and self._has_color(blocker, 'blue'): blocker_meets = True
+                # Add power checks
+                elif any(c.startswith("power ") for c in exception_criteria):
+                    power_req = int(re.search(r"power (\d+)", exception_criteria).group(1))
+                    comparator = ">=" if "or greater" in exception_criteria else "<=" if "or less" in exception_criteria else "=="
+                    blocker_power = getattr(blocker,'power',0) or 0
+                    if eval(f"{blocker_power} {comparator} {power_req}"): blocker_meets = True
+                # Add more common exceptions
+                if not blocker_meets: return False # Blocker does not meet the specific exception criteria
+
+            # Menace check handled during assignment (needs 2+ blockers) - individual block check is fine here
+
+            return True # No restriction found preventing this specific block
 
     # Helper for landwalk check
     def _get_landwalk_type(self, card):

@@ -571,64 +571,92 @@ class CombatActionHandler:
         return None
 
     def handle_ninjutsu(self, param=None, context=None, **kwargs):
-        """Handle the ninjutsu mechanic. Expects (ninja_hand_idx, attacker_bf_idx) in context."""
+        """Handle the ninjutsu mechanic. Expects ('ninja_identifier', 'attacker_identifier') in context."""
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2 # Player performing ninjutsu
         if context is None: context = {}
 
         # --- Get Parameters from Context ---
-        ninja_identifier = context.get('ninja_identifier') # Use a consistent key name
-        attacker_identifier = context.get('attacker_identifier') # Use a consistent key name
+        # Assume context keys like 'ninja_hand_idx', 'attacker_bf_idx' are provided if param not used.
+        # Use descriptive keys: 'ninja_identifier' and 'attacker_identifier' (can be index or ID).
+        ninja_identifier = context.get('ninja_identifier')
+        attacker_identifier = context.get('attacker_identifier')
+
+        # Fallback logic using param if context keys are missing - LESS ROBUST
+        # Assumes param contains a tuple or other structure if used this way.
+        if ninja_identifier is None and attacker_identifier is None and isinstance(param, tuple) and len(param) == 2:
+            ninja_identifier, attacker_identifier = param
+            logging.warning("Using 'param' for Ninjutsu identifiers - context preferred.")
 
         if ninja_identifier is None or attacker_identifier is None:
-            logging.error(f"Ninjutsu handler missing parameters 'ninja_identifier' or 'attacker_identifier' in context: {context}")
+            logging.error(f"Ninjutsu handler missing parameters 'ninja_identifier' or 'attacker_identifier' in context: {context} / param: {param}")
             return False
 
         # --- Validate Ninja ---
         ninja_id = self._find_card_in_hand(player, ninja_identifier)
-        if not ninja_id: logging.warning("Invalid ninja identifier."); return False
+        if not ninja_id: logging.warning(f"Invalid ninja identifier: {ninja_identifier}."); return False
         ninja_card = gs._safe_get_card(ninja_id)
+        # Check using central keyword check now
         if not ninja_card or not self._has_keyword(ninja_card, "ninjutsu"):
-            logging.warning(f"Card {getattr(ninja_card, 'name', 'N/A')} lacks Ninjutsu."); return False
+            logging.warning(f"Card {getattr(ninja_card, 'name', 'N/A')} lacks Ninjutsu.")
+            return False
 
         # --- Validate Attacker ---
         attacker_id = self._find_permanent_id(player, attacker_identifier)
-        if not attacker_id: logging.warning("Invalid attacker identifier."); return False
+        if not attacker_id: logging.warning(f"Invalid attacker identifier: {attacker_identifier}."); return False
         attacker_card = gs._safe_get_card(attacker_id)
-        if not attacker_card or attacker_id not in getattr(gs, 'current_attackers', []): # Check against gs list
-            logging.warning("Selected permanent is not a valid attacker."); return False
+        if not attacker_card:
+            logging.warning(f"Attacker card not found for ID {attacker_id}"); return False
+        if attacker_id not in getattr(gs, 'current_attackers', []): # Check against gs list
+            logging.warning(f"Selected permanent {attacker_card.name} is not a currently declared attacker."); return False
         # Check if unblocked
-        if attacker_id in gs.current_block_assignments and gs.current_block_assignments[attacker_id]:
+        if getattr(gs, 'current_block_assignments', {}).get(attacker_id): # Check if key exists and has blockers
             logging.warning("Attacker is blocked, cannot use Ninjutsu."); return False
 
         # --- Pay Cost ---
         ninjutsu_cost_str = self._get_ninjutsu_cost_str(ninja_card)
         if not ninjutsu_cost_str or not self._can_afford_cost_string(player, ninjutsu_cost_str):
              logging.warning(f"Cannot pay Ninjutsu cost {ninjutsu_cost_str}."); return False
-        if not gs.mana_system.pay_mana_cost(player, ninjutsu_cost_str): return False # Payment failed
+        if not hasattr(gs, 'mana_system') or not gs.mana_system or not gs.mana_system.pay_mana_cost(player, ninjutsu_cost_str):
+             logging.warning(f"Failed to pay Ninjutsu cost {ninjutsu_cost_str}.")
+             # Need mana system rollback? Assume cost failed cleanly for now.
+             return False # Payment failed
 
         # --- Perform Swap ---
+        logging.debug(f"Performing Ninjutsu: Returning {attacker_card.name}, Putting {ninja_card.name} onto battlefield attacking.")
         success_return = gs.move_card(attacker_id, player, "battlefield", player, "hand", cause="ninjutsu_return")
         if not success_return: logging.error("Failed to return attacker for Ninjutsu."); return False
 
         success_enter = gs.move_card(ninja_id, player, "hand", player, "battlefield", cause="ninjutsu_enter")
         if not success_enter:
             logging.error("Failed to put ninja onto battlefield.")
-            gs.move_card(attacker_id, player, "hand", player, "battlefield") # Rollback
-            # Refund cost? Complex.
+            # Attempt rollback of attacker
+            gs.move_card(attacker_id, player, "hand", player, "battlefield")
+            # Need cost refund mechanism? Complex.
             return False
 
+        # Tap the ninja entering, add it to attackers, remove original attacker
         gs.tap_permanent(ninja_id, player)
-        if attacker_id in gs.current_attackers: gs.current_attackers.remove(attacker_id)
-        gs.current_attackers.append(ninja_id)
+        if hasattr(gs, 'current_attackers'):
+            if attacker_id in gs.current_attackers: gs.current_attackers.remove(attacker_id)
+            gs.current_attackers.append(ninja_id)
 
-        # Transfer attack target
+        # Transfer attack target (Planeswalker/Battle)
         pw_targets = getattr(gs, 'planeswalker_attack_targets', {})
         battle_targets = getattr(gs, 'battle_attack_targets', {})
-        if attacker_id in pw_targets: pw_targets[ninja_id] = pw_targets.pop(attacker_id)
-        if attacker_id in battle_targets: battle_targets[ninja_id] = battle_targets.pop(attacker_id)
+        target_description = "" # For logging
+        if attacker_id in pw_targets:
+             target_id = pw_targets.pop(attacker_id)
+             pw_targets[ninja_id] = target_id
+             target_description = f" (Target: {gs._safe_get_card(target_id).name})"
+        if attacker_id in battle_targets:
+             target_id = battle_targets.pop(attacker_id)
+             battle_targets[ninja_id] = target_id
+             target_description = f" (Target: {gs._safe_get_card(target_id).name})"
 
-        logging.info(f"Ninjutsu successful: {attacker_card.name} returned, {ninja_card.name} entered attacking.")
+
+        logging.info(f"Ninjutsu successful: {attacker_card.name} returned, {ninja_card.name} entered attacking{target_description}.")
+        # Ninjas often have ETB triggers, check for them
         gs.trigger_ability(ninja_id, "ENTERS_BATTLEFIELD", {"controller": player, "used_ninjutsu": True})
         return True
     
@@ -692,13 +720,14 @@ class CombatActionHandler:
 
 
     def handle_assign_multiple_blockers(self, param=None, context=None, **kwargs):
-        """Handle assigning multiple blockers. Attacker index from param, blocker identifiers from context."""
+        """Handle assigning multiple blockers. Attacker index from context, blocker identifiers from context."""
         gs = self.game_state
         if gs.phase != gs.PHASE_DECLARE_BLOCKERS: return False
         if context is None: context = {}
 
-        # --- Get Attacker Index from Param ---
-        attacker_idx = param
+        # --- Get Attacker Index from CONTEXT (more reliable than param) ---
+        # Param might still be the index passed from ACTION_MEANINGS, but context is preferred.
+        attacker_idx = context.get('attacker_index', param) # Check context first, fallback to param
         if attacker_idx is None or not isinstance(attacker_idx, int) or not (0 <= attacker_idx < len(gs.current_attackers)):
              logging.error(f"Invalid or missing attacker index for multi-block: {attacker_idx}")
              return False
@@ -706,19 +735,17 @@ class CombatActionHandler:
         attacker_card = gs._safe_get_card(attacker_id)
         if not attacker_card: return False
 
-        # --- Get Blocker Indices from Context ---
-        # --- ADDED Context Check ---
+        # --- Get Blocker Identifiers from Context ---
         blocker_identifiers = context.get('blocker_identifiers') # Use consistent key, expect a list
         if not blocker_identifiers or not isinstance(blocker_identifiers, list):
             logging.error("Missing or invalid 'blocker_identifiers' list in context for multi-block.")
             return False
-        # --- END Check ---
 
         # --- Validate Blockers ---
-        player = gs.p1 if gs.agent_is_p1 else gs.p2 # Player controlling blockers
+        player = gs.p1 if not gs.agent_is_p1 else gs.p2 # Correct: Player controlling blockers is NON-AGENT
         valid_blocker_ids = []
         for identifier in blocker_identifiers:
-             blocker_id = self._find_permanent_id(player, identifier)
+             blocker_id = self._find_permanent_id(player, identifier) # Find on blocking player's field
              if not blocker_id:
                   logging.warning(f"Invalid blocker identifier {identifier} for multi-block.")
                   return False
@@ -737,6 +764,7 @@ class CombatActionHandler:
             return False # Technically handled above, but good explicit check
 
         # --- Assign Block ---
+        if not hasattr(gs, 'current_block_assignments'): gs.current_block_assignments = {}
         gs.current_block_assignments[attacker_id] = valid_blocker_ids # Replace any existing blocks for this attacker
 
         blocker_names = [gs._safe_get_card(bid).name for bid in valid_blocker_ids if gs._safe_get_card(bid)]
@@ -985,10 +1013,13 @@ class CombatActionHandler:
         # Action 431 allows manual override or triggers auto-resolve. Context optional.
         set_valid_action(431, "Resolve Combat Damage")
 
+
     def handle_protect_planeswalker(self, param=None, context=None, **kwargs):
-        """Assign a creature to protect a planeswalker. Expects (pw_idx_or_id, defender_idx_or_id) in context."""
+        """Assign a creature to protect a planeswalker. Expects (pw_identifier, defender_identifier) in context."""
         gs = self.game_state
-        if gs.phase != gs.PHASE_DECLARE_BLOCKERS: return False
+        if gs.phase != gs.PHASE_DECLARE_BLOCKERS:
+            logging.warning("Cannot protect PW outside Declare Blockers phase.")
+            return False
         if context is None: context = {}
 
         # --- Get Parameters from Context ---
@@ -1000,28 +1031,34 @@ class CombatActionHandler:
             return False
 
         # --- Find Planeswalker Being Attacked ---
+        # Use _find_planeswalker_target helper which uses context identifiers
         target_pw_id, attacker_id = self._find_planeswalker_target(pw_identifier)
         if not attacker_id:
             logging.warning(f"PW {pw_identifier} not found or not being attacked.")
             return False
 
         # --- Find Defender ---
-        player = gs.p1 if gs.agent_is_p1 else gs.p2 # Defender is the agent
+        # Blocker is the non-agent player
+        player = gs.p1 if not gs.agent_is_p1 else gs.p2
         defender_id = self._find_permanent_id(player, defender_identifier)
         if not defender_id:
              logging.warning(f"Invalid defender identifier {defender_identifier}.")
              return False
+        defender_card = gs._safe_get_card(defender_id)
+        attacker_card = gs._safe_get_card(attacker_id)
+        if not defender_card or not attacker_card: return False # Safety
 
         # --- Validate Blocker ---
         if not self._can_block(defender_id, attacker_id):
-            logging.warning(f"Defender {gs._safe_get_card(defender_id).name} cannot block attacker {gs._safe_get_card(attacker_id).name}")
+            logging.warning(f"Defender {defender_card.name} cannot block attacker {attacker_card.name}")
             return False
 
         # --- Assign Block ---
+        if not hasattr(gs, 'current_block_assignments'): gs.current_block_assignments = {}
         if attacker_id not in gs.current_block_assignments: gs.current_block_assignments[attacker_id] = []
         if defender_id not in gs.current_block_assignments[attacker_id]:
              gs.current_block_assignments[attacker_id].append(defender_id)
-             logging.info(f"{gs._safe_get_card(defender_id).name} assigned to block {gs._safe_get_card(attacker_id).name} (protecting PW {gs._safe_get_card(target_pw_id).name})")
+             logging.info(f"{defender_card.name} assigned to block {attacker_card.name} (protecting PW {gs._safe_get_card(target_pw_id).name})")
              return True
         logging.debug("Blocker already assigned to this attacker.")
         return False # Already assigned

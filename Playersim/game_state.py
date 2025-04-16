@@ -702,6 +702,9 @@ class GameState:
         player["land_played"] = False
         player["damage_counters"] = {} # Damage removed in Cleanup usually, but safe reset here? Rule 514.2. Okay.
         logging.debug(f"Untap Phase for {player['name']} complete.")
+        
+        
+
 
 
     def _draw_phase(self, player):
@@ -4475,6 +4478,83 @@ class GameState:
             return True
             
         logging.warning(f"Invalid card index {card_idx} for put_on_bottom")
+        return False
+    
+    def check_keyword(self, card_id, keyword):
+        """
+        Checks if a card has a specific keyword, prioritizing Layer System results.
+        This is the central point for keyword checks within GameState.
+
+        Args:
+            card_id (str): The ID of the card to check.
+            keyword (str): The keyword to check for (e.g., 'flying', 'haste').
+
+        Returns:
+            bool: True if the card currently has the keyword, False otherwise.
+        """
+        card = self._safe_get_card(card_id)
+        if not card:
+            logging.debug(f"check_keyword: Card {card_id} not found.")
+            return False
+
+        keyword_lower = keyword.lower()
+
+        # 1. Prefer Layer System Results (on the live card object)
+        # The LayerSystem updates the card object directly with the final 'keywords' array.
+        if hasattr(card, 'keywords') and isinstance(card.keywords, (list, np.ndarray)):
+            try:
+                # Ensure Card.ALL_KEYWORDS is available and populated
+                if not hasattr(Card, 'ALL_KEYWORDS') or not Card.ALL_KEYWORDS:
+                     # Attempt to load if missing (e.g., if Card class wasn't fully initialized)
+                     if hasattr(Card, '_load_keywords'):
+                         Card._load_keywords()
+                     if not hasattr(Card, 'ALL_KEYWORDS') or not Card.ALL_KEYWORDS:
+                          logging.error("Card.ALL_KEYWORDS is missing or empty. Cannot perform keyword check.")
+                          return False # Cannot check without the list
+
+                # Use the static list from Card class for consistency
+                kw_list = [k.lower() for k in Card.ALL_KEYWORDS]
+                idx = kw_list.index(keyword_lower)
+                if idx < len(card.keywords):
+                    has_keyword = bool(card.keywords[idx])
+                    # Logging can be very verbose, disable or make conditional
+                    # logging.debug(f"check_keyword (Layer): '{keyword_lower}' on '{card.name}' -> {has_keyword}")
+                    return has_keyword
+                else:
+                    # Index is valid for the keyword list, but out of bounds for *this card's* keyword array
+                    # This implies an issue with array initialization or keyword list mismatch.
+                    logging.warning(f"check_keyword (Layer): Keyword index {idx} out of bounds for {card.name}'s keyword array (Len: {len(card.keywords)})")
+                    return False # Treat as not having the keyword if array is wrong size
+            except ValueError:
+                 # Keyword is not in the standard Card.ALL_KEYWORDS list
+                 # Could be a temporary/pseudo keyword like 'cant_attack' added by layers.
+                 # How LayerSystem handles these needs clarification. If it adds them directly
+                 # as attributes or modifies the 'keywords' array needs to be consistent.
+                 # For now, assume standard keywords are in the array. Non-standard = False.
+                 logging.debug(f"check_keyword (Layer): Keyword '{keyword_lower}' not in Card.ALL_KEYWORDS list.")
+                 # Check if it exists as a direct attribute (less likely for LayerSystem)
+                 # return getattr(card, keyword_lower, False)
+                 return False
+            except IndexError:
+                 # Should be caught by the length check above, but safety catch.
+                 logging.warning(f"check_keyword (Layer): Unexpected IndexError for keyword {keyword_lower} on {card.name}.")
+                 return False
+            except Exception as e:
+                 logging.error(f"check_keyword (Layer): Error checking keyword array for {card.name}: {e}")
+                 return False # Error implies uncertainty, assume false
+
+        # 2. Fallback (Less Reliable): Check base card text IF no layer system active/result found
+        # This is unreliable because layers can grant/remove keywords. Use with caution.
+        elif not self.layer_system:
+             logging.warning(f"check_keyword: LayerSystem inactive, falling back to basic text check for '{keyword_lower}' on {card.name}. This may be inaccurate.")
+             if hasattr(card, 'oracle_text'):
+                 # Simple text check (can be fooled by reminder text or unrelated mentions)
+                 # Add word boundaries for more accuracy on single-word keywords
+                 pattern = r'\b' + re.escape(keyword_lower) + r'\b'
+                 return bool(re.search(pattern, card.oracle_text.lower()))
+
+        # If no LayerSystem result and no fallback text check done, assume False
+        logging.debug(f"check_keyword: Keyword '{keyword_lower}' not found or verifiable for {card.name}.")
         return False
         
     def reveal_top(self, player, count=1):

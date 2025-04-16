@@ -2768,9 +2768,12 @@ class ActionHandler:
     
 
     def _handle_sacrifice_permanent(self, param, context, **kwargs):
+        """Handles the SACRIFICE_PERMANENT action, correctly identifying the chosen permanent."""
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
-        if not gs.sacrifice_context or gs.sacrifice_context.get("controller") != player:
+
+        # Validate context: Ensure we are in the SACRIFICE phase and the correct player is acting
+        if not hasattr(gs, 'sacrifice_context') or not gs.sacrifice_context or gs.sacrifice_context.get("controller") != player:
             logging.warning("SACRIFICE_PERMANENT called but not in sacrifice phase for this player.")
             return -0.2, False
 
@@ -2778,62 +2781,92 @@ class ActionHandler:
         required_count = ctx.get('required_count', 1)
         selected_perms = ctx.get('selected_permanents', [])
 
-        # Get valid permanents to sacrifice
+        # Regenerate the list of valid permanents the agent *could have* chosen from, based on context.
+        # This is needed to map the 'param' index back to the correct card ID.
         valid_perms = []
         perm_type_req = ctx.get('required_type')
-        for i, perm_id in enumerate(player["battlefield"]):
+        for i, perm_id in enumerate(player.get("battlefield", [])): # Use get for safety
              perm_card = gs._safe_get_card(perm_id)
              if not perm_card: continue
              # Check type if required
-             if not perm_type_req or perm_type_req == "permanent" or perm_type_req in getattr(perm_card, 'card_types', []):
+             is_valid_type = False
+             if not perm_type_req or perm_type_req == "permanent":
+                  is_valid_type = True
+             elif hasattr(perm_card, 'card_types') and perm_type_req in perm_card.card_types:
+                  is_valid_type = True
+             elif hasattr(perm_card, 'subtypes') and perm_type_req in perm_card.subtypes: # Check subtypes too
+                  is_valid_type = True
+
+             if is_valid_type:
                  valid_perms.append(perm_id)
 
-        if param < len(valid_perms):
-            sac_id = valid_perms[param]
-            if sac_id not in selected_perms: # Avoid duplicates
+        # Use 'param' (the action index parameter 0-9) to select the card from the VALID options list.
+        if param >= 0 and param < len(valid_perms):
+            sac_id = valid_perms[param] # <<< This correctly maps the agent's choice index to the card ID
+            if sac_id not in selected_perms: # Avoid duplicates if somehow selected again
                 selected_perms.append(sac_id)
-                ctx["selected_permanents"] = selected_perms
-                logging.debug(f"Selected sacrifice {len(selected_perms)}/{required_count}: {gs._safe_get_card(sac_id).name}")
+                ctx["selected_permanents"] = selected_perms # Update the context
+                sac_card = gs._safe_get_card(sac_id)
+                logging.debug(f"Selected sacrifice {len(selected_perms)}/{required_count}: {getattr(sac_card, 'name', sac_id)} (Choice Index {param})")
 
                 # If enough sacrifices selected, finalize
                 if len(selected_perms) >= required_count:
-                     # Perform sacrifices and update stack item
-                     # ... (logic moved from _add_sacrifice_actions) ...
                     sac_reward_mod = 0
-                    for sacrifice_id in selected_perms:
-                        sac_card = gs._safe_get_card(sacrifice_id)
-                        if self.card_evaluator and sac_card:
-                            sac_reward_mod -= self.card_evaluator.evaluate_card(sacrifice_id, "general") * 0.2
-                        # Actual move handled by the ability resolution usually
-                        # We store the chosen IDs for the ability resolver.
+                    # Note: Sacrifices usually happen when the *original ability resolves*, not immediately.
+                    # We just store the chosen IDs in the stack item's context.
+                    # The *original ability* needs to read `sacrificed_permanents` during its resolution.
 
-                    # Update the context of the ability on the stack
+                    # Update the context of the ability ON THE STACK that required the sacrifice
                     found_stack_item = False
-                    for i in range(len(gs.stack) -1, -1, -1):
-                         item = gs.stack[i]
-                         if isinstance(item, tuple) and item[1] == ctx["source_id"]:
-                              new_stack_context = item[3] if len(item) > 3 else {}
-                              new_stack_context['sacrificed_permanents'] = selected_perms
-                              gs.stack[i] = item[:3] + (new_stack_context,)
-                              found_stack_item = True
-                              logging.debug(f"Updated stack item {i} with sacrifices: {selected_perms}")
-                              break
-                    if not found_stack_item: logging.error("Sacrifice context active but couldn't find stack item!")
+                    stack_source_id = ctx.get("source_id") # ID of the spell/ability requiring sacrifice
+                    if stack_source_id:
+                         for i in range(len(gs.stack) -1, -1, -1): # Search stack from top
+                              item = gs.stack[i]
+                              if isinstance(item, tuple) and item[1] == stack_source_id:
+                                   # Update the context of THAT stack item
+                                   new_stack_context = item[3] if len(item) > 3 else {}
+                                   # Add the list of IDs chosen to be sacrificed
+                                   new_stack_context['sacrificed_permanents'] = selected_perms
+                                   gs.stack[i] = item[:3] + (new_stack_context,) # Replace item with updated context
+                                   found_stack_item = True
+                                   logging.debug(f"Updated stack item {i} (Source: {stack_source_id}) with sacrifices: {selected_perms}")
+                                   break
+                    else:
+                         logging.error("Sacrifice context missing 'source_id', cannot update stack item!")
+                         # Cannot link sacrifice to the cause, potential logic error.
 
-                    gs.sacrifice_context = None
-                    gs.phase = gs.PHASE_PRIORITY
-                    gs.priority_pass_count = 0
+                    if not found_stack_item and stack_source_id:
+                         logging.error(f"Sacrifice context active (Source: {stack_source_id}), but couldn't find matching stack item to store chosen sacrifices!")
+                         # May need alternative handling if sacrifice is not tied to stack (e.g., cost for activation?)
+
+                    # Calculate reward modifier based on sacrificed card value
+                    if hasattr(self, 'card_evaluator'):
+                        for sacrifice_id in selected_perms:
+                            sac_reward_mod -= self.card_evaluator.evaluate_card(sacrifice_id, "sacrifice") * 0.2
+
+                    # --- Phase Transition ---
+                    gs.sacrifice_context = None # Clear the context
+                    # Return to the phase before SACRIFICE was entered
+                    if hasattr(gs, 'previous_priority_phase') and gs.previous_priority_phase is not None:
+                        gs.phase = gs.previous_priority_phase
+                        gs.previous_priority_phase = None
+                    else:
+                         logging.warning("No previous phase tracked, returning to generic PRIORITY.")
+                         gs.phase = gs.PHASE_PRIORITY # Fallback
+                    gs.priority_pass_count = 0 # Reset priority
                     gs.priority_player = gs._get_active_player()
-                    logging.debug("Sacrifice choice complete, returning to priority.")
+                    # --- End Phase Transition ---
+                    logging.debug("Sacrifice choice complete, returning to priority phase.")
                     return 0.1 + sac_reward_mod, True # Reward for completing sacrifice choice
                 else:
-                     # More sacrifices needed
-                     return 0.02, True # Incremental success
-            else: # Invalid index
-                 logging.warning(f"Invalid sacrifice index selected: {param}")
-                 return -0.1, False
-        else: # Not in sacrifice phase
-             return -0.2, False
+                    # More sacrifices needed, stay in SACRIFICE phase
+                    return 0.02, True # Incremental success reward
+            else: # Card already selected? Or tried to select invalidly.
+                 logging.warning(f"Sacrifice choice index {param} points to already selected or invalid permanent {sac_id}.")
+                 return -0.05, False
+        else: # Invalid index provided by 'param'
+             logging.error(f"Invalid SACRIFICE_PERMANENT action parameter: {param}. Valid choices: {len(valid_perms)}")
+             return -0.1, False
     
     def _handle_special_choice_actions(self, player, valid_actions, set_valid_action):
         """Add actions for Scry, Surveil, Dredge, Choose Mode, Choose X, Choose Color."""
@@ -3525,90 +3558,88 @@ class ActionHandler:
         return 0.01, True
       
     def _handle_copy_permanent(self, param, context, **kwargs):
-            """Handle COPY_PERMANENT action. Expects context={'target_permanent_idx':X}."""
-            gs = self.game_state; player = gs.p1 if gs.agent_is_p1 else gs.p2
-            target_idx = context.get('target_permanent_idx') # Combined index
+        """Handle COPY_PERMANENT action. Expects context={'target_identifier':X}."""
+        gs = self.game_state; player = gs._get_active_player()
+        target_identifier = context.get('target_identifier', context.get('target_permanent_idx')) # Allow old key fallback
 
-            if target_idx is not None:
-                try: target_idx = int(target_idx)
-                except (ValueError, TypeError):
-                    logging.warning(f"Copy Permanent context has non-integer index: {context}")
-                    return (-0.15, False)
-
-                target_id, target_owner = gs.get_permanent_by_combined_index(target_idx)
-                if target_id:
-                    target_card = gs._safe_get_card(target_id)
-                    if target_card:
-                        token_id = gs.create_token_copy(target_card, player) # Create copy token
-                        return 0.4 if token_id else -0.1, token_id is not None
-                    else: logging.warning(f"Target card not found for copy: {target_id}")
-                else: logging.warning(f"Target index out of bounds for copy: {target_idx}")
-            else: logging.warning(f"Copy Permanent context missing 'target_permanent_idx'")
-            return -0.15, False
+        if target_identifier is not None:
+            target_id, target_owner = gs.get_permanent_by_identifier(target_identifier) # Use helper for index/ID
+            if target_id:
+                target_card = gs._safe_get_card(target_id)
+                if target_card:
+                    # GS method handles token creation/copying
+                    token_id = gs.create_token_copy(target_card, player)
+                    return 0.4 if token_id else -0.1, token_id is not None
+                else: logging.warning(f"Target card not found for copy: {target_id}")
+            else: logging.warning(f"Target identifier invalid for copy: {target_identifier}")
+        else: logging.warning(f"Copy Permanent context missing 'target_identifier'")
+        return -0.15, False
 
     def _handle_copy_spell(self, param, context, **kwargs):
-            """Handle COPY_SPELL action. Expects context={'target_spell_idx':X}."""
-            gs = self.game_state; player = gs.p1 if gs.agent_is_p1 else gs.p2
-            target_stack_idx = context.get('target_spell_idx') # Index on stack
+        """Handle COPY_SPELL action. Expects context={'target_stack_identifier':X}."""
+        gs = self.game_state; player = gs._get_active_player()
+        target_identifier = context.get('target_stack_identifier', context.get('target_spell_idx')) # Stack Index or unique ID
 
-            if target_stack_idx is not None:
-                try: target_stack_idx = int(target_stack_idx)
-                except (ValueError, TypeError):
-                    logging.warning(f"Copy Spell context has non-integer index: {context}")
-                    return (-0.15, False)
+        if target_identifier is not None:
+            # Find stack item by identifier (index or ID)
+            target_stack_item = None
+            if isinstance(target_identifier, int): # Index
+                 if 0 <= target_identifier < len(gs.stack):
+                      if gs.stack[target_identifier][0] == "SPELL": # Check type
+                           target_stack_item = gs.stack[target_identifier]
+            else: # Assume ID (less common)
+                for item in gs.stack:
+                     if item[0] == "SPELL" and item[1] == target_identifier:
+                          target_stack_item = item; break
 
-                if 0 <= target_stack_idx < len(gs.stack):
-                    item_type, card_id, original_controller, old_context = gs.stack[target_stack_idx]
-                    if item_type == "SPELL":
-                        card = gs._safe_get_card(card_id)
-                        if card:
-                            import copy # Ensure copy is imported
-                            new_context = copy.deepcopy(old_context)
-                            new_context["is_copy"] = True
-                            # Allow choosing new targets for the copy
-                            new_context["needs_new_targets"] = True # Flag for targeting phase
-                            # Remove target info from copy context; needs selection
-                            new_context.pop("targets", None)
-                            new_context.pop("target_stack_index", None) # Remove specific targeting indices if they were passed
+            if target_stack_item:
+                 item_type, card_id, original_controller, old_context = target_stack_item
+                 card = gs._safe_get_card(card_id)
+                 if card:
+                      import copy
+                      new_context = copy.deepcopy(old_context)
+                      new_context["is_copy"] = True
+                      new_context["needs_new_targets"] = True # Always allow new targets for copy
+                      new_context.pop("targets", None) # Clear old targets
 
-                            gs.add_to_stack("SPELL", card_id, player, new_context) # Copy controlled by current player
-                            logging.debug(f"Successfully copied spell {card.name} onto stack.")
-                            return 0.4, True
-                        else: logging.warning(f"Spell card not found for copy: {card_id}")
-                    else: logging.warning(f"Target stack item {target_stack_idx} is not a spell.")
-                else: logging.warning(f"Target stack index out of bounds: {target_stack_idx}")
-            else: logging.warning(f"Copy Spell context missing 'target_spell_idx'")
-            return -0.15, False
+                      # Add copy to stack, controlled by the player taking the copy action
+                      gs.add_to_stack("SPELL", card_id, player, new_context)
+                      logging.debug(f"Successfully copied spell {card.name} onto stack.")
+                      return 0.4, True
+                 else: logging.warning(f"Spell card {card_id} not found for copy.")
+            else: logging.warning(f"Target stack item not found or not a spell: {target_identifier}")
+        else: logging.warning(f"Copy Spell context missing 'target_stack_identifier'")
+        return -0.15, False
 
     def _handle_populate(self, param, context, **kwargs):
-            """Handle POPULATE action. Expects context={'target_token_idx':X}."""
-            gs = self.game_state; player = gs.p1 if gs.agent_is_p1 else gs.p2
-            target_token_idx = context.get('target_token_idx') # Index relative to player's tokens ON BATTLEFIELD
+        """Handle POPULATE action. Expects context={'target_token_identifier':X}."""
+        gs = self.game_state; player = gs._get_active_player()
+        target_identifier = context.get('target_token_identifier', context.get('target_token_idx')) # Identifier (index or ID)
 
-            if target_token_idx is not None:
-                try: target_token_idx = int(target_token_idx)
-                except (ValueError, TypeError):
-                    logging.warning(f"Populate context has non-integer index: {context}")
-                    return (-0.15, False)
+        if target_identifier is not None:
+            token_to_copy_id = self.action_handler._find_permanent_id(player, target_identifier) # Find token ID
+            if token_to_copy_id:
+                 original_token = gs._safe_get_card(token_to_copy_id)
+                 if original_token and hasattr(original_token,'is_token') and original_token.is_token and 'creature' in getattr(original_token, 'card_types', []):
+                      new_token_id = gs.create_token_copy(original_token, player)
+                      return 0.35 if new_token_id else -0.1, new_token_id is not None
+                 else: logging.warning(f"Target for populate {token_to_copy_id} is not a valid creature token.")
+            else: logging.warning(f"Target token identifier invalid for populate: {target_identifier}")
+        else: logging.warning(f"Populate context missing 'target_token_identifier'")
+        return -0.15, False
+        
+    def _handle_investigate(self, param, context=None, **kwargs):
+            """Handle the INVESTIGATE action."""
+            gs = self.game_state
+            player = gs.p1 if gs.agent_is_p1 else gs.p2 # Usually triggered by own effect
 
-                # Find the actual token on the battlefield based on the relative index
-                tokens_on_bf = [cid for cid in player.get("battlefield", []) if cid.startswith("TOKEN_")] # Basic check
-                if target_token_idx < len(tokens_on_bf):
-                    token_to_copy_id = tokens_on_bf[target_token_idx]
-                    original_token = gs._safe_get_card(token_to_copy_id)
-                    if original_token and original_token.is_token: # Check if it's really a token
-                        # --- Create the copy ---
-                        new_token_id = gs.create_token_copy(original_token, player)
-                        return 0.35 if new_token_id else -0.1, new_token_id is not None
-                    else: logging.warning(f"Target for populate {token_to_copy_id} is not a valid token.")
-                else: logging.warning(f"Target token index out of bounds: {target_token_idx}")
-            else: logging.warning(f"Populate context missing 'target_token_idx'")
-            return -0.15, False
-    def _handle_investigate(self, param, action_type=None, **kwargs):
-        gs = self.game_state; player = gs.p1 if gs.agent_is_p1 else gs.p2
-        token_data = {"name":"Clue", "type_line":"Artifact - Clue", "card_types":["artifact"],"subtypes":["Clue"],"oracle_text":"{2}, Sacrifice this artifact: Draw a card."}
-        success = gs.create_token(player, token_data)
-        return (0.25, success) if success else (-0.05, False)
+            token_data = gs.get_token_data_by_index(4) # Index 4 is Clue token in ACTION_MEANINGS example
+            if not token_data:
+                # Fallback Clue data if mapping missing
+                token_data = {"name": "Clue", "type_line": "Token Artifact — Clue", "card_types": ["artifact"], "subtypes": ["Clue"], "oracle_text": "{2}, Sacrifice this artifact: Draw a card."}
+
+            success = gs.create_token(player, token_data)
+            return (0.25, success) if success else (-0.05, False) # Reward creating a clue
       
     def _handle_foretell(self, param, context, **kwargs):
             gs = self.game_state; player = gs.p1 if gs.agent_is_p1 else gs.p2
@@ -3644,61 +3675,92 @@ class ActionHandler:
             return -0.15, False
     
     def _handle_amass(self, param, context, **kwargs):
-            gs = self.game_state; player = gs.p1 if gs.agent_is_p1 else gs.p2
-            amount = context.get('amount', 1) # Get amount from context
+            """Handle AMASS action. Expects amount in context."""
+            gs = self.game_state;
+            player = gs.p1 if gs.agent_is_p1 else gs.p2 # Player who amasses
+            amount = context.get('amount', 1) # Get amount from context, default 1
             if not isinstance(amount, int) or amount <= 0: amount = 1
 
-            success = gs.amass(player, amount) # GS method handles logic
-            return (0.1 * amount, success) if success else (-0.05, False)
+            success = False
+            if hasattr(gs, 'amass') and callable(gs.amass):
+                success = gs.amass(player, amount) # GS method handles logic
+            else:
+                logging.error("Amass function missing in GameState.")
+
+            # Reward scales with amount, capped
+            reward = min(0.4, 0.1 * amount) if success else -0.05
+            return reward, success
     
+      
     def _handle_learn(self, param, context, **kwargs):
-        gs = self.game_state; player = gs.p1 if gs.agent_is_p1 else gs.p2
-        # Learn allows: Draw, then discard OR reveal Lesson from sideboard and put in hand.
-        # Simple AI: Always Draw, then Discard
-        drew_card = False
-        discarded_card = False
-        reward = 0.0
+            """Handle LEARN action. Simple Draw->Discard implementation."""
+            gs = self.game_state
+            player = gs.p1 if gs.agent_is_p1 else gs.p2 # Player learning
 
-        # Draw
-        if player["library"]:
-            card_drawn_id = player["library"].pop(0)
-            player["hand"].append(card_drawn_id)
-            drew_card = True
-            logging.debug(f"Learn: Drew {gs._safe_get_card(card_drawn_id).name}")
-            reward += 0.1 # Value for drawing
+            # TODO: Add sideboard interaction for a full implementation
 
-        # Discard
-        if player["hand"]:
-            # Simple AI: Discard highest CMC card currently?
-            card_to_discard_id = None
-            highest_cmc = -1
-            idx_to_discard = -1
-            for i, cid in enumerate(player["hand"]):
-                 card = gs._safe_get_card(cid)
-                 cmc = getattr(card, 'cmc', 0) if card else 0
-                 if cmc > highest_cmc:
-                     highest_cmc = cmc
-                     card_to_discard_id = cid
-                     idx_to_discard = i
+            # Option 1: Draw, then discard
+            drew_card = False
+            discarded_card = False
+            reward = 0.0
 
-            if idx_to_discard != -1:
-                 player["hand"].pop(idx_to_discard)
-                 player["graveyard"].append(card_to_discard_id)
-                 discarded_card = True
-                 logging.debug(f"Learn: Discarded {gs._safe_get_card(card_to_discard_id).name}")
-                 reward += 0.05 # Small reward for completing discard
+            # Draw
+            if player["library"]:
+                card_drawn_id = gs._draw_card(player) # Use GS draw method
+                if card_drawn_id:
+                    drew_card = True
+                    card_name = getattr(gs._safe_get_card(card_drawn_id), 'name', card_drawn_id)
+                    logging.debug(f"Learn: Drew {card_name}")
+                    reward += 0.1 # Value for drawing
+                else: # Draw failed?
+                    pass
+            else:
+                logging.warning(f"Learn: Cannot draw, library empty for {player['name']}")
 
-        # Trigger Learn ability completed
-        gs.trigger_ability(None, "LEARNED", {"controller": player, "drew":drew_card, "discarded":discarded_card})
+            # Discard (only if a card was successfully drawn, usually)
+            if drew_card and player["hand"]:
+                # AI needs to choose discard. Simple AI: Discard drawn card if CMC high, else highest CMC?
+                # Simpler: Discard lowest value card in hand based on evaluator.
+                chosen_discard_id = None
+                if self.card_evaluator:
+                    lowest_value = float('inf')
+                    for card_id_in_hand in player["hand"]:
+                        # Context for discard eval might be important (e.g., GY synergy)
+                        val = self.card_evaluator.evaluate_card(card_id_in_hand, "discard")
+                        if val < lowest_value:
+                            lowest_value = val
+                            chosen_discard_id = card_id_in_hand
+                else: # Fallback: discard last drawn card
+                    chosen_discard_id = card_drawn_id if card_drawn_id in player["hand"] else (player["hand"][0] if player["hand"] else None)
 
-        return reward, drew_card or discarded_card # Return True if either happened
+                if chosen_discard_id:
+                    discard_success = gs.move_card(chosen_discard_id, player, "hand", player, "graveyard", cause="learn_discard")
+                    if discard_success:
+                        discarded_card = True
+                        card_name = getattr(gs._safe_get_card(chosen_discard_id), 'name', chosen_discard_id)
+                        logging.debug(f"Learn: Discarded {card_name}")
+                        reward += 0.05 # Small reward for completing discard
+                    else:
+                        logging.warning("Learn: Failed to move card to graveyard for discard.")
+                        reward -= 0.05 # Penalty for failed move
 
+            # Trigger Learn ability completed
+            gs.trigger_ability(None, "LEARNED", {"controller": player, "drew": drew_card, "discarded": discarded_card})
+
+            return reward, drew_card or discarded_card # Return True if either happened
 
     def _handle_venture(self, param, context, **kwargs):
-        gs = self.game_state; player = gs.p1 if gs.agent_is_p1 else gs.p2
-        success = gs.venture(player) # Assumes venture logic in GS
-        # Reward might depend on room entered? Simple reward for now.
-        return (0.15, success) if success else (-0.05, False)
+            """Handle VENTURE action."""
+            gs = self.game_state;
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+
+            if hasattr(gs, 'venture') and callable(gs.venture):
+                success = gs.venture(player) # GS handles dungeon logic
+                # Reward might depend on room entered? Simple reward for now.
+                return 0.15 if success else -0.05, success
+            else:
+                logging.warning("Venture called but GameState.venture method not implemented.")
+                return -0.1, False # Cannot perform action
 
       
     def _handle_exert(self, param, context, **kwargs):
@@ -3733,8 +3795,10 @@ class ActionHandler:
             return -0.15, False
       
     def _handle_explore(self, param, context, **kwargs):
-            gs = self.game_state; player = gs.p1 if gs.agent_is_p1 else gs.p2
-            creature_idx = context.get('creature_idx') # Index of exploring creature
+            """Handle EXPLORE action. Expects creature_idx in context."""
+            gs = self.game_state
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            creature_idx = context.get('creature_idx') # Battlefield index
 
             if creature_idx is not None:
                 try: creature_idx = int(creature_idx)
@@ -3744,8 +3808,12 @@ class ActionHandler:
 
                 if creature_idx < len(player["battlefield"]):
                     card_id = player["battlefield"][creature_idx]
-                    success = gs.explore(player, card_id) # GS handles explore logic
-                    return 0.25 if success else -0.05, success
+                    if hasattr(gs, 'explore') and callable(gs.explore):
+                        success = gs.explore(player, card_id) # GS handles logic
+                        return 0.25 if success else -0.05, success
+                    else:
+                        logging.error("Explore function missing in GameState.")
+                        return -0.1, False
                 else: logging.warning(f"Explore index out of bounds: {creature_idx}")
             else: logging.warning(f"Explore context missing 'creature_idx'")
             return -0.15, False
@@ -4024,37 +4092,39 @@ class ActionHandler:
     def _handle_equip(self, param, context, **kwargs):
         """Handle EQUIP action. Expects context={'equip_idx':X, 'target_idx':Y}."""
         gs = self.game_state
-        player = gs.p1 if gs.agent_is_p1 else gs.p2
-        equip_idx = context.get('equip_idx') # Index of equipment on battlefield
-        target_idx = context.get('target_idx') # Index of target creature on battlefield
+        player = gs._get_active_player() # Equipping happens on your turn
+        # context should be populated by the environment based on agent's target selection
+        # or derived during action generation if targeting is simple.
+        # Use more descriptive keys: 'equipment_identifier' and 'target_identifier'
+        equip_identifier = context.get('equipment_identifier', context.get('equip_idx')) # Fallback for older context
+        target_identifier = context.get('target_identifier', context.get('target_idx')) # Fallback
 
-        if equip_idx is None or target_idx is None:
-            logging.error(f"Equip context missing required indices ('equip_idx', 'target_idx'): {context}")
+        if equip_identifier is None or target_identifier is None:
+            logging.error(f"Equip context missing required identifiers ('equipment_identifier', 'target_identifier'): {context}")
             return -0.15, False
 
-        try: equip_idx, target_idx = int(equip_idx), int(target_idx)
-        except (ValueError, TypeError):
-            logging.error(f"Equip context has non-integer indices: {context}")
-            return -0.15, False
+        # Find IDs using helpers
+        equip_id = self.action_handler._find_permanent_id(player, equip_identifier) # Use handler's helper
+        target_id = self.action_handler._find_permanent_id(player, target_identifier) # Use handler's helper
 
-        # --- Validation: Indices in bounds ---
-        if not (0 <= equip_idx < len(player["battlefield"]) and 0 <= target_idx < len(player["battlefield"])):
-             logging.warning(f"Equip indices out of bounds: E:{equip_idx}, T:{target_idx}")
+        if not equip_id or not target_id:
+             logging.warning(f"Equip failed: Invalid identifiers. Equip: '{equip_identifier}' -> {equip_id}, Target: '{target_identifier}' -> {target_id}")
              return -0.15, False
-
-        equip_id = player["battlefield"][equip_idx]
-        target_id = player["battlefield"][target_idx]
 
         # --- Check Equip Cost & Affordability ---
         equip_card = gs._safe_get_card(equip_id)
-        equip_cost_str = self._get_equip_cost_str(equip_card) # Use internal helper
-        if not equip_cost_str or not self._can_afford_cost_string(player, equip_cost_str):
+        # Delegate cost string retrieval to CombatActionHandler or ActionHandler
+        equip_cost_str = self.action_handler._get_equip_cost_str(equip_card) if hasattr(self.action_handler, '_get_equip_cost_str') else None
+        if equip_cost_str is None and hasattr(self.combat_handler, '_get_equip_cost_str'):
+            equip_cost_str = self.combat_handler._get_equip_cost_str(equip_card)
+
+        if not equip_cost_str or not self.action_handler._can_afford_cost_string(player, equip_cost_str):
             logging.debug(f"Cannot afford equip cost {equip_cost_str} for {equip_id}")
             return -0.05, False
 
         # --- Perform Equip via GameState ---
-        # The cost payment needs to happen here before calling equip_permanent
-        if not gs.mana_system.pay_mana_cost(player, equip_cost_str):
+        # Cost payment must happen *before* the state change
+        if not hasattr(gs, 'mana_system') or not gs.mana_system.pay_mana_cost(player, equip_cost_str):
             logging.warning(f"Failed to pay equip cost {equip_cost_str}")
             return -0.05, False
 
@@ -4063,7 +4133,7 @@ class ActionHandler:
             return 0.25, True
         else:
             logging.debug(f"Equip action failed validation or execution for {equip_id} -> {target_id}")
-            # Need to refund mana? Assume failed equip = cost wasted for now.
+            # Need to refund mana? Assume cost wasted for now.
             return -0.1, False
         
     def _handle_unequip(self, param, context, **kwargs):
@@ -4111,71 +4181,94 @@ class ActionHandler:
                 return -0.15, False
 
     def _handle_fortify(self, param, context, **kwargs):
+        """Handle FORTIFY action. Expects context={'fort_identifier':X, 'target_identifier':Y}."""
         gs = self.game_state
-        player = gs.p1 if gs.agent_is_p1 else gs.p2
-        # Context must contain 'fort_idx' and 'target_idx'
-        # context passed from kwargs
-        fort_idx = context.get('fort_idx')
-        target_idx = context.get('target_idx') # Land battlefield index
+        player = gs._get_active_player()
+        fort_identifier = context.get('fort_identifier', context.get('fort_idx')) # Fallback for older context
+        target_identifier = context.get('target_identifier', context.get('target_idx')) # Fallback
 
-        if fort_idx is not None and target_idx is not None:
-            try: fort_idx, target_idx = int(fort_idx), int(target_idx)
-            except (ValueError, TypeError): return -0.15, False
+        if fort_identifier is None or target_identifier is None:
+            logging.error(f"Fortify context missing required identifiers ('fort_identifier', 'target_identifier'): {context}")
+            return -0.15, False
 
-            if 0 <= fort_idx < len(player["battlefield"]) and 0 <= target_idx < len(player["battlefield"]):
-                fort_id = player["battlefield"][fort_idx]
-                target_id = player["battlefield"][target_idx]
+        fort_id = self.action_handler._find_permanent_id(player, fort_identifier) # Use handler's helper
+        target_id = self.action_handler._find_permanent_id(player, target_identifier) # Target land
 
-                # --- Check Cost & Affordability ---
-                fort_card = gs._safe_get_card(fort_id)
-                fort_cost_str = self._get_fortify_cost_str(fort_card) # Use internal helper
-                if not fort_cost_str or not self._can_afford_cost_string(player, fort_cost_str):
-                    logging.debug(f"Cannot afford fortify cost {fort_cost_str} for {fort_id}")
-                    return -0.05, False
+        if not fort_id or not target_id:
+             logging.warning(f"Fortify failed: Invalid identifiers. Fort: '{fort_identifier}' -> {fort_id}, Target: '{target_identifier}' -> {target_id}")
+             return -0.15, False
 
-                # --- Perform Fortify via GameState ---
-                if hasattr(gs, 'fortify_land') and gs.fortify_land(player, fort_id, target_id):
-                    return 0.2, True
-                else:
-                    logging.debug(f"Fortify action failed validation or execution for {fort_id} -> {target_id}")
-                    return -0.1, False
-            else: logging.warning(f"Fortify indices out of bounds: F:{fort_idx}, T:{target_idx}")
-        else: logging.warning(f"Fortify context missing indices: {context}")
-        return -0.15, False
+        # --- Check Cost & Affordability ---
+        fort_card = gs._safe_get_card(fort_id)
+        # Delegate cost string retrieval
+        fort_cost_str = self.action_handler._get_fortify_cost_str(fort_card) if hasattr(self.action_handler, '_get_fortify_cost_str') else None
+        if fort_cost_str is None and hasattr(self.combat_handler, '_get_fortify_cost_str'):
+             fort_cost_str = self.combat_handler._get_fortify_cost_str(fort_card)
+
+        if not fort_cost_str or not self.action_handler._can_afford_cost_string(player, fort_cost_str):
+            logging.debug(f"Cannot afford fortify cost {fort_cost_str} for {fort_id}")
+            return -0.05, False
+
+        # --- Perform Fortify via GameState ---
+        if not hasattr(gs, 'mana_system') or not gs.mana_system.pay_mana_cost(player, fort_cost_str):
+            logging.warning(f"Failed to pay fortify cost {fort_cost_str}")
+            return -0.05, False
+
+        if hasattr(gs, 'fortify_land') and gs.fortify_land(player, fort_id, target_id):
+            return 0.2, True
+        else:
+            logging.debug(f"Fortify action failed validation or execution for {fort_id} -> {target_id}")
+            return -0.1, False
      
     def _handle_reconfigure(self, param, context, **kwargs):
-            """Handle reconfigure action. Expects battlefield_idx in context."""
-            gs = self.game_state
-            player = gs.p1 if gs.agent_is_p1 else gs.p2
-            # context passed from apply_action
-            card_idx = context.get('battlefield_idx') # Get from context
+        """Handle RECONFIGURE action. Expects context={'card_identifier':X}. Might need target context if attaching."""
+        gs = self.game_state
+        player = gs._get_active_player()
+        card_identifier = context.get('card_identifier', context.get('battlefield_idx')) # Fallback
 
-            if card_idx is not None:
-                try: card_idx = int(card_idx)
-                except (ValueError, TypeError):
-                    logging.warning(f"Reconfigure context has non-integer index: {context}")
-                    return (-0.15, False)
+        if card_identifier is None:
+             logging.error(f"Reconfigure context missing 'card_identifier': {context}")
+             return -0.15, False
 
-                if card_idx < len(player["battlefield"]):
-                    card_id = player["battlefield"][card_idx]
-                    # --- Check Cost & Affordability ---
-                    card = gs._safe_get_card(card_id)
-                    reconf_cost_str = self._get_reconfigure_cost_str(card)
-                    if not reconf_cost_str or not self._can_afford_cost_string(player, reconf_cost_str):
-                        logging.debug(f"Cannot afford reconfigure cost {reconf_cost_str} for {card_id}")
-                        return (-0.05, False)
+        card_id = self.action_handler._find_permanent_id(player, card_identifier)
+        if not card_id:
+             logging.warning(f"Reconfigure failed: Invalid identifier '{card_identifier}' -> {card_id}")
+             return -0.15, False
 
-                    # --- Perform Reconfigure (validation, payment, attach/detach) ---
-                    # Needs target selection logic if attaching (AI choice or context).
-                    # GameState method should handle this.
-                    if hasattr(gs, 'reconfigure_permanent') and gs.reconfigure_permanent(player, card_id):
-                        return (0.2, True)
-                    else:
-                        logging.debug(f"Reconfigure failed for {card_id}")
-                        return (-0.1, False)
-                else: logging.warning(f"Reconfigure index out of bounds: {card_idx}")
-            else: logging.warning(f"Reconfigure context missing 'battlefield_idx'")
-            return (-0.15, False)
+        # --- Check Cost & Affordability ---
+        card = gs._safe_get_card(card_id)
+        reconf_cost_str = self.action_handler._get_reconfigure_cost_str(card) if hasattr(self.action_handler, '_get_reconfigure_cost_str') else None
+        if reconf_cost_str is None and hasattr(self.combat_handler, '_get_reconfigure_cost_str'):
+            reconf_cost_str = self.combat_handler._get_reconfigure_cost_str(card)
+
+        if not reconf_cost_str or not self.action_handler._can_afford_cost_string(player, reconf_cost_str):
+            logging.debug(f"Cannot afford reconfigure cost {reconf_cost_str} for {card_id}")
+            return (-0.05, False)
+
+        # --- Determine target if attaching ---
+        target_id = None
+        is_attached = card_id in player.get("attachments", {})
+        if not is_attached: # Trying to attach
+             # Target should come from context if agent made a choice
+             target_identifier_ctx = context.get('target_identifier')
+             if target_identifier_ctx:
+                  target_id = self.action_handler._find_permanent_id(player, target_identifier_ctx)
+                  if not target_id: logging.warning(f"Reconfigure attach target invalid: {target_identifier_ctx}")
+             else:
+                  # AI fallback: choose first valid creature? Or expect context? Expect context for now.
+                  logging.error("Reconfigure attach requires target identifier in context.")
+                  return -0.1, False # Require explicit target choice
+
+        # --- Perform Reconfigure via GameState ---
+        if not hasattr(gs, 'mana_system') or not gs.mana_system.pay_mana_cost(player, reconf_cost_str):
+            logging.warning(f"Failed to pay reconfigure cost {reconf_cost_str}")
+            return (-0.05, False)
+
+        if hasattr(gs, 'reconfigure_permanent') and gs.reconfigure_permanent(player, card_id, target_id=target_id):
+            return (0.2, True)
+        else:
+            logging.debug(f"Reconfigure failed for {card_id}")
+            return (-0.1, False)
 
 
     def _handle_morph(self, param, context, **kwargs):

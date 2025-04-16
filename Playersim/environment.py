@@ -1816,13 +1816,16 @@ class AlphaZeroMTGEnv(gym.Env):
         }
 
     def _validate_obs(self, obs):
-        """Checks if the generated observation dictionary conforms to the defined observation space."""
+        """
+        Checks if the generated observation dictionary conforms to the defined observation space.
+        Includes stricter dtype/shape checks and improved logging.
+        """
         if not isinstance(obs, dict):
-             logging.error("Observation Validation Error: Observation is not a dictionary.")
-             return False
+            logging.error("Observation Validation Error: Observation is not a dictionary.")
+            return False
         if not hasattr(self, 'observation_space') or not isinstance(self.observation_space, spaces.Dict):
-             logging.error("Observation Validation Error: Observation space is not defined or not a Dict space.")
-             return False
+            logging.error("Observation Validation Error: Observation space is not defined or not a Dict space.")
+            return False
 
         valid = True
         for key, space in self.observation_space.spaces.items():
@@ -1833,55 +1836,102 @@ class AlphaZeroMTGEnv(gym.Env):
 
             value = obs[key]
             if not isinstance(value, np.ndarray):
-                logging.error(f"Observation Validation Error: Key '{key}' is not a numpy array (type: {type(value)})")
-                valid = False
-                continue
+                # Special case: Allow simple scalars if the space shape is () or (1,) - Gymnasium can handle this sometimes
+                if (space.shape == () or space.shape == (1,)) and np.isscalar(value):
+                    # Attempt to cast scalar to numpy array for further checks
+                    try:
+                        value = np.array([value], dtype=space.dtype) # Wrap in array matching space dtype
+                        obs[key] = value # Update the observation dict for consistency if needed downstream
+                    except Exception as e:
+                         logging.error(f"Observation Validation Error: Key '{key}' is scalar but couldn't be cast to expected type {space.dtype}. Value: {value}. Error: {e}")
+                         valid = False
+                         continue # Skip further checks for this key
+                else:
+                    logging.error(f"Observation Validation Error: Key '{key}' is not a numpy array (type: {type(value)}) and not a compatible scalar.")
+                    valid = False
+                    continue
 
-            # Shape check
+            # Shape check (allow broadcasting for single-element dimensions)
             expected_shape = space.shape
             actual_shape = value.shape
-            if actual_shape != expected_shape:
-                # Allow broadcasting for single-element dimensions if types match
-                is_broadcastable = True
-                if len(expected_shape) != len(actual_shape):
-                     is_broadcastable = False
-                else:
-                     for exp_d, act_d in zip(expected_shape, actual_shape):
-                          if exp_d != act_d and exp_d != 1 and act_d != 1:
-                               is_broadcastable = False; break
-                if not is_broadcastable:
-                    logging.error(f"Observation Validation Error: Shape mismatch for '{key}'. Expected {expected_shape}, got {actual_shape}")
-                    valid = False
+            shape_match = False
+            if len(expected_shape) == len(actual_shape):
+                 shape_match = all(exp_d == act_d or exp_d == 1 or act_d == 1 for exp_d, act_d in zip(expected_shape, actual_shape))
+            # Handle case where space shape is () e.g. Box(0,1, shape=())
+            elif expected_shape == () and (actual_shape == (1,) or actual_shape == ()):
+                 shape_match = True # Allow shape (1,) for a shape () space
+            elif actual_shape == () and (expected_shape == (1,)):
+                shape_match = True
 
-            # Dtype check
-            if not np.can_cast(value.dtype, space.dtype, casting='safe'):
-                # Allow float32 -> float64, int32 -> int64, etc.
-                if not (np.issubdtype(value.dtype, np.number) and np.issubdtype(space.dtype, np.number)) and \
-                   not (np.issubdtype(value.dtype, np.bool_) and np.issubdtype(space.dtype, np.bool_)):
-                     logging.error(f"Observation Validation Error: Dtype mismatch for '{key}'. Expected {space.dtype}, got {value.dtype}")
+            if not shape_match:
+                 logging.error(f"Observation Validation Error: Shape mismatch for '{key}'. Expected {expected_shape}, got {actual_shape}")
+                 valid = False
+
+            # Dtype check - Be stricter, check exact match or safe casting
+            # Allow safe casting (e.g., int32 to int64, float32 to float64), but flag exact mismatches.
+            if value.dtype != space.dtype:
+                 # Check if casting is safe based on NumPy kinds
+                 expected_kind = np.dtype(space.dtype).kind
+                 actual_kind = value.dtype.kind
+                 # Allow int->int, float->float, bool->bool if target bits >= source bits
+                 can_safely_cast = False
+                 if expected_kind == actual_kind:
+                      if expected_kind == 'b': # Bool
+                           can_safely_cast = True
+                      elif expected_kind in 'iu': # Ints
+                           can_safely_cast = np.dtype(space.dtype).itemsize >= value.dtype.itemsize
+                      elif expected_kind == 'f': # Floats
+                           can_safely_cast = np.dtype(space.dtype).itemsize >= value.dtype.itemsize
+                 # Allow int to float conversion
+                 elif expected_kind == 'f' and actual_kind in 'iu':
+                      can_safely_cast = True
+                 # Allow float to int conversion (often problematic, maybe warn?)
+                 # elif expected_kind in 'iu' and actual_kind == 'f':
+                 #     can_safely_cast = True # Needs explicit check for data loss
+
+                 if not can_safely_cast:
+                     logging.error(f"Observation Validation Error: Dtype mismatch for '{key}'. Expected {space.dtype} (kind '{expected_kind}'), got {value.dtype} (kind '{actual_kind}').")
                      valid = False
+                 else:
+                     # Optionally log a warning for safe casts if desired for debugging
+                     pass # logging.debug(f"Observation Validation Warning: Safe dtype cast required for '{key}'. Expected {space.dtype}, got {value.dtype}")
 
-            # Bounds check (only for Box spaces)
+
+            # Bounds check (only for Box spaces) - Improved handling for different shapes/NaN
             if isinstance(space, spaces.Box):
-                # Need careful check due to potential broadcasting/NaN
                 try:
-                    # Check min bound
-                    lower_bound = np.full(value.shape, space.low.item() if space.low.size == 1 else space.low, dtype=space.dtype)
-                    if not np.all(np.greater_equal(value, lower_bound)):
-                        min_val_idx = np.unravel_index(np.argmin(value), value.shape)
-                        min_val = value[min_val_idx]
-                        logging.error(f"Observation Validation Error: Value out of lower bound for '{key}'. Expected >= {lower_bound[min_val_idx]}, got {min_val} at index {min_val_idx}")
-                        valid = False
+                    # Handle NaN values - skip bounds check for NaNs if space allows
+                    allow_nan = False # Set to True if your space explicitly intends to use NaNs
+                    if allow_nan:
+                        nan_mask = np.isnan(value)
+                        valid_non_nan = True
+                        # Check bounds only for non-NaN values
+                        if not np.all(nan_mask):
+                             value_to_check = value[~nan_mask]
+                             lower_bound = space.low[0] if space.low.size==1 else space.low[~nan_mask] # Align bounds
+                             upper_bound = space.high[0] if space.high.size==1 else space.high[~nan_mask]
+                             valid_non_nan = np.all(np.greater_equal(value_to_check, lower_bound)) and \
+                                             np.all(np.less_equal(value_to_check, upper_bound))
+                    else:
+                        # No NaNs allowed, check directly
+                        # Handle shape mismatch for bounds comparison if space bounds are scalar but value is array
+                        low_bound_val = space.low if space.low.shape == value.shape else space.low[0]
+                        high_bound_val = space.high if space.high.shape == value.shape else space.high[0]
+                        valid_bounds = np.all(np.greater_equal(value, low_bound_val)) and \
+                                       np.all(np.less_equal(value, high_bound_val))
 
-                    # Check max bound
-                    upper_bound = np.full(value.shape, space.high.item() if space.high.size == 1 else space.high, dtype=space.dtype)
-                    if not np.all(np.less_equal(value, upper_bound)):
-                        max_val_idx = np.unravel_index(np.argmax(value), value.shape)
-                        max_val = value[max_val_idx]
-                        logging.error(f"Observation Validation Error: Value out of upper bound for '{key}'. Expected <= {upper_bound[max_val_idx]}, got {max_val} at index {max_val_idx}")
-                        valid = False
+                    if not valid_bounds and not allow_nan:
+                         # Find first violation for logging
+                         lower_violations = value < low_bound_val
+                         upper_violations = value > high_bound_val
+                         violation_indices = np.where(lower_violations | upper_violations)[0]
+                         if violation_indices.size > 0:
+                              first_violation_idx = violation_indices[0]
+                              min_val = value[first_violation_idx]
+                              logging.error(f"Observation Validation Error: Value out of bounds for '{key}'. Expected [{low_bound_val}, {high_bound_val}], got {min_val} at index {first_violation_idx}")
+                              valid = False
                 except Exception as bound_e:
-                    logging.error(f"Observation Validation Error: Error checking bounds for '{key}': {bound_e}")
+                    logging.error(f"Observation Validation Error: Error checking bounds for '{key}' with value shape {value.shape} against space {space}. Error: {bound_e}", exc_info=True)
                     valid = False
 
         return valid
@@ -2004,71 +2054,136 @@ class AlphaZeroMTGEnv(gym.Env):
 
         return encoded_indices
 
-
     def _get_potential_sacrifices(self):
-        """Helper to get INDICES of permanents the agent can sacrifice. Returns np.array padded with -1."""
-        gs = self.game_state
-        agent_player_obj = gs.p1 if gs.agent_is_p1 else gs.p2
-        sacrificeable_indices = []
-        max_size = self.observation_space["sacrificeable_permanents"].shape[0]
+            """Helper to get INDICES of permanents the agent can sacrifice. Returns np.array padded with -1."""
+            gs = self.game_state
+            agent_player_obj = gs.p1 if gs.agent_is_p1 else gs.p2
+            sacrificeable_info = [] # Store tuples (permanent_id, battlefield_index)
+            max_size = self.observation_space["sacrificeable_permanents"].shape[0]
+            dtype_for_space = np.int32
 
-        if gs.phase == gs.PHASE_SACRIFICE and gs.sacrifice_context:
-            controller = gs.sacrifice_context["controller"]
-            if controller == agent_player_obj: # Only if it's agent's turn
-                req_type = gs.sacrifice_context.get('required_type')
-                for i, perm_id in enumerate(controller.get("battlefield", [])):
-                    if i >= max_size: break # Stop if exceeding observation space size
+            # Check if sacrifice context is active for the agent
+            context_active_for_agent = False
+            if hasattr(gs, 'sacrifice_context') and gs.sacrifice_context:
+                controller = gs.sacrifice_context.get("controller")
+                if controller == agent_player_obj:
+                    context_active_for_agent = True
+
+            if context_active_for_agent:
+                context = gs.sacrifice_context
+                req_type = context.get('required_type') # e.g., 'creature', 'artifact', 'permanent'
+                # Get permanents on the battlefield
+                player_battlefield = agent_player_obj.get("battlefield", [])
+
+                # Filter based on requirements
+                for i, perm_id in enumerate(player_battlefield):
+                    # Do not exceed observation space size
+                    # if i >= max_size: break # Check later when populating array
+
                     perm_card = gs._safe_get_card(perm_id)
                     if not perm_card: continue
-                    # Check type requirement
-                    type_match = not req_type or req_type == "permanent" or req_type in getattr(perm_card, 'card_types', [])
-                    # TODO: Add checks for "can't be sacrificed" effects if needed
-                    if type_match:
-                         sacrificeable_indices.append(i) # Append the battlefield index
 
-        # Pad/truncate the list of INDICES
-        encoded_indices = np.full(max_size, -1, dtype=np.int32)
-        for k, bf_index in enumerate(sacrificeable_indices):
-             # The action param corresponds to the index within the list of valid sacrifices.
-             # The observation stores the battlefield index `bf_index` at position `k`.
-             # The agent needs to know that taking action param `k` means sacrificing the permanent at `encoded_indices[k]`.
-             if k >= max_size: break
-             encoded_indices[k] = bf_index # Store the battlefield index at position k
-        return encoded_indices
+                    # Type Check
+                    type_match = False
+                    if not req_type or req_type == "permanent":
+                        type_match = True
+                    elif hasattr(perm_card, 'card_types') and req_type in perm_card.card_types:
+                        type_match = True
 
+                    # Additional Checks (can't be sacrificed, etc.) - TODO: Implement if needed
+                    can_be_sacrificed = True # Placeholder
+
+                    if type_match and can_be_sacrificed:
+                        sacrificeable_info.append((perm_id, i)) # Store ID and its battlefield index
+
+            # Encode Battlefield Indices (pad/truncate)
+            encoded_indices = np.full(max_size, -1, dtype=dtype_for_space)
+            # The action parameter the agent chooses (0 to k-1) corresponds to the k-th valid sacrifice option.
+            # The observation array at index k should store the BATTLEFIELD index of that option.
+            for k, (perm_id, bf_index) in enumerate(sacrificeable_info):
+                if k >= max_size: break
+                encoded_indices[k] = bf_index # Store the battlefield index
+
+            return encoded_indices
 
     def _get_available_choice_options(self, choice_kind):
-        """Helper to get available modes, colors, or X range."""
-        gs = self.game_state
-        options = np.full(10, -1, dtype=np.int32) # Default size based on max modes
-        dtype = np.int32
-        max_size = 10
-
-        if choice_kind == 'color': max_size = 5
-        elif choice_kind == 'x_range': max_size = 2; dtype = np.int32
-        else: max_size = self.observation_space.get(f"selectable_{choice_kind}s", spaces.Box(-1,10,shape=(10,), dtype=np.int32)).shape[0]
-
-
-        if gs.phase == gs.PHASE_CHOOSE and gs.choice_context:
-            context = gs.choice_context
-            controller = context.get("player")
+            """Helper to get available modes, colors, or X range based on active choice context."""
+            gs = self.game_state
             agent_player_obj = gs.p1 if gs.agent_is_p1 else gs.p2
 
-            if controller == agent_player_obj: # Only if agent is choosing
-                choice_type = context.get("type")
-                if choice_type == "choose_mode" and choice_kind == 'mode':
-                     num_choices = context.get("num_choices", 0)
-                     selected = context.get("selected_modes", [])
-                     available = [i for i in range(num_choices) if i not in selected]
-                     options = np.full(max_size, -1, dtype=dtype)
-                     for i, mode_idx in enumerate(available[:max_size]): options[i] = mode_idx
-                elif choice_type == "choose_color" and choice_kind == 'color':
-                    options = np.arange(5, dtype=dtype) # Indices 0-4 for WUBRG
-                elif choice_type == "choose_x" and choice_kind == 'x_range':
-                    options = np.array([context.get("min_x", 0), context.get("max_x", 0)], dtype=dtype) # Return min/max
-                # Add other choice types (e.g., choose target from list? handled by targeting)
+            # Determine space properties dynamically
+            obs_key = f"selectable_{choice_kind}s" if choice_kind in ['mode', 'color'] else f"valid_{choice_kind}_range"
+            space = self.observation_space.spaces.get(obs_key)
+            if space is None:
+                logging.warning(f"Observation space missing for choice kind '{choice_kind}'.")
+                # Provide a default shape and type if space definition is missing
+                default_shape = (10,) if choice_kind == 'mode' else (5,) if choice_kind == 'color' else (2,) if choice_kind == 'x_range' else (1,)
+                dtype = np.int32
+                max_size = default_shape[0]
+            else:
+                max_size = space.shape[0]
+                dtype = space.dtype
 
-        return options
+            # Default result is padded array
+            options_vector = np.full(max_size, -1, dtype=dtype) # Default to int, use -1 padding
+
+            # Check if choice context is active for the AGENT
+            context_active_for_agent = False
+            if hasattr(gs, 'choice_context') and gs.choice_context:
+                controller = gs.choice_context.get("player")
+                if controller == agent_player_obj:
+                    context_active_for_agent = True
+
+            if context_active_for_agent:
+                context = gs.choice_context
+                current_choice_type = context.get("type")
+
+                # Populate based on the specific choice type needed by the agent
+                if choice_kind == 'mode' and current_choice_type == 'choose_mode':
+                    num_choices = context.get("num_choices", 0)
+                    max_selectable = context.get("max_modes", 1)
+                    selected_already = context.get("selected_modes", [])
+                    can_select_more = len(selected_already) < max_selectable
+
+                    if can_select_more:
+                        available_mode_indices = []
+                        for i in range(num_choices):
+                            # Mode is represented by its index (0, 1, 2...)
+                            # Avoid selecting duplicates if not allowed (most cases)
+                            if max_selectable == 1 and i in selected_already: continue # Don't show selected if only choosing 1
+                            # Add logic here if multiple different modes CAN be selected
+                            if i not in selected_already:
+                                available_mode_indices.append(i)
+
+                        # Fill the vector with available mode indices
+                        for k, mode_idx in enumerate(available_mode_indices):
+                            if k >= max_size: break
+                            options_vector[k] = mode_idx
+
+                elif choice_kind == 'color' and current_choice_type == 'choose_color':
+                    # Indices 0-4 represent WUBRG
+                    # Assuming all 5 colors are always potential choices
+                    valid_colors = np.arange(5, dtype=dtype)
+                    len_to_copy = min(len(valid_colors), max_size)
+                    options_vector[:len_to_copy] = valid_colors[:len_to_copy]
+
+                elif choice_kind == 'x_range' and current_choice_type == 'choose_x':
+                    # Expected shape is (2,) for [min_X, max_X]
+                    min_x = context.get("min_x", 0)
+                    max_x_calc = context.get("max_x", 0) # Max X calculated based on mana
+                    # Ensure dtype compatibility if space expects float
+                    if np.issubdtype(dtype, np.floating):
+                        min_x = float(min_x)
+                        max_x_calc = float(max_x_calc)
+                    options_vector[0] = min_x
+                    options_vector[1] = max_x_calc
+                # Add logic for other choice kinds if introduced (e.g., choose target type)
+                else:
+                    # Kind doesn't match active context type, return padded default
+                    pass
+
+            # Return the populated (or default padded) vector
+            return options_vector
 
     def _get_bottoming_mask(self, player):
         """Helper to get mask of cards available to bottom after mulligan."""
