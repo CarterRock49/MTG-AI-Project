@@ -2207,11 +2207,44 @@ class ActionHandler:
         return -0.1 # Error keeping
 
     def _handle_bottom_card(self, param, **kwargs):
+        """Handles BOTTOM_CARD action during mulligan. Param is the hand index (0-3 or more based on max hand size)."""
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
-        if gs.bottom_card(player, param):
-            return 0.05 # Small reward
-        return -0.1 # Failed
+        hand_idx_to_bottom = param # Agent's choice index
+
+        # Validate context
+        if not gs.bottoming_in_progress or gs.bottoming_player != player:
+            logging.warning("BOTTOM_CARD called but not in bottoming phase for this player.")
+            return -0.2, False
+
+        # Validate index
+        if 0 <= hand_idx_to_bottom < len(player.get("hand", [])):
+             card_id = player["hand"][hand_idx_to_bottom]
+             card = gs._safe_get_card(card_id)
+             card_name = getattr(card, 'name', card_id)
+
+             # Use GameState method to handle bottoming
+             if gs.bottom_card(player, hand_idx_to_bottom):
+                 reward_mod = -0.01 # Small default penalty for bottoming
+                 if self.card_evaluator:
+                     # Penalize more for bottoming good cards
+                     value = self.card_evaluator.evaluate_card(card_id, "bottoming")
+                     reward_mod = (0.5 - value) * 0.1 # Higher penalty if value > 0.5
+
+                 # Check if bottoming is now complete
+                 if gs.bottoming_count >= gs.cards_to_bottom:
+                     # Game should now proceed to the first turn automatically
+                     logging.debug("Bottoming complete.")
+                     return 0.05 + reward_mod, True # Success in completing bottoming
+                 else:
+                     # More cards needed, stay in bottoming phase
+                     return 0.02 + reward_mod, True # Incremental success
+             else: # Bottoming failed (e.g., index already bottomed - GameState.bottom_card should handle)
+                 logging.warning(f"Failed to bottom card at index {hand_idx_to_bottom} (Handled by gs.bottom_card).")
+                 return -0.05, False # Failed action
+        else: # Invalid index
+            logging.error(f"Invalid BOTTOM_CARD action parameter: {hand_idx_to_bottom}. Valid indices: 0-{len(player.get('hand', []))-1}")
+            return -0.1, False
 
     def _handle_upkeep_pass(self, param, **kwargs):
         gs = self.game_state
@@ -2689,24 +2722,13 @@ class ActionHandler:
              return 0.3, True
         return -0.1, False
 
-    def _handle_level_up_class(self, param, context, **kwargs):
-        gs = self.game_state
-        # Param is battlefield index of Class card
-        if hasattr(gs, 'ability_handler'):
-            success = gs.ability_handler.handle_class_level_up(param)
-            if success:
-                 # Calculate reward based on new level maybe
-                 player = gs._get_active_player()
-                 card = gs._safe_get_card(player["battlefield"][param])
-                 level = getattr(card, 'current_level', 1)
-                 return 0.2 * level, True # Higher reward for higher levels
-            else:
-                 return -0.1, False
-        return -0.15, False # No ability handler
-
     def _handle_select_target(self, param, context, **kwargs):
+        """Handles the SELECT_TARGET action. Param is the index (0-9) into the list of currently valid targets."""
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
+        target_choice_index = param # Param is the index chosen by the agent
+
+        # Validate context
         if not gs.targeting_context or gs.targeting_context.get("controller") != player:
             logging.warning("SELECT_TARGET called but not in targeting phase for this player.")
             return -0.2, False
@@ -2715,64 +2737,100 @@ class ActionHandler:
         required_count = ctx.get('required_count', 1)
         selected_targets = ctx.get('selected_targets', [])
 
-        # Get valid targets for the current selection step
+        # Regenerate the list of valid targets the agent could have chosen from NOW
+        # This ensures the index maps correctly even if valid targets changed slightly
         valid_targets_list = []
         if gs.targeting_system:
-             valid_map = gs.targeting_system.get_valid_targets(ctx["source_id"], player, ctx["required_type"])
-             for targets in valid_map.values(): valid_targets_list.extend(targets)
-        else: return -0.15, False # Cannot select target without system
+            valid_map = gs.targeting_system.get_valid_targets(ctx["source_id"], player, ctx["required_type"])
+            # Flatten map consistently (e.g., sorted by category then ID)
+            for category in sorted(valid_map.keys()):
+                valid_targets_list.extend(sorted(valid_map[category]))
+            # Ensure list uniqueness if needed (should be handled by get_valid_targets ideally)
+            valid_targets_list = sorted(list(set(valid_targets_list))) # Simple unique sort
+        else:
+            logging.error("Targeting system not available during target selection.")
+            return -0.15, False # Cannot select target without system
 
-        if param < len(valid_targets_list):
-            target_id = valid_targets_list[param]
-            if target_id not in selected_targets: # Avoid duplicates unless allowed
-                 selected_targets.append(target_id)
-                 ctx["selected_targets"] = selected_targets
-                 logging.debug(f"Selected target {len(selected_targets)}/{required_count}: {target_id}")
+        # Validate the chosen index
+        if 0 <= target_choice_index < len(valid_targets_list):
+            target_id = valid_targets_list[target_choice_index] # Get the ID using the agent's chosen index
 
-                 # If enough targets are now selected, finalize targeting
-                 if len(selected_targets) >= required_count:
-                      # Update the stack item context
-                      found_stack_item = False
-                      for i in range(len(gs.stack) - 1, -1, -1): # Check from top down
-                           item = gs.stack[i]
-                           if isinstance(item, tuple) and item[1] == ctx["source_id"]:
+            if target_id not in selected_targets: # Avoid duplicates unless context allows
+                selected_targets.append(target_id)
+                ctx["selected_targets"] = selected_targets
+                logging.debug(f"Selected target {len(selected_targets)}/{required_count}: {target_id} (Choice Index {target_choice_index})")
+
+                # If enough targets are now selected, finalize targeting
+                min_targets = ctx.get('min_targets', required_count) # Use min_targets
+                if len(selected_targets) >= min_targets: # Met minimum requirement
+                    # Max targets check handled here or implicitly by required_count? Check max too.
+                    max_targets = ctx.get('max_targets', required_count)
+                    if len(selected_targets) > max_targets:
+                         logging.error("Selected more targets than allowed!") # Should not happen if mask is correct
+                         return -0.15, False # Error state
+
+                    # Proceed to finalize (put targets into stack item context)
+                    found_stack_item = False
+                    source_id = ctx.get("source_id")
+                    copy_instance_id = ctx.get("copy_instance_id") # Handle copies needing targets
+                    if source_id:
+                        for i in range(len(gs.stack) - 1, -1, -1):
+                            item = gs.stack[i]
+                            # Match by source ID and potentially copy ID if available
+                            item_matches = (isinstance(item, tuple) and item[1] == source_id)
+                            if copy_instance_id: # If targeting a copy, match its specific ID
+                                item_matches &= (item[3].get('copy_instance_id') == copy_instance_id)
+
+                            if item_matches:
                                 new_stack_context = item[3] if len(item) > 3 else {}
-                                # Structure targets based on type? Simple list for now.
-                                new_stack_context['targets'] = {"chosen": selected_targets} # Example structure
+                                # Structure targets (e.g., categorized or flat list)
+                                # Categorization needed if resolution logic depends on type
+                                categorized_targets = defaultdict(list)
+                                for tid in selected_targets:
+                                     # Determine category (simple example)
+                                     cat = gs._determine_target_category(tid) # Need helper method
+                                     categorized_targets[cat].append(tid)
+                                new_stack_context['targets'] = dict(categorized_targets) # Store categorized dict
                                 gs.stack[i] = item[:3] + (new_stack_context,)
                                 found_stack_item = True
-                                logging.debug(f"Updated stack item {i} with targets: {selected_targets}")
+                                logging.debug(f"Updated stack item {i} (Source: {source_id}) with targets: {new_stack_context['targets']}")
                                 break
-                      if not found_stack_item:
-                           logging.error("Targeting context active but couldn't find matching stack item!")
-                           # Reset state anyway?
-                           gs.targeting_context = None
-                           gs.phase = gs.PHASE_PRIORITY
-                           return -0.2, False
+                    if not found_stack_item:
+                         # Check if targeting context was for an ability *not* on stack (e.g. ETB choice?)
+                         # This requires a different update mechanism if choice isn't for stack item.
+                         logging.error(f"Targeting context active (Source: {source_id}) but couldn't find matching stack item!")
+                         gs.targeting_context = None # Clear potentially invalid context
+                         gs.phase = gs.PHASE_PRIORITY
+                         return -0.2, False
 
-                      # Clear targeting context and return to priority phase
-                      gs.targeting_context = None
-                      gs.phase = gs.PHASE_PRIORITY
-                      gs.priority_pass_count = 0
-                      gs.priority_player = gs._get_active_player()
-                      logging.debug("Targeting complete, returning to priority.")
-                      return 0.05, True # Success
-                 else:
-                      # More targets needed, stay in targeting phase
-                      return 0.02, True # Incremental success
-            else: # Invalid index 'param'
-                 logging.warning(f"Invalid target index selected: {param}")
-                 return -0.1, False
-        else: # Not in targeting phase
-             return -0.2, False
-    
+                    # Clear targeting context and return to previous phase
+                    gs.targeting_context = None
+                    if hasattr(gs, 'previous_priority_phase') and gs.previous_priority_phase is not None:
+                         gs.phase = gs.previous_priority_phase
+                         gs.previous_priority_phase = None
+                    else: gs.phase = gs.PHASE_PRIORITY # Fallback
+                    gs.priority_pass_count = 0
+                    gs.priority_player = gs._get_active_player()
+                    logging.debug("Targeting complete, returning to priority phase.")
+                    return 0.05, True # Success
+                else:
+                    # More targets needed, stay in targeting phase
+                    # Let agent choose next target index.
+                    return 0.02, True # Incremental success
+            else: # Target already selected
+                 logging.warning(f"Target {target_id} (Index {target_choice_index}) already selected.")
+                 return -0.05, False # Redundant selection
+        else: # Invalid index 'param' provided by agent
+             logging.error(f"Invalid SELECT_TARGET action parameter: {target_choice_index}. Valid indices: 0-{len(valid_targets_list)-1}")
+             return -0.1, False # Invalid choice
 
     def _handle_sacrifice_permanent(self, param, context, **kwargs):
-        """Handles the SACRIFICE_PERMANENT action, correctly identifying the chosen permanent."""
+        """Handles the SACRIFICE_PERMANENT action. Param is the index (0-9) into the list of currently valid sacrifices."""
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
+        sacrifice_choice_index = param # Agent's choice index
 
-        # Validate context: Ensure we are in the SACRIFICE phase and the correct player is acting
+        # Validate context
         if not hasattr(gs, 'sacrifice_context') or not gs.sacrifice_context or gs.sacrifice_context.get("controller") != player:
             logging.warning("SACRIFICE_PERMANENT called but not in sacrifice phase for this player.")
             return -0.2, False
@@ -2781,92 +2839,76 @@ class ActionHandler:
         required_count = ctx.get('required_count', 1)
         selected_perms = ctx.get('selected_permanents', [])
 
-        # Regenerate the list of valid permanents the agent *could have* chosen from, based on context.
-        # This is needed to map the 'param' index back to the correct card ID.
+        # Regenerate the list of valid permanents the agent could have chosen from NOW
         valid_perms = []
         perm_type_req = ctx.get('required_type')
         for i, perm_id in enumerate(player.get("battlefield", [])): # Use get for safety
-             perm_card = gs._safe_get_card(perm_id)
-             if not perm_card: continue
-             # Check type if required
-             is_valid_type = False
-             if not perm_type_req or perm_type_req == "permanent":
-                  is_valid_type = True
-             elif hasattr(perm_card, 'card_types') and perm_type_req in perm_card.card_types:
-                  is_valid_type = True
-             elif hasattr(perm_card, 'subtypes') and perm_type_req in perm_card.subtypes: # Check subtypes too
-                  is_valid_type = True
+            perm_card = gs._safe_get_card(perm_id)
+            if not perm_card: continue
+            is_valid_type = False
+            if not perm_type_req or perm_type_req == "permanent": is_valid_type = True
+            elif hasattr(perm_card, 'card_types') and perm_type_req in perm_card.card_types: is_valid_type = True
+            elif hasattr(perm_card, 'subtypes') and perm_type_req in perm_card.subtypes: is_valid_type = True
 
-             if is_valid_type:
+            if is_valid_type:
+                 # Check additional conditions from context if needed (e.g., "non-token")
                  valid_perms.append(perm_id)
 
-        # Use 'param' (the action index parameter 0-9) to select the card from the VALID options list.
-        if param >= 0 and param < len(valid_perms):
-            sac_id = valid_perms[param] # <<< This correctly maps the agent's choice index to the card ID
-            if sac_id not in selected_perms: # Avoid duplicates if somehow selected again
+        # Validate the chosen index
+        if 0 <= sacrifice_choice_index < len(valid_perms):
+            sac_id = valid_perms[sacrifice_choice_index] # <<< Use agent's chosen index
+
+            if sac_id not in selected_perms: # Avoid duplicates
                 selected_perms.append(sac_id)
                 ctx["selected_permanents"] = selected_perms # Update the context
                 sac_card = gs._safe_get_card(sac_id)
-                logging.debug(f"Selected sacrifice {len(selected_perms)}/{required_count}: {getattr(sac_card, 'name', sac_id)} (Choice Index {param})")
+                logging.debug(f"Selected sacrifice {len(selected_perms)}/{required_count}: {getattr(sac_card, 'name', sac_id)} (Choice Index {sacrifice_choice_index})")
 
                 # If enough sacrifices selected, finalize
                 if len(selected_perms) >= required_count:
                     sac_reward_mod = 0
-                    # Note: Sacrifices usually happen when the *original ability resolves*, not immediately.
-                    # We just store the chosen IDs in the stack item's context.
-                    # The *original ability* needs to read `sacrificed_permanents` during its resolution.
-
-                    # Update the context of the ability ON THE STACK that required the sacrifice
+                    # Find stack item requiring the sacrifice and update its context
                     found_stack_item = False
-                    stack_source_id = ctx.get("source_id") # ID of the spell/ability requiring sacrifice
+                    stack_source_id = ctx.get("source_id")
                     if stack_source_id:
-                         for i in range(len(gs.stack) -1, -1, -1): # Search stack from top
-                              item = gs.stack[i]
-                              if isinstance(item, tuple) and item[1] == stack_source_id:
-                                   # Update the context of THAT stack item
-                                   new_stack_context = item[3] if len(item) > 3 else {}
-                                   # Add the list of IDs chosen to be sacrificed
-                                   new_stack_context['sacrificed_permanents'] = selected_perms
-                                   gs.stack[i] = item[:3] + (new_stack_context,) # Replace item with updated context
-                                   found_stack_item = True
-                                   logging.debug(f"Updated stack item {i} (Source: {stack_source_id}) with sacrifices: {selected_perms}")
-                                   break
-                    else:
-                         logging.error("Sacrifice context missing 'source_id', cannot update stack item!")
-                         # Cannot link sacrifice to the cause, potential logic error.
-
+                        for i in range(len(gs.stack) - 1, -1, -1):
+                            item = gs.stack[i]
+                            if isinstance(item, tuple) and item[1] == stack_source_id:
+                                new_stack_context = item[3] if len(item) > 3 else {}
+                                new_stack_context['sacrificed_permanents'] = selected_perms
+                                gs.stack[i] = item[:3] + (new_stack_context,)
+                                found_stack_item = True
+                                logging.debug(f"Updated stack item {i} (Source: {stack_source_id}) with sacrifices: {selected_perms}")
+                                break
+                    # Handle cases where sacrifice isn't for stack (e.g., cost payment)
+                    # Need context to know how to proceed if not stack related. Assume stack for now.
                     if not found_stack_item and stack_source_id:
-                         logging.error(f"Sacrifice context active (Source: {stack_source_id}), but couldn't find matching stack item to store chosen sacrifices!")
-                         # May need alternative handling if sacrifice is not tied to stack (e.g., cost for activation?)
+                        logging.error(f"Sacrifice context active (Source: {stack_source_id}), but couldn't find matching stack item!")
 
-                    # Calculate reward modifier based on sacrificed card value
+                    # Calculate reward based on value of sacrificed cards
                     if hasattr(self, 'card_evaluator'):
                         for sacrifice_id in selected_perms:
                             sac_reward_mod -= self.card_evaluator.evaluate_card(sacrifice_id, "sacrifice") * 0.2
 
-                    # --- Phase Transition ---
-                    gs.sacrifice_context = None # Clear the context
-                    # Return to the phase before SACRIFICE was entered
+                    # Clear context and return to previous phase
+                    gs.sacrifice_context = None
                     if hasattr(gs, 'previous_priority_phase') and gs.previous_priority_phase is not None:
-                        gs.phase = gs.previous_priority_phase
-                        gs.previous_priority_phase = None
-                    else:
-                         logging.warning("No previous phase tracked, returning to generic PRIORITY.")
-                         gs.phase = gs.PHASE_PRIORITY # Fallback
-                    gs.priority_pass_count = 0 # Reset priority
+                         gs.phase = gs.previous_priority_phase
+                         gs.previous_priority_phase = None
+                    else: gs.phase = gs.PHASE_PRIORITY
+                    gs.priority_pass_count = 0
                     gs.priority_player = gs._get_active_player()
-                    # --- End Phase Transition ---
                     logging.debug("Sacrifice choice complete, returning to priority phase.")
-                    return 0.1 + sac_reward_mod, True # Reward for completing sacrifice choice
+                    return 0.1 + sac_reward_mod, True
                 else:
                     # More sacrifices needed, stay in SACRIFICE phase
-                    return 0.02, True # Incremental success reward
-            else: # Card already selected? Or tried to select invalidly.
-                 logging.warning(f"Sacrifice choice index {param} points to already selected or invalid permanent {sac_id}.")
+                    return 0.02, True # Incremental success
+            else: # Card already selected
+                 logging.warning(f"Sacrifice choice index {sacrifice_choice_index} points to already selected permanent {sac_id}.")
                  return -0.05, False
-        else: # Invalid index provided by 'param'
-             logging.error(f"Invalid SACRIFICE_PERMANENT action parameter: {param}. Valid choices: {len(valid_perms)}")
-             return -0.1, False
+        else: # Invalid index 'param' provided by agent
+            logging.error(f"Invalid SACRIFICE_PERMANENT action parameter: {sacrifice_choice_index}. Valid indices: 0-{len(valid_perms)-1}")
+            return -0.1, False
     
     def _handle_special_choice_actions(self, player, valid_actions, set_valid_action):
         """Add actions for Scry, Surveil, Dredge, Choose Mode, Choose X, Choose Color."""
@@ -3000,8 +3042,12 @@ class ActionHandler:
                      set_valid_action(20 + hand_idx, f"CAST_SPREE {card.name} with selected modes")    
 
     def _handle_choose_mode(self, param, context, **kwargs):
+        """Handles the CHOOSE_MODE action. Param is the chosen mode index (0-9)."""
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
+        chosen_mode_idx = param # Agent's choice
+
+        # Validate context
         if not gs.choice_context or gs.choice_context.get("type") != "choose_mode" or gs.choice_context.get("player") != player:
              logging.warning("CHOOSE_MODE called out of context.")
              return -0.2, False
@@ -3011,119 +3057,178 @@ class ActionHandler:
         max_modes = ctx.get("max_modes", 1)
         selected_modes = ctx.get("selected_modes", [])
 
-        if param < num_choices:
-             if len(selected_modes) < max_modes:
-                  if param not in selected_modes: # Prevent duplicates unless allowed by max_modes > 1? Logic needed.
-                       selected_modes.append(param)
-                       ctx["selected_modes"] = selected_modes
-                       logging.debug(f"Selected mode {len(selected_modes)}/{max_modes}: Mode Index {param}")
-                       # If final choice, finalize
-                       if len(selected_modes) >= max_modes:
-                            # Update stack item context
-                            found_stack_item = False
-                            for i in range(len(gs.stack) - 1, -1, -1):
-                                item = gs.stack[i]
-                                if isinstance(item, tuple) and item[1] == ctx["source_id"]:
-                                    new_stack_context = item[3] if len(item) > 3 else {}
-                                    new_stack_context['selected_modes'] = selected_modes
-                                    gs.stack[i] = item[:3] + (new_stack_context,)
-                                    found_stack_item = True
-                                    logging.debug(f"Updated stack item {i} with modes: {selected_modes}")
-                                    break
-                            if not found_stack_item: logging.error("Mode choice context active but couldn't find stack item!")
+        # Validate chosen mode index
+        if 0 <= chosen_mode_idx < num_choices:
+            if len(selected_modes) < max_modes:
+                 if chosen_mode_idx not in selected_modes: # Prevent duplicates if max_modes=1
+                      selected_modes.append(chosen_mode_idx)
+                      ctx["selected_modes"] = selected_modes
+                      logging.debug(f"Selected mode {len(selected_modes)}/{max_modes}: Mode Index {chosen_mode_idx}")
+                      # If final choice, finalize
+                      if len(selected_modes) >= max_modes:
+                          # --- FINALIZING LOGIC (Update Stack, Change Phase) ---
+                          found_stack_item = False
+                          source_id = ctx.get("source_id")
+                          copy_instance_id = ctx.get("copy_instance_id") # Handle copies
+                          if source_id:
+                              for i in range(len(gs.stack) - 1, -1, -1):
+                                  item = gs.stack[i]
+                                  item_matches = (isinstance(item, tuple) and item[1] == source_id)
+                                  if copy_instance_id: item_matches &= (item[3].get('copy_instance_id') == copy_instance_id)
 
-                            # --- Phase Transition ---
-                            gs.choice_context = None
-                            # Return to phase before CHOOSE was entered
-                            if hasattr(gs, 'previous_priority_phase') and gs.previous_priority_phase is not None:
-                                 gs.phase = gs.previous_priority_phase
-                                 gs.previous_priority_phase = None
-                            else:
-                                 gs.phase = gs.PHASE_PRIORITY # Fallback
-                            gs.priority_player = gs._get_active_player()
-                            gs.priority_pass_count = 0
-                            # --- End Phase Transition ---
-                            logging.debug("Mode choice complete.")
-                            return 0.05, True
-                       else: return 0.02, True # Incremental success
-                  else: # Mode already selected
-                       return -0.05, False
-             else: # Tried to select too many modes
+                                  if item_matches:
+                                      new_stack_context = item[3] if len(item) > 3 else {}
+                                      new_stack_context['selected_modes'] = selected_modes # Store the chosen mode index(es)
+                                      gs.stack[i] = item[:3] + (new_stack_context,)
+                                      found_stack_item = True
+                                      logging.debug(f"Updated stack item {i} (Source: {source_id}) with mode choices: {selected_modes}")
+                                      break
+                          if not found_stack_item: logging.error("Mode choice context active but couldn't find stack item!")
+
+                          # Clear choice context and return to previous phase
+                          gs.choice_context = None
+                          if hasattr(gs, 'previous_priority_phase') and gs.previous_priority_phase is not None:
+                               gs.phase = gs.previous_priority_phase
+                               gs.previous_priority_phase = None
+                          else: gs.phase = gs.PHASE_PRIORITY
+                          gs.priority_player = gs._get_active_player()
+                          gs.priority_pass_count = 0
+                          logging.debug("Mode choice complete.")
+                          return 0.05, True # Success
+                      else: # More modes needed (e.g., Choose Two)
+                           return 0.02, True # Incremental success
+                 else: # Mode already selected
+                      logging.warning(f"Mode index {chosen_mode_idx} already selected.")
+                      return -0.05, False
+            else: # Tried to select too many modes
+                 logging.warning("Attempted to select more modes than allowed.")
                  return -0.1, False
         else: # Invalid mode index
+             logging.error(f"Invalid CHOOSE_MODE action parameter: {chosen_mode_idx}. Valid indices: 0-{num_choices-1}")
+             return -0.1, False
+
+    def _handle_choose_x(self, param, context, **kwargs):
+        """Handles CHOOSE_X action. Param is the chosen X value (1-10)."""
+        gs = self.game_state
+        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        x_value = param # Use agent's chosen value directly
+
+        # Validate context
+        if not gs.choice_context or gs.choice_context.get("type") != "choose_x" or gs.choice_context.get("player") != player:
+            logging.warning("CHOOSE_X called out of context.")
+            return -0.2, False
+
+        ctx = gs.choice_context
+        max_x = ctx.get("max_x", 0) # Get max allowed based on affordability check done earlier
+        min_x = ctx.get("min_x", 0)
+
+        # Validate chosen X value
+        if min_x <= x_value <= max_x:
+            ctx["chosen_x"] = x_value # Store chosen value
+
+            # --- FINALIZING LOGIC (Update Stack, Pay X Cost, Change Phase) ---
+            found_stack_item = False
+            source_id = ctx.get("source_id")
+            copy_instance_id = ctx.get("copy_instance_id")
+            if source_id:
+                for i in range(len(gs.stack) - 1, -1, -1):
+                    item = gs.stack[i]
+                    item_matches = (isinstance(item, tuple) and item[1] == source_id)
+                    if copy_instance_id: item_matches &= (item[3].get('copy_instance_id') == copy_instance_id)
+
+                    if item_matches:
+                        new_stack_context = item[3] if len(item) > 3 else {}
+                        new_stack_context['X'] = x_value # Store chosen X
+                        # Store final cost including X component? Or assume ManaSystem tracks pending?
+                        # Store chosen X is usually enough for resolution logic.
+                        gs.stack[i] = item[:3] + (new_stack_context,)
+                        found_stack_item = True
+                        logging.debug(f"Updated stack item {i} (Source: {source_id}) with X={x_value}")
+                        break
+            if not found_stack_item: logging.error("X choice context active but couldn't find stack item!")
+
+            # Pay the X cost (ManaSystem needed)
+            # NOTE: Cost payment for X was originally planned during cast_spell setup,
+            # but rules state costs paid on resolution *after* choices.
+            # For simplicity, assume cost was checked during CHOOSE_X action generation,
+            # and PAY it now. More accurate would be to require agent PAY_X action, or pay during resolution.
+            # Pay now for simplification.
+            x_cost_paid = False
+            if gs.mana_system:
+                paid_details = gs.mana_system.pay_mana_cost_get_details(player, {'generic': x_value})
+                if paid_details: x_cost_paid = True
+                else: logging.error(f"Failed to pay X={x_value} mana cost!")
+            if not x_cost_paid:
+                logging.error("Aborting CHOOSE_X: Failed to pay the required mana for X.")
+                gs.choice_context = None # Clear invalid state
+                gs.phase = gs.PHASE_PRIORITY # Return to priority
+                # Need to handle stack potentially? Rollback?
+                return -0.2, False # Failed cost payment
+
+            # Clear choice context and return to previous phase
+            gs.choice_context = None
+            if hasattr(gs, 'previous_priority_phase') and gs.previous_priority_phase is not None:
+                 gs.phase = gs.previous_priority_phase
+                 gs.previous_priority_phase = None
+            else: gs.phase = gs.PHASE_PRIORITY
+            gs.priority_player = gs._get_active_player()
+            gs.priority_pass_count = 0
+            logging.debug(f"Chose X={x_value} and paid cost.")
+            return 0.05, True
+        else: # Invalid X value
+             logging.error(f"Invalid CHOOSE_X action parameter: {x_value}. Valid range: [{min_x}-{max_x}]")
              return -0.1, False
 
 
-    def _handle_choose_x(self, param, context, **kwargs):
-         gs = self.game_state
-         player = gs.p1 if gs.agent_is_p1 else gs.p2
-         if not gs.choice_context or gs.choice_context.get("type") != "choose_x" or gs.choice_context.get("player") != player:
-              logging.warning("CHOOSE_X called out of context.")
-              return -0.2, False
-
-         ctx = gs.choice_context
-         x_value = param # Action param 1-10 maps directly to X
-         max_x = ctx.get("max_x", 10) # Get max X allowed by affordability/context
-
-         if 1 <= x_value <= max_x:
-              ctx["chosen_x"] = x_value # Store chosen value
-              # Update stack item context
-              found_stack_item = False
-              for i in range(len(gs.stack) - 1, -1, -1):
-                   item = gs.stack[i]
-                   if isinstance(item, tuple) and item[1] == ctx["source_id"]:
-                       new_stack_context = item[3] if len(item) > 3 else {}
-                       new_stack_context['X'] = x_value
-                       gs.stack[i] = item[:3] + (new_stack_context,)
-                       found_stack_item = True
-                       logging.debug(f"Updated stack item {i} with X={x_value}")
-                       break
-              if not found_stack_item: logging.error("X choice context active but couldn't find stack item!")
-
-              # Pay the X cost (mana system needs update?)
-              if gs.mana_system:
-                  gs.mana_system.pay_mana_cost(player, {'generic': x_value}) # Assume generic mana for X
-
-              gs.choice_context = None
-              gs.phase = gs.PHASE_PRIORITY
-              gs.priority_pass_count = 0
-              gs.priority_player = gs._get_active_player()
-              logging.debug(f"Chose X={x_value}")
-              return 0.05, True
-         else:
-              logging.warning(f"Invalid X value chosen: {x_value} (Max: {max_x})")
-              return -0.1, False
-
     def _handle_choose_color(self, param, context, **kwargs):
-         gs = self.game_state
-         player = gs.p1 if gs.agent_is_p1 else gs.p2
-         if not gs.choice_context or gs.choice_context.get("type") != "choose_color" or gs.choice_context.get("player") != player:
-              logging.warning("CHOOSE_COLOR called out of context.")
-              return -0.2, False
+        """Handles CHOOSE_COLOR action. Param is the color index (0-4)."""
+        gs = self.game_state
+        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        color_idx = param # Use agent's choice
 
-         ctx = gs.choice_context
-         chosen_color = ['W','U','B','R','G'][param]
-         ctx["chosen_color"] = chosen_color
+        # Validate context
+        if not gs.choice_context or gs.choice_context.get("type") != "choose_color" or gs.choice_context.get("player") != player:
+            logging.warning("CHOOSE_COLOR called out of context.")
+            return -0.2, False
 
-         # Update stack item context
-         found_stack_item = False
-         for i in range(len(gs.stack) - 1, -1, -1):
-             item = gs.stack[i]
-             if isinstance(item, tuple) and item[1] == ctx["source_id"]:
-                  new_stack_context = item[3] if len(item) > 3 else {}
-                  new_stack_context['chosen_color'] = chosen_color
-                  gs.stack[i] = item[:3] + (new_stack_context,)
-                  found_stack_item = True
-                  logging.debug(f"Updated stack item {i} with color={chosen_color}")
-                  break
-         if not found_stack_item: logging.error("Color choice context active but couldn't find stack item!")
+        ctx = gs.choice_context
+        # Validate chosen color index
+        if 0 <= color_idx <= 4:
+             chosen_color = ['W','U','B','R','G'][color_idx]
+             ctx["chosen_color"] = chosen_color
 
-         gs.choice_context = None
-         gs.phase = gs.PHASE_PRIORITY
-         gs.priority_pass_count = 0
-         gs.priority_player = gs._get_active_player()
-         logging.debug(f"Chose color {chosen_color}")
-         return 0.05, True
+             # --- FINALIZING LOGIC (Update Stack, Change Phase) ---
+             found_stack_item = False
+             source_id = ctx.get("source_id")
+             copy_instance_id = ctx.get("copy_instance_id")
+             if source_id:
+                 for i in range(len(gs.stack) - 1, -1, -1):
+                     item = gs.stack[i]
+                     item_matches = (isinstance(item, tuple) and item[1] == source_id)
+                     if copy_instance_id: item_matches &= (item[3].get('copy_instance_id') == copy_instance_id)
+
+                     if item_matches:
+                         new_stack_context = item[3] if len(item) > 3 else {}
+                         new_stack_context['chosen_color'] = chosen_color
+                         gs.stack[i] = item[:3] + (new_stack_context,)
+                         found_stack_item = True
+                         logging.debug(f"Updated stack item {i} (Source: {source_id}) with chosen color={chosen_color}")
+                         break
+             if not found_stack_item: logging.error("Color choice context active but couldn't find stack item!")
+
+             # Clear choice context and return to previous phase
+             gs.choice_context = None
+             if hasattr(gs, 'previous_priority_phase') and gs.previous_priority_phase is not None:
+                  gs.phase = gs.previous_priority_phase
+                  gs.previous_priority_phase = None
+             else: gs.phase = gs.PHASE_PRIORITY
+             gs.priority_player = gs._get_active_player()
+             gs.priority_pass_count = 0
+             logging.debug(f"Chose color {chosen_color}")
+             return 0.05, True
+        else: # Invalid color index
+            logging.error(f"Invalid CHOOSE_COLOR action parameter: {color_idx}. Valid indices: 0-4")
+            return -0.1, False
     
         # --- Placeholder Handlers for unimplemented actions ---
     def _handle_unimplemented(self, param, action_type, **kwargs):
@@ -3171,33 +3276,51 @@ class ActionHandler:
         search_map = {0: "basic land", 1: "creature", 2: "instant", 3: "sorcery", 4: "artifact"}
         return search_map.get(param, None) # param would be 0-4 if derived from 299-303
 
-
     def _handle_dredge(self, param, context=None, **kwargs):
-        """Handle DREDGE action. Param is GY index. (Updated for context clarity)"""
+        """Handle DREDGE action. Param is the index (0-5) into the GY options."""
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
-        gy_idx = param
+        gy_choice_idx = param # Agent's choice index from available dredge options
 
         # Ensure dredge is actually pending for this player
         if not hasattr(gs, 'dredge_pending') or not gs.dredge_pending or gs.dredge_pending['player'] != player:
              logging.warning("DREDGE action called but no dredge pending for this player.")
              return -0.1, False
 
-        dredge_card_id = gs.dredge_pending.get('card_id')
-        # Verify the param (gy_idx) matches the card expected to be dredged
-        if gy_idx >= len(player.get("graveyard", [])) or player["graveyard"][gy_idx] != dredge_card_id:
-            logging.warning(f"DREDGE index {gy_idx} does not match pending dredge card {dredge_card_id}")
+        # Regenerate the list of available dredge options NOW
+        dredge_options_now = [] # List of (gy_index, card_id, dredge_value)
+        for idx, card_id in enumerate(player.get("graveyard", [])):
+            card = gs._safe_get_card(card_id)
+            if card and "dredge" in getattr(card, 'oracle_text', '').lower():
+                 dredge_match = re.search(r"dredge (\d+)", card.oracle_text.lower())
+                 if dredge_match:
+                     dredge_value = int(dredge_match.group(1))
+                     if len(player.get("library", [])) >= dredge_value:
+                          dredge_options_now.append((idx, card_id, dredge_value))
+        # Limit options based on action space if needed (e.g., max 6 dredge actions)
+        dredge_options_now = dredge_options_now[:6]
+
+        # Validate the chosen index from the regenerated list
+        if 0 <= gy_choice_idx < len(dredge_options_now):
+             gy_idx, dredge_card_id, dredge_val = dredge_options_now[gy_choice_idx]
+
+             # Verify the chosen card ID matches the originally pending one (sanity check)
+             if dredge_card_id != gs.dredge_pending['card_id']:
+                  logging.warning(f"DREDGE choice index {gy_choice_idx} points to {dredge_card_id}, but pending was {gs.dredge_pending['card_id']}. State mismatch?")
+                  # Proceed with the agent's choice anyway? Or fail? Fail for safety.
+                  return -0.1, False
+
+             # Perform dredge via GameState method
+             if hasattr(gs, 'perform_dredge') and gs.perform_dredge(player, dredge_card_id):
+                 return 0.3, True
+             else:
+                 # perform_dredge should clear pending state on failure
+                 logging.warning(f"Dredge failed (perform_dredge returned False).")
+                 return -0.05, False
+        else: # Invalid index 'param' provided by agent
+            logging.error(f"Invalid DREDGE action parameter: {gy_choice_idx}. Valid indices: 0-{len(dredge_options_now)-1}")
             return -0.1, False
-
-        # Perform dredge via GameState method
-        if hasattr(gs, 'perform_dredge') and gs.perform_dredge(player, dredge_card_id):
-            return 0.3, True
-        else:
-            gs.dredge_pending = None # Clear pending state on failure
-            logging.warning(f"Dredge failed (perform_dredge returned False).")
-            return -0.05, False
-
-
+        
     def _handle_add_counter(self, param, context, **kwargs):
         """Adds a counter to a target. Param is target index, context supplies counter info."""
         gs = self.game_state
@@ -4693,7 +4816,7 @@ class ActionHandler:
         # --- Specific Handler Implementations ---
 
     def _handle_alternative_casting(self, param, action_type, context=None, **kwargs):
-        """Generic handler for alternative casting methods. (Updated Context Handling)"""
+        """Generic handler for alternative casting methods. (Updated Context Handling & Madness)"""
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
         if context is None: context = {} # Ensure context is a dict
@@ -4709,25 +4832,29 @@ class ActionHandler:
         context["use_alt_cost"] = alt_cost_name # Flag for mana/cost system
 
         # --- Identify Source Card and Zone based on Action Type & CONTEXT ---
-        # Source location and identifiers must now come from the provided CONTEXT dictionary
-        # The 'param' argument from ACTION_MEANINGS might be redundant if context is provided.
-
         if action_type == "CAST_FOR_MADNESS":
             source_zone = "exile"
-            # Card ID should be in the context if madness trigger was processed
+            # Card ID *MUST* come from context now (provided during action generation)
             card_id = context.get('card_id')
-            if not card_id or card_id not in player.get(source_zone, []):
-                # Attempt to retrieve from gs.madness_trigger if context is missing it
-                if hasattr(gs, 'madness_trigger') and gs.madness_trigger and gs.madness_trigger.get('player') == player:
-                     card_id = gs.madness_trigger.get("card_id")
-                     context['card_id'] = card_id # Update context
-                     if not card_id or card_id not in player.get(source_zone, []):
-                         logging.error(f"Madness trigger card {card_id} not found in exile.")
-                         validation_ok = False
-                else:
-                    logging.error(f"Madness cast action, but no valid madness trigger context found: {context}")
-                    validation_ok = False
+            if not card_id:
+                logging.error(f"Madness cast action, but context missing 'card_id': {context}")
+                validation_ok = False
+            # Verify card is actually in exile (context provided exile_idx)
+            elif 'exile_idx' not in context or context['exile_idx'] >= len(player.get(source_zone, [])) or player[source_zone][context['exile_idx']] != card_id:
+                logging.error(f"Madness cast context mismatch: Card {card_id} not found at exile_idx {context.get('exile_idx')}")
+                validation_ok = False
+            # Check against the gs.madness_cast_available state as well for consistency
+            elif not hasattr(gs, 'madness_cast_available') or not gs.madness_cast_available or \
+                 gs.madness_cast_available.get('card_id') != card_id or \
+                 gs.madness_cast_available.get('player') != player:
+                 logging.warning(f"Madness cast attempted but does not match current gs.madness_cast_available state. Context: {context}, State: {gs.madness_cast_available}")
+                 # Allow attempt anyway? Or fail strictly? Fail strictly for now.
+                 validation_ok = False
 
+            # Store exile_idx if needed downstream
+            if validation_ok: context['source_idx'] = context['exile_idx']
+
+        # --- Other alt cast types (remain largely the same logic using context indices) ---
         elif action_type in ["CAST_FOR_EMERGE", "CAST_FOR_DELVE", "CAST_WITH_OVERLOAD"]: # Originates from hand
              source_zone = "hand"
              if "hand_idx" not in context:
@@ -4741,13 +4868,10 @@ class ActionHandler:
                  else:
                      card_id = player[source_zone][hand_idx]
                      context['source_idx'] = hand_idx # Store index
-
         elif action_type in ["CAST_WITH_FLASHBACK", "CAST_WITH_JUMP_START", "CAST_WITH_ESCAPE", "AFTERMATH_CAST"]:
              source_zone = "graveyard"
-             # GY Index must be in context now
              if "gy_idx" not in context:
                  logging.error(f"{action_type} requires 'gy_idx' in context. Param={param} is unused if context is missing.")
-                 # Fallback to param if gy_idx is missing in context? Risky. Fail for now.
                  validation_ok = False
              else:
                  gy_idx = context['gy_idx']
@@ -4762,9 +4886,9 @@ class ActionHandler:
             logging.error(f"Cannot determine valid card ID for {action_type} with context: {context}")
             return -0.2, False
 
-        context["source_zone"] = source_zone # Pass source zone info to cast_spell
+        context["source_zone"] = source_zone
 
-        # --- Prepare Additional Cost Info (Validation happens in cast_spell/pay_cost) ---
+        # --- Prepare Additional Cost Info (remains the same logic using context indices) ---
         if action_type == "CAST_WITH_JUMP_START":
             if "discard_idx" not in context or context["discard_idx"] >= len(player.get("hand", [])):
                 logging.error(f"Jump-Start requires valid 'discard_idx' in context: {context}")
@@ -4774,7 +4898,6 @@ class ActionHandler:
             if "sacrifice_idx" not in context or context["sacrifice_idx"] >= len(player.get("battlefield", [])):
                 logging.error(f"Emerge requires valid 'sacrifice_idx' in context: {context}")
                 return -0.1, False
-            # Get sacrificed creature info for cost reduction calculation
             sac_idx = context["sacrifice_idx"]
             sac_id = player["battlefield"][sac_idx]
             sac_card = gs._safe_get_card(sac_id)
@@ -4782,56 +4905,52 @@ class ActionHandler:
                 logging.error(f"Emerge sacrifice target index {sac_idx} is not a creature.")
                 return -0.1, False
             context["additional_cost_to_pay"] = {"type": "sacrifice", "target_id": sac_id}
-            context["sacrificed_cmc"] = getattr(sac_card, 'cmc', 0) # Pass for cost calc
+            context["sacrificed_cmc"] = getattr(sac_card, 'cmc', 0)
         elif action_type == "CAST_WITH_ESCAPE":
             if "gy_indices_escape" not in context or not isinstance(context["gy_indices_escape"], list):
                 logging.error("Escape requires 'gy_indices_escape' list in context.")
                 return -0.1, False
             card = gs._safe_get_card(card_id)
-            # Check required exile count
             required_exile_count = 0
             match = re.search(r"exile (\w+|\d+) other cards?", getattr(card, 'oracle_text','').lower())
             if match: required_exile_count = self._word_to_number(match.group(1))
-            if required_exile_count <= 0: # Card doesn't define escape exile count?
-                 logging.warning(f"Could not determine required exile count for Escape on {card.name}. Assuming 1.")
-                 required_exile_count = 1
-
-            # Validate provided indices against count and GY contents
-            actual_gy_indices = [idx for idx in context["gy_indices_escape"] if idx < len(player["graveyard"])]
+            if required_exile_count <= 0: required_exile_count = 1
+            actual_gy_indices = [idx for idx in context["gy_indices_escape"] if idx < len(player.get("graveyard",[]))]
             if len(actual_gy_indices) < required_exile_count:
                 logging.warning(f"Not enough valid GY indices provided for Escape ({len(actual_gy_indices)}/{required_exile_count})")
                 return -0.1, False
-            # Pass *validated and sliced* indices for cost payment
             context["additional_cost_to_pay"] = {"type": "escape_exile", "gy_indices": actual_gy_indices[:required_exile_count]}
         elif action_type == "CAST_FOR_DELVE":
              if "gy_indices" not in context or not isinstance(context["gy_indices"], list):
                  logging.error("Delve requires 'gy_indices' list in context.")
                  return -0.1, False
-             actual_gy_indices = [idx for idx in context["gy_indices"] if idx < len(player["graveyard"])]
+             actual_gy_indices = [idx for idx in context["gy_indices"] if idx < len(player.get("graveyard",[]))]
              context["additional_cost_to_pay"] = {"type": "delve", "gy_indices": actual_gy_indices}
-             context["delve_count"] = len(actual_gy_indices) # Pass for cost calculation
-
-        if action_type == "AFTERMATH_CAST":
-            context["cast_right_half"] = True # Assume Aftermath always casts right half
-
+             context["delve_count"] = len(actual_gy_indices)
+        if action_type == "AFTERMATH_CAST": context["cast_right_half"] = True
 
         # --- Cast the spell using GameState ---
-        # cast_spell now handles paying additional non-mana costs from context['additional_cost_to_pay']
         success = gs.cast_spell(card_id, player, context=context)
 
         if success:
+            # --- CLEAR MADNESS STATE ---
             if action_type == "CAST_FOR_MADNESS":
-                gs.madness_trigger = None # Clear state if cast successfully
-            # Calculate reward
-            card_value = 0.25 # Base reward for successful alt cast
+                # Verify it was the correct card before clearing
+                if hasattr(gs, 'madness_cast_available') and gs.madness_cast_available and \
+                   gs.madness_cast_available.get('card_id') == card_id:
+                    gs.madness_cast_available = None # Clear state *after* successful cast
+                    logging.debug("Madness state cleared after successful cast.")
+            # --- END CLEAR MADNESS STATE ---
+
+            # Calculate reward... (remains the same)
+            card_value = 0.25
             if self.card_evaluator:
-                 eval_context = {"situation": f"cast_{alt_cost_name}"}
-                 eval_context.update(context) # Pass cast context to evaluator
+                 eval_context = {"situation": f"cast_{alt_cost_name}"}; eval_context.update(context)
                  card_value += self.card_evaluator.evaluate_card(card_id, "play", context_details=eval_context) * 0.2
             return card_value, True
         else:
             logging.warning(f"Alternative cast failed for {action_type} {card_id}. Handled by gs.cast_spell.")
-            # Rollback should be handled by cast_spell if payment failed partially
+            # Rollback handled by cast_spell if payment failed partially
             return -0.1, False
 
     def _handle_cast_split(self, param, action_type, **kwargs):
@@ -5509,28 +5628,33 @@ class ActionHandler:
         """Add actions for alternative casting costs."""
         gs = self.game_state
         # Flashback
-        for i in range(min(len(player["graveyard"]), 6)): # GY index 0-5
+        for i in range(min(len(player.get("graveyard",[])), 6)): # Use get for safety
             card_id = player["graveyard"][i]
             card = gs._safe_get_card(card_id)
             if card and hasattr(card, 'oracle_text') and "flashback" in card.oracle_text.lower():
                  is_instant = 'instant' in getattr(card, 'card_types', [])
                  if is_sorcery_speed or is_instant: # Check timing
-                    cost_str = re.search(r"flashback (\{[^\}]+\})", card.oracle_text.lower())
-                    if cost_str and self._can_afford_cost_string(player, cost_str.group(1)):
-                         set_valid_action(393, f"CAST_WITH_FLASHBACK {card.name}") # Param needs to be GY index `i`
+                    cost_match = re.search(r"flashback (\{[^\}]+\})", card.oracle_text.lower())
+                    if cost_match and self._can_afford_cost_string(player, cost_match.group(1)):
+                         # Context needs gy_idx
+                         context = {'gy_idx': i}
+                         set_valid_action(393, f"CAST_WITH_FLASHBACK {card.name}", context=context)
 
         # Jump-start
-        for i in range(min(len(player["graveyard"]), 6)): # GY index 0-5
+        for i in range(min(len(player.get("graveyard",[])), 6)):
             card_id = player["graveyard"][i]
             card = gs._safe_get_card(card_id)
             if card and hasattr(card, 'oracle_text') and "jump-start" in card.oracle_text.lower():
                  is_instant = 'instant' in getattr(card, 'card_types', [])
                  if is_sorcery_speed or is_instant: # Check timing
                     if len(player["hand"]) > 0 and self._can_afford_card(player, card):
-                        set_valid_action(394, f"CAST_WITH_JUMP_START {card.name}") # Param needs to be GY index `i`
+                        # Context needs gy_idx and choice of card to discard
+                        # For now, enable action assuming agent will provide discard target later
+                        context = {'gy_idx': i}
+                        set_valid_action(394, f"CAST_WITH_JUMP_START {card.name}", context=context)
 
         # Escape
-        for i in range(min(len(player["graveyard"]), 6)): # GY index 0-5
+        for i in range(min(len(player.get("graveyard",[])), 6)):
             card_id = player["graveyard"][i]
             card = gs._safe_get_card(card_id)
             if card and hasattr(card, 'oracle_text') and "escape" in card.oracle_text.lower():
@@ -5540,30 +5664,38 @@ class ActionHandler:
                     if cost_match:
                         cost_str = cost_match.group(1).strip()
                         exile_req_str = cost_match.group(2).strip()
-                        exile_count_match = re.search(r"(\d+)", exile_req_str)
-                        exile_count = int(exile_count_match.group(1)) if exile_count_match else 1
+                        exile_count = self._word_to_number(re.search(r"(\w+|\d+)", exile_req_str).group(1)) if re.search(r"(\w+|\d+)", exile_req_str) else 1
+
+                        # Check if enough *other* cards exist in GY
                         if len(player["graveyard"]) > exile_count and self._can_afford_cost_string(player, cost_str):
-                             set_valid_action(395, f"CAST_WITH_ESCAPE {card.name}") # Param needs to be GY index `i`
+                             # Agent needs to provide list of GY indices to exile later
+                             context = {'gy_idx': i}
+                             set_valid_action(395, f"CAST_WITH_ESCAPE {card.name}", context=context)
 
         # Madness (Triggered when discarded, check if castable)
-        # Need a state for "waiting_for_madness_cast"
-        if hasattr(gs, 'madness_trigger') and gs.madness_trigger:
-             card_id = gs.madness_trigger['card_id']
-             card = gs._safe_get_card(card_id)
-             if card and hasattr(card, 'oracle_text') and "madness" in card.oracle_text.lower():
-                  cost_match = re.search(r"madness (\{[^\}]+\})", card.oracle_text.lower())
-                  if cost_match and self._can_afford_cost_string(player, cost_match.group(1)):
-                      # Find card in exile (where it goes temporarily)
-                      exile_idx = -1
-                      for idx, ex_id in enumerate(player["exile"]):
-                           if ex_id == card_id and idx < 8: # Exile index 0-7
-                                exile_idx = idx
-                                break
-                      if exile_idx != -1:
-                           set_valid_action(396, f"CAST_FOR_MADNESS {card.name}") # Param needs to be exile index
+        if hasattr(gs, 'madness_cast_available') and gs.madness_cast_available:
+            madness_info = gs.madness_cast_available
+            # Only make action available if the player matches and it's *their* turn/priority?
+            # Rule 702.34a: Casts it as the triggered ability resolves. Let's allow if player matches.
+            if madness_info['player'] == player:
+                card_id = madness_info['card_id']
+                cost_str = madness_info['cost']
+                card = gs._safe_get_card(card_id)
+
+                # Find the card in exile to provide context for handler
+                exile_idx = -1
+                for idx, exiled_id in enumerate(player.get("exile", [])):
+                    if exiled_id == card_id:
+                         exile_idx = idx
+                         break
+
+                # Check affordability
+                if exile_idx != -1 and self._can_afford_cost_string(player, cost_str):
+                    context = {'exile_idx': exile_idx, 'card_id': card_id} # Pass required context
+                    set_valid_action(396, f"CAST_FOR_MADNESS {card.name if card else card_id}", context=context)
 
         # Overload
-        for i in range(min(len(player["hand"]), 8)): # Hand index 0-7
+        for i in range(min(len(player["hand"]), 8)):
             card_id = player["hand"][i]
             card = gs._safe_get_card(card_id)
             if card and hasattr(card, 'oracle_text') and "overload" in card.oracle_text.lower():
@@ -5571,29 +5703,33 @@ class ActionHandler:
                  if is_sorcery_speed or is_instant: # Check timing
                     cost_match = re.search(r"overload (\{[^\}]+\})", card.oracle_text.lower())
                     if cost_match and self._can_afford_cost_string(player, cost_match.group(1)):
-                        set_valid_action(397, f"CAST_WITH_OVERLOAD {card.name}") # Param needs to be hand index `i`
+                        context = {'hand_idx': i}
+                        set_valid_action(397, f"CAST_WITH_OVERLOAD {card.name}", context=context)
 
         # Emerge (Sorcery speed only)
         if is_sorcery_speed:
-            for i in range(min(len(player["hand"]), 8)): # Hand index 0-7
+            for i in range(min(len(player["hand"]), 8)):
                 card_id = player["hand"][i]
                 card = gs._safe_get_card(card_id)
                 if card and hasattr(card, 'oracle_text') and "emerge" in card.oracle_text.lower():
                     cost_match = re.search(r"emerge (\{[^\}]+\})", card.oracle_text.lower())
                     if cost_match:
                         # Check if there's a creature to sacrifice
-                        can_sac = any('creature' in getattr(gs._safe_get_card(cid), 'card_types', []) for cid in player["battlefield"])
-                        if can_sac and self._can_afford_cost_string(player, cost_match.group(1)): # Simplified cost check
-                             set_valid_action(398, f"CAST_FOR_EMERGE {card.name}") # Param needs (hand_idx, sac_idx)
+                        can_sac = any('creature' in getattr(gs._safe_get_card(cid), 'card_types', []) for cid in player.get("battlefield",[]))
+                        # Simplified cost check - full check happens later
+                        if can_sac and self._can_afford_cost_string(player, cost_match.group(1)):
+                             context = {'hand_idx': i}
+                             set_valid_action(398, f"CAST_FOR_EMERGE {card.name}", context=context)
 
         # Delve (Sorcery speed only)
         if is_sorcery_speed:
-            for i in range(min(len(player["hand"]), 8)): # Hand index 0-7
+            for i in range(min(len(player["hand"]), 8)):
                 card_id = player["hand"][i]
                 card = gs._safe_get_card(card_id)
                 if card and hasattr(card, 'oracle_text') and "delve" in card.oracle_text.lower():
-                    if len(player["graveyard"]) > 0 and self._can_afford_card(player, card): # Simplified check
-                        set_valid_action(399, f"CAST_FOR_DELVE {card.name}") # Param needs (hand_idx, List[GY_idx])
+                    if len(player.get("graveyard",[])) > 0 and self._can_afford_card(player, card): # Simplified check
+                        context = {'hand_idx': i}
+                        set_valid_action(399, f"CAST_FOR_DELVE {card.name}", context=context)
 
                     
     def _add_x_cost_actions(self, player, valid_actions, set_valid_action):

@@ -1194,7 +1194,6 @@ class GameState:
 
         # else: # Only one pass, priority toggled, nothing else happens
 
-    
     def move_card(self, card_id, from_player, from_zone, to_player, to_zone, cause=None, context=None):
         """Move a card between zones, applying replacement effects and triggering abilities, handling Madness."""
         if context is None: context = {}
@@ -1205,20 +1204,20 @@ class GameState:
         # 1. Handle Implicit Zones & Validate Source
         source_list = None
         actual_from_zone = from_zone
-        if from_zone == "stack_implicit": actual_from_zone = "stack"; source_list = []
-        elif from_zone == "library_implicit": actual_from_zone = "library"; source_list = []
-        elif from_zone == "hand_implicit": actual_from_zone = "hand"; source_list = []
-        elif from_zone == "nonexistent_zone": actual_from_zone = "nonexistent"; source_list = []
-        else:
+        # Handle placeholder zones used when the exact zone is unknown/not needed for source removal
+        if from_zone == "stack_implicit": actual_from_zone = "stack"; source_list = [] # Removed from stack by caller
+        elif from_zone == "library_implicit": actual_from_zone = "library"; source_list = [] # Removed from library by caller
+        elif from_zone == "hand_implicit": actual_from_zone = "hand"; source_list = [] # Removed from hand by caller
+        elif from_zone == "nonexistent_zone": actual_from_zone = "nonexistent"; source_list = [] # Not actually removed from anywhere (e.g., token creation)
+        else: # A specific, known zone
              source_list = from_player.get(actual_from_zone) if from_player else None
              if source_list is None:
                  logging.warning(f"Cannot move {card_name}: Invalid source zone '{actual_from_zone}'.")
                  return False
              # Check if actually present (handle list/set)
              is_present = False
-             if isinstance(source_list, list) and card_id in source_list: is_present = True
-             elif isinstance(source_list, set) and card_id in source_list: is_present = True
-             elif isinstance(source_list, dict) and card_id in source_list: is_present = True # For dict-based zones?
+             if isinstance(source_list, (list, set)) and card_id in source_list: is_present = True
+             elif isinstance(source_list, dict) and card_id in source_list: is_present = True
 
              if not is_present:
                   current_location_player, current_location_zone = self.find_card_location(card_id)
@@ -1243,23 +1242,12 @@ class GameState:
 
         if hasattr(self, 'replacement_effects') and self.replacement_effects:
             # --- MADNESS CHECK (DISCARD) ---
-            # Madness triggers on discard EVENT before destination check.
-            # We check it here *if* the *initial intended destination* is graveyard due to discard.
             is_discard_event = (actual_from_zone == "hand" and to_zone == "graveyard" and cause == "discard")
             has_madness = card and "madness" in getattr(card, 'oracle_text', '').lower()
-
-            if is_discard_event and has_madness:
-                 logging.debug(f"Discarding card {card_name} with Madness. Checking replacements...")
-                 # Rule 616.1: Player controlling the affected object (the card) chooses order.
-                 # If other replacements exist (e.g., Rest in Peace), player chooses.
-                 # If Madness applies, it changes the *destination* of the discard.
-                 # It should be checked along with other replacements.
-                 # Let's allow apply_replacements to handle the interaction by adding a potential
-                 # Madness effect if the player chooses it.
-                 # We already do this inside apply_replacements, so no extra logic needed here.
+            # Madness replacement handling is now primarily within apply_replacements
 
             # --- Standard Leave/Enter Replacements ---
-            # Use specific events: LEAVE_<ZONE> and ENTER_<ZONE>
+            # Apply LEAVE_<ZONE> replacement effects
             leave_event = f"LEAVE_{actual_from_zone.upper()}"
             modified_leave_ctx, replaced_leave = self.replacement_effects.apply_replacements(leave_event, event_context.copy())
             if replaced_leave:
@@ -1269,21 +1257,18 @@ class GameState:
                  prevented = event_context.get('prevented', False)
                  logging.debug(f"Leave replacement applied: New Dest: {final_destination_zone}, Prevented: {prevented}")
 
-
-            # If not prevented, check enter replacements for the *potential* destination
+            # If not prevented, check ENTER_<ZONE> replacement effects for the *potential* destination
             if not prevented:
                  enter_event = f"ENTER_{final_destination_zone.upper()}"
-                 # Pass the *current* event context state
                  modified_enter_ctx, replaced_enter = self.replacement_effects.apply_replacements(enter_event, event_context.copy())
                  if replaced_enter:
                       final_destination_player = modified_enter_ctx.get('to_player', final_destination_player)
                       final_destination_zone = modified_enter_ctx.get('to_zone', final_destination_zone)
                       prevented = modified_enter_ctx.get('prevented', False)
-                      # Merge ETB effects from context
+                      # Merge ETB flags/counters from context if they were added by the replacement
                       if 'enters_tapped' in modified_enter_ctx: context['enters_tapped'] = modified_enter_ctx['enters_tapped']
                       if 'enter_counters' in modified_enter_ctx: context.setdefault('enter_counters', []).extend(modified_enter_ctx['enter_counters'])
                       logging.debug(f"Enter replacement applied: Final Dest: {final_destination_zone}, Prevented: {prevented}")
-
 
         # --- Final Prevention Check ---
         if prevented:
@@ -1291,54 +1276,90 @@ class GameState:
             return False
 
         # --- Check if Madness was the outcome ---
-        # Madness replacement function (in ReplacementEffects) would have set the final_zone to 'exile'
-        # and potentially set up the 'madness_cast_available' state.
+        # Check if this specific card was flagged by a Madness replacement during apply_replacements
+        # This requires apply_replacements to add information to the final context if Madness was chosen.
         if is_discard_event and has_madness and final_destination_zone == 'exile':
-             madness_applied = True
-             # Ensure state was set (should have happened in replacement func)
-             madness_cost_found = getattr(self,'madness_cast_available', {}).get('cost') if getattr(self,'madness_cast_available', {}).get('card_id') == card_id else None
+             # Double-check if madness state was correctly set up by replacement effect
+             if hasattr(self,'madness_cast_available') and getattr(self,'madness_cast_available',{}).get('card_id') == card_id:
+                 madness_applied = True
+                 madness_cost_found = getattr(self,'madness_cast_available',{}).get('cost')
 
         # --- Perform Actual Move ---
-        # 1. Remove from source zone
-        if source_list is not None:
+        # 1. Remove from source zone (unless implicitly removed)
+        if source_list is not None and original_from_zone not in ["stack_implicit", "library_implicit", "hand_implicit", "nonexistent_zone"]:
             removed = False
-            if isinstance(source_list, list) and card_id in source_list: source_list.remove(card_id); removed = True
-            elif isinstance(source_list, set) and card_id in source_list: source_list.discard(card_id); removed = True
-            elif isinstance(source_list, dict) and card_id in source_list: del source_list[card_id]; removed = True
-            # if not removed: Log warning only if removal failed unexpectedly (should have been caught earlier)
+            # Check actual source list stored in the player dictionary
+            source_list_live = from_player.get(actual_from_zone)
+            if source_list_live is not None:
+                 if isinstance(source_list_live, list) and card_id in source_list_live: source_list_live.remove(card_id); removed = True
+                 elif isinstance(source_list_live, set) and card_id in source_list_live: source_list_live.discard(card_id); removed = True
+                 elif isinstance(source_list_live, dict) and card_id in source_list_live: del source_list_live[card_id]; removed = True
 
-        # 2. Handle "leaves the battlefield" cleanup & triggers
+            #if not removed: Log warning only if removal failed unexpectedly
+
+        # 2. Handle "leaves the battlefield" cleanup & triggers (This is the crucial part updated)
         if actual_from_zone == "battlefield" and from_player:
+            # --- Start LTB Cleanup/Trigger Sequence ---
             ltb_trigger_context = {
                 'controller': from_player, # Controller when it left
                 'from_zone': actual_from_zone,
                 'to_zone': final_destination_zone,
                 'cause': cause, **context
             }
-            # Trigger LTB first (603.6c)
+            # a. Trigger LTB abilities first (Rule 603.6c)
             self.trigger_ability(card_id, "LEAVE_BATTLEFIELD", ltb_trigger_context)
-            # Cleanup state AFTER LTB triggers resolve (conceptually - synchronous sim means we cleanup now)
+
+            # b. Cleanup State Associated with the Permanent (Immediately after LTB triggers)
+            logging.debug(f"Cleaning up state for {card_name} ({card_id}) leaving battlefield.")
             from_player.get("tapped_permanents", set()).discard(card_id)
-            from_player.get("entered_battlefield_this_turn", set()).discard(card_id)
-            if hasattr(from_player, "attachments"):
-                if card_id in from_player["attachments"]: del from_player["attachments"][card_id]
-                items_attached_to_it = [att_id for att_id, target_id in list(from_player["attachments"].items()) if target_id == card_id]
-                for att_id in items_attached_to_it: del from_player["attachments"][att_id]
-            if hasattr(from_player, 'loyalty_counters') and card_id in from_player['loyalty_counters']: del from_player['loyalty_counters'][card_id]
-            # Remove effects from source AFTER triggers resolve (Rule 611.3b applies?) - Do it now for simplicity
+            from_player.get("entered_battlefield_this_turn", set()).discard(card_id) # Clear summoning sickness if it just entered
+
+            # Cleanup attachments (what it's attached to, or what's attached to it)
+            attachments = from_player.get("attachments")
+            if attachments:
+                # If it's an Equip/Aura/Fort itself
+                if card_id in attachments: del attachments[card_id]
+                # If other things were attached to it
+                items_attached_to_it = [att_id for att_id, target_id in list(attachments.items()) if target_id == card_id]
+                for att_id in items_attached_to_it: del attachments[att_id] # Unattach Aura/Equip/Fort
+
+            # Remove other counters/statuses associated with the card ID
+            if hasattr(from_player, 'loyalty_counters'): from_player['loyalty_counters'].pop(card_id, None)
+            if hasattr(from_player, 'damage_counters'): from_player['damage_counters'].pop(card_id, None)
+            if hasattr(from_player, 'deathtouch_damage'): from_player.get('deathtouch_damage', {}).pop(card_id, None)
+            if hasattr(self, 'saga_counters'): self.saga_counters.pop(card_id, None)
+            if hasattr(self, 'battle_cards'): self.battle_cards.pop(card_id, None) # Remove defense counters for battles
+            if hasattr(from_player, 'regeneration_shields'): from_player['regeneration_shields'].discard(card_id)
+            # Clear mutation stack if it was the base
+            if hasattr(from_player, 'mutation_stacks') and card_id in from_player['mutation_stacks']: del from_player['mutation_stacks'][card_id]
+            # Add other cleanups as needed (champion, cipher, haunt, hideaway etc.)
+
+            # Remove continuous effects from this source (LayerSystem)
             if self.layer_system: self.layer_system.remove_effects_by_source(card_id)
+            # Remove replacement effects from this source
             if self.replacement_effects: self.replacement_effects.remove_effects_by_source(card_id)
-            # Reset card state
+            # Unregister abilities associated with this card
+            if self.ability_handler: self.ability_handler.unregister_card_abilities(card_id)
+
+            # *** CRITICAL: Reset the card object state ***
             if card and hasattr(card, 'reset_state_on_zone_change'):
-                card.reset_state_on_zone_change()
+                 logging.debug(f"Calling reset_state_on_zone_change for {card_name} ({card_id}).")
+                 card.reset_state_on_zone_change()
+            # --- End LTB Cleanup/Trigger Sequence ---
 
         # 3. Add to destination zone
         destination_list = final_destination_player.get(final_destination_zone)
         if destination_list is None:
              logging.error(f"Invalid destination zone '{final_destination_zone}' for player {final_destination_player['name']}.")
              return False # Cannot recover card state easily
-        if card_id not in destination_list: # Prevent duplicates
+        # Check if list or set, prevent duplicates appropriately
+        if isinstance(destination_list, list) and card_id not in destination_list:
             destination_list.append(card_id)
+        elif isinstance(destination_list, set) and card_id not in destination_list:
+             destination_list.add(card_id)
+        elif not isinstance(destination_list, (list, set)): # Safety check for unexpected zone types
+             logging.error(f"Destination zone '{final_destination_zone}' is not a list or set ({type(destination_list)}).")
+             return False
 
         logging.debug(f"Moved {card_name} from {from_player['name'] if from_player else 'N/A'}'s {actual_from_zone} to {final_destination_player['name']}'s {final_destination_zone}{' (via Madness)' if madness_applied else ''}")
 
@@ -1350,10 +1371,15 @@ class GameState:
             'cause': cause, **context
         }
         if final_destination_zone == "battlefield":
-             # ... (Existing ETB logic: entered this turn, tapped, counters, register effects, triggers) ...
+             # Ensure base P/T are set from DB or default before potential ETB counter effects
+             # (Reset should handle this, but double check)
+             if card and getattr(card, 'power', None) is None and 'creature' in getattr(card,'card_types',[]): card.power = 0
+             if card and getattr(card, 'toughness', None) is None and 'creature' in getattr(card,'card_types',[]): card.toughness = 0
+
              final_destination_player.setdefault("entered_battlefield_this_turn", set()).add(card_id)
              enters_tapped = context.get('enters_tapped', False) or (hasattr(card, 'oracle_text') and "enters the battlefield tapped" in card.oracle_text.lower())
              if enters_tapped: final_destination_player.setdefault("tapped_permanents", set()).add(card_id)
+             # Apply counters passed via context from replacement effects or "as enters"
              enter_counters = context.get('enter_counters')
              if enter_counters and isinstance(enter_counters, list):
                  for counter_info in enter_counters: self.add_counter(card_id, counter_info['type'], counter_info['count'])
@@ -1361,14 +1387,36 @@ class GameState:
              if card and 'saga' in getattr(card,'subtypes',[]): self.add_counter(card_id, "lore", 1)
              # Planeswalker entry loyalty
              if card and 'planeswalker' in getattr(card,'card_types',[]):
-                  final_destination_player.setdefault("loyalty_counters", {})[card_id] = getattr(card, 'loyalty', 0)
+                  base_loyalty = getattr(card, 'loyalty', 0) # Get base from card object
+                  # Check replacements that might modify starting loyalty? Rare.
+                  final_destination_player.setdefault("loyalty_counters", {})[card_id] = base_loyalty
+             # Battle entry defense
+             if card and 'battle' in getattr(card,'type_line','').lower():
+                  base_defense = getattr(card, 'defense', 0) # Get base defense
+                  if not hasattr(self,'battle_cards'): self.battle_cards = {}
+                  self.battle_cards[card_id] = base_defense
 
-             if card: self._register_card_effects(card_id, card, final_destination_player) # Register effects now
+
+             # Register card effects (static, replacement) - Needs AbilityHandler
+             if card and self.ability_handler:
+                 self.ability_handler.register_card_abilities(card_id, final_destination_player) # Pass current controller
+
+             # Trigger ETB abilities
              self.trigger_ability(card_id, "ENTERS_BATTLEFIELD", enter_trigger_context) # Standard ETB
-             if card and 'land' in getattr(card,'card_types',[]): self.trigger_ability(card_id, "LANDFALL", enter_trigger_context)
-             # Special ETB-like handlers
-             if card and 'aura' in getattr(card, 'subtypes',[]): self._resolve_aura_attachment(card_id, final_destination_player, context)
+             # Trigger Landfall if it's a land
+             if card and 'land' in getattr(card,'card_types',[]):
+                 # Trigger for player who played the land
+                 self.trigger_ability(None, "LANDFALL", enter_trigger_context) # Trigger general landfall for player
+                 # Trigger ability on the land itself if it has one
+                 self.trigger_ability(card_id, "LANDFALL_SELF", enter_trigger_context) # Specific landfall for this land
 
+
+             # Special ETB handlers
+             if card and 'aura' in getattr(card, 'subtypes',[]):
+                  # Handle attachment based on context target (or needs choice phase)
+                  self._resolve_aura_attachment(card_id, final_destination_player, context)
+                  # Ensure layer recalculation if Aura attached
+                  if self.layer_system: self.layer_system.invalidate_cache()
 
         else: # Entering non-battlefield zone
              self.trigger_ability(card_id, f"ENTER_{final_destination_zone.upper()}", enter_trigger_context)
@@ -1376,18 +1424,23 @@ class GameState:
              if final_destination_zone == "graveyard":
                   turn_gy_list = self.cards_to_graveyard_this_turn.setdefault(self.turn, [])
                   turn_gy_list.append(card_id)
-                  # Gravestorm count only increments for permanents going BF->GY? Check rules.
-                  # Rule 702.61a: Cast -> GY is NOT a permanent entering GY.
-                  # Assuming only BF->GY counts for Gravestorm for now.
+                  # Gravestorm count increases if card came from battlefield (per Rule 702.61a)
                   if actual_from_zone == "battlefield":
                       self.gravestorm_count = self.gravestorm_count + 1 if hasattr(self, 'gravestorm_count') else 1
 
 
         # --- Post-Move Cleanup ---
-        # Handle Tokens Ceasing to Exist
-        if card and hasattr(card, 'is_token') and card.is_token and actual_from_zone == "battlefield" and final_destination_zone != "battlefield":
+        # Handle Tokens Ceasing to Exist if moved off battlefield
+        # Must use the card object BEFORE reset state was called if it's a token
+        card_was_token = hasattr(card, 'is_token') and card.is_token # Check before potentially losing token status in reset?
+        if card_was_token and actual_from_zone == "battlefield" and final_destination_zone != "battlefield":
             logging.debug(f"Token {card_name} ceased to exist after moving to {final_destination_zone}.")
-            if card_id in destination_list: destination_list.remove(card_id)
+            # Remove from destination zone list/set
+            dest_list = final_destination_player.get(final_destination_zone)
+            if dest_list and card_id in dest_list:
+                if isinstance(dest_list, list): dest_list.remove(card_id)
+                elif isinstance(dest_list, set): dest_list.discard(card_id)
+            # Remove from card_db
             if card_id in self.card_db: del self.card_db[card_id]
 
         # Clear lingering Madness opportunity if card moved FROM exile for another reason
@@ -1395,7 +1448,7 @@ class GameState:
             logging.debug(f"Clearing Madness opportunity for {card_name} as it moved from exile.")
             self.madness_cast_available = None
 
-        # --- Trigger ability processing happens AFTER the action completes (in main loop) ---
+        # Trigger ability processing happens AFTER the action completes (in main loop)
         return True
     
     def _register_card_effects(self, card_id, card, player):
@@ -2009,65 +2062,101 @@ class GameState:
         self.trigger_ability(card_id, "UNTAPPED", {"controller": player})
         return True
     
-    def _validate_targets_on_resolution(self, source_id, controller, targets):
+    def _validate_targets_on_resolution(self, source_id, controller, targets, context=None):
         """Checks if the targets selected for a spell/ability are still valid upon resolution."""
-        # Added check for no targeting system
-        if not self.targeting_system:
+        if context is None: context = {} # Ensure context is dict
+
+        # Use TargetingSystem if available
+        if hasattr(self, 'targeting_system') and self.targeting_system:
+            card = self._safe_get_card(source_id)
+            if not card: return False # Source disappeared?
+
+            # --- Pass Effect Text and Context ---
+            # Use specific effect text from context if available (e.g., chosen modal effect)
+            # Otherwise, fallback to card's oracle text.
+            effect_text = context.get('effect_text', getattr(card, 'oracle_text', None))
+
+            # Validate using TargetingSystem
+            if hasattr(self.targeting_system, 'validate_targets'):
+                is_valid = self.targeting_system.validate_targets(source_id, targets, controller, effect_text=effect_text)
+                if not is_valid:
+                     logging.debug(f"Target validation failed for {getattr(card,'name',source_id)} using TargetingSystem.validate_targets.")
+                return is_valid
+            else:
+                logging.warning("TargetingSystem missing 'validate_targets' method.")
+                # Fallback? Re-evaluate get_valid_targets? Risky, assume true.
+                return True
+        else:
             logging.warning("Cannot validate targets: TargetingSystem not available.")
-            # Basic fallback: assume valid if no system? Risky. Return true for now.
-            return True
+            return True # Assume valid if no system? Safer than failing spells.
 
-        if not targets: return True # No targets to validate
+    def bottom_card(self, player, hand_index_to_bottom):
+        """
+        Handle bottoming a card from hand during mulligan resolution.
 
-        card = self._safe_get_card(source_id)
-        if not card: return False # Source disappeared?
+        Args:
+            player: The player performing the bottoming.
+            hand_index_to_bottom: The index of the card in the player's hand to bottom.
 
-        # --- Use TargetingSystem.validate_targets ---
-        # Ensure targets are passed in the format expected by validate_targets (typically dict)
-        validation_targets = {}
-        if isinstance(targets, dict):
-            validation_targets = targets
-        elif isinstance(targets, list):
-            # Attempt to categorize the list if needed, or pass as a generic category
-            # This depends on how validate_targets is implemented. Assuming it can handle a flat list or needs categorization.
-            # Simple approach: Assign to a 'chosen' category for validation.
-            validation_targets = {"chosen": targets}
-        else:
-            logging.warning(f"Unexpected targets format for validation: {type(targets)}")
-            return False # Cannot validate unknown format
+        Returns:
+            bool: True if the card was successfully bottomed.
+        """
+        # Validate state
+        if not self.bottoming_in_progress or self.bottoming_player != player:
+            logging.warning("Invalid state to bottom card.")
+            return False
+        if not (0 <= hand_index_to_bottom < len(player["hand"])):
+            logging.warning(f"Invalid hand index to bottom: {hand_index_to_bottom}")
+            return False
 
-        # Check if validate_targets exists and call it
-        if hasattr(self.targeting_system, 'validate_targets'):
-            # Pass the effect text if available in context, helps with specific checks
-            effect_text = getattr(card, 'oracle_text', None) # Get effect text from source card
-            # The stack context might have a more specific effect_text (e.g., for modal abilities)
-            # Need to retrieve the context associated with the source_id if it's on the stack.
-            # For simplicity now, just using card text. A better approach would find the stack item.
-            is_valid = self.targeting_system.validate_targets(source_id, validation_targets, controller, effect_text=effect_text)
-            if not is_valid:
-                 logging.debug(f"Target validation failed for {getattr(card,'name',source_id)} using TargetingSystem.validate_targets.")
-            return is_valid
-        else:
-            # Fallback to get_valid_targets re-check if validate_targets is missing
-            logging.warning("TargetingSystem missing 'validate_targets', falling back to re-checking get_valid_targets.")
-            valid_now = self.targeting_system.get_valid_targets(source_id, controller) # Get *currently* valid targets
-            all_targets_list = []
-            if isinstance(validation_targets, dict):
-                for target_list in validation_targets.values():
-                    all_targets_list.extend(target_list)
-            else: # Assume flat list
-                 all_targets_list = validation_targets.get("chosen",[]) # If used 'chosen' key
+        # Move the card
+        card_id = player["hand"].pop(hand_index_to_bottom)
+        player["library"].append(card_id) # Add to bottom
+        card = self._safe_get_card(card_id)
+        logging.debug(f"Player {player['name']} bottomed {getattr(card, 'name', card_id)}.")
+        self.bottoming_count += 1
 
-            for selected_target in all_targets_list:
-                found_valid = False
-                for category, valid_list in valid_now.items():
-                     if selected_target in valid_list:
-                          found_valid = True
-                          break
-                if not found_valid:
-                     logging.debug(f"Target '{selected_target}' is no longer valid for {getattr(card,'name',source_id)} (Fallback check).")
-                     return False # At least one target is invalid
-            return True # All targets still valid
+        # Check if bottoming is complete
+        if self.bottoming_count >= self.cards_to_bottom:
+             logging.info(f"Bottoming complete for {player['name']}.")
+             self.bottoming_in_progress = False
+             self.bottoming_player = None
+             # Game starts - Transition to first turn, first phase
+             if self.turn == 0: self.turn = 1 # Ensure turn starts at 1
+             self.phase = self.PHASE_UNTAP
+             self.priority_player = self.p1 # P1 starts
+             self.priority_pass_count = 0
+             # Process untap immediately? No, let main loop handle phase progression.
+        # Else, remain in bottoming state (implicit, no specific phase constant needed)
+        # The action mask generator will continue to only allow BOTTOM_CARD or maybe PASS/CONCEDE.
+
+        return True
+
+    def _determine_target_category(self, target_id):
+        """Helper to determine the primary category ('creatures', 'players', etc.) for logging/categorization."""
+        # This can reuse the logic from the Environment's helper if preferred,
+        # or keep a local version for GameState internal use.
+        owner, zone = self.find_card_location(target_id)
+        if zone == 'player': return 'players'
+        if zone == 'stack':
+            for item in self.stack:
+                if isinstance(item, tuple) and item[1] == target_id:
+                    return 'spells' if item[0] == 'SPELL' else 'abilities'
+            return 'stack_items' # Generic if not found matching ID
+        if zone in ['graveyard', 'exile', 'library']: return 'cards'
+        if zone == 'battlefield':
+             card = self._safe_get_card(target_id)
+             if card:
+                  types = getattr(card, 'card_types', [])
+                  type_line = getattr(card, 'type_line', '').lower()
+                  if 'creature' in types: return 'creatures'
+                  if 'planeswalker' in types: return 'planeswalkers'
+                  if 'battle' in type_line: return 'battles'
+                  if 'land' in types: return 'lands'
+                  if 'artifact' in types: return 'artifacts'
+                  if 'enchantment' in types: return 'enchantments'
+                  return 'permanents' # Default permanent
+        return 'other' # Fallback
 
     def resolve_top_of_stack(self):
         """Resolve the top item of the stack."""
@@ -2093,25 +2182,36 @@ class GameState:
                 validation_targets = {}
                 if isinstance(targets_on_stack_raw, dict):
                     validation_targets = targets_on_stack_raw
-                elif isinstance(targets_on_stack_raw, list):
+                elif isinstance(targets_on_stack_raw, list): # Handle potential flat list from simple targeting
                     validation_targets = {"chosen": targets_on_stack_raw}
-                targets_still_valid = self._validate_targets_on_resolution(item_id, controller, validation_targets)
+                # Else: If not list or dict, keep empty dict
+
+                # --- Pass full context to validation ---
+                targets_still_valid = self._validate_targets_on_resolution(item_id, controller, validation_targets, context)
 
                 if not targets_still_valid:
                     logging.info(f"Stack Item {item_type} {card_name} fizzled: All targets invalid.")
                     if item_type == "SPELL" and not context.get("is_copy", False) and not context.get("skip_default_movement", False):
-                        self.move_card(item_id, controller, "stack_implicit", controller, "graveyard", cause="spell_fizzle")
-                    resolution_success = True
+                        # Spell fizzles - move to GY unless it shouldn't move (e.g., rebound, flashback)
+                        # Replacement effects can still apply here (e.g., exile instead of GY)
+                        self.move_card(item_id, controller, "stack_implicit", controller, "graveyard", cause="spell_fizzle", context=context)
+                    # If ability fizzles, it just leaves the stack.
+                    resolution_success = True # Fizzling counts as resolution finishing
                 else:
-                    # Proceed with resolution
+                    # --- Proceed with resolution ---
                     if item_type == "SPELL": resolution_success = self._resolve_spell(item_id, controller, context)
-                    elif item_type == "ABILITY" or item_type == "TRIGGER": resolution_success = self.ability_handler.resolve_ability(item_type, item_id, controller, context) if self.ability_handler else False
+                    elif item_type == "ABILITY" or item_type == "TRIGGER":
+                        if self.ability_handler:
+                            # Pass full context, including potentially validated/updated targets
+                            if targets_still_valid: context['targets'] = validation_targets # Update context with validated targets format
+                            resolution_success = self.ability_handler.resolve_ability(item_type, item_id, controller, context)
+                        else: resolution_success = False
                     else: logging.warning(f"Unknown stack item type: {item_type}"); resolution_success = False
 
-                    if resolution_success:
-                        self.check_state_based_actions()
-                        if self.phase in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
-                            new_special_phase_entered = True
+                    # If resolution itself initiates a new choice phase, flag it
+                    if resolution_success and self.phase in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+                        new_special_phase_entered = True
+                        logging.debug(f"Resolution of {card_name} led to new special phase: {self._PHASE_NAMES.get(self.phase)}")
             else:
                  logging.warning(f"Invalid stack item format: {top_item}")
                  resolution_success = False
@@ -2119,30 +2219,30 @@ class GameState:
             logging.error(f"Error resolving stack item: {str(e)}", exc_info=True)
             resolution_success = False
         finally:
-            # --- Clear split second flag *after* resolution ---
+            # --- Post-Resolution Cleanup ---
+            # Clear split second flag *after* resolution if it was the last one
             if resolved_item_had_split_second:
                 any_other_ss_on_stack = any(isinstance(i,tuple) and len(i)>3 and i[3].get('is_split_second') for i in self.stack)
                 if not any_other_ss_on_stack:
                     self.split_second_active = False
                     logging.info("Split Second is now INACTIVE.")
 
-            # Reset priority
-            self.priority_pass_count = 0
-            self.priority_player = self._get_active_player()
-            self.last_stack_size = len(self.stack)
-            # Reset phase if returning from special phase and not entering a new one
-            if not new_special_phase_entered and self.phase in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
-                 if hasattr(self, 'previous_priority_phase') and self.previous_priority_phase is not None:
-                      self.phase = self.previous_priority_phase
-                      self.previous_priority_phase = None
-                      logging.debug(f"Stack resolved/fizzled, returning to phase {self._PHASE_NAMES.get(self.phase, self.phase)}")
-                 else:
-                      logging.warning("Stack resolved, but no previous phase tracked. Returning to PRIORITY phase.")
-                      self.phase = self.PHASE_PRIORITY
+            # --- Reset Priority ---
+            # Only reset priority if a *new* special phase wasn't entered AND
+            # if the stack is now empty or the active player should get priority back.
+            if not new_special_phase_entered:
+                self.priority_player = self._get_active_player() # AP gets priority after resolution
+                self.priority_pass_count = 0
+                logging.debug(f"Finished resolving stack item. Priority to AP ({self.priority_player['name']})")
+            else:
+                # If a special phase was entered, priority logic is handled by that phase setup.
+                logging.debug(f"Resolution led to special phase, priority already set.")
 
-            logging.debug(f"Finished resolving top of stack. Priority to {self.priority_player['name']}. Phase: {self._PHASE_NAMES.get(self.phase, '?')}")
+            # --- Update stack size tracking ---
+            self.last_stack_size = len(self.stack)
 
         return resolution_success
+
 
         
     def _resolve_ability(self, ability_id, controller, context=None):

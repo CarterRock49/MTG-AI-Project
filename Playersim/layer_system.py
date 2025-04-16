@@ -556,9 +556,67 @@ class LayerSystem:
 
         
     def _sort_layer_effects(self, layer_num, effects, sublayer=None):
-        """Sorts effects for a given layer/sublayer based primarily on timestamps."""
-        # Simple timestamp sort for now. Dependency implementation deferred.
-        return sorted(effects, key=lambda x: self.timestamps.get(x[0], 0))
+        """
+        Sorts effects for a given layer/sublayer based primarily on timestamps.
+        Includes a basic check for critical layer dependencies that might override timestamps.
+        """
+        gs = self.game_state
+
+        # Check for potential dependencies before timestamp sorting
+        # Simple dependency: Layer 4 (type) affects Layer 6 (abilities) and 7 (P/T)
+        # If effect A in Layer 6/7 targets X, and effect B in Layer 4 targets X,
+        # B should conceptually apply first. Timestamp usually handles this, but edge cases exist.
+
+        # Perform timestamp sort (Python's sort is stable)
+        # Fallback to 0 if effect_id somehow missing from timestamps dict
+        sorted_effects = sorted(effects, key=lambda x: self.timestamps.get(x[0], 0))
+
+        # --- Dependency Check (Post-Sort Warning/Potential Reorder - Simplified) ---
+        # This check detects potential violations if timestamps lead to wrong order
+        # Note: Full dependency resolution is complex (topological sort). This is a simpler check.
+        if layer_num in [6, 7] and self.layers.get(4): # Check only if Layer 4 effects exist
+            layer4_effects_map = defaultdict(list)
+            # Collect all *active* Layer 4 effects
+            for effect_id4, data4 in self.layers[4]:
+                # Check effect condition *now*
+                is_active4 = True # Assume active if no condition
+                if callable(data4.get('condition')):
+                     try: is_active4 = data4['condition'](gs)
+                     except Exception as e: logging.warning(f"Error checking condition for L4 effect {effect_id4}: {e}"); is_active4=False # Treat error as inactive
+                if not is_active4: continue
+
+                # Store effect keyed by target_id
+                for target_id in data4.get('affected_ids', []):
+                     layer4_effects_map[target_id].append((effect_id4, data4))
+
+            # Check effects in the current layer (6 or 7) against Layer 4 effects
+            for i in range(len(sorted_effects)):
+                effect_id1, effect_data1 = sorted_effects[i]
+                # Skip if this effect itself isn't active
+                is_active1 = True
+                if callable(effect_data1.get('condition')):
+                     try: is_active1 = effect_data1['condition'](gs)
+                     except Exception as e: logging.warning(f"Error checking condition for L{layer_num} effect {effect_id1}: {e}"); is_active1=False
+                if not is_active1: continue
+
+                source_id1 = effect_data1['source_id']
+                ts1 = self.timestamps.get(effect_id1, 0)
+
+                for target_id in effect_data1.get('affected_ids', []):
+                    # Check if this target has Layer 4 effects applied later
+                    if target_id in layer4_effects_map:
+                         for effect_id4, effect_data4 in layer4_effects_map[target_id]:
+                             source_id4 = effect_data4['source_id']
+                             ts4 = self.timestamps.get(effect_id4, 0)
+                             # If a relevant Layer 4 effect has a *later* timestamp, it's a potential dependency violation
+                             if ts4 > ts1 and source_id1 != source_id4:
+                                 logging.warning(f"Potential Layer Dependency Violation: Layer {layer_num} effect {effect_id1} (TS:{ts1}) "
+                                                 f"on {target_id} might depend on Layer 4 effect {effect_id4} (TS:{ts4}) which has a later timestamp.")
+                                 # Simple Reorder (Swap adjacent pair if violation found): Risky, can cascade.
+                                 # If full topological sort isn't implemented, logging is the safest action.
+
+        # Return timestamp-sorted list (potentially with logged warnings)
+        return sorted_effects
     
     def _calculate_layer1_copy(self, effect_data, calculated_characteristics):
         source_to_copy_id = effect_data.get('effect_value')
