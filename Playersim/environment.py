@@ -962,65 +962,152 @@ class AlphaZeroMTGEnv(gym.Env):
     def _get_obs_safe(self):
             """Return a minimal, safe observation dictionary in case of errors. (Reinforced)"""
             gs = self.game_state
+            obs = {} # Initialize empty dict
+
             try:
-                # Initialize with zeros based on the defined space
+                # --- STEP 1: Ensure observation_space is accessible ---
+                if not hasattr(self, 'observation_space') or not isinstance(self.observation_space, spaces.Dict):
+                     logging.critical("_get_obs_safe: observation_space is missing or invalid!")
+                     # If space is missing, we cannot reliably create the obs dict.
+                     # Return a very basic dict that SB3 *might* tolerate or error on gracefully.
+                     obs['action_mask'] = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+                     obs['action_mask'][11] = True; obs['action_mask'][12] = True;
+                     # Try adding the problematic key with default assumptions if space unknown
+                     obs['ability_features'] = np.zeros((self.max_battlefield, 5), dtype=np.float32) # Assumed defaults
+                     # Manually add other critical keys expected by your feature extractor if known
+                     obs['phase'] = np.array([0], dtype=np.int32)
+                     obs['turn'] = np.array([1], dtype=np.int32)
+                     # Add minimal life etc.
+                     obs["my_life"] = np.array([0], dtype=np.int32)
+                     obs["opp_life"] = np.array([0], dtype=np.int32)
+                     obs["p1_life"] = np.array([0], dtype=np.int32)
+                     obs["p2_life"] = np.array([0], dtype=np.int32)
+                     # Add counts
+                     obs["my_hand_count"] = np.array([0], dtype=np.int32)
+                     obs["opp_hand_count"] = np.array([0], dtype=np.int32)
+                     obs["p1_bf_count"] = np.array([0], dtype=np.int32)
+                     obs["p2_bf_count"] = np.array([0], dtype=np.int32)
+                     # Fill necessary keys with placeholder shapes/types if possible
+                     # This part is fragile if the observation space itself is broken.
+                     return obs # Return minimal dict
+
+                # --- STEP 2: Initialize obs based on VALID observation_space ---
                 obs = {k: np.zeros(space.shape, dtype=space.dtype)
                     for k, space in self.observation_space.spaces.items()}
 
-                # Fill minimal necessary fields, checking attribute existence
-                obs["phase"] = np.array([getattr(gs, 'phase', 0)], dtype=np.int32)
-                obs["turn"] = np.array([getattr(gs, 'turn', 1)], dtype=np.int32)
-                # Ensure p1 and p2 exist before accessing life
-                p1_life = getattr(gs, 'p1', {}).get('life', 0)
-                p2_life = getattr(gs, 'p2', {}).get('life', 0)
+                # --- STEP 3: Fill MINIMAL known-good values ---
+                # Use getattr and .get liberally to prevent AttributeErrors/KeyErrors
+                current_phase = getattr(gs, 'phase', 0)
+                current_turn = getattr(gs, 'turn', 1)
                 agent_is_p1 = getattr(gs, 'agent_is_p1', True)
+
+                obs["phase"] = np.array([current_phase], dtype=np.int32)
+                obs["turn"] = np.array([current_turn], dtype=np.int32)
+
+                # Player State (Check if players exist)
+                p1_exists = hasattr(gs, 'p1') and gs.p1 is not None
+                p2_exists = hasattr(gs, 'p2') and gs.p2 is not None
+
+                p1_life = gs.p1.get('life', 0) if p1_exists else 0
+                p2_life = gs.p2.get('life', 0) if p2_exists else 0
                 obs["p1_life"] = np.array([p1_life], dtype=np.int32)
                 obs["p2_life"] = np.array([p2_life], dtype=np.int32)
                 obs["my_life"] = np.array([p1_life if agent_is_p1 else p2_life], dtype=np.int32)
                 obs["opp_life"] = np.array([p2_life if agent_is_p1 else p1_life], dtype=np.int32)
 
-                # Safely generate action mask
+                # Counts (Safely get lengths)
+                obs["my_hand_count"] = np.array([len(gs.p1.get("hand", [])) if agent_is_p1 else len(gs.p2.get("hand", []))], dtype=np.int32) if p1_exists and p2_exists else np.array([0], dtype=np.int32)
+                obs["opp_hand_count"] = np.array([len(gs.p2.get("hand", [])) if agent_is_p1 else len(gs.p1.get("hand", []))], dtype=np.int32) if p1_exists and p2_exists else np.array([0], dtype=np.int32)
+                obs["p1_bf_count"] = np.array([len(gs.p1.get("battlefield", []))], dtype=np.int32) if p1_exists else np.array([0], dtype=np.int32)
+                obs["p2_bf_count"] = np.array([len(gs.p2.get("battlefield", []))], dtype=np.int32) if p2_exists else np.array([0], dtype=np.int32)
+
+
+                # Phase onehot (Safely create)
+                phase_onehot_space = self.observation_space.spaces.get("phase_onehot")
+                if phase_onehot_space:
+                    max_phase = phase_onehot_space.shape[0] - 1
+                    if 0 <= current_phase <= max_phase:
+                        obs["phase_onehot"][current_phase] = 1.0
+                    else:
+                        obs["phase_onehot"][0] = 1.0 # Default to phase 0 if invalid
+
+                # --- STEP 4: Safe Action Mask Generation ---
+                # Already initialized to zeros. Try generating, but ensure PASS/CONCEDE on failure.
                 try:
-                    # Use generate_valid_actions which has internal error handling
-                    mask = self.generate_valid_actions().astype(bool)
-                    obs["action_mask"] = mask
-                except Exception:
-                    obs["action_mask"] = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+                    if hasattr(self, 'action_mask') and callable(self.action_mask): # Ensure method exists
+                        mask_result = self.action_mask()
+                        if mask_result is not None and mask_result.shape == (self.ACTION_SPACE_SIZE,):
+                            obs["action_mask"] = mask_result.astype(bool)
+                        else: # Mask generation failed or returned invalid result
+                            obs["action_mask"][11] = True # Pass priority
+                            obs["action_mask"][12] = True # Concede
+                    else: # Method doesn't exist
+                        obs["action_mask"][11] = True # Pass priority
+                        obs["action_mask"][12] = True # Concede
+                except Exception as safe_mask_e:
+                    logging.error(f"_get_obs_safe: Error generating action mask: {safe_mask_e}")
+                    obs["action_mask"][:] = False # Clear potential partial mask
                     obs["action_mask"][11] = True # Pass priority
                     obs["action_mask"][12] = True # Concede
 
-                # Fill phase onehot safely
-                max_phase = self.observation_space["phase_onehot"].shape[0] - 1
-                current_phase = getattr(gs, 'phase', 0)
-                if 0 <= current_phase <= max_phase:
-                    obs["phase_onehot"][current_phase] = 1.0
-                else:
-                    obs["phase_onehot"][0] = 1.0 # Default to phase 0
-
-                # *** CRITICAL: Ensure ability_features exists and has correct shape/dtype ***
-                ability_features_key = "ability_features"
-                if ability_features_key not in obs:
-                    logging.critical(f"CRITICAL: '{ability_features_key}' missing from obs right before return! Resetting.")
-                    obs[ability_features_key] = np.zeros(self.observation_space[ability_features_key].shape, dtype=self.observation_space[ability_features_key].dtype)
-                elif obs[ability_features_key].shape != self.observation_space[ability_features_key].shape:
-                    logging.critical(f"CRITICAL: '{ability_features_key}' has WRONG SHAPE before return! Got {obs[ability_features_key].shape}, expected {self.observation_space[ability_features_key].shape}. Resetting.")
-                    obs[ability_features_key] = np.zeros(self.observation_space[ability_features_key].shape, dtype=self.observation_space[ability_features_key].dtype)
-
-                # Ensure all keys are present one last time (belt and suspenders)
+                # --- STEP 5: GUARANTEE ALL Keys Exist with Correct Shape/Dtype ---
+                # This loop is crucial. It verifies every key defined in the observation space.
                 for key, space in self.observation_space.spaces.items():
-                     if key not in obs:
-                          logging.error(f"_get_obs_safe: Final check failed, missing '{key}'. Resetting.")
-                          obs[key] = np.zeros(space.shape, dtype=space.dtype)
+                    if key not in obs:
+                        logging.critical(f"_get_obs_safe: Key '{key}' WAS MISSING! Re-initializing.")
+                        obs[key] = np.zeros(space.shape, dtype=space.dtype)
+                    elif not isinstance(obs[key], np.ndarray):
+                         logging.critical(f"_get_obs_safe: Key '{key}' is not ndarray ({type(obs[key])})! Re-initializing.")
+                         obs[key] = np.zeros(space.shape, dtype=space.dtype)
+                    elif obs[key].shape != space.shape:
+                         logging.critical(f"_get_obs_safe: Key '{key}' has WRONG SHAPE! Got {obs[key].shape}, expected {space.shape}. Re-initializing.")
+                         obs[key] = np.zeros(space.shape, dtype=space.dtype)
+                    elif obs[key].dtype != space.dtype:
+                        logging.critical(f"_get_obs_safe: Key '{key}' has WRONG DTYPE! Got {obs[key].dtype}, expected {space.dtype}. Trying safe cast, then re-initializing.")
+                        try:
+                            obs[key] = obs[key].astype(space.dtype) # Attempt safe cast first
+                        except Exception as cast_e:
+                            logging.error(f"_get_obs_safe: Cast failed for key '{key}'. Re-initializing. Error: {cast_e}")
+                            obs[key] = np.zeros(space.shape, dtype=space.dtype)
 
-            except Exception as safe_obs_e:
-                logging.critical(f"Error in _get_obs_safe itself: {safe_obs_e}", exc_info=True)
-                # Re-initialize obs with zeros as last resort
-                obs = {k: np.zeros(space.shape, dtype=space.dtype)
-                    for k, space in self.observation_space.spaces.items()}
-                obs["action_mask"][11] = True # Pass priority
-                obs["action_mask"][12] = True # Concede
-                # Ensure the key exists even here
-                obs['ability_features'] = np.zeros(self.observation_space['ability_features'].shape, dtype=self.observation_space['ability_features'].dtype)
+            # --- Final Outer Exception Handling for _get_obs_safe ---
+            except Exception as outer_safe_e:
+                logging.critical(f"CRITICAL Error within _get_obs_safe execution itself: {outer_safe_e}", exc_info=True)
+                # --- Last Resort Fallback ---
+                # Re-initialize obs completely to ensure structure matches space as best as possible
+                try:
+                     if hasattr(self, 'observation_space') and isinstance(self.observation_space, spaces.Dict):
+                          obs = {k: np.zeros(space.shape, dtype=space.dtype)
+                                 for k, space in self.observation_space.spaces.items()}
+                     else: # Observation space broken, use hardcoded minimal dict
+                          obs = {
+                              "action_mask": np.zeros(self.ACTION_SPACE_SIZE, dtype=bool),
+                              "ability_features": np.zeros((self.max_battlefield, 5), dtype=np.float32),
+                              "phase": np.array([0], dtype=np.int32), "turn": np.array([1], dtype=np.int32),
+                              "my_life": np.array([0], dtype=np.int32), "opp_life": np.array([0], dtype=np.int32),
+                              "p1_life": np.array([0], dtype=np.int32), "p2_life": np.array([0], dtype=np.int32),
+                              "my_hand_count": np.array([0], dtype=np.int32),"opp_hand_count": np.array([0], dtype=np.int32),
+                              "p1_bf_count": np.array([0], dtype=np.int32), "p2_bf_count": np.array([0], dtype=np.int32),
+                              # Add other known keys manually if possible
+                          }
+                     # Ensure crucial keys are present
+                     obs["action_mask"][11] = True; obs["action_mask"][12] = True;
+                     if "ability_features" not in obs and hasattr(self, 'observation_space') and 'ability_features' in self.observation_space.spaces:
+                          space_af = self.observation_space.spaces["ability_features"]
+                          obs["ability_features"] = np.zeros(space_af.shape, dtype=space_af.dtype)
+                     elif "ability_features" not in obs: # Hardcode fallback
+                          obs["ability_features"] = np.zeros((self.max_battlefield, 5), dtype=np.float32)
+
+                     # Final safety check for ALL expected keys in this ultimate fallback
+                     if hasattr(self, 'observation_space') and isinstance(self.observation_space, spaces.Dict):
+                         for key, space in self.observation_space.spaces.items():
+                              if key not in obs: obs[key] = np.zeros(space.shape, dtype=space.dtype)
+
+                except Exception as final_fallback_e:
+                     logging.critical(f"Failed to even create ULTIMATE FALLBACK observation: {final_fallback_e}")
+                     # Return the partially constructed obs, it might still crash but is better than raising here.
+                     if 'action_mask' not in obs: obs['action_mask'] = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+                     obs['action_mask'][11] = True; obs['action_mask'][12] = True;
             return obs
 
     def _check_game_end_conditions(self, info):
@@ -1757,19 +1844,19 @@ class AlphaZeroMTGEnv(gym.Env):
             # --- *** 5. Explicitly Handle Ability Features with Logging *** ---
             ability_features_key = "ability_features"
             try:
-                logging.debug(f"Calling _get_ability_features for {agent_player_obj.get('name','unknown player')}")
-                # Use safe helper call
+                # logging.debug(f"Calling _get_ability_features for {agent_player_obj.get('name','unknown player')}")
                 bf_ids_for_features = agent_player_obj.get("battlefield", [])
                 ability_features_result = self._get_ability_features(bf_ids_for_features, agent_player_obj)
 
-                # Verify shape IMMEDIATELY after getting the result
-                expected_shape = self.observation_space[ability_features_key].shape
-                if ability_features_result.shape == expected_shape:
-                    obs[ability_features_key] = ability_features_result
-                    logging.debug(f"_get_ability_features returned shape {ability_features_result.shape}, assigned to obs.")
+                # --->>> ADDED Check and Correction: <<<---
+                expected_space = self.observation_space.spaces[ability_features_key]
+                if not isinstance(ability_features_result, np.ndarray) or ability_features_result.shape != expected_space.shape or ability_features_result.dtype != expected_space.dtype:
+                     logging.error(f"CRITICAL: _get_ability_features returned invalid result! "
+                                  f"Got type {type(ability_features_result)}, shape {getattr(ability_features_result, 'shape', 'N/A')}, dtype {getattr(ability_features_result, 'dtype', 'N/A')}. "
+                                  f"Expected shape {expected_space.shape}, dtype {expected_space.dtype}. Resetting to zeros.")
+                     obs[ability_features_key] = np.zeros(expected_space.shape, dtype=expected_space.dtype)
                 else:
-                    logging.error(f"CRITICAL: _get_ability_features returned INCORRECT shape! Got {ability_features_result.shape}, expected {expected_shape}. Resetting {ability_features_key} to zeros.")
-                    obs[ability_features_key] = np.zeros(expected_shape, dtype=self.observation_space[ability_features_key].dtype)
+                    obs[ability_features_key] = ability_features_result
 
             except Exception as ab_feat_e:
                 logging.error(f"CRITICAL error during _get_ability_features call or assignment: {ab_feat_e}", exc_info=True)
@@ -1909,13 +1996,19 @@ class AlphaZeroMTGEnv(gym.Env):
             # --- 9. FINAL VALIDATION AND RETURN ---
             logging.debug(f"_get_obs: Populated keys: {list(obs.keys())}")
             # Explicitly check the problematic key *just before returning*
+            # Special handling for critical 'ability_features' key that's causing issues
             ability_features_key = "ability_features"
-            if ability_features_key not in obs:
-                logging.critical(f"CRITICAL: '{ability_features_key}' missing from obs right before return! Resetting.")
-                obs[ability_features_key] = np.zeros(self.observation_space[ability_features_key].shape, dtype=self.observation_space[ability_features_key].dtype)
-            elif obs[ability_features_key].shape != self.observation_space[ability_features_key].shape:
-                logging.critical(f"CRITICAL: '{ability_features_key}' has WRONG SHAPE before return! Got {obs[ability_features_key].shape}, expected {self.observation_space[ability_features_key].shape}. Resetting.")
-                obs[ability_features_key] = np.zeros(self.observation_space[ability_features_key].shape, dtype=self.observation_space[ability_features_key].dtype)
+            if ability_features_key in self.observation_space.spaces:
+                expected_space = self.observation_space.spaces[ability_features_key]
+                if ability_features_key not in obs:
+                    logging.critical(f"_get_obs_safe: Critical key '{ability_features_key}' is missing! Creating default zeros.")
+                    obs[ability_features_key] = np.zeros(expected_space.shape, dtype=expected_space.dtype)
+                elif not isinstance(obs[ability_features_key], np.ndarray):
+                    logging.critical(f"_get_obs_safe: Critical key '{ability_features_key}' is not an ndarray! Recreating.")
+                    obs[ability_features_key] = np.zeros(expected_space.shape, dtype=expected_space.dtype)
+                elif obs[ability_features_key].shape != expected_space.shape:
+                    logging.critical(f"_get_obs_safe: Critical key '{ability_features_key}' has wrong shape! Got {obs[ability_features_key].shape}, expected {expected_space.shape}. Recreating.")
+                    obs[ability_features_key] = np.zeros(expected_space.shape, dtype=expected_space.dtype)
 
             # Optional: Full validation loop (can be verbose)
             # if not self._validate_obs(obs): # Check if final obs is valid
