@@ -20,7 +20,7 @@ class GameState:
                  "phase_history", "stack", "priority_pass_count", "last_stack_size",
                  "turn", "phase", "agent_is_p1", "combat_damage_dealt", "day_night_state",
                  "current_attackers", "current_block_assignments", 'mulligan_data',
-                 "current_spell_requires_target", "current_spell_card_id",
+                 "current_spell_requires_target", "current_spell_card_id", "exhaust_ability_used",
                  "optimal_attackers", "attack_suggestion_used", 'cards_played',
                  "p1", "p2", "ability_handler", "damage_dealt_this_turn",
                  "previous_priority_phase", "layer_system", "until_end_of_turn_effects",
@@ -116,7 +116,7 @@ class GameState:
         # Combat state initialization
         self.current_attackers = []
         self.current_block_assignments = {}
-
+        self.exhaust_ability_used = {} # Add this line
         # Combat optimization variables
         self.optimal_attackers = None
         self.attack_suggestion_used = False
@@ -476,7 +476,7 @@ class GameState:
         # Assign names after init
         if self.p1: self.p1['name'] = 'Player 1'
         if self.p2: self.p2['name'] = 'Player 2'
-
+        self.exhaust_ability_used = {} # Add this line to reset
         # Set initial priority player and agent identity AFTER player init
         self.priority_player = self.p1 # P1 starts with priority
         self.agent_is_p1 = True # Assume agent is P1 by default unless configured otherwise
@@ -1313,7 +1313,11 @@ class GameState:
             logging.debug(f"Cleaning up state for {card_name} ({card_id}) leaving battlefield.")
             from_player.get("tapped_permanents", set()).discard(card_id)
             from_player.get("entered_battlefield_this_turn", set()).discard(card_id) # Clear summoning sickness if it just entered
-
+            keys_to_remove = [key for key in self.exhaust_ability_used if key[0] == card_id]
+            if keys_to_remove:
+                logging.debug(f"Clearing exhaust state for {card_name} leaving battlefield.")
+                for key in keys_to_remove:
+                    del self.exhaust_ability_used[key]
             # Cleanup attachments (what it's attached to, or what's attached to it)
             attachments = from_player.get("attachments")
             if attachments:
@@ -1464,6 +1468,21 @@ class GameState:
         # Register replacement effects
         if self.replacement_effects:
             self.replacement_effects.register_card_replacement_effects(card_id, player)
+            
+    def mark_exhaust_used(self, card_id, ability_index):
+        """Mark an exhaust ability as used for this instance of the permanent."""
+        key = (card_id, ability_index)
+        if key not in self.exhaust_ability_used:
+            self.exhaust_ability_used[key] = True
+            logging.debug(f"Marked exhaust ability index {ability_index} for {card_id} as used.")
+            return True
+        else:
+            logging.warning(f"Attempted to mark already used exhaust ability {ability_index} for {card_id}.")
+            return False # Should not happen if check_exhaust_used is called first
+
+    def check_exhaust_used(self, card_id, ability_index):
+        """Check if an exhaust ability has already been used for this instance."""
+        return (card_id, ability_index) in self.exhaust_ability_used
     
     def record_strategy_pattern(self, action_idx, reward):
         """Record the current strategy pattern and action."""
@@ -3087,7 +3106,7 @@ class GameState:
         cloned_state.miracle_card_id = self.miracle_card_id if hasattr(self, 'miracle_card_id') else None
         cloned_state.progress_was_forced = self.progress_was_forced if hasattr(self, 'progress_was_forced') else False
         cloned_state._turn_limit_checked = self._turn_limit_checked if hasattr(self, '_turn_limit_checked') else False
-
+        cloned_state.exhaust_ability_used = copy.deepcopy(self.exhaust_ability_used) if hasattr(self, 'exhaust_ability_used') else {}
         # --- Deep Copy Player States ---
         # Player States (Critical to deep copy) - Need to handle potential None
         cloned_state.p1 = copy.deepcopy(self.p1) if self.p1 else None

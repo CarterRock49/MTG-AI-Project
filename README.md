@@ -32,7 +32,6 @@ graph TD
 - Bug fix deck_stat_tracker.py (inconsistent stats?)
 - Add a better MD5 hash to saving decks, one that includes card count in deck_stat_tracker.py
 - Add support for "Start your engines"
-- Add support for "Exhaust"
 - Overhaul DeckStats_Viewer to work with the current versions of the deck_stat_tracker and card_memory.py
 - General Bug fixing needs to be done, need to integrate other stuff
 

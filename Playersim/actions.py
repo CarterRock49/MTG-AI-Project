@@ -2582,17 +2582,24 @@ class ActionHandler:
          return -0.2
 
     def _handle_activate_ability(self, param, context, **kwargs): # Param (derived from ACTION_MEANINGS) is None here
+        """
+        Handles the ACTIVATE_ABILITY action.
+        Expects 'battlefield_idx' and 'ability_idx' in context.
+        Includes checks and handling for the Exhaust mechanic.
+        """
         gs = self.game_state
-        player = gs._get_active_player()
+        player = gs._get_active_player() # Ability activation usually on your turn/priority
         # --- Get Indices from CONTEXT ---
         bf_idx = context.get('battlefield_idx')
-        ability_idx = context.get('ability_idx')
+        # The ability_idx provided in the context is the *index within the list of activated abilities*
+        # generated for the action mask (0-2 typically).
+        activated_ability_list_idx = context.get('ability_idx')
 
-        if bf_idx is None or ability_idx is None:
+        if bf_idx is None or activated_ability_list_idx is None:
              logging.error(f"ACTIVATE_ABILITY missing 'battlefield_idx' or 'ability_idx' in context: {context}")
              return -0.15, False
 
-        if not isinstance(bf_idx, int) or not isinstance(ability_idx, int):
+        if not isinstance(bf_idx, int) or not isinstance(activated_ability_list_idx, int):
              logging.error(f"ACTIVATE_ABILITY context indices are not integers: {context}")
              return -0.15, False
         # --- End Context Check ---
@@ -2602,24 +2609,153 @@ class ActionHandler:
             return -0.2, False
 
         card_id = player["battlefield"][bf_idx]
+        card = gs._safe_get_card(card_id)
+        if not card: return -0.2, False # Card not found
 
-        # Evaluate ability value before activating
-        ability_value = 0
-        if self.card_evaluator:
-            ability_value, _ = self.evaluate_ability_activation(card_id, ability_idx) # Pass correct indices
+        # Use AbilityHandler to get the ability instance
+        if not gs.ability_handler:
+            logging.error("Cannot activate ability: AbilityHandler not found.")
+            return -0.15, False
+        activated_abilities = gs.ability_handler.get_activated_abilities(card_id)
 
-        # Use AbilityHandler to activate
-        if gs.ability_handler:
-            # Pass full context if needed by specific abilities
-            success = gs.ability_handler.activate_ability(card_id, ability_idx, player, context=context)
-            if success:
-                return 0.1 + ability_value * 0.4, True
+        # Validate the list index provided by the context/action
+        if not (0 <= activated_ability_list_idx < len(activated_abilities)):
+            logging.warning(f"Invalid ability list index {activated_ability_list_idx} provided for {card.name}. Available: {len(activated_abilities)}")
+            return -0.15, False
+
+        ability_to_activate = activated_abilities[activated_ability_list_idx]
+        # Get the *internal* activation index stored on the ability object (used for tracking)
+        activation_idx_on_card = getattr(ability_to_activate, 'activation_index', -1)
+
+        if activation_idx_on_card == -1:
+             logging.error(f"Internal activation_index missing for ability {activated_ability_list_idx} on {card.name}! Cannot track exhaust.")
+             # Fail activation if it's supposed to be exhaust
+             if getattr(ability_to_activate, 'is_exhaust', False): return -0.15, False
+
+        # --- EXHAUST CHECK ---
+        is_exhaust = getattr(ability_to_activate, 'is_exhaust', False)
+
+        if is_exhaust:
+             if gs.check_exhaust_used(card_id, activation_idx_on_card): # Use the internal index
+                  logging.debug(f"Cannot activate Exhaust ability index {activation_idx_on_card} for {card.name}: Already used.")
+                  return -0.05, False # Penalty for trying used exhaust
+        # --- END EXHAUST CHECK ---
+
+        # --- PERMISSION CHECK (Timing, Priority - already done by action mask gen) ---
+        # We can assume the action is valid timing/priority-wise if it passed the mask.
+
+        # --- PAY COSTS ---
+        # Merge game state context with action context
+        cost_context = {
+            "card_id": card_id, "card": card,
+            "ability": ability_to_activate, # Pass the ability object
+            "is_ability": True,
+            "cause": "ability_activation",
+            **context # Include context from the action (e.g., choices for costs)
+        }
+
+        costs_paid = False
+        if gs.mana_system:
+            # Ensure cost string exists
+            cost_str = getattr(ability_to_activate, 'cost', None)
+            if cost_str is not None:
+                 costs_paid = gs.mana_system.pay_mana_cost(player, cost_str, cost_context)
             else:
-                logging.debug(f"ACTIVATE_ABILITY: Failed (Handled by ability_handler). Card: {card_id}, Ability: {ability_idx}")
-                return -0.1, False
+                 logging.error(f"Ability object for {card.name} missing 'cost' attribute.")
+        else: # Fallback if no mana system
+            logging.warning("Mana system missing, cannot properly handle cost payment.")
+            costs_paid = True # Assume costs paid if no system to check (risky)
+
+        if costs_paid:
+            # --- MARK EXHAUST USED (AFTER paying cost, before adding to stack) ---
+            if is_exhaust:
+                if not gs.mark_exhaust_used(card_id, activation_idx_on_card): # Use internal index
+                     logging.error(f"Failed to mark exhaust used for {card.name} index {activation_idx_on_card} despite successful payment!")
+                     # Rollback costs? Complex. Fail activation for safety.
+                     # gs.mana_system._refund_payment(player, cost_context.get('payment_details')) # Requires payment details stored
+                     return -0.2, False
+            # --- END MARK EXHAUST USED ---
+
+            # --- TRIGGER EXHAUST ACTIVATED EVENT ---
+            if is_exhaust:
+                 exhaust_context = {"activator": player, "source_card_id": card_id, "ability_index": activation_idx_on_card}
+                 # Make sure ability_handler exists before triggering
+                 if gs.ability_handler:
+                    gs.ability_handler.check_abilities(card_id, "EXHAUST_ABILITY_ACTIVATED", exhaust_context)
+                    # Immediately process triggers resulting from activation
+                    gs.ability_handler.process_triggered_abilities()
+                 else:
+                     logging.warning("Cannot trigger EXHAUST_ABILITY_ACTIVATED: AbilityHandler missing.")
+            # --- END TRIGGER EXHAUST ACTIVATED EVENT ---
+
+            # --- ADD TO STACK (Handle Targeting) ---
+            effect_text_for_stack = getattr(ability_to_activate, 'effect', getattr(ability_to_activate, 'effect_text', 'Unknown Effect'))
+            requires_target = "target" in effect_text_for_stack.lower()
+
+            if requires_target:
+                 # Ability needs targets, set up targeting phase
+                 logging.debug(f"Activated ability requires target. Entering TARGETING phase.")
+                 # Store previous phase unless already in a special phase
+                 if gs.phase not in [gs.PHASE_TARGETING, gs.PHASE_SACRIFICE, gs.PHASE_CHOOSE]:
+                    gs.previous_priority_phase = gs.phase
+                 else:
+                    gs.previous_priority_phase = gs.PHASE_MAIN_PRECOMBAT # Fallback if already special
+
+                 gs.phase = gs.PHASE_TARGETING
+                 gs.targeting_context = {
+                      "source_id": card_id,
+                      "controller": player,
+                      "effect_text": effect_text_for_stack,
+                      "required_type": gs._get_target_type_from_text(effect_text_for_stack), # Use helper
+                      "required_count": 1, # Default, need better parsing for >1 target
+                      "min_targets": 1, # Assume required if "target" present
+                      "max_targets": 1,
+                      "selected_targets": [],
+                      # Store info to put the *actual ability instance* on stack AFTER targeting
+                      "stack_info": {
+                           "item_type": "ABILITY",
+                           "source_id": card_id,
+                           "controller": player,
+                           "context": {
+                                "ability_index": activation_idx_on_card, # Use internal index
+                                "effect_text": effect_text_for_stack,
+                                "ability": ability_to_activate, # <<< Pass the ability object itself
+                                "is_exhaust": is_exhaust, # Pass exhaust status if needed for resolution
+                                "targets": {} # To be filled
+                           }
+                      }
+                 }
+                 # Set priority to the choosing player
+                 gs.priority_player = player
+                 gs.priority_pass_count = 0
+                 logging.debug(f"Set up targeting for ability: {effect_text_for_stack}")
+
+            else: # No targets needed, add directly to stack
+                 stack_context = {
+                     "ability_index": activation_idx_on_card, # Use internal index
+                     "effect_text": effect_text_for_stack,
+                     "ability": ability_to_activate, # <<< Pass the ability object itself
+                     "is_exhaust": is_exhaust, # Pass exhaust status
+                     "targets": {}
+                 }
+                 gs.add_to_stack("ABILITY", card_id, player, stack_context)
+                 logging.debug(f"Added non-targeting ability index {activated_ability_list_idx} ({activation_idx_on_card}) for {card.name} to stack{' (Exhaust)' if is_exhaust else ''}.")
+
+            # --- Calculate Reward ---
+            ability_value = 0
+            if self.card_evaluator:
+                try:
+                     # Pass correct ability index (internal activation_idx_on_card)
+                     ability_value, _ = self.evaluate_ability_activation(card_id, activation_idx_on_card)
+                except Exception as eval_e:
+                    logging.error(f"Error evaluating ability activation {card_id}, {activation_idx_on_card}: {eval_e}")
+
+            # Activation success reward + strategic value
+            return 0.1 + ability_value * 0.4, True
         else:
-             logging.warning("ACTIVATE_ABILITY: AbilityHandler not found.")
-             return -0.15, False
+            logging.debug(f"Failed to pay cost for ability index {activated_ability_list_idx} ({activation_idx_on_card}) on {card.name}")
+            # Cost payment failure might need rollback logic in pay_cost (should be handled by ManaSystem)
+            return -0.1, False
 
     def _handle_loyalty_ability(self, param, action_type, **kwargs):
          gs = self.game_state

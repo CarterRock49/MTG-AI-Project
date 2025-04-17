@@ -626,7 +626,7 @@ class AbilityHandler:
         Parse a card's text to identify and register its abilities.
         Handles regular cards, Class cards, and MDFCs. Clears previous abilities first.
         Uses _create_keyword_ability for keywords. Skips text already processed by specialized parsers.
-        Applies static abilities immediately after parsing.
+        Applies static abilities immediately after parsing. Tracks activated ability indices.
         """
         if not card:
             logging.warning(f"Attempted to parse abilities for non-existent card {card_id}.")
@@ -639,6 +639,7 @@ class AbilityHandler:
         # Clear existing registered abilities for this card_id to avoid duplication
         self.registered_abilities[card_id] = []
         abilities_list = self.registered_abilities[card_id] # Get reference to the list
+        activated_ability_counter = 0 # Track index for activated abilities specifically
 
         try:
             texts_to_parse = []
@@ -652,33 +653,29 @@ class AbilityHandler:
             if hasattr(card, 'is_class') and card.is_class:
                 current_level_data = card.get_current_class_data()
                 if current_level_data:
-                    # Text comes from combined abilities of current level
-                    texts_to_parse.extend(current_level_data.get('all_abilities', [])) # Use combined abilities
-                    # The raw oracle text containing level structure is considered "special"
+                    texts_to_parse.extend(current_level_data.get('all_abilities', []))
                     processed_special_text = getattr(card, 'oracle_text', '')
-                if hasattr(card, 'keywords'): keywords_from_card_data = card.keywords # Assuming base keywords apply
+                if hasattr(card, 'keywords'): keywords_from_card_data = card.keywords
 
             elif hasattr(card, 'faces') and card.faces and current_face_index < len(card.faces):
-                 # MDFC or Transforming DFC - use current face
                  face_data = card.faces[current_face_index]
-                 card_data_source = face_data # Get attributes from the face dict/object
+                 card_data_source = face_data
                  texts_to_parse.append(face_data.get('oracle_text', ''))
-                 keywords_from_card_data = face_data.get('keywords', []) # Use face keywords
-                 # Consider if back face text needs special marking? Depends on structure.
+                 keywords_from_card_data = face_data.get('keywords', [])
 
             else:
-                 # Standard card or other types (like Room, Battle)
                  texts_to_parse.append(getattr(card, 'oracle_text', ''))
                  if hasattr(card, 'keywords'): keywords_from_card_data = card.keywords
-                 # --- Check for Spree Text Marker ---
                  if hasattr(card, 'is_spree') and card.is_spree and hasattr(card, '_spree_related_text_marker'):
                      processed_special_text += card._spree_related_text_marker
 
             # --- Parse Keywords from Data ---
             parsed_keywords = self._get_parsed_keywords(keywords_from_card_data)
             for keyword_text in parsed_keywords:
-                first_word = keyword_text.split()[0]
-                self._create_keyword_ability(card_id, card, first_word, abilities_list, full_keyword_text=keyword_text)
+                first_word = keyword_text.split()[0] if keyword_text else ""
+                if first_word: # Ensure first_word is not empty
+                    self._create_keyword_ability(card_id, card, first_word, abilities_list, full_keyword_text=keyword_text)
+
 
             # --- Process Oracle Text Clauses ---
             processed_text_hashes = set()
@@ -710,22 +707,48 @@ class AbilityHandler:
                     text_hash = hash(cleaned_clause_text)
 
                     if text_hash not in processed_text_hashes:
+                        original_length = len(abilities_list) # Track list length before parsing clause
+
                         is_keyword_clause, keyword_found = self._is_keyword_clause(cleaned_clause_text)
 
                         if is_keyword_clause:
+                            # Handle keywords (might create Static or Triggered or marker)
                             if isinstance(keyword_found, list):
                                 for sub_kw in keyword_found: self._create_keyword_ability(card_id, card, sub_kw, abilities_list, full_keyword_text=sub_kw)
                             else: self._create_keyword_ability(card_id, card, keyword_found, abilities_list, full_keyword_text=cleaned_clause_text)
                         else:
-                             # Delegate classification to _parse_ability_text
-                             self._parse_ability_text(card_id, card, cleaned_clause_text, abilities_list)
+                            # Delegate classification, checking for Exhaust first
+                            is_exhaust = False
+                            text_to_parse_further = cleaned_clause_text
+                            # Use more robust pattern matching various dash types
+                            exhaust_match = re.match(r"^\s*Exhaust\s*(?:—|-|–|\u2014)\s*(.+)", cleaned_clause_text, re.IGNORECASE | re.DOTALL)
+                            if exhaust_match:
+                                is_exhaust = True
+                                text_to_parse_further = exhaust_match.group(1).strip()
+
+                            # Pass flags and current counter to parser
+                            self._parse_ability_text(
+                                card_id, card, text_to_parse_further, abilities_list,
+                                is_exhaust=is_exhaust,
+                                current_activated_index=activated_ability_counter
+                            )
+
+                        # Increment activated counter ONLY if a NEW ActivatedAbility was added
+                        if len(abilities_list) > original_length and isinstance(abilities_list[-1], ActivatedAbility) and not isinstance(abilities_list[-1], ManaAbility):
+                            # Ensure the activation index is set correctly on the newly added ability
+                            newly_added_ability = abilities_list[-1]
+                            if not hasattr(newly_added_ability, 'activation_index'): # Only set if not already set (e.g., by _parse_ability_text)
+                                setattr(newly_added_ability, 'activation_index', activated_ability_counter)
+                            # Increment counter for the *next* potential activated ability
+                            activated_ability_counter += 1
+
                         processed_text_hashes.add(text_hash)
+
 
             # Log final count for this card
             logging.debug(f"Parsed {len(abilities_list)} functional abilities for {card.name} ({card_id})")
 
             # Immediately apply newly registered Static Abilities
-            # Needs to happen AFTER all parsing for a card is done.
             static_abilities_applied = []
             for ability in abilities_list:
                 if isinstance(ability, StaticAbility):
@@ -744,7 +767,6 @@ class AbilityHandler:
             logging.error(traceback.format_exc())
             # Ensure list exists even on error
             if card_id not in self.registered_abilities: self.registered_abilities[card_id] = []
-
             
     # Helper function to parse keywords list/array
     def _get_parsed_keywords(self, keywords_data):
@@ -1101,33 +1123,31 @@ class AbilityHandler:
              logging.warning(f"Keyword '{keyword_lower}' (from '{full_text}') not explicitly mapped or parsed.")
             
 
-    def _parse_ability_text(self, card_id, card, ability_text, abilities_list):
+    def _parse_ability_text(self, card_id, card, ability_text, abilities_list, is_exhaust=False, current_activated_index=None):
         """
         Parse a single ability text string. Delegates parsing logic to Ability subclasses.
         Tries to identify Activated, Triggered, or Static, in that order. Handles em dashes.
         Avoids classifying effects clearly handled by replacements (like copy ETBs).
+        Accepts is_exhaust and current_activated_index to correctly label exhaust abilities.
         """
         ability_text = ability_text.strip()
         if not ability_text: return
 
         # --- Check for Replacement Effect Patterns first ---
         replacement_keywords = ["if", "would", "instead", "as", "with"]
-        # Very basic check, assumes more complex parsing happens elsewhere
-        if all(kw in ability_text.lower() for kw in ["if", "would", "instead"]) or \
-           (ability_text.lower().startswith("as ") and "enters the battlefield" in ability_text.lower()) or \
-           (ability_text.lower().startswith("enters the battlefield with ") and "counter" in ability_text.lower()):
-            # This looks like a replacement or ETB effect, handled by ReplacementEffectSystem or ETB logic.
-            # Log that we're skipping it here.
+        text_lower_for_check = ability_text.lower() # Use lower for keyword checks
+        if all(kw in text_lower_for_check for kw in ["if", "would", "instead"]) or \
+           (text_lower_for_check.startswith("as ") and "enters the battlefield" in text_lower_for_check) or \
+           (text_lower_for_check.startswith("enters the battlefield with ") and "counter" in text_lower_for_check):
             logging.debug(f"Skipping parsing functional ability for text resembling replacement/ETB: '{ability_text}'")
             return
-
 
         # 1. Try parsing as Activated Ability (Cost[:—] Effect)
         try:
             # Temporarily create to attempt parsing
             ability = ActivatedAbility(card_id=card_id, effect_text=ability_text, cost="placeholder", effect="placeholder")
             # Check if the constructor successfully found a cost AND effect
-            if ability.cost != "placeholder" and ability.effect is not None: # Allow empty effect if structure is Cost:
+            if ability.cost != "placeholder" and ability.effect is not None:
                  # Check if it's actually a Mana Ability
                  if "add {" in ability.effect.lower() or "add mana" in ability.effect.lower():
                       mana_produced = self._parse_mana_produced(ability.effect)
@@ -1136,29 +1156,39 @@ class AbilityHandler:
                            setattr(mana_ability, 'source_card', card)
                            abilities_list.append(mana_ability)
                            logging.debug(f"Registered ManaAbility for {card.name}: {mana_ability.effect_text}")
-                           return
+                           return # Parsed as Mana Ability, EXITS function
                  # Parsed as standard Activated
                  setattr(ability, 'source_card', card)
+                 # --- ADDED: Attach exhaust flags and activation index ---
+                 if is_exhaust and current_activated_index is not None:
+                     setattr(ability, 'is_exhaust', True)
+                     setattr(ability, 'activation_index', current_activated_index)
+                     logging.debug(f"  Attached is_exhaust=True, activation_index={current_activated_index}")
+                 elif current_activated_index is not None: # Store index even if not exhaust
+                      setattr(ability, 'activation_index', current_activated_index)
+                 else:
+                      # Fallback: If index wasn't provided but we *know* it's exhaust (e.g. direct call), error?
+                      if is_exhaust:
+                         logging.error(f"Exhaust ability '{ability_text}' parsed without an activation index!")
+                 # --- END ADDED ---
                  abilities_list.append(ability)
-                 logging.debug(f"Registered ActivatedAbility for {card.name}: {ability.effect_text}")
-                 return
+                 logging.debug(f"Registered ActivatedAbility for {card.name}: {ability.effect_text}{' (Exhaust)' if is_exhaust else ''}")
+                 return # Parsed as Activated Ability, EXITS function
             # If placeholder remains, it didn't parse as activated. Fall through.
         except ValueError: pass # Pattern not found or invalid cost/effect structure
         except Exception as e: logging.error(f"Error attempting to parse as ActivatedAbility: {e}")
 
-
         # 2. Try parsing as Triggered Ability (When/Whenever/At ..., Effect)
         try:
             ability = TriggeredAbility(card_id=card_id, effect_text=ability_text, trigger_condition="placeholder", effect="placeholder")
-            if ability.trigger_condition != "placeholder" and ability.effect is not None: # Allow empty effect part? Check rules. Usually has effect.
+            if ability.trigger_condition != "placeholder" and ability.effect is not None:
                  setattr(ability, 'source_card', card)
                  abilities_list.append(ability)
                  logging.debug(f"Registered TriggeredAbility for {card.name}: {ability.effect_text}")
-                 return
+                 return # Parsed as Triggered, EXITS function
             # If placeholder remains, fall through.
         except ValueError: pass
         except Exception as e: logging.error(f"Error attempting to parse as TriggeredAbility: {e}")
-
 
         # 3. Assume Static if not Activated/Triggered AND doesn't look like simple keyword
         # Basic check to avoid re-registering keywords already handled
@@ -1166,8 +1196,8 @@ class AbilityHandler:
         already_registered_as_keyword = any(getattr(a, 'keyword', None) == ability_text.lower() for a in abilities_list)
 
         # Add check for common action verbs unlikely in static abilities
-        action_verbs = [r'\b(destroy|exile|counter|draw|discard|create|search|tap|untap|target|deal|sacrifice)\b'] # Needs refinement
-        is_likely_action = any(re.search(verb, ability_text.lower()) for verb in action_verbs)
+        action_verbs = [r'\b(destroy|exile|counter|draw|discard|create|search|tap|untap|target|deal|sacrifice)\b']
+        is_likely_action = any(re.search(verb, text_lower_for_check) for verb in action_verbs)
 
         if not is_likely_action and (not is_simple_keyword or not already_registered_as_keyword):
             try:
@@ -1176,16 +1206,13 @@ class AbilityHandler:
                 setattr(ability, 'source_card', card)
                 abilities_list.append(ability)
                 logging.debug(f"Registered StaticAbility for {card.name}: {ability.effect_text}")
-                # IMPORTANT: Apply static ability during the *apply_all_effects* stage of LayerSystem,
-                # not necessarily right here during parsing. The call below is deferred.
-                # ability.apply(self.game_state) # Removed immediate application
-                return
+                # StaticAbility.apply() called later by _parse_and_register_abilities
+                return # Parsed as Static, EXITS function
             except Exception as e:
                 logging.error(f"Error parsing as StaticAbility: {e}")
 
         # If none of the above worked, log it unless it was handled keyword
         if not is_simple_keyword or not already_registered_as_keyword:
-             # Don't log if it was likely an action phrase we intentionally skipped
             if not is_likely_action:
                  logging.debug(f"Could not classify ability text for {card.name}: '{ability_text}' (Potentially Replacement/Action/Keyword?)")
         
@@ -1244,6 +1271,7 @@ class AbilityHandler:
         """
         Checks all registered triggered abilities to see if they should trigger based on the event.
         Adds valid triggers to the self.active_triggers queue. Now checks graveyard.
+        Handles EXHAUST_ABILITY_ACTIVATED event and checks activator relationship.
         """
         if context is None: context = {}
         gs = self.game_state
@@ -1256,22 +1284,26 @@ class AbilityHandler:
         context['event_card_id'] = event_origin_card_id
         context['event_card'] = event_card
 
-        logging.debug(f"Checking triggers for event: {event_type} (Origin: {getattr(event_card, 'name', event_origin_card_id)}) Context: {context.keys()}")
+        # Debug logging for the event check initiation
+        event_card_name = getattr(event_card, 'name', event_origin_card_id) if event_origin_card_id else "Game Event"
+        logging.debug(f"Checking triggers for event: {event_type} (Origin: {event_card_name}) Context keys: {list(context.keys())}")
+        if event_type == "EXHAUST_ABILITY_ACTIVATED":
+            logging.debug(f"  (Exhaust activation by {context.get('activator', {}).get('name', 'Unknown')})")
+
 
         # Determine zones to check based on event type
         zones_to_check = {"battlefield"} # Default zone
         # Add graveyard checks for specific events
-        # Example: Abilities triggering on discard, or specific card abilities (Bloodghast)
-        graveyard_trigger_events = ["DISCARD", "DIES", "CAST_SPELL"] # Add more as needed
-        # Specific "Whenever X is put into your graveyard from anywhere" or similar text?
+        graveyard_trigger_events = ["DISCARD", "DIES", "CAST_SPELL", "MILL"] # Added MILL
         if event_type in graveyard_trigger_events:
             zones_to_check.add("graveyard")
 
         # Check abilities on permanents in relevant zones
         cards_to_check_ids = set()
         for p in [gs.p1, gs.p2]:
-            for zone_name in zones_to_check:
-                 cards_to_check_ids.update(p.get(zone_name, []))
+            if p: # Ensure player exists
+                for zone_name in zones_to_check:
+                    cards_to_check_ids.update(p.get(zone_name, []))
             # Consider adding hand/library/exile if specific triggers warrant it
 
         for ability_source_id in cards_to_check_ids:
@@ -1279,8 +1311,7 @@ class AbilityHandler:
             if not source_card: continue
 
             registered_abilities = self.registered_abilities.get(ability_source_id, [])
-            # Find current zone of the source
-            source_controller, source_zone = gs.find_card_location(ability_source_id)
+            source_controller, source_zone = gs.find_card_location(ability_source_id) # Get current location
 
             for ability in registered_abilities:
                 if isinstance(ability, TriggeredAbility):
@@ -1289,25 +1320,33 @@ class AbilityHandler:
                     ability_zone = getattr(ability, 'zone', 'battlefield').lower() # Where the ability normally functions from
                     trigger_text = getattr(ability, 'trigger_condition', '').lower()
 
-                    # Battlefield abilities usually require source on battlefield
-                    if ability_zone == 'battlefield' and source_zone == 'battlefield':
+                    # Define conditions for triggering from zones
+                    zone_conditions = {
+                        'battlefield': source_zone == 'battlefield',
+                        'graveyard': source_zone == 'graveyard',
+                        'hand': source_zone == 'hand',
+                        # Add more zones as needed (exile, stack)
+                    }
+                    # Standard zone check
+                    if zone_conditions.get(ability_zone, False):
                         can_trigger_from_zone = True
-                    # Graveyard abilities trigger only from graveyard
-                    elif ability_zone == 'graveyard' and source_zone == 'graveyard':
+                    # Special zone-crossing triggers (e.g., Dies triggers check LTB event)
+                    elif ability_zone == 'battlefield' and "dies" in trigger_text and event_type == "DIES":
                         can_trigger_from_zone = True
-                    # Abilities that trigger from anywhere (rare, need specific check)
+                    # "Leaves the battlefield" triggers
+                    elif ability_zone == 'battlefield' and "leaves the battlefield" in trigger_text and event_type == "LEAVE_BATTLEFIELD":
+                         can_trigger_from_zone = True
+                    # Cast triggers from Hand (or other zones like GY/Exile if applicable)
+                    elif ability_zone == source_zone and ("when you cast" in trigger_text or "whenever you cast" in trigger_text) and event_type == "CAST_SPELL":
+                        # Needs to check if the cast source *is this ability source*
+                        if context.get('cast_card_id') == ability_source_id:
+                             can_trigger_from_zone = True
+                    # "From anywhere" triggers
                     elif "from anywhere" in trigger_text:
                         can_trigger_from_zone = True
-                    # Hand triggers? (e.g., Cycling triggers 'when cycled')
-                    elif ability_zone == 'hand' and source_zone == 'hand' and event_type == "CYCLING":
-                        can_trigger_from_zone = True
-                    # Dies triggers check when leaving battlefield
-                    elif source_zone == 'battlefield' and "dies" in trigger_text and event_type == "DIES":
-                        can_trigger_from_zone = True # Trigger condition check handles the rest
 
                     if not can_trigger_from_zone:
-                        # logging.debug(f"Skipping ability check for {source_card.name}: Cannot trigger from zone '{source_zone}'.")
-                        continue
+                        continue # Skip this ability, can't trigger from its current zone
 
                     # Prepare context specific to this ability check
                     trigger_check_context = context.copy()
@@ -1316,22 +1355,44 @@ class AbilityHandler:
                     trigger_check_context['source_zone'] = source_zone # Pass current zone
 
                     try:
-                        if ability.can_trigger(event_type, trigger_check_context):
-                            # Ability controller might differ from card controller if zone changes
-                            # Get controller based on ability source (or owner if no controller)
-                            ability_controller = source_controller if source_controller else gs.get_card_owner(ability_source_id) # Get owner as fallback
+                        # Determine if the ability's condition matches the event type
+                        should_check_event = False
+                        # --- MODIFIED: Check for exhaust trigger text BEFORE general can_trigger ---
+                        if event_type == "EXHAUST_ABILITY_ACTIVATED":
+                            if "activate an exhaust ability" in trigger_text:
+                                activator = context.get("activator")
+                                trigger_controller_obj = source_controller # Use controller from find_card_location
+                                if activator and trigger_controller_obj:
+                                    if "you activate" in trigger_text:
+                                        should_check_event = (activator == trigger_controller_obj)
+                                    elif "an opponent activates" in trigger_text:
+                                        should_check_event = (activator != trigger_controller_obj)
+                                    else: # No specific player mentioned, applies to any exhaust activation
+                                        should_check_event = True
+                        # --- END MODIFIED ---
+                        else: # Use standard trigger check for other events
+                             should_check_event = ability.can_trigger(event_type, trigger_check_context)
+
+                        # If event type matches, queue the trigger
+                        if should_check_event:
+                            ability_controller = source_controller # Use controller from find_card_location
                             if ability_controller:
                                 self.active_triggers.append((ability, ability_controller))
                                 logging.debug(f"Queued trigger: '{ability.trigger_condition}' from {source_card.name} ({ability_source_id} in {source_zone}) due to {event_type}")
                             else:
-                                logging.warning(f"Trigger source {ability_source_id} has no controller/owner, cannot queue trigger.")
+                                # This might happen if card is not controlled (e.g., in GY owned by other player?)
+                                # Fallback to owner
+                                owner = gs.get_card_owner(ability_source_id)
+                                if owner:
+                                    self.active_triggers.append((ability, owner))
+                                    logging.debug(f"Queued trigger (owner fallback): '{ability.trigger_condition}' from {source_card.name}")
+                                else:
+                                     logging.warning(f"Trigger source {ability_source_id} has no controller/owner, cannot queue trigger.")
                     except Exception as e:
                         logging.error(f"Error checking trigger condition for {ability.effect_text} from {source_card.name}: {e}")
                         import traceback; logging.error(traceback.format_exc())
 
-
-        # Return value indicates if any triggers were added, but not used externally right now
-        return bool(self.active_triggers) # Or just return None
+        return bool(self.active_triggers) # Return value indicates if any triggers were added
 
     def get_activated_abilities(self, card_id):
         """Get all activated abilities for a given card"""
