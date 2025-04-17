@@ -813,55 +813,45 @@ class ReplacementEffectSystem:
         return effect_id
     
     def _extract_replacement_clauses(self, text):
-        """Extract replacement clauses from card text with better pattern recognition."""
+        """Extract replacement clauses, handling em dash."""
         clauses = []
-
-        # Common replacement patterns with named groups
+        # Patterns accept em dash in some cases if it replaces other punctuation
         patterns = [
-            # If X would Y, instead Z
-            r'if (?P<subject>[^,]+?) would (?P<action>[^,]+?), (?:instead )?(?P<replacement>[^\.]+)\.?',
-            # If X would Y, Z instead
-            r'if (?P<subject>[^,]+?) would (?P<action>[^,]+?), (?P<replacement>[^\.]+?) instead\.?',
-            # Instead of X doing Y, Z
-            r'instead of (?P<subject>[^,]+?) (?P<action>[^,]+?), (?P<replacement>[^\.]+)\.?',
-            # As X enters..., ... instead
-            r'as (?P<subject>[^,]+?) enters.*?, (?P<replacement>[^\.]+) instead\.?',
-            # X is replaced by Y
-            r'(?P<action>[^,]+?) is replaced by (?P<replacement>[^\.]+)\.?' # Subject might be implicit
+            r'if (?P<subject>[^,]+?) would (?P<action>[^,:\u2014]+?),?\s*(?:instead\s+)?(?P<replacement>[^\.]+)\.?', # Handle optional comma/dash before instead
+            # Removed redundant/overlapping patterns
+            r'as (?P<subject>[^,]+?) enters.*?,?\s*(?P<replacement>[^\.]+) instead\.?',
         ]
-
-        # Normalize potential line breaks affecting patterns
         text = text.replace('\n', ' ')
 
         for pattern in patterns:
             for match in re.finditer(pattern, text, re.IGNORECASE | re.DOTALL):
-                subject = match.groupdict().get('subject', 'it').strip() # Default subject if pattern misses it
-                action = match.groupdict().get('action', '').strip()
-                replacement = match.groupdict().get('replacement', '').strip()
-
-                # Determine event type from action
-                event_type = self._determine_event_type(action)
-
-                # Extract condition (if any) - check within replacement text first
+                clause_data = match.groupdict()
+                # Basic post-processing
+                subject = clause_data.get('subject', 'it').strip()
+                action = clause_data.get('action', '').strip()
+                replacement = clause_data.get('replacement', '').strip()
+                event_type = self._determine_event_type(action) if action else 'UNKNOWN' # Determine from action
+                # Simple condition extraction
                 condition = None
                 if " if " in replacement:
                     parts = replacement.split(" if ", 1)
                     replacement = parts[0].strip()
                     condition = parts[1].strip()
-                # Also check subject for simple conditions like "a creature an opponent controls"
-                if condition is None and "opponent controls" in subject:
-                     # This simple check is weak, _create_enhanced_condition_function is better
-                     # condition = f"subject controller is opponent" # Example marker
-                     pass
 
                 clauses.append({
-                    'clause': match.group(0),
-                    'event_type': event_type,
-                    'subject': subject,
-                    'action': action,
-                    'replacement': replacement,
-                    'condition': condition
+                    'clause': match.group(0), 'event_type': event_type, 'subject': subject,
+                    'action': action, 'replacement': replacement, 'condition': condition
                 })
+
+        # Add pattern specifically for Dredge "If you would draw..., instead you may..."
+        dredge_pattern = r"if you would draw a card, instead you may put exactly (\d+) cards from the top of your library into your graveyard"
+        for match in re.finditer(dredge_pattern, text, re.IGNORECASE):
+             clauses.append({
+                 'clause': match.group(0), 'event_type': 'DRAW', 'subject': 'you',
+                 'action': 'draw a card', 'replacement': 'dredge', 'condition': None, # Dredge is a special replacement handled differently
+                 'dredge_value': int(match.group(1))
+             })
+
 
         return clauses
     
@@ -938,36 +928,32 @@ class ReplacementEffectSystem:
         return True
         
     def _register_if_would_instead_effect(self, card_id, player, oracle_text):
-        """Register standard 'if...would...instead' effects."""
+        """Register standard 'if...would...instead' effects (No dash change needed)."""
+        # The core logic relies on finding these keywords, not specific separators.
+        # The _extract_replacement_clauses helper is responsible for parsing the structure.
         source_card = self.game_state._safe_get_card(card_id)
         source_name = source_card.name if source_card and hasattr(source_card, 'name') else f"Card {card_id}"
         registered_effects = []
 
-        # Normalize text and extract clauses
         normalized_text = re.sub(r'\([^)]*\)', '', oracle_text.lower()).strip()
-        clauses = self._extract_replacement_clauses(normalized_text)
+        clauses = self._extract_replacement_clauses(normalized_text) # Call the updated helper
 
         for clause_data in clauses:
             event_type = clause_data['event_type']
-            if event_type == 'UNKNOWN': continue # Skip if we couldn't map action
+            if event_type == 'UNKNOWN': continue
 
-            # Create condition and replacement functions
             condition_func = self._create_enhanced_condition_function(event_type, clause_data['subject'], clause_data['condition'], player)
             replacement_func = self._create_enhanced_replacement_function(event_type, clause_data['replacement'], player, source_name)
 
             duration = self._determine_duration(normalized_text)
 
             effect_id = self.register_effect({
-                'source_id': card_id,
-                'event_type': event_type,
-                'condition': condition_func,
-                'replacement': replacement_func,
-                'duration': duration,
-                'controller_id': player, # Store who controls the effect source
+                'source_id': card_id, 'event_type': event_type, 'condition': condition_func,
+                'replacement': replacement_func, 'duration': duration, 'controller_id': player,
                 'description': f"{source_name}: {clause_data['clause']}"
             })
             registered_effects.append(effect_id)
-            logging.debug(f"Registered {event_type} replacement from {source_name}: {clause_data['clause']}")
+            # Logging inside register_effect is sufficient
 
         return registered_effects
 

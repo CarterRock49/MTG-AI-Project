@@ -145,57 +145,34 @@ class Card:
          # Reset temporary attachments? Should be handled by GS attachment logic.
             
     def parse_type_line(self, type_line):
-        """
-        Enhanced parsing of type line with support for complex type structures.
-        
-        Args:
-            type_line (str): The type line to parse
-            
-        Returns:
-            tuple: (card_types, subtypes, supertypes)
-        """
+        """Enhanced parsing of type line with support for em dash separator."""
         if not type_line:
             return [], [], []
-        
-        # Normalize type line
+
         normalized = type_line.lower().strip()
-        
-        # Handle split cards
         if '//' in normalized:
-            # For split cards, we'll only parse the front face's type line
             normalized = normalized.split('//')[0].strip()
-        
-        # Parse supertypes, types, and subtypes
-        supertypes = []
-        card_types = []
-        subtypes = []
-        
-        # Split into main types and subtypes
-        if '—' in normalized:
-            main_types, subtype_text = normalized.split('—', 1)
+
+        supertypes, card_types, subtypes = [], [], []
+        # Handle both em dash and hyphen as subtype separators
+        if '—' in normalized or '-' in normalized:
+            separator = '—' if '—' in normalized else '-'
+            main_types, subtype_text = normalized.split(separator, 1)
             subtypes = [s.strip() for s in subtype_text.strip().split()]
         else:
             main_types = normalized
-        
-        # Parse main types into supertypes and card types
+
         known_supertypes = ['legendary', 'basic', 'world', 'snow', 'tribal']
-        known_card_types = [
-            'creature', 'artifact', 'enchantment', 'land', 'planeswalker', 
-            'instant', 'sorcery', 'battle', 'conspiracy', 'dungeon', 
-            'phenomenon', 'plane', 'scheme', 'vanguard', 'class', 'room'
-        ]
-        
+        known_card_types = Card.ALL_CARD_TYPES # Use class variable
+
         main_type_parts = main_types.split()
         for part in main_type_parts:
             if part in known_supertypes:
                 supertypes.append(part)
             elif part in known_card_types:
                 card_types.append(part)
-            else:
-                # Unknown type - could be a custom type or a typo
-                # For safety, we'll treat it as a card type
-                card_types.append(part)
-        
+            # Ignore potential unknown super/card types if needed, or add to a specific list
+
         return card_types, subtypes, supertypes
             
     def get_transform_trigger_type(self):
@@ -312,76 +289,99 @@ class Card:
     #
     def _parse_spree_modes(self):
         """
-        Enhanced parsing of Spree modes with comprehensive handling of variations.
-        
+        Enhanced parsing of Spree modes with comprehensive handling of variations,
+        including em dash separators.
+
         Parsing strategy:
-        1. Deeply parse spree base text and mode descriptions
-        2. Extract detailed mode information including:
-        - Precise cost parsing (mana, life, other resources)
-        - Comprehensive effect analysis
-        - Target identification with nuanced restrictions
-        - Conditional and contextual parsing
+        1. Identify if the card has the Spree keyword.
+        2. Extract the text block containing the modes.
+        3. Use regex to find individual modes, matching "+ COST {—|-} EFFECT".
+        4. Parse details for each mode using helper functions.
         """
         # Reset spree-related attributes
         self.is_spree = False
-        self.spree_modes = []
+        self.spree_modes = [] # Store list of mode dictionaries
 
+        # Check if card has oracle text
         if not hasattr(self, 'oracle_text') or not self.oracle_text:
-            return
+            return # Cannot parse without text
 
         # Normalize oracle text for consistent parsing
-        oracle_text = self.oracle_text.lower()
-        
-        # Robust Spree identification
-        spree_patterns = [
-            r'spree\s*\((.*?)\)(.*?)(?:\n|$)',  # Primary pattern
-            r'choose\s+additional\s+modes\s*:(.*?)(?:\n|$)'  # Alternative pattern
-        ]
-        
-        spree_match = None
-        for pattern in spree_patterns:
-            match = re.search(pattern, oracle_text, re.IGNORECASE | re.DOTALL)
-            if match:
-                spree_match = match
-                break
-        
-        if not spree_match:
-            return
-        
-        # Set spree flag
+        # Remove reminder text first
+        oracle_text_cleaned = re.sub(r'\s*\([^()]*?\)\s*', ' ', self.oracle_text).strip()
+        oracle_text_lower = oracle_text_cleaned.lower() # Use lowercase for matching
+
+        # Robust Spree identification using keyword
+        spree_keyword_match = re.search(r'\bspree\b', oracle_text_lower)
+        if not spree_keyword_match:
+            return # Not a spree card
+
         self.is_spree = True
 
         try:
-            spree_explanation = spree_match.group(1).strip()
-            modes_text = spree_match.group(2).strip()
-            
-            # More sophisticated mode parsing
-            mode_patterns = [
-                r'\+\s*(\{[^}]+\})\s*—\s*([^+.]+)\.?',  # Standard mode pattern
-                r'additional\s+cost:\s*(\{[^}]+\})\s*effect:\s*([^+.]+)\.?'  # Alternative pattern
-            ]
-            
-            modes = []
-            for pattern in mode_patterns:
-                modes = re.findall(pattern, modes_text, re.IGNORECASE)
-                if modes:
-                    break
-            
-            for cost_text, effect_text in modes:
+            # --- Extract Modes Text ---
+            # Find the start of the modes list, usually after "spree" keyword or introductory text.
+            # Often modes start with '+' symbol. Find the first '+' indicating a mode.
+            first_mode_plus_match = re.search(r'\n\s*\+\s*', oracle_text_cleaned)
+            modes_text_block = ""
+            if first_mode_plus_match:
+                 modes_text_block = oracle_text_cleaned[first_mode_plus_match.start():].strip()
+            else:
+                 # Fallback: Assume modes start after the first sentence containing "spree" if '+' not found
+                 spree_sentence_end = oracle_text_lower.find('.', spree_keyword_match.end())
+                 if spree_sentence_end != -1:
+                      modes_text_block = oracle_text_cleaned[spree_sentence_end + 1:].strip()
+                 else: # If no period, maybe text ends? Take rest of text.
+                      modes_text_block = oracle_text_cleaned[spree_keyword_match.end():].strip()
+
+
+            if not modes_text_block:
+                 logging.warning(f"Could not isolate spree modes text for {self.name}")
+                 return
+
+            # --- Parse Individual Modes ---
+            # Regex: Find '+' sign, capture cost in {}, then capture effect after '-' or '—' until newline or end
+            # Pattern: Start with '+', capture cost {.*?} optionally followed by whitespace, then '-' OR '—', capture effect .*?
+            #          Non-greedy .*? stops before the next potential '+' or end of string \Z
+            mode_pattern = r'\+\s*(\{.+?\})\s*(?:-|—)\s*(.*?)(?=(?:\n\s*\+)|$|\Z)' # Accepts - or — after cost
+            mode_matches = re.findall(mode_pattern, modes_text_block, re.DOTALL) # Use DOTALL to match across newlines if needed
+
+            if not mode_matches:
+                 logging.warning(f"No spree modes matched pattern for {self.name} in block: '{modes_text_block[:100]}...'")
+                 return
+
+            for cost_text, effect_text in mode_matches:
+                # Basic cleanup of captured groups
+                cost_cleaned = cost_text.strip()
+                effect_cleaned = effect_text.strip().rstrip('.').strip() # Remove trailing periods and whitespace
+
+                if not cost_cleaned or not effect_cleaned:
+                     logging.warning(f"Skipped poorly matched spree mode for {self.name}: Cost='{cost_cleaned}', Effect='{effect_cleaned}'")
+                     continue
+
+                # Use helper functions to parse details (kept from original structure)
                 mode_details = {
-                    'cost': cost_text.strip(),
-                    'effect': effect_text.strip(),
-                    'cost_type': self._analyze_cost_type(cost_text),
-                    'cost_value': self._parse_cost_value(cost_text),
-                    'effect_details': self._parse_effect_details(effect_text)
+                    'cost': cost_cleaned,
+                    'effect': effect_cleaned,
+                    'cost_type': self._analyze_cost_type(cost_cleaned),
+                    'cost_value': self._parse_cost_value(cost_cleaned), # Simple numeric value if applicable
+                    'effect_details': self._parse_effect_details(effect_cleaned) # Detailed parsing
                 }
-                
+
                 self.spree_modes.append(mode_details)
-        
+                logging.debug(f"Parsed Spree Mode for {self.name}: Cost='{mode_details['cost']}', Effect='{mode_details['effect'][:50]}...'")
+
+            if not self.spree_modes:
+                 logging.warning(f"Identified {self.name} as Spree card, but failed to parse any modes.")
+
+
         except Exception as e:
             logging.error(f"Complex Spree mode parsing error for {self.name}: {str(e)}")
             import traceback
             logging.error(traceback.format_exc())
+            # Ensure attributes are reset/empty on error
+            self.is_spree = False
+            self.spree_modes = []
             
     def _analyze_cost_type(self, cost_text):
         """Determine cost type (mana, life, sacrifice, etc.)"""
@@ -439,92 +439,106 @@ class Card:
                 details['targets'].extend(targets)
         
         return details
-    #
-    # Class card handling methods
+    
     def _parse_class_data(self, card_data):
         """
-        Enhanced parsing of Class card data with comprehensive level handling.
-        
-        Robust parsing strategy:
-        1. Detect complex Class card characteristics
-        2. Parse multi-stage level progressions
-        3. Handle nuanced ability inheritance
-        4. Support conditional level-up mechanics
+        Enhanced parsing of Class card data, handling base level and level-up costs/abilities.
         """
         # Reset Class-related attributes
         self.is_class = False
         self.levels = []
-        self.current_level = 1
+        self.current_level = 1 # Assume starting at level 1
         self.all_abilities = []
-        self.level_up_costs = {}
-        
+        self.level_up_costs = {} # Store costs keyed by target level {2: cost, 3: cost}
+
         if not hasattr(self, 'type_line') or 'class' not in self.type_line.lower():
             return
 
         self.is_class = True
 
         try:
-            if not hasattr(self, 'oracle_text') or not self.oracle_text:
+            oracle_text = getattr(self, 'oracle_text', '')
+            if not oracle_text:
+                logging.warning(f"Class card {self.name} has no oracle_text to parse.")
                 return
 
-            oracle_text = self.oracle_text.lower()
-            
-            # Enhanced level parsing pattern
-            level_pattern = r'level\s+(\d+)(?:\s*\(([^)]+)\))?:\s*([^\n]+)'
-            level_matches = re.finditer(level_pattern, oracle_text, re.IGNORECASE)
-            
-            # Comprehensive level parsing
-            for match in level_matches:
-                level_num = int(match.group(1))
-                level_condition = match.group(2)  # Optional condition
-                level_text = match.group(3).strip()
-                
+            # Normalize text: remove reminder text, normalize whitespace
+            processed_text = re.sub(r'\s*\([^()]*?\)\s*', ' ', oracle_text).strip()
+            processed_text = re.sub(r'\s+', ' ', processed_text)
+
+            # --- Parse Base Level (Level 1) ---
+            # Find text before the first level-up indicator (e.g., "{COST}: Level 2")
+            level_2_marker_match = re.search(r"(\{.+?\}:\s*Level\s+2)", processed_text)
+            base_text = processed_text
+            if level_2_marker_match:
+                base_text = processed_text[:level_2_marker_match.start()].strip()
+
+            # Split base text into abilities (handle different separators)
+            base_abilities = [a.strip() for a in re.split(r'\s*\n\s*|\s*[•●]\s*', base_text) if a.strip()]
+            base_level_data = {
+                'level': 1,
+                'cost': None, # No cost to *reach* level 1 itself
+                'abilities': base_abilities,
+                'power': None, # Class usually isn't creature initially
+                'toughness': None,
+                'type_modifications': {}
+            }
+            self.levels.append(base_level_data)
+
+            # --- Parse Higher Levels ---
+            # Regex to find COST: Level N followed by ability text until next marker or end
+            # Pattern explanation:
+            # (\{.+?\}):\s*       # Group 1: Capture the cost like {3}{U}:
+            # Level\s+(\d+)       # Group 2: Capture the level number
+            # \s*                  # Optional whitespace
+            # ([\s\S]*?)          # Group 3: Capture the abilities text (non-greedy)
+            # (?=(\{.+?\}:\s*Level|\Z)) # Lookahead: Stop before the next level marker or end of string
+            higher_level_pattern = r"(\{.+?\}):\s*Level\s+(\d+)\s*([\s\S]*?)(?=(?:\{.+?\}:\s*Level\s+\d)|\Z)"
+            higher_level_matches = re.finditer(higher_level_pattern, processed_text, re.IGNORECASE)
+
+            for match in higher_level_matches:
+                cost = match.group(1).strip()
+                level_num = int(match.group(2))
+                abilities_text = match.group(3).strip()
+
+                # Split ability text into individual abilities
+                level_abilities = [a.strip() for a in re.split(r'\s*\n\s*|\s*[•●]\s*', abilities_text) if a.strip()]
+
                 level_data = {
                     'level': level_num,
-                    'condition': level_condition,
-                    'abilities': [],
+                    'cost': cost,
+                    'abilities': level_abilities,
                     'power': None,
                     'toughness': None,
-                    'type_modifications': {},
-                    'cost': self._parse_level_up_cost(level_num, oracle_text)
+                    'type_modifications': {}
                 }
-                
-                # Ability extraction with more nuanced parsing
-                ability_patterns = [
-                    r'gains?\s+(.+?)(?:\.|$)',  # Ability gaining
-                    r'becomes?\s+(.+?)(?:\.|$)'  # Transformation effects
-                ]
-                
-                for pattern in ability_patterns:
-                    ability_matches = re.findall(pattern, level_text, re.IGNORECASE)
-                    level_data['abilities'].extend(ability_matches)
-                
-                # Power/Toughness parsing
-                power_match = re.search(r'(\d+)/(\d+)', level_text)
-                if power_match:
-                    level_data['power'] = int(power_match.group(1))
-                    level_data['toughness'] = int(power_match.group(2))
-                
-                # Type line modifications
-                type_mods = re.findall(r'becomes?\s+a?\s*(.+?)\s+(?:creature|card)', level_text, re.IGNORECASE)
-                if type_mods:
-                    level_data['type_modifications'] = {
-                        'subtypes': type_mods[0].split()
-                    }
-                
+
+                # Store the cost required to *reach* this level
+                self.level_up_costs[level_num] = cost
+
                 self.levels.append(level_data)
-            
-            # Sort levels to ensure progression
+
+            # Sort levels just in case they weren't in order in the text
             self.levels.sort(key=lambda x: x['level'])
-            
-            # Initial ability consolidation
+
+            # Consolidate initial abilities for level 1
             self._consolidate_abilities()
-        
+
+            # Log the parsed levels for verification
+            logging.debug(f"Parsed Class '{self.name}' Levels: {self.levels}")
+            logging.debug(f"Level Up Costs for '{self.name}': {self.level_up_costs}")
+
+            if not self.levels or self.levels[0]['level'] != 1:
+                 logging.warning(f"Class parsing might be incomplete for {self.name}. Base level not found or levels list empty.")
+
+
         except Exception as e:
             logging.error(f"Complex Class parsing error for {self.name}: {str(e)}")
             import traceback
             logging.error(traceback.format_exc())
-            
+            # Ensure levels is at least an empty list on error
+            if not hasattr(self, 'levels'):
+                self.levels = []
     
     def _parse_level_up_cost(self, level, oracle_text):
         """
@@ -700,22 +714,25 @@ class Card:
 
     def get_level_cost(self, level):
         """
-        Get the mana cost to reach a specific level.
-        
+        Get the mana cost to activate the ability to reach a specific level.
+
         Args:
-            level (int): Target level to reach
-        
+            level (int): Target level to reach (e.g., 2 or 3)
+
         Returns:
-            str: Mana cost to reach the level, or None if not found
+            str: Mana cost string (e.g., "{3}{U}") or None if not found.
         """
         if not self.is_class:
             return None
-        
-        for level_data in self.levels:
-            if level_data['level'] == level:
-                return level_data['cost']
-        
-        return None
+
+        # Use the pre-parsed level_up_costs dictionary
+        cost = self.level_up_costs.get(level)
+
+        if cost:
+            return cost
+        else:
+            logging.warning(f"Could not find level-up cost for level {level} of Class {self.name}.")
+            return None
 
     def can_level_up(self):
         """
@@ -760,34 +777,71 @@ class Card:
 
     def get_current_class_data(self):
         """
-        Get the data for the Class at its current level. Handles cases with no valid levels.
+        Get the consolidated data for the Class at its current level.
+        Includes abilities from all levels up to and including the current one.
 
         Returns:
-            dict or None: Comprehensive data for the current class level, or None if no valid level found.
+            dict or None: Comprehensive data for the current class state, or None if invalid.
         """
         if not self.is_class or not hasattr(self, 'levels') or not self.levels:
-            logging.warning(f"Attempted to get class data for non-class card or card with no levels: {self.name}")
-            return None
+            logging.warning(f"Attempted to get class data for non-class card or card with unparsed levels: {self.name}")
+            # Check if levels might be empty *after* parsing attempt due to error
+            if not hasattr(self, 'levels'): self.levels = [] # Ensure it's a list
+            if not self.levels:
+                # Attempt re-parse as a fallback? Could be risky.
+                # Log error and return None for now.
+                logging.error(f"Cannot get class data for {self.name}: 'levels' list is empty after parsing.")
+                return None
+            # If list exists but somehow no level 1 (parsing error), also return None
+            if not any(lvl.get('level') == 1 for lvl in self.levels):
+                logging.error(f"Cannot get class data for {self.name}: Level 1 data missing.")
+                return None
+            # If code reaches here, self.levels exists but self.is_class might be false? Should be caught earlier.
 
-        # Find the highest level data not exceeding current level
-        filtered_levels = [level for level in self.levels if hasattr(level, 'get') and level.get('level') is not None and level['level'] <= self.current_level]
+        # Find data for the exact current level
+        current_level_data = None
+        for level_data in self.levels:
+            if isinstance(level_data, dict) and level_data.get('level') == self.current_level:
+                current_level_data = level_data
+                break
 
-        if not filtered_levels:
-            # This should ideally not happen if parsing/init is correct, but handle defensively.
-            # Could mean current_level is invalid or no levels <= current_level exist.
-            logging.warning(f"Could not find valid level data at or below current level {self.current_level} for class {self.name}. Levels available: {self.levels}")
-            # Option 1: Return None
-            # return None
-            # Option 2: Return the lowest available level as a fallback?
-            lowest_level_data = min(self.levels, key=lambda x: x.get('level', float('inf')))
-            logging.warning(f"Falling back to lowest level data (Level {lowest_level_data.get('level')})")
-            return lowest_level_data
-            # Option 3: Create a default level 1 data structure? More complex.
+        if current_level_data is None:
+             # Fallback: Find the highest level achieved <= current level (Handles cases where current_level might be invalid temporarily)
+             valid_levels = [lvl for lvl in self.levels if isinstance(lvl, dict) and lvl.get('level') is not None and lvl['level'] <= self.current_level]
+             if valid_levels:
+                 current_level_data = max(valid_levels, key=lambda x: x.get('level', 0))
+                 logging.warning(f"Could not find exact data for Level {self.current_level} of {self.name}. Using highest valid level found: {current_level_data.get('level')}")
+             else:
+                  # Severe issue: No levels <= current_level found. Use Level 1 as absolute fallback.
+                  level_1_data = next((lvl for lvl in self.levels if isinstance(lvl, dict) and lvl.get('level') == 1), None)
+                  if level_1_data:
+                       logging.error(f"No valid level data found at or below current level {self.current_level} for {self.name}. Defaulting to Level 1.")
+                       current_level_data = level_1_data
+                  else:
+                       logging.error(f"CRITICAL: Cannot find ANY level data (not even Level 1) for {self.name}.")
+                       return None # Cannot proceed
 
-        # If filtered_levels is not empty, proceed with max()
-        current_level_data = max(filtered_levels, key=lambda x: x.get('level', 0))
+        # --- Consolidate data ---
+        # Combine abilities from all levels up to current level
+        consolidated_data = {
+            'level': self.current_level,
+            'all_abilities': [],
+            'current_level_abilities': current_level_data.get('abilities', []), # Abilities specifically from this level
+            # Include other relevant fields from the current level data
+            'power': current_level_data.get('power'),
+            'toughness': current_level_data.get('toughness'),
+            'type_modifications': current_level_data.get('type_modifications', {})
+        }
 
-        return current_level_data
+        # Add abilities from previous levels
+        for level_data in self.levels:
+            if isinstance(level_data, dict) and level_data.get('level') is not None and level_data['level'] <= self.current_level:
+                consolidated_data['all_abilities'].extend(level_data.get('abilities', []))
+
+        # Store the consolidated abilities on the instance if needed elsewhere quickly
+        self.all_abilities = consolidated_data['all_abilities']
+
+        return consolidated_data
 
     #
     # Room card handling methods

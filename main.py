@@ -802,8 +802,17 @@ def objective(trial):
         logging.info(f"Trial pruned due to poor performance")
         raise
     except Exception as e:
-        logging.error(f"Hyperparameter trial failed: {e}")
-        return float('-inf')
+        import traceback
+        tb_str = traceback.format_exc() # Get the full traceback string
+        logging.error(f"Hyperparameter trial failed.")
+        logging.error(f"--- Exception Type: {type(e).__name__} ---")
+        logging.error(f"--- Exception Args: {e.args} ---")
+        logging.error(f"--- Full Traceback: ---")
+        logging.error(tb_str) # Log the detailed traceback
+        logging.error(f"-------------------------")
+        # Still return -inf for Optuna or raise TrialPruned
+        # raise optuna.TrialPruned() # If you want Optuna to handle it as pruned
+        return float('-inf') # If you want Optuna to just record a bad score
     finally:
         vec_env.close()
 

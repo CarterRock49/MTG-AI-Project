@@ -1069,31 +1069,33 @@ class CombatActionHandler:
     # --- Mana Cost String Helpers ---
     def _get_equip_cost_str(self, card):
         if card and hasattr(card, 'oracle_text'):
-            match = re.search(r"equip\s*(?:—)?\s*(\{.*?\})", card.oracle_text.lower()) # More robust pattern
+            # Match 'equip' followed optionally by em dash or hyphen, then cost
+            match = re.search(r"equip\s*(?:-|—)?\s*(\{.*?\})", card.oracle_text.lower())
             if match: return match.group(1)
-            match = re.search(r"equip\s*(\d+)", card.oracle_text.lower())
+            match = re.search(r"equip\s*(\d+)\b", card.oracle_text.lower()) # Match digits only if bracketed cost not found
             if match: return f"{{{match.group(1)}}}"
         return None
 
     def _get_reconfigure_cost_str(self, card):
         if card and hasattr(card, 'oracle_text'):
-             match = re.search(r"reconfigure\s*(?:—)?\s*(\{.*?\})", card.oracle_text.lower())
+             match = re.search(r"reconfigure\s*(?:-|—)?\s*(\{.*?\})", card.oracle_text.lower())
              if match: return match.group(1)
-             match = re.search(r"reconfigure\s*(\d+)", card.oracle_text.lower())
+             match = re.search(r"reconfigure\s*(\d+)\b", card.oracle_text.lower())
              if match: return f"{{{match.group(1)}}}"
         return None
 
     def _get_ninjutsu_cost_str(self, card):
         if card and hasattr(card, 'oracle_text'):
-             match = re.search(r"ninjutsu\s*(?:—)?\s*(\{.*?\})", card.oracle_text.lower())
+             match = re.search(r"ninjutsu\s*(?:-|—)?\s*(\{.*?\})", card.oracle_text.lower())
              if match: return match.group(1)
+             # Ninjutsu usually requires mana cost, less likely just digits
         return None
-    
+
     def _get_fortify_cost_str(self, card):
          if card and hasattr(card, 'oracle_text'):
-             match = re.search(r"fortify\s*(?:—)?\s*(\{.*?\})", card.oracle_text.lower())
+             match = re.search(r"fortify\s*(?:-|—)?\s*(\{.*?\})", card.oracle_text.lower())
              if match: return match.group(1)
-             match = re.search(r"fortify\s*(\d+)", card.oracle_text.lower())
+             match = re.search(r"fortify\s*(\d+)\b", card.oracle_text.lower())
              if match: return f"{{{match.group(1)}}}"
          return None
 

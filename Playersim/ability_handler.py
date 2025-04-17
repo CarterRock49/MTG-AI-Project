@@ -775,8 +775,13 @@ class AbilityHandler:
         Distinguishes static, triggered, activated, and rule-modifying keywords. (Improved)
         Connects rule-modifying keywords to game state/systems where appropriate.
         """
-        keyword_lower = keyword_name.lower()
-        full_text = (full_keyword_text or keyword_name).lower() # Use full text if provided
+        keyword_lower = keyword_name.lower().strip() # Ensure clean keyword
+        full_text = (full_keyword_text or keyword_name).lower().strip() # Use full text if provided
+
+        # --- Basic validation ---
+        if not keyword_lower or not full_text:
+            logging.warning(f"Skipping keyword ability creation due to empty keyword/text.")
+            return
 
         current_value = None
         is_parametrized_keyword = False
@@ -788,117 +793,120 @@ class AbilityHandler:
             if match_num:
                 val_str = match_num.group(1)
                 return val_str if val_str.lower() == 'x' else int(val_str)
-            defaults = {'annihilator':1, 'poisonous':1, 'afterlife':1, 'fading':1, 'vanishing':1, 'reinforce':1, 'crew':1, 'scavenge':1, 'monstrosity':1, 'adapt':1, 'afflict':1, 'rampage':1, 'cascade':0, 'discover':0, 'suspend': 1} # Added Suspend default
-            return defaults.get(keyword, 1)
+            # Add default values for keywords with implicit N=1 or N=specific
+            defaults = {'annihilator':1, 'poisonous':1, 'afterlife':1, 'fading':1, 'vanishing':1,
+                        'reinforce':1, 'crew':1, 'scavenge':1, 'monstrosity':1, 'adapt':1,
+                        'afflict':1, 'rampage':1, 'cascade':0, 'discover':0, 'suspend': 1,
+                        'frenzy': 1} # Added frenzy default
+            return defaults.get(keyword, 1) # Default to 1 if no specific N or default known
 
         def _parse_cost(text, keyword):
             keyword_pattern = re.escape(keyword)
+            # Add Ninjutsu pattern
             patterns = [
                 # Regex for standard mana costs like {W}, {2}, {G/U}
-                rf"{keyword_pattern}\s*(\{{" + r"[WUBRGCXSPMTQA0-9\/\.]+" + r"+\}})",
+                rf"{keyword_pattern}\s*(?:—)?\s*(\{{" + r"[WUBRGCXSPMTQA0-9\/\.]+" + r"+\}})",
                  # Regex for simple numeric costs like Kicker 2
                 rf"{keyword_pattern}\s+(\d+)\b",
                 # Specific patterns for Cycling variations
                 rf"cycling\s+(discard.+)\b", rf"cycling\s+-\s+pay (\d+) life",
-                # Add Ward costs explicitly if needed here or handle in main Ward check
+                # Ward cost variations
+                rf"ward\s*(\{{" + r"[WUBRGCXSPMTQA0-9\/\.]+" + r"+\}})", rf"ward\s+(-|–)\s*(pay (\d+) life|discard a card|sacrifice (?:a|an) (\w+))", rf"ward\s*(\d+)"
             ]
             for pattern in patterns:
                 match = re.search(pattern, text, re.IGNORECASE)
                 if match:
-                    cost_part = match.group(1).strip()
-                    if cost_part.isdigit(): return f"{{{cost_part}}}" # Convert '2' to '{2}'
-                    if cost_part.startswith('{') and cost_part.endswith('}'): return cost_part # Already formatted
-                    if "discard" in cost_part: return "discard" # Specific non-mana cost
-                    if "pay life" in cost_part: return "pay_life" # Specific non-mana cost
-            # Special cases not matching patterns
+                    cost_part = match.group(1) or match.group(2) or match.group(3) or match.group(4)
+                    if cost_part:
+                        cost_part = cost_part.strip()
+                        if cost_part.isdigit(): return f"{{{cost_part}}}" # Convert '2' to '{2}'
+                        if cost_part.startswith('{') and cost_part.endswith('}'): return cost_part # Already formatted
+                        # Return non-mana cost descriptors
+                        if "discard" in cost_part: return "discard_card"
+                        if "pay life" in cost_part: return f"pay_{re.search(r'(\d+)', cost_part).group(1)}_life"
+                        if "sacrifice" in cost_part: return f"sacrifice_{re.search(r'sacrifice (?:a|an) (\w+)', cost_part).group(1)}"
+            # Special cases
             if keyword == "retrace": return "Discard a land card"
             if keyword == "level up":
                  cost_match = re.search(r"(\{.*?\})\s*:\s*Level Up", text, re.IGNORECASE)
                  if cost_match: return cost_match.group(1)
             if keyword == "suspend":
-                # Find the cost after Suspend N - COST
                 cost_match = re.search(r"suspend\s+\d+\s*—\s*(\{.*?\})", text, re.IGNORECASE)
-                if cost_match:
-                    return cost_match.group(1)
-                # Suspend without a cost (e.g., Rift Bolt) defaults to {0} - treated as free cast from suspend
-                return "{0}" # No explicit cost means it's free to cast when counters run out
+                if cost_match: return cost_match.group(1)
+                return "{0}" # No explicit cost means free cast
 
-            # Return default free cost if no pattern matches
-            return "{0}"
+            return "{0}" # Default free cost
 
-        # --- Value/Cost Parsing ---
+
+        # --- Value/Cost Parsing (Moved Ward before N to handle complex ward first) ---
         # Protection
         if keyword_lower == "protection":
             match = re.search(r"protection from (.*)", full_text)
             if match: current_value = match.group(1).strip(); is_parametrized_keyword = True
-        # Ward
+        # Ward (Needs careful parsing of cost types)
         elif keyword_lower == "ward":
-            ward_cost_match = re.search(r"ward\s*(\{.*?\})", full_text) or \
-                            re.search(r"ward\s*(\d+)", full_text) or \
-                            re.search(r"ward\s*(- \d+)", full_text) or \
-                            re.search(r"ward\s+-\s+discard a card", full_text) or \
-                            re.search(r"ward\s+-\s+pay (\d+) life", full_text) or \
-                            re.search(r"ward\s+-\s+sacrifice a", full_text)
-            if ward_cost_match:
-                cost_group = ward_cost_match.group(1) or ward_cost_match.group(2)
-                if cost_group: current_value = cost_group.strip()
-                else: # Handle text-based ward costs
-                    if "discard a card" in full_text: current_value = "discard_card"
-                    elif "pay life" in full_text: current_value = "pay_life" # TODO: Capture amount
-                    elif "sacrifice" in full_text: current_value = "sacrifice" # TODO: Capture sacrifice type
-                    else: current_value = "ward_generic"
-            else: current_value = "ward_generic"
+            cost_str = _parse_cost(full_text, keyword_lower) # Use cost parser
+            if cost_str and cost_str != "{0}": # Found a cost other than default empty
+                current_value = cost_str
+            else: # Fallback if cost parser didn't find standard ward cost
+                current_value = "ward_generic" # Generic flag
             is_parametrized_keyword = True
         # Keywords with numerical value (N)
-        elif keyword_lower in ["annihilator", "afflict", "fading", "vanishing", "rampage", "poisonous", "afterlife", "cascade", "reinforce", "crew", "scavenge", "monstrosity", "adapt", "discover"]:
+        elif keyword_lower in ["annihilator", "afflict", "fading", "vanishing", "rampage", "poisonous", "afterlife", "cascade", "reinforce", "crew", "scavenge", "monstrosity", "adapt", "discover", "frenzy"]: # Added frenzy
             current_value = _parse_value(full_text, keyword_lower)
             is_parametrized_keyword = True
-        # Keywords with associated cost string
-        elif keyword_lower in ["cycling", "equip", "fortify", "reconfigure", "unearth", "flashback", "bestow", "dash", "buyback", "madness", "transmute", "channel", "kicker", "entwine", "overload", "splice", "surge", "embalm", "eternalize", "jump-start", "escape", "awaken", "level up", "retrace"]:
-            cost_str = _parse_cost(full_text, keyword_lower) # Use helper to parse cost
-            current_value = cost_str # Store cost string as the value
+        # Keywords with associated cost string (includes Ninjutsu now)
+        elif keyword_lower in ["cycling", "equip", "fortify", "reconfigure", "unearth", "flashback", "bestow", "dash", "buyback", "madness", "transmute", "channel", "kicker", "entwine", "overload", "splice", "surge", "embalm", "eternalize", "jump-start", "escape", "awaken", "level up", "retrace", "ninjutsu"]: # Added Ninjutsu
+            cost_str = _parse_cost(full_text, keyword_lower)
+            current_value = cost_str
             is_parametrized_keyword = True
         # Suspend (N, Cost)
         elif keyword_lower == "suspend":
-            cost_str = _parse_cost(full_text, keyword_lower) # Use helper to parse cost
+            cost_str = _parse_cost(full_text, keyword_lower)
             n_value = _parse_value(full_text, keyword_lower) # N value
             is_parametrized_keyword = True
             current_value = (n_value, cost_str) # Store tuple (N, Cost)
 
         # --- Duplicate Check ---
         if is_parametrized_keyword:
-            # Correct check for suspend tuple
+            # Handle suspend tuple value
+            value_to_check = current_value
             if keyword_lower == "suspend":
-                if any(getattr(a, 'keyword', None) == keyword_lower and getattr(a, 'keyword_value', None) == current_value for a in abilities_list):
-                     return
-            elif any(getattr(a, 'keyword', None) == keyword_lower and getattr(a, 'keyword_value', None) == current_value for a in abilities_list):
-                return
+                value_to_check = f"N={current_value[0]},Cost={current_value[1]}" # String representation for checking
+
+            # Check if an ability with the same keyword and *value* already exists
+            if any(getattr(a, 'keyword', None) == keyword_lower and
+                   ((keyword_lower != "suspend" and getattr(a, 'keyword_value', None) == value_to_check) or
+                    (keyword_lower == "suspend" and getattr(a, 'keyword_value', None) == current_value)) # Direct tuple check for suspend
+                   for a in abilities_list):
+                 return
         else:
-            if any(getattr(a, 'keyword', None) == keyword_lower for a in abilities_list):
-                return
+             # Check if an ability with the same keyword (without value) already exists
+             if any(getattr(a, 'keyword', None) == keyword_lower for a in abilities_list):
+                  return
 
 
         # --- Static Grant Keywords (Layer 6) -> StaticAbility ---
-        # Includes phasing and banding which affect rules but apply like static abilities
-        static_keywords = ["flying", "first strike", "double strike", "trample", "vigilance", "haste", "lifelink", "deathtouch", "indestructible", "hexproof", "shroud", "reach", "menace", "defender", "unblockable", "protection", "ward", "landwalk", "islandwalk", "swampwalk", "mountainwalk", "forestwalk", "plainswalk", "fear", "intimidate", "shadow", "horsemanship", "infect", "wither", "changeling", "phasing", "banding"] # Added phasing, banding
+        # Flash and Double Strike added
+        static_keywords = ["flying", "first strike", "double strike", "trample", "vigilance", "haste", "lifelink", "deathtouch", "indestructible", "hexproof", "shroud", "reach", "menace", "defender", "unblockable", "protection", "ward", "landwalk", "islandwalk", "swampwalk", "mountainwalk", "forestwalk", "plainswalk", "fear", "intimidate", "shadow", "horsemanship", "infect", "wither", "changeling", "phasing", "banding", "flash"]
         is_static_grant = keyword_lower in static_keywords or "walk" in keyword_lower
         if is_static_grant:
             ability_effect_text = f"This permanent has {full_text}."
-            ability_title = f"{keyword_name.capitalize()}" # Base title
+            ability_title = keyword_name.capitalize()
             # Adjust title for parametrized keywords
             if keyword_lower == "protection" and current_value: ability_title = f"Protection from {current_value}"
             elif keyword_lower == "ward" and current_value: ability_title = f"Ward {current_value}"
-            elif "walk" in keyword_lower: ability_title = f"{keyword_name.capitalize()}"
+            elif "walk" in keyword_lower: ability_title = keyword_name.capitalize()
 
             ability = StaticAbility(card_id, ability_title, ability_effect_text) # Use title, full text
             setattr(ability, 'keyword', keyword_lower)
             setattr(ability, 'keyword_value', current_value)
-            abilities_list.append(ability); ability.apply(self.game_state)
+            abilities_list.append(ability); ability.apply(self.game_state) # Apply immediately
             logging.debug(f"Created StaticAbility for keyword: {full_text}")
             return
 
-
         # --- Triggered Keywords -> TriggeredAbility ---
+        # Added Frenzy N
         triggered_map = {
             "prowess": ("whenever you cast a noncreature spell", "this creature gets +1/+1 until end of turn."),
             "cascade": ("when you cast this spell", f"Exile cards until you hit a nonland card with mana value less than {getattr(current_value,'__iter__', False) and current_value[0] or 'this spell'}. You may cast it without paying its mana cost."), # Use N from tuple or default text
@@ -925,6 +933,7 @@ class AbilityHandler:
             "haunt": ("When this creature dies, exile it haunting target creature.", "When the haunted creature dies, trigger haunt effect."), # Simplified text
             "discover": ("when you cast this spell", f"Exile cards until you hit a nonland card with mana value {current_value} or less. You may cast it without paying its mana cost or put it into your hand."), # N=current_value
             "living weapon": ("when this equipment enters the battlefield", "create a 0/0 black Phyrexian Germ creature token, then attach this to it."),
+            "frenzy": ("whenever this creature attacks and isn't blocked", f"it gets +{current_value}/+0 until end of turn."), # Added Frenzy N
         }
         if keyword_lower in triggered_map:
              trigger_cond, effect_desc = triggered_map[keyword_lower]
@@ -951,6 +960,7 @@ class AbilityHandler:
 
 
         # --- Activated Keywords -> ActivatedAbility ---
+        # Added Ninjutsu
         activated_map = {
             "cycling": ("discard this card: draw a card."),
             "equip": ("attach to target creature you control. Equip only as a sorcery."),
@@ -973,33 +983,38 @@ class AbilityHandler:
             "retrace": ("You may cast this card from your graveyard by discarding a land card in addition to paying its other costs."), # Value is cost
             "embalm": ("Exile this card from your graveyard: Create a token that's a copy of it, except it's a white Zombie [OriginalType] with no mana cost. Embalm only as a sorcery."), # Value is cost
             "eternalize": ("Exile this card from your graveyard: Create a token that's a copy of it, except it's a 4/4 black Zombie [OriginalType] with no mana cost. Eternalize only as a sorcery."), # Value is cost
-            # Madness is handled differently - not a standard activated ability
+            "ninjutsu": ("Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking."), # Added Ninjutsu
         }
         battlefield_activated = ["equip", "fortify", "level up", "reconfigure", "crew", "outlast", "monstrosity", "adapt", "boast"]
-        hand_activated = ["cycling", "channel", "transmute", "reinforce"]
+        hand_activated = ["cycling", "channel", "transmute", "reinforce", "ninjutsu"] # Added ninjutsu
         gy_activated = ["unearth", "scavenge", "flashback", "jump-start", "retrace", "embalm", "eternalize"]
         other_zone_activated = ["morph"] # Face down is a special state
 
         if keyword_lower in activated_map: # Excludes Madness explicitly now
             cost_to_use = current_value if current_value else "{0}"
             effect_desc = activated_map[keyword_lower]
-            ability = ActivatedAbility(card_id, cost_to_use, effect_desc, effect_text=full_text)
+            # Ninjutsu cost is already stored in `current_value`. The description doesn't need cost prefix.
+            if keyword_lower == "ninjutsu": ability_text = effect_desc
+            else: ability_text = full_text # Use full text for others
+
+            ability = ActivatedAbility(card_id, cost_to_use, effect_desc, effect_text=ability_text)
             setattr(ability, 'keyword', keyword_lower)
             setattr(ability, 'keyword_value', cost_to_use)
-            # --- Zone setting logic remains the same ---
+            # --- Zone setting logic ---
             if keyword_lower in hand_activated: setattr(ability, 'zone', 'hand')
             elif keyword_lower in gy_activated: setattr(ability, 'zone', 'graveyard')
             elif keyword_lower in battlefield_activated: setattr(ability, 'zone', 'battlefield')
             elif keyword_lower in other_zone_activated:
                 if keyword_lower == 'morph': setattr(ability, 'zone', 'face_down')
             else: setattr(ability, 'zone', 'battlefield') # Default
+
             abilities_list.append(ability)
             logging.debug(f"Created ActivatedAbility for keyword: {full_text} (Zone: {getattr(ability, 'zone', 'unknown')})")
             return
 
 
         # --- Rule Modifying Keywords -> StaticAbility OR Special Handling ---
-        # Includes Suspend, Madness, Rebound, Phasing, Banding markers
+        # ... (Keep existing Rule Keyword logic) ...
         rule_keywords = {
             # Cost reduction
             "affinity": "artifact", "convoke": True, "delve": True, "improvise": True,
@@ -1047,11 +1062,11 @@ class AbilityHandler:
 
             setattr(ability, 'keyword_cost', kw_cost)
             setattr(ability, 'keyword_value', kw_value)
-            abilities_list.append(ability); ability.apply(self.game_state)
+            abilities_list.append(ability); ability.apply(self.game_state) # Apply immediately
 
-            # --- Special Handling Refined Logging ---
+            # Special Handling Refined Logging
+            # ... (keep existing logging for special cases) ...
             if keyword_lower == "suspend":
-                 # Static ability marks the option to suspend from hand
                  logging.debug(f"Registered Suspend marker (N={kw_value}, Cost={kw_cost}). Requires separate action.")
             elif keyword_lower == "split second":
                  logging.debug("Registered Split Second marker (handled by GameState/ActionHandler).")
@@ -1063,14 +1078,15 @@ class AbilityHandler:
                 logging.debug("Registered Phasing marker (handled by GameState during untap).")
             elif keyword_lower == "banding":
                 logging.debug("Registered Banding marker (handled by CombatResolver).")
-            # ... other complex keywords ...
             else:
                 logging.debug(f"Registered rule-modifying keyword '{keyword_lower}' as StaticAbility marker.")
             return
 
 
-        # --- Fallback (remains the same) ---
-        if not is_static_grant: # Avoid logging if already handled as static grant
+        # --- Fallback ---
+        # Check if it's handled by EffectFactory before warning
+        is_scry_effect = keyword_lower.startswith("scry")
+        if not is_static_grant and not is_scry_effect: # Scry handled by EffectFactory from text
              logging.warning(f"Keyword '{keyword_lower}' (from '{full_text}') not explicitly mapped or parsed.")
             
     def _parse_ability_text(self, card_id, card, ability_text, abilities_list):

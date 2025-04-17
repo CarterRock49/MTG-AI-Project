@@ -172,37 +172,45 @@ class ActivatedAbility(Ability):
             self.effect_text = f"{self.cost}: {self.effect}"
         
     def _parse_cost_effect(self, text):
-        """Attempt to parse 'Cost: Effect' format."""
-        match = re.match(r'^\s*([^:]+?)\s*:\s*(.+)\s*$', text.strip())
+        """Attempt to parse 'Cost: Effect' or 'Cost — Effect' format."""
+        # Updated regex to match ':' or '—' as separator
+        match = re.match(r'^\s*([^:—\u2014]+?)\s*[:—\u2014]\s*(.+)\s*$', text.strip()) # Use [:—\u2014]
         if match:
             cost_part = match.group(1).strip()
             effect_part = match.group(2).strip()
             # Basic validation: Cost should contain '{' or keyword like 'Tap'
             if '{' in cost_part or re.search(r'\b(tap|sacrifice|discard|pay)\b', cost_part.lower()):
                  return cost_part, effect_part
-        # Check for keyword costs without colon (e.g., Cycling {2}, Equip {1})
-        match_keyword_cost = re.match(r"^(cycling|equip|flashback|kicker|level up|morph|unearth|reconfigure|fortify|channel|adapt|monstrosity)\s*(.*?)(?::|$)", text.lower().strip())
+
+        # Check for keyword costs without separator (e.g., Cycling {2}, Equip {1}, Flashback {R}—Return...)
+        # Check keywords that might be followed by cost (and maybe an em dash before description)
+        keyword_cost_pattern = r"^(cycling|equip|flashback|kicker|level up|morph|unearth|reconfigure|fortify|channel|adapt|monstrosity|ninjutsu)\s*(?:-|—)?\s*(.*?)(?:\s*[:—\u2014]\s*|$)"
+        match_keyword_cost = re.match(keyword_cost_pattern, text.lower().strip(), re.IGNORECASE)
         if match_keyword_cost:
             keyword = match_keyword_cost.group(1)
-            # Extract cost from the rest of the text
             rest_of_text = match_keyword_cost.group(2).strip()
+            # Extract cost from the rest of the text (handles digits or bracketed costs)
             cost_match = re.search(r"(\{[^}]+\}|[0-9]+)", rest_of_text)
             cost_part = cost_match.group(1) if cost_match else "{0}" # Default free? Risky.
             if cost_part.isdigit(): cost_part = f"{{{cost_part}}}"
-            # Effect is derived from the keyword action itself
-            effect_map = {
-                "cycling": "Discard this card: Draw a card.",
-                "equip": "Attach to target creature.",
-                "flashback": "Cast from graveyard, then exile.",
-                "level up": "Put a level counter on this.",
-                "morph": "Turn this face up.",
-                # Add more keyword effects
-            }
-            effect_part = effect_map.get(keyword, f"Perform {keyword} effect.")
+
+            # If there's more text after the cost, it's likely the effect description. Otherwise derive from keyword.
+            effect_part_match = re.search(re.escape(cost_part) + r"\s*[:—\u2014]?\s*(.+)", text.strip(), re.IGNORECASE)
+            if effect_part_match:
+                effect_part = effect_part_match.group(1).strip()
+            else: # Derive effect from keyword if no description found
+                effect_map = { # Simplified effects, full text parsing elsewhere is better
+                    "cycling": "Discard this card: Draw a card.", "equip": "Attach to target creature.",
+                    "flashback": "Cast from graveyard, then exile.", "level up": "Put a level counter on this.",
+                    "morph": "Turn this face up.", "ninjutsu": "Return attacker, put this onto battlefield."
+                    # Add more...
+                }
+                effect_part = effect_map.get(keyword, f"Perform {keyword} effect.")
+
             return cost_part, effect_part
 
-        # Assume no cost found if no ':' or keyword pattern matched
-        logging.debug(f"Could not parse Cost: Effect from '{text}'")
+        # Assume no cost found if no separator or keyword pattern matched
+        logging.debug(f"Could not parse Cost[:—] Effect from '{text}'")
         return None, text # Assume entire text is the effect if cost not found
 
     def resolve(self, game_state, controller, targets=None):
@@ -622,19 +630,19 @@ class TriggeredAbility(Ability):
             self.effect_text = f"{self.trigger_condition.capitalize()}, {self.effect.capitalize()}."
             
     def _parse_condition_effect(self, text):
-        """Attempt to parse 'When/Whenever/At..., Effect.' format."""
-        # More robust regex to handle variations and potential intervening text
-        match = re.match(r'^\s*(when|whenever|at)\s+([^,]+?),?\s*(.+)\s*$', text.strip(), re.IGNORECASE | re.DOTALL)
+        """Attempt to parse 'When/Whenever/At..., Effect.' or 'When/Whenever/At... — Effect' format."""
+        # More robust regex to handle variations and potential intervening text, including em dash
+        match = re.match(r'^\s*(when|whenever|at)\s+([^,:\u2014]+?),?[:—\u2014]?\s*(.+)\s*$', text.strip(), re.IGNORECASE | re.DOTALL)
         if match:
-             # Combine trigger parts
-             trigger_part = f"{match.group(1)} {match.group(2)}".strip()
-             effect_part = match.group(3).strip()
-             # Simple validation: effect shouldn't contain trigger keywords unless nested
-             if not re.match(r'^(when|whenever|at)\b', effect_part.lower()):
-                 # Remove trailing period if present
-                 if effect_part.endswith('.'): effect_part = effect_part[:-1]
-                 return trigger_part, effect_part
-        logging.debug(f"Could not parse Trigger, Effect from '{text}'")
+            # Combine trigger parts
+            trigger_part = f"{match.group(1)} {match.group(2)}".strip()
+            effect_part = match.group(3).strip()
+            # Simple validation: effect shouldn't contain trigger keywords unless nested
+            if not re.match(r'^(when|whenever|at)\b', effect_part.lower()):
+                # Remove trailing period if present
+                if effect_part.endswith('.'): effect_part = effect_part[:-1]
+                return trigger_part, effect_part
+        logging.debug(f"Could not parse Trigger[?,:,\u2014] Effect from '{text}'")
         return None, None
         
     def can_trigger(self, event_type, context=None):
