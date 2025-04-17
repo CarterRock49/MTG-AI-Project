@@ -30,13 +30,15 @@ class GameState:
                  "strategic_planner", "attackers_this_turn", 'strategy_memory',
                  "_logged_card_ids", "_logged_errors", "targeting_system",
                  "_phase_action_count", "priority_player", "stats_tracker",
-                 "card_memory", # Added from env
+                 "card_memory",
+                 # *** ADDED action_handler ***
+                 "action_handler",
                  # Special card types
                  "adventure_cards", "saga_counters", "mdfc_cards", "battle_cards", 'battle_attack_targets',
                  "cards_castable_from_exile", "cast_as_back_face", 'planeswalker_attack_targets',
                  # Additional slots for various tracking variables
-                 "phased_out", # Keep for Phasing
-                 "suspended_cards", # Keep for Suspend
+                 "phased_out",
+                 "suspended_cards",
                  "kicked_cards", "evoked_cards", 'planeswalker_protectors',
                  "foretold_cards", "blitz_cards", "dash_cards", "unearthed_cards",
                  "jump_start_cards", "buyback_cards", "flashback_cards",
@@ -46,23 +48,23 @@ class GameState:
                  "miracle_active", "miracle_card_id", "miracle_cost_parsed",
                  # New tracking variables
                  "split_second_active",
-                 "rebounded_cards", # Keep for Rebound
-                 "banding_creatures", # Keep for Banding (maybe handled differently)
+                 "rebounded_cards",
+                 "banding_creatures",
                  "crewed_vehicles", "morphed_cards", "manifested_cards",
                  "cards_to_graveyard_this_turn", 'first_strike_ordering',
                  "boast_activated", "forecast_used", "epic_spells", "city_blessing",
                  "myriad_tokens", "persist_returned", "undying_returned", "gravestorm_count",
-                 "madness_cast_available", # Keep for Madness
+                 "madness_cast_available",
                  # Context slots
                  "targeting_context", "sacrifice_context", "choice_context",
                  "mulligan_in_progress", "mulligan_player", "mulligan_count",
                  "bottoming_in_progress", "bottoming_player", "cards_to_bottom", "bottoming_count",
                  "spree_context", 'combat_action_handler', '_handle_level_up_class',
                  "dredge_pending",
-                 "madness_trigger", # Keep for Madness
+                 "madness_trigger",
                  "pending_spell_context", "clash_context",
-                 "surveil_in_progress", "cards_being_surveiled", "surveiling_player", # Surveil state
-                 "scry_in_progress", "scrying_cards", "scrying_player", "scrying_tops", "scrying_bottoms" # Scry state
+                 "surveil_in_progress", "cards_being_surveiled", "surveiling_player",
+                 "scry_in_progress", "scrying_cards", "scrying_player", "scrying_tops", "scrying_bottoms"
                  ]
     # Define phase names consistently within the class
     # Updated with missing phases and explicit mappings
@@ -137,7 +139,8 @@ class GameState:
         self.layer_system = None
         self.replacement_effects = None
         self.targeting_system = None
-
+        # *** ADDED: Initialize action_handler to None ***
+        self.action_handler = None
 
         # Process card_db properly (ensure Card objects are correctly instantiated if needed)
         if isinstance(card_db, list):

@@ -100,10 +100,10 @@ class AlphaZeroMTGEnv(gym.Env):
 
         # Initialize action handler AFTER GameState
         self.action_handler = ActionHandler(self.game_state)
-        # *** ADDED: Link ActionHandler back to GameState ***
-        self.game_state.action_handler = self.action_handler
+        # *** UPDATED: Set attribute AFTER confirming __slots__ allows it ***
+        self.game_state.action_handler = self.action_handler # This should now work
         logging.debug("Linked ActionHandler instance to GameState.")
-        # *** END ADDED ***
+
 
         # GameState initializes its own subsystems now
         self.combat_resolver = getattr(self.game_state, 'combat_resolver', None) # Get ref if needed
