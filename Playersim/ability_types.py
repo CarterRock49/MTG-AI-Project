@@ -905,16 +905,16 @@ class StaticAbility(Ability):
         if not effect_text and self.effect:
             self.effect_text = self.effect.capitalize()
         
-
     def apply(self, game_state, affected_cards=None):
-        """Register the static ability's effect with the LayerSystem. (Improved Handling)"""
+        """Register the static ability's effect with the LayerSystem. (Corrected Layer Determination Call)"""
         if not hasattr(game_state, 'layer_system') or not game_state.layer_system:
             logging.warning(f"Layer system not found, cannot apply static ability: {self.effect_text}")
             return False
 
         # Use the clean effect text (lowercase, potentially stripped punctuation) for layer determination
         effect_lower_clean = self.effect.lower().strip('.—\u2014: ')
-        layer = game_state.layer_system._determine_layer_for_effect(effect_lower_clean) # Use cleaned text
+        # *** CORRECTED: Call the method on self, not the layer_system ***
+        layer = self._determine_layer_for_effect(effect_lower_clean) # Use cleaned text
 
         if layer is None:
             # Log the *original* effect text for better debugging if layer determination fails
