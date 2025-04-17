@@ -2575,26 +2575,82 @@ class AlphaZeroMTGEnv(gym.Env):
         """Helper to determine playability flags for hand cards."""
         playable = np.zeros(self.max_hand_size, dtype=np.float32)
         gs = self.game_state
-        can_play_sorcery = is_my_turn and gs.phase in [gs.PHASE_MAIN_PRECOMBAT, gs.PHASE_MAIN_POSTCOMBAT] and not gs.stack
+        # Use GameState method which checks phase, stack, priority correctly
+        can_play_sorcery = hasattr(gs, '_can_act_at_sorcery_speed') and gs._can_act_at_sorcery_speed(player)
 
         for i, card_id in enumerate(hand_ids):
             if i >= self.max_hand_size: break
             card = gs._safe_get_card(card_id)
             if card:
                 is_land = 'land' in getattr(card, 'type_line', '').lower()
-                is_instant_speed = 'instant' in getattr(card, 'card_types', []) or self._has_flash(card_id)
+                # *** FIXED: Check action_handler for _has_flash, not self ***
+                has_flash = False
+                if self.action_handler and hasattr(self.action_handler, '_has_flash'):
+                    has_flash = self.action_handler._has_flash(card_id)
+                else:
+                    # Fallback check if action_handler is missing method
+                    has_flash = self._has_flash_text(getattr(card, 'oracle_text', ''))
+
+                is_instant_speed = 'instant' in getattr(card, 'card_types', []) or has_flash
 
                 can_afford = self._can_afford_card(player, card)
 
                 if is_land:
+                    # Lands can only be played at sorcery speed, 1 per turn
                     if not player.get("land_played", False) and can_play_sorcery:
                         playable[i] = 1.0
                 elif can_afford:
+                    # Spells need correct timing
                     if is_instant_speed:
-                         playable[i] = 1.0 # Can always cast if affordable and has priority
+                        # Can cast if player has priority (assume valid timing if instant)
+                        # Action mask generation actually handles priority check, so assume OK here if affordable.
+                        playable[i] = 1.0
                     elif can_play_sorcery:
-                         playable[i] = 1.0
+                        playable[i] = 1.0
         return playable
+    
+    def _can_afford_card(self, player, card_or_data, is_back_face=False, context=None):
+        """Check affordability using ManaSystem, handling dict or Card object."""
+        gs = self.game_state
+        if context is None: context = {}
+        # *** FIXED: Check mana_system exists on gs first ***
+        if not hasattr(gs, 'mana_system') or not gs.mana_system:
+            return sum(player.get("mana_pool", {}).values()) > 0 # Basic check
+
+        if isinstance(card_or_data, dict): # E.g., back face data
+            cost_str = card_or_data.get('mana_cost', '')
+            card_id = card_or_data.get('id') # Need ID for context
+        elif isinstance(card_or_data, Card):
+            cost_str = getattr(card_or_data, 'mana_cost', '')
+            card_id = getattr(card_or_data, 'card_id', None)
+        else:
+            return False # Invalid input
+
+        if not cost_str and not context.get('use_alt_cost'): return True # Free spell (unless alt cost used)
+
+        try:
+            parsed_cost = gs.mana_system.parse_mana_cost(cost_str)
+            # Apply cost modifiers based on context (Kicker, Additional, Alternative)
+            final_cost = gs.mana_system.apply_cost_modifiers(player, parsed_cost, card_id, context)
+            return gs.mana_system.can_pay_mana_cost(player, final_cost, context)
+        except Exception as e:
+            card_name = getattr(card_or_data, 'name', 'Unknown') if isinstance(card_or_data, Card) else card_or_data.get('name', 'Unknown')
+            logging.warning(f"Error checking mana cost for '{card_name}': {e}")
+            return False
+
+    def _has_flash_text(self, oracle_text):
+        """Check if oracle text contains flash keyword."""
+        return oracle_text and 'flash' in oracle_text.lower()
+
+    def _can_act_at_sorcery_speed(self, player):
+        """Helper to determine if the player can currently act at sorcery speed."""
+        gs = self.game_state
+        is_my_turn = (gs.p1 == player and (gs.turn % 2 == 1) == gs.agent_is_p1) or \
+                     (gs.p2 == player and (gs.turn % 2 == 0) == gs.agent_is_p1)
+        return (is_my_turn and
+                gs.phase in [gs.PHASE_MAIN_PRECOMBAT, gs.PHASE_MAIN_POSTCOMBAT] and
+                not gs.stack and # Stack must be empty
+                gs.priority_player == player) # Player must have priority
 
     def _get_stack_info(self, stack, me_player):
         """Helper to get controller and type info for top stack items."""

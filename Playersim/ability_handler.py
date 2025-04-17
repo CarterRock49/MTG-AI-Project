@@ -668,6 +668,7 @@ class AbilityHandler:
                  count += 1
         logging.debug(f"Finished initializing abilities for {count} cards.")
             
+
     def _parse_and_register_abilities(self, card_id, card):
         """
         Parse a card's text to identify and register its abilities.
@@ -695,7 +696,9 @@ class AbilityHandler:
 
             # --- Get Text Source(s) and Keywords ---
             current_face_index = getattr(card, 'current_face', 0)
-            is_mdfc = hasattr(card, 'layout') and card.layout == 'modal_dfc'
+            # *** FIXED: Safely access layout attribute ***
+            card_layout = getattr(card, 'layout', None)
+            is_mdfc = card_layout == 'modal_dfc'
 
             # MDFCs are complex - parse ONLY the current face for now.
             # Full parsing would need to handle interactions between faces if any.
@@ -704,7 +707,8 @@ class AbilityHandler:
                 oracle_text_sources.append(face_data.get('oracle_text', ''))
                 keywords_from_card_data = face_data.get('keywords', [])
                  # Get Spree info if MDFC face is Spree
-                if card.layout == 'modal_dfc' and 'spree' in (kw.lower() for kw in keywords_from_card_data):
+                 # *** FIXED: Use card_layout variable ***
+                if is_mdfc and 'spree' in (kw.lower() for kw in keywords_from_card_data):
                      # Re-parse spree on face change? Assume parsed earlier.
                      processed_special_text_markers += getattr(card, '_spree_related_text_marker', '')
 
@@ -720,6 +724,7 @@ class AbilityHandler:
             else: # Normal card or current face of TDFC/Saga etc.
                 oracle_text_sources.append(getattr(card, 'oracle_text', ''))
                 if hasattr(card, 'keywords'): keywords_from_card_data = card.keywords
+                # *** FIXED: Use hasattr check for is_spree ***
                 if hasattr(card, 'is_spree') and card.is_spree:
                      processed_special_text_markers = getattr(card, '_spree_related_text_marker', '')
 
@@ -830,7 +835,9 @@ class AbilityHandler:
                 logging.debug(f"Applied {len(static_abilities_applied_texts)} static abilities for {card.name}")
 
         except Exception as e:
-            logging.error(f"Error parsing abilities for card {card_id} ({getattr(card, 'name', 'Unknown')}): {str(e)}")
+            # Ensure card_id has an entry, even if empty, on error
+            card_name_log = getattr(card, 'name', 'Unknown') # Safely get name for logging
+            logging.error(f"Error parsing abilities for card {card_id} ({card_name_log}): {str(e)}")
             import traceback
             logging.error(traceback.format_exc())
             if card_id not in self.registered_abilities: self.registered_abilities[card_id] = []
