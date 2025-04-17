@@ -987,64 +987,117 @@ class ActionHandler:
         # ... add more basic checks
         return True # Assume available if check is simple
                      
-    
+
     def _add_special_choice_actions(self, player, valid_actions, set_valid_action):
         """Add actions for Scry, Surveil, Dredge, Choose Mode, Choose X, Choose Color."""
         gs = self.game_state
-        # Scry
-        if hasattr(gs, 'scry_in_progress') and gs.scry_in_progress and gs.scrying_player == player:
-            if gs.scrying_cards:
-                card_id = gs.scrying_cards[0]
-                card = gs._safe_get_card(card_id)
-                card_name = card.name if card else card_id
-                set_valid_action(306, f"PUT_ON_TOP {card_name}")
-                set_valid_action(307, f"PUT_ON_BOTTOM {card_name}")
-        # Surveil
-        elif hasattr(gs, 'surveil_in_progress') and gs.surveil_in_progress and gs.surveiling_player == player:
-             if gs.cards_being_surveiled:
-                 card_id = gs.cards_being_surveiled[0]
-                 card = gs._safe_get_card(card_id)
-                 card_name = card.name if card else card_id
-                 set_valid_action(305, f"PUT_TO_GRAVEYARD {card_name}")
-                 set_valid_action(306, f"PUT_ON_TOP {card_name}")
-        # Dredge (Needs integration with Draw replacement)
-        # If a draw is being replaced by dredge, allow dredge action
-        if hasattr(gs, 'dredge_pending') and gs.dredge_pending['player'] == player:
-            card_id = gs.dredge_pending['card_id']
-            dredge_val = gs.dredge_pending['value']
-            if len(player["library"]) >= dredge_val:
-                 # Find card index in graveyard
-                 gy_idx = -1
-                 for idx, gy_id in enumerate(player["graveyard"]):
-                      if gy_id == card_id and idx < 6: # GY Index 0-5
-                           gy_idx = idx
-                           break
-                 if gy_idx != -1:
-                     set_valid_action(308, f"DREDGE {gs._safe_get_card(card_id).name}") # Param = gy_idx
+        # Only generate these during the dedicated CHOICE phase
+        if gs.phase != gs.PHASE_CHOOSE: return
 
-        # Choose Mode/X/Color for spell/ability on stack
-        if gs.stack:
-            top_item = gs.stack[-1]
-            if isinstance(top_item, tuple) and len(top_item) >= 3 and top_item[2] == player:
-                 stack_type, card_id, controller = top_item[:3]
-                 card = gs._safe_get_card(card_id)
-                 context = top_item[3] if len(top_item) > 3 else {}
-                 if card and hasattr(card, 'oracle_text'):
-                     text = card.oracle_text.lower()
-                     # Choose Mode
-                     if "choose one" in text or "choose two" in text or "choose up to" in text:
-                          num_modes = len(re.findall(r'[•\-−–—]', text))
-                          for i in range(min(num_modes, 10)): # Mode index 0-9
-                               set_valid_action(348 + i, f"CHOOSE_MODE {i+1}")
-                     # Choose X
-                     if hasattr(card, 'mana_cost') and 'X' in card.mana_cost and "X" not in context:
-                         available_mana = sum(player["mana_pool"].values())
-                         for i in range(min(available_mana, 10)): # X value 1-10
-                              set_valid_action(358 + i, f"CHOOSE_X_VALUE {i+1}")
-                     # Choose Color
-                     if "choose a color" in text:
-                          for i in range(5): # Color index 0-4 (WUBRG)
-                               set_valid_action(368 + i, f"CHOOSE_COLOR {['W','U','B','R','G'][i]}")
+        if hasattr(gs, 'choice_context') and gs.choice_context:
+            context = gs.choice_context
+            choice_type = context.get("type")
+            source_id = context.get("source_id")
+            choice_player = context.get("player")
+
+            if choice_player != player: # Not this player's choice
+                set_valid_action(11, "PASS_PRIORITY (Waiting for opponent choice)")
+                return
+
+            # --- Scry / Surveil ---
+            if choice_type in ["scry", "surveil"] and context.get("cards"):
+                card_id = context["cards"][0] # Process one card at a time
+                card = gs._safe_get_card(card_id)
+                card_name = getattr(card, 'name', card_id)
+                set_valid_action(306, f"PUT_ON_TOP {card_name}") # Action for Top
+                if choice_type == "scry":
+                    set_valid_action(307, f"PUT_ON_BOTTOM {card_name}") # Action for Bottom (Scry only)
+                else: # Surveil
+                     set_valid_action(305, f"PUT_TO_GRAVEYARD {card_name}") # Action for Graveyard (Surveil only)
+
+            # --- Dredge (Replace Draw) ---
+            elif choice_type == "dredge" and context.get("card_id"):
+                 # ... (keep existing Dredge logic for action 308) ...
+                 card_id = context.get("card_id")
+                 dredge_val = context.get("value")
+                 if len(player["library"]) >= dredge_val:
+                     # Validate card is still in GY? Probably not needed, context source is reliable
+                     gy_idx = -1
+                     for idx, gy_id in enumerate(player.get("graveyard", [])):
+                         if gy_id == card_id: gy_idx = idx; break
+                     if gy_idx != -1:
+                         # We need context for the DREDGE action handler now
+                         dredge_action_context = {'gy_idx': gy_idx}
+                         set_valid_action(308, f"DREDGE {gs._safe_get_card(card_id).name}", context=dredge_action_context)
+                 # Always allow skipping the dredge replacement
+                 set_valid_action(11, "Skip Dredge") # PASS_PRIORITY effectively skips
+
+            # --- Choose Mode ---
+            elif choice_type == "choose_mode":
+                 num_choices = context.get("num_choices", 0)
+                 max_modes = context.get("max_required", 1)
+                 min_modes = context.get("min_required", 1)
+                 selected_count = len(context.get("selected_modes", []))
+
+                 # Allow choosing another mode if max not reached
+                 if selected_count < max_modes:
+                     for i in range(min(num_choices, 10)): # Mode index 0-9 (Action 353-362)
+                          # Prevent selecting the same mode twice if only choosing 1 or 2 unless allowed
+                          if i not in context.get("selected_modes", []): # Basic duplicate check
+                               # Action needs context: { 'battlefield_idx': ?, 'ability_idx': ?} NO - context is in gs.choice_context
+                               set_valid_action(353 + i, f"CHOOSE_MODE {i+1}")
+
+                 # Allow finalizing choice if minimum met (and min != max)
+                 if selected_count >= min_modes and min_modes != max_modes:
+                      set_valid_action(11, "PASS_PRIORITY (Finish Mode Choice)") # Allow passing to finalize if optional modes remain
+
+            # --- Choose X ---
+            elif choice_type == "choose_x":
+                 max_x = context.get("max_x", 0)
+                 min_x = context.get("min_x", 0)
+                 for i in range(min(max_x, 10)): # X value 1-10 (Actions 363-372)
+                      x_val = i + 1
+                      if x_val >= min_x: # Only allow valid X choices based on min
+                           # Action needs context: { 'X_Value': x_val } - This is embedded in param
+                           set_valid_action(363 + i, f"CHOOSE_X_VALUE {x_val}")
+                 # No PASS needed, choosing X implicitly finalizes
+
+            # --- Choose Color ---
+            elif choice_type == "choose_color":
+                 for i in range(5): # Color index 0-4 (WUBRG -> Actions 373-377)
+                      # Action needs context: { 'color_index': i } - Embedded in param
+                      set_valid_action(373 + i, f"CHOOSE_COLOR {['W','U','B','R','G'][i]}")
+                 # No PASS needed, choosing color implicitly finalizes
+
+            # --- Kicker / Additional Cost / Escalate Choices ---
+            elif choice_type == "pay_kicker":
+                set_valid_action(405, "PAY_KICKER") # Param=True
+                set_valid_action(406, "DONT_PAY_KICKER") # Param=False
+            elif choice_type == "pay_additional":
+                 set_valid_action(407, "PAY_ADDITIONAL_COST") # Param=True
+                 set_valid_action(408, "DONT_PAY_ADDITIONAL_COST") # Param=False
+            elif choice_type == "pay_escalate":
+                 # Context needed: num_modes, num_selected, max_allowed_extra
+                 # This logic is complex for generating distinct actions.
+                 # Simplified: Offer PAY_ESCALATE action, handler decides how many based on cost/context.
+                 # Param = number of *extra* modes to pay for (1 or more)
+                 max_extra = context.get('max_modes', 1) - context.get('num_selected', 1)
+                 for i in range(min(max_extra, 3)): # Allow paying for 1, 2, or 3 extra modes max (adjust as needed)
+                      num_extra = i + 1
+                      # Check affordability of paying N times (simplistic check)
+                      escalate_cost = context.get('escalate_cost_each')
+                      if escalate_cost and gs.mana_system.can_pay_mana_cost(player, f"{escalate_cost}*{num_extra}"):
+                            escalate_action_context = {'num_extra_modes': num_extra}
+                            # Needs dedicated actions if param doesn't support count.
+                            # Reuse action 409, use context.
+                            set_valid_action(409, f"PAY_ESCALATE for {num_extra} extra mode(s)", context=escalate_action_context)
+                 set_valid_action(11, "PASS_PRIORITY (Finish Escalate/Don't pay)") # Finish Escalate choice
+
+            # Add more choice types (Distribute counters, choose order, etc.) here
+
+        else:
+            # If no choice context is active during PHASE_CHOOSE (shouldn't happen), allow PASS
+            set_valid_action(11, "PASS_PRIORITY (No choices pending?)")
         
     def _add_sacrifice_actions(self, player, valid_actions, set_valid_action):
          """Add SACRIFICE_PERMANENT actions when in the sacrifice phase."""
@@ -3195,11 +3248,12 @@ class ActionHandler:
                      # Add action to finalize spree casting? Or use PLAY_SPELL?
                      set_valid_action(20 + hand_idx, f"CAST_SPREE {card.name} with selected modes")    
 
+
     def _handle_choose_mode(self, param, context, **kwargs):
-        """Handles the CHOOSE_MODE action. Param is the chosen mode index (0-9)."""
+        """Handles the CHOOSE_MODE action. Param is the chosen mode index (0-9). Finalizes choice if criteria met."""
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
-        chosen_mode_idx = param # Agent's choice
+        chosen_mode_idx = param # Agent's choice index from action
 
         # Validate context
         if not gs.choice_context or gs.choice_context.get("type") != "choose_mode" or gs.choice_context.get("player") != player:
@@ -3208,58 +3262,79 @@ class ActionHandler:
 
         ctx = gs.choice_context
         num_choices = ctx.get("num_choices", 0)
-        max_modes = ctx.get("max_modes", 1)
+        min_required = ctx.get("min_required", 1)
+        max_required = ctx.get("max_required", 1)
         selected_modes = ctx.get("selected_modes", [])
+        available_modes_text = ctx.get("available_modes", [])
 
         # Validate chosen mode index
         if 0 <= chosen_mode_idx < num_choices:
-            if len(selected_modes) < max_modes:
-                 if chosen_mode_idx not in selected_modes: # Prevent duplicates if max_modes=1
-                      selected_modes.append(chosen_mode_idx)
-                      ctx["selected_modes"] = selected_modes
-                      logging.debug(f"Selected mode {len(selected_modes)}/{max_modes}: Mode Index {chosen_mode_idx}")
-                      # If final choice, finalize
-                      if len(selected_modes) >= max_modes:
-                          # --- FINALIZING LOGIC (Update Stack, Change Phase) ---
-                          found_stack_item = False
-                          source_id = ctx.get("source_id")
-                          copy_instance_id = ctx.get("copy_instance_id") # Handle copies
-                          if source_id:
-                              for i in range(len(gs.stack) - 1, -1, -1):
-                                  item = gs.stack[i]
-                                  item_matches = (isinstance(item, tuple) and item[1] == source_id)
-                                  if copy_instance_id: item_matches &= (item[3].get('copy_instance_id') == copy_instance_id)
+            # Check if maximum choices already reached
+            if len(selected_modes) >= max_required:
+                logging.warning(f"Attempted to select more modes than allowed ({max_required}) for {ctx.get('card_id')}.")
+                return -0.1, False
 
-                                  if item_matches:
-                                      new_stack_context = item[3] if len(item) > 3 else {}
-                                      new_stack_context['selected_modes'] = selected_modes # Store the chosen mode index(es)
-                                      gs.stack[i] = item[:3] + (new_stack_context,)
-                                      found_stack_item = True
-                                      logging.debug(f"Updated stack item {i} (Source: {source_id}) with mode choices: {selected_modes}")
-                                      break
-                          if not found_stack_item: logging.error("Mode choice context active but couldn't find stack item!")
+            # Check if mode already selected (disallow unless specific rule allows - rare)
+            if chosen_mode_idx in selected_modes:
+                logging.warning(f"Mode index {chosen_mode_idx} already selected for {ctx.get('card_id')}.")
+                return -0.05, False # Penalty for redundant choice
 
-                          # Clear choice context and return to previous phase
-                          gs.choice_context = None
-                          if hasattr(gs, 'previous_priority_phase') and gs.previous_priority_phase is not None:
-                               gs.phase = gs.previous_priority_phase
-                               gs.previous_priority_phase = None
-                          else: gs.phase = gs.PHASE_PRIORITY
-                          gs.priority_player = gs._get_active_player()
-                          gs.priority_pass_count = 0
-                          logging.debug("Mode choice complete.")
-                          return 0.05, True # Success
-                      else: # More modes needed (e.g., Choose Two)
-                           return 0.02, True # Incremental success
-                 else: # Mode already selected
-                      logging.warning(f"Mode index {chosen_mode_idx} already selected.")
-                      return -0.05, False
-            else: # Tried to select too many modes
-                 logging.warning("Attempted to select more modes than allowed.")
-                 return -0.1, False
-        else: # Invalid mode index
-             logging.error(f"Invalid CHOOSE_MODE action parameter: {chosen_mode_idx}. Valid indices: 0-{num_choices-1}")
-             return -0.1, False
+            # --- Valid Choice Made ---
+            selected_modes.append(chosen_mode_idx)
+            ctx["selected_modes"] = selected_modes # Update context immediately
+            chosen_mode_text = available_modes_text[chosen_mode_idx] if chosen_mode_idx < len(available_modes_text) else f"Mode {chosen_mode_idx}"
+            logging.debug(f"Selected mode {len(selected_modes)}/{max_required}: Mode Index {chosen_mode_idx} ('{chosen_mode_text[:30]}...')")
+
+            # Check if the choice is now complete
+            # Complete if max required reached OR min required reached and player passes/finalizes
+            finalize_choice = False
+            if len(selected_modes) >= max_required:
+                 finalize_choice = True
+                 logging.debug("Maximum modes selected.")
+            # Note: Need a way for player to signal completion if min < max.
+            # Could use PASS_PRIORITY action when in PHASE_CHOOSE, or a dedicated FINISH_CHOICE action.
+            # For now, assume finalize only when max is reached.
+
+            if finalize_choice:
+                 # --- Finalizing the Choice ---
+                 card_id = ctx.get("card_id")
+                 cast_controller = ctx.get("controller") # Get original caster
+                 original_cast_context = ctx.get("original_cast_context", {})
+                 final_paid_cost = ctx.get("final_paid_cost", {})
+
+                 if not card_id or not cast_controller:
+                      logging.error("CRITICAL: Choice context missing card_id or controller during finalization.")
+                      # Clear broken context
+                      gs.choice_context = None
+                      gs.phase = gs.PHASE_PRIORITY
+                      return -0.5, False # Indicate major state error
+
+                 # Prepare the final context for the stack item
+                 final_stack_context = original_cast_context.copy() # Start with original cast context
+                 final_stack_context['selected_modes'] = selected_modes # Embed the chosen modes
+                 final_stack_context['final_paid_cost'] = final_paid_cost # Include cost paid for copies etc.
+                 # Clear temporary choice flags from context if any
+                 final_stack_context.pop('available_modes', None)
+                 final_stack_context.pop('min_required', None)
+                 final_stack_context.pop('max_required', None)
+
+                 # Add the spell WITH CHOSEN MODES to the stack
+                 gs.add_to_stack("SPELL", card_id, cast_controller, final_stack_context)
+                 # add_to_stack handles phase transition back to PRIORITY and resets priority
+
+                 logging.debug(f"Finalized mode choice for {card_id}. Spell added to stack.")
+
+                 # Clear choice context AFTER adding to stack
+                 gs.choice_context = None
+
+                 return 0.1, True # Successful choice and finalization
+            else:
+                 # More modes can/must be chosen, stay in PHASE_CHOOSE
+                 return 0.05, True # Incremental success
+        else:
+            # Invalid mode index chosen by agent
+            logging.error(f"Invalid CHOOSE_MODE action parameter: {chosen_mode_idx}. Valid indices: 0-{num_choices-1}")
+            return -0.1, False
 
     def _handle_choose_x(self, param, context, **kwargs):
         """Handles CHOOSE_X action. Param is the chosen X value (1-10)."""

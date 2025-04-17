@@ -1815,10 +1815,8 @@ class GameState:
              self.last_stack_size = len(self.stack)
              logging.debug("Added to stack during special choice phase, priority maintained.")
     
-
-
     def cast_spell(self, card_id, player, context=None):
-        """Cast a spell: Pay costs -> Move to Stack -> Set up Targeting/Choices."""
+        """Cast a spell: Pay costs -> Move to Stack (or Enter Choice Phase) -> Set up Targeting/Choices."""
         if context is None: context = {}
         card = self._safe_get_card(card_id)
         if not card:
@@ -1832,125 +1830,185 @@ class GameState:
         card_in_source = False
         if isinstance(source_list, (list, set)) and card_id in source_list:
              card_in_source = True
-        # Handle special source zones like Command Zone if needed
+
+        if not card_in_source:
+            # Check special cast locations if source not default 'hand'
+            if source_zone == 'graveyard' and card_id in player.get("graveyard", []): card_in_source = True
+            elif source_zone == 'exile' and card_id in player.get("exile", []): card_in_source = True
+            # Add command zone etc. if needed
 
         if not card_in_source:
             logging.warning(f"Cannot cast {card.name}: Not found in {player['name']}'s {source_zone}.")
             return False
 
-        if not self._can_cast_now(card_id, player): # Includes priority and timing check
-            logging.warning(f"Cannot cast {card.name}: Invalid timing (Phase: {self.phase}, Priority: {getattr(self.priority_player,'name','None')}).")
-            return False
+        # --- Timing/Priority Check ---
+        # Use internal helper which includes split second check
+        if not self._can_cast_now(card_id, player):
+             logging.warning(f"Cannot cast {card.name}: Invalid timing (Phase: {self._PHASE_NAMES.get(self.phase)}, Prio: {getattr(self.priority_player,'name','None')}, Stack:{len(self.stack)}).")
+             return False
 
-        # Determine Final Cost (Handles alternative costs like Kicker via context flags)
+        # --- Check for Modality BEFORE Cost Calculation/Payment ---
+        # Modal check needs AbilityHandler's parser
+        modal_modes, min_modes, max_modes = None, 0, 0
+        is_modal_spell = False
+        if self.ability_handler and hasattr(self.ability_handler, '_parse_modal_text'):
+             # Check oracle text for modality
+             modal_modes, min_modes, max_modes = self.ability_handler._parse_modal_text(getattr(card, 'oracle_text', ''))
+             if modal_modes:
+                  is_modal_spell = True
+                  logging.debug(f"Detected modal spell: {card.name}")
+
+        # --- Determine Final Cost ---
         base_cost_str = getattr(card, 'mana_cost', '')
-        # Handle alternative costs like Flashback, Escape, Overload etc. if flagged in context
+        # Use context flag 'use_alt_cost'
         if context.get("use_alt_cost"):
             alt_cost_type = context["use_alt_cost"]
             final_cost_dict = self.mana_system.calculate_alternative_cost(card_id, player, alt_cost_type, context)
-            if final_cost_dict is None: # Cannot use specified alt cost
+            if final_cost_dict is None:
                  logging.warning(f"Cannot use alternative cost '{alt_cost_type}' for {card.name}.")
                  return False
-        else: # Use normal cost
+        else:
             final_cost_dict = self.mana_system.parse_mana_cost(base_cost_str)
 
         # Apply Kicker cost if context['kicked'] is True
         if context.get('kicked'):
-             kicker_cost_str = self._get_kicker_cost_str(card) # Helper needed
+             kicker_cost_str = context.get('kicker_cost_to_pay') # Use stored cost
              if kicker_cost_str:
                  kicker_cost_dict = self.mana_system.parse_mana_cost(kicker_cost_str)
-                 for key, val in kicker_cost_dict.items():
-                      if key == 'hybrid' or key == 'phyrexian': final_cost_dict[key].extend(val)
-                      elif key != 'conditional': final_cost_dict[key] = final_cost_dict.get(key, 0) + val
-                 context['actual_kicker_paid'] = kicker_cost_str # Track kicker payment for resolution
+                 final_cost_dict = self.mana_system.combine_costs(final_cost_dict, kicker_cost_dict)
+                 context['actual_kicker_paid'] = kicker_cost_str
 
-        # Apply other additional costs (sacrifice, discard) if context['pay_additional'] is True
-        # The non-mana parts of additional costs are handled during the pay_mana_cost step.
-        # The mana parts need adding here.
-        if context.get('pay_additional'):
-             add_cost_info = self._get_additional_cost_info(card) # Needs helper
-             if add_cost_info and 'mana_cost' in add_cost_info:
+        # Apply other additional costs (sacrifice, discard, etc. stored in context)
+        if context.get('pay_additional') and context.get('additional_cost_info'):
+             add_cost_info = context['additional_cost_info']
+             if add_cost_info and 'mana_cost' in add_cost_info: # Add mana part
                   add_cost_dict = self.mana_system.parse_mana_cost(add_cost_info['mana_cost'])
-                  for key, val in add_cost_dict.items():
-                      if key == 'hybrid' or key == 'phyrexian': final_cost_dict[key].extend(val)
-                      elif key != 'conditional': final_cost_dict[key] = final_cost_dict.get(key, 0) + val
+                  final_cost_dict = self.mana_system.combine_costs(final_cost_dict, add_cost_dict)
+             # Non-mana part handled by ManaSystem.pay_mana_cost
 
-        # Apply modifiers (reduction/increase) LAST, after base/alt/additional costs determined
+        # Apply cost modifiers (reduction/increase) LAST
         final_cost_dict = self.mana_system.apply_cost_modifiers(player, final_cost_dict, card_id, context)
 
-        # Check Affordability of the final calculated cost
+        # --- Check Affordability ---
         if not self.mana_system.can_pay_mana_cost(player, final_cost_dict, context):
             cost_str_log = self._format_mana_cost_for_logging(final_cost_dict, context.get('X', 0) if 'X' in final_cost_dict else 0)
             logging.warning(f"Cannot cast {card.name}: Cannot afford final cost {cost_str_log}.")
             return False
 
-        # Targeting Requirement Check (BEFORE Paying Costs)
-        requires_target = "target" in getattr(card, 'oracle_text', '').lower()
-        num_targets = getattr(card, 'num_targets', 1) if requires_target else 0
-        # Add handling for "choose up to N targets" - makes targeting optional below minimum
-        up_to_N = "up to" in getattr(card, 'oracle_text', '').lower()
+        # --- Targeting Check (Only if NOT modal yet - modes might determine targets) ---
+        if not is_modal_spell:
+            requires_target = "target" in getattr(card, 'oracle_text', '').lower()
+            num_targets = getattr(card, 'num_targets', 1) if requires_target else 0
+            up_to_N = "up to" in getattr(card, 'oracle_text', '').lower()
+            if requires_target and num_targets > 0:
+                 valid_targets_map = self.targeting_system.get_valid_targets(card_id, player) if self.targeting_system else {}
+                 total_valid_targets = sum(len(v) for v in valid_targets_map.values())
+                 if total_valid_targets < num_targets and not up_to_N:
+                      logging.warning(f"Cannot cast {card.name}: Not enough valid targets available ({total_valid_targets}/{num_targets}).")
+                      return False
 
-        if requires_target and num_targets > 0:
-             valid_targets_map = self.targeting_system.get_valid_targets(card_id, player) if self.targeting_system else {}
-             total_valid_targets = sum(len(v) for v in valid_targets_map.values())
-             if total_valid_targets < num_targets and not up_to_N: # Check minimum if not "up to"
-                  logging.warning(f"Cannot cast {card.name}: Not enough valid targets available ({total_valid_targets}/{num_targets}).")
-                  return False
-
-        # Pay Costs (Includes non-mana from context)
+        # --- Pay Costs ---
         if not self.mana_system.pay_mana_cost(player, final_cost_dict, context):
             logging.warning(f"Failed to pay cost for {card.name}.")
-            # ManaSystem's pay_mana_cost needs robust rollback for non-mana costs
             return False
 
-        # --- Move Card and Add to Stack ---
-        # Remove from source zone first (use GameState.move_card with implicit source)
-        if not self.move_card(card_id, player, source_zone, player, "stack_implicit", cause="casting"):
-             logging.error(f"Failed to implicitly remove {card.name} from {source_zone} during casting.")
-             # Rollback costs? Critical error state.
+        # --- Move Card from Source Zone (Do this BEFORE triggering choice/stack) ---
+        removed = False
+        source_list_live = player.get(source_zone)
+        if source_list_live is not None:
+             if isinstance(source_list_live, list) and card_id in source_list_live: source_list_live.remove(card_id); removed = True
+             elif isinstance(source_list_live, set) and card_id in source_list_live: source_list_live.discard(card_id); removed = True
+        if not removed:
+             # This should ideally not happen if initial checks passed
+             logging.error(f"Critical Error: Could not remove {card.name} from source zone {source_zone} after paying costs.")
+             # Need rollback logic here if mana system supports it.
              return False
 
-        # Prepare stack context
-        context["source_zone"] = source_zone
-        context["final_paid_cost"] = final_cost_dict # Store final cost for resolution/copying
-        context["requires_target"] = requires_target
-        context["num_targets"] = num_targets
-        # Add Kicker/Additional flags if they were set true
-        context["kicked"] = context.get("kicked", False)
-        context["paid_additional"] = context.get("pay_additional", False)
-        # Add flags for Adventure/Back Face if cast that way
-        if context.get("cast_as_adventure"): pass # Already in context
-        if context.get("cast_back_face"): pass # Already in context
 
-        # Add to stack
-        self.add_to_stack("SPELL", card_id, player, context)
+        # --- MODAL SPELL DIVERGENCE ---
+        if is_modal_spell:
+            logging.debug(f"Entering CHOICE phase for modal spell: {card.name}")
+            # Store previous phase unless already special
+            if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+                self.previous_priority_phase = self.phase
 
-        # --- Set up Targeting Phase ---
-        if requires_target and num_targets > 0:
-             logging.debug(f"{card.name} requires target(s). Entering TARGETING phase.")
-             self.previous_priority_phase = self.phase # Store current phase
-             self.phase = self.PHASE_TARGETING
-             self.targeting_context = {
-                 "source_id": card_id,
-                 "controller": player,
-                 "required_type": getattr(card, 'target_type', 'target'), # Need card schema for this
-                 "required_count": num_targets,
-                 "min_targets": 0 if up_to_N else num_targets, # Min 0 if "up to N"
-                 "max_targets": num_targets,
-                 "selected_targets": [],
-                 "effect_text": getattr(card, 'oracle_text', '')
-             }
-        else: # No targets, priority passes normally via add_to_stack
-            pass
+            self.phase = self.PHASE_CHOOSE
+            # Create choice context
+            self.choice_context = {
+                'type': 'choose_mode',
+                'player': player,
+                'card_id': card_id, # ID of the spell card being cast
+                'source_zone': source_zone, # Where it came from
+                'num_choices': len(modal_modes), # Total number of modes available
+                'min_required': min_modes,
+                'max_required': max_modes,
+                'available_modes': modal_modes, # Store mode text for validation/display
+                'selected_modes': [], # Track chosen indices
+                'original_cast_context': context.copy(), # Store original context (kicker, etc.)
+                'final_paid_cost': final_cost_dict, # Store the actual cost paid for stack item later
+                'resolved': False
+            }
+            # Give priority to the choosing player
+            self.priority_player = player
+            self.priority_pass_count = 0
+
+            logging.info(f"Modal spell {card.name} cast initiation successful. Waiting for mode choice(s).")
+            # Don't add to stack here. _handle_choose_mode will add it later.
+
+        # --- NON-MODAL SPELL (Continues as before) ---
+        else:
+            # Prepare stack context
+            context["source_zone"] = source_zone
+            context["final_paid_cost"] = final_cost_dict
+            context["requires_target"] = requires_target
+            context["num_targets"] = num_targets
+            context["kicked"] = context.get("kicked", False)
+            context["paid_additional"] = context.get("pay_additional", False)
+
+            # Add to stack
+            self.add_to_stack("SPELL", card_id, player, context)
+
+            # Set up Targeting Phase if needed
+            if requires_target and num_targets > 0:
+                 logging.debug(f"{card.name} requires target(s). Entering TARGETING phase.")
+                 if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+                     self.previous_priority_phase = self.phase
+                 self.phase = self.PHASE_TARGETING
+                 self.targeting_context = {
+                     "source_id": card_id,
+                     "controller": player,
+                     "required_type": self._get_target_type_from_text(getattr(card,'oracle_text','')),
+                     "required_count": num_targets,
+                     "min_targets": 0 if up_to_N else num_targets,
+                     "max_targets": num_targets,
+                     "selected_targets": [],
+                     "effect_text": getattr(card, 'oracle_text', '')
+                     # NO stack_info here, the item is already on stack
+                 }
+                 # Priority handled by add_to_stack or will be set here? Let add_to_stack handle it.
+                 self.priority_player = player
+                 self.priority_pass_count = 0
+
+            logging.info(f"Successfully cast non-modal spell: {card.name} ({card_id}) from {source_zone} onto stack.")
 
         # --- Track Cast & Trigger ---
+        # Moved card removal earlier, so track AFTER cost payment and move
         self.track_card_played(card_id, player_idx = 0 if player == self.p1 else 1)
         if not hasattr(self, 'spells_cast_this_turn'): self.spells_cast_this_turn = []
         self.spells_cast_this_turn.append((card_id, player))
-        self.handle_cast_trigger(card_id, player, context=context)
+        # Trigger "When you cast..." abilities
+        cast_trigger_context = {'card_id': card_id, 'controller': player, **context} # Pass context
+        self.trigger_ability(None, "CAST_SPELL", cast_trigger_context)
+        # Specific type triggers
+        if 'creature' in getattr(card, 'card_types',[]): self.trigger_ability(None, "CAST_CREATURE_SPELL", cast_trigger_context)
+        elif 'instant' in getattr(card, 'card_types',[]) or 'sorcery' in getattr(card, 'card_types',[]): self.trigger_ability(None, "CAST_NONCREATURE_SPELL", cast_trigger_context)
+        # Add other type-specific cast triggers
 
-        logging.info(f"Successfully cast spell: {card.name} ({card_id}) from {source_zone} onto stack.")
-        return True
+        # Clear pending spell context AFTER casting is fully processed (stack or choice phase)
+        if hasattr(self, 'pending_spell_context') and self.pending_spell_context and self.pending_spell_context.get('card_id') == card_id:
+            self.pending_spell_context = None
+
+        return True # Casting process initiated successfully
 
     def _can_cast_now(self, card_id, player):
         """
@@ -2353,64 +2411,83 @@ class GameState:
         logging.warning(f"Could not resolve triggered ability for card {trigger_id}")
         
     def _resolve_spell(self, spell_id, controller, context=None):
-        """
-        Resolve a spell with comprehensive handling for all spell types.
-        
-        Args:
-            spell_id: The ID of the spell to resolve
-            controller: The player casting the spell
-            context: Additional context about the spell (e.g., if it's a copy)
-        """
-        if context is None:
-            context = {}
-            
+        """Resolve a spell with handling for modal spells based on context."""
+        if context is None: context = {}
         spell = self._safe_get_card(spell_id)
         if not spell:
-            logging.warning(f"Cannot resolve spell: card {spell_id} not found")
-            return
-        
-        spell_name = spell.name if hasattr(spell, "name") else "Unknown"
+             logging.warning(f"Cannot resolve spell: card {spell_id} not found")
+             # Don't move to graveyard if it didn't exist
+             return False
+
+        spell_name = getattr(spell, "name", f"Spell {spell_id}")
         logging.debug(f"Resolving spell: {spell_name}")
-        
-        # Check if spell is countered (e.g., by a previous spell/ability)
+
+        # Check if countered (e.g., by a replacement effect during resolution?) - less common
         if context.get("countered"):
-            logging.debug(f"Spell {spell_name} was countered - moving to graveyard")
-            if not context.get("is_copy", False):
-                controller["graveyard"].append(spell_id)
-            return
-        
-        # Determine spell type based on card type
-        if hasattr(spell, 'card_types'):
-            # Modal spell handling
-            if hasattr(spell, 'modal') and spell.modal:
-                mode = context.get("mode")
-                if mode is not None:
-                    self._resolve_modal_spell(spell_id, controller, mode, context)
+             logging.debug(f"Spell {spell_name} was countered - moving to graveyard")
+             if not context.get("is_copy", False) and not context.get("skip_default_movement", False):
+                  self.move_card(spell_id, controller, "stack_implicit", controller, "graveyard")
+             return False # Resolution stopped
+
+        # Determine spell type and base characteristics post-layers (layers shouldn't affect stack usually)
+        card_types = getattr(spell, 'card_types', [])
+
+        # --- MODAL SPELL RESOLUTION ---
+        selected_modes_indices = context.get("selected_modes") # Get list of chosen indices
+        if selected_modes_indices is not None: # Check specifically for None, empty list is valid (for "up to" maybe)
+            logging.debug(f"Resolving modal spell {spell_name} with chosen modes: {selected_modes_indices}")
+            all_modes_text, _, _ = self.ability_handler._parse_modal_text(getattr(spell, 'oracle_text', ''))
+
+            if not all_modes_text:
+                 logging.error(f"Failed to re-parse modes for resolving modal spell {spell_name}")
+                 # Move to GY if non-permanent?
+                 return False
+
+            resolution_effects_applied = False
+            for mode_idx in selected_modes_indices:
+                if 0 <= mode_idx < len(all_modes_text):
+                     mode_text = all_modes_text[mode_idx]
+                     logging.debug(f"Applying mode {mode_idx}: '{mode_text}'")
+                     # Create and apply effects for THIS mode's text
+                     # Pass targets that were selected *for the whole spell* if available
+                     # If modes have separate targets, targeting phase needs modification. Assume shared targets for now.
+                     mode_targets = context.get("targets") # Targets selected before spell was put on stack (if any)
+                     effects = EffectFactory.create_effects(mode_text, mode_targets)
+                     for effect_obj in effects:
+                         if effect_obj.apply(self, spell_id, controller, mode_targets):
+                              resolution_effects_applied = True
                 else:
-                    logging.warning(f"Modal spell {spell_name} has no mode specified")
-                    if not context.get("is_copy", False):
-                        controller["graveyard"].append(spell_id)
-                return
-            
-            # Handle different card types
-            if 'creature' in spell.card_types:
-                self._resolve_creature_spell(spell_id, controller, context)
-            elif 'planeswalker' in spell.card_types:
-                self._resolve_planeswalker_spell(spell_id, controller, context)
-            elif 'artifact' in spell.card_types or 'enchantment' in spell.card_types:
-                self._resolve_permanent_spell(spell_id, controller, context)
-            elif 'land' in spell.card_types:
-                self._resolve_land_spell(spell_id, controller, context)
-            elif 'instant' in spell.card_types or 'sorcery' in spell.card_types:
-                self._resolve_instant_sorcery_spell(spell_id, controller, context)
-            else:
-                logging.warning(f"Unknown card type for {spell_name}: {spell.card_types}")
-                if not context.get("is_copy", False):
-                    controller["graveyard"].append(spell_id)
+                     logging.warning(f"Invalid mode index {mode_idx} found in context for {spell_name}")
+
+            # Move non-permanent modal spells to graveyard after applying effects
+            if not any(t in card_types for t in ['creature', 'artifact', 'enchantment', 'planeswalker', 'land', 'battle']):
+                if not context.get("is_copy", False) and not context.get("skip_default_movement", False):
+                    self.move_card(spell_id, controller, "stack_implicit", controller, "graveyard")
+
+            self.trigger_ability(spell_id, "SPELL_RESOLVED", {"controller": controller, **context})
+            return resolution_effects_applied
+
+        # --- NON-MODAL SPELL RESOLUTION ---
         else:
-            logging.warning(f"Card {spell_name} has no card_types attribute")
-            if not context.get("is_copy", False):
-                controller["graveyard"].append(spell_id)
+            # Handle different card types (calls helpers which use move_card)
+            if 'creature' in card_types:
+                 success = self._resolve_creature_spell(spell_id, controller, context)
+            elif 'planeswalker' in card_types:
+                 success = self._resolve_planeswalker_spell(spell_id, controller, context)
+            elif any(t in card_types for t in ['artifact', 'enchantment', 'battle']):
+                 success = self._resolve_permanent_spell(spell_id, controller, context)
+            elif 'land' in card_types:
+                 success = self._resolve_land_spell(spell_id, controller, context)
+            elif any(t in card_types for t in ['instant', 'sorcery']):
+                 success = self._resolve_instant_sorcery_spell(spell_id, controller, context)
+            else:
+                 logging.warning(f"Unknown card type for resolution: {card_types} on {spell_name}")
+                 if not context.get("is_copy", False) and not context.get("skip_default_movement", False):
+                     self.move_card(spell_id, controller, "stack_implicit", controller, "graveyard")
+                 success = False # Unknown type failed resolution
+
+            # Post-resolution SBAs are handled by the main loop
+            return success
                 
     def _resolve_modal_spell(self, spell_id, controller, mode, context=None):
         """

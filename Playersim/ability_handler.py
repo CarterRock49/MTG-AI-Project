@@ -479,62 +479,109 @@ class AbilityHandler:
         return True
     
     def _parse_modal_text(self, text):
-        """Parse modal text from card or ability effect text."""
+        """
+        Parse modal text to extract mode descriptions and choice requirements.
+
+        Args:
+            text (str): The oracle text or ability effect text.
+
+        Returns:
+            tuple: (modes_list, min_choices, max_choices) or (None, 0, 0) if not modal.
+                   modes_list contains the text of each mode.
+        """
         modes = []
+        min_choices, max_choices = 0, 0
+        if not text:
+            return None, 0, 0
+
         text_lower = text.lower()
 
-        # Find the start of the modes using various markers
+        # Define markers and their corresponding min/max choices
+        # Order matters - check more specific ones first
         markers = [
-            "choose one —", "choose two —", "choose one or more —",
-            "choose up to one —", "choose up to two —", "choose up to three —",
-            "choose one or both —", "choose one •"
+            ("choose two or more —", 2, float('inf')), # Very rare, treat max as inf for now
+            ("choose three —", 3, 3),
+            ("choose two —", 2, 2),
+            ("choose one or both —", 1, 2), # Specific handling needed later?
+            ("choose up to three —", 0, 3),
+            ("choose up to two —", 0, 2),
+            ("choose up to one —", 0, 1),
+            ("choose one —", 1, 1),
+            ("choose one •", 1, 1) # Alternative marker
         ]
+
         start_index = -1
         marker_len = 0
-        for marker in markers:
-            idx = text_lower.find(marker)
+        chosen_marker_info = None
+
+        for marker_text, min_req, max_req in markers:
+            idx = text_lower.find(marker_text)
             if idx != -1:
+                # Basic check: Is it preceded by text that might negate it being the primary modal?
+                # (e.g., part of another ability description) - Needs complex parsing. For now, assume first found marker is primary.
                 start_index = idx
-                marker_len = len(marker)
+                marker_len = len(marker_text)
+                chosen_marker_info = (marker_text, min_req, max_req)
+                min_choices, max_choices = min_req, max_req
+                logging.debug(f"Found modal marker: '{marker_text}' in '{text[:100]}...'")
                 break
 
-        if start_index == -1: # No standard marker found, maybe just bullet points?
-             if '•' in text_lower or '●' in text_lower:
-                 # Assume modes start after the first colon or the start of the text if no colon
-                 colon_idx = text_lower.find(':')
-                 modal_text_start = colon_idx + 1 if colon_idx != -1 else 0
-                 modal_text = text[modal_text_start:]
-             else:
-                 return [] # Cannot reliably parse modes
-        else:
+        modal_text = ""
+        if start_index != -1:
             modal_text = text[start_index + marker_len:]
+        # Handle case where modes use bullet points without a standard "Choose X" intro
+        elif '•' in text or '●' in text:
+            # Find first bullet point that seems part of a list (heuristic: preceded by newline or start)
+            bullet_match = re.search(r"(?:\n|^)\s*[•●]\s+", text)
+            if bullet_match:
+                # Assume standard "choose one" if no text marker found
+                min_choices, max_choices = 1, 1
+                modal_text = text[bullet_match.start():] # Start parsing from the first bullet
+                logging.debug(f"Found bullet point modes, assuming 'Choose one'.")
+            else: # Not a clear modal structure
+                return None, 0, 0
+        else: # No modal markers found
+            return None, 0, 0
 
         modal_text = modal_text.strip()
 
-        # Split by bullet points or similar markers
+        # Split by bullet points (primary method)
+        # Handle different bullet characters and whitespace robustly
         mode_parts = re.split(r'\s*[•●]\s*', modal_text) # Split by bullet, trim whitespace
 
         # Clean up modes
         for part in mode_parts:
+            if not part.strip(): continue # Skip empty parts resulting from split
             # Remove reminder text first
             cleaned_part = re.sub(r'\s*\([^()]*?\)\s*', ' ', part).strip()
-            # Remove leading/trailing punctuation and whitespace
+             # Clean surrounding whitespace again after removal
+            cleaned_part = cleaned_part.strip()
+            # Remove leading/trailing punctuation like sentence ends, commas, etc.
             cleaned_part = re.sub(r'^[;,\.]+|[;,\.]+$', '', cleaned_part).strip()
             if cleaned_part:
                 modes.append(cleaned_part)
 
-        # Further split based on sentence structure if no bullets found but "choose" was present
-        if not modes and ("choose one" in text_lower or "choose two" in text_lower) and start_index != -1:
-             # Try splitting by sentence ending punctuation followed by uppercase letter (heuristic)
-             # This is less reliable
-             sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z•●-])', modal_text) # Split on sentence end + capital letter
+        # If no modes found via bullets but a text marker *was* found, try sentence splitting (less reliable)
+        if not modes and chosen_marker_info:
+             logging.debug("No bullet points found after modal marker, trying sentence split.")
+             # Split by sentence ending punctuation followed by potential start of next mode (Cap letter, list marker)
+             sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z•●\d\+\-])', modal_text) # Split on sentence end + potential mode start
              for sentence in sentences:
                   cleaned_sentence = re.sub(r'\s*\([^()]*?\)\s*', ' ', sentence).strip()
                   cleaned_sentence = re.sub(r'^[;,\.]+|[;,\.]+$', '', cleaned_sentence).strip()
                   if cleaned_sentence:
                        modes.append(cleaned_sentence)
 
-        return modes
+        # Handle 'inf' max_choices if needed (replace with actual number of modes)
+        if max_choices == float('inf'):
+            max_choices = len(modes) if modes else 0
+
+        if not modes:
+             logging.warning(f"Found modal marker but failed to parse mode texts from: '{modal_text[:100]}...'")
+             return None, 0, 0
+
+        logging.debug(f"Parsed modes: {modes}, MinChoices: {min_choices}, MaxChoices: {max_choices}")
+        return modes, min_choices, max_choices
         
     def register_card_abilities(self, card_id, player):
         """
