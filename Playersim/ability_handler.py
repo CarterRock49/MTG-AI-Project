@@ -625,8 +625,8 @@ class AbilityHandler:
         """
         Parse a card's text to identify and register its abilities.
         Handles regular cards, Class cards, and MDFCs. Clears previous abilities first.
-        Uses _create_keyword_ability for keywords found in text blocks.
-        Applies static abilities immediately after parsing. (Revised)
+        Uses _create_keyword_ability for keywords. Skips text already processed by specialized parsers.
+        Applies static abilities immediately after parsing.
         """
         if not card:
             logging.warning(f"Attempted to parse abilities for non-existent card {card_id}.")
@@ -634,7 +634,7 @@ class AbilityHandler:
 
         # Ensure card has game_state reference if missing
         if not hasattr(card, 'game_state') or card.game_state is None:
-             setattr(card, 'game_state', self.game_state)
+            setattr(card, 'game_state', self.game_state)
 
         # Clear existing registered abilities for this card_id to avoid duplication
         self.registered_abilities[card_id] = []
@@ -643,90 +643,100 @@ class AbilityHandler:
         try:
             texts_to_parse = []
             keywords_from_card_data = [] # Keywords explicitly listed on card data
+            processed_special_text = "" # Track text handled by Spree, Class etc.
 
-            # --- Get Text Source(s) ---
+            # --- Get Text Source(s) and Keywords ---
             current_face_index = getattr(card, 'current_face', 0)
             card_data_source = card # Default to main card object
 
             if hasattr(card, 'is_class') and card.is_class:
                 current_level_data = card.get_current_class_data()
                 if current_level_data:
-                    texts_to_parse.extend(current_level_data.get('abilities', []))
-                    # Handle level up action text
-                    if hasattr(card, 'can_level_up') and card.can_level_up():
-                        next_level = getattr(card, 'current_level', 1) + 1
-                        cost_str = card.get_level_cost(next_level)
-                        if cost_str:
-                            texts_to_parse.append(f"{cost_str}: Level up to {next_level}.")
-                # Keywords usually defined per level? If so, need to get from level_data. Assuming base card for now.
-                if hasattr(card, 'keywords'): keywords_from_card_data = card.keywords
+                    # Text comes from combined abilities of current level
+                    texts_to_parse.extend(current_level_data.get('all_abilities', [])) # Use combined abilities
+                    # The raw oracle text containing level structure is considered "special"
+                    processed_special_text = getattr(card, 'oracle_text', '')
+                if hasattr(card, 'keywords'): keywords_from_card_data = card.keywords # Assuming base keywords apply
 
             elif hasattr(card, 'faces') and card.faces and current_face_index < len(card.faces):
                  # MDFC or Transforming DFC - use current face
                  face_data = card.faces[current_face_index]
                  card_data_source = face_data # Get attributes from the face dict/object
                  texts_to_parse.append(face_data.get('oracle_text', ''))
-                 keywords_from_card_data = face_data.get('keywords', [])
-                 # Add transform action if applicable
-                 if card.can_transform(self.game_state):
-                     transform_cost = card.get_transform_cost()
-                     if transform_cost: texts_to_parse.append(f"{transform_cost}: Transform {card.name}.")
-                     else: texts_to_parse.append(f"Transform {card.name}.") # No cost transform trigger/action
+                 keywords_from_card_data = face_data.get('keywords', []) # Use face keywords
+                 # Consider if back face text needs special marking? Depends on structure.
 
             else:
-                 # Standard card or other types
+                 # Standard card or other types (like Room, Battle)
                  texts_to_parse.append(getattr(card, 'oracle_text', ''))
                  if hasattr(card, 'keywords'): keywords_from_card_data = card.keywords
+                 # --- Check for Spree Text Marker ---
+                 if hasattr(card, 'is_spree') and card.is_spree and hasattr(card, '_spree_related_text_marker'):
+                     processed_special_text += card._spree_related_text_marker
 
-            # --- Parse Keywords ---
-            # Use _get_parsed_keywords helper
+            # --- Parse Keywords from Data ---
             parsed_keywords = self._get_parsed_keywords(keywords_from_card_data)
             for keyword_text in parsed_keywords:
-                 first_word = keyword_text.split()[0] # Just the base keyword
-                 self._create_keyword_ability(card_id, card, first_word, abilities_list, full_keyword_text=keyword_text)
+                first_word = keyword_text.split()[0]
+                self._create_keyword_ability(card_id, card, first_word, abilities_list, full_keyword_text=keyword_text)
 
-            # --- Process Oracle Text ---
-            processed_text_hashes = set() # Avoid processing duplicate lines/clauses
+            # --- Process Oracle Text Clauses ---
+            processed_text_hashes = set()
             for text_block in texts_to_parse:
                 if not text_block or not isinstance(text_block, str): continue
 
-                # Split text into potential ability clauses using robust splitting
-                # Split by bullets, newlines, or sentence-ending punctuation followed by potential start of new clause
-                split_pattern = r'\s*•\s*|\n|\.(?=\s+[A-Z{\(])|\)(?=\s+[A-Z{\(])' # Enhanced splitting
-                clauses = filter(None, [c.strip() for c in re.split(split_pattern, text_block)])
+                # Remove reminder text globally from the block first
+                cleaned_text_block = re.sub(r'\s*\([^()]*?\)\s*', ' ', text_block).strip()
+                cleaned_text_block = re.sub(r'\s+([:.,;—])', r'\1', cleaned_text_block) # Clean space before punctuation
+                cleaned_text_block = re.sub(r'\s+', ' ', cleaned_text_block).strip() # Normalize spaces
+
+                # Skip block if it was handled by special parsers (Spree, Class)
+                if processed_special_text and cleaned_text_block in processed_special_text:
+                     logging.debug(f"Skipping text block for {card.name} as it was handled by special parser: '{cleaned_text_block[:50]}...'")
+                     continue
+
+                # Split text into potential ability clauses
+                split_pattern = r'\s*•\s*|\n|\.(?=\s+[A-Z{\(—])|\)(?=\s+[A-Z{\(—])|—(?=\s*\w)|(?<=.)—' # Handle em dash better
+                clauses = filter(None, [c.strip().rstrip('.').strip() for c in re.split(split_pattern, cleaned_text_block)])
 
                 for clause in clauses:
-                     if not clause: continue
-                     # Remove reminder text specific to this clause
-                     cleaned_clause_text = re.sub(r'\s*\([^()]*?\)\s*', ' ', clause).strip()
-                     cleaned_clause_text = re.sub(r'\s+([:.,;])', r'\1', cleaned_clause_text) # Clean space before punctuation
-                     cleaned_clause_text = re.sub(r'\s+', ' ', cleaned_clause_text).strip() # Normalize spaces
+                    if not clause: continue
+                    # Skip clause if it was part of special text (more granular check)
+                    if processed_special_text and clause in processed_special_text:
+                         # logging.debug(f"Skipping clause '{clause}' for {card.name} (handled by special parser).")
+                         continue
 
-                     if not cleaned_clause_text: continue
-                     text_hash = hash(cleaned_clause_text)
+                    cleaned_clause_text = clause # Already cleaned and stripped
+                    text_hash = hash(cleaned_clause_text)
 
-                     if text_hash not in processed_text_hashes:
-                         # Check if this clause IS a keyword before general parsing
-                         is_keyword_clause, keyword_found = self._is_keyword_clause(cleaned_clause_text)
+                    if text_hash not in processed_text_hashes:
+                        is_keyword_clause, keyword_found = self._is_keyword_clause(cleaned_clause_text)
 
-                         if is_keyword_clause:
-                              if isinstance(keyword_found, list): # Handle comma-separated lists
-                                   for sub_kw in keyword_found:
-                                        self._create_keyword_ability(card_id, card, sub_kw, abilities_list, full_keyword_text=sub_kw)
-                              else: # Single keyword
-                                   self._create_keyword_ability(card_id, card, keyword_found, abilities_list, full_keyword_text=cleaned_clause_text)
-                         else: # If not purely a keyword clause, parse normally
+                        if is_keyword_clause:
+                            if isinstance(keyword_found, list):
+                                for sub_kw in keyword_found: self._create_keyword_ability(card_id, card, sub_kw, abilities_list, full_keyword_text=sub_kw)
+                            else: self._create_keyword_ability(card_id, card, keyword_found, abilities_list, full_keyword_text=cleaned_clause_text)
+                        else:
+                             # Delegate classification to _parse_ability_text
                              self._parse_ability_text(card_id, card, cleaned_clause_text, abilities_list)
-                         processed_text_hashes.add(text_hash)
+                        processed_text_hashes.add(text_hash)
 
             # Log final count for this card
-            logging.debug(f"Parsed {len(abilities_list)} abilities for {card.name} ({card_id})")
+            logging.debug(f"Parsed {len(abilities_list)} functional abilities for {card.name} ({card_id})")
 
             # Immediately apply newly registered Static Abilities
-            # This ensures LayerSystem gets updated with the effect intentions.
+            # Needs to happen AFTER all parsing for a card is done.
+            static_abilities_applied = []
             for ability in abilities_list:
                 if isinstance(ability, StaticAbility):
-                    ability.apply(self.game_state)
+                    try:
+                         if ability.apply(self.game_state): # Apply returns True on successful registration
+                             static_abilities_applied.append(ability.effect_text)
+                    except Exception as static_apply_e:
+                         logging.error(f"Error applying static ability '{ability.effect_text}' for {card.name}: {static_apply_e}", exc_info=True)
+            if static_abilities_applied:
+                logging.debug(f"Applied {len(static_abilities_applied)} static abilities for {card.name}")
+
 
         except Exception as e:
             logging.error(f"Error parsing abilities for card {card_id} ({getattr(card, 'name', 'Unknown')}): {str(e)}")
@@ -734,6 +744,7 @@ class AbilityHandler:
             logging.error(traceback.format_exc())
             # Ensure list exists even on error
             if card_id not in self.registered_abilities: self.registered_abilities[card_id] = []
+
             
     # Helper function to parse keywords list/array
     def _get_parsed_keywords(self, keywords_data):
@@ -1089,19 +1100,34 @@ class AbilityHandler:
         if not is_static_grant and not is_scry_effect: # Scry handled by EffectFactory from text
              logging.warning(f"Keyword '{keyword_lower}' (from '{full_text}') not explicitly mapped or parsed.")
             
+
     def _parse_ability_text(self, card_id, card, ability_text, abilities_list):
         """
         Parse a single ability text string. Delegates parsing logic to Ability subclasses.
-        Tries to identify Activated, Triggered, or Static.
+        Tries to identify Activated, Triggered, or Static, in that order. Handles em dashes.
+        Avoids classifying effects clearly handled by replacements (like copy ETBs).
         """
         ability_text = ability_text.strip()
         if not ability_text: return
 
-        # Try parsing as Activated Ability first (common format: Cost: Effect)
+        # --- Check for Replacement Effect Patterns first ---
+        replacement_keywords = ["if", "would", "instead", "as", "with"]
+        # Very basic check, assumes more complex parsing happens elsewhere
+        if all(kw in ability_text.lower() for kw in ["if", "would", "instead"]) or \
+           (ability_text.lower().startswith("as ") and "enters the battlefield" in ability_text.lower()) or \
+           (ability_text.lower().startswith("enters the battlefield with ") and "counter" in ability_text.lower()):
+            # This looks like a replacement or ETB effect, handled by ReplacementEffectSystem or ETB logic.
+            # Log that we're skipping it here.
+            logging.debug(f"Skipping parsing functional ability for text resembling replacement/ETB: '{ability_text}'")
+            return
+
+
+        # 1. Try parsing as Activated Ability (Cost[:—] Effect)
         try:
-            ability = ActivatedAbility(card_id=card_id, effect_text=ability_text, cost="placeholder", effect="placeholder") # Temp cost/effect
-            # If ActivatedAbility constructor successfully parses cost/effect:
-            if ability.cost != "placeholder" and ability.effect != "placeholder":
+            # Temporarily create to attempt parsing
+            ability = ActivatedAbility(card_id=card_id, effect_text=ability_text, cost="placeholder", effect="placeholder")
+            # Check if the constructor successfully found a cost AND effect
+            if ability.cost != "placeholder" and ability.effect is not None: # Allow empty effect if structure is Cost:
                  # Check if it's actually a Mana Ability
                  if "add {" in ability.effect.lower() or "add mana" in ability.effect.lower():
                       mana_produced = self._parse_mana_produced(ability.effect)
@@ -1110,56 +1136,58 @@ class AbilityHandler:
                            setattr(mana_ability, 'source_card', card)
                            abilities_list.append(mana_ability)
                            logging.debug(f"Registered ManaAbility for {card.name}: {mana_ability.effect_text}")
-                           return # Successfully parsed as Mana Ability
-                      # else: Failed mana parsing, treat as regular activated
-                 # Parsed as Activated (non-mana)
+                           return
+                 # Parsed as standard Activated
                  setattr(ability, 'source_card', card)
                  abilities_list.append(ability)
                  logging.debug(f"Registered ActivatedAbility for {card.name}: {ability.effect_text}")
-                 return # Successfully parsed as Activated Ability
-            # else: Did not parse as Activated, continue checking
-        except ValueError: pass # Cost: Effect pattern not found or invalid
-        except Exception as e: logging.error(f"Error parsing as ActivatedAbility: {e}")
+                 return
+            # If placeholder remains, it didn't parse as activated. Fall through.
+        except ValueError: pass # Pattern not found or invalid cost/effect structure
+        except Exception as e: logging.error(f"Error attempting to parse as ActivatedAbility: {e}")
 
-        # Try parsing as Triggered Ability ("When/Whenever/At ... , ...")
+
+        # 2. Try parsing as Triggered Ability (When/Whenever/At ..., Effect)
         try:
-            ability = TriggeredAbility(card_id=card_id, effect_text=ability_text, trigger_condition="placeholder", effect="placeholder") # Temp placeholders
-            # If TriggeredAbility constructor successfully parses:
-            if ability.trigger_condition != "placeholder" and ability.effect != "placeholder":
+            ability = TriggeredAbility(card_id=card_id, effect_text=ability_text, trigger_condition="placeholder", effect="placeholder")
+            if ability.trigger_condition != "placeholder" and ability.effect is not None: # Allow empty effect part? Check rules. Usually has effect.
                  setattr(ability, 'source_card', card)
                  abilities_list.append(ability)
                  logging.debug(f"Registered TriggeredAbility for {card.name}: {ability.effect_text}")
-                 return # Successfully parsed as Triggered Ability
-            # else: Did not parse as Triggered, continue checking
-        except ValueError: pass # Trigger pattern not found or invalid
-        except Exception as e: logging.error(f"Error parsing as TriggeredAbility: {e}")
+                 return
+            # If placeholder remains, fall through.
+        except ValueError: pass
+        except Exception as e: logging.error(f"Error attempting to parse as TriggeredAbility: {e}")
 
-        # Assume Static Ability if not Activated or Triggered
-        # Basic check: Avoid adding plain keywords again if already handled by _create_keyword_ability
+
+        # 3. Assume Static if not Activated/Triggered AND doesn't look like simple keyword
+        # Basic check to avoid re-registering keywords already handled
         is_simple_keyword = ability_text.lower() in [kw.lower() for kw in Card.ALL_KEYWORDS]
         already_registered_as_keyword = any(getattr(a, 'keyword', None) == ability_text.lower() for a in abilities_list)
 
-        if not is_simple_keyword or not already_registered_as_keyword:
-             try:
-                 # Effect is the whole text for static abilities
-                 ability = StaticAbility(card_id=card_id, effect=ability_text, effect_text=ability_text)
-                 setattr(ability, 'source_card', card)
-                 abilities_list.append(ability)
-                 logging.debug(f"Registered StaticAbility for {card.name}: {ability.effect_text}")
-                 # --- >>> APPLY STATIC ABILITY <<< ---
-                 # StaticAbility.apply registers with LayerSystem
-                 try:
-                     ability.apply(self.game_state)
-                     logging.debug(f"Called apply() for StaticAbility: {ability.effect_text}")
-                 except Exception as apply_e:
-                     logging.error(f"Error calling apply() for static ability '{ability.effect_text}': {apply_e}")
-                 return # Parsed as Static
-             except Exception as e:
-                 logging.error(f"Error parsing as StaticAbility: {e}")
+        # Add check for common action verbs unlikely in static abilities
+        action_verbs = [r'\b(destroy|exile|counter|draw|discard|create|search|tap|untap|target|deal|sacrifice)\b'] # Needs refinement
+        is_likely_action = any(re.search(verb, ability_text.lower()) for verb in action_verbs)
 
-        # If none of the above worked, log it (unless it was a handled keyword)
+        if not is_likely_action and (not is_simple_keyword or not already_registered_as_keyword):
+            try:
+                # Treat the whole text as the static effect description
+                ability = StaticAbility(card_id=card_id, effect=ability_text, effect_text=ability_text)
+                setattr(ability, 'source_card', card)
+                abilities_list.append(ability)
+                logging.debug(f"Registered StaticAbility for {card.name}: {ability.effect_text}")
+                # IMPORTANT: Apply static ability during the *apply_all_effects* stage of LayerSystem,
+                # not necessarily right here during parsing. The call below is deferred.
+                # ability.apply(self.game_state) # Removed immediate application
+                return
+            except Exception as e:
+                logging.error(f"Error parsing as StaticAbility: {e}")
+
+        # If none of the above worked, log it unless it was handled keyword
         if not is_simple_keyword or not already_registered_as_keyword:
-            logging.debug(f"Could not classify ability text for {card.name}: '{ability_text}'")
+             # Don't log if it was likely an action phrase we intentionally skipped
+            if not is_likely_action:
+                 logging.debug(f"Could not classify ability text for {card.name}: '{ability_text}' (Potentially Replacement/Action/Keyword?)")
         
     def _parse_mana_produced(self, mana_text):
          """Parses a mana production string (e.g., "add {G}{G}") into a dict."""

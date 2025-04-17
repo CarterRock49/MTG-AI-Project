@@ -159,59 +159,62 @@ class ActivatedAbility(Ability):
         # Allow parsing from effect_text if cost/effect not provided
         parsed_cost, parsed_effect = None, None
         if cost is None and effect is None and effect_text:
-             parsed_cost, parsed_effect = self._parse_cost_effect(effect_text)
-        self.cost = cost if cost is not None else parsed_cost
-        self.effect = effect if effect is not None else parsed_effect
+            parsed_cost, parsed_effect = self._parse_cost_effect(effect_text) # Uses updated parser
 
-        # Validation after potential parsing
-        if self.cost is None or self.effect is None: # Allow empty cost/effect if text provides it implicitly? Check rules. For now, require both.
-            raise ValueError(f"ActivatedAbility requires cost and effect. Got cost='{self.cost}', effect='{self.effect}' from text='{effect_text}'")
+        # Ensure self.cost and self.effect are strings, default to empty string if None
+        self.cost = str(cost) if cost is not None else (str(parsed_cost) if parsed_cost is not None else "")
+        self.effect = str(effect) if effect is not None else (str(parsed_effect) if parsed_effect is not None else "")
 
-        # Store original text if not provided
+        # Validation: Cost is required (unless it's an implicit cost like Morph)
+        if not self.cost and "morph" not in self.effect_text.lower(): # Allow no explicit cost for morph text
+            raise ValueError(f"ActivatedAbility requires a cost. Got text='{effect_text}'")
+        # Effect can sometimes be derived (e.g., Equip {1}) but should generally exist if parsed
+        # No explicit effect validation here, rely on EffectFactory later?
+
+        # Store original text if not provided, constructing from potentially empty parts
         if not effect_text:
-            self.effect_text = f"{self.cost}: {self.effect}"
-        
+            self.effect_text = f"{self.cost}: {self.effect}".strip(': ') # Clean potential empty cost
+
+
     def _parse_cost_effect(self, text):
-        """Attempt to parse 'Cost: Effect' or 'Cost — Effect' format."""
-        # Updated regex to match ':' or '—' as separator
-        match = re.match(r'^\s*([^:—\u2014]+?)\s*[:—\u2014]\s*(.+)\s*$', text.strip()) # Use [:—\u2014]
+        """Attempt to parse 'Cost: Effect' or 'Cost — Effect' format. Handles em dash."""
+        # Regex includes colon, en dash, em dash, unicode em dash
+        match = re.match(r'^\s*([^:—\u2014]+?)\s*[:—\u2014]\s*(.+)\s*$', text.strip())
         if match:
             cost_part = match.group(1).strip()
             effect_part = match.group(2).strip()
-            # Basic validation: Cost should contain '{' or keyword like 'Tap'
-            if '{' in cost_part or re.search(r'\b(tap|sacrifice|discard|pay)\b', cost_part.lower()):
+            # Basic validation: Cost should contain '{' or keyword like 'Tap' or number
+            if '{' in cost_part or re.search(r'\b(tap|sacrifice|discard|pay)\b|\d+', cost_part.lower()):
                  return cost_part, effect_part
 
-        # Check for keyword costs without separator (e.g., Cycling {2}, Equip {1}, Flashback {R}—Return...)
-        # Check keywords that might be followed by cost (and maybe an em dash before description)
-        keyword_cost_pattern = r"^(cycling|equip|flashback|kicker|level up|morph|unearth|reconfigure|fortify|channel|adapt|monstrosity|ninjutsu)\s*(?:-|—)?\s*(.*?)(?:\s*[:—\u2014]\s*|$)"
-        match_keyword_cost = re.match(keyword_cost_pattern, text.lower().strip(), re.IGNORECASE)
+        # Check for keyword costs without separator
+        # Handles common keyword costs followed by mana or number, possibly description
+        keyword_cost_pattern = r"^(cycling|equip|flashback|kicker|level up|morph|unearth|reconfigure|fortify|channel|adapt|monstrosity|ninjutsu)\s*(?:-|—|–|:)?\s*(\{.*?\}(?![0-9])|\d+|pay \d+ life|discard a card)" # Look for {cost}, number, or specific text costs
+        match_keyword_cost = re.match(keyword_cost_pattern, text.strip(), re.IGNORECASE)
         if match_keyword_cost:
             keyword = match_keyword_cost.group(1)
-            rest_of_text = match_keyword_cost.group(2).strip()
-            # Extract cost from the rest of the text (handles digits or bracketed costs)
-            cost_match = re.search(r"(\{[^}]+\}|[0-9]+)", rest_of_text)
-            cost_part = cost_match.group(1) if cost_match else "{0}" # Default free? Risky.
+            cost_part = match_keyword_cost.group(2).strip()
+            # Normalize numeric cost to {N}
             if cost_part.isdigit(): cost_part = f"{{{cost_part}}}"
 
-            # If there's more text after the cost, it's likely the effect description. Otherwise derive from keyword.
-            effect_part_match = re.search(re.escape(cost_part) + r"\s*[:—\u2014]?\s*(.+)", text.strip(), re.IGNORECASE)
+            # Extract effect description AFTER the cost
+            effect_part_match = re.search(re.escape(cost_part) + r"\s*[:—\u2014]?\s*(.+)", text.strip(), re.IGNORECASE | re.DOTALL)
             if effect_part_match:
-                effect_part = effect_part_match.group(1).strip()
+                 effect_part = effect_part_match.group(1).strip()
             else: # Derive effect from keyword if no description found
-                effect_map = { # Simplified effects, full text parsing elsewhere is better
+                # Refine derived effects
+                effect_map = {
                     "cycling": "Discard this card: Draw a card.", "equip": "Attach to target creature.",
                     "flashback": "Cast from graveyard, then exile.", "level up": "Put a level counter on this.",
-                    "morph": "Turn this face up.", "ninjutsu": "Return attacker, put this onto battlefield."
-                    # Add more...
+                    "morph": "Turn this face up.", "unearth": "Return to battlefield with haste, exile later.",
+                    "ninjutsu": "Return attacker, put this onto battlefield.", "channel": "Activate channel effect."
+                    # Add more default effects based on keywords
                 }
                 effect_part = effect_map.get(keyword, f"Perform {keyword} effect.")
-
             return cost_part, effect_part
 
-        # Assume no cost found if no separator or keyword pattern matched
-        logging.debug(f"Could not parse Cost[:—] Effect from '{text}'")
-        return None, text # Assume entire text is the effect if cost not found
+        logging.debug(f"Could not parse Cost[:—\u2014] Effect from '{text}'")
+        return None, text # Assume entire text is the effect if cost not parsed
 
     def resolve(self, game_state, controller, targets=None):
         """Resolve this activated ability using the default implementation."""
@@ -614,36 +617,44 @@ class TriggeredAbility(Ability):
         # Allow parsing from effect_text if condition/effect not provided
         parsed_condition, parsed_effect = None, None
         if trigger_condition is None and effect is None and effect_text:
-            parsed_condition, parsed_effect = self._parse_condition_effect(effect_text)
-        self.trigger_condition = (trigger_condition if trigger_condition is not None else parsed_condition or "Unknown").lower()
-        self.effect = (effect if effect is not None else parsed_effect or "Unknown").lower()
-        self.additional_condition = additional_condition  # Extra condition beyond the trigger
+            parsed_condition, parsed_effect = self._parse_condition_effect(effect_text) # Uses updated parser
+
+        # Ensure attributes are strings, default to empty if None
+        self.trigger_condition = str(trigger_condition) if trigger_condition is not None else (str(parsed_condition) if parsed_condition is not None else "Unknown")
+        self.effect = str(effect) if effect is not None else (str(parsed_effect) if parsed_effect is not None else "Unknown")
+        self.trigger_condition = self.trigger_condition.lower() # Store lower
+        self.effect = self.effect.lower() # Store lower
+        self.additional_condition = additional_condition # Can be string or callable
 
         # Validation after potential parsing
-        if not self.trigger_condition or self.trigger_condition == "unknown":
+        if self.trigger_condition == "unknown":
              raise ValueError(f"TriggeredAbility requires trigger_condition. Got text='{effect_text}'")
-        if not self.effect or self.effect == "unknown":
+        if self.effect == "unknown":
              raise ValueError(f"TriggeredAbility requires effect. Got text='{effect_text}'")
 
         # Store original text if not provided
         if not effect_text:
-            self.effect_text = f"{self.trigger_condition.capitalize()}, {self.effect.capitalize()}."
-            
+            self.effect_text = f"{self.trigger_condition.capitalize()}, {self.effect.capitalize()}." # Reconstruct from parts
+
     def _parse_condition_effect(self, text):
-        """Attempt to parse 'When/Whenever/At..., Effect.' or 'When/Whenever/At... — Effect' format."""
-        # More robust regex to handle variations and potential intervening text, including em dash
-        match = re.match(r'^\s*(when|whenever|at)\s+([^,:\u2014]+?),?[:—\u2014]?\s*(.+)\s*$', text.strip(), re.IGNORECASE | re.DOTALL)
+        """Attempt to parse 'When/Whenever/At..., Effect.' or 'When/Whenever/At... — Effect' format. Handles em dash."""
+        # Regex includes comma, colon, en dash, em dash, unicode em dash as separators
+        match = re.match(r'^\s*(when|whenever|at)\s+([^,:—\u2014]+?),?[:—\u2014]?\s*(.+)\s*$', text.strip(), re.IGNORECASE | re.DOTALL)
         if match:
             # Combine trigger parts
             trigger_part = f"{match.group(1)} {match.group(2)}".strip()
             effect_part = match.group(3).strip()
+            # Remove trailing period if present
+            if effect_part.endswith('.'): effect_part = effect_part[:-1]
             # Simple validation: effect shouldn't contain trigger keywords unless nested
             if not re.match(r'^(when|whenever|at)\b', effect_part.lower()):
-                # Remove trailing period if present
-                if effect_part.endswith('.'): effect_part = effect_part[:-1]
-                return trigger_part, effect_part
+                 return trigger_part, effect_part
+            else: # Effect seems to contain another trigger keyword, parse likely failed
+                 logging.debug(f"Possible nested trigger in effect part: '{effect_part}'. Parse might be inaccurate.")
+                 # Return best guess
+                 return trigger_part, effect_part
         logging.debug(f"Could not parse Trigger[?,:,\u2014] Effect from '{text}'")
-        return None, None
+        return None, None # Return None if parse fails
         
     def can_trigger(self, event_type, context=None):
         """Check if the ability should trigger based on an event and additional conditions with improved pattern matching."""
@@ -904,89 +915,158 @@ class StaticAbility(Ability):
         # Set effect_text from effect if not provided
         if not effect_text and self.effect:
             self.effect_text = self.effect.capitalize()
-        
+
     def apply(self, game_state, affected_cards=None):
-        """Register the static ability's effect with the LayerSystem. (Corrected Layer Determination Call)"""
-        if not hasattr(game_state, 'layer_system') or not game_state.layer_system:
+        """Register the static ability's effect with the LayerSystem. Validates controller."""
+        gs = game_state # Alias
+
+        # --- 1. Check Controller and Zone ---
+        # Static abilities only function while the source is on the battlefield typically
+        card_owner, card_zone = gs.find_card_location(self.card_id)
+        if not card_owner or card_zone != 'battlefield':
+            # This static ability source isn't on the battlefield, do not apply.
+            # Log if expected to be applied but isn't found.
+            # logging.debug(f"StaticAbility source {self.card_id} not on battlefield (Zone: {card_zone}). Skipping apply.")
+            return False # Signal that application was skipped/failed due to zone
+
+        # Use the determined owner as the controller for this ability instance
+        controller = card_owner
+
+        # --- 2. Pre-validation: Check if effect looks like non-static ---
+        # Prevent attempting to register activated/triggered abilities as static layers
+        non_static_pattern = r'^\s*(\{.*?\}|tap|sacrifice|pay\s\d+\slife|discard|remove.*?counter)\s*[:—\u2014]' # Matches Cost: Effect
+        trigger_pattern = r'^\s*(when|whenever|at)\b'
+        # Also check for explicit action verbs less common in static abilities applied continuously
+        action_verbs = r'\b(destroy|exile|counter|return target|deals? damage|create token|search|target player draws?|target player loses?)\b'
+
+        if re.match(non_static_pattern, self.effect) or re.match(trigger_pattern, self.effect) or re.search(action_verbs, self.effect):
+             # Log only if it wasn't caught by the parser earlier (this is a double-check)
+             # logging.warning(f"StaticAbility.apply skipped: Effect text '{self.effect_text}' resembles activated/triggered/action ability.")
+             return False # Do not register this with LayerSystem
+
+        # --- 3. Proceed with Registration ---
+        if not hasattr(gs, 'layer_system') or not gs.layer_system:
             logging.warning(f"Layer system not found, cannot apply static ability: {self.effect_text}")
             return False
 
-        # Use the clean effect text (lowercase, potentially stripped punctuation) for layer determination
+        # Clean effect text for layer determination
         effect_lower_clean = self.effect.lower().strip('.—\u2014: ')
-        # *** CORRECTED: Call the method on self, not the layer_system ***
-        layer = self._determine_layer_for_effect(effect_lower_clean) # Use cleaned text
+        layer = self._determine_layer_for_effect(effect_lower_clean)
 
         if layer is None:
-            # Log the *original* effect text for better debugging if layer determination fails
             logging.debug(f"StaticAbility.apply: Could not determine layer for static effect: '{self.effect_text}'")
-            return False # Cannot apply if layer unknown
-
-        # Find affected cards if not specified
-        # Need robust controller finding
-        card_owner, card_zone = game_state.find_card_location(self.card_id)
-        if not card_owner:
-             logging.warning(f"Cannot determine controller for static ability source {self.card_id}")
-             return False # Cannot proceed without controller context
-
-        controller = card_owner # Use the found controller
+            return False
 
         if affected_cards is None:
             affected_cards = self.get_affected_cards(game_state, controller)
+            if affected_cards is None: affected_cards = [] # Ensure list
 
-        # No need to proceed if the effect affects nothing
-        # Check explicitly for None as an empty list might be valid (e.g., "Creatures you control...")
-        if affected_cards is None:
-             logging.debug(f"Static ability '{self.effect_text}' currently affects no cards.")
-             # Still register? Might affect future cards. Let's register but with empty affected_ids for now.
-             # If get_affected_cards returns None, default to empty list.
-             affected_cards = []
+        # --- Parse and Register Potentially Multiple Layer Effects ---
+        # Handle complex static abilities that affect multiple layers (like Kaito)
+        parsed_effects_data = self._parse_multi_layer_effect(effect_lower_clean)
+        registered_count = 0
 
-        # Prepare base effect data
-        effect_data = {
-            'source_id': self.card_id,
-            'layer': layer,
-            'affected_ids': affected_cards,
-            'effect_text': self.effect_text, # Store original text for reference/debugging
-            'duration': 'permanent', # Static effects are usually permanent while source is on battlefield
-            # Condition: effect is active only if the source card is on the battlefield and controlled by original controller?
-            # Use current controller found above for the condition check.
-            'condition': lambda gs_check: (self.card_id in controller.get("battlefield", [])),
-            'controller_id': controller, # Store controller for potential reference
-            # Layer 7 specifics added by handlers below
-        }
-
-        # --- Delegate to specific parsers to fill effect_type and effect_value ---
-        # Pass the cleaned effect text to parsers for consistency
-        parsed = False
-        parsed_data = None # Initialize
-        try:
-            if layer == 7: parsed_data = self._parse_layer7_effect(effect_lower_clean)
-            elif layer == 6: parsed_data = self._parse_layer6_effect(effect_lower_clean)
-            elif layer == 5: parsed_data = self._parse_layer5_effect(effect_lower_clean)
-            elif layer == 4: parsed_data = self._parse_layer4_effect(effect_lower_clean)
-            elif layer == 3: parsed_data = self._parse_layer3_effect(effect_lower_clean)
-            elif layer == 2: parsed_data = self._parse_layer2_effect(effect_lower_clean)
-            elif layer == 1: parsed_data = self._parse_layer1_effect(effect_lower_clean)
-        except Exception as parse_e:
-            logging.error(f"Error parsing Layer {layer} effect '{self.effect_text}': {parse_e}", exc_info=True)
-
-        if parsed_data:
-            effect_data.update(parsed_data) # Adds relevant keys like 'sublayer', 'effect_type', 'effect_value'
-            parsed = True
-
-        if parsed:
-            effect_id = game_state.layer_system.register_effect(effect_data)
-            if effect_id:
-                # Log the original text for clarity
-                logging.debug(f"Registered static effect '{self.effect_text}' (ID: {effect_id}, Layer: {layer}{effect_data.get('sublayer', '')}) for {self.card_id}")
-                return True
+        if parsed_effects_data: # Got specific parsed data
+            for layer_data in parsed_effects_data:
+                final_data = {
+                    'source_id': self.card_id,
+                    'affected_ids': affected_cards, # Apply to same targets unless overridden
+                    'effect_text': self.effect_text, # Store original text
+                    'duration': 'permanent',
+                    'condition': lambda gs_check: (self.card_id in controller.get("battlefield", [])), # Standard condition
+                    'controller_id': controller,
+                    **layer_data # Merge parsed layer, sublayer, type, value
+                }
+                if game_state.layer_system.register_effect(final_data):
+                    registered_count += 1
+            if registered_count > 0:
+                 logging.debug(f"Registered {registered_count} layer effects from static ability '{self.effect_text}'")
+                 return True
             else:
-                logging.warning(f"Failed to register static effect '{self.effect_text}' for {self.card_id}")
-                return False
-        else:
-            # Log original text if parsing fails
-            logging.warning(f"Static ability parser could not interpret effect: '{self.effect_text}'")
-            return False
+                 logging.warning(f"Parsed multi-layer data for '{self.effect_text}', but failed to register any.")
+                 return False
+
+        else: # Fallback: Try to parse as single layer effect (less robust)
+            parsed_data_single = None
+            try:
+                if layer == 7: parsed_data_single = self._parse_layer7_effect(effect_lower_clean)
+                elif layer == 6: parsed_data_single = self._parse_layer6_effect(effect_lower_clean)
+                elif layer == 5: parsed_data_single = self._parse_layer5_effect(effect_lower_clean)
+                elif layer == 4: parsed_data_single = self._parse_layer4_effect(effect_lower_clean)
+                # Layers 1-3 less common for this kind of fallback
+            except Exception as parse_e:
+                logging.error(f"Error parsing single Layer {layer} effect '{self.effect_text}': {parse_e}", exc_info=True)
+
+            if parsed_data_single:
+                 effect_data = {
+                     'source_id': self.card_id,
+                     'layer': layer,
+                     'affected_ids': affected_cards,
+                     'effect_text': self.effect_text,
+                     'duration': 'permanent',
+                     'condition': lambda gs_check: (self.card_id in controller.get("battlefield", [])),
+                     'controller_id': controller,
+                     **parsed_data_single # Add sublayer, type, value
+                 }
+                 if game_state.layer_system.register_effect(effect_data):
+                      logging.debug(f"Registered static effect (single) '{self.effect_text}' in Layer {layer}")
+                      return True
+                 else:
+                      logging.warning(f"Failed to register single-layer static effect '{self.effect_text}'")
+                      return False
+            else:
+                 logging.warning(f"Static ability parser could not interpret effect (apply): '{self.effect_text}'")
+                 return False
+
+
+    def _parse_multi_layer_effect(self, effect_lower_clean):
+        """
+        Attempt to parse complex static abilities that affect multiple layers.
+        Returns a list of effect data dictionaries, one for each layer/sublayer.
+        Returns None if no complex pattern is matched.
+        """
+        # Example: Kaito: "During your turn, as long as Kaito has one or more loyalty counters on him, he's a 3/4 Ninja creature and has hexproof."
+        kaito_match = re.match(r"(during your turn,)?\s*(as long as .+?,)?\s*(?:it's|he's|she's)\s+a\s+(\d+)/(\d+)\s+(.*?)\s+creature(?: and has (.*?))?(?:\.|$)", effect_lower_clean)
+        if kaito_match:
+            turn_restriction, condition_part, power_str, toughness_str, types_part, extra_keywords = kaito_match.groups()
+            power = safe_int(power_str); toughness = safe_int(toughness_str)
+            # --- Extract conditional logic ---
+            # Base condition is presence on battlefield. Add "as long as" condition.
+            # More complex conditional function generation needed here. Simplified for now.
+            conditional_func = lambda gs: (self.card_id in self.game_state.get_card_controller(self.card_id).get("battlefield", [])) # Basic presence
+            # Add loyalty check for Kaito
+            if "loyalty counter" in (condition_part or ""):
+                 controller = self.game_state.get_card_controller(self.card_id)
+                 conditional_func = lambda gs: (controller and controller.get("loyalty_counters", {}).get(self.card_id, 0) > 0 and
+                                                  self.card_id in controller.get("battlefield", []))
+
+            # Base effect data for this ability
+            base_data = {'affected_ids': [self.card_id], 'condition': conditional_func}
+
+            effects = []
+            # Layer 4: Add types (e.g., "Ninja")
+            types_to_add = [t.strip() for t in types_part.split() if t.strip().capitalize() in Card.SUBTYPE_VOCAB or t.strip() in Card.ALL_CARD_TYPES]
+            if types_to_add:
+                # Determine if it adds *in addition* or sets the type
+                # Kaito becomes a Ninja Creature -> SETS Creature type, adds Ninja subtype? Rules check.
+                # Rule 205.1b: If effect makes it a type without "in addition", it loses other card types.
+                # It keeps supertypes and subtypes appropriate to the new type.
+                # This is complex. Simplify: Assume SET Creature type, ADD relevant subtypes.
+                effects.append({**base_data, 'layer': 4, 'effect_type': 'set_type', 'effect_value': ["Creature"]})
+                effects.append({**base_data, 'layer': 4, 'effect_type': 'add_subtype', 'effect_value': [t for t in types_to_add if t.lower() != 'creature']}) # Add non-creature parts as subtypes
+            # Layer 6: Add keywords (e.g., "hexproof")
+            if extra_keywords:
+                 keywords_to_add = [kw.strip() for kw in extra_keywords.split('and') if kw.strip()]
+                 for kw in keywords_to_add:
+                     if kw in Card.ALL_KEYWORDS:
+                          effects.append({**base_data, 'layer': 6, 'effect_type': 'add_ability', 'effect_value': kw})
+            # Layer 7b: Set P/T
+            effects.append({**base_data, 'layer': 7, 'sublayer': 'b', 'effect_type': 'set_pt', 'effect_value': (power, toughness)})
+            return effects
+
+        # Add patterns for other multi-layer static abilities here
+
+        return None # No multi-layer pattern matched
         
     def _parse_layer1_effect(self, effect_lower):
         """Parse continuous copy effects for Layer 1 (Rare for static abilities)."""

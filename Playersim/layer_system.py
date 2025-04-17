@@ -484,20 +484,21 @@ class LayerSystem:
         # If not found anywhere, return None or default
         return None
         
-    def _calculate_layer7b_set_specific(self, effect_data, calculated_characteristics): # New method for Layer 7b
+    def _calculate_layer7b_set_specific(self, effect_data, calculated_characteristics):
          effect_type = effect_data.get('effect_type')
          value = effect_data.get('effect_value')
          for target_id in effect_data.get('affected_ids', []):
-              if target_id in calculated_characteristics:
-                  chars = calculated_characteristics[target_id]
-                  # Only apply if it's a creature
-                  if 'creature' in chars.get('card_types', []):
+             # Check if target exists in calculated data BEFORE proceeding
+             if target_id in calculated_characteristics:
+                 chars = calculated_characteristics[target_id]
+                 # Only apply if it's a creature AFTER Layer 4 applied
+                 if 'creature' in chars.get('card_types', []):
                      # Effects setting P/T to specific values (e.g., "becomes 1/1")
                      if effect_type == 'set_pt' and isinstance(value, (tuple, list)) and len(value)==2:
-                          p, t = value
-                          # This sets current P/T but doesn't change the _base_ P/T
-                          chars['power'], chars['toughness'] = p, t
-                          logging.debug(f"Layer 7b: Set specific P/T of {target_id} to {p}/{t}")
+                         p, t = value
+                         # This sets current P/T but doesn't change the _base_ P/T
+                         chars['power'], chars['toughness'] = p, t
+                         logging.debug(f"Layer 7b: Set specific P/T of {target_id} to {p}/{t}")
                           
         
     def _calculate_layer7a_cda_and_base(self, effect_data, calculated_characteristics): # Renamed from _calculate_layer7a_set

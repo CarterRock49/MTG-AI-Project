@@ -287,20 +287,24 @@ class Card:
     #
     # Spree card handling methods
     #
+
     def _parse_spree_modes(self):
         """
         Enhanced parsing of Spree modes with comprehensive handling of variations,
-        including em dash separators.
+        including em dash separators. Ensures Spree mode text is handled distinctly.
 
         Parsing strategy:
         1. Identify if the card has the Spree keyword.
         2. Extract the text block containing the modes.
         3. Use regex to find individual modes, matching "+ COST {—|-} EFFECT".
         4. Parse details for each mode using helper functions.
+        5. IMPORTANT: Mark the main card text that constitutes the Spree mechanic itself
+           so it isn't parsed again as a separate static/triggered ability later.
         """
         # Reset spree-related attributes
         self.is_spree = False
         self.spree_modes = [] # Store list of mode dictionaries
+        self._spree_related_text_marker = "" # Store text block belonging to spree
 
         # Check if card has oracle text
         if not hasattr(self, 'oracle_text') or not self.oracle_text:
@@ -319,41 +323,51 @@ class Card:
         self.is_spree = True
 
         try:
-            # --- Extract Modes Text ---
+            # --- Extract Modes Text and Mark ---
             # Find the start of the modes list, usually after "spree" keyword or introductory text.
-            # Often modes start with '+' symbol. Find the first '+' indicating a mode.
-            first_mode_plus_match = re.search(r'\n\s*\+\s*', oracle_text_cleaned)
+            # Find the first '+' indicating a mode, potentially after the "spree" keyword.
+            spree_block_start_index = spree_keyword_match.start()
+            # Find first '+' AFTER the spree keyword
+            first_mode_plus_match = re.search(r'\n\s*\+\s*', oracle_text_cleaned[spree_keyword_match.end():])
             modes_text_block = ""
             if first_mode_plus_match:
-                 modes_text_block = oracle_text_cleaned[first_mode_plus_match.start():].strip()
+                 # The block starts from the '+' sign found after 'spree'
+                 modes_start_offset = spree_keyword_match.end() + first_mode_plus_match.start()
+                 modes_text_block = oracle_text_cleaned[modes_start_offset:].strip()
+                 # Mark the entire text from 'Spree' keyword onwards as processed by this parser
+                 self._spree_related_text_marker = oracle_text_cleaned[spree_block_start_index:].strip()
             else:
-                 # Fallback: Assume modes start after the first sentence containing "spree" if '+' not found
-                 spree_sentence_end = oracle_text_lower.find('.', spree_keyword_match.end())
-                 if spree_sentence_end != -1:
-                      modes_text_block = oracle_text_cleaned[spree_sentence_end + 1:].strip()
-                 else: # If no period, maybe text ends? Take rest of text.
-                      modes_text_block = oracle_text_cleaned[spree_keyword_match.end():].strip()
+                 # Fallback: Maybe modes directly follow spree keyword without '+'? Or take rest of text?
+                 # This case is less defined. Mark from spree onwards for now.
+                 modes_text_block = oracle_text_cleaned[spree_keyword_match.end():].strip()
+                 self._spree_related_text_marker = modes_text_block
 
 
             if not modes_text_block:
-                 logging.warning(f"Could not isolate spree modes text for {self.name}")
-                 return
+                 # If no modes found after keyword, still mark the keyword itself.
+                 self._spree_related_text_marker = oracle_text_cleaned[spree_keyword_match.start() : spree_keyword_match.end()].strip()
+                 logging.debug(f"Spree keyword found for {self.name}, but no modes parsed. Marking '{self._spree_related_text_marker}'.")
+                 return # Stop parsing modes if block is empty
 
             # --- Parse Individual Modes ---
             # Regex: Find '+' sign, capture cost in {}, then capture effect after '-' or '—' until newline or end
-            # Pattern: Start with '+', capture cost {.*?} optionally followed by whitespace, then '-' OR '—', capture effect .*?
-            #          Non-greedy .*? stops before the next potential '+' or end of string \Z
-            mode_pattern = r'\+\s*(\{.+?\})\s*(?:-|—)\s*(.*?)(?=(?:\n\s*\+)|$|\Z)' # Accepts - or — after cost
-            mode_matches = re.findall(mode_pattern, modes_text_block, re.DOTALL) # Use DOTALL to match across newlines if needed
+            # Pattern accepts '-' OR '—', with optional whitespace around them.
+            mode_pattern = r'^\+\s*(\{.+?\})\s*[-—\u2014]\s*(.*?)(?=(?:\n\s*\+)|$)' # Matches start of line ^, accepts dashes
+            # Apply findall on the isolated modes_text_block line by line or using MULTILINE
+            mode_matches = re.findall(mode_pattern, modes_text_block, re.MULTILINE | re.DOTALL)
+
 
             if not mode_matches:
                  logging.warning(f"No spree modes matched pattern for {self.name} in block: '{modes_text_block[:100]}...'")
+                 # Mark the text block anyway, even if parsing failed
+                 self._spree_related_text_marker = oracle_text_cleaned[spree_block_start_index:].strip()
                  return
 
             for cost_text, effect_text in mode_matches:
                 # Basic cleanup of captured groups
                 cost_cleaned = cost_text.strip()
-                effect_cleaned = effect_text.strip().rstrip('.').strip() # Remove trailing periods and whitespace
+                # Strip leading/trailing whitespace/newlines and potential trailing punctuation from effect
+                effect_cleaned = re.sub(r'[\s\n]+$','', effect_text).strip().rstrip('.').strip()
 
                 if not cost_cleaned or not effect_cleaned:
                      logging.warning(f"Skipped poorly matched spree mode for {self.name}: Cost='{cost_cleaned}', Effect='{effect_cleaned}'")
@@ -374,6 +388,8 @@ class Card:
             if not self.spree_modes:
                  logging.warning(f"Identified {self.name} as Spree card, but failed to parse any modes.")
 
+            # Mark the parsed block
+            self._spree_related_text_marker = oracle_text_cleaned[spree_block_start_index:].strip()
 
         except Exception as e:
             logging.error(f"Complex Spree mode parsing error for {self.name}: {str(e)}")
@@ -382,6 +398,7 @@ class Card:
             # Ensure attributes are reset/empty on error
             self.is_spree = False
             self.spree_modes = []
+            self._spree_related_text_marker = ""
             
     def _analyze_cost_type(self, cost_text):
         """Determine cost type (mana, life, sacrifice, etc.)"""
