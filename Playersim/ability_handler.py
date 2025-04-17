@@ -671,9 +671,9 @@ class AbilityHandler:
     def _parse_and_register_abilities(self, card_id, card):
         """
         Parse a card's text to identify and register its abilities.
-        Handles regular cards, Class cards, and MDFCs. Clears previous abilities first.
-        Uses _create_keyword_ability for keywords. Skips text already processed by specialized parsers.
-        Applies static abilities immediately after parsing. Tracks activated ability indices.
+        Handles regular cards, Class cards, MDFCs, keywords, and multi-ability paragraphs.
+        Clears previous abilities first. Applies static abilities immediately after parsing.
+        Tracks activated ability indices.
         """
         if not card:
             logging.warning(f"Attempted to parse abilities for non-existent card {card_id}.")
@@ -683,137 +683,294 @@ class AbilityHandler:
         if not hasattr(card, 'game_state') or card.game_state is None:
             setattr(card, 'game_state', self.game_state)
 
-        # Clear existing registered abilities for this card_id to avoid duplication
+        # Clear existing registered abilities for this card_id
         self.registered_abilities[card_id] = []
-        abilities_list = self.registered_abilities[card_id] # Get reference to the list
-        activated_ability_counter = 0 # Track index for activated abilities specifically
+        abilities_list = self.registered_abilities[card_id]
+        activated_ability_counter = 0
 
         try:
-            texts_to_parse = []
-            keywords_from_card_data = [] # Keywords explicitly listed on card data
-            processed_special_text = "" # Track text handled by Spree, Class etc.
+            oracle_text_sources = []
+            keywords_from_card_data = []
+            processed_special_text_markers = "" # Track text handled by Spree, Class etc.
 
             # --- Get Text Source(s) and Keywords ---
             current_face_index = getattr(card, 'current_face', 0)
-            card_data_source = card # Default to main card object
+            is_mdfc = hasattr(card, 'layout') and card.layout == 'modal_dfc'
 
-            if hasattr(card, 'is_class') and card.is_class:
+            # MDFCs are complex - parse ONLY the current face for now.
+            # Full parsing would need to handle interactions between faces if any.
+            if hasattr(card, 'faces') and card.faces and current_face_index < len(card.faces):
+                face_data = card.faces[current_face_index]
+                oracle_text_sources.append(face_data.get('oracle_text', ''))
+                keywords_from_card_data = face_data.get('keywords', [])
+                 # Get Spree info if MDFC face is Spree
+                if card.layout == 'modal_dfc' and 'spree' in (kw.lower() for kw in keywords_from_card_data):
+                     # Re-parse spree on face change? Assume parsed earlier.
+                     processed_special_text_markers += getattr(card, '_spree_related_text_marker', '')
+
+            elif hasattr(card, 'is_class') and card.is_class:
                 current_level_data = card.get_current_class_data()
                 if current_level_data:
-                    texts_to_parse.extend(current_level_data.get('all_abilities', []))
-                    processed_special_text = getattr(card, 'oracle_text', '')
+                    # Get *all* abilities active at this level
+                    oracle_text_sources.extend(current_level_data.get('all_abilities', []))
+                    # Mark class text as handled (avoid parsing level indicators etc.)
+                    processed_special_text_markers = getattr(card, 'oracle_text', '') # Mark full original text
                 if hasattr(card, 'keywords'): keywords_from_card_data = card.keywords
 
-            elif hasattr(card, 'faces') and card.faces and current_face_index < len(card.faces):
-                 face_data = card.faces[current_face_index]
-                 card_data_source = face_data
-                 texts_to_parse.append(face_data.get('oracle_text', ''))
-                 keywords_from_card_data = face_data.get('keywords', [])
-
-            else:
-                 texts_to_parse.append(getattr(card, 'oracle_text', ''))
-                 if hasattr(card, 'keywords'): keywords_from_card_data = card.keywords
-                 if hasattr(card, 'is_spree') and card.is_spree and hasattr(card, '_spree_related_text_marker'):
-                     processed_special_text += card._spree_related_text_marker
-
-            # --- Parse Keywords from Data ---
-            parsed_keywords = self._get_parsed_keywords(keywords_from_card_data)
-            for keyword_text in parsed_keywords:
-                first_word = keyword_text.split()[0] if keyword_text else ""
-                if first_word: # Ensure first_word is not empty
-                    self._create_keyword_ability(card_id, card, first_word, abilities_list, full_keyword_text=keyword_text)
+            else: # Normal card or current face of TDFC/Saga etc.
+                oracle_text_sources.append(getattr(card, 'oracle_text', ''))
+                if hasattr(card, 'keywords'): keywords_from_card_data = card.keywords
+                if hasattr(card, 'is_spree') and card.is_spree:
+                     processed_special_text_markers = getattr(card, '_spree_related_text_marker', '')
 
 
-            # --- Process Oracle Text Clauses ---
-            processed_text_hashes = set()
-            for text_block in texts_to_parse:
+            # --- Parse Keywords from Explicit Data ---
+            handled_keywords = set() # Keep track of keywords already handled by _create_keyword_ability
+            parsed_keywords_from_data = self._get_parsed_keywords(keywords_from_card_data)
+            for keyword_text in parsed_keywords_from_data:
+                # Store the base keyword found (e.g., 'flying' from 'flying, lifelink')
+                # _create_keyword_ability needs base keyword, not the full phrase
+                base_kw = keyword_text.split()[0].lower()
+                if base_kw in Card.ALL_KEYWORDS:
+                    # Only create if not already added from another source for this card
+                    if base_kw not in handled_keywords:
+                         if self._create_keyword_ability(card_id, card, base_kw, abilities_list, full_keyword_text=keyword_text):
+                              handled_keywords.add(base_kw)
+                elif ',' in keyword_text: # Handle comma lists explicitly
+                    for sub_kw in keyword_text.split(','):
+                        sub_kw_clean = sub_kw.strip().lower()
+                        base_sub_kw = sub_kw_clean.split()[0]
+                        if base_sub_kw in Card.ALL_KEYWORDS and base_sub_kw not in handled_keywords:
+                            if self._create_keyword_ability(card_id, card, base_sub_kw, abilities_list, full_keyword_text=sub_kw_clean):
+                                handled_keywords.add(base_sub_kw)
+
+            # --- Process Oracle Text ---
+            processed_clauses_hashes = set()
+            for text_block in oracle_text_sources:
                 if not text_block or not isinstance(text_block, str): continue
 
-                # Remove reminder text globally from the block first
+                # Remove reminder text
                 cleaned_text_block = re.sub(r'\s*\([^()]*?\)\s*', ' ', text_block).strip()
-                cleaned_text_block = re.sub(r'\s+([:.,;—])', r'\1', cleaned_text_block) # Clean space before punctuation
-                cleaned_text_block = re.sub(r'\s+', ' ', cleaned_text_block).strip() # Normalize spaces
+                if not cleaned_text_block: continue
 
-                # Skip block if it was handled by special parsers (Spree, Class)
-                if processed_special_text and cleaned_text_block in processed_special_text:
-                     logging.debug(f"Skipping text block for {card.name} as it was handled by special parser: '{cleaned_text_block[:50]}...'")
-                     continue
+                # Check if the whole block was handled by Spree/Class parser
+                if processed_special_text_markers and cleaned_text_block in processed_special_text_markers:
+                    continue
 
-                # Split text into potential ability clauses
-                split_pattern = r'\s*•\s*|\n|\.(?=\s+[A-Z{\(—])|\)(?=\s+[A-Z{\(—])|—(?=\s*\w)|(?<=.)—' # Handle em dash better
-                clauses = filter(None, [c.strip().rstrip('.').strip() for c in re.split(split_pattern, cleaned_text_block)])
+                # Split into paragraphs/clauses based on double newlines first, then single
+                # Preserve structure for cards like Beza where one sentence defines one ability
+                potential_clauses = re.split(r'\n{2,}', cleaned_text_block) # Split by blank lines first
+                final_clauses = []
+                for clause in potential_clauses:
+                     # Then split remaining paragraphs by single newline if needed (e.g., bullet points without bullets)
+                     final_clauses.extend(filter(None, [c.strip().rstrip('.').strip() for c in clause.split('\n')]))
 
-                for clause in clauses:
-                    if not clause: continue
-                    # Skip clause if it was part of special text (more granular check)
-                    if processed_special_text and clause in processed_special_text:
-                         # logging.debug(f"Skipping clause '{clause}' for {card.name} (handled by special parser).")
+
+                for clause_text in final_clauses:
+                    if not clause_text: continue
+
+                    clause_hash = hash(clause_text)
+                    if clause_hash in processed_clauses_hashes: continue # Skip identical text blocks
+                    processed_clauses_hashes.add(clause_hash)
+
+                    original_length = len(abilities_list) # Track list length before parsing clause
+
+                    # Check if clause is handled by special parser text first
+                    if processed_special_text_markers and clause_text in processed_special_text_markers:
                          continue
 
-                    cleaned_clause_text = clause # Already cleaned and stripped
-                    text_hash = hash(cleaned_clause_text)
+                    # Check if the clause *only* contains keywords already handled
+                    # Split by common separators (, and) and check if all resulting words are handled keywords
+                    words_in_clause = set(re.findall(r'\b\w+\b', clause_text.lower()))
+                    is_just_handled_keywords = False
+                    if words_in_clause.issubset(handled_keywords):
+                        # Further check: Ensure it doesn't look like an activated/triggered ability text using these keywords
+                        if not (':' in clause_text or any(trig in clause_text.lower() for trig in ['when', 'whenever', 'at the beginning'])):
+                            is_just_handled_keywords = True
 
-                    if text_hash not in processed_text_hashes:
-                        original_length = len(abilities_list) # Track list length before parsing clause
-
-                        is_keyword_clause, keyword_found = self._is_keyword_clause(cleaned_clause_text)
-
-                        if is_keyword_clause:
-                            # Handle keywords (might create Static or Triggered or marker)
-                            if isinstance(keyword_found, list):
-                                for sub_kw in keyword_found: self._create_keyword_ability(card_id, card, sub_kw, abilities_list, full_keyword_text=sub_kw)
-                            else: self._create_keyword_ability(card_id, card, keyword_found, abilities_list, full_keyword_text=cleaned_clause_text)
-                        else:
-                            # Delegate classification, checking for Exhaust first
-                            is_exhaust = False
-                            text_to_parse_further = cleaned_clause_text
-                            # Use more robust pattern matching various dash types
-                            exhaust_match = re.match(r"^\s*Exhaust\s*(?:—|-|–|\u2014)\s*(.+)", cleaned_clause_text, re.IGNORECASE | re.DOTALL)
-                            if exhaust_match:
-                                is_exhaust = True
-                                text_to_parse_further = exhaust_match.group(1).strip()
-
-                            # Pass flags and current counter to parser
-                            self._parse_ability_text(
-                                card_id, card, text_to_parse_further, abilities_list,
-                                is_exhaust=is_exhaust,
-                                current_activated_index=activated_ability_counter
-                            )
-
-                        # Increment activated counter ONLY if a NEW ActivatedAbility was added
-                        if len(abilities_list) > original_length and isinstance(abilities_list[-1], ActivatedAbility) and not isinstance(abilities_list[-1], ManaAbility):
-                            # Ensure the activation index is set correctly on the newly added ability
-                            newly_added_ability = abilities_list[-1]
-                            if not hasattr(newly_added_ability, 'activation_index'): # Only set if not already set (e.g., by _parse_ability_text)
-                                setattr(newly_added_ability, 'activation_index', activated_ability_counter)
-                            # Increment counter for the *next* potential activated ability
-                            activated_ability_counter += 1
-
-                        processed_text_hashes.add(text_hash)
+                    if is_just_handled_keywords:
+                        # logging.debug(f"Skipping clause '{clause_text}' as it consists only of handled keywords.")
+                        continue # Skip parsing this clause further
 
 
-            # Log final count for this card
-            logging.debug(f"Parsed {len(abilities_list)} functional abilities for {card.name} ({card_id})")
+                    # --- DELEGATE TO NEW CLASSIFICATION LOGIC ---
+                    created_abilities = self._classify_and_parse_ability_clause(
+                         card_id, card, clause_text, current_activated_index=activated_ability_counter
+                    )
+                    # --- END DELEGATION ---
+
+                    # Process results
+                    if created_abilities:
+                         new_activated_count = 0
+                         for ability in created_abilities:
+                             # Attach card reference
+                             setattr(ability, 'source_card', card)
+                             abilities_list.append(ability)
+                             # Increment activated counter ONLY if a NEW ActivatedAbility was added by THIS clause processing
+                             if isinstance(ability, ActivatedAbility) and not isinstance(ability, ManaAbility):
+                                  new_activated_count += 1
+                         activated_ability_counter += new_activated_count # Update main counter
+
+
+            # --- Apply Static Abilities and Finalize ---
+            logging.debug(f"Parsed {len(abilities_list)} total functional abilities for {card.name} ({card_id})")
 
             # Immediately apply newly registered Static Abilities
-            static_abilities_applied = []
+            static_abilities_applied_texts = []
             for ability in abilities_list:
                 if isinstance(ability, StaticAbility):
                     try:
-                         if ability.apply(self.game_state): # Apply returns True on successful registration
-                             static_abilities_applied.append(ability.effect_text)
+                         # Ensure apply method exists before calling
+                         if hasattr(ability, 'apply') and callable(ability.apply):
+                              if ability.apply(self.game_state): # Apply returns True on successful registration
+                                  static_abilities_applied_texts.append(ability.effect_text)
                     except Exception as static_apply_e:
                          logging.error(f"Error applying static ability '{ability.effect_text}' for {card.name}: {static_apply_e}", exc_info=True)
-            if static_abilities_applied:
-                logging.debug(f"Applied {len(static_abilities_applied)} static abilities for {card.name}")
-
+            if static_abilities_applied_texts:
+                logging.debug(f"Applied {len(static_abilities_applied_texts)} static abilities for {card.name}")
 
         except Exception as e:
             logging.error(f"Error parsing abilities for card {card_id} ({getattr(card, 'name', 'Unknown')}): {str(e)}")
             import traceback
             logging.error(traceback.format_exc())
-            # Ensure list exists even on error
             if card_id not in self.registered_abilities: self.registered_abilities[card_id] = []
+            
+    def _classify_and_parse_ability_clause(self, card_id, card, clause_text, current_activated_index):
+        """
+        Attempts to classify and parse a single text clause (paragraph/sentence)
+        into one or more Activated, Triggered, or Static abilities.
+        Skips clauses identified as likely Replacement Effects.
+
+        Returns:
+            list: A list of created Ability objects (can be empty).
+        """
+        if not clause_text: return []
+
+        abilities_found = []
+        text_lower = clause_text.lower()
+        # Strip trailing period just in case
+        text_lower_stripped = text_lower.rstrip('.').strip()
+
+        # --- 0. Skip likely Replacement Effects ---
+        # Pattern Explanation:
+        #   ^as\s+.*\s+enters\sthe\sbattlefield -> "As X enters..."
+        #   ^if.*?would.*?instead           -> "If X would Y, instead Z"
+        #   ^if\s+a\s+source\s+would\s+deal\s+damage\s+to.*?prevent -> Damage prevention
+        replacement_patterns = [
+            r"^as\s+.*\s+enters\sthe\sbattlefield",
+            r"^if.*?would.*?instead",
+            r"^if\s+a\s+source\s+would\s+deal\s+damage\s+to.*?prevent",
+        ]
+        if any(re.match(pattern, text_lower_stripped) for pattern in replacement_patterns):
+            logging.debug(f"Skipping clause '{clause_text}' as likely Replacement Effect.")
+            return [] # Handled by ReplacementEffectSystem
+
+        # --- 1. Check for Activated Ability ---
+        # Includes Exhaust prefix check
+        is_exhaust = False
+        text_to_parse_activated = clause_text # Use original case for constructor
+        exhaust_match = re.match(r"^\s*Exhaust\s*(?:—|-|–|\u2014)\s*(.+)", text_to_parse_activated, re.IGNORECASE | re.DOTALL)
+        if exhaust_match:
+            is_exhaust = True
+            text_to_parse_activated = exhaust_match.group(1).strip() # Use text after Exhaust
+
+        try:
+            # Use constructor's parsing logic
+            ability = ActivatedAbility(card_id=card_id, effect_text=text_to_parse_activated)
+            # Check if valid cost/effect was parsed
+            if ability.cost and ability.effect and ability.cost != "placeholder":
+                 # Check Mana Ability subtype
+                 if "add {" in ability.effect.lower() or "add mana" in ability.effect.lower():
+                      mana_produced = self._parse_mana_produced(ability.effect)
+                      if mana_produced and any(mana_produced.values()):
+                           mana_ability = ManaAbility(card_id=card_id, cost=ability.cost, mana_produced=mana_produced, effect_text=ability.effect_text)
+                           if is_exhaust: setattr(mana_ability, 'is_exhaust', True) # Carry over exhaust flag
+                           setattr(mana_ability, 'activation_index', current_activated_index) # Store index
+                           abilities_found.append(mana_ability)
+                           logging.debug(f"Registered ManaAbility for {card.name}: {mana_ability.effect_text}")
+                           return abilities_found # Assume whole clause is just this mana ability
+                 # Standard Activated
+                 if is_exhaust: setattr(ability, 'is_exhaust', True)
+                 setattr(ability, 'activation_index', current_activated_index) # Store index
+                 abilities_found.append(ability)
+                 logging.debug(f"Registered ActivatedAbility for {card.name}: {ability.effect_text}{' (Exhaust)' if is_exhaust else ''}")
+                 return abilities_found # Assume whole clause is just this activated ability
+        except ValueError: pass # Didn't match activated pattern
+        except Exception as e: logging.error(f"Error parsing as Activated: '{clause_text}'. E: {e}")
+
+        # --- 2. Check for Triggered Ability ---
+        # Includes common ETB patterns
+        # Check for "When/Whenever/At ..."
+        # Use original case for constructor
+        trigger_match = re.match(r'^(When|Whenever|At)\b', clause_text.strip(), re.IGNORECASE)
+        # Also check for "Enters the battlefield with..." which is an ETB Trigger generating a replacement effect context
+        etb_with_match = re.match(r"^(?:this\s+permanent\s+|this\s+creature\s+)?enters?\s+the\s+battlefield\s+with", text_lower_stripped, re.IGNORECASE)
+
+        if trigger_match or etb_with_match:
+            try:
+                # Use constructor's parsing logic
+                # Pass original case text for better reconstruction if needed
+                ability = TriggeredAbility(card_id=card_id, effect_text=clause_text.strip())
+                # Check if valid trigger/effect was parsed
+                if ability.trigger_condition != "Unknown" and ability.trigger_condition != "placeholder":
+                     # --- Special Case: Handle Beza-style multiple effects in one trigger ---
+                     # If the effect text contains multiple sentences describing distinct actions
+                     # Example: "..., create a Treasure... You gain 4 life... Create two..."
+                     # We need to create MULTIPLE TriggeredAbility objects with the SAME trigger condition
+                     # OR create ONE TriggeredAbility whose effect resolves multiple steps.
+                     # Creating ONE TriggeredAbility with complex resolution is simpler.
+                     # The TriggeredAbility constructor should parse the effect,
+                     # EffectFactory should handle multiple sentences later during resolution.
+                     # Exception: Sometimes a trigger has multiple effects linked by "and". Parse those too?
+                     # No, keep it simple. One TriggeredAbility per clause starting with trigger word.
+
+                     # Check for Obstinate Baloth ETB case
+                     is_baloth_etb = "when this creature enters" in ability.trigger_condition.lower() and "gain 4 life" in ability.effect.lower()
+                     if is_baloth_etb: logging.debug("Identified Obstinate Baloth ETB trigger.")
+
+                     abilities_found.append(ability)
+                     logging.debug(f"Registered TriggeredAbility for {card.name}: {ability.effect_text}")
+                     # Return after finding the trigger, assuming one trigger per clause.
+                     return abilities_found
+
+            except ValueError: pass # Didn't match triggered pattern
+            except Exception as e: logging.error(f"Error parsing as Triggered: '{clause_text}'. E: {e}")
+
+        # --- 3. Check for Static Ability (Be stricter) ---
+        # Exclude cases already handled or clear non-static indicators
+        # Should NOT match: ETB effects (When X enters), activated/triggered keywords (handled elsewhere), actions.
+        potential_static = True
+        if trigger_match or etb_with_match or exhaust_match: potential_static = False # Exclude explicit triggers
+        if ':' in clause_text: potential_static = False # Exclude activated cost marker
+        # Basic action verb check
+        action_verbs = [r'\b(destroy|exile|counter|draw|discard|create|search|tap|untap|target|deal|sacrifice|gain\s\d+\slife|lose\s\d+\slife)\b']
+        if any(re.search(verb, text_lower) for verb in action_verbs):
+             # Allow static effects like "You gain life when..." -> NO, that's triggered.
+             # Allow "Creatures gain lifelink"
+             if not ("have " in text_lower or "has " in text_lower or "gain " in text_lower or "are " in text_lower or "can't " in text_lower or "don't " in text_lower):
+                 potential_static = False
+
+
+        if potential_static:
+            try:
+                # Assume it's static if not clearly Triggered/Activated/Replacement/Action
+                # This will catch keyword grants ("Flying", "Creatures have trample"), rule modifications etc.
+                # It will also catch Obstinate Baloth's second ability ("If a spell or ability...")
+                # Let StaticAbility constructor take the full text. apply() method links to LayerSystem.
+                ability = StaticAbility(card_id=card_id, effect=clause_text.strip(), effect_text=clause_text.strip())
+                # Simple check if it seems valid
+                if ability.effect:
+                    abilities_found.append(ability)
+                    logging.debug(f"Registered StaticAbility for {card.name}: {ability.effect_text}")
+                    return abilities_found
+            except Exception as e: logging.error(f"Error parsing as Static: '{clause_text}'. E: {e}")
+
+
+        # If none matched, log warning if not blank or obviously reminder-like
+        if not abilities_found and clause_text.strip() and not clause_text.strip().startswith("("):
+            logging.warning(f"Could not classify ability clause for {card.name}: '{clause_text}'")
+
+        return abilities_found
             
     # Helper function to parse keywords list/array
     def _get_parsed_keywords(self, keywords_data):
@@ -852,8 +1009,9 @@ class AbilityHandler:
     def _create_keyword_ability(self, card_id, card, keyword_name, abilities_list, full_keyword_text=None):
         """
         Creates the appropriate Ability object for a given keyword.
-        Distinguishes static, triggered, activated, and rule-modifying keywords. (Improved)
+        Distinguishes static, triggered, activated, and rule-modifying keywords.
         Connects rule-modifying keywords to game state/systems where appropriate.
+        Returns True if an ability was successfully created and added, False otherwise.
         """
         keyword_lower = keyword_name.lower().strip() # Ensure clean keyword
         full_text = (full_keyword_text or keyword_name).lower().strip() # Use full text if provided
@@ -861,260 +1019,248 @@ class AbilityHandler:
         # --- Basic validation ---
         if not keyword_lower or not full_text:
             logging.warning(f"Skipping keyword ability creation due to empty keyword/text.")
-            return
+            return False # <<< Added Return
 
         current_value = None
         is_parametrized_keyword = False
         cost_str = None
-        # --- Use Internal Helpers ---
+        ability = None # Initialize ability variable
+
+        # --- Internal Helpers (Assume these exist elsewhere or are defined above) ---
+        # Placeholder implementations for clarity:
         def _parse_value(text, keyword):
-            keyword_pattern = re.escape(keyword)
-            match_num = re.search(f"{keyword_pattern}\\s+(\\d+|x)\\b", text, re.IGNORECASE)
-            if match_num:
-                val_str = match_num.group(1)
-                return val_str if val_str.lower() == 'x' else int(val_str)
-            # Add default values for keywords with implicit N=1 or N=specific
-            defaults = {'annihilator':1, 'poisonous':1, 'afterlife':1, 'fading':1, 'vanishing':1,
-                        'reinforce':1, 'crew':1, 'scavenge':1, 'monstrosity':1, 'adapt':1,
-                        'afflict':1, 'rampage':1, 'cascade':0, 'discover':0, 'suspend': 1,
-                        'frenzy': 1} # Added frenzy default
-            return defaults.get(keyword, 1) # Default to 1 if no specific N or default known
+             keyword_pattern = re.escape(keyword)
+             match_num = re.search(f"{keyword_pattern}\\s+(\\d+|x)\\b", text, re.IGNORECASE)
+             if match_num:
+                 val_str = match_num.group(1)
+                 return val_str if val_str.lower() == 'x' else int(val_str)
+             defaults = {'annihilator':1, 'poisonous':1, 'afterlife':1, 'fading':1, 'vanishing':1,
+                         'reinforce':1, 'crew':1, 'scavenge':1, 'monstrosity':1, 'adapt':1,
+                         'afflict':1, 'rampage':1, 'cascade':0, 'discover':0, 'suspend': 1,
+                         'frenzy': 1} # Added frenzy default
+             return defaults.get(keyword, 1)
 
         def _parse_cost(text, keyword):
-            keyword_pattern = re.escape(keyword)
-            # Add Ninjutsu pattern
-            patterns = [
-                # Regex for standard mana costs like {W}, {2}, {G/U}
-                rf"{keyword_pattern}\s*(?:—)?\s*(\{{" + r"[WUBRGCXSPMTQA0-9\/\.]+" + r"+\}})",
-                 # Regex for simple numeric costs like Kicker 2
-                rf"{keyword_pattern}\s+(\d+)\b",
-                # Specific patterns for Cycling variations
-                rf"cycling\s+(discard.+)\b", rf"cycling\s+-\s+pay (\d+) life",
-                # Ward cost variations
-                rf"ward\s*(\{{" + r"[WUBRGCXSPMTQA0-9\/\.]+" + r"+\}})", rf"ward\s+(-|–)\s*(pay (\d+) life|discard a card|sacrifice (?:a|an) (\w+))", rf"ward\s*(\d+)"
-            ]
-            for pattern in patterns:
-                match = re.search(pattern, text, re.IGNORECASE)
-                if match:
-                    cost_part = match.group(1) or match.group(2) or match.group(3) or match.group(4)
-                    if cost_part:
-                        cost_part = cost_part.strip()
-                        if cost_part.isdigit(): return f"{{{cost_part}}}" # Convert '2' to '{2}'
-                        if cost_part.startswith('{') and cost_part.endswith('}'): return cost_part # Already formatted
-                        # Return non-mana cost descriptors
-                        if "discard" in cost_part: return "discard_card"
-                        if "pay life" in cost_part: return f"pay_{re.search(r'(\d+)', cost_part).group(1)}_life"
-                        if "sacrifice" in cost_part: return f"sacrifice_{re.search(r'sacrifice (?:a|an) (\w+)', cost_part).group(1)}"
-            # Special cases
-            if keyword == "retrace": return "Discard a land card"
-            if keyword == "level up":
+             keyword_pattern = re.escape(keyword)
+             # Basic Regex for mana costs: {W}, {2}, {G/U}, {X}, {W/P} etc. Needs refinement.
+             mana_pattern = r"(\{([WUBRGCXSPMTQA0-9\/\.]+)\})"
+             # Look for cost immediately after keyword, possibly with separator
+             match_cost = re.search(rf"{keyword_pattern}\s*(?:—|-|–|:)?\s*({mana_pattern}+|\d+|pay \d+ life|discard a card|sacrifice (?:a|an) \w+)\b", text, re.IGNORECASE)
+             if match_cost:
+                 cost_part = match_cost.group(1).strip()
+                 if cost_part.isdigit(): return f"{{{cost_part}}}" # Normalize '2' to '{2}'
+                 # Check if already mana symbol format or handle life/discard/sac costs
+                 if cost_part.startswith('{') or "life" in cost_part or "discard" in cost_part or "sacrifice" in cost_part:
+                     return cost_part
+             # Handle keyword-specific cost patterns (e.g., Level up {COST}: ..., Suspend N—{COST})
+             if keyword == "level up":
                  cost_match = re.search(r"(\{.*?\})\s*:\s*Level Up", text, re.IGNORECASE)
                  if cost_match: return cost_match.group(1)
-            if keyword == "suspend":
-                cost_match = re.search(r"suspend\s+\d+\s*—\s*(\{.*?\})", text, re.IGNORECASE)
-                if cost_match: return cost_match.group(1)
-                return "{0}" # No explicit cost means free cast
+             if keyword == "suspend":
+                 cost_match = re.search(r"suspend\s+\d+\s*—\s*(\{.*?\})", text, re.IGNORECASE)
+                 if cost_match: return cost_match.group(1)
+             if keyword == "retrace": return "Discard a land card"
+             # Ward cost variations
+             ward_match = re.search(rf"ward\s*(?:—|-|–|:)?\s*({mana_pattern}+|\d+|pay \d+ life|discard a card|sacrifice (?:a|an) \w+)", text, re.IGNORECASE)
+             if ward_match:
+                 ward_cost_part = ward_match.group(1).strip()
+                 if ward_cost_part.isdigit(): return f"{{{ward_cost_part}}}"
+                 return ward_cost_part
 
-            return "{0}" # Default free cost
+             return "{0}" # Default free cost
+
+        def _word_to_number(word):
+            mapping = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+            if isinstance(word, str) and word.isdigit(): return int(word)
+            return mapping.get(str(word).lower(), 1)
+        # --- End Internal Helpers ---
 
 
         # --- Value/Cost Parsing (Moved Ward before N to handle complex ward first) ---
-        # Protection
         if keyword_lower == "protection":
             match = re.search(r"protection from (.*)", full_text)
             if match: current_value = match.group(1).strip(); is_parametrized_keyword = True
-        # Ward (Needs careful parsing of cost types)
         elif keyword_lower == "ward":
             cost_str = _parse_cost(full_text, keyword_lower) # Use cost parser
-            if cost_str and cost_str != "{0}": # Found a cost other than default empty
-                current_value = cost_str
-            else: # Fallback if cost parser didn't find standard ward cost
-                current_value = "ward_generic" # Generic flag
+            if cost_str and cost_str != "{0}": current_value = cost_str # Use parsed cost as value
+            else: current_value = "ward_generic" # Fallback
             is_parametrized_keyword = True
-        # Keywords with numerical value (N)
-        elif keyword_lower in ["annihilator", "afflict", "fading", "vanishing", "rampage", "poisonous", "afterlife", "cascade", "reinforce", "crew", "scavenge", "monstrosity", "adapt", "discover", "frenzy"]: # Added frenzy
+        elif keyword_lower in ["annihilator", "afflict", "fading", "vanishing", "rampage", "poisonous", "afterlife", "cascade", "reinforce", "crew", "scavenge", "monstrosity", "adapt", "discover", "frenzy"]:
             current_value = _parse_value(full_text, keyword_lower)
             is_parametrized_keyword = True
-        # Keywords with associated cost string (includes Ninjutsu now)
-        elif keyword_lower in ["cycling", "equip", "fortify", "reconfigure", "unearth", "flashback", "bestow", "dash", "buyback", "madness", "transmute", "channel", "kicker", "entwine", "overload", "splice", "surge", "embalm", "eternalize", "jump-start", "escape", "awaken", "level up", "retrace", "ninjutsu"]: # Added Ninjutsu
+        elif keyword_lower in ["cycling", "equip", "fortify", "reconfigure", "unearth", "flashback", "bestow", "dash", "buyback", "madness", "transmute", "channel", "kicker", "entwine", "overload", "splice", "surge", "embalm", "eternalize", "jump-start", "escape", "awaken", "level up", "retrace", "ninjutsu"]:
             cost_str = _parse_cost(full_text, keyword_lower)
             current_value = cost_str
             is_parametrized_keyword = True
-        # Suspend (N, Cost)
         elif keyword_lower == "suspend":
             cost_str = _parse_cost(full_text, keyword_lower)
-            n_value = _parse_value(full_text, keyword_lower) # N value
+            n_value = _parse_value(full_text, keyword_lower)
             is_parametrized_keyword = True
             current_value = (n_value, cost_str) # Store tuple (N, Cost)
 
         # --- Duplicate Check ---
-        if is_parametrized_keyword:
-            # Handle suspend tuple value
-            value_to_check = current_value
-            if keyword_lower == "suspend":
-                value_to_check = f"N={current_value[0]},Cost={current_value[1]}" # String representation for checking
-
-            # Check if an ability with the same keyword and *value* already exists
-            if any(getattr(a, 'keyword', None) == keyword_lower and
-                   ((keyword_lower != "suspend" and getattr(a, 'keyword_value', None) == value_to_check) or
-                    (keyword_lower == "suspend" and getattr(a, 'keyword_value', None) == current_value)) # Direct tuple check for suspend
-                   for a in abilities_list):
-                 return
-        else:
-             # Check if an ability with the same keyword (without value) already exists
-             if any(getattr(a, 'keyword', None) == keyword_lower for a in abilities_list):
-                  return
-
+        # This checks if an identical keyword (with the same value if parametrized) already exists in the list *for this card*.
+        keyword_already_exists = False
+        for existing_ability in abilities_list:
+             if getattr(existing_ability, 'keyword', None) == keyword_lower:
+                 # If keyword is parametrized, value must also match
+                 if is_parametrized_keyword:
+                     if getattr(existing_ability, 'keyword_value', None) == current_value:
+                         keyword_already_exists = True; break
+                 else: # If not parametrized, just matching keyword is enough
+                      keyword_already_exists = True; break
+        if keyword_already_exists:
+             # logging.debug(f"Skipping duplicate keyword '{keyword_lower}' (Value: {current_value}) for {card.name}")
+             return False # Do not add duplicate
 
         # --- Static Grant Keywords (Layer 6) -> StaticAbility ---
-        # Flash and Double Strike added
         static_keywords = ["flying", "first strike", "double strike", "trample", "vigilance", "haste", "lifelink", "deathtouch", "indestructible", "hexproof", "shroud", "reach", "menace", "defender", "unblockable", "protection", "ward", "landwalk", "islandwalk", "swampwalk", "mountainwalk", "forestwalk", "plainswalk", "fear", "intimidate", "shadow", "horsemanship", "infect", "wither", "changeling", "phasing", "banding", "flash"]
         is_static_grant = keyword_lower in static_keywords or "walk" in keyword_lower
         if is_static_grant:
             ability_effect_text = f"This permanent has {full_text}."
             ability_title = keyword_name.capitalize()
-            # Adjust title for parametrized keywords
             if keyword_lower == "protection" and current_value: ability_title = f"Protection from {current_value}"
             elif keyword_lower == "ward" and current_value: ability_title = f"Ward {current_value}"
             elif "walk" in keyword_lower: ability_title = keyword_name.capitalize()
 
-            ability = StaticAbility(card_id, ability_title, ability_effect_text) # Use title, full text
+            ability = StaticAbility(card_id, ability_title, ability_effect_text)
             setattr(ability, 'keyword', keyword_lower)
-            setattr(ability, 'keyword_value', current_value)
-            abilities_list.append(ability); ability.apply(self.game_state) # Apply immediately
-            logging.debug(f"Created StaticAbility for keyword: {full_text}")
-            return
+            setattr(ability, 'keyword_value', current_value) # Store protection/ward detail here
+            # Apply logic moved to main parser loop
+
 
         # --- Triggered Keywords -> TriggeredAbility ---
-        # Added Frenzy N
-        triggered_map = {
+        triggered_map = { # Map keyword to (trigger_condition, effect_desc_template)
             "prowess": ("whenever you cast a noncreature spell", "this creature gets +1/+1 until end of turn."),
-            "cascade": ("when you cast this spell", f"Exile cards until you hit a nonland card with mana value less than {getattr(current_value,'__iter__', False) and current_value[0] or 'this spell'}. You may cast it without paying its mana cost."), # Use N from tuple or default text
+            "cascade": ("when you cast this spell", "Exile cards until you hit a nonland card with mana value less than {N}. You may cast it without paying its mana cost."),
             "storm": ("when you cast this spell", "Copy this spell for each spell cast before it this turn."),
             "exalted": ("whenever a creature you control attacks alone", "that creature gets +1/+1 until end of turn."),
-            "annihilator": ("whenever this creature attacks", f"defending player sacrifices {current_value} permanents."),
+            "annihilator": ("whenever this creature attacks", "defending player sacrifices {N} permanents."),
             "battle cry": ("whenever this creature attacks", "each other attacking creature gets +1/+0 until end of turn."),
             "extort": ("whenever you cast a spell", "you may pay {W/B}. If you do, each opponent loses 1 life and you gain that much life."),
-            "afflict": ("whenever this creature becomes blocked", f"defending player loses {current_value} life."),
+            "afflict": ("whenever this creature becomes blocked", "defending player loses {N} life."),
             "enrage": ("whenever this creature is dealt damage", "trigger its enrage effect."),
             "mentor": ("whenever this creature attacks", "put a +1/+1 counter on target attacking creature with lesser power."),
-            "afterlife": ("when this permanent dies", f"create {current_value} 1/1 white and black Spirit creature tokens with flying."),
+            "afterlife": ("when this permanent dies", "create {N} 1/1 white and black Spirit creature tokens with flying."),
             "ingest": ("whenever this creature deals combat damage to a player", "that player exiles the top card of their library."),
-            "poisonous": ("whenever this creature deals combat damage to a player", f"that player gets {current_value} poison counters."),
-            "rebound": ("if this spell was cast from hand, instead of graveyard", "exile it. At beginning of your next upkeep, you may cast it from exile without paying its mana cost."), # Handled by GameState resolution
+            "poisonous": ("whenever this creature deals combat damage to a player", "that player gets {N} poison counters."),
+            "rebound": ("if this spell was cast from hand, instead of graveyard", "exile it. At beginning of your next upkeep, you may cast it from exile without paying its mana cost."),
             "gravestorm": ("when you cast this spell", "Copy this spell for each permanent put into a graveyard this turn."),
             "training": ("whenever this creature attacks with another creature with greater power", "put a +1/+1 counter on this creature."),
             "undying": ("when this permanent dies", "if it had no +1/+1 counters on it, return it to the battlefield under its owner's control with a +1/+1 counter on it."),
             "persist": ("when this permanent dies", "if it had no -1/-1 counters on it, return it to the battlefield under its owner's control with a -1/-1 counter on it."),
             "decayed": ("this creature can't block.", "When it attacks, sacrifice it at end of combat."), # Multi-part
-            "rampage": ("whenever this creature becomes blocked", f"it gets +{current_value}/+{current_value} until end of turn for each creature blocking it beyond the first."),
-            "fading": ("this permanent enters the battlefield with N fade counters on it.", "at the beginning of your upkeep, remove a fade counter. if you can't, sacrifice it."), # Multi-part, N=current_value
-            "vanishing": ("this permanent enters the battlefield with N time counters on it.", "at the beginning of your upkeep, remove a time counter. when the last is removed, sacrifice it."), # Multi-part, N=current_value
-            "haunt": ("When this creature dies, exile it haunting target creature.", "When the haunted creature dies, trigger haunt effect."), # Simplified text
-            "discover": ("when you cast this spell", f"Exile cards until you hit a nonland card with mana value {current_value} or less. You may cast it without paying its mana cost or put it into your hand."), # N=current_value
+            "rampage": ("whenever this creature becomes blocked", "it gets +{N}/+{N} until end of turn for each creature blocking it beyond the first."),
+            "fading": ("this permanent enters the battlefield with {N} fade counters on it.", "at the beginning of your upkeep, remove a fade counter. if you can't, sacrifice it."), # Multi-part
+            "vanishing": ("this permanent enters the battlefield with {N} time counters on it.", "at the beginning of your upkeep, remove a time counter. when the last is removed, sacrifice it."), # Multi-part
+            "haunt": ("When this creature dies, exile it haunting target creature.", "When the haunted creature dies, trigger haunt effect."),
+            "discover": ("when you cast this spell", "Exile cards until you hit a nonland card with mana value {N} or less. You may cast it without paying its mana cost or put it into your hand."),
             "living weapon": ("when this equipment enters the battlefield", "create a 0/0 black Phyrexian Germ creature token, then attach this to it."),
-            "frenzy": ("whenever this creature attacks and isn't blocked", f"it gets +{current_value}/+0 until end of turn."), # Added Frenzy N
+            "frenzy": ("whenever this creature attacks and isn't blocked", "it gets +{N}/+0 until end of turn."),
         }
         if keyword_lower in triggered_map:
-             trigger_cond, effect_desc = triggered_map[keyword_lower]
-             effect = effect_desc
-             if keyword_lower == "decayed":
-                 static_part = StaticAbility(card_id, "This creature can't block.", "This creature can't block.")
-                 setattr(static_part, 'keyword', 'cant_block_static')
-                 abilities_list.append(static_part); static_part.apply(self.game_state)
-                 trigger_cond = "when this creature attacks"; effect = "sacrifice it at end of combat."
-             elif keyword_lower == "fading" or keyword_lower == "vanishing":
-                 counter_type = "fade" if keyword_lower == "fading" else "time"
-                 val = current_value # Parsed value for N
-                 etb_trigger = f"when this permanent enters the battlefield"; etb_effect = f"put {val} {counter_type} counters on it."
-                 etb_ability = TriggeredAbility(card_id, etb_trigger, etb_effect, effect_text=f"ETB {counter_type} counters")
-                 setattr(etb_ability, 'keyword', f"{keyword_lower}_etb"); abilities_list.append(etb_ability)
-                 trigger_cond = "at the beginning of your upkeep"; effect = f"remove a {counter_type} counter from it. if you can't, sacrifice it."
+            trigger_cond_tmpl, effect_desc_tmpl = triggered_map[keyword_lower]
+            val_str = str(current_value) if current_value is not None else "N"
+            effect_desc = effect_desc_tmpl.format(N=val_str)
+            trigger_cond = trigger_cond_tmpl # Trigger condition usually doesn't change with N
 
-             ability = TriggeredAbility(card_id, trigger_cond, effect, effect_text=full_text)
-             setattr(ability, 'keyword', keyword_lower)
-             setattr(ability, 'keyword_value', current_value) # Store N value if parsed
-             abilities_list.append(ability)
-             logging.debug(f"Created TriggeredAbility for keyword: {full_text}")
-             return
+            if keyword_lower == "decayed":
+                # Create static 'cant block' ability
+                static_part = StaticAbility(card_id, "This creature can't block.", "This creature can't block.")
+                setattr(static_part, 'keyword', 'cant_block_static')
+                setattr(static_part, 'source_card', card)
+                abilities_list.append(static_part);
+                if hasattr(static_part, 'apply') and callable(static_part.apply):
+                     static_part.apply(self.game_state)
+                # Define the trigger part
+                trigger_cond = "when this creature attacks"; effect_desc = "sacrifice it at end of combat."
+                ability = TriggeredAbility(card_id, trigger_cond, effect_desc, effect_text=f"Decayed - {effect_desc}")
 
+            elif keyword_lower == "fading" or keyword_lower == "vanishing":
+                counter_type = "fade" if keyword_lower == "fading" else "time"
+                val = current_value # Parsed value for N
+                etb_trigger = "when this permanent enters the battlefield"
+                etb_effect = f"put {val} {counter_type} counters on it."
+                etb_ability = TriggeredAbility(card_id, etb_trigger, etb_effect, effect_text=f"{keyword_name} ETB {val} {counter_type} counters")
+                setattr(etb_ability, 'keyword', f"{keyword_lower}_etb")
+                setattr(etb_ability, 'source_card', card)
+                abilities_list.append(etb_ability)
+                # Define the upkeep trigger part
+                trigger_cond = "at the beginning of your upkeep"
+                effect_desc = f"remove a {counter_type} counter from it. if you can't, sacrifice it."
+                ability = TriggeredAbility(card_id, trigger_cond, effect_desc, effect_text=f"{keyword_name} Upkeep Check")
+            else:
+                # Standard trigger creation
+                ability = TriggeredAbility(card_id, trigger_cond, effect_desc, effect_text=full_text)
+
+            # Set attributes and add to list if created
+            if isinstance(ability, TriggeredAbility):
+                 setattr(ability, 'keyword', keyword_lower)
+                 setattr(ability, 'keyword_value', current_value) # Store N value if parsed
+                 # Set source_card handled below in the final check
+                 # abilities_list.append(ability) # Append handled in the final check
 
         # --- Activated Keywords -> ActivatedAbility ---
-        # Added Ninjutsu
-        activated_map = {
-            "cycling": ("discard this card: draw a card."),
-            "equip": ("attach to target creature you control. Equip only as a sorcery."),
-            "fortify": ("attach to target land you control. Fortify only as a sorcery."),
-            "level up": ("put a level counter on this creature. Level up only as a sorcery."),
-            "unearth": ("return this card from your graveyard to the battlefield. It gains haste. Exile it at the beginning of the next end step or if it would leave the battlefield. Unearth only as a sorcery."),
-            "channel": ("discard this card: activate its channel effect."),
-            "transmute": ("discard this card: search your library for a card with the same mana value as this card, reveal it, put it into your hand, then shuffle. Transmute only as a sorcery."),
-            "reconfigure": ("attach to target creature you control or unattach from a creature. Reconfigure only as a sorcery."),
-            "crew": (f"tap any number of untapped creatures you control with total power {current_value} or greater: this Vehicle becomes an artifact creature until end of turn."),
-            "scavenge": (f"exile this card from your graveyard: Put {current_value} +1/+1 counters on target creature. Activate only as a sorcery."),
-            "reinforce": (f"discard this card: Put {current_value} +1/+1 counters on target creature."),
-            "morph": ("turn this face up."), # Cost handled separately
-            "outlast": ("put a +1/+1 counter on this creature. Outlast only as a sorcery."),
-            "monstrosity": (f"put {current_value} +1/+1 counters on this creature and it becomes monstrous. Activate only as a sorcery."),
-            "adapt": (f"If this creature has no +1/+1 counters on it, put {current_value} +1/+1 counters on it."),
-            "boast": ("activate boast effect."), # Cost/effect on card
-            "flashback": ("Cast this card from your graveyard for its flashback cost. Then exile it."), # Value is cost
-            "jump-start": ("Cast this card from your graveyard by discarding a card in addition to paying its other costs. Then exile it."), # Value is cost
-            "retrace": ("You may cast this card from your graveyard by discarding a land card in addition to paying its other costs."), # Value is cost
-            "embalm": ("Exile this card from your graveyard: Create a token that's a copy of it, except it's a white Zombie [OriginalType] with no mana cost. Embalm only as a sorcery."), # Value is cost
-            "eternalize": ("Exile this card from your graveyard: Create a token that's a copy of it, except it's a 4/4 black Zombie [OriginalType] with no mana cost. Eternalize only as a sorcery."), # Value is cost
-            "ninjutsu": ("Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking."), # Added Ninjutsu
+        activated_map = { # Map keyword to effect description template (cost handled separately)
+            "cycling": "discard this card: draw a card.",
+            "equip": "attach to target creature you control. Equip only as a sorcery.",
+            "fortify": "attach to target land you control. Fortify only as a sorcery.",
+            "level up": "put a level counter on this creature. Level up only as a sorcery.",
+            "unearth": "return this card from your graveyard to the battlefield. It gains haste. Exile it at the beginning of the next end step or if it would leave the battlefield. Unearth only as a sorcery.",
+            "channel": "discard this card: activate its channel effect.",
+            "transmute": "discard this card: search your library for a card with the same mana value as this card, reveal it, put it into your hand, then shuffle. Transmute only as a sorcery.",
+            "reconfigure": "attach to target creature you control or unattach from a creature. Reconfigure only as a sorcery.",
+            "crew": "tap any number of untapped creatures you control with total power {N} or greater: this Vehicle becomes an artifact creature until end of turn.",
+            "scavenge": "exile this card from your graveyard: Put {N} +1/+1 counters on target creature. Activate only as a sorcery.",
+            "reinforce": "discard this card: Put {N} +1/+1 counters on target creature.",
+            "morph": "turn this face up.",
+            "outlast": "put a +1/+1 counter on this creature. Outlast only as a sorcery.",
+            "monstrosity": "put {N} +1/+1 counters on this creature and it becomes monstrous. Activate only as a sorcery.",
+            "adapt": "If this creature has no +1/+1 counters on it, put {N} +1/+1 counters on it.",
+            "boast": "activate boast effect.", # Cost/effect on card
+            "flashback": "Cast this card from your graveyard for its flashback cost. Then exile it.",
+            "jump-start": "Cast this card from your graveyard by discarding a card in addition to paying its other costs. Then exile it.",
+            "retrace": "You may cast this card from your graveyard by discarding a land card in addition to paying its other costs.",
+            "embalm": "Exile this card from your graveyard: Create a token that's a copy of it, except it's a white Zombie [OriginalType] with no mana cost. Embalm only as a sorcery.",
+            "eternalize": "Exile this card from your graveyard: Create a token that's a copy of it, except it's a 4/4 black Zombie [OriginalType] with no mana cost. Eternalize only as a sorcery.",
+            "ninjutsu": "Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking.",
         }
         battlefield_activated = ["equip", "fortify", "level up", "reconfigure", "crew", "outlast", "monstrosity", "adapt", "boast"]
-        hand_activated = ["cycling", "channel", "transmute", "reinforce", "ninjutsu"] # Added ninjutsu
+        hand_activated = ["cycling", "channel", "transmute", "reinforce", "ninjutsu"]
         gy_activated = ["unearth", "scavenge", "flashback", "jump-start", "retrace", "embalm", "eternalize"]
-        other_zone_activated = ["morph"] # Face down is a special state
+        other_zone_activated = ["morph"]
 
-        if keyword_lower in activated_map: # Excludes Madness explicitly now
-            cost_to_use = current_value if current_value else "{0}"
-            effect_desc = activated_map[keyword_lower]
-            # Ninjutsu cost is already stored in `current_value`. The description doesn't need cost prefix.
-            if keyword_lower == "ninjutsu": ability_text = effect_desc
-            else: ability_text = full_text # Use full text for others
+        if keyword_lower in activated_map:
+            cost_to_use = current_value if current_value is not None else "{0}"
+            effect_desc_tmpl = activated_map[keyword_lower]
+            val_str = str(_parse_value(full_text, keyword_lower)) # Ensure N value parsed correctly for effect text
+            effect_desc = effect_desc_tmpl.format(N=val_str)
 
-            ability = ActivatedAbility(card_id, cost_to_use, effect_desc, effect_text=ability_text)
+            # Cost is parsed from current_value/cost_str for ActivatedAbility
+            # Use full_text as the effect_text passed to constructor for better context
+            ability = ActivatedAbility(card_id, cost_to_use, effect_desc, effect_text=full_text)
             setattr(ability, 'keyword', keyword_lower)
-            setattr(ability, 'keyword_value', cost_to_use)
-            # --- Zone setting logic ---
+            setattr(ability, 'keyword_value', cost_to_use) # Store parsed cost
+
             if keyword_lower in hand_activated: setattr(ability, 'zone', 'hand')
             elif keyword_lower in gy_activated: setattr(ability, 'zone', 'graveyard')
-            elif keyword_lower in battlefield_activated: setattr(ability, 'zone', 'battlefield')
-            elif keyword_lower in other_zone_activated:
-                if keyword_lower == 'morph': setattr(ability, 'zone', 'face_down')
-            else: setattr(ability, 'zone', 'battlefield') # Default
+            elif keyword_lower == 'morph': setattr(ability, 'zone', 'face_down')
+            else: setattr(ability, 'zone', 'battlefield') # Default to battlefield
 
-            abilities_list.append(ability)
-            logging.debug(f"Created ActivatedAbility for keyword: {full_text} (Zone: {getattr(ability, 'zone', 'unknown')})")
-            return
+            # Append handled in final check
 
 
         # --- Rule Modifying Keywords -> StaticAbility OR Special Handling ---
-        # ... (Keep existing Rule Keyword logic) ...
         rule_keywords = {
-            # Cost reduction
             "affinity": "artifact", "convoke": True, "delve": True, "improvise": True,
-            # Alt/Additional costs
             "bestow": "cost", "buyback": "cost", "entwine": "cost", "escape": "cost_and_gy", "kicker": "cost",
-            "madness": "cost", # Triggered by discard, stores cost
-            "overload": "cost", "splice": "cost", "surge": "cost", "spree": True,
-            # Timing/Rules
-            "split second": True,
-            "suspend": "cost_and_time", # Activated from hand to exile
-            "companion": True,
-            "rebound": True, # Flag checked by GameState on resolution
-            "phasing": True, # State change handled by GameState
-            "banding": True, # Combat modification handled by CombatResolver
-            # Living Weapon handled as TriggeredAbility
-            "awaken": "cost_and_counters",
+            "madness": "cost", "overload": "cost", "splice": "cost", "surge": "cost", "spree": True,
+            "split second": True, "suspend": "cost_and_time", "companion": True, "rebound": True,
+            "phasing": True, "banding": True, "awaken": "cost_and_counters",
         }
         if keyword_lower in rule_keywords:
-            ability_effect_text = f"This card has the rule-modifying keyword: {full_text}."
-            ability = StaticAbility(card_id, ability_effect_text, ability_effect_text) # Pass effect text for debugging/display
+            ability_effect_text = f"Rule Keyword: {full_text}" # Clearer description for static marker
+            ability = StaticAbility(card_id, ability_effect_text, ability_effect_text)
             setattr(ability, 'keyword', keyword_lower)
             kw_cost = None
             kw_value = None
@@ -1124,50 +1270,35 @@ class AbilityHandler:
             elif cost_context == "cost_and_gy": # Escape
                 kw_cost = _parse_cost(full_text, keyword_lower)
                 match = re.search(r"exile (\w+|\d+) other cards?", full_text, re.IGNORECASE)
-                if match: kw_value = self._word_to_number(match.group(1))
-                else: kw_value = 1
+                kw_value = _word_to_number(match.group(1)) if match else 1
             elif cost_context == "cost_and_time": # Suspend
-                 # Current value should be (N, Cost) from earlier parse
-                 if isinstance(current_value, tuple) and len(current_value) == 2:
-                     kw_value, kw_cost = current_value # N, Cost
-                 else: # Fallback parsing if initial failed
-                      kw_cost = _parse_cost(full_text, keyword_lower)
-                      kw_value = _parse_value(full_text, keyword_lower) # N
+                 kw_value, kw_cost = current_value if isinstance(current_value, tuple) and len(current_value) == 2 else (_parse_value(full_text, keyword_lower), _parse_cost(full_text, keyword_lower))
             elif cost_context == "cost_and_counters": # Awaken
                 kw_cost = _parse_cost(full_text, keyword_lower)
                 match = re.search(r"put (\w+|\d+) \+1/\+1 counters", full_text, re.IGNORECASE)
-                if match: kw_value = self._word_to_number(match.group(1))
-                else: kw_value = 1
-            elif isinstance(cost_context, str): kw_value = cost_context # e.g., "artifact" for affinity
+                kw_value = _word_to_number(match.group(1)) if match else 1
+            elif isinstance(cost_context, str): kw_value = cost_context
 
             setattr(ability, 'keyword_cost', kw_cost)
             setattr(ability, 'keyword_value', kw_value)
-            abilities_list.append(ability); ability.apply(self.game_state) # Apply immediately
-
-            # Special Handling Refined Logging
-            # ... (keep existing logging for special cases) ...
-            if keyword_lower == "suspend":
-                 logging.debug(f"Registered Suspend marker (N={kw_value}, Cost={kw_cost}). Requires separate action.")
-            elif keyword_lower == "split second":
-                 logging.debug("Registered Split Second marker (handled by GameState/ActionHandler).")
-            elif keyword_lower == "rebound":
-                 logging.debug("Registered Rebound marker (handled by GameState on resolution).")
-            elif keyword_lower == "madness":
-                 logging.debug(f"Registered Madness marker (Cost: {kw_cost}). Activation handled by discard trigger.")
-            elif keyword_lower == "phasing":
-                logging.debug("Registered Phasing marker (handled by GameState during untap).")
-            elif keyword_lower == "banding":
-                logging.debug("Registered Banding marker (handled by CombatResolver).")
-            else:
-                logging.debug(f"Registered rule-modifying keyword '{keyword_lower}' as StaticAbility marker.")
-            return
+            # Append handled in final check
 
 
-        # --- Fallback ---
-        # Check if it's handled by EffectFactory before warning
-        is_scry_effect = keyword_lower.startswith("scry")
-        if not is_static_grant and not is_scry_effect: # Scry handled by EffectFactory from text
-             logging.warning(f"Keyword '{keyword_lower}' (from '{full_text}') not explicitly mapped or parsed.")
+        # --- Final Append and Logging ---
+        if ability:
+            setattr(ability, 'source_card', card) # Ensure card link
+            abilities_list.append(ability)
+            if isinstance(ability, StaticAbility):
+                # Apply rule markers/static grants immediately
+                if hasattr(ability, 'apply') and callable(ability.apply):
+                     ability.apply(self.game_state)
+            logging.debug(f"Created {type(ability).__name__} for keyword: {full_text} (Card: {card.name})")
+            return True # Indicate success
+        else:
+             # Fallback warning if keyword wasn't categorized
+             if not is_static_grant and keyword_lower not in triggered_map and keyword_lower not in activated_map and keyword_lower not in rule_keywords:
+                  logging.warning(f"Keyword '{keyword_lower}' (from '{full_text}') on {card.name} not explicitly mapped or parsed.")
+             return False # Indicate no ability created
             
     def _parse_ability_text(self, card_id, card, ability_text, abilities_list, is_exhaust=False, current_activated_index=None):
         """
