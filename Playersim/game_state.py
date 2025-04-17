@@ -32,12 +32,12 @@ class GameState:
                  "_phase_action_count", "priority_player", "stats_tracker",
                  "card_memory", # Added from env
                  # Special card types
-                 "adventure_cards", "saga_counters", "mdfc_cards", "battle_cards",
-                 "cards_castable_from_exile", "cast_as_back_face",
+                 "adventure_cards", "saga_counters", "mdfc_cards", "battle_cards", 'battle_attack_targets',
+                 "cards_castable_from_exile", "cast_as_back_face", 'planeswalker_attack_targets',
                  # Additional slots for various tracking variables
                  "phased_out", # Keep for Phasing
                  "suspended_cards", # Keep for Suspend
-                 "kicked_cards", "evoked_cards",
+                 "kicked_cards", "evoked_cards", 'planeswalker_protectors',
                  "foretold_cards", "blitz_cards", "dash_cards", "unearthed_cards",
                  "jump_start_cards", "buyback_cards", "flashback_cards",
                  "life_gained_this_turn", "damage_this_turn", "exile_at_end_of_combat",
@@ -49,7 +49,7 @@ class GameState:
                  "rebounded_cards", # Keep for Rebound
                  "banding_creatures", # Keep for Banding (maybe handled differently)
                  "crewed_vehicles", "morphed_cards", "manifested_cards",
-                 "cards_to_graveyard_this_turn",
+                 "cards_to_graveyard_this_turn", 'first_strike_ordering',
                  "boast_activated", "forecast_used", "epic_spells", "city_blessing",
                  "myriad_tokens", "persist_returned", "undying_returned", "gravestorm_count",
                  "madness_cast_available", # Keep for Madness
@@ -57,7 +57,7 @@ class GameState:
                  "targeting_context", "sacrifice_context", "choice_context",
                  "mulligan_in_progress", "mulligan_player", "mulligan_count",
                  "bottoming_in_progress", "bottoming_player", "cards_to_bottom", "bottoming_count",
-                 "spree_context",
+                 "spree_context", 'combat_action_handler', '_handle_level_up_class',
                  "dredge_pending",
                  "madness_trigger", # Keep for Madness
                  "pending_spell_context", "clash_context",

@@ -27,16 +27,27 @@ from .replacement_effects import ReplacementEffectSystem
 from .deck_stats_tracker import DeckStatsTracker
 from .card_memory import CardMemory
 
-# Define FEATURE_DIM more safely or pass it around
-# Attempt to determine dynamically first
 try:
     # Create a dummy card to get feature dimension
+    logging.info("Creating dummy card for feature dimension calculation...")
     dummy_card_data = {"name": "Dummy", "type_line": "Creature", "mana_cost": "{1}"}
-    FEATURE_DIM = len(Card(dummy_card_data).to_feature_vector())
-    logging.info(f"Determined FEATURE_DIM dynamically: {FEATURE_DIM}")
+    dummy_card = Card(dummy_card_data)
+    logging.info(f"Successfully created dummy card: {dummy_card}")
+    
+    # Try to get the feature vector with detailed debugging
+    logging.info("Attempting to get feature vector from dummy card...")
+    feature_vector = dummy_card.to_feature_vector()
+    logging.info(f"Got feature vector with type: {type(feature_vector)}, shape: {len(feature_vector)}")
+    
+    # Set the dimension
+    FEATURE_DIM = len(feature_vector)
+    logging.info(f"Successfully determined FEATURE_DIM dynamically: {FEATURE_DIM}")
 except Exception as e:
-    logging.warning(f"Could not determine FEATURE_DIM dynamically, using fallback 223: {e}")
-    FEATURE_DIM = 223 # Fallback
+    import traceback
+    logging.error(f"Error determining FEATURE_DIM dynamically: {e}")
+    logging.error(traceback.format_exc())
+    logging.warning("Using fallback dimension value of 223")
+    FEATURE_DIM = 223  # Fallback
     
 class AlphaZeroMTGEnv(gym.Env):
     """
@@ -46,6 +57,7 @@ class AlphaZeroMTGEnv(gym.Env):
     ACTION_SPACE_SIZE = 480 # Moved constant here
 
     def __init__(self, decks, card_db, max_turns=20, max_hand_size=7, max_battlefield=20):
+        logging.info("Initializing AlphaZeroMTGEnv...")
         super().__init__()
         self.decks = decks
         self.card_db = card_db
@@ -55,7 +67,8 @@ class AlphaZeroMTGEnv(gym.Env):
         self.strategy_memory = StrategyMemory()
         self.current_episode_actions = []
         self.current_analysis = None
-        self._feature_dim = FEATURE_DIM # Store determined feature dim
+        self._feature_dim = FEATURE_DIM if 'FEATURE_DIM' in globals() else 223  # Store determined feature dim with fallback
+        logging.info(f"Using feature dimension: {self._feature_dim}")
 
         # Initialize deck statistics tracker (Corrected class name usage)
         try:
@@ -66,7 +79,21 @@ class AlphaZeroMTGEnv(gym.Env):
             self.stats_tracker = None
             self.has_stats_tracker = False
 
-        # (Rest of __init__ including CardMemory init remains largely the same)
+        # --- ADDED: Initialize Card Memory ---
+        try:
+            self.card_memory = CardMemory() # Initialize CardMemory
+            self.has_card_memory = True
+            logging.debug("CardMemory system initialized successfully")
+        except (ImportError, ModuleNotFoundError, NameError):
+            logging.warning("CardMemory not available, card statistics will not be tracked dynamically")
+            self.card_memory = None
+            self.has_card_memory = False
+        except Exception as e:
+            logging.error(f"Error initializing CardMemory: {str(e)}")
+            self.card_memory = None
+            self.has_card_memory = False
+        # --- END ADDED ---
+
 
         # Initialize game state manager
         self.game_state = GameState(self.card_db, max_turns, max_hand_size, max_battlefield)
@@ -175,21 +202,19 @@ class AlphaZeroMTGEnv(gym.Env):
             "mulligan_recommendation": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
             "mulligan_reason_count": spaces.Box(low=0, high=5, shape=(1,), dtype=np.int32),
             "mulligan_reasons": spaces.Box(low=0, high=1, shape=(5,), dtype=np.float32),
-            # Shape indicates max possible targets/options. Values are IDs or indices, padded with -1.
-            # High bound can be large, but realistically it's limited by battlefield/GY size. Set reasonably high or use -1 padding.
-            "targetable_permanents": spaces.Box(low=-1, high=500, shape=(self.max_battlefield * 2,), dtype=np.int32), # INDICES of potentially targetable battlefield permanents
-            "targetable_players": spaces.Box(low=-1, high=1, shape=(2,), dtype=np.int32), # INDICES [0,1] representing [P1, P2]
-            "targetable_spells_on_stack": spaces.Box(low=-1, high=20, shape=(5,), dtype=np.int32), # INDICES of targetable stack items
-            "targetable_cards_in_graveyards": spaces.Box(low=-1, high=200, shape=(10 * 2,), dtype=np.int32), # INDICES relative to combined graveyards? Or player's GY?
-            "sacrificeable_permanents": spaces.Box(low=-1, high=self.max_battlefield, shape=(self.max_battlefield,), dtype=np.int32), # INDICES of own perms that can be sacrificed
-            "selectable_modes": spaces.Box(low=-1, high=10, shape=(10,), dtype=np.int32), # INDICES of selectable modes if in choice phase
-            "selectable_colors": spaces.Box(low=-1, high=4, shape=(5,), dtype=np.int32), # INDICES [0-4] for WUBRG if choosing color
-            "valid_x_range": spaces.Box(low=0, high=100, shape=(2,), dtype=np.int32), # [min_X, max_X] if choosing X
-            "bottomable_cards": spaces.Box(low=0, high=1, shape=(self.max_hand_size,), dtype=bool), # Mask for bottoming (Hand indices 0..N-1)
-            "dredgeable_cards_in_gy": spaces.Box(low=-1, high=100, shape=(6,), dtype=np.int32), # INDICES of dredgeable cards in own GY
+            "targetable_permanents": spaces.Box(low=-1, high=500, shape=(self.max_battlefield * 2,), dtype=np.int32),
+            "targetable_players": spaces.Box(low=-1, high=1, shape=(2,), dtype=np.int32),
+            "targetable_spells_on_stack": spaces.Box(low=-1, high=20, shape=(5,), dtype=np.int32),
+            "targetable_cards_in_graveyards": spaces.Box(low=-1, high=200, shape=(10 * 2,), dtype=np.int32),
+            "sacrificeable_permanents": spaces.Box(low=-1, high=self.max_battlefield, shape=(self.max_battlefield,), dtype=np.int32),
+            "selectable_modes": spaces.Box(low=-1, high=10, shape=(10,), dtype=np.int32),
+            "selectable_colors": spaces.Box(low=-1, high=4, shape=(5,), dtype=np.int32),
+            "valid_x_range": spaces.Box(low=0, high=100, shape=(2,), dtype=np.int32),
+            "bottomable_cards": spaces.Box(low=0, high=1, shape=(self.max_hand_size,), dtype=bool),
+            "dredgeable_cards_in_gy": spaces.Box(low=-1, high=100, shape=(6,), dtype=np.int32),
         })
         # --- End Observation Space Update ---
-
+        self.action_space = spaces.Discrete(self.ACTION_SPACE_SIZE)
         # Add memory for actions and rewards
         self.last_n_actions = np.full(self.action_memory_size, -1, dtype=np.int32) # Use -1 for padding
         self.last_n_rewards = np.zeros(self.action_memory_size, dtype=np.float32)
@@ -691,19 +716,17 @@ class AlphaZeroMTGEnv(gym.Env):
     def _record_cards_to_memory(self, player_deck, opponent_deck, cards_played_data, turn_count,
                             player_archetype, opponent_archetype, opening_hands_data, draw_history_data, is_draw=False, player_idx=0):
         """Record detailed card performance data to the card memory system, handles draw."""
-        # Renamed: winner/loser -> player/opponent for clarity, added is_draw flag
         try:
-            if not self.has_card_memory or not self.card_memory: return
+            # Check if CardMemory system exists AND if the flag is set
+            if not hasattr(self, 'has_card_memory') or not self.has_card_memory or not self.card_memory: return
 
-            # Determine player/opponent indices based on the perspective we are recording
-            player_key = player_idx # 0 for P1, 1 for P2
+            player_key = player_idx
             opponent_key = 1 - player_key
 
             player_played = cards_played_data.get(player_key, [])
-            player_opening = opening_hands_data.get(f'p{player_key+1}', []) # Adjust key based on GS tracking
-            player_draws = draw_history_data.get(f'p{player_key+1}', {}) # Adjust key
+            player_opening = opening_hands_data.get(f'p{player_key+1}', [])
+            player_draws = draw_history_data.get(f'p{player_key+1}', {})
 
-            # --- Process Player Deck ---
             player_turn_played = {}
             for card_id in player_played:
                  for turn, cards in player_draws.items():
@@ -715,7 +738,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 if not card or not hasattr(card, 'name'): continue
 
                 perf_data = {
-                    'is_win': not is_draw, # Win if not a draw
+                    'is_win': not is_draw,
                     'is_draw': is_draw,
                     'was_played': card_id in player_played,
                     'was_drawn': any(card_id in cards for turn, cards in player_draws.items()),
@@ -732,7 +755,6 @@ class AlphaZeroMTGEnv(gym.Env):
                      'types': getattr(card, 'card_types', []),
                      'colors': getattr(card, 'colors', []) })
 
-            # --- Process Opponent Deck (Only need to register cards) ---
             for card_id in set(opponent_deck):
                  card = self.game_state._safe_get_card(card_id)
                  if card and hasattr(card, 'name'):
@@ -741,7 +763,6 @@ class AlphaZeroMTGEnv(gym.Env):
                           'types': getattr(card, 'card_types', []),
                           'colors': getattr(card, 'colors', []) })
 
-            # Save card memory async
             if hasattr(self.card_memory, 'save_memory_async'):
                  self.card_memory.save_memory_async()
 
@@ -939,42 +960,68 @@ class AlphaZeroMTGEnv(gym.Env):
             return obs, -5.0, True, False, final_info
         
     def _get_obs_safe(self):
-        """Return a minimal, safe observation dictionary in case of errors."""
-        gs = self.game_state
-        # Initialize with zeros based on the defined space
-        obs = {k: np.zeros(space.shape, dtype=space.dtype)
-               for k, space in self.observation_space.spaces.items()}
-        try:
-            # Fill minimal necessary fields, checking attribute existence
-            obs["phase"] = np.array([getattr(gs, 'phase', 0)], dtype=np.int32)
-            obs["turn"] = np.array([getattr(gs, 'turn', 1)], dtype=np.int32)
-            # Ensure p1 and p2 exist before accessing life
-            p1_life = getattr(gs, 'p1', {}).get('life', 0)
-            p2_life = getattr(gs, 'p2', {}).get('life', 0)
-            agent_is_p1 = getattr(gs, 'agent_is_p1', True)
-            obs["p1_life"] = np.array([p1_life], dtype=np.int32)
-            obs["p2_life"] = np.array([p2_life], dtype=np.int32)
-            obs["my_life"] = np.array([p1_life if agent_is_p1 else p2_life], dtype=np.int32)
-            obs["opp_life"] = np.array([p2_life if agent_is_p1 else p1_life], dtype=np.int32)
-            # Safely generate action mask
+            """Return a minimal, safe observation dictionary in case of errors. (Reinforced)"""
+            gs = self.game_state
             try:
-                obs["action_mask"] = self.action_mask().astype(bool)
-            except Exception:
-                obs["action_mask"] = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+                # Initialize with zeros based on the defined space
+                obs = {k: np.zeros(space.shape, dtype=space.dtype)
+                    for k, space in self.observation_space.spaces.items()}
+
+                # Fill minimal necessary fields, checking attribute existence
+                obs["phase"] = np.array([getattr(gs, 'phase', 0)], dtype=np.int32)
+                obs["turn"] = np.array([getattr(gs, 'turn', 1)], dtype=np.int32)
+                # Ensure p1 and p2 exist before accessing life
+                p1_life = getattr(gs, 'p1', {}).get('life', 0)
+                p2_life = getattr(gs, 'p2', {}).get('life', 0)
+                agent_is_p1 = getattr(gs, 'agent_is_p1', True)
+                obs["p1_life"] = np.array([p1_life], dtype=np.int32)
+                obs["p2_life"] = np.array([p2_life], dtype=np.int32)
+                obs["my_life"] = np.array([p1_life if agent_is_p1 else p2_life], dtype=np.int32)
+                obs["opp_life"] = np.array([p2_life if agent_is_p1 else p1_life], dtype=np.int32)
+
+                # Safely generate action mask
+                try:
+                    # Use generate_valid_actions which has internal error handling
+                    mask = self.generate_valid_actions().astype(bool)
+                    obs["action_mask"] = mask
+                except Exception:
+                    obs["action_mask"] = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+                    obs["action_mask"][11] = True # Pass priority
+                    obs["action_mask"][12] = True # Concede
+
+                # Fill phase onehot safely
+                max_phase = self.observation_space["phase_onehot"].shape[0] - 1
+                current_phase = getattr(gs, 'phase', 0)
+                if 0 <= current_phase <= max_phase:
+                    obs["phase_onehot"][current_phase] = 1.0
+                else:
+                    obs["phase_onehot"][0] = 1.0 # Default to phase 0
+
+                # *** CRITICAL: Ensure ability_features exists and has correct shape/dtype ***
+                ability_features_key = "ability_features"
+                if ability_features_key not in obs:
+                    logging.critical(f"CRITICAL: '{ability_features_key}' missing from obs right before return! Resetting.")
+                    obs[ability_features_key] = np.zeros(self.observation_space[ability_features_key].shape, dtype=self.observation_space[ability_features_key].dtype)
+                elif obs[ability_features_key].shape != self.observation_space[ability_features_key].shape:
+                    logging.critical(f"CRITICAL: '{ability_features_key}' has WRONG SHAPE before return! Got {obs[ability_features_key].shape}, expected {self.observation_space[ability_features_key].shape}. Resetting.")
+                    obs[ability_features_key] = np.zeros(self.observation_space[ability_features_key].shape, dtype=self.observation_space[ability_features_key].dtype)
+
+                # Ensure all keys are present one last time (belt and suspenders)
+                for key, space in self.observation_space.spaces.items():
+                     if key not in obs:
+                          logging.error(f"_get_obs_safe: Final check failed, missing '{key}'. Resetting.")
+                          obs[key] = np.zeros(space.shape, dtype=space.dtype)
+
+            except Exception as safe_obs_e:
+                logging.critical(f"Error in _get_obs_safe itself: {safe_obs_e}", exc_info=True)
+                # Re-initialize obs with zeros as last resort
+                obs = {k: np.zeros(space.shape, dtype=space.dtype)
+                    for k, space in self.observation_space.spaces.items()}
                 obs["action_mask"][11] = True # Pass priority
                 obs["action_mask"][12] = True # Concede
-            # Fill phase onehot safely
-            max_phase = self.observation_space["phase_onehot"].shape[0] - 1
-            current_phase = getattr(gs, 'phase', 0)
-            if 0 <= current_phase <= max_phase:
-                 obs["phase_onehot"][current_phase] = 1.0
-            else:
-                 obs["phase_onehot"][0] = 1.0 # Default to phase 0
-
-        except Exception as safe_obs_e:
-            logging.error(f"Error in _get_obs_safe itself: {safe_obs_e}")
-            # Return the zero-initialized obs as a last resort
-        return obs
+                # Ensure the key exists even here
+                obs['ability_features'] = np.zeros(self.observation_space['ability_features'].shape, dtype=self.observation_space['ability_features'].dtype)
+            return obs
 
     def _check_game_end_conditions(self, info):
             """Helper to check standard game end conditions and update info dict."""
@@ -1560,219 +1607,346 @@ class AlphaZeroMTGEnv(gym.Env):
             logging.error(f"Error recording game statistics: {e}")
             import traceback
             logging.error(traceback.format_exc())
-            
-
 
     def _get_obs(self):
         """Build the observation dictionary. Assumes helpers are implemented."""
         try:
+            # 0. Ensure layer effects are applied first
             if hasattr(self, 'layer_system') and self.layer_system:
-                self.layer_system.apply_all_effects()
+                try:
+                    self.layer_system.apply_all_effects()
+                except Exception as layer_e:
+                     logging.error(f"Error applying layer effects in _get_obs: {layer_e}", exc_info=True)
+                     # Continue generating obs, but layers might be inconsistent
 
             gs = self.game_state
             # Use GS helpers to get players
-            me = gs._get_active_player() if gs.priority_player == gs._get_active_player() else gs.priority_player if gs.priority_player else gs._get_active_player() # Player whose turn it is, or who has priority
-            opp = gs._get_non_active_player() # Get the other player relative to active
-            agent_player_obj = gs.p1 if gs.agent_is_p1 else gs.p2 # The actual agent player object
+            agent_player_obj = gs.p1 if gs.agent_is_p1 else gs.p2
+            opp = gs.p2 if gs.agent_is_p1 else gs.p1
 
+            # 1. INITIALIZE obs with default values for ALL keys FIRST
+            obs = {k: np.zeros(space.shape, dtype=space.dtype)
+                   for k, space in self.observation_space.spaces.items()}
+            logging.debug(f"_get_obs: Initialized obs keys: {list(obs.keys())}") # Log initial keys
+
+            # Ensure players are valid before proceeding with population
+            if not agent_player_obj: raise ValueError("Agent player object is None in _get_obs")
+            if not opp: raise ValueError("Opponent player object is None in _get_obs")
+
+            # 2. Regenerate Action Mask (necessary for the observation itself)
+            current_mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool) # Default mask
+            if hasattr(self, 'action_handler') and self.action_handler is not None:
+                try:
+                    current_mask = self.action_mask()
+                except Exception as mask_e:
+                     logging.error(f"Error generating action mask in _get_obs: {mask_e}", exc_info=True)
+                     # Use default mask with pass/concede if generation fails
+                     current_mask[11] = True; current_mask[12] = True;
+            else:
+                 logging.warning("ActionHandler not available in _get_obs, using default mask.")
+                 current_mask[11] = True; current_mask[12] = True;
+            obs["action_mask"] = current_mask.astype(bool) # Assign the potentially corrected mask
+
+
+            # --- 3. Populate Basic Game State Info ---
             is_my_turn = (gs.turn % 2 == 1) == gs.agent_is_p1
             current_phase = getattr(gs, 'phase', 0)
             current_turn = getattr(gs, 'turn', 1)
             keyword_dimension = len(Card.ALL_KEYWORDS) # Ensure this matches
 
-            # Regenerate action mask based on the current state
-            current_mask = self.action_mask()
+            obs["phase"] = np.array([current_phase], dtype=np.int32)
+            obs["phase_onehot"] = self._phase_to_onehot(current_phase)
+            obs["turn"] = np.array([current_turn], dtype=np.int32)
+            obs["is_my_turn"] = np.array([int(is_my_turn)], dtype=np.int32)
+            obs["my_life"] = np.array([agent_player_obj.get('life', 0)], dtype=np.int32)
+            obs["opp_life"] = np.array([opp.get('life', 0)], dtype=np.int32)
+            obs["life_difference"] = np.array([agent_player_obj.get('life', 0) - opp.get('life', 0)], dtype=np.int32)
+            obs["p1_life"] = np.array([getattr(gs.p1, 'life', 0)], dtype=np.int32)
+            obs["p2_life"] = np.array([getattr(gs.p2, 'life', 0)], dtype=np.int32)
 
-            obs = {
-                # ... (Keep most existing key population logic the same) ...
-                "phase": np.array([current_phase], dtype=np.int32),
-                "phase_onehot": self._phase_to_onehot(current_phase),
-                "turn": np.array([current_turn], dtype=np.int32),
-                "is_my_turn": np.array([int(is_my_turn)], dtype=np.int32),
-                # ... (Life, Hand, Battlefield etc.) ...
-                "my_life": np.array([agent_player_obj.get('life', 0)], dtype=np.int32),
-                "opp_life": np.array([opp.get('life', 0)], dtype=np.int32),
-                "life_difference": np.array([agent_player_obj.get('life', 0) - opp.get('life', 0)], dtype=np.int32),
-                "p1_life": np.array([getattr(gs.p1, 'life', 0)], dtype=np.int32), # Keep absolute refs if needed
-                "p2_life": np.array([getattr(gs.p2, 'life', 0)], dtype=np.int32),
+            # --- 4. Populate Zone Features and Related Info ---
+            # Wrap potentially complex population blocks in try/excepts to prevent
+            # errors in one section from stopping others, and ensuring defaults remain.
+            try:
+                # Hand state
+                obs["my_hand"] = self._get_zone_features(agent_player_obj.get("hand", []), self.max_hand_size)
+                obs["my_hand_count"] = np.array([len(agent_player_obj.get("hand", []))], dtype=np.int32)
+                obs["opp_hand_count"] = np.array([len(opp.get("hand", []))], dtype=np.int32)
+                obs["hand_card_types"] = self._get_hand_card_types(agent_player_obj.get("hand", []))
+                obs["hand_playable"] = self._get_hand_playable(agent_player_obj.get("hand", []), agent_player_obj, is_my_turn)
+                obs["hand_performance"] = self._get_hand_performance(agent_player_obj.get("hand", []))
+                obs["hand_synergy_scores"] = self._get_hand_synergy_scores(agent_player_obj.get("hand", []), agent_player_obj.get("battlefield", []))
+                obs["opportunity_assessment"] = self._get_opportunity_assessment(agent_player_obj.get("hand", []), agent_player_obj)
+            except Exception as e:
+                logging.error(f"Error populating hand features in _get_obs: {e}", exc_info=True)
+                # Keep default zero values initialized earlier
 
-                # Hand state (from agent's perspective)
-                "my_hand": self._get_zone_features(agent_player_obj.get("hand", []), self.max_hand_size),
-                "my_hand_count": np.array([len(agent_player_obj.get("hand", []))], dtype=np.int32),
-                "opp_hand_count": np.array([len(opp.get("hand", []))], dtype=np.int32),
-                "hand_card_types": self._get_hand_card_types(agent_player_obj.get("hand", [])),
-                "hand_playable": self._get_hand_playable(agent_player_obj.get("hand", []), agent_player_obj, is_my_turn),
-                "hand_performance": self._get_hand_performance(agent_player_obj.get("hand", [])),
-                "hand_synergy_scores": self._get_hand_synergy_scores(agent_player_obj.get("hand", []), agent_player_obj.get("battlefield", [])),
-                "opportunity_assessment": self._get_opportunity_assessment(agent_player_obj.get("hand", []), agent_player_obj),
+            try:
+                # Battlefield state
+                obs["my_battlefield"] = self._get_zone_features(agent_player_obj.get("battlefield", []), self.max_battlefield)
+                obs["my_battlefield_flags"] = self._get_battlefield_flags(agent_player_obj.get("battlefield", []), agent_player_obj, self.max_battlefield)
+                obs["my_battlefield_keywords"] = self._get_battlefield_keywords(agent_player_obj.get("battlefield", []), keyword_dimension)
+                obs["my_tapped_permanents"] = self._get_tapped_mask(agent_player_obj.get("battlefield", []), agent_player_obj.get("tapped_permanents", set()), self.max_battlefield)
+                obs["opp_battlefield"] = self._get_zone_features(opp.get("battlefield", []), self.max_battlefield)
+                obs["opp_battlefield_flags"] = self._get_battlefield_flags(opp.get("battlefield", []), opp, self.max_battlefield)
+                obs["p1_battlefield"] = self._get_zone_features(gs.p1.get("battlefield", []), self.max_battlefield)
+                obs["p2_battlefield"] = self._get_zone_features(gs.p2.get("battlefield", []), self.max_battlefield)
+                obs["p1_bf_count"] = np.array([len(gs.p1.get("battlefield", []))], dtype=np.int32)
+                obs["p2_bf_count"] = np.array([len(gs.p2.get("battlefield", []))], dtype=np.int32)
+            except Exception as e:
+                logging.error(f"Error populating battlefield features in _get_obs: {e}", exc_info=True)
 
-                # Battlefield state (from agent's perspective)
-                "my_battlefield": self._get_zone_features(agent_player_obj.get("battlefield", []), self.max_battlefield),
-                "my_battlefield_flags": self._get_battlefield_flags(agent_player_obj.get("battlefield", []), agent_player_obj, self.max_battlefield),
-                "my_battlefield_keywords": self._get_battlefield_keywords(agent_player_obj.get("battlefield", []), keyword_dimension),
-                "my_tapped_permanents": self._get_tapped_mask(agent_player_obj.get("battlefield", []), agent_player_obj.get("tapped_permanents", set()), self.max_battlefield),
-                "opp_battlefield": self._get_zone_features(opp.get("battlefield", []), self.max_battlefield),
-                "opp_battlefield_flags": self._get_battlefield_flags(opp.get("battlefield", []), opp, self.max_battlefield),
-                # Absolute player battlefield state
-                "p1_battlefield": self._get_zone_features(gs.p1.get("battlefield", []), self.max_battlefield),
-                "p2_battlefield": self._get_zone_features(gs.p2.get("battlefield", []), self.max_battlefield),
-                "p1_bf_count": np.array([len(gs.p1.get("battlefield", []))], dtype=np.int32),
-                "p2_bf_count": np.array([len(gs.p2.get("battlefield", []))], dtype=np.int32),
+            try:
+                # Creature stats
+                my_creature_stats = self._get_creature_stats(agent_player_obj.get("battlefield", []))
+                opp_creature_stats = self._get_creature_stats(opp.get("battlefield", []))
+                obs["my_creature_count"] = np.array([my_creature_stats['count']], dtype=np.int32)
+                obs["opp_creature_count"] = np.array([opp_creature_stats['count']], dtype=np.int32)
+                obs["my_total_power"] = np.array([my_creature_stats['power']], dtype=np.int32)
+                obs["my_total_toughness"] = np.array([my_creature_stats['toughness']], dtype=np.int32)
+                obs["opp_total_power"] = np.array([opp_creature_stats['power']], dtype=np.int32)
+                obs["opp_total_toughness"] = np.array([opp_creature_stats['toughness']], dtype=np.int32)
+                obs["power_advantage"] = np.array([my_creature_stats['power'] - opp_creature_stats['power']], dtype=np.int32)
+                obs["toughness_advantage"] = np.array([my_creature_stats['toughness'] - opp_creature_stats['toughness']], dtype=np.int32)
+                obs["creature_advantage"] = np.array([my_creature_stats['count'] - opp_creature_stats['count']], dtype=np.int32)
+                obs["threat_assessment"] = self._get_threat_assessment(opp.get("battlefield", []))
+                obs["card_synergy_scores"] = self._calculate_card_synergies(agent_player_obj.get("battlefield", []))
+            except Exception as e:
+                logging.error(f"Error populating creature stats in _get_obs: {e}", exc_info=True)
 
-                # Creature stats (using helper)
-                "my_creature_count": np.array([self._get_creature_stats(agent_player_obj.get("battlefield", []))['count']], dtype=np.int32),
-                "opp_creature_count": np.array([self._get_creature_stats(opp.get("battlefield", []))['count']], dtype=np.int32),
-                "my_total_power": np.array([self._get_creature_stats(agent_player_obj.get("battlefield", []))['power']], dtype=np.int32),
-                "my_total_toughness": np.array([self._get_creature_stats(agent_player_obj.get("battlefield", []))['toughness']], dtype=np.int32),
-                "opp_total_power": np.array([self._get_creature_stats(opp.get("battlefield", []))['power']], dtype=np.int32),
-                "opp_total_toughness": np.array([self._get_creature_stats(opp.get("battlefield", []))['toughness']], dtype=np.int32),
-                "power_advantage": np.array([self._get_creature_stats(agent_player_obj.get("battlefield", []))['power'] - self._get_creature_stats(opp.get("battlefield", []))['power']], dtype=np.int32),
-                "toughness_advantage": np.array([self._get_creature_stats(agent_player_obj.get("battlefield", []))['toughness'] - self._get_creature_stats(opp.get("battlefield", []))['toughness']], dtype=np.int32),
-                "creature_advantage": np.array([self._get_creature_stats(agent_player_obj.get("battlefield", []))['count'] - self._get_creature_stats(opp.get("battlefield", []))['count']], dtype=np.int32),
-                "threat_assessment": self._get_threat_assessment(opp.get("battlefield", [])), # Opponent threats
-                "card_synergy_scores": self._calculate_card_synergies(agent_player_obj.get("battlefield", [])), # Agent's synergies
+            try:
+                # Mana state
+                obs["my_mana_pool"] = np.array([agent_player_obj.get("mana_pool", {}).get(c, 0) for c in ['W', 'U', 'B', 'R', 'G', 'C']], dtype=np.int32)
+                obs["my_mana"] = np.array([sum(agent_player_obj.get("mana_pool", {}).values())], dtype=np.int32)
+                obs["untapped_land_count"] = np.array([sum(1 for cid in agent_player_obj.get("battlefield", []) if self._is_land(cid) and cid not in agent_player_obj.get("tapped_permanents", set()))], dtype=np.int32)
+                obs["total_available_mana"] = np.array([sum(agent_player_obj.get("mana_pool", {}).values()) + obs["untapped_land_count"][0]], dtype=np.int32) # Simplified total available
+                obs["turn_vs_mana"] = np.array([min(1.0, len([cid for cid in agent_player_obj.get("battlefield",[]) if self._is_land(cid)]) / max(1.0, float(current_turn)))], dtype=np.float32)
+                obs["remaining_mana_sources"] = np.array([obs["untapped_land_count"][0]], dtype=np.int32) # Same as untapped lands for now
+            except Exception as e:
+                logging.error(f"Error populating mana features in _get_obs: {e}", exc_info=True)
 
-                # Mana state (agent's perspective)
-                "my_mana_pool": np.array([agent_player_obj.get("mana_pool", {}).get(c, 0) for c in ['W', 'U', 'B', 'R', 'G', 'C']], dtype=np.int32),
-                "my_mana": np.array([sum(agent_player_obj.get("mana_pool", {}).values())], dtype=np.int32), # Total mana in pool
-                "untapped_land_count": np.array([sum(1 for cid in agent_player_obj.get("battlefield", []) if self._is_land(cid) and cid not in agent_player_obj.get("tapped_permanents", set()))], dtype=np.int32),
-                "total_available_mana": np.array([sum(agent_player_obj.get("mana_pool", {}).values()) + sum(1 for cid in agent_player_obj.get("battlefield", []) if self._is_land(cid) and cid not in agent_player_obj.get("tapped_permanents", set()))], dtype=np.int32), # Pool + untapped basic lands approximation
-                "turn_vs_mana": np.array([min(1.0, len([cid for cid in agent_player_obj.get("battlefield",[]) if self._is_land(cid)]) / max(1.0, float(current_turn)))], dtype=np.float32),
-                "remaining_mana_sources": np.array([sum(1 for cid in agent_player_obj.get("battlefield", []) if self._is_land(cid) and cid not in agent_player_obj.get("tapped_permanents", set()))], dtype=np.int32),
-
+            try:
                 # Graveyard/Exile state
-                "my_graveyard_count": np.array([len(agent_player_obj.get("graveyard", []))], dtype=np.int32),
-                "opp_graveyard_count": np.array([len(opp.get("graveyard", []))], dtype=np.int32),
-                "my_dead_creatures": np.array([sum(1 for cid in agent_player_obj.get("graveyard", []) if self._is_creature(cid))], dtype=np.int32),
-                "opp_dead_creatures": np.array([sum(1 for cid in opp.get("graveyard", []) if self._is_creature(cid))], dtype=np.int32),
-                "graveyard_key_cards": self._get_zone_features(agent_player_obj.get("graveyard", []), 10),
-                "exile_key_cards": self._get_zone_features(agent_player_obj.get("exile", []), 10),
+                obs["my_graveyard_count"] = np.array([len(agent_player_obj.get("graveyard", []))], dtype=np.int32)
+                obs["opp_graveyard_count"] = np.array([len(opp.get("graveyard", []))], dtype=np.int32)
+                obs["my_dead_creatures"] = np.array([sum(1 for cid in agent_player_obj.get("graveyard", []) if self._is_creature(cid))], dtype=np.int32)
+                obs["opp_dead_creatures"] = np.array([sum(1 for cid in opp.get("graveyard", []) if self._is_creature(cid))], dtype=np.int32)
+                obs["graveyard_key_cards"] = self._get_zone_features(agent_player_obj.get("graveyard", []), 10)
+                obs["exile_key_cards"] = self._get_zone_features(agent_player_obj.get("exile", []), 10)
+            except Exception as e:
+                logging.error(f"Error populating graveyard/exile features in _get_obs: {e}", exc_info=True)
 
+            try:
                 # Stack state
-                "stack_count": np.array([len(gs.stack)], dtype=np.int32),
-                "stack_controller": self._get_stack_info(gs.stack, agent_player_obj)[0],
-                "stack_card_types": self._get_stack_info(gs.stack, agent_player_obj)[1],
+                stack_controllers, stack_types = self._get_stack_info(gs.stack, agent_player_obj)
+                obs["stack_count"] = np.array([len(gs.stack)], dtype=np.int32)
+                obs["stack_controller"] = stack_controllers
+                obs["stack_card_types"] = stack_types
+            except Exception as e:
+                logging.error(f"Error populating stack features in _get_obs: {e}", exc_info=True)
 
+            try:
                 # Combat state
-                "attackers_count": np.array([len(gs.current_attackers)], dtype=np.int32),
-                "blockers_count": np.array([sum(len(b) for b in gs.current_block_assignments.values())], dtype=np.int32),
-                "potential_combat_damage": np.zeros(1, dtype=np.int32), # Populate if simulation ran
+                obs["attackers_count"] = np.array([len(getattr(gs, 'current_attackers', []))], dtype=np.int32)
+                obs["blockers_count"] = np.array([sum(len(b) for b in getattr(gs, 'current_block_assignments', {}).values())], dtype=np.int32)
+                obs["potential_combat_damage"] = np.zeros(1, dtype=np.int32) # Placeholder
+            except Exception as e:
+                logging.error(f"Error populating combat state features in _get_obs: {e}", exc_info=True)
 
-                # Ability states (agent's perspective)
-                "ability_features": self._get_ability_features(agent_player_obj.get("battlefield", []), agent_player_obj),
-                "ability_timing": self._get_ability_timing(current_phase),
-                "planeswalker_activations": self._get_planeswalker_activation_flags(agent_player_obj.get("battlefield", []), agent_player_obj),
-                "planeswalker_activation_counts": self._get_planeswalker_activation_counts(agent_player_obj.get("battlefield", []), agent_player_obj),
 
-                # History
-                "phase_history": np.array(self._phase_history[-5:] + [-1]*(5-len(self._phase_history)), dtype=np.int32), # Pad with -1
-                "previous_actions": np.array(self.last_n_actions if hasattr(self, 'last_n_actions') else [-1]*self.action_memory_size, dtype=np.int32),
-                "previous_rewards": np.array(self.last_n_rewards if hasattr(self, 'last_n_rewards') else [0.0]*self.action_memory_size, dtype=np.float32),
+            # --- *** 5. Explicitly Handle Ability Features with Logging *** ---
+            ability_features_key = "ability_features"
+            try:
+                logging.debug(f"Calling _get_ability_features for {agent_player_obj.get('name','unknown player')}")
+                # Use safe helper call
+                bf_ids_for_features = agent_player_obj.get("battlefield", [])
+                ability_features_result = self._get_ability_features(bf_ids_for_features, agent_player_obj)
 
-                # Strategy / Planning Features
-                "strategic_metrics": np.zeros(10, dtype=np.float32), # Populated below
-                "position_advantage": np.array([self._calculate_position_advantage()], dtype=np.float32),
-                "estimated_opponent_hand": self._estimate_opponent_hand(),
-                "deck_composition_estimate": self._get_deck_composition(agent_player_obj),
-                "opponent_archetype": np.zeros(6, dtype=np.float32), # Populated below
-                "future_state_projections": np.zeros(7, dtype=np.float32), # Populated below
-                "multi_turn_plan": np.zeros(6, dtype=np.float32), # Populated below
-                "win_condition_viability": np.zeros(6, dtype=np.float32), # Populated below
-                "win_condition_timings": np.zeros(6, dtype=np.float32), # Populated below
-                "resource_efficiency": self._get_resource_efficiency(agent_player_obj, current_turn),
+                # Verify shape IMMEDIATELY after getting the result
+                expected_shape = self.observation_space[ability_features_key].shape
+                if ability_features_result.shape == expected_shape:
+                    obs[ability_features_key] = ability_features_result
+                    logging.debug(f"_get_ability_features returned shape {ability_features_result.shape}, assigned to obs.")
+                else:
+                    logging.error(f"CRITICAL: _get_ability_features returned INCORRECT shape! Got {ability_features_result.shape}, expected {expected_shape}. Resetting {ability_features_key} to zeros.")
+                    obs[ability_features_key] = np.zeros(expected_shape, dtype=self.observation_space[ability_features_key].dtype)
 
-                # Action Mask & Recommendations
-                "action_mask": current_mask.astype(bool), # Use generated mask
-                "recommended_action": np.array([-1], dtype=np.int32), # Populated below
-                "recommended_action_confidence": np.zeros(1, dtype=np.float32), # Populated below
-                "memory_suggested_action": np.array([-1], dtype=np.int32), # Populated below
-                "suggestion_matches_recommendation": np.zeros(1, dtype=np.int32), # Populated below
-                "optimal_attackers": np.zeros(self.max_battlefield, dtype=np.float32), # Populated below
-                "attacker_values": np.zeros(self.max_battlefield, dtype=np.float32), # Populated below
-                "ability_recommendations": np.zeros((self.max_battlefield, 5, 2), dtype=np.float32), # Populated below
+            except Exception as ab_feat_e:
+                logging.error(f"CRITICAL error during _get_ability_features call or assignment: {ab_feat_e}", exc_info=True)
+                # Reset to zeros explicitly if any error occurred during processing
+                expected_shape = self.observation_space[ability_features_key].shape
+                obs[ability_features_key] = np.zeros(expected_shape, dtype=self.observation_space[ability_features_key].dtype)
+                logging.error(f"Reset {ability_features_key} to zeros due to error.")
+            # --- End Ability Features Handling ---
 
-                # Mulligan state (agent's perspective)
-                "mulligan_in_progress": np.array([int(getattr(gs, 'mulligan_in_progress', False))], dtype=np.int32),
-                "mulligan_recommendation": np.array([0.5], dtype=np.float32), # Populated below
-                "mulligan_reason_count": np.zeros(1, dtype=np.int32), # Populated below
-                "mulligan_reasons": np.zeros(5, dtype=np.float32), # Populated below
+            # Populate other features AFTER the problematic one, if possible
+            try:
+                obs["ability_timing"] = self._get_ability_timing(current_phase)
+                obs["planeswalker_activations"] = self._get_planeswalker_activation_flags(agent_player_obj.get("battlefield", []), agent_player_obj)
+                obs["planeswalker_activation_counts"] = self._get_planeswalker_activation_counts(agent_player_obj.get("battlefield", []), agent_player_obj)
+            except Exception as e:
+                logging.error(f"Error populating post-ability features: {e}", exc_info=True)
 
-                # --- Context-related Observation Fields ---
-                "targetable_permanents": self._get_potential_targets_vector('permanent'),
-                "targetable_players": self._get_potential_targets_vector('player'),
-                "targetable_spells_on_stack": self._get_potential_targets_vector('spell'),
-                "targetable_cards_in_graveyards": self._get_potential_targets_vector('graveyard_card'),
-                "sacrificeable_permanents": self._get_potential_sacrifices(),
-                "selectable_modes": self._get_available_choice_options('mode'),
-                "selectable_colors": self._get_available_choice_options('color'),
-                "valid_x_range": self._get_available_choice_options('x_range'),
-                "bottomable_cards": self._get_bottoming_mask(agent_player_obj),
-                "dredgeable_cards_in_gy": self._get_dredge_options(agent_player_obj),
-            }
 
-            # --- Populate dynamic/planner-dependent parts ---
-            if self.strategic_planner:
-                try:
-                    # ... (Planner population logic remains the same) ...
+            # --- 6. Populate History & Planning Features (inside try/except) ---
+            try:
+                phase_hist = getattr(self,'_phase_history',[]) # Use getattr
+                phase_hist_len = len(phase_hist)
+                phase_hist_arr = np.full(5, -1, dtype=np.int32)
+                if phase_hist_len > 0: phase_hist_arr[-min(phase_hist_len, 5):] = phase_hist[-min(phase_hist_len, 5):] # Fill from end
+                obs["phase_history"] = phase_hist_arr
+                obs["previous_actions"] = np.array(self.last_n_actions if hasattr(self, 'last_n_actions') else [-1]*self.action_memory_size, dtype=np.int32)
+                obs["previous_rewards"] = np.array(self.last_n_rewards if hasattr(self, 'last_n_rewards') else [0.0]*self.action_memory_size, dtype=np.float32)
+
+                # Planning Features
+                obs["strategic_metrics"] = np.zeros(10, dtype=np.float32) # Default
+                obs["position_advantage"] = np.array([self._calculate_position_advantage()], dtype=np.float32)
+                obs["estimated_opponent_hand"] = self._estimate_opponent_hand()
+                obs["deck_composition_estimate"] = self._get_deck_composition(agent_player_obj)
+                obs["opponent_archetype"] = np.zeros(6, dtype=np.float32) # Default
+                obs["future_state_projections"] = np.zeros(7, dtype=np.float32) # Default
+                obs["multi_turn_plan"] = np.zeros(6, dtype=np.float32) # Default
+                obs["win_condition_viability"] = np.zeros(6, dtype=np.float32) # Default
+                obs["win_condition_timings"] = np.zeros(6, dtype=np.float32) # Default
+                obs["resource_efficiency"] = self._get_resource_efficiency(agent_player_obj, current_turn)
+
+                # Recommendations (Defaults assigned earlier)
+                # Action Mask already assigned
+
+                # Mulligan state (Defaults assigned earlier)
+                obs["mulligan_in_progress"] = np.array([int(getattr(gs, 'mulligan_in_progress', False))], dtype=np.int32)
+
+                # Context Features (Defaults assigned earlier)
+                obs["targetable_permanents"] = self._get_potential_targets_vector('permanent')
+                obs["targetable_players"] = self._get_potential_targets_vector('player')
+                obs["targetable_spells_on_stack"] = self._get_potential_targets_vector('spell')
+                obs["targetable_cards_in_graveyards"] = self._get_potential_targets_vector('graveyard_card')
+                obs["sacrificeable_permanents"] = self._get_potential_sacrifices()
+                obs["selectable_modes"] = self._get_available_choice_options('mode')
+                obs["selectable_colors"] = self._get_available_choice_options('color')
+                obs["valid_x_range"] = self._get_available_choice_options('x_range')
+                obs["bottomable_cards"] = self._get_bottoming_mask(agent_player_obj)
+                obs["dredgeable_cards_in_gy"] = self._get_dredge_options(agent_player_obj)
+
+            except Exception as e:
+                logging.error(f"Error populating history/planning/context features in _get_obs: {e}", exc_info=True)
+
+
+            # --- 7. Populate Dynamic/Planner Dependent Features (wrapped) ---
+            # (Keep existing planner population logic, wrapped in try/except)
+            try:
+                if hasattr(self, 'strategic_planner') and self.strategic_planner:
+                    # (Planner population logic - remains the same as previous version)
+                    # ... (fill strategic_metrics, opponent_archetype, recommendations etc.) ...
                     analysis = getattr(self, 'current_analysis', None)
                     if not analysis or analysis.get("game_info", {}).get("turn") != current_turn:
                          analysis = self.strategic_planner.analyze_game_state()
                          self.current_analysis = analysis
 
                     if analysis:
-                        obs["strategic_metrics"] = self._analysis_to_metrics(analysis)
-                        obs["position_advantage"] = np.array([analysis.get("position", {}).get("score", 0)], dtype=np.float32)
+                        obs["strategic_metrics"][:10] = self._analysis_to_metrics(analysis)[:10]
+                        obs["position_advantage"][0] = analysis.get("position", {}).get("score", 0)
 
                     opp_arch = self.strategic_planner.predict_opponent_archetype()
-                    obs["opponent_archetype"][:len(opp_arch)] = opp_arch # Fill first 6
+                    arch_len = min(len(obs["opponent_archetype"]), len(opp_arch))
+                    obs["opponent_archetype"][:arch_len] = opp_arch[:arch_len]
 
-                    future_proj = self.strategic_planner.project_future_states(num_turns=7) # Request 7 turns
-                    obs["future_state_projections"][:len(future_proj)] = future_proj # Fill first 7
+                    future_proj = self.strategic_planner.project_future_states(num_turns=7)
+                    proj_len = min(len(obs["future_state_projections"]), len(future_proj))
+                    obs["future_state_projections"][:proj_len] = future_proj[:proj_len]
 
                     win_cons = self.strategic_planner.identify_win_conditions()
                     wc_keys = ["combat_damage", "direct_damage", "card_advantage", "combo", "control", "alternate"]
-                    obs["win_condition_viability"] = np.array([win_cons.get(k, {}).get("score", 0.0) for k in wc_keys], dtype=np.float32)
-                    obs["win_condition_timings"] = np.array([min(self.max_turns + 1, win_cons.get(k, {}).get("turns_to_win", 99)) for k in wc_keys], dtype=np.float32)
+                    wc_viab_len = min(len(obs["win_condition_viability"]), len(wc_keys))
+                    wc_time_len = min(len(obs["win_condition_timings"]), len(wc_keys))
+                    obs["win_condition_viability"][:wc_viab_len] = np.array([win_cons.get(k, {}).get("score", 0.0) for k in wc_keys[:wc_viab_len]], dtype=np.float32)
+                    obs["win_condition_timings"][:wc_time_len] = np.array([min(self.max_turns + 1, win_cons.get(k, {}).get("turns_to_win", 99)) for k in wc_keys[:wc_time_len]], dtype=np.float32)
 
-                    obs["multi_turn_plan"] = self._get_multi_turn_plan_metrics() # Assuming this returns shape (6,)
-                    obs["threat_assessment"] = self._get_threat_assessment(opp.get("battlefield", [])) # Pass opponent's battlefield
+                    plan_len = min(len(obs["multi_turn_plan"]), 6)
+                    obs["multi_turn_plan"][:plan_len] = self._get_multi_turn_plan_metrics()[:plan_len]
 
-                    # Populate Recommendations
-                    valid_actions_list = np.where(current_mask)[0].tolist() # Use current mask
+                    bf_ids_opp = opp.get("battlefield", [])
+                    threat_assessment_values = self._get_threat_assessment(bf_ids_opp)
+                    copy_len_threat = min(len(obs["threat_assessment"]), len(threat_assessment_values))
+                    obs["threat_assessment"][:copy_len_threat] = threat_assessment_values[:copy_len_threat]
+
+                    valid_actions_list = np.where(current_mask)[0].tolist()
                     rec_action, rec_conf, mem_action, matches = self._get_recommendations(valid_actions_list)
-                    obs["recommended_action"] = np.array([rec_action], dtype=np.int32)
-                    obs["recommended_action_confidence"] = np.array([rec_conf], dtype=np.float32)
-                    obs["memory_suggested_action"] = np.array([mem_action], dtype=np.int32)
-                    obs["suggestion_matches_recommendation"] = np.array([matches], dtype=np.int32)
+                    obs["recommended_action"][0] = rec_action
+                    obs["recommended_action_confidence"][0] = rec_conf
+                    obs["memory_suggested_action"][0] = mem_action
+                    obs["suggestion_matches_recommendation"][0] = matches
 
-                    # Populate Optimal Attackers / PW Activations
+                    bf_ids_agent = agent_player_obj.get("battlefield", [])
                     if hasattr(self.strategic_planner,'find_optimal_attack'):
                         optimal_ids = self.strategic_planner.find_optimal_attack()
-                        bf_ids = agent_player_obj.get("battlefield", [])
                         optimal_mask = np.zeros(self.max_battlefield, dtype=np.float32)
-                        for i, cid in enumerate(bf_ids[:self.max_battlefield]):
+                        for i, cid in enumerate(bf_ids_agent[:self.max_battlefield]):
                             if cid in optimal_ids: optimal_mask[i] = 1.0
-                        obs["optimal_attackers"] = optimal_mask
-                        obs["attacker_values"] = self._get_attacker_values(bf_ids, agent_player_obj)
-                    obs["ability_recommendations"] = self._get_ability_recommendations(agent_player_obj.get("battlefield", []), agent_player_obj)
-                except Exception as planner_e:
-                     logging.warning(f"Error getting strategic info for observation: {planner_e}", exc_info=True) # Log traceback
+                        if obs["optimal_attackers"].shape == optimal_mask.shape: obs["optimal_attackers"][:] = optimal_mask
 
-            # --- Populate Mulligan info if applicable (Remains same) ---
-            if getattr(gs, 'mulligan_in_progress', False) and getattr(gs, 'mulligan_player', None) == agent_player_obj:
-                 mull_rec, mull_reasons, mull_count = self._get_mulligan_info(agent_player_obj)
-                 obs["mulligan_recommendation"] = np.array([mull_rec], dtype=np.float32)
-                 obs["mulligan_reason_count"] = np.array([mull_count], dtype=np.int32)
-                 obs["mulligan_reasons"] = mull_reasons
+                        attacker_values = self._get_attacker_values(bf_ids_agent, agent_player_obj)
+                        if obs["attacker_values"].shape == attacker_values.shape: obs["attacker_values"][:] = attacker_values
+
+                    ability_recs = self._get_ability_recommendations(bf_ids_agent, agent_player_obj)
+                    if obs["ability_recommendations"].shape == ability_recs.shape: obs["ability_recommendations"][:,:,:] = ability_recs
+
+            except Exception as planner_e:
+                 logging.warning(f"Error getting strategic info for observation: {planner_e}", exc_info=False)
+
+            # --- 8. Populate Mulligan Info ---
+            try:
+                if getattr(gs, 'mulligan_in_progress', False) and getattr(gs, 'mulligan_player', None) == agent_player_obj:
+                     mull_rec, mull_reasons, mull_count = self._get_mulligan_info(agent_player_obj)
+                     obs["mulligan_recommendation"][0] = mull_rec
+                     obs["mulligan_reason_count"][0] = mull_count
+                     reason_len = min(len(obs["mulligan_reasons"]), len(mull_reasons))
+                     obs["mulligan_reasons"][:reason_len] = mull_reasons[:reason_len]
+            except Exception as e:
+                 logging.error(f"Error populating mulligan features in _get_obs: {e}", exc_info=True)
 
 
-            # --- Validate and Return ---
-            self._validate_obs(obs)
+            # --- 9. FINAL VALIDATION AND RETURN ---
+            logging.debug(f"_get_obs: Populated keys: {list(obs.keys())}")
+            # Explicitly check the problematic key *just before returning*
+            ability_features_key = "ability_features"
+            if ability_features_key not in obs:
+                logging.critical(f"CRITICAL: '{ability_features_key}' missing from obs right before return! Resetting.")
+                obs[ability_features_key] = np.zeros(self.observation_space[ability_features_key].shape, dtype=self.observation_space[ability_features_key].dtype)
+            elif obs[ability_features_key].shape != self.observation_space[ability_features_key].shape:
+                logging.critical(f"CRITICAL: '{ability_features_key}' has WRONG SHAPE before return! Got {obs[ability_features_key].shape}, expected {self.observation_space[ability_features_key].shape}. Resetting.")
+                obs[ability_features_key] = np.zeros(self.observation_space[ability_features_key].shape, dtype=self.observation_space[ability_features_key].dtype)
+
+            # Optional: Full validation loop (can be verbose)
+            # if not self._validate_obs(obs): # Check if final obs is valid
+            #      logging.error("Observation failed validation in _get_obs after all population. Returning safe observation.")
+            #      return self._get_obs_safe() # This safe obs also needs validation
+
             return obs
 
+        # --- Main Exception Handling for _get_obs ---
         except Exception as e:
-            logging.critical(f"CRITICAL error generating observation: {str(e)}", exc_info=True)
-            return self._get_obs_safe() # Return safe observation on error
+            logging.critical(f"CRITICAL error during _get_obs execution: {str(e)}", exc_info=True)
+            # Attempt to return safe observation
+            try:
+                 safe_obs = self._get_obs_safe()
+                 # Double-check the problematic key in the safe obs
+                 ability_features_key = "ability_features"
+                 if ability_features_key not in safe_obs:
+                    logging.error(f"CRITICAL: _get_obs_safe also failed to include '{ability_features_key}'. Manually adding.")
+                    safe_obs[ability_features_key] = np.zeros(self.observation_space[ability_features_key].shape, dtype=self.observation_space[ability_features_key].dtype)
+                 elif safe_obs[ability_features_key].shape != self.observation_space[ability_features_key].shape:
+                    logging.error(f"CRITICAL: _get_obs_safe produced wrong shape for '{ability_features_key}'. Correcting.")
+                    safe_obs[ability_features_key] = np.zeros(self.observation_space[ability_features_key].shape, dtype=self.observation_space[ability_features_key].dtype)
+                 return safe_obs
+            except Exception as safe_e:
+                 logging.critical(f"CRITICAL error generating SAFE observation: {safe_e}", exc_info=True)
+                 # Last resort: manually create a dict with zeros and valid mask
+                 obs = {k: np.zeros(space.shape, dtype=space.dtype) for k, space in self.observation_space.spaces.items()}
+                 obs['action_mask'] = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool); obs['action_mask'][11]=True; obs['action_mask'][12]=True;
+                 # Ensure the key exists even in this ultimate fallback
+                 obs['ability_features'] = np.zeros(self.observation_space['ability_features'].shape, dtype=self.observation_space['ability_features'].dtype)
+                 return obs
 
     def _get_tapped_mask(self, battlefield_ids, tapped_set, max_size):
         """Helper to get a boolean mask for tapped permanents."""
@@ -2469,31 +2643,90 @@ class AlphaZeroMTGEnv(gym.Env):
         return efficiency
 
     def _get_ability_features(self, bf_ids, player):
-        """Get features related to activatable abilities."""
-        features = np.zeros((self.max_battlefield, 5), dtype=np.float32)
+        """Get features related to activatable abilities. Ensures correct shape is returned. (Reinforced)"""
+        space = self.observation_space["ability_features"]
+        max_bf_size = space.shape[0]
+        num_ability_features = space.shape[1]
+        dtype = space.dtype
+        features = np.zeros((max_bf_size, num_ability_features), dtype=dtype)
         gs = self.game_state
-        if not hasattr(gs, 'ability_handler'): return features
 
-        for i, card_id in enumerate(bf_ids):
-            if i >= self.max_battlefield: break
-            abilities = gs.ability_handler.get_activated_abilities(card_id)
-            if not abilities: continue
-            features[i, 0] = len(abilities) # Ability count
-            activatable_count = 0
-            mana_count = 0
-            draw_count = 0
-            removal_count = 0
-            for j, ability in enumerate(abilities):
-                 if gs.ability_handler.can_activate_ability(card_id, j, player):
-                      activatable_count += 1
-                 effect_text = getattr(ability, 'effect', '').lower()
-                 if "add mana" in effect_text or "add {" in effect_text: mana_count += 1
-                 if "draw" in effect_text: draw_count += 1
-                 if "destroy" in effect_text or "exile" in effect_text or "damage" in effect_text: removal_count += 1
-            features[i, 1] = activatable_count
-            features[i, 2] = mana_count
-            features[i, 3] = draw_count
-            features[i, 4] = removal_count
+        try:
+            # Ensure ability handler exists
+            if not hasattr(gs, 'ability_handler') or gs.ability_handler is None:
+                #logging.debug("Ability handler not available in _get_ability_features, returning zeros.")
+                # Ensure the zero array shape is correct before returning
+                if features.shape != space.shape:
+                     logging.error(f"Initial zero array shape error in _get_ability_features! Shape: {features.shape}, Expected: {space.shape}")
+                     features = np.zeros(space.shape, dtype=dtype) # Recreate with correct shape
+                return features # Return zeros if handler missing
+
+            # Proceed with populating features
+            for i, card_id in enumerate(bf_ids):
+                if i >= max_bf_size: break # Respect observation space size
+                card = gs._safe_get_card(card_id)
+                if not card: continue
+
+                abilities = gs.ability_handler.get_activated_abilities(card_id)
+                if not abilities: continue
+
+                # Limit checks to defined feature dimension
+                features[i, 0] = min(len(abilities), num_ability_features -1) # Count excludes itself
+
+                activatable_count, mana_count, draw_count, removal_count = 0, 0, 0, 0
+                for j, ability in enumerate(abilities):
+                    if not ability: continue
+                    # --- Check Feature Bounds Explicitly ---
+                    feature_idx_base = 1 # Start features from index 1
+
+                    # Check activatability
+                    can_activate = False
+                    if player and hasattr(gs.ability_handler, 'can_activate_ability'):
+                         try:
+                              if gs.ability_handler.can_activate_ability(card_id, j, player):
+                                   can_activate = True
+                         except Exception as can_act_e: pass # Logged before, keep silent here
+                    if can_activate and (feature_idx_base + 0 < num_ability_features): activatable_count += 1
+
+                    # Analyze effect text
+                    effect_text = getattr(ability, 'effect_text', '').lower()
+                    if not effect_text: continue
+
+                    # Check mana
+                    is_mana = isinstance(ability, gs.ability_handler.ManaAbility) or ("add mana" in effect_text or "add {" in effect_text and "target" not in effect_text)
+                    if is_mana and (feature_idx_base + 1 < num_ability_features): mana_count += 1
+
+                    # Check draw
+                    if "draw" in effect_text and "card" in effect_text and (feature_idx_base + 2 < num_ability_features): draw_count += 1
+
+                    # Check removal
+                    is_removal = "destroy" in effect_text or "exile" in effect_text or ("deal" in effect_text and "damage" in effect_text)
+                    if is_removal and (feature_idx_base + 3 < num_ability_features): removal_count += 1
+
+
+                # Assign calculated features, respecting bounds
+                if num_ability_features > 1: features[i, 1] = activatable_count
+                if num_ability_features > 2: features[i, 2] = mana_count
+                if num_ability_features > 3: features[i, 3] = draw_count
+                if num_ability_features > 4: features[i, 4] = removal_count
+
+        except Exception as e:
+            # Log error and return the initialized zero array
+            log_card_id = card_id if 'card_id' in locals() else 'unknown'
+            logging.error(f"Error populating _get_ability_features for {log_card_id}: {e}", exc_info=True)
+            # Ensure zero array shape is correct
+            if features.shape != space.shape:
+                 features = np.zeros(space.shape, dtype=dtype)
+            return features
+
+        # Final shape check before return
+        if features.shape != space.shape:
+            logging.error(f"_get_ability_features: FINAL Shape mismatch! Expected {space.shape}, got {features.shape}. Padding/truncating.")
+            corrected_features = np.zeros(space.shape, dtype=dtype)
+            copy_shape = (min(features.shape[0], max_bf_size), min(features.shape[1], num_ability_features))
+            corrected_features[:copy_shape[0], :copy_shape[1]] = features[:copy_shape[0], :copy_shape[1]]
+            return corrected_features
+
         return features
 
     def _get_ability_timing(self, phase):

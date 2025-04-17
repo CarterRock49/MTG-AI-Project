@@ -760,20 +760,33 @@ class Card:
 
     def get_current_class_data(self):
         """
-        Get the data for the Class at its current level.
-        
+        Get the data for the Class at its current level. Handles cases with no valid levels.
+
         Returns:
-            dict: Comprehensive data for the current class level
+            dict or None: Comprehensive data for the current class level, or None if no valid level found.
         """
-        if not self.is_class:
+        if not self.is_class or not hasattr(self, 'levels') or not self.levels:
+            logging.warning(f"Attempted to get class data for non-class card or card with no levels: {self.name}")
             return None
-        
+
         # Find the highest level data not exceeding current level
-        current_level_data = max(
-            (level for level in self.levels if level['level'] <= self.current_level),
-            key=lambda x: x['level']
-        )
-        
+        filtered_levels = [level for level in self.levels if hasattr(level, 'get') and level.get('level') is not None and level['level'] <= self.current_level]
+
+        if not filtered_levels:
+            # This should ideally not happen if parsing/init is correct, but handle defensively.
+            # Could mean current_level is invalid or no levels <= current_level exist.
+            logging.warning(f"Could not find valid level data at or below current level {self.current_level} for class {self.name}. Levels available: {self.levels}")
+            # Option 1: Return None
+            # return None
+            # Option 2: Return the lowest available level as a fallback?
+            lowest_level_data = min(self.levels, key=lambda x: x.get('level', float('inf')))
+            logging.warning(f"Falling back to lowest level data (Level {lowest_level_data.get('level')})")
+            return lowest_level_data
+            # Option 3: Create a default level 1 data structure? More complex.
+
+        # If filtered_levels is not empty, proceed with max()
+        current_level_data = max(filtered_levels, key=lambda x: x.get('level', 0))
+
         return current_level_data
 
     #
@@ -812,24 +825,34 @@ class Card:
             
     def _parse_single_door(self, door_source):
         """
-        Comprehensive single door parsing with advanced trigger and effect detection
+        Comprehensive single door parsing with advanced trigger and effect detection.
+        Handles both Card objects and dictionary sources.
         """
+        # Determine how to access data based on source type
+        if isinstance(door_source, Card):
+            get_attr = lambda name, default: getattr(door_source, name, default)
+        elif isinstance(door_source, dict):
+            get_attr = lambda name, default: door_source.get(name, default)
+        else:
+            logging.error(f"Unsupported door_source type in _parse_single_door: {type(door_source)}")
+            return None # Cannot parse
+
         door_data = {
-            'name': door_source.get('name', 'Unnamed Door'),
-            'oracle_text': door_source.get('oracle_text', '').lower(),
+            'name': get_attr('name', 'Unnamed Door'), # Use helper
+            'oracle_text': get_attr('oracle_text', '').lower(), # Use helper
             'triggers': [],
             'effects': [],
             'unlock_conditions': [],
-            'mana_cost': door_source.get('mana_cost', '')
+            'mana_cost': get_attr('mana_cost', '') # Use helper
         }
-        
+
         # Trigger parsing with more comprehensive patterns
         trigger_patterns = [
             r'when\s+(.*?),\s*(.*)',  # General when triggers
             r'whenever\s+(.*?),\s*(.*)',  # Whenever triggers
             r'at\s+the\s+beginning\s+of\s+(.*?),\s*(.*)'  # Phase-based triggers
         ]
-        
+
         for pattern in trigger_patterns:
             triggers = re.findall(pattern, door_data['oracle_text'])
             for condition, effect in triggers:
@@ -838,7 +861,7 @@ class Card:
                     'condition': condition.strip(),
                     'effect': effect.strip()
                 })
-        
+
         # Effect parsing with advanced detection
         effect_patterns = [
             (r'create\s+(\d+)\s+(.+)\s+token', 'token_creation'),
@@ -847,18 +870,19 @@ class Card:
             (r'draw\s+(\d+)\s+cards?', 'card_draw'),
             (r'surveil\s+(\d+)', 'surveil')
         ]
-        
+
         for pattern, effect_type in effect_patterns:
             effects = re.findall(pattern, door_data['oracle_text'], re.IGNORECASE)
             for match in effects:
                 door_data['effects'].append({
                     'type': effect_type,
-                    'details': match
+                    # Ensure match is correctly structured (often a tuple or list)
+                    'details': match if isinstance(match, (tuple, list)) else (match,)
                 })
-        
+
         # Unlock conditions parsing
         door_data['unlock_conditions'] = self._parse_door_unlock_conditions(door_data['oracle_text'])
-        
+
         return door_data
 
     def _parse_door_unlock_conditions(self, oracle_text):

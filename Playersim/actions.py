@@ -337,7 +337,7 @@ class ActionHandler:
                 "PUT_ON_BOTTOM": self._handle_scry_surveil_choice, # Updated mapping
                 # Library/Card Movement
                 "SEARCH_LIBRARY": self._handle_search_library, # Param is search type 0-4
-                "DREDGE": self._handle_dredge, # Param is GY index 0-5
+                "DREDGE": self._handle_dredge, # Handler expects {'gy_idx': int} in context
                 # Counter Management
                 "ADD_COUNTER": self._handle_add_counter, # Param is target index 0-9, context needed
                 "REMOVE_COUNTER": self._handle_remove_counter, # Param is target index 0-9, context needed
@@ -347,23 +347,23 @@ class ActionHandler:
                 "REANIMATE": self._handle_reanimate, # Param is GY index 0-5
                 "RETURN_FROM_EXILE": self._handle_return_from_exile, # Param is Exile index 0-5
                 # Alternative Casting
-                "CAST_WITH_FLASHBACK": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_FLASHBACK", context=context, **k), # Param is gy_idx
-                "CAST_WITH_JUMP_START": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_JUMP_START", context=context, **k), # Param is gy_idx, context needs discard_idx
-                "CAST_WITH_ESCAPE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_ESCAPE", context=context, **k), # Param is gy_idx, context needs gy_indices_escape
-                "CAST_FOR_MADNESS": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_MADNESS", context=context, **k), # Param is exile_idx
-                "CAST_WITH_OVERLOAD": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_OVERLOAD", context=context, **k), # Param is hand_idx
-                "CAST_FOR_EMERGE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_EMERGE", context=context, **k), # Param=None, context needs hand_idx, sacrifice_idx
-                "CAST_FOR_DELVE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_DELVE", context=context, **k), # Param=None, context needs hand_idx, gy_indices
-                "AFTERMATH_CAST": lambda p=None, context=None, **k: self._handle_handle_copy_permanent_alternative_casting(p, action_type="AFTERMATH_CAST", context=context, **k), # Param is gy_idx
+                "CAST_WITH_FLASHBACK": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_FLASHBACK", context=context, **k),
+                "CAST_WITH_JUMP_START": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_JUMP_START", context=context, **k),
+                "CAST_WITH_ESCAPE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_ESCAPE", context=context, **k),
+                "CAST_FOR_MADNESS": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_MADNESS", context=context, **k),
+                "CAST_WITH_OVERLOAD": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_OVERLOAD", context=context, **k),
+                "CAST_FOR_EMERGE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_EMERGE", context=context, **k),
+                "CAST_FOR_DELVE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_DELVE", context=context, **k),
+                "AFTERMATH_CAST": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="AFTERMATH_CAST", context=context, **k),
                 # Informational Flags
                 "PAY_KICKER": self._handle_pay_kicker, # Param=True/False
                 "PAY_ADDITIONAL_COST": self._handle_pay_additional_cost, # Param=True/False
                 "PAY_ESCALATE": self._handle_pay_escalate, # Param=count
                 # Token/Copy
                 "CREATE_TOKEN": self._handle_create_token, # Param is predefined token index 0-4
-                "COPY_PERMANENT": self._handle_copy_permanent, # Param=None, Context={'target_permanent_idx':X}
-                "COPY_SPELL": self._handle_copy_spell, # Param=None, Context={'target_spell_idx':X}
-                "POPULATE": self._handle_populate, # Param=None, Context={'target_token_idx':X}
+                "COPY_PERMANENT": self._handle_copy_permanent, # Param=None, Context={'target_permanent_identifier':X}
+                "COPY_SPELL": self._handle_copy_spell, # Param=None, Context={'target_stack_identifier':X}
+                "POPULATE": self._handle_populate, # Param=None, Context={'target_token_identifier':X}
                 # Specific Mechanics
                 "INVESTIGATE": self._handle_investigate,
                 "FORETELL": self._handle_foretell, # Param=None, Context={'hand_idx':X}
@@ -375,7 +375,7 @@ class ActionHandler:
                 "ADAPT": self._handle_adapt, # Param=None, Context={'creature_idx':X, 'amount':Y}
                 "MUTATE": self._handle_mutate, # Param=None, Context={'hand_idx':X, 'target_idx':Y}
                 "CYCLING": self._handle_cycling, # Param=None, Context={'hand_idx':X}
-                "GOAD": self._handle_goad, # Param=None, Context={'target_creature_idx':X}
+                "GOAD": self._handle_goad, # Param=None, Context={'target_creature_identifier':X}
                 "BOAST": self._handle_boast, # Param=None, Context={'creature_idx':X}
                 # Response Actions
                 "COUNTER_SPELL": self._handle_counter_spell, # Param=None, Context={'hand_idx':X, 'target_spell_idx':Y}
@@ -388,15 +388,15 @@ class ActionHandler:
                 "CAST_RIGHT_HALF": lambda p=None, context=None, **k: self._handle_cast_split(p, context=context, action_type="CAST_RIGHT_HALF", **k),# Param is hand_idx
                 "CAST_FUSE": lambda p=None, context=None, **k: self._handle_cast_split(p, context=context, action_type="CAST_FUSE", **k),# Param is hand_idx
                 "FLIP_CARD": self._handle_flip_card, # Param=None, Context={'battlefield_idx':X}
-                "EQUIP": self._handle_equip, # Param=None, Context={'equip_idx':X, 'target_idx':Y}
-                "FORTIFY": self._handle_fortify, # Param=None, Context={'fort_idx':X, 'target_idx':Y}
-                "RECONFIGURE": self._handle_reconfigure, # Param=None, Context={'battlefield_idx':X}
+                "EQUIP": self._handle_equip, # Param=None, Context={'equip_identifier':X, 'target_identifier':Y}
+                "FORTIFY": self._handle_fortify, # Param=None, Context={'fort_identifier':X, 'target_identifier':Y}
+                "RECONFIGURE": self._handle_reconfigure, # Param=None, Context={'card_identifier':X}
                 "MORPH": self._handle_morph, # Param=None, Context={'battlefield_idx':X}
                 "MANIFEST": self._handle_manifest, # Param=None, Context={'battlefield_idx':X}
                 "CLASH": self._handle_clash,
                 "CONSPIRE": self._handle_conspire, # Param=None, Context={'spell_stack_idx':X, 'creature1_identifier':Y, 'creature2_identifier':Z}
                 "GRANDEUR": self._handle_grandeur, # Param=None, Context={'hand_idx':X}
-                # Room/Class
+                # Room/Class (Delegated to _handle_ methods)
                 "UNLOCK_DOOR": self._handle_unlock_door, # Param is room battlefield_idx
                 "LEVEL_UP_CLASS": self._handle_level_up_class, # Param is class battlefield_idx
                 # Discard / Spree
@@ -411,6 +411,27 @@ class ActionHandler:
                 "UNEQUIP": self._handle_no_op,
                 "ATTACH_AURA": self._handle_no_op,
             }
+
+    def _handle_level_up_class(self, param, context, **kwargs):
+        """Handle leveling up a class card."""
+        gs = self.game_state
+        player = gs._get_active_player() # Leveling up usually happens on your turn
+        class_idx = param # Param is the battlefield index
+
+        if not hasattr(gs, 'ability_handler') or not gs.ability_handler:
+            logging.error("LEVEL_UP_CLASS failed: AbilityHandler not found.")
+            return -0.15, False
+
+        if class_idx is None or not isinstance(class_idx, int):
+            logging.error(f"LEVEL_UP_CLASS failed: Invalid or missing index parameter '{class_idx}'.")
+            return -0.15, False
+
+        # Use AbilityHandler's method
+        if gs.ability_handler.handle_class_level_up(class_idx):
+            return 0.35, True # Reward leveling up
+        else:
+            logging.debug(f"Leveling up class at index {class_idx} failed (handled by ability_handler).")
+            return -0.1, False
 
     def _add_battle_attack_actions(self, player, valid_actions, set_valid_action):
         """Delegate to CombatActionHandler._add_battle_attack_actions"""
@@ -729,7 +750,36 @@ class ActionHandler:
                 fallback_actions[12] = True
                 self.action_reasons = {11: "Critical Error Fallback", 12: "Critical Error Fallback"}
                 return fallback_actions
-                return fallback_actions
+            
+    def _add_basic_phase_actions(self, is_my_turn, valid_actions, set_valid_action):
+        """Adds basic actions available based on the current phase, assuming priority and no stack."""
+        gs = self.game_state
+
+        # MAIN_PHASE_END (Action 3)
+        if is_my_turn and gs.phase in [gs.PHASE_MAIN_PRECOMBAT, gs.PHASE_MAIN_POSTCOMBAT]:
+            set_valid_action(3, f"End Main Phase {gs._PHASE_NAMES.get(gs.phase)}")
+
+        # BEGIN_COMBAT_END (Action 8)
+        if is_my_turn and gs.phase == gs.PHASE_BEGIN_COMBAT:
+            set_valid_action(8, "End Begin Combat Step")
+
+        # COMBAT_DAMAGE (Action 4) - Only if combat occurred and damage assignment is next
+        # This action is less of a player choice and more a system transition.
+        # Might be better handled by the combat handler logic triggering the phase change.
+        # Let's *not* add it here, assuming the declare blockers done action transitions to damage steps.
+
+        # END_COMBAT (Action 9)
+        if is_my_turn and gs.phase == gs.PHASE_END_OF_COMBAT:
+             set_valid_action(9, "End Combat Phase")
+
+        # END_STEP (Action 10) - Renamed from END_PHASE to match ACTION_MEANINGS
+        if is_my_turn and gs.phase == gs.PHASE_END_STEP:
+            # Passing priority in End Step handles moving to Cleanup
+            pass # Let PASS_PRIORITY handle this transition
+
+        # UPKEEP_PASS (Action 7)
+        if is_my_turn and gs.phase == gs.PHASE_UPKEEP:
+            set_valid_action(7, "End Upkeep Step")
             
     def _add_mana_ability_actions(self, player, valid_actions, set_valid_action):
             """Add actions only for mana abilities (used during Split Second)."""
