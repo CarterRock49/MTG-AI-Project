@@ -100,6 +100,10 @@ class AlphaZeroMTGEnv(gym.Env):
 
         # Initialize action handler AFTER GameState
         self.action_handler = ActionHandler(self.game_state)
+        # *** ADDED: Link ActionHandler back to GameState ***
+        self.game_state.action_handler = self.action_handler
+        logging.debug("Linked ActionHandler instance to GameState.")
+        # *** END ADDED ***
 
         # GameState initializes its own subsystems now
         self.combat_resolver = getattr(self.game_state, 'combat_resolver', None) # Get ref if needed
@@ -902,12 +906,16 @@ class AlphaZeroMTGEnv(gym.Env):
             if not hasattr(self, 'action_handler') or self.action_handler is None:
                 raise RuntimeError("ActionHandler is not initialized.")
 
-            # --- Pass CONTEXT to ActionHandler ---
-            # ActionHandler will merge relevant GameState contexts (targeting, sacrifice etc.)
-            # with the context passed from the agent here.
-            obs, reward, done, truncated, info = self.action_handler.apply_action(
-                action_idx, context=action_context
-            )
+            # --- CRITICAL CHANGE: Call apply_action but don't rely on its observation ---
+            action_handler_result = self.action_handler.apply_action(action_idx, context=action_context)
+            reward, done, truncated = action_handler_result[1], action_handler_result[2], action_handler_result[3]
+            
+            # Extract action_mask and other info if available, but don't trust the full observation
+            ah_info = action_handler_result[4] if len(action_handler_result) > 4 else {}
+            info.update(ah_info)
+            
+            # Generate a fresh observation using our more robust _get_obs method
+            obs = self._get_obs()
 
             # --- Post-Action Environment Updates ---
             # Update environment-level history/tracking
@@ -931,7 +939,6 @@ class AlphaZeroMTGEnv(gym.Env):
                 # Regenerate as fallback
                 info["action_mask"] = self.action_mask().astype(bool)
 
-
             # Add detailed logging if enabled
             if self.detailed_logging:
                 action_type, param = self.action_handler.get_action_info(action_idx)
@@ -939,9 +946,8 @@ class AlphaZeroMTGEnv(gym.Env):
                 logging.info(f"Action Taken: {action_idx} ({action_type}({param})) Context: {action_context}")
                 logging.info(f"Returned State: Turn {gs.turn}, Phase {self.game_state._PHASE_NAMES.get(gs.phase, gs.phase)}, Prio {getattr(gs.priority_player,'name','None')}")
                 logging.info(f"Reward: {reward:.4f}, Done: {done}, Truncated: {truncated}")
-                # Log key observation parts maybe? e.g. life totals, board sizes
 
-            # Final verification for ALL observation keys
+            # Final verification for ALL observation keys (as a safeguard)
             if hasattr(self, 'observation_space') and isinstance(self.observation_space, spaces.Dict):
                 # Check every key defined in the observation space
                 for key, space in self.observation_space.spaces.items():
@@ -955,21 +961,6 @@ class AlphaZeroMTGEnv(gym.Env):
                             # Action mask should at least allow PASS and CONCEDE
                             obs[key][11] = True  # PASS_PRIORITY
                             obs[key][12] = True  # CONCEDE
-                            
-            # Double-check specifically the most critical keys
-            for critical_key in ["action_mask", "ability_features", "ability_recommendations", "ability_timing"]:
-                if critical_key not in obs:
-                    logging.critical(f"CRITICAL: {critical_key} still missing after all checks! Final emergency fix.")
-                    if critical_key == "action_mask":
-                        obs[critical_key] = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
-                        obs[critical_key][11] = True  # PASS_PRIORITY
-                        obs[critical_key][12] = True  # CONCEDE
-                    elif critical_key == "ability_features":
-                        obs[critical_key] = np.zeros((self.max_battlefield, 5), dtype=np.float32)
-                    elif critical_key == "ability_recommendations":
-                        obs[critical_key] = np.zeros((self.max_battlefield, 5, 2), dtype=np.float32)
-                    elif critical_key == "ability_timing":
-                        obs[critical_key] = np.zeros((5,), dtype=np.float32)
 
             return obs, reward, done, truncated, info
 
@@ -2530,12 +2521,13 @@ class AlphaZeroMTGEnv(gym.Env):
         sick_set = player.get("entered_battlefield_this_turn", set())
         attackers_set = set(getattr(self.game_state, 'current_attackers', []))
         blocking_set = set()
+        gs = self.game_state
         for blockers in getattr(self.game_state, 'current_block_assignments', {}).values():
             blocking_set.update(blockers)
 
         for i, card_id in enumerate(card_ids):
             if i >= max_size: break
-            card = self._safe_get_card(card_id)
+            card = gs._safe_get_card(card_id)
             flags[i, 0] = float(card_id in tapped_set)
             # Check summoning sickness and haste using _has_haste helper
             has_haste = self._has_haste(card_id) if card else False
@@ -2551,8 +2543,9 @@ class AlphaZeroMTGEnv(gym.Env):
         count = 0
         power = 0
         toughness = 0
+        gs = self.game_state
         for card_id in creature_ids:
-             card = self._safe_get_card(card_id)
+             card = gs._safe_get_card(card_id)
              # Check if it's actually a creature (type might change post-layers)
              # LayerSystem should have been applied before calling _get_obs
              if card and 'creature' in getattr(card, 'card_types', []):
@@ -2564,9 +2557,10 @@ class AlphaZeroMTGEnv(gym.Env):
     def _get_hand_card_types(self, hand_ids):
         """Helper to get one-hot encoding of card types in hand."""
         types = np.zeros((self.max_hand_size, 5), dtype=np.float32)
+        gs = self.game_state
         for i, card_id in enumerate(hand_ids):
             if i >= self.max_hand_size: break
-            card = self._safe_get_card(card_id)
+            card = gs._safe_get_card(card_id)
             if card:
                 type_line = getattr(card, 'type_line', '').lower()
                 card_types = getattr(card, 'card_types', [])
@@ -2604,12 +2598,13 @@ class AlphaZeroMTGEnv(gym.Env):
 
     def _get_stack_info(self, stack, me_player):
         """Helper to get controller and type info for top stack items."""
+        gs = self.game_state
         controllers = np.full(5, -1, dtype=np.int32) # -1=Empty, 0=Me, 1=Opp
         types = np.zeros((5, 5), dtype=np.float32) # Creature, Inst, Sorc, Ability, Other
         for i, item in enumerate(reversed(stack[:5])): # Top 5 items
             if isinstance(item, tuple) and len(item) >= 3:
                 item_type, card_id, controller = item[:3]
-                card = self._safe_get_card(card_id)
+                card = gs._safe_get_card(card_id)
                 controllers[i] = 0 if controller == me_player else 1
                 if card:
                     card_types = getattr(card, 'card_types', [])
@@ -2622,12 +2617,14 @@ class AlphaZeroMTGEnv(gym.Env):
 
     def _is_land(self, card_id):
         """Check if card is a land."""
-        card = self._safe_get_card(card_id)
+        gs = self.game_state
+        card = gs._safe_get_card(card_id)
         return card and 'land' in getattr(card, 'type_line', '').lower()
 
     def _is_creature(self, card_id):
         """Check if card is a creature."""
-        card = self._safe_get_card(card_id)
+        gs = self.game_state
+        card = gs._safe_get_card(card_id)
         return card and 'creature' in getattr(card, 'card_types', [])
 
     def _analysis_to_metrics(self, analysis):
@@ -2654,10 +2651,11 @@ class AlphaZeroMTGEnv(gym.Env):
 
     def _get_hand_performance(self, hand_ids):
         """Get performance ratings for cards in hand."""
+        gs = self.game_state
         perf = np.full(self.max_hand_size, 0.5, dtype=np.float32) # Default 0.5
         for i, card_id in enumerate(hand_ids):
             if i >= self.max_hand_size: break
-            card = self._safe_get_card(card_id)
+            card = gs._safe_get_card(card_id)
             if card and hasattr(card, 'performance_rating'):
                  perf[i] = card.performance_rating
         return perf
@@ -2665,9 +2663,10 @@ class AlphaZeroMTGEnv(gym.Env):
     def _get_battlefield_keywords(self, card_ids, keyword_dim):
         """Get keyword vectors for battlefield cards."""
         keywords = np.zeros((self.max_battlefield, keyword_dim), dtype=np.float32)
+        gs = self.game_state
         for i, card_id in enumerate(card_ids):
              if i >= self.max_battlefield: break
-             card = self._safe_get_card(card_id)
+             card = gs._safe_get_card(card_id)
              if card and hasattr(card, 'keywords'):
                  kw_vector = np.array(getattr(card, 'keywords', []))
                  current_len = len(kw_vector)
@@ -2682,13 +2681,14 @@ class AlphaZeroMTGEnv(gym.Env):
     def _get_deck_composition(self, player):
         """Estimate deck composition based on known cards."""
         composition = np.zeros(6, dtype=np.float32)
+        gs = self.game_state
         known_cards = player.get("hand", []) + player.get("battlefield", []) + player.get("graveyard", []) + player.get("exile", [])
         total_known = len(known_cards)
         if total_known == 0: return composition
 
         counts = defaultdict(int)
         for card_id in known_cards:
-            card = self._safe_get_card(card_id)
+            card = gs._safe_get_card(card_id)
             if card:
                  if 'creature' in getattr(card, 'card_types', []): counts['creature'] += 1
                  elif 'instant' in getattr(card, 'card_types', []): counts['instant'] += 1
@@ -2723,6 +2723,7 @@ class AlphaZeroMTGEnv(gym.Env):
     def _get_opportunity_assessment(self, hand_ids, player):
         """Assess opportunities presented by cards in hand."""
         # Fallback: Return zeros if card evaluator is not available
+        gs = self.game_state
         if not self.card_evaluator:
             return np.zeros(self.max_hand_size, dtype=np.float32)
 
@@ -2730,7 +2731,7 @@ class AlphaZeroMTGEnv(gym.Env):
         if self.card_evaluator:
              for i, card_id in enumerate(hand_ids):
                   if i >= self.max_hand_size: break
-                  card = self._safe_get_card(card_id)
+                  card = gs._safe_get_card(card_id)
                   if card:
                       # Evaluate playability *and* potential impact
                       can_play = self._get_hand_playable([card_id], player, self.game_state.turn % 2 == 1)[0] > 0
@@ -2742,6 +2743,7 @@ class AlphaZeroMTGEnv(gym.Env):
     def _get_resource_efficiency(self, player, turn):
         """Calculate resource efficiency metrics."""
         efficiency = np.zeros(3, dtype=np.float32)
+        gs = self.game_state
         # Mana efficiency: % of lands tapped or mana used this turn? Complex.
         # Simple: Lands available vs turn number
         lands_in_play = sum(1 for cid in player.get("battlefield", []) if self._is_land(cid))
@@ -2752,7 +2754,7 @@ class AlphaZeroMTGEnv(gym.Env):
         total_drawn = cards_drawn + 7 # Initial hand + draws
         efficiency[1] = min(1.0, total_drawn / max(7, turn + 6)) # Compare against expected cards drawn
         # Tempo: Avg CMC of permanents vs turn. Higher early CMC might be bad tempo unless ramp.
-        cmc_sum = sum(getattr(self._safe_get_card(cid), 'cmc', 0) for cid in player.get("battlefield", []) if self._safe_get_card(cid))
+        cmc_sum = sum(getattr(gs._safe_get_card(cid), 'cmc', 0) for cid in player.get("battlefield", []) if gs._safe_get_card(cid))
         num_perms = len(player.get("battlefield", []))
         avg_cmc = cmc_sum / max(1, num_perms)
         efficiency[2] = min(1.0, max(0, 1.0 - abs(avg_cmc - turn / 2) / 5.0)) # Closer avg CMC to half turn num is better?
@@ -2940,6 +2942,7 @@ class AlphaZeroMTGEnv(gym.Env):
     def _get_attacker_values(self, bf_ids, player):
         """Evaluate the strategic value of attacking with each potential attacker."""
         # Fallback: Return zeros if planner is not available
+        gs = self.game_state
         if not self.strategic_planner or not hasattr(self.strategic_planner, 'evaluate_attack_action'):
              return np.zeros(self.max_battlefield, dtype=np.float32)
 
@@ -2957,7 +2960,7 @@ class AlphaZeroMTGEnv(gym.Env):
                  except Exception as atk_eval_e:
                       logging.warning(f"Error evaluating single attacker {card_id}: {atk_eval_e}")
                       # Fallback value based on power?
-                      card = self._safe_get_card(card_id)
+                      card = gs._safe_get_card(card_id)
                       values[i] = getattr(card, 'power', 0) * 0.5 if card else 0.0
         return values
 

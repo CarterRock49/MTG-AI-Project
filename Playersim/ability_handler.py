@@ -1122,13 +1122,13 @@ class AbilityHandler:
         if not is_static_grant and not is_scry_effect: # Scry handled by EffectFactory from text
              logging.warning(f"Keyword '{keyword_lower}' (from '{full_text}') not explicitly mapped or parsed.")
             
-
     def _parse_ability_text(self, card_id, card, ability_text, abilities_list, is_exhaust=False, current_activated_index=None):
         """
         Parse a single ability text string. Delegates parsing logic to Ability subclasses.
         Tries to identify Activated, Triggered, or Static, in that order. Handles em dashes.
         Avoids classifying effects clearly handled by replacements (like copy ETBs).
         Accepts is_exhaust and current_activated_index to correctly label exhaust abilities.
+        Checks card type before defaulting to StaticAbility.
         """
         ability_text = ability_text.strip()
         if not ability_text: return
@@ -1190,7 +1190,7 @@ class AbilityHandler:
         except ValueError: pass
         except Exception as e: logging.error(f"Error attempting to parse as TriggeredAbility: {e}")
 
-        # 3. Assume Static if not Activated/Triggered AND doesn't look like simple keyword
+        # 3. Assume Static if not Activated/Triggered AND doesn't look like simple keyword AND IS a permanent type
         # Basic check to avoid re-registering keywords already handled
         is_simple_keyword = ability_text.lower() in [kw.lower() for kw in Card.ALL_KEYWORDS]
         already_registered_as_keyword = any(getattr(a, 'keyword', None) == ability_text.lower() for a in abilities_list)
@@ -1199,7 +1199,13 @@ class AbilityHandler:
         action_verbs = [r'\b(destroy|exile|counter|draw|discard|create|search|tap|untap|target|deal|sacrifice)\b']
         is_likely_action = any(re.search(verb, text_lower_for_check) for verb in action_verbs)
 
-        if not is_likely_action and (not is_simple_keyword or not already_registered_as_keyword):
+        # --- ADDED: Check if the source card is a type that can have inherent static abilities ---
+        permanent_types = {'creature', 'artifact', 'enchantment', 'land', 'planeswalker', 'battle', 'class', 'room'}
+        is_permanent_type = card and hasattr(card, 'card_types') and any(ct in permanent_types for ct in card.card_types)
+        # --- END ADDED ---
+
+        # Only consider static if it's a permanent type, not likely an action, and not a handled keyword
+        if is_permanent_type and not is_likely_action and (not is_simple_keyword or not already_registered_as_keyword):
             try:
                 # Treat the whole text as the static effect description
                 ability = StaticAbility(card_id=card_id, effect=ability_text, effect_text=ability_text)
@@ -1211,8 +1217,11 @@ class AbilityHandler:
             except Exception as e:
                 logging.error(f"Error parsing as StaticAbility: {e}")
 
-        # If none of the above worked, log it unless it was handled keyword
-        if not is_simple_keyword or not already_registered_as_keyword:
+        # If none of the above worked, log it unless it was handled keyword or a non-permanent
+        if not is_permanent_type:
+             # It's an Instant/Sorcery effect, skip static classification. Let EffectFactory handle on resolution.
+             logging.debug(f"Skipped static classification for non-permanent card {card.name}: '{ability_text}'")
+        elif not is_simple_keyword or not already_registered_as_keyword:
             if not is_likely_action:
                  logging.debug(f"Could not classify ability text for {card.name}: '{ability_text}' (Potentially Replacement/Action/Keyword?)")
         
