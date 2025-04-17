@@ -5996,4 +5996,8 @@ class ActionHandler:
         obs["action_mask"] = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
         obs["action_mask"][11] = True # Pass priority
         obs["action_mask"][12] = True # Concede
+        # Ensure ability_features is always present
+        if "ability_features" in self.observation_space.spaces:
+            space = self.observation_space.spaces["ability_features"]
+            obs["ability_features"] = np.zeros(space.shape, dtype=space.dtype)
         return obs
