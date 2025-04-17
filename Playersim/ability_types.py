@@ -905,28 +905,41 @@ class StaticAbility(Ability):
         if not effect_text and self.effect:
             self.effect_text = self.effect.capitalize()
         
+
     def apply(self, game_state, affected_cards=None):
-        """Register the static ability's effect with the LayerSystem."""
+        """Register the static ability's effect with the LayerSystem. (Improved Handling)"""
         if not hasattr(game_state, 'layer_system') or not game_state.layer_system:
             logging.warning(f"Layer system not found, cannot apply static ability: {self.effect_text}")
             return False
 
-        effect_lower = self.effect.lower()
-        layer = self._determine_layer_for_effect(effect_lower)
+        # Use the clean effect text (lowercase, potentially stripped punctuation) for layer determination
+        effect_lower_clean = self.effect.lower().strip('.—\u2014: ')
+        layer = game_state.layer_system._determine_layer_for_effect(effect_lower_clean) # Use cleaned text
 
         if layer is None:
-            logging.debug(f"Could not determine layer for static effect: '{self.effect_text}'")
+            # Log the *original* effect text for better debugging if layer determination fails
+            logging.debug(f"StaticAbility.apply: Could not determine layer for static effect: '{self.effect_text}'")
             return False # Cannot apply if layer unknown
 
         # Find affected cards if not specified
-        controller = game_state.get_card_controller(self.card_id) # Assuming GS has this method
-        if not controller: return False # Should not happen if card exists
+        # Need robust controller finding
+        card_owner, card_zone = game_state.find_card_location(self.card_id)
+        if not card_owner:
+             logging.warning(f"Cannot determine controller for static ability source {self.card_id}")
+             return False # Cannot proceed without controller context
+
+        controller = card_owner # Use the found controller
 
         if affected_cards is None:
             affected_cards = self.get_affected_cards(game_state, controller)
 
-        if not affected_cards:
-            return False # No targets to affect
+        # No need to proceed if the effect affects nothing
+        # Check explicitly for None as an empty list might be valid (e.g., "Creatures you control...")
+        if affected_cards is None:
+             logging.debug(f"Static ability '{self.effect_text}' currently affects no cards.")
+             # Still register? Might affect future cards. Let's register but with empty affected_ids for now.
+             # If get_affected_cards returns None, default to empty list.
+             affected_cards = []
 
         # Prepare base effect data
         effect_data = {
@@ -935,60 +948,43 @@ class StaticAbility(Ability):
             'affected_ids': affected_cards,
             'effect_text': self.effect_text, # Store original text for reference/debugging
             'duration': 'permanent', # Static effects are usually permanent while source is on battlefield
-            # Condition: effect is active only if the source card is on the battlefield
-            # Corrected condition: lambda needs gs passed in, also check controller exists
-            'condition': lambda gs_check: (gs_check.get_card_controller(self.card_id) and
-                                         self.card_id in gs_check.get_card_controller(self.card_id).get("battlefield", [])),
+            # Condition: effect is active only if the source card is on the battlefield and controlled by original controller?
+            # Use current controller found above for the condition check.
+            'condition': lambda gs_check: (self.card_id in controller.get("battlefield", [])),
+            'controller_id': controller, # Store controller for potential reference
             # Layer 7 specifics added by handlers below
         }
 
         # --- Delegate to specific parsers to fill effect_type and effect_value ---
+        # Pass the cleaned effect text to parsers for consistency
         parsed = False
-        if layer == 7:
-            parsed_data = self._parse_layer7_effect(effect_lower)
-            if parsed_data:
-                effect_data.update(parsed_data) # Adds 'sublayer', 'effect_type', 'effect_value'
-                parsed = True
-        elif layer == 6:
-            parsed_data = self._parse_layer6_effect(effect_lower)
-            if parsed_data:
-                effect_data.update(parsed_data) # Adds 'effect_type', 'effect_value'
-                parsed = True
-        elif layer == 5:
-            parsed_data = self._parse_layer5_effect(effect_lower)
-            if parsed_data:
-                effect_data.update(parsed_data) # Adds 'effect_type', 'effect_value'
-                parsed = True
-        elif layer == 4:
-            parsed_data = self._parse_layer4_effect(effect_lower)
-            if parsed_data:
-                effect_data.update(parsed_data) # Adds 'effect_type', 'effect_value'
-                parsed = True
-        elif layer == 3: # Added Layer 3
-            parsed_data = self._parse_layer3_effect(effect_lower)
-            if parsed_data:
-                 effect_data.update(parsed_data)
-                 parsed = True
-        elif layer == 2: # Added Layer 2
-             parsed_data = self._parse_layer2_effect(effect_lower)
-             if parsed_data:
-                  effect_data.update(parsed_data)
-                  parsed = True
-        elif layer == 1: # Added Layer 1
-             parsed_data = self._parse_layer1_effect(effect_lower)
-             if parsed_data:
-                  effect_data.update(parsed_data)
-                  parsed = True
+        parsed_data = None # Initialize
+        try:
+            if layer == 7: parsed_data = self._parse_layer7_effect(effect_lower_clean)
+            elif layer == 6: parsed_data = self._parse_layer6_effect(effect_lower_clean)
+            elif layer == 5: parsed_data = self._parse_layer5_effect(effect_lower_clean)
+            elif layer == 4: parsed_data = self._parse_layer4_effect(effect_lower_clean)
+            elif layer == 3: parsed_data = self._parse_layer3_effect(effect_lower_clean)
+            elif layer == 2: parsed_data = self._parse_layer2_effect(effect_lower_clean)
+            elif layer == 1: parsed_data = self._parse_layer1_effect(effect_lower_clean)
+        except Exception as parse_e:
+            logging.error(f"Error parsing Layer {layer} effect '{self.effect_text}': {parse_e}", exc_info=True)
+
+        if parsed_data:
+            effect_data.update(parsed_data) # Adds relevant keys like 'sublayer', 'effect_type', 'effect_value'
+            parsed = True
 
         if parsed:
             effect_id = game_state.layer_system.register_effect(effect_data)
             if effect_id:
-                logging.debug(f"Registered static effect '{self.effect_text}' (ID: {effect_id}) for {self.card_id}")
+                # Log the original text for clarity
+                logging.debug(f"Registered static effect '{self.effect_text}' (ID: {effect_id}, Layer: {layer}{effect_data.get('sublayer', '')}) for {self.card_id}")
                 return True
             else:
                 logging.warning(f"Failed to register static effect '{self.effect_text}' for {self.card_id}")
                 return False
         else:
+            # Log original text if parsing fails
             logging.warning(f"Static ability parser could not interpret effect: '{self.effect_text}'")
             return False
         
@@ -1115,19 +1111,20 @@ class StaticAbility(Ability):
 
         return None # No Layer 7 effect parsed
 
-    def _parse_layer6_effect(self, effect_lower):
-        """Parse ability adding/removing effects for Layer 6."""
+    def _parse_layer6_effect(self, effect_lower_clean):
+        """Parse ability adding/removing effects for Layer 6. (Uses cleaned text)"""
         # Check for removal first (more specific patterns)
-        if "lose all abilities" in effect_lower:
+        if "lose all abilities" in effect_lower_clean:
             return {'effect_type': 'remove_all_abilities', 'effect_value': True}
 
-        # Simple "loses X" check
-        lose_match = re.search(r"loses ([\w\s\-]+?)(?: and |,|$|\.)", effect_lower)
+        # Simple "loses X" check - uses cleaned text
+        lose_match = re.search(r"loses ([\w\s\-]+?)(?: and |,|$)", effect_lower_clean) # Removed check for trailing punctuation as it should be stripped
         if lose_match:
             ability_to_lose = lose_match.group(1).strip()
             # Normalize: Check against canonical keywords
             normalized_kw_lose = None
             for official_kw in Card.ALL_KEYWORDS:
+                 # Use exact match after cleaning
                  if ability_to_lose == official_kw.lower():
                      normalized_kw_lose = official_kw # Use canonical name
                      break
@@ -1135,63 +1132,66 @@ class StaticAbility(Ability):
                  # Found a standard keyword being lost
                  return {'effect_type': 'remove_ability', 'effect_value': normalized_kw_lose}
             else:
-                # Handle non-keyword abilities being lost if necessary
-                # For now, log if it's not a standard keyword
                 logging.debug(f"Potential non-keyword ability loss detected: '{ability_to_lose}' (not standard)")
 
-
-        # Check for additions: "gains/has [ability list]"
-        gain_match = re.search(r"(?:have|has|gains?|gain)\s+(.*?)(?: and |,| until|\.|$)", effect_lower)
+        # Check for additions: "gains/has [ability list]" - uses cleaned text
+        # Regex updated to stop at potential separators or end of string reliably
+        gain_match = re.search(r"\b(have|has|gains?|gain)\s+(.*?)(?: and |,| until| —|\u2014|$)", effect_lower_clean)
         if gain_match:
-            gained_abilities_text = gain_match.group(1).strip()
-            # Split potential list by comma (cannot reliably split by 'and' due to keyword names)
+            gained_abilities_text = gain_match.group(2).strip()
+            # Split potential list by comma
             potential_gains = gained_abilities_text.split(',')
-            # Further refinement for keywords like "protection from red and from blue"
-            # Need more robust parsing for multiple keywords in one phrase
+            # Process first matched keyword (refine later if multiple needed per effect)
             for potential_kw_phrase in potential_gains:
                 potential_kw_phrase = potential_kw_phrase.strip()
                 if not potential_kw_phrase: continue
 
                 # Handle parametrized keywords explicitly first
-                if "protection from" in potential_kw_phrase:
-                    # Regex to capture the full "protection from ..." text reliably
-                    protection_match = re.match(r"protection from ([\w\s]+)", potential_kw_phrase)
-                    if protection_match:
-                        protected_from_value = protection_match.group(1).strip()
+                if potential_kw_phrase.startswith("protection from"):
+                    # Use safer splitting
+                    parts = potential_kw_phrase.split("protection from", 1)
+                    if len(parts) == 2:
+                        protected_from_value = parts[1].strip()
                         return {'effect_type': 'add_ability', 'effect_value': f"protection from {protected_from_value}"}
-                elif "ward" in potential_kw_phrase:
-                    # Regex for ward cost ({X}, N, Pay X life etc.)
-                    ward_cost_match = re.search(r"ward\s*(\{[^}]+\}|\d+|pay \d+ life|discard a card)", potential_kw_phrase)
+                elif potential_kw_phrase.startswith("ward"):
+                    # Regex for ward cost ({X}, N, Pay X life etc.) - improved
+                    ward_cost_match = re.match(r"ward\s*(?:-|—)?\s*(\{.*?\})$|\bward\s*(\d+)$|\bward\s*(pay \d+ life|discard a card)", potential_kw_phrase)
                     ward_cost = "{1}" # Default ward {1}
                     if ward_cost_match:
-                         ward_cost = ward_cost_match.group(1).strip()
-                         if ward_cost.isdigit(): ward_cost = f"{{{ward_cost}}}" # Normalize N to {N}
+                         cost_part = ward_cost_match.group(1) or ward_cost_match.group(2) or ward_cost_match.group(3)
+                         if cost_part:
+                              if cost_part.isdigit(): ward_cost = f"{{{cost_part}}}"
+                              else: ward_cost = cost_part.strip() # Takes {X}, pay N life, discard...
                     return {'effect_type': 'add_ability', 'effect_value': f"ward {ward_cost}"}
-                elif "landwalk" in potential_kw_phrase: # Handle various landwalks
-                    landwalk_type_match = re.match(r"(\w+)walk", potential_kw_phrase)
-                    if landwalk_type_match:
-                        walk_type = landwalk_type_match.group(1).strip()
-                        return {'effect_type': 'add_ability', 'effect_value': f"{walk_type}walk"}
-                    # Fallback for generic landwalk?
-                    return {'effect_type': 'add_ability', 'effect_value': 'Landwalk'}
 
-                # Match simple keywords against canonical list
-                found_match = False
+                # Check simple keywords against canonical list (using cleaned phrase)
                 for official_kw in Card.ALL_KEYWORDS:
                     if potential_kw_phrase == official_kw.lower():
-                        # Return the canonical keyword name
                         return {'effect_type': 'add_ability', 'effect_value': official_kw}
+                # If it gets here after checking a phrase part, it wasn't a recognized keyword
+                break # Move to next check after first phrase part processed
 
-        # Check specific "can't attack/block" / "must attack/block" phrases
-        # Use tuples for keyword consistency (match internal representation)
-        if "can't attack" in effect_lower: return {'effect_type': 'add_ability', 'effect_value': 'cant_attack'}
-        if "can't block" in effect_lower: return {'effect_type': 'add_ability', 'effect_value': 'cant_block'}
-        if "attacks each combat if able" in effect_lower or "must attack if able" in effect_lower:
+        # Check specific "can't attack/block" / "must attack/block" phrases - use cleaned text
+        if "can't attack" in effect_lower_clean: return {'effect_type': 'add_ability', 'effect_value': 'cant_attack'}
+        if "can't block" in effect_lower_clean: return {'effect_type': 'add_ability', 'effect_value': 'cant_block'}
+        if "attacks each combat if able" in effect_lower_clean or "must attack if able" in effect_lower_clean:
             return {'effect_type': 'add_ability', 'effect_value': 'must_attack'}
-        if "blocks each combat if able" in effect_lower or "must block if able" in effect_lower:
+        if "blocks each combat if able" in effect_lower_clean or "must block if able" in effect_lower_clean:
             return {'effect_type': 'add_ability', 'effect_value': 'must_block'}
 
+        # Check if the *entire* cleaned effect is just a keyword
+        for official_kw in Card.ALL_KEYWORDS:
+             if effect_lower_clean == official_kw.lower():
+                  return {'effect_type': 'add_ability', 'effect_value': official_kw}
+        # Handle comma separated lists like "Flying, lifelink"
+        parts = [p.strip() for p in effect_lower_clean.split(',')]
+        if len(parts) > 1 and all(p in [k.lower() for k in Card.ALL_KEYWORDS] for p in parts):
+             # Need to return multiple effects? Or handle list? Return first for now.
+             return {'effect_type': 'add_ability', 'effect_value': Card.ALL_KEYWORDS[[k.lower() for k in Card.ALL_KEYWORDS].index(parts[0])]} # Return canonical name of first
+
+
         return None # No Layer 6 effect parsed
+
 
     def _parse_layer5_effect(self, effect_lower):
         """Parse color adding/removing effects for Layer 5."""
@@ -1244,7 +1244,7 @@ class StaticAbility(Ability):
     def _parse_layer4_effect(self, effect_lower):
         """Parse type/subtype adding/removing effects for Layer 4."""
         # Patterns to detect type/subtype changes
-        set_type_match = re.search(r"becomes? a(?:n)? ([\w\s]+?)(?: in addition| that's still|$)", effect_lower) # Adjusted regex
+        set_type_match = re.search(r"becomes? a(?:n)? ([\w\s]+?)(?: in addition| that's still|$)", effect_lower)
         add_type_match = re.search(r"(is|are) also a(?:n)? (\w+)", effect_lower)
         set_subtype_match = re.search(r"becomes? a(?:n)? ([\w\s]+?) creature", effect_lower)
         add_subtype_match = re.search(r"(?:is|are) also ([\w\s]+)", effect_lower)
@@ -1302,37 +1302,83 @@ class StaticAbility(Ability):
 
         return None # No Layer 4 effect parsed
 
-    # Add helper method to determine which layer an effect belongs to
     def _determine_layer_for_effect(self, effect_lower):
-        """Determine the appropriate layer for an effect based on its text."""
-        # Layer 1: Copy effects
-        if "copy" in effect_lower or "becomes a copy" in effect_lower: return 1
-        # Layer 2: Control-changing effects
-        if "gain control" in effect_lower or "exchange control" in effect_lower: return 2
-        # Layer 3: Text-changing effects
-        if "text becomes" in effect_lower: return 3
-        # Layer 4: Type-changing effects
-        if re.search(r"\bbecomes?\b.*\b(artifact|creature|enchantment|land|planeswalker)\b", effect_lower) or \
-           re.search(r"\bis also\b.*\b(artifact|creature|enchantment|land|planeswalker)\b", effect_lower) or \
-           "loses all creature types" in effect_lower: return 4
-        # Layer 5: Color-changing effects
-        if re.search(r"\b(is|are|becomes?)\b.*\b(white|blue|black|red|green|colorless)\b", effect_lower) or \
-           "loses all colors" in effect_lower: return 5
-        # Layer 6: Ability adding/removing effects
-        # Use a more comprehensive check against ALL_KEYWORDS
-        for kw in Card.ALL_KEYWORDS:
-            if re.search(rf"\b(gains?|has|lose|loses)\b.*\b{re.escape(kw.lower())}\b", effect_lower):
-                 return 6
-        if "lose all abilities" in effect_lower: return 6
-        if any(kw in effect_lower for kw in ["can't attack", "can't block", "must attack", "must block"]): return 6
-        # Layer 7: Power/toughness changing effects
-        if re.search(r"(\+|-)\d+/\s*(\+|-)\d+", effect_lower) or \
-           re.search(r"base power and toughness are", effect_lower) or \
-           re.search(r"\b(is|are|becomes)\s+\d+/\d+", effect_lower) or \
-           re.search(r"power and toughness are each equal to", effect_lower) or \
-           re.search(r"switch.*power and toughness", effect_lower): return 7
+        """Determine the appropriate layer for an effect based on its text. (Improved Pattern Matching)"""
+        # Strip common punctuation and leading/trailing separators that might interfere
+        cleaned_effect = effect_lower.strip('.—\u2014: ')
 
-        # If unsure, maybe return None or a default? Layer 6 is common for misc static.
+        # Layer 1: Copy effects
+        if "copy" in cleaned_effect or "becomes a copy" in cleaned_effect: return 1
+        # Layer 2: Control-changing effects
+        if "gain control" in cleaned_effect or "exchange control" in cleaned_effect: return 2
+        # Layer 3: Text-changing effects
+        if "text becomes" in cleaned_effect: return 3
+
+        # Layer 4: Type-changing effects
+        # Check for "becomes [type]", "is also [type]", or specific type removals
+        # Use word boundaries to avoid partial matches within other words
+        type_pattern = r"\b(becomes?|is also|are also)\b.*\b(artifact|creature|enchantment|land|planeswalker|battle)\b"
+        if re.search(type_pattern, cleaned_effect) or "loses all creature types" in cleaned_effect:
+            return 4
+
+        # Layer 5: Color-changing effects
+        color_pattern = r"\b(is|are|becomes?)\b.*\b(white|blue|black|red|green|colorless)\b"
+        if re.search(color_pattern, cleaned_effect) or "loses all colors" in cleaned_effect:
+            return 5
+
+        # Layer 6: Ability adding/removing effects
+        # Use word boundaries for most keywords
+        # Need to handle multi-word keywords and parametrized keywords like protection
+        for kw in Card.ALL_KEYWORDS:
+            kw_lower = kw.lower()
+            # Use word boundaries for single-word keywords, simple substring for multi-word
+            pattern = r'\b' + re.escape(kw_lower) + r'\b' if ' ' not in kw_lower else re.escape(kw_lower)
+            # Check if the text explicitly grants or removes this keyword
+            if re.search(rf"\b(gains?|has|lose|loses)\b.*\b{pattern}", cleaned_effect):
+                 return 6
+        # Catch cases like "lose all abilities", "can't attack/block", "must attack/block"
+        if "lose all abilities" in cleaned_effect: return 6
+        if any(restriction in cleaned_effect for restriction in ["can't attack", "can't block", "must attack", "must block"]): return 6
+
+        # Layer 7: Power/toughness changing effects
+        pt_patterns = [
+            r"([+\-]\d+)\s*/\s*([+\-]\d+)",  # +N/+M, -N/-M
+            r"\b(base power and toughness|base power|base toughness)\s+(?:is|are)\b", # Set base P/T
+            r"\b(is|are|becomes)\s+\d+/\d+", # Set P/T to specific value
+            r"(?:power and toughness are each equal to|power is equal to|toughness is equal to)", # CDA P/T setting
+            r"switch.*power and toughness" # Switch P/T
+        ]
+        if any(re.search(pattern, cleaned_effect) for pattern in pt_patterns):
+            return 7
+
+        # If no standard static effect pattern matched, return None
+        # Avoid classifying activated/triggered text like "Exile target creature..."
+        # Basic check: Does it contain common action verbs typical of non-static effects?
+        non_static_verbs = [r'\bexile\b', r'\bdestroy\b', r'\bcounter\b', r'\btap\b', r'\buntap\b', r'\bdraw\b', r'\bdiscard\b', r'\bsacrifice\b', r'\bsearch\b']
+        if any(re.search(verb, cleaned_effect) for verb in non_static_verbs):
+            # If it looks like an activated/triggered effect text, don't assign a layer
+            # Exception: If it ALSO contains "gains/has/loses", it might be Layer 6. Handled above.
+            is_layer6 = False
+            for kw in Card.ALL_KEYWORDS:
+                 pattern = r'\b' + re.escape(kw.lower()) + r'\b' if ' ' not in kw.lower() else re.escape(kw.lower())
+                 if re.search(rf"\b(gains?|has|lose|loses)\b.*\b{pattern}", cleaned_effect):
+                      is_layer6 = True; break
+            if not is_layer6: return None # Looks like non-static
+
+        # Final check: If it's just a keyword like "Flying" or "Lifelink" alone. This is Layer 6.
+        # Use word boundaries and match entire cleaned string for single keywords.
+        for kw in Card.ALL_KEYWORDS:
+             kw_lower = kw.lower()
+             if kw_lower == cleaned_effect:
+                  return 6
+        # Handle comma separated lists like "Flying, lifelink"
+        parts = [p.strip() for p in cleaned_effect.split(',')]
+        if len(parts) > 1 and all(p in [k.lower() for k in Card.ALL_KEYWORDS] for p in parts):
+            return 6
+
+        # If unsure, return None or log warning
+        # Returning None is safer to avoid misclassification.
+        logging.debug(f"LayerSystem: Could not determine layer for effect text: '{effect_lower}' (Cleaned: '{cleaned_effect}')")
         return None
 
     def _find_all_battlefield_cards(self, game_state):
@@ -1341,31 +1387,84 @@ class StaticAbility(Ability):
         for player in [game_state.p1, game_state.p2]:
             battlefield_cards.extend(player["battlefield"])
         return battlefield_cards
-            
+
     def get_affected_cards(self, game_state, controller):
-        """Determine which cards this static ability affects"""
-        effect = self.effect.lower()
+        """Determine which cards this static ability affects (Improved Scope Parsing)"""
+        effect_lower = self.effect.lower() if self.effect else ""
         affected_cards = []
-        
-        # Parse the effect to determine the scope
-        if 'creatures you control' in effect:
-            # Affects all of controller's creatures
-            for card_id in controller["battlefield"]:
-                card = game_state._safe_get_card(card_id)
-                if card and 'creature' in card.card_types:
-                    affected_cards.append(card_id)
-                    
-        elif 'all creatures' in effect:
-            # Affects all creatures in play
-            for player in [game_state.p1, game_state.p2]:
-                for card_id in player["battlefield"]:
-                    card = game_state._safe_get_card(card_id)
-                    if card and 'creature' in card.card_types:
-                        affected_cards.append(card_id)
-                        
-        # Add more scopes as needed
-        
-        return affected_cards
+        me = controller
+        opp = game_state.p2 if me == game_state.p1 else game_state.p1
+
+        # Common scopes using regex for more flexibility
+        scopes = {
+            r"\bcreatures? you control\b": (me, "creature"),
+            r"\bartifacts? you control\b": (me, "artifact"),
+            r"\bpermanents? you control\b": (me, "permanent"),
+            r"\blands? you control\b": (me, "land"),
+            r"\bplaneswalkers? you control\b": (me, "planeswalker"),
+            r"\bcreatures? opponents? control\b": (opp, "creature"),
+            r"\bpermanents? opponents? control\b": (opp, "permanent"),
+            r"\b(each|all) creatures?\b": (None, "creature"), # Affects both players
+            r"\b(each|all) permanents?\b": (None, "permanent"),
+            r"\b(each|all) artifacts?\b": (None, "artifact"),
+            r"\b(each|all) enchantments?\b": (None, "enchantment"),
+            r"\b(each|all) lands?\b": (None, "land"),
+            r"\b(each|all) planeswalkers?\b": (None, "planeswalker"),
+            r"\byou control\b": (me, "any"), # Generic "you control"
+            r"opponents control\b": (opp, "any"), # Generic "opponents control"
+            # More specific scopes like "attacking creatures", "untapped creatures", etc.
+            r"\battacking creatures?\b": (None, "attacking_creature"),
+            r"\bblocking creatures?\b": (None, "blocking_creature"),
+            r"\buntapped creatures?\b": (None, "untapped_creature"),
+            r"\btapped creatures?\b": (None, "tapped_creature"),
+        }
+
+        matched_scope = False
+        for pattern, (player_scope, type_scope) in scopes.items():
+            if re.search(pattern, effect_lower):
+                players_to_check = []
+                if player_scope is None: # Affects all players
+                    players_to_check = [p for p in [me, opp] if p] # Check both if they exist
+                else:
+                    players_to_check.append(player_scope)
+
+                for p in players_to_check:
+                    if not p: continue # Skip if player is None
+                    for card_id in p.get("battlefield", []): # Use get for safety
+                         card = game_state._safe_get_card(card_id)
+                         if self._card_matches_scope_criteria(card, type_scope, card_id, game_state, p):
+                              affected_cards.append(card_id)
+                matched_scope = True
+                break # Stop after first matching scope (most specific should come first ideally)
+
+        # Default: Affects the source card itself if no other scope matched
+        if not matched_scope:
+            affected_cards.append(self.card_id)
+
+        # Remove duplicates and return
+        return list(set(affected_cards))
+    
+    def _card_matches_scope_criteria(self, card, type_scope, card_id, game_state, player):
+        """Helper to check if a card matches the scope criteria (type, state)."""
+        if not card: return False
+        # Check basic type
+        if type_scope != "any":
+            card_types = getattr(card, 'card_types', [])
+            if type_scope != "permanent" and type_scope not in card_types and type_scope not in getattr(card,'subtypes',[]): # Allow subtype match
+                return False # Type doesn't match
+
+        # Check specific states
+        if type_scope == "attacking_creature":
+            if card_id not in getattr(game_state, 'current_attackers', []): return False
+        elif type_scope == "blocking_creature":
+             is_blocking = any(card_id in blockers for blockers in getattr(game_state, 'current_block_assignments', {}).values())
+             if not is_blocking: return False
+        elif type_scope == "tapped_creature":
+             if 'creature' not in getattr(card, 'card_types', []) or card_id not in player.get("tapped_permanents", set()): return False
+        elif type_scope == "untapped_creature":
+             if 'creature' not in getattr(card, 'card_types', []) or card_id in player.get("tapped_permanents", set()): return False
+
+        return True
 
 
 class ManaAbility(ActivatedAbility):
