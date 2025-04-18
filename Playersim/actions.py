@@ -517,13 +517,13 @@ class ActionHandler:
                 logging.warning(f"Error using strategic planner for ability recommendation: {e}")
         # Fallback heuristic
         return True, 0.6 # Default to recommend with medium confidence
- 
+
+
     def generate_valid_actions(self):
-        """Return the current action mask as boolean array with reasoning. (Updated for New Phases and Delegation)"""
+        """Return the current action mask as boolean array with reasoning. (Updated Mulligan/Bottoming Logic)"""
         gs = self.game_state
         try:
             valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
-            # Ensure player objects are valid
             p1_valid = hasattr(gs, 'p1') and gs.p1 is not None
             p2_valid = hasattr(gs, 'p2') and gs.p2 is not None
             if not p1_valid or not p2_valid:
@@ -538,90 +538,95 @@ class ActionHandler:
 
             action_reasons = {}
 
-            def set_valid_action(index, reason="", context=None): # Add context to helper
-                """Helper to set action and reason, with bounds check."""
+            def set_valid_action(index, reason="", context=None):
                 if 0 <= index < self.ACTION_SPACE_SIZE:
                     if not valid_actions[index]:
                         valid_actions[index] = True
-                        # Store context along with reason if provided
                         action_reasons[index] = {"reason": reason, "context": context or {}}
                 else:
                     logging.error(f"INVALID ACTION INDEX: {index} bounds (0-{self.ACTION_SPACE_SIZE-1}) Reason: {reason}")
                 return True
 
-            # --- Check Special Phases FIRST ---
-            # Mulligan/Bottoming take absolute precedence
+            # --- Special Phase: Mulligan ---
             if getattr(gs, 'mulligan_in_progress', False):
-                if getattr(gs, 'mulligan_player', None) == current_player:
-                    set_valid_action(6, "MULLIGAN")
+                if getattr(gs, 'bottoming_in_progress', False): # Bottoming Phase
+                    if getattr(gs, 'bottoming_player', None) == current_player:
+                        # Add BOTTOM_CARD actions for valid hand indices
+                        hand_size = len(current_player.get("hand", []))
+                        # Limit based on action space AND remaining needed
+                        num_remaining_to_bottom = max(0, gs.cards_to_bottom - gs.bottoming_count)
+                        logging.debug(f"Bottoming: {gs.bottoming_count}/{gs.cards_to_bottom} chosen. Needs {num_remaining_to_bottom} more.")
+                        for i in range(min(hand_size, 4)): # Check indices 0-3 (Actions 226-229)
+                            # Action needs context of the hand index to bottom
+                            set_valid_action(226 + i, f"BOTTOM_CARD index {i}", context={'hand_idx': i})
+                        # NOTE: Passing priority to finish bottoming is not a separate action.
+                        # Choosing the final required card automatically ends the state via gs.bottom_card().
+                    else: # Waiting for opponent to bottom
+                        set_valid_action(224, "NO_OP (Waiting for opponent bottoming)")
+                elif getattr(gs, 'mulligan_player', None) == current_player: # Mulligan Decision Phase
+                    # Allow KEEP_HAND (Action 225)
                     set_valid_action(225, "KEEP_HAND")
-                else: # Waiting for opponent mulligan
+                    # Allow MULLIGAN (Action 6) if player can still mulligan (e.g., based on hand size > 0?)
+                    # London Mulligan allows mulligan to 0, so always allow theoretically?
+                    set_valid_action(6, "MULLIGAN")
+                else: # Waiting for opponent mulligan decision
                     set_valid_action(224, "NO_OP (Waiting for opponent mulligan)")
-                self.action_reasons = {k: v["reason"] for k, v in action_reasons.items()} # Simplify for return
-                return valid_actions
-            if getattr(gs, 'bottoming_in_progress', False):
-                if getattr(gs, 'bottoming_player', None) == current_player:
-                    for i in range(len(current_player.get("hand", []))): # Use get for safety
-                        if i < 4: # Limit based on action indices 226-229
-                             # Action requires context of the card index to bottom
-                             set_valid_action(226 + i, f"BOTTOM_CARD index {i}", context={'hand_idx': i})
-                    # Always allow pass if *minimum* required cards bottomed
-                    # Assumes GameState clears phase once required count is met after a pass/action.
-                    if gs.bottoming_count >= gs.cards_to_bottom:
-                        set_valid_action(11, "PASS_PRIORITY (Finish Bottoming)")
-                else: # Waiting for opponent bottom
-                    set_valid_action(224, "NO_OP (Waiting for opponent bottom)")
-                self.action_reasons = {k: v["reason"] for k, v in action_reasons.items()} # Simplify for return
-                return valid_actions
 
-            # Check for other special phases (Targeting, Sacrifice, Choice)
+                # Always add Concede during mulligan phase
+                set_valid_action(12, "CONCEDE")
+                # Finalize and return the mask for the mulligan phase
+                self.action_reasons_with_context = action_reasons.copy()
+                self.action_reasons = {k: v.get("reason","Unknown") for k, v in action_reasons.items()}
+                return valid_actions
+            # --- End Mulligan Phase ---
+
+
+            # --- Rest of the logic (Targeting, Sacrifice, Choose, Regular play) ---
             special_phase = None
             if gs.phase == gs.PHASE_TARGETING: special_phase = "TARGETING"
             elif gs.phase == gs.PHASE_SACRIFICE: special_phase = "SACRIFICE"
             elif gs.phase == gs.PHASE_CHOOSE: special_phase = "CHOOSE"
 
             if special_phase:
-                logging.debug(f"Generating actions limited to {special_phase} phase.")
-                player_is_acting = False
-                # Determine if the current player is the one needing to act in this phase
-                if special_phase == "TARGETING" and hasattr(gs, 'targeting_context') and gs.targeting_context and gs.targeting_context.get("controller") == current_player:
+                # ... (keep existing special phase logic) ...
+                 logging.debug(f"Generating actions limited to {special_phase} phase.")
+                 player_is_acting = False
+                 # Determine if the current player is the one needing to act in this phase
+                 if special_phase == "TARGETING" and hasattr(gs, 'targeting_context') and gs.targeting_context and gs.targeting_context.get("controller") == current_player:
                     player_is_acting = True
                     self._add_targeting_actions(current_player, valid_actions, set_valid_action)
                     min_targets = gs.targeting_context.get("min_targets", 1)
                     selected_count = len(gs.targeting_context.get("selected_targets", []))
                     if selected_count >= min_targets:
                         set_valid_action(11, f"PASS_PRIORITY (Finish {special_phase})")
-                elif special_phase == "SACRIFICE" and hasattr(gs, 'sacrifice_context') and gs.sacrifice_context and gs.sacrifice_context.get("controller") == current_player:
-                    player_is_acting = True
-                    self._add_sacrifice_actions(current_player, valid_actions, set_valid_action)
-                    required_count = gs.sacrifice_context.get("required_count", 1)
-                    selected_count = len(gs.sacrifice_context.get("selected_permanents", []))
-                    if selected_count >= required_count:
-                        set_valid_action(11, f"PASS_PRIORITY (Finish {special_phase})")
-                elif special_phase == "CHOOSE" and hasattr(gs, 'choice_context') and gs.choice_context and gs.choice_context.get("player") == current_player:
-                    player_is_acting = True
-                    # Choice logic handled within _add_special_choice_actions
-                    self._add_special_choice_actions(current_player, valid_actions, set_valid_action)
-                    # PASS logic also handled within that function based on choice type
+                 elif special_phase == "SACRIFICE" and hasattr(gs, 'sacrifice_context') and gs.sacrifice_context and gs.sacrifice_context.get("controller") == current_player:
+                     player_is_acting = True
+                     self._add_sacrifice_actions(current_player, valid_actions, set_valid_action)
+                     required_count = gs.sacrifice_context.get("required_count", 1)
+                     selected_count = len(gs.sacrifice_context.get("selected_permanents", []))
+                     if selected_count >= required_count:
+                         set_valid_action(11, f"PASS_PRIORITY (Finish {special_phase})")
+                 elif special_phase == "CHOOSE" and hasattr(gs, 'choice_context') and gs.choice_context and gs.choice_context.get("player") == current_player:
+                     player_is_acting = True
+                     self._add_special_choice_actions(current_player, valid_actions, set_valid_action)
+                     # PASS logic also handled within that function based on choice type
 
-                # Always add Concede
-                set_valid_action(12, "CONCEDE")
-                # If it's not player's turn to act, allow only PASS/CONCEDE
-                if not player_is_acting:
-                     set_valid_action(11, f"PASS_PRIORITY (Waiting Opponent {special_phase})")
+                 # Always add Concede
+                 set_valid_action(12, "CONCEDE")
+                 # If it's not player's turn to act, allow only PASS/CONCEDE
+                 if not player_is_acting:
+                      set_valid_action(11, f"PASS_PRIORITY (Waiting Opponent {special_phase})")
 
-                # Final check: if no actions besides Concede, add Pass as fallback
-                self.action_reasons = {k: v["reason"] for k, v in action_reasons.items()} # Simplify for return
-                if np.sum(valid_actions) == 1 and valid_actions[12]:
-                    set_valid_action(11, f"FALLBACK PASS (Special Phase {special_phase})")
-                # Return here for special phases
-                return valid_actions
-            # --- End Special Phase Handling ---
+                 # Final check: if no actions besides Concede, add Pass as fallback
+                 self.action_reasons_with_context = action_reasons.copy()
+                 self.action_reasons = {k: v.get("reason","Unknown") for k, v in action_reasons.items()}
+                 if np.sum(valid_actions) == 1 and valid_actions[12]:
+                     set_valid_action(11, f"FALLBACK PASS (Special Phase {special_phase})")
+                 return valid_actions
 
-            # --- Rest of the logic (Timing checks, standard actions) ---
+            # --- Regular Game Play ---
             has_priority = (getattr(gs, 'priority_player', None) == current_player)
             can_act_sorcery_speed = is_my_turn and gs.phase in [gs.PHASE_MAIN_PRECOMBAT, gs.PHASE_MAIN_POSTCOMBAT] and not gs.stack and has_priority
-            # Instant speed possible if player has priority AND not untap/cleanup
             can_act_instant_speed = has_priority and gs.phase not in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP]
 
             # --- Always Available ---
@@ -631,26 +636,26 @@ class ActionHandler:
             # --- Split Second ---
             split_second_is_active = getattr(gs, 'split_second_active', False)
             if split_second_is_active:
-                logging.debug("Split Second active, limiting actions.")
-                # Only mana abilities are allowed. Keep PASS and CONCEDE? Yes.
-                temp_valid_actions = np.zeros_like(valid_actions)
-                temp_reasons = {}
-                # Add Pass and Concede back if they were valid
-                if valid_actions[11]: temp_valid_actions[11] = True; temp_reasons[11] = action_reasons[11]
-                if valid_actions[12]: temp_valid_actions[12] = True; temp_reasons[12] = action_reasons[12]
+                # ... (keep existing split second logic) ...
+                 logging.debug("Split Second active, limiting actions.")
+                 # Only mana abilities are allowed. Keep PASS and CONCEDE? Yes.
+                 temp_valid_actions = np.zeros_like(valid_actions)
+                 temp_reasons = {}
+                 # Add Pass and Concede back if they were valid
+                 if valid_actions[11]: temp_valid_actions[11] = True; temp_reasons[11] = action_reasons.get(11, {"reason":"PASS", "context":{}})
+                 if valid_actions[12]: temp_valid_actions[12] = True; temp_reasons[12] = action_reasons.get(12, {"reason":"CONCEDE", "context":{}})
 
-                def set_valid_mana_action(index, reason="", context=None): # Context not usually needed for mana abilities
+                 def set_valid_mana_action(index, reason="", context=None): # Context not usually needed for mana abilities
                     if 0 <= index < self.ACTION_SPACE_SIZE:
                         temp_valid_actions[index] = True
                         temp_reasons[index] = {"reason": reason, "context": context or {}} # Store full info
                     return True
 
-                self._add_mana_ability_actions(current_player, temp_valid_actions, set_valid_mana_action) # Populate mana actions
+                 self._add_mana_ability_actions(current_player, temp_valid_actions, set_valid_mana_action) # Populate mana actions
 
-                # Replace original mask and reasons
-                valid_actions = temp_valid_actions
-                action_reasons = temp_reasons # Use the temp reasons dict
-
+                 # Replace original mask and reasons
+                 valid_actions = temp_valid_actions
+                 action_reasons = temp_reasons # Use the temp reasons dict
             else: # Not Split Second - add normal actions based on timing
                 if can_act_sorcery_speed:
                     self._add_sorcery_speed_actions(current_player, opponent, valid_actions, set_valid_action)
@@ -668,11 +673,14 @@ class ActionHandler:
                     elif not is_my_turn and gs.phase == gs.PHASE_DECLARE_BLOCKERS and getattr(gs, 'current_attackers', []):
                         self.combat_handler._add_block_declaration_actions(current_player, valid_actions, set_valid_action)
                     elif is_my_turn and gs.phase in [gs.PHASE_FIRST_STRIKE_DAMAGE, gs.PHASE_COMBAT_DAMAGE] and not getattr(gs, 'combat_damage_dealt', False):
-                        self.combat_handler._add_combat_damage_actions(current_player, valid_actions, set_valid_action)
+                         # Delegate damage assignment choices if manual assignment is used
+                         # Or just ensure PASS is available to move past the step
+                        pass # Keep basic pass action available
+
                 elif has_priority and not self.combat_handler:
                     logging.warning("Combat phase actions cannot be generated: CombatActionHandler missing.")
 
-                # --- Additional check for PAY_OFFSPRING during cast setup ---
+                 # --- Additional check for PAY_OFFSPRING during cast setup ---
                 pending_spell_context = getattr(gs, 'pending_spell_context', None)
                 # Only offer if player has priority AND a spell is pending AND it's an offspring spell
                 if has_priority and pending_spell_context and pending_spell_context.get('card_id') and \
@@ -687,21 +695,16 @@ class ActionHandler:
                                   # No specific context needed, handler uses pending_spell_context
                                   set_valid_action(295, f"Optional: PAY_OFFSPRING_COST for {card.name}")
 
+
             # --- Final Checks ---
-            # Store reasons dict before simplifying for return value
             self.action_reasons_with_context = action_reasons.copy()
-            # Simplify for mask return (only reason string)
             self.action_reasons = {k: v.get("reason","Unknown") for k, v in action_reasons.items()}
 
             valid_count = np.sum(valid_actions)
             if valid_count == 0:
                 logging.warning("No valid actions found! Forcing CONCEDE.")
                 set_valid_action(12, "FALLBACK - CONCEDE")
-                # Re-simplify reasons after adding fallback
-                self.action_reasons = {k: v["reason"] for k, v in action_reasons.items() if isinstance(v, dict)}
-
-            #elif valid_count == 1 and valid_actions[12]: pass
-            #elif valid_count == 2 and valid_actions[11] and valid_actions[12] and has_priority: pass
+                self.action_reasons = {k: v.get("reason", "Unknown") for k, v in action_reasons.items()}
 
             return valid_actions
 
@@ -2312,58 +2315,90 @@ class ActionHandler:
         return 0.01
 
     def _handle_mulligan(self, param, **kwargs):
+        """Handle MULLIGAN action."""
         gs = self.game_state
-        player = gs.p1 if gs.agent_is_p1 else gs.p2
-        if gs.perform_mulligan(player, keep_hand=False):
-            return -0.1 # Small penalty for mulligan
-        return -0.2 # Failed mulligan
+        player = gs.mulligan_player
+        if not player:
+            logging.warning("MULLIGAN action called but gs.mulligan_player is None.")
+            return -0.2, False
+
+        # Call GameState method to handle taking a mulligan
+        result = gs.perform_mulligan(player, keep_hand=False)
+
+        if result is True: # Successfully took a mulligan
+             mull_count = gs.mulligan_count.get('p1' if player == gs.p1 else 'p2', 1)
+             return -0.05 * mull_count, True # Scale penalty
+        elif result is None: # Should not happen for keep_hand=False
+             logging.error("perform_mulligan(keep=False) returned None unexpectedly.")
+             return -0.2, False
+        else: # Result is False (e.g., cannot mulligan further?)
+             logging.warning(f"MULLIGAN action failed (perform_mulligan returned False).")
+             return -0.2, False
 
     def _handle_keep_hand(self, param, **kwargs):
         gs = self.game_state
-        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        player = gs.mulligan_player # Act on the player whose turn it is to decide
+        if not player:
+            logging.warning("KEEP_HAND action called but gs.mulligan_player is None.")
+            return -0.2, False
+
         if gs.perform_mulligan(player, keep_hand=True):
-             return 0.1 # Small reward for keeping
-        return -0.1 # Error keeping
+            return 0.05, True # Small reward for progressing
+        else:
+            logging.warning(f"KEEP_HAND failed (likely invalid state).")
+            return -0.2, False # Failed state change
 
-    def _handle_bottom_card(self, param, **kwargs):
-        """Handles BOTTOM_CARD action during mulligan. Param is the hand index (0-3 or more based on max hand size)."""
+    def _handle_bottom_card(self, param, context, **kwargs):
+        """Handles BOTTOM_CARD action during mulligan. Param is the hand index."""
         gs = self.game_state
-        player = gs.p1 if gs.agent_is_p1 else gs.p2
-        hand_idx_to_bottom = param # Agent's choice index
+        player = gs.bottoming_player # Act on the player who needs to bottom
+        hand_idx_to_bottom = param # Agent's choice index from action
 
-        # Validate context
+        if not player:
+            logging.warning("BOTTOM_CARD action called but gs.bottoming_player is None.")
+            return -0.2, False
+
+        # Validate context and state
         if not gs.bottoming_in_progress or gs.bottoming_player != player:
             logging.warning("BOTTOM_CARD called but not in bottoming phase for this player.")
             return -0.2, False
 
-        # Validate index
-        if 0 <= hand_idx_to_bottom < len(player.get("hand", [])):
-             card_id = player["hand"][hand_idx_to_bottom]
-             card = gs._safe_get_card(card_id)
-             card_name = getattr(card, 'name', card_id)
+        # Check index exists before accessing hand
+        if not (0 <= hand_idx_to_bottom < len(player.get("hand", []))):
+             logging.warning(f"Invalid hand index {hand_idx_to_bottom} for bottoming.")
+             return -0.15, False
 
-             # Use GameState method to handle bottoming
-             if gs.bottom_card(player, hand_idx_to_bottom):
-                 reward_mod = -0.01 # Small default penalty for bottoming
-                 if self.card_evaluator:
-                     # Penalize more for bottoming good cards
+        card_id = player["hand"][hand_idx_to_bottom]
+        card = gs._safe_get_card(card_id)
+        card_name = getattr(card, 'name', card_id)
+
+        # Use GameState method to handle bottoming & state transitions
+        success = gs.bottom_card(player, hand_idx_to_bottom)
+
+        if success:
+            reward_mod = -0.01 # Small default penalty for bottoming
+            if self.card_evaluator:
+                try:
                      value = self.card_evaluator.evaluate_card(card_id, "bottoming")
-                     reward_mod = (0.5 - value) * 0.1 # Higher penalty if value > 0.5
+                     reward_mod -= value * 0.05 # More penalty for high value card
+                except Exception as e:
+                    logging.warning(f"Error evaluating card {card_id} during bottoming: {e}")
 
-                 # Check if bottoming is now complete
-                 if gs.bottoming_count >= gs.cards_to_bottom:
-                     # Game should now proceed to the first turn automatically
-                     logging.debug("Bottoming complete.")
-                     return 0.05 + reward_mod, True # Success in completing bottoming
-                 else:
-                     # More cards needed, stay in bottoming phase
-                     return 0.02 + reward_mod, True # Incremental success
-             else: # Bottoming failed (e.g., index already bottomed - GameState.bottom_card should handle)
-                 logging.warning(f"Failed to bottom card at index {hand_idx_to_bottom} (Handled by gs.bottom_card).")
-                 return -0.05, False # Failed action
-        else: # Invalid index
-            logging.error(f"Invalid BOTTOM_CARD action parameter: {hand_idx_to_bottom}. Valid indices: 0-{len(player.get('hand', []))-1}")
-            return -0.1, False
+            # Check if bottoming is now complete GLOBALLY (gs.bottom_card updates state)
+            if not gs.bottoming_in_progress and not gs.mulligan_in_progress:
+                 logging.debug("Bottoming action completed the entire mulligan phase.")
+                 return 0.05 + reward_mod, True # Finished bottoming process
+            elif not gs.bottoming_in_progress and gs.mulligan_in_progress:
+                 logging.debug("Bottoming finished for this player, mulligan continues for opponent/next state.")
+                 return 0.03 + reward_mod, True # Finished player's part
+            else:
+                 # More cards needed, stay in bottoming phase for this player
+                 logging.debug("Bottoming action chosen, more cards needed.")
+                 return 0.02 + reward_mod, True # Incremental success
+        else: # Bottoming failed internally
+            logging.warning(f"Failed to bottom card index {hand_idx_to_bottom} (gs.bottom_card returned False).")
+            return -0.05, False
+
 
     def _handle_upkeep_pass(self, param, **kwargs):
         gs = self.game_state

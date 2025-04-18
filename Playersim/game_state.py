@@ -1041,66 +1041,114 @@ class GameState:
 
     def perform_mulligan(self, player, keep_hand=False):
         """
-        Implement the London Mulligan rule, allowing the AI to decide whether to keep or mulligan.
-        
+        Implement the London Mulligan rule. Transitions between mulliganing and bottoming.
+        Handles turn switching during the mulligan phase.
+
         Args:
-            player: Player who is taking a mulligan
-            keep_hand: Whether to keep the current hand or mulligan
-            
+            player: Player making the decision.
+            keep_hand: Whether the player chose to keep the current hand.
+
         Returns:
-            bool: Whether a mulligan was performed
+            bool: True if a mulligan was *taken* (drew new hand), False otherwise (kept or failed).
+                 Returns None if the action transitioned state but didn't involve drawing a new hand (e.g., switched to opponent's decision).
         """
-        # If the player decides to keep their hand
+        if not self.mulligan_in_progress:
+            logging.warning("Attempted mulligan action when not in mulligan phase.")
+            return False
+
+        player_id_str = 'p1' if player == self.p1 else 'p2'
+        opponent = self.p2 if player == self.p1 else self.p1
+        opponent_id_str = 'p2' if player == self.p1 else 'p1'
+
         if keep_hand:
-            # If they've taken mulligans, they need to bottom cards
-            mulligan_count = self.mulligan_count.get('p1' if player == self.p1 else 'p2', 0)
-            
+            mulligan_count = self.mulligan_count.get(player_id_str, 0)
+            logging.debug(f"{player['name']} decided to keep hand after {mulligan_count} mulligan(s).")
+
+            # Check if bottoming is needed
             if mulligan_count > 0:
-                # Set state for bottoming decisions
-                cards_to_bottom = mulligan_count
-                self.bottoming_in_progress = True
-                self.bottoming_player = player
-                self.cards_to_bottom = cards_to_bottom
-                self.bottoming_count = 0
-                
-                logging.debug(f"Player keeping hand after {mulligan_count} mulligan(s), needs to bottom {cards_to_bottom} card(s)")
-                
-                return False  # No mulligan performed, in bottoming phase now
+                # Ensure cards to bottom doesn't exceed current hand size
+                current_hand_size = len(player.get("hand", []))
+                self.cards_to_bottom = min(mulligan_count, current_hand_size)
+                if self.cards_to_bottom > 0:
+                    logging.info(f"{player['name']} needs to bottom {self.cards_to_bottom} card(s). Starting bottoming phase.")
+                    self.bottoming_in_progress = True
+                    self.bottoming_player = player
+                    self.bottoming_count = 0 # Reset counter for this bottoming session
+                    return None # State changed to bottoming, not a mulligan "taken"
+                else:
+                    # Took mulligans but hand size is 0? Or mulligan_count became > hand size somehow.
+                    # Treat as bottoming complete immediately if nothing to bottom.
+                    logging.warning(f"Calculated {self.cards_to_bottom} cards to bottom for {player['name']}. Proceeding.")
+                    self.bottoming_in_progress = False # Skip bottoming
+                    # Now check opponent state or end mulligan phase
+
             else:
-                # First hand kept, no bottoming needed
-                self.mulligan_in_progress = False
-                logging.debug("Player kept initial hand, no mulligan taken")
-                return False
-        
-        # Track mulligan in statistics
-        self.track_mulligan(player)
-        
-        # Count current hand as mulligan number
-        player_idx = 'p1' if player == self.p1 else 'p2'
-        self.mulligan_count[player_idx] = self.mulligan_count.get(player_idx, 0) + 1
-        mulligan_count = self.mulligan_count[player_idx]
-        
-        # Return current hand to library
-        player["library"].extend(player["hand"])
-        player["hand"] = []
-        
-        # Shuffle
-        random.shuffle(player["library"])
-        
-        # Always draw 7 cards
-        for _ in range(7):
-            if player["library"]:
-                player["hand"].append(player["library"].pop(0))
+                # Kept initial hand, no bottoming needed.
+                self.bottoming_in_progress = False # Ensure flag is false
+
+            # --- Mulligan Turn Switching (After Keep) ---
+            # Has opponent made their decision yet?
+            opp_mull_count = self.mulligan_count.get(opponent_id_str, -1) # Use -1 to signify hasn't decided yet
+            if opp_mull_count == -1:
+                 # Opponent hasn't decided, switch to them.
+                 logging.debug(f"Switching mulligan decision to {opponent['name']}")
+                 self.mulligan_player = opponent
+                 self.bottoming_player = None # Ensure not accidentally set
+                 self.bottoming_in_progress = False
+                 return None # State changed to opponent's mulligan decision
             else:
-                logging.warning("Not enough cards in library to complete mulligan")
-                break
-        
-        # Keep mulligan in progress
-        self.mulligan_in_progress = True
-        
-        logging.debug(f"Player took mulligan #{mulligan_count}, drew new hand of {len(player['hand'])} cards")
-        
-        return True  # Mulligan was performed
+                 # Both players have decided to keep (or finished mulligans).
+                 # Now, check if THIS player needed to bottom.
+                 if self.cards_to_bottom > 0:
+                      # We already set bottoming_in_progress = True above. Just return.
+                      return None
+                 # Else, this player didn't need to bottom. Check if OPPONENT needs to bottom.
+                 elif getattr(opponent, '_needs_to_bottom_next', False): # Check custom flag if needed
+                     logging.debug(f"Switching to {opponent['name']} for bottoming.")
+                     self.mulligan_player = None
+                     self.bottoming_player = opponent
+                     self.bottoming_in_progress = True
+                     self.bottoming_count = 0 # Reset counter for opponent
+                     self.cards_to_bottom = min(self.mulligan_count.get(opponent_id_str,0), len(opponent.get("hand",[])))
+                     return None
+                 else:
+                      # Neither player needs to bottom (or they already finished), end mulligan phase.
+                      logging.info("Both players finished mulligans/bottoming. Starting game.")
+                      self.mulligan_in_progress = False
+                      self.mulligan_player = None
+                      self.bottoming_player = None
+                      self.phase = self.PHASE_UNTAP
+                      self.turn = 1
+                      self.priority_player = self.p1 # P1 starts
+                      self.priority_pass_count = 0
+                      return False # Mulligan process complete
+
+        else: # Player chose to Mulligan (keep_hand=False)
+            # Track mulligan
+            self.track_mulligan(player)
+            current_mull_count = self.mulligan_count.get(player_id_str, 0)
+            new_mull_count = current_mull_count + 1
+            self.mulligan_count[player_id_str] = new_mull_count
+
+            # Return current hand to library
+            player["library"].extend(player["hand"])
+            player["hand"] = []
+
+            # Shuffle
+            random.shuffle(player["library"])
+
+            # Draw 7 cards
+            for _ in range(7):
+                if player["library"]:
+                    player["hand"].append(player["library"].pop(0))
+                else:
+                    logging.warning(f"Not enough cards in library for {player['name']} to complete mulligan #{new_mull_count}")
+                    break
+
+            logging.debug(f"{player['name']} took mulligan #{new_mull_count}, drew new hand of {len(player['hand'])} cards.")
+            # Keep mulligan in progress, same player decides again immediately.
+            self.mulligan_player = player
+            return True # Mulligan was successfully *taken*
     
     def _can_respond_to_stack(self, player=None):
         """
@@ -2286,6 +2334,7 @@ class GameState:
     def bottom_card(self, player, hand_index_to_bottom):
         """
         Handle bottoming a card from hand during mulligan resolution.
+        Handles switching turns or ending the mulligan phase.
 
         Args:
             player: The player performing the bottoming.
@@ -2302,26 +2351,54 @@ class GameState:
             logging.warning(f"Invalid hand index to bottom: {hand_index_to_bottom}")
             return False
 
+        player_id_str = 'p1' if player == self.p1 else 'p2'
+        opponent = self.p2 if player == self.p1 else self.p1
+        opponent_id_str = 'p2' if player == self.p1 else 'p1'
+
         # Move the card
         card_id = player["hand"].pop(hand_index_to_bottom)
         player["library"].append(card_id) # Add to bottom
         card = self._safe_get_card(card_id)
-        logging.debug(f"Player {player['name']} bottomed {getattr(card, 'name', card_id)}.")
+        logging.debug(f"{player['name']} bottomed {getattr(card, 'name', card_id)}.")
         self.bottoming_count += 1
 
-        # Check if bottoming is complete
+        # Check if bottoming is complete for this player
         if self.bottoming_count >= self.cards_to_bottom:
              logging.info(f"Bottoming complete for {player['name']}.")
              self.bottoming_in_progress = False
              self.bottoming_player = None
-             # Game starts - Transition to first turn, first phase
-             if self.turn == 0: self.turn = 1 # Ensure turn starts at 1
-             self.phase = self.PHASE_UNTAP
-             self.priority_player = self.p1 # P1 starts
-             self.priority_pass_count = 0
-             # Process untap immediately? No, let main loop handle phase progression.
-        # Else, remain in bottoming state (implicit, no specific phase constant needed)
-        # The action mask generator will continue to only allow BOTTOM_CARD or maybe PASS/CONCEDE.
+
+             # Check if opponent needs to bottom
+             opp_mull_count = self.mulligan_count.get(opponent_id_str, 0)
+             opp_needs_to_bottom = opp_mull_count > 0 and len(opponent["hand"]) > 0
+             opp_has_bottomed = getattr(opponent, '_bottoming_complete', False) # Check if opponent has already done their turn
+
+             if opp_needs_to_bottom and not opp_has_bottomed:
+                 # Switch to opponent's bottoming turn
+                 logging.debug(f"Switching to {opponent['name']} for bottoming.")
+                 self.mulligan_player = None # Not making mulligan decisions anymore
+                 self.bottoming_player = opponent
+                 self.bottoming_in_progress = True
+                 self.bottoming_count = 0 # Reset counter for opponent
+                 self.cards_to_bottom = min(opp_mull_count, len(opponent["hand"])) # Recalculate for opponent
+                 setattr(player, '_bottoming_complete', True) # Mark this player as done
+             else:
+                 # Opponent doesn't need to bottom or already finished, end mulligan phase.
+                 logging.info("Both players finished mulligans/bottoming. Starting game.")
+                 self.mulligan_in_progress = False
+                 self.mulligan_player = None
+                 self.bottoming_player = None
+                 # Reset helper flags
+                 if hasattr(self.p1, '_bottoming_complete'): del self.p1._bottoming_complete
+                 if hasattr(self.p2, '_bottoming_complete'): del self.p2._bottoming_complete
+                 # Transition to first turn, first phase
+                 if self.turn == 0: self.turn = 1 # Ensure turn starts at 1
+                 self.phase = self.PHASE_UNTAP
+                 self.priority_player = self.p1 # P1 starts
+                 self.priority_pass_count = 0
+
+        # Else, remain in bottoming state for the *same* player (they need to choose more cards)
+        # The action mask generator will continue to only allow BOTTOM_CARD for this player.
 
         return True
 
