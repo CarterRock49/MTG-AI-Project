@@ -213,7 +213,7 @@ class ActivatedAbility(Ability):
                 effect_part = effect_map.get(keyword, f"Perform {keyword} effect.")
             return cost_part, effect_part
 
-        logging.debug(f"Could not parse Cost[:—\u2014] Effect from '{text}'")
+        logging.warning(f"Could not parse Cost[:—\u2014] Effect from '{text}'")
         return None, text # Assume entire text is the effect if cost not parsed
 
     def resolve(self, game_state, controller, targets=None):
@@ -653,7 +653,7 @@ class TriggeredAbility(Ability):
                  logging.debug(f"Possible nested trigger in effect part: '{effect_part}'. Parse might be inaccurate.")
                  # Return best guess
                  return trigger_part, effect_part
-        logging.debug(f"Could not parse Trigger[?,:,\u2014] Effect from '{text}'")
+        logging.warning(f"Could not parse Trigger[?,:,\u2014] Effect from '{text}'")
         return None, None # Return None if parse fails
         
     def can_trigger(self, event_type, context=None):
@@ -954,7 +954,7 @@ class StaticAbility(Ability):
         layer = self._determine_layer_for_effect(effect_lower_clean)
 
         if layer is None:
-            logging.debug(f"StaticAbility.apply: Could not determine layer for static effect: '{self.effect_text}'")
+            logging.warning(f"StaticAbility.apply: Could not determine layer for static effect: '{self.effect_text}'")
             return False
 
         if affected_cards is None:
@@ -1458,7 +1458,7 @@ class StaticAbility(Ability):
 
         # If unsure, return None or log warning
         # Returning None is safer to avoid misclassification.
-        logging.debug(f"LayerSystem: Could not determine layer for effect text: '{effect_lower}' (Cleaned: '{cleaned_effect}')")
+        logging.warning(f"LayerSystem: Could not determine layer for effect text: '{effect_lower}' (Cleaned: '{cleaned_effect}')")
         return None
 
     def _find_all_battlefield_cards(self, game_state):
@@ -2803,7 +2803,7 @@ class CopySpellEffect(AbilityEffect):
                 game_state.stack[stack_idx_to_update] = game_state.stack[stack_idx_to_update][:3] + (new_context_with_targets,)
                 logging.debug(f"Updated stack item {stack_idx_to_update} (Copy) with targets: {resolved_targets}")
             else:
-                 logging.error("Could not find newly added copy on stack to update targets!")
+                 logging.warning("Could not find newly added copy on stack to update targets!")
 
         return True
 

@@ -93,7 +93,7 @@ def is_beneficial_effect(effect_text):
 
     # If no clear indicator, default to harmful/neutral for safety
     # Many effects involve interaction and aren't purely beneficial.
-    logging.debug(f"Could not confidently determine benefit of '{effect_text}'. Defaulting to False.")
+    logging.warning(f"Could not confidently determine benefit of '{effect_text}'. Defaulting to False.")
     return False
 
 def text_to_number(text):
