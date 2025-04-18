@@ -333,17 +333,19 @@ class DeckStatsTracker:
                         stats[key][i] = self._validate_stats_types(item)
         
         return stats
+    
     # === Statistics Cache Methods ===
     def _safe_numeric_operation(self, operation: str, a: Any, b: Any, default: float = 0.0) -> float:
+        # (Implementation remains the same)
         """
         Safely perform numeric operations with error handling and type checking.
-        
+
         Args:
             operation: Operation to perform ('add', 'subtract', 'multiply', 'divide')
             a: First operand
             b: Second operand
             default: Default value to return on error
-            
+
         Returns:
             Result of operation or default on error
         """
@@ -351,7 +353,7 @@ class DeckStatsTracker:
             # Convert inputs to float for consistent behavior
             a_float = float(a)
             b_float = float(b)
-            
+
             if operation == 'add':
                 return a_float + b_float
             elif operation == 'subtract':
@@ -370,70 +372,64 @@ class DeckStatsTracker:
             logging.warning(f"Numeric operation error: {str(e)}")
             return default
     
-    def _create_statistics_cache(self, max_size: int = 100, ttl: int = 3600):
+    def _create_statistics_cache(self, max_size: int = 100, ttl: int = 3600): # ttl is no longer used
         """Create a new cache for frequently accessed statistics with LRU eviction"""
         from collections import OrderedDict
-        
+
         cache = {
             "max_size": max_size,
-            "ttl": ttl,
+            # "ttl": ttl, # TTL mechanism removed
             "cache": OrderedDict(),  # Use OrderedDict for LRU behavior
-            "timestamps": {},
+            # "timestamps": {}, # Timestamps removed
             "lock": threading.RLock()
         }
         return cache
 
+
     def cache_get(self, key: str) -> Optional[Any]:
-        """Get a value from the cache with LRU update"""
+        """Get a value from the cache with LRU update (TTL removed)"""
         with self.cache["lock"]:
             if key in self.cache["cache"]:
-                timestamp = self.cache["timestamps"].get(key, 0)
-                if time.time() - timestamp <= self.cache["ttl"]:
-                    # Move to end to mark as recently used
-                    self.cache["cache"].move_to_end(key)
-                    # Refresh timestamp on access
-                    self.cache["timestamps"][key] = time.time()
-                    return self.cache["cache"][key]
-                else:
-                    # Expired
-                    del self.cache["cache"][key]
-                    del self.cache["timestamps"][key]
+                # No TTL check needed anymore
+                # Move to end to mark as recently used
+                self.cache["cache"].move_to_end(key)
+                return self.cache["cache"][key]
             return None
-            
+
     def cache_set(self, key: str, value: Any) -> None:
-        """Store a value in the cache with LRU eviction"""
+        """Store a value in the cache with LRU eviction (TTL removed)"""
         with self.cache["lock"]:
-            # If key already exists, remove it first
+            # If key already exists, remove it first to update order
             if key in self.cache["cache"]:
                 del self.cache["cache"][key]
-            
+
             # Evict if full
             if len(self.cache["cache"]) >= self.cache["max_size"]:
                 # Evict least recently used item (first item in OrderedDict)
-                oldest_key, _ = self.cache["cache"].popitem(last=False)
-                del self.cache["timestamps"][oldest_key]
-                
+                self.cache["cache"].popitem(last=False)
+                # No timestamp to remove
+
             # Add to cache
             self.cache["cache"][key] = value
-            self.cache["timestamps"][key] = time.time()
-            
+            # No timestamp to set
+
     def cache_invalidate(self, key: str) -> None:
         """Remove a specific key from the cache"""
         with self.cache["lock"]:
             if key in self.cache["cache"]:
                 del self.cache["cache"][key]
-                del self.cache["timestamps"][key]
-                
+                # No timestamp to remove
+
     def cache_clear(self) -> None:
         """Clear the entire cache"""
         with self.cache["lock"]:
             self.cache["cache"].clear()
-            self.cache["timestamps"].clear()
-            
+            # No timestamps to clear
+
     def _cache_evict_oldest(self) -> None:
-        """Evict the oldest entry from the cache"""
-        if not self.cache["timestamps"]:
-            return
+        """Evict the oldest entry from the cache (LRU via OrderedDict)"""
+        if self.cache["cache"]:
+             self.cache["cache"].popitem(last=False) # Removes the first (oldest) item
             
         oldest_key = min(self.cache["timestamps"], key=self.cache["timestamps"].get)
         del self.cache["cache"][oldest_key]
@@ -1219,10 +1215,10 @@ class DeckStatsTracker:
             # Initialize empty meta data
             meta_data = {
                 "version": STATS_VERSION,
-                "last_updated": time.time(),
+                # "last_updated": time.time(), # Removed time dependency
                 "total_games": 0,
                 "archetypes": {},
-                "cards": {},  # Will now index by card name instead of ID
+                "cards": {},
                 "matchups": {},
                 "trends": {
                     "weekly": {},
@@ -1230,11 +1226,11 @@ class DeckStatsTracker:
                 }
             }
         return meta_data
-        
+
     def save_meta_data(self) -> bool:
         """Save meta data to storage"""
         meta_data = self._load_meta_data()
-        meta_data["last_updated"] = time.time()
+        # meta_data["last_updated"] = time.time() # Removed time dependency
         return self.save("meta/meta_data.json", meta_data)
     
     def update_meta_with_game_result(self, winner_deck: List[int], loser_deck: List[int], 
@@ -2337,36 +2333,20 @@ class DeckStatsTracker:
         # Use a default if name becomes empty
         return name if name else "Unnamed Deck"
     
-    def _update_deck_stats(self, deck_id: str, deck: List[int], archetype: str, 
-                            is_winner: bool, turn_count: int, 
+    def _update_deck_stats(self, deck_id: str, deck: List[int], archetype: str,
+                            is_winner: bool, turn_count: int,
                             game_stage: GameStage, game_state: GameState,
                             deck_name: str = None, is_draw: bool = False,
                             mulligan_count: int = 0, opening_hand: List[int] = None,
                             draw_history: Dict = None, play_order: bool = True) -> bool:
         """
         Update statistics for a deck with enhanced tracking for mulligans and game progression.
-        
-        Args:
-            deck_id: The deck's unique fingerprint ID
-            deck: List of card IDs in the deck
-            archetype: The identified archetype of the deck
-            is_winner: Whether this deck won the game
-            turn_count: How many turns the game lasted
-            game_stage: What stage the game ended at (early, mid, late)
-            game_state: The game state from this deck's perspective (ahead, parity, behind)
-            deck_name: Optional friendly name for the deck
-            is_draw: Whether the game ended in a draw
-            mulligan_count: Number of mulligans this deck took
-            opening_hand: List of card IDs in the opening hand after mulligans
-            draw_history: Dictionary mapping turn numbers to cards drawn that turn
-            play_order: Whether this deck played first (True) or second (False)
-            
-        Returns:
-            bool: Whether the update was successful
+        (Removed time.time() update for last_updated)
         """
+        # (Get current stats logic remains)
         stats = self.get_deck_stats(deck_id)
         if not stats:
-            # Build immutable card list once.
+            # (Initialize new stats logic remains, but without last_updated time)
             card_list = []
             for card_id in set(deck):
                 count = deck.count(card_id)
@@ -2380,13 +2360,13 @@ class DeckStatsTracker:
                 deck_name = f"{archetype.title()} Deck"
             stats = {
                 "name": deck_name,
-                "deck_id": deck_id,  # Fingerprint computed from the immutable card list.
+                "deck_id": deck_id,
                 "archetype": archetype,
-                "card_list": card_list,  # Use 'card_list' for the deck composition.
+                "card_list": card_list,
                 "games": 0,
                 "wins": 0,
                 "losses": 0,
-                "draws": 0,  # Add draws field
+                "draws": 0,
                 "total_turns": 0,
                 "win_rate": 0,
                 "mulligan_stats": {
@@ -2401,68 +2381,45 @@ class DeckStatsTracker:
                     "play_second": {"games": 0, "wins": 0, "draws": 0}
                 },
                 "performance_by_stage": {
-                    "early": {"wins": 0, "losses": 0, "draws": 0},  # Add draws to each stage
+                    "early": {"wins": 0, "losses": 0, "draws": 0},
                     "mid": {"wins": 0, "losses": 0, "draws": 0},
                     "late": {"wins": 0, "losses": 0, "draws": 0}
                 },
                 "performance_by_position": {
-                    "ahead": {"wins": 0, "losses": 0, "draws": 0},  # Explicitly add draws
+                    "ahead": {"wins": 0, "losses": 0, "draws": 0},
                     "parity": {"wins": 0, "losses": 0, "draws": 0},
                     "behind": {"wins": 0, "losses": 0, "draws": 0}
                 },
-                "performance_by_turn": {},  # Track performance at different turn counts
+                "performance_by_turn": {},
                 "matchups": {},
-                "specific_matchups": {},  # Track matchups against specific decks
+                "specific_matchups": {},
                 "card_performance": {},
                 "card_performance_by_name": {},
                 "meta_position": {},
-                "last_updated": time.time()
+                # "last_updated": time.time() # Removed time dependency
             }
         else:
-            # Ensure draws field exists
-            if "draws" not in stats:
-                stats["draws"] = 0
-                
-            # Ensure draws field exists in each stage
+            # (Ensure fields exist logic remains the same)
+            if "draws" not in stats: stats["draws"] = 0
             if "performance_by_stage" in stats:
                 for stage_data in stats["performance_by_stage"].values():
-                    if "draws" not in stage_data:
-                        stage_data["draws"] = 0
-            else:
-                stats["performance_by_stage"] = {
-                    "early": {"wins": 0, "losses": 0, "draws": 0},
-                    "mid": {"wins": 0, "losses": 0, "draws": 0},
-                    "late": {"wins": 0, "losses": 0, "draws": 0}
-                }
-            
-            # Ensure mulligan stats exist
+                    if "draws" not in stage_data: stage_data["draws"] = 0
+            else: # Ensure structure exists
+                stats["performance_by_stage"] = {"early": {"wins": 0,"losses": 0,"draws": 0}, "mid": {"wins": 0,"losses": 0,"draws": 0}, "late": {"wins": 0,"losses": 0,"draws": 0}}
             if "mulligan_stats" not in stats:
-                stats["mulligan_stats"] = {
-                    "total_mulligans": 0,
-                    "games_with_mulligan": 0,
-                    "win_rate_with_mulligan": 0,
-                    "win_rate_without_mulligan": 0,
-                    "avg_mulligans": 0
-                }
-                
-            # Ensure play order stats exist
+                 stats["mulligan_stats"] = {"total_mulligans": 0, "games_with_mulligan": 0, "win_rate_with_mulligan": 0, "win_rate_without_mulligan": 0, "avg_mulligans": 0}
             if "play_order_stats" not in stats:
-                stats["play_order_stats"] = {
-                    "play_first": {"games": 0, "wins": 0, "draws": 0},
-                    "play_second": {"games": 0, "wins": 0, "draws": 0}
-                }
-                
-            # Ensure performance by turn exists
-            if "performance_by_turn" not in stats:
-                stats["performance_by_turn"] = {}
-                
-            # Ensure specific matchups exists
-            if "specific_matchups" not in stats:
-                stats["specific_matchups"] = {}
-                    
-            # On subsequent updates, update deck name if provided.
-            if deck_name is not None and deck_name != stats.get("name", ""):
-                stats["name"] = deck_name
+                 stats["play_order_stats"] = {"play_first": {"games": 0, "wins": 0, "draws": 0}, "play_second": {"games": 0, "wins": 0, "draws": 0}}
+            if "performance_by_turn" not in stats: stats["performance_by_turn"] = {}
+            if "specific_matchups" not in stats: stats["specific_matchups"] = {}
+            if "performance_by_position" not in stats: # Ensure structure exists
+                 stats["performance_by_position"] = {"ahead": {"wins": 0,"losses": 0,"draws": 0}, "parity": {"wins": 0,"losses": 0,"draws": 0}, "behind": {"wins": 0,"losses": 0,"draws": 0}}
+            else: # Add draws if missing
+                for state_data in stats["performance_by_position"].values():
+                    if "draws" not in state_data: state_data["draws"] = 0
+
+            if deck_name is not None and deck_name != stats.get("name", ""): stats["name"] = deck_name
+
 
         # Update dynamic game statistics.
         stats["games"] += 1
@@ -2472,143 +2429,112 @@ class DeckStatsTracker:
             stats["wins"] += 1
         else:
             stats["losses"] += 1
-        
+
         stats["total_turns"] += turn_count
         # Update win_rate to account for draws (0.5 points per draw)
-        stats["win_rate"] = (stats["wins"] + 0.5 * stats["draws"]) / stats["games"]
-        stats["last_updated"] = time.time()
+        if stats["games"] > 0: # Avoid division by zero
+             stats["win_rate"] = (stats["wins"] + 0.5 * stats["draws"]) / stats["games"]
+        else: stats["win_rate"] = 0.0
 
+        # stats["last_updated"] = time.time() # Removed time dependency
+
+        # (Rest of the update logic for mulligan, play order, stage, turn, position remains)
         # Update mulligan statistics
         if mulligan_count > 0:
             stats["mulligan_stats"]["total_mulligans"] += mulligan_count
             stats["mulligan_stats"]["games_with_mulligan"] += 1
-        
-        # Update wins with/without mulligan
-        games_with_mulligan = max(1, stats["mulligan_stats"]["games_with_mulligan"])
-        games_without_mulligan = max(1, stats["games"] - games_with_mulligan)
-        
-        # Track wins with mulligans vs without mulligans
-        if mulligan_count > 0:
-            # This game had a mulligan
-            if is_winner:
-                # Increment wins with mulligan (not stored directly, calculated below)
-                pass
-        else:
-            # This game had no mulligan
-            if is_winner:
-                # Increment wins without mulligan (not stored directly, calculated below)
-                pass
-        
-        # Calculate win rates for mulligans
-        # We need to recalculate this each time since we don't store the raw counts
+
+        games_with_mulligan = stats["mulligan_stats"]["games_with_mulligan"]
         wins_with_mulligan = stats["mulligan_stats"].get("wins_with_mulligan", 0)
-        if mulligan_count > 0 and is_winner:
-            wins_with_mulligan += 1
-            stats["mulligan_stats"]["wins_with_mulligan"] = wins_with_mulligan
-            
+        draws_with_mulligan = stats["mulligan_stats"].get("draws_with_mulligan", 0) # Need to track draws with mulligan
+        if mulligan_count > 0:
+             if is_winner: wins_with_mulligan += 1
+             if is_draw: draws_with_mulligan += 1
+        stats["mulligan_stats"]["wins_with_mulligan"] = wins_with_mulligan # Store cumulative wins/draws with mulligans
+        stats["mulligan_stats"]["draws_with_mulligan"] = draws_with_mulligan # Store cumulative draws
+
+        games_without_mulligan = stats["games"] - games_with_mulligan
         wins_without_mulligan = stats["mulligan_stats"].get("wins_without_mulligan", 0)
-        if mulligan_count == 0 and is_winner:
-            wins_without_mulligan += 1
-            stats["mulligan_stats"]["wins_without_mulligan"] = wins_without_mulligan
-            
-        # Update win rates for mulligans
-        stats["mulligan_stats"]["win_rate_with_mulligan"] = wins_with_mulligan / max(1, games_with_mulligan)
-        stats["mulligan_stats"]["win_rate_without_mulligan"] = wins_without_mulligan / max(1, games_without_mulligan)
-        stats["mulligan_stats"]["avg_mulligans"] = stats["mulligan_stats"]["total_mulligans"] / max(1, stats["games"])
-        
-        # Update play order statistics
+        draws_without_mulligan = stats["mulligan_stats"].get("draws_without_mulligan", 0) # Track draws without mulligan
+        if mulligan_count == 0:
+             if is_winner: wins_without_mulligan += 1
+             if is_draw: draws_without_mulligan += 1
+        stats["mulligan_stats"]["wins_without_mulligan"] = wins_without_mulligan
+        stats["mulligan_stats"]["draws_without_mulligan"] = draws_without_mulligan
+
+        # Calculate win rates including draws
+        if games_with_mulligan > 0: stats["mulligan_stats"]["win_rate_with_mulligan"] = (wins_with_mulligan + 0.5 * draws_with_mulligan) / games_with_mulligan
+        else: stats["mulligan_stats"]["win_rate_with_mulligan"] = 0.0
+        if games_without_mulligan > 0: stats["mulligan_stats"]["win_rate_without_mulligan"] = (wins_without_mulligan + 0.5 * draws_without_mulligan) / games_without_mulligan
+        else: stats["mulligan_stats"]["win_rate_without_mulligan"] = 0.0
+        if stats["games"] > 0: stats["mulligan_stats"]["avg_mulligans"] = stats["mulligan_stats"]["total_mulligans"] / stats["games"]
+        else: stats["mulligan_stats"]["avg_mulligans"] = 0.0
+
+        # Play order stats
         play_position = "play_first" if play_order else "play_second"
+        if play_position not in stats["play_order_stats"]: # Ensure sub-dict exists
+            stats["play_order_stats"][play_position] = {"games": 0, "wins": 0, "draws": 0}
         stats["play_order_stats"][play_position]["games"] += 1
-        if is_draw:
-            stats["play_order_stats"][play_position]["draws"] += 1
-        elif is_winner:
-            stats["play_order_stats"][play_position]["wins"] += 1
+        if is_draw: stats["play_order_stats"][play_position]["draws"] += 1
+        elif is_winner: stats["play_order_stats"][play_position]["wins"] += 1
 
-        # Update performance by game stage
+        # Perf by stage
         stage_key = game_stage.value
-        if is_draw:
-            stats["performance_by_stage"][stage_key]["draws"] += 1
-        elif is_winner:
-            stats["performance_by_stage"][stage_key]["wins"] += 1
-        else:
-            stats["performance_by_stage"][stage_key]["losses"] += 1
+        if stage_key not in stats["performance_by_stage"]: # Ensure sub-dict exists
+             stats["performance_by_stage"][stage_key] = {"wins": 0, "losses": 0, "draws": 0}
+        if is_draw: stats["performance_by_stage"][stage_key]["draws"] += 1
+        elif is_winner: stats["performance_by_stage"][stage_key]["wins"] += 1
+        else: stats["performance_by_stage"][stage_key]["losses"] += 1
 
-        # Update performance by turn
+        # Perf by turn
         turn_key = str(turn_count)
-        if turn_key not in stats["performance_by_turn"]:
-            stats["performance_by_turn"][turn_key] = {
-                "games": 0, "wins": 0, "losses": 0, "draws": 0
-            }
+        if turn_key not in stats["performance_by_turn"]: # Ensure sub-dict exists
+            stats["performance_by_turn"][turn_key] = {"games": 0, "wins": 0, "losses": 0, "draws": 0}
         stats["performance_by_turn"][turn_key]["games"] += 1
-        if is_draw:
-            stats["performance_by_turn"][turn_key]["draws"] += 1
-        elif is_winner:
-            stats["performance_by_turn"][turn_key]["wins"] += 1
-        else:
-            stats["performance_by_turn"][turn_key]["losses"] += 1
+        if is_draw: stats["performance_by_turn"][turn_key]["draws"] += 1
+        elif is_winner: stats["performance_by_turn"][turn_key]["wins"] += 1
+        else: stats["performance_by_turn"][turn_key]["losses"] += 1
 
-        # Update performance by game state
+        # Perf by position
         position_key = game_state.value
-        if position_key not in stats["performance_by_position"]:
-            stats["performance_by_position"][position_key] = {"wins": 0, "losses": 0, "draws": 0}
-            
-        if is_draw:
-            stats["performance_by_position"][position_key]["draws"] += 1
-        elif is_winner:
-            stats["performance_by_position"][position_key]["wins"] += 1
-        else:
-            stats["performance_by_position"][position_key]["losses"] += 1
+        if position_key not in stats["performance_by_position"]: # Ensure sub-dict exists
+             stats["performance_by_position"][position_key] = {"wins": 0, "losses": 0, "draws": 0}
+        if is_draw: stats["performance_by_position"][position_key]["draws"] += 1
+        elif is_winner: stats["performance_by_position"][position_key]["wins"] += 1
+        else: stats["performance_by_position"][position_key]["losses"] += 1
 
-        # Update opening hand data if provided
+        # Opening hand stats
         if opening_hand:
-            if "opening_hand_stats" not in stats:
-                stats["opening_hand_stats"] = {}
-                
-            # Track which cards were in opening hand and their win rates
+            if "opening_hand_stats" not in stats: stats["opening_hand_stats"] = {}
             for card_id in opening_hand:
                 card_key = str(card_id)
                 if card_key not in stats["opening_hand_stats"]:
-                    stats["opening_hand_stats"][card_key] = {
-                        "games": 0, "wins": 0, "losses": 0, "draws": 0
-                    }
-                    
+                    stats["opening_hand_stats"][card_key] = {"games": 0, "wins": 0, "losses": 0, "draws": 0}
                 stats["opening_hand_stats"][card_key]["games"] += 1
-                if is_draw:
-                    stats["opening_hand_stats"][card_key]["draws"] += 1
-                elif is_winner:
-                    stats["opening_hand_stats"][card_key]["wins"] += 1
-                else:
-                    stats["opening_hand_stats"][card_key]["losses"] += 1
+                if is_draw: stats["opening_hand_stats"][card_key]["draws"] += 1
+                elif is_winner: stats["opening_hand_stats"][card_key]["wins"] += 1
+                else: stats["opening_hand_stats"][card_key]["losses"] += 1
 
-        # Update draw history if provided
+        # Draw history stats
         if draw_history:
-            if "draw_history_stats" not in stats:
-                stats["draw_history_stats"] = {}
-                
+            if "draw_history_stats" not in stats: stats["draw_history_stats"] = {}
             for turn, cards in draw_history.items():
                 turn_key = str(turn)
-                if turn_key not in stats["draw_history_stats"]:
-                    stats["draw_history_stats"][turn_key] = {}
-                    
+                if turn_key not in stats["draw_history_stats"]: stats["draw_history_stats"][turn_key] = {}
                 for card_id in cards:
                     card_key = str(card_id)
                     if card_key not in stats["draw_history_stats"][turn_key]:
-                        stats["draw_history_stats"][turn_key][card_key] = {
-                            "games": 0, "wins": 0, "losses": 0, "draws": 0
-                        }
-                        
+                        stats["draw_history_stats"][turn_key][card_key] = {"games": 0, "wins": 0, "losses": 0, "draws": 0}
                     stats["draw_history_stats"][turn_key][card_key]["games"] += 1
-                    if is_draw:
-                        stats["draw_history_stats"][turn_key][card_key]["draws"] += 1
-                    elif is_winner:
-                        stats["draw_history_stats"][turn_key][card_key]["wins"] += 1
-                    else:
-                        stats["draw_history_stats"][turn_key][card_key]["losses"] += 1
+                    if is_draw: stats["draw_history_stats"][turn_key][card_key]["draws"] += 1
+                    elif is_winner: stats["draw_history_stats"][turn_key][card_key]["wins"] += 1
+                    else: stats["draw_history_stats"][turn_key][card_key]["losses"] += 1
 
-        # Update name-to-id mapping.
+        # Update name mapping
         if "name" in stats:
             self.deck_name_to_id[stats["name"]] = deck_id
             self.deck_id_to_name[deck_id] = stats["name"]
+
 
         return self.update_deck_stats(deck_id, stats)
 

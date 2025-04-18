@@ -303,6 +303,7 @@ class AlphaZeroMTGEnv(gym.Env):
     def reset(self, seed=None, **kwargs):
         """
         Reset the environment and return initial observation and info.
+        (Removed time-based rapid reset check)
 
         Args:
             seed: Random seed
@@ -320,11 +321,11 @@ class AlphaZeroMTGEnv(gym.Env):
                 import traceback
                 logging.debug(f"Reset call stack (last 5 frames):\n{''.join(traceback.format_stack()[-6:-1])}")
 
-            # Simple check for rapid resets
-            current_time = time.time()
-            if hasattr(self, '_last_reset_time') and current_time - self._last_reset_time < 0.1:
-                logging.warning(f"Multiple resets detected within {current_time - self._last_reset_time:.3f}s!")
-            self._last_reset_time = current_time
+            # Removed time-based rapid reset check
+            # current_time = time.time()
+            # if hasattr(self, '_last_reset_time') and current_time - self._last_reset_time < 0.1:
+            #     logging.warning(f"Multiple resets detected!")
+            # self._last_reset_time = current_time
 
             # Call parent reset method (for seeding primarily)
             super().reset(seed=seed)
@@ -345,43 +346,29 @@ class AlphaZeroMTGEnv(gym.Env):
 
 
             # --- Reset GameState and Player Setup ---
-            # Choose random decks
+            # (Player/Deck/GameState setup remains the same)
             p1_deck_data = random.choice(self.decks)
             p2_deck_data = random.choice(self.decks)
             self.current_deck_name_p1 = p1_deck_data["name"]
             self.current_deck_name_p2 = p2_deck_data["name"]
             self.original_p1_deck = p1_deck_data["cards"].copy() # Store original for memory
             self.original_p2_deck = p2_deck_data["cards"].copy()
-
-            # Initialize GameState (creates players, resets turn/phase, etc.)
             self.game_state = GameState(self.card_db, self.max_turns, self.max_hand_size, self.max_battlefield)
-            # GameState's reset performs deck setup, shuffling, initial draw
             self.game_state.reset(p1_deck_data["cards"], p2_deck_data["cards"], seed)
 
-            # --- Initialize & Link Subsystems to GameState ---
-            # GameState._init_subsystems() should handle this now.
-            # We need references to these subsystems in the environment though.
 
-            # Initialize strategy memory early if others depend on it
+            # --- Initialize & Link Subsystems to GameState ---
+            # (Subsystem initialization remains the same)
             self.initialize_strategic_memory()
             if self.strategy_memory:
                  self.game_state.strategy_memory = self.strategy_memory
-
-            # Initialize stats/card memory trackers if available and link to GS
             if self.has_stats_tracker and self.stats_tracker:
                 self.game_state.stats_tracker = self.stats_tracker
                 self.stats_tracker.current_deck_name_p1 = self.current_deck_name_p1
                 self.stats_tracker.current_deck_name_p2 = self.current_deck_name_p2
             if self.has_card_memory and self.card_memory:
                 self.game_state.card_memory = self.card_memory
-
-
-            # --- Initialize Environment Components Using GameState Subsystems ---
-            # Action Handler depends on GameState and its subsystems
             self.action_handler = ActionHandler(self.game_state) # Recreate/link ActionHandler
-
-            # Get references to components created by GameState for env use
-            # Add checks to ensure subsystems were initialized in GameState
             subsystems_to_check = ['combat_resolver', 'card_evaluator', 'strategic_planner',
                                    'mana_system', 'ability_handler', 'layer_system',
                                    'replacement_effects', 'targeting_system']
@@ -393,12 +380,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 else:
                     logging.warning(f"GameState is missing expected subsystem: '{system_name}'. Setting environment reference to None.")
                     setattr(self, system_name, None)
-
-
-            # Ensure combat integration after handlers are created
-            # Integrate combat actions checks if combat_resolver exists now
             integrate_combat_actions(self.game_state)
-            # Ensure CombatActionHandler has link to GS components (safe access)
             if hasattr(self.action_handler, 'combat_handler') and self.action_handler.combat_handler:
                 self.action_handler.combat_handler.game_state = self.game_state
                 self.action_handler.combat_handler.card_evaluator = getattr(self.game_state, 'card_evaluator', None)
@@ -406,28 +388,21 @@ class AlphaZeroMTGEnv(gym.Env):
 
 
             # --- Final Reset Steps ---
-            # Reset mulligan state AFTER subsystems are ready
+            # (Mulligan, analysis, mask, obs/info remains the same)
             gs = self.game_state # Alias for convenience
             gs.mulligan_in_progress = True
-            gs.mulligan_player = gs.p1 # Start with P1's mulligan decision
+            gs.mulligan_player = gs.p1
             gs.mulligan_count = {'p1': 0, 'p2': 0}
             gs.bottoming_in_progress = False
             gs.bottoming_player = None
             gs.cards_to_bottom = 0
             gs.bottoming_count = 0
-
-
-            # Perform initial game state analysis if planner exists
             if self.strategic_planner:
                 try:
                     self.strategic_planner.analyze_game_state()
                 except Exception as analysis_e:
                     logging.warning(f"Error during initial game state analysis: {analysis_e}")
-
-            # Initialize Action Mask for the starting player
             self.current_valid_actions = self.action_mask()
-
-            # Get initial observation and info
             obs = self._get_obs_safe()
             info = {
                 "action_mask": self.current_valid_actions.astype(bool),
@@ -441,40 +416,33 @@ class AlphaZeroMTGEnv(gym.Env):
             return obs, info
 
         except Exception as e:
+            # (Fallback reset logic remains the same)
             logging.critical(f"CRITICAL error during environment reset: {str(e)}")
             logging.critical(traceback.format_exc())
-
-            # Emergency reset fallback (simplified)
             try:
                 logging.warning("Attempting emergency fallback reset...")
-                # Basic GameState init
                 self.game_state = GameState(self.card_db, self.max_turns, self.max_hand_size, self.max_battlefield)
-                deck = self.decks[0]["cards"].copy() if self.decks else [0]*60 # Use default card 0 if decks fail
-                # Simplified reset, relies on _init_player and basic setup
+                deck = self.decks[0]["cards"].copy() if self.decks else [0]*60
                 self.game_state.p1 = self.game_state._init_player(deck.copy())
                 self.game_state.p2 = self.game_state._init_player(deck.copy())
                 self.game_state.turn = 1
-                self.game_state.phase = self.game_state.PHASE_MAIN_PRECOMBAT # Skip first phases
-                self.game_state.mulligan_in_progress = False # Skip mulligans
+                self.game_state.phase = self.game_state.PHASE_MAIN_PRECOMBAT
+                self.game_state.mulligan_in_progress = False
                 self.game_state.agent_is_p1 = True
-
-                # Minimal subsystems (need at least ActionHandler)
-                self.game_state._init_subsystems() # Try subsystem init
-                self.action_handler = ActionHandler(self.game_state) # Ensure handler exists
-
+                self.game_state._init_subsystems()
+                self.action_handler = ActionHandler(self.game_state)
                 self.current_valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
-                self.current_valid_actions[11] = True # PASS
-                self.current_valid_actions[12] = True # CONCEDE
-
-                obs = self._get_obs_safe() # Attempt to get obs
+                self.current_valid_actions[11] = True
+                self.current_valid_actions[12] = True
+                obs = self._get_obs_safe()
                 info = {"action_mask": self.current_valid_actions.astype(bool), "error_reset": True}
                 logging.info("Emergency reset completed with minimal state.")
                 return obs, info
             except Exception as fallback_e:
                  logging.critical(f"FALLBACK RESET FAILED: {fallback_e}")
-                 # If even fallback fails, raise the error
                  raise fallback_e
         
+
     def ensure_game_result_recorded(self):
         """Make sure game result is recorded if it hasn't been already"""
         if getattr(self, '_game_result_recorded', False):
@@ -489,15 +457,24 @@ class AlphaZeroMTGEnv(gym.Env):
         me = gs.p1 if gs.agent_is_p1 else gs.p2
         opp = gs.p2 if gs.agent_is_p1 else gs.p1
 
+        # Check if players are initialized before accessing attributes
+        if me is None or opp is None:
+            logging.error("Cannot record game result: Player object(s) are None.")
+            return
+
         is_p1_winner = False
         winner_life = 0
         is_draw = False
 
         # Determine the winner based on game state
-        if me.get("lost_game", False) or me.get("life", 20) <= 0 or me.get("attempted_draw_from_empty", False) or me.get("poison_counters", 0) >= 10:
+        # Safely access player states using .get()
+        my_lost = me.get("lost_game", False) or me.get("life", 20) <= 0 or me.get("attempted_draw_from_empty", False) or me.get("poison_counters", 0) >= 10
+        opp_lost = opp.get("lost_game", False) or opp.get("life", 20) <= 0 or opp.get("attempted_draw_from_empty", False) or opp.get("poison_counters", 0) >= 10
+
+        if my_lost:
             is_p1_winner = not gs.agent_is_p1
             winner_life = opp.get("life", 0)
-        elif opp.get("lost_game", False) or opp.get("life", 20) <= 0 or opp.get("attempted_draw_from_empty", False) or opp.get("poison_counters", 0) >= 10:
+        elif opp_lost:
             is_p1_winner = gs.agent_is_p1
             winner_life = me.get("life", 0)
         elif me.get("won_game", False):
@@ -506,10 +483,10 @@ class AlphaZeroMTGEnv(gym.Env):
         elif opp.get("won_game", False):
             is_p1_winner = not gs.agent_is_p1
             winner_life = opp.get("life", 0)
-        elif me.get("game_draw", False) or opp.get("game_draw", False) or me.get("life", 0) == opp.get("life", 0):
+        elif me.get("game_draw", False) or opp.get("game_draw", False): # Explicit draw condition
              is_draw = True
              winner_life = me.get("life", 0) # Record life even in draw
-        else: # Game ended due to turn limit or other reason
+        elif gs.turn > gs.max_turns: # Game ended due to turn limit
             my_final_life = me.get("life", 0)
             opp_final_life = opp.get("life", 0)
             if my_final_life > opp_final_life:
@@ -521,43 +498,100 @@ class AlphaZeroMTGEnv(gym.Env):
             else: # Draw by life at turn limit
                 is_draw = True
                 winner_life = my_final_life
+        else: # If no end condition met but function called, possibly an issue elsewhere
+            logging.warning("ensure_game_result_recorded called but no definitive game end condition met.")
+            # Decide how to handle - assume draw for now? Or determine based on current life?
+            # Defaulting to draw if life is equal, otherwise higher life wins.
+            my_final_life = me.get("life", 0)
+            opp_final_life = opp.get("life", 0)
+            if my_final_life > opp_final_life:
+                is_p1_winner = gs.agent_is_p1; winner_life = my_final_life
+            elif opp_final_life > my_final_life:
+                is_p1_winner = not gs.agent_is_p1; winner_life = opp_final_life
+            else: is_draw = True; winner_life = my_final_life
 
-        # Record the game result
+        # --- Record the game result (FIXED: Removed winner_is_p1 keyword arg) ---
         if self.has_stats_tracker and self.stats_tracker:
             try:
-                self.stats_tracker.record_game(
-                     winner_is_p1=is_p1_winner if not is_draw else None, # Pass None for draw
-                     turn_count=gs.turn,
-                     winner_life=winner_life if not is_draw else None,
-                     is_draw=is_draw # Pass draw flag
-                )
+                # Determine winner/loser decks and names BEFORE the call
+                winner_deck_obj = gs.p1 if is_p1_winner else gs.p2
+                loser_deck_obj = gs.p2 if is_p1_winner else gs.p1
+                # Use original decks stored at reset
+                winner_deck_list = getattr(self, 'original_p1_deck', winner_deck_obj.get("library", []).copy()) if is_p1_winner else getattr(self, 'original_p2_deck', loser_deck_obj.get("library", []).copy())
+                loser_deck_list = getattr(self, 'original_p2_deck', loser_deck_obj.get("library", []).copy()) if is_p1_winner else getattr(self, 'original_p1_deck', winner_deck_obj.get("library", []).copy())
+                winner_name = getattr(self, 'current_deck_name_p1', "Unknown Deck 1") if is_p1_winner else getattr(self, 'current_deck_name_p2', "Unknown Deck 2")
+                loser_name = getattr(self, 'current_deck_name_p2', "Unknown Deck 2") if is_p1_winner else getattr(self, 'current_deck_name_p1', "Unknown Deck 1")
+
+                # Handle draws explicitly by not assigning a winner/loser
+                if is_draw:
+                     # For draws, the concept of winner/loser deck/name/life doesn't strictly apply.
+                     # Pass both decks, but maybe set winner_life=None or pass average?
+                     # DeckStatsTracker.record_game needs logic to handle this. Let's pass winner deck as p1's and loser as p2's for consistency, and the draw flag.
+                     p1_deck_list = getattr(self, 'original_p1_deck', gs.p1.get("library", []).copy())
+                     p2_deck_list = getattr(self, 'original_p2_deck', gs.p2.get("library", []).copy())
+                     p1_name = getattr(self, 'current_deck_name_p1', "Unknown Deck 1")
+                     p2_name = getattr(self, 'current_deck_name_p2', "Unknown Deck 2")
+
+                     self.stats_tracker.record_game(
+                         # Pass both decks in a consistent order, e.g., p1 then p2
+                         winner_deck=p1_deck_list,
+                         loser_deck=p2_deck_list,
+                         card_db=self.card_db, # Pass card_db if needed by tracker
+                         turn_count=gs.turn,
+                         winner_life=winner_life, # Record the life total at the end of the draw
+                         winner_deck_name=p1_name, # Name consistency
+                         loser_deck_name=p2_name, # Name consistency
+                         cards_played=getattr(gs, 'cards_played', {0: [], 1: []}),
+                         is_draw=is_draw # Crucial flag for the tracker
+                     )
+                else:
+                     # Normal win/loss case
+                     self.stats_tracker.record_game(
+                         winner_deck=winner_deck_list,
+                         loser_deck=loser_deck_list,
+                         card_db=self.card_db, # Pass card_db if needed by tracker
+                         turn_count=gs.turn,
+                         winner_life=winner_life,
+                         winner_deck_name=winner_name,
+                         loser_deck_name=loser_name,
+                         cards_played=getattr(gs, 'cards_played', {0: [], 1: []}),
+                         is_draw=is_draw
+                     )
+
                 self._game_result_recorded = True
+            except TypeError as type_err: # Catch the specific error
+                 logging.error(f"TypeError during stats_tracker.record_game (maybe another signature issue?): {type_err}")
+                 logging.error(traceback.format_exc()) # Log traceback for debugging
             except Exception as stat_e:
                  logging.error(f"Error during stats_tracker.record_game: {stat_e}")
+                 logging.error(traceback.format_exc()) # Log traceback for debugging
 
+        # Record cards to card memory system
         if self.has_card_memory and self.card_memory:
             try:
-                winner_deck = self.original_p1_deck if is_p1_winner else self.original_p2_deck
-                loser_deck = self.original_p2_deck if is_p1_winner else self.original_p1_deck
-                winner_archetype = self.current_deck_name_p1 if is_p1_winner else self.current_deck_name_p2
-                loser_archetype = self.current_deck_name_p2 if is_p1_winner else self.current_deck_name_p1
+                winner_deck_list_mem = getattr(self, 'original_p1_deck', []) if is_p1_winner else getattr(self, 'original_p2_deck', [])
+                loser_deck_list_mem = getattr(self, 'original_p2_deck', []) if is_p1_winner else getattr(self, 'original_p1_deck', [])
+                winner_archetype_mem = self.current_deck_name_p1 if is_p1_winner else self.current_deck_name_p2
+                loser_archetype_mem = self.current_deck_name_p2 if is_p1_winner else self.current_deck_name_p1
 
-                # Provide empty defaults if tracking data is missing
                 cards_played_data = getattr(self, 'cards_played', {0: [], 1: []})
                 opening_hands_data = getattr(self.game_state, 'opening_hands', {}) # Assuming GS tracks this
                 draw_history_data = getattr(self.game_state, 'draw_history', {}) # Assuming GS tracks this
 
-                # Handle draw case for memory recording
                 if is_draw:
-                     # Record stats for both decks as a draw
-                     self._record_cards_to_memory(self.original_p1_deck, self.original_p2_deck, cards_played_data, gs.turn,
-                                            self.current_deck_name_p1, self.current_deck_name_p2, opening_hands_data, draw_history_data, is_draw=True, player_idx=0) # P1 perspective
-                     self._record_cards_to_memory(self.original_p2_deck, self.original_p1_deck, cards_played_data, gs.turn,
-                                            self.current_deck_name_p2, self.current_deck_name_p1, opening_hands_data, draw_history_data, is_draw=True, player_idx=1) # P2 perspective
+                    # Record stats for both decks as a draw
+                    p1_deck_list_mem = getattr(self, 'original_p1_deck', [])
+                    p2_deck_list_mem = getattr(self, 'original_p2_deck', [])
+                    p1_name_mem = self.current_deck_name_p1
+                    p2_name_mem = self.current_deck_name_p2
+                    self._record_cards_to_memory(p1_deck_list_mem, p2_deck_list_mem, cards_played_data, gs.turn,
+                                           p1_name_mem, p2_name_mem, opening_hands_data, draw_history_data, is_draw=True, player_idx=0) # P1 perspective
+                    self._record_cards_to_memory(p2_deck_list_mem, p1_deck_list_mem, cards_played_data, gs.turn,
+                                           p2_name_mem, p1_name_mem, opening_hands_data, draw_history_data, is_draw=True, player_idx=1) # P2 perspective
                 else:
-                     # Record winner/loser normally
-                     self._record_cards_to_memory(winner_deck, loser_deck, cards_played_data, gs.turn,
-                                                winner_archetype, loser_archetype, opening_hands_data, draw_history_data, is_draw=False, player_idx=(0 if is_p1_winner else 1))
+                    # Record winner/loser normally
+                    self._record_cards_to_memory(winner_deck_list_mem, loser_deck_list_mem, cards_played_data, gs.turn,
+                                               winner_archetype_mem, loser_archetype_mem, opening_hands_data, draw_history_data, is_draw=False, player_idx=(0 if is_p1_winner else 1))
 
             except Exception as mem_e:
                  logging.error(f"Error recording cards to memory: {mem_e}")
@@ -665,62 +699,52 @@ class AlphaZeroMTGEnv(gym.Env):
         
     def _check_phase_progress(self):
         """
-        Check if the game is potentially stuck in a phase and force progression when necessary.
-        This prevents the game from getting stuck in certain phases.
-        
+        Check if the game is potentially stuck in a phase based on action count.
+        (Removed time-based check)
+
         Returns:
             bool: True if phase was forced to progress, False otherwise
         """
         gs = self.game_state
-        
+
         # Check if we have phase history tracking
-        if not hasattr(self, '_phase_history'):
-            self._phase_history = []
-            self._phase_timestamps = []
+        if not hasattr(self, '_phase_history_counts'):
+            self._phase_history_counts = defaultdict(int) # Store counts per phase
+            self._last_phase_progressed = -1 # Track the last phase we were actually in
             self._phase_stuck_count = 0
-        
-        current_time = time.time()
+
         current_phase = gs.phase
-        
-        # Update phase history
-        self._phase_history.append(current_phase)
-        self._phase_timestamps.append(current_time)
-        
-        # Keep history limited to reasonable size
-        max_history = 50
-        if len(self._phase_history) > max_history:
-            self._phase_history = self._phase_history[-max_history:]
-            self._phase_timestamps = self._phase_timestamps[-max_history:]
-        
-        # Check for phase getting stuck
-        stuck_threshold = 20  # Number of consecutive identical phases to consider "stuck"
-        time_threshold = 10.0  # Seconds to consider a phase potentially stuck
-        
-        # Only check if we have enough history
-        if len(self._phase_history) >= stuck_threshold:
-            # Check if last N phases are identical
-            recent_phases = self._phase_history[-stuck_threshold:]
-            if all(phase == recent_phases[0] for phase in recent_phases):
-                # Check time spent in this phase
-                phase_time = current_time - self._phase_timestamps[-stuck_threshold]
-                if phase_time > time_threshold:
-                    # Phase appears stuck, force progression
-                    self._phase_stuck_count += 1
-                    
-                    # Log the issue
-                    logging.warning(f"Game potentially stuck in phase {current_phase} for {phase_time:.1f} seconds. Forcing progression. (Occurrence #{self._phase_stuck_count})")
-                    
-                    # Force phase transition based on current phase
-                    forced_phase = self._force_phase_transition(current_phase)
-                    
-                    # Set flag for reward penalty
-                    gs.progress_was_forced = True
-                    
-                    # Update phase history to reflect the forced change
-                    self._phase_history[-1] = forced_phase
-                    
-                    return True
-        
+
+        # If phase changed since last check, reset the counter for the new phase
+        if current_phase != self._last_phase_progressed:
+             self._phase_history_counts[current_phase] = 0
+             self._last_phase_progressed = current_phase
+
+        # Increment the counter for the current phase
+        self._phase_history_counts[current_phase] += 1
+
+        # Check for phase getting stuck based on action count
+        stuck_threshold = 30  # Number of consecutive identical phases actions to consider "stuck"
+
+        if self._phase_history_counts[current_phase] >= stuck_threshold:
+            # Phase appears stuck based on count, force progression
+            self._phase_stuck_count += 1
+
+            # Log the issue
+            logging.warning(f"Game potentially stuck in phase {current_phase} for {self._phase_history_counts[current_phase]} consecutive actions. Forcing progression. (Occurrence #{self._phase_stuck_count})")
+
+            # Force phase transition based on current phase
+            forced_phase = self._force_phase_transition(current_phase)
+
+            # Set flag for reward penalty
+            gs.progress_was_forced = True
+
+            # Reset counter for the new phase we just forced
+            self._phase_history_counts[forced_phase] = 0
+            self._last_phase_progressed = forced_phase
+
+            return True
+
         # No progression was forced
         return False
     
@@ -859,33 +883,38 @@ class AlphaZeroMTGEnv(gym.Env):
         action_context = {} # Local dict for passing context
         if context: action_context.update(context)
 
-        # Ensure initial mask is generated for info dict even if action invalidates immediately
+        # Ensure initial mask is generated if needed for info dict even if action invalidates immediately
         if not hasattr(self, 'current_valid_actions') or self.current_valid_actions is None:
             logging.warning("current_valid_actions missing or invalid at step start. Regenerating.")
-            self.current_valid_actions = self.action_mask()
+            try:
+                self.current_valid_actions = self.action_mask()
+            except Exception as mask_regen_e:
+                logging.error(f"Error regenerating mask at step start: {mask_regen_e}")
+                self.current_valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+                self.current_valid_actions[11] = True; self.current_valid_actions[12] = True # Pass/Concede
 
         initial_mask = self.current_valid_actions.astype(bool) if self.current_valid_actions is not None else np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
-        info = {"action_mask": initial_mask, "game_result": "undetermined"}
+        env_info = {"action_mask": initial_mask, "game_result": "undetermined"} # Start fresh info dict
 
         try:
-            # --- Action Validation ---
+            # --- Action Validation (Performed by Env before calling Handler) ---
             if not (0 <= action_idx < self.ACTION_SPACE_SIZE):
                 logging.error(f"Action index {action_idx} is out of bounds (0-{self.ACTION_SPACE_SIZE-1}).")
-                obs = self._get_obs_safe() # Get safe obs
-                info["critical_error"] = True
-                info["error_message"] = "Action index out of bounds"
-                # Use initial mask from above
-                return obs, -0.5, False, False, info # Return negative reward, not done
+                obs = self._get_obs_safe() # Get safe obs from Env
+                env_info["critical_error"] = True
+                env_info["error_message"] = "Action index out of bounds"
+                return obs, -0.5, False, False, env_info # Use Env info dict
 
-            # Validate against the *current* action mask
-            current_mask = self.action_mask() # Re-fetch mask just before check
+            # Validate against the *current* action mask (regenerate mask just before check)
+            current_mask = self.action_mask() # Regenerate mask
+            env_info["action_mask"] = current_mask.astype(bool) # Update info dict immediately
             if not current_mask[action_idx]:
                 logging.warning(f"Step {self.current_step}: Invalid action {action_idx} selected (Mask False). Reason: {self.action_handler.action_reasons.get(action_idx, 'Not valid')}. Available: {np.where(current_mask)[0]}")
                 self.invalid_action_count += 1
                 self.episode_invalid_actions += 1
                 step_reward = -0.1 # Standard penalty
 
-                # Update history even for invalid mask selection
+                # Update Env history even for invalid mask selection
                 if hasattr(self, 'last_n_actions'): self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
                 if hasattr(self, 'last_n_rewards'): self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = step_reward
                 if hasattr(self, 'current_episode_actions'): self.current_episode_actions.append(action_idx)
@@ -895,96 +924,80 @@ class AlphaZeroMTGEnv(gym.Env):
                     logging.error(f"Exceeded invalid action limit ({self.invalid_action_count}). Terminating episode.")
                     done, truncated, step_reward = True, True, -2.0
 
-                obs = self._get_obs_safe()
-                info["action_mask"] = current_mask.astype(bool) # Update mask in info
-                info["invalid_action"] = True
-                info["invalid_action_reason"] = self.action_handler.action_reasons.get(action_idx, 'Not valid')
+                obs = self._get_obs_safe() # Get safe obs from Env
+                env_info["invalid_action"] = True
+                env_info["invalid_action_reason"] = self.action_handler.action_reasons.get(action_idx, 'Not valid')
                 if done: self.ensure_game_result_recorded() # Record if terminated due to invalid limit
-                return obs, step_reward, done, truncated, info
+                return obs, step_reward, done, truncated, env_info
 
             # Reset invalid action counter on valid action
             self.invalid_action_count = 0
 
             # --- Execute Action using ActionHandler ---
-            # Increment step counter only AFTER validation
             self.current_step += 1
-
-            # ActionHandler.apply_action handles the game logic, internal loops, SBAs, stack, rewards etc.
             if not hasattr(self, 'action_handler') or self.action_handler is None:
                 raise RuntimeError("ActionHandler is not initialized.")
 
-            # --- CRITICAL CHANGE: Call apply_action but don't rely on its observation ---
+            # Call ActionHandler.apply_action - it modifies gs and returns results
             action_handler_result = self.action_handler.apply_action(action_idx, context=action_context)
-            reward, done, truncated = action_handler_result[1], action_handler_result[2], action_handler_result[3]
-            
-            # Extract action_mask and other info if available, but don't trust the full observation
-            ah_info = action_handler_result[4] if len(action_handler_result) > 4 else {}
-            info.update(ah_info)
-            
-            # Generate a fresh observation using our more robust _get_obs method
-            obs = self._get_obs()
+            # Unpack results: reward, done, truncated, action_info
+            reward, done, truncated, handler_info = action_handler_result
 
-            # --- Post-Action Environment Updates ---
+            # Update env_info with results from the handler
+            env_info.update(handler_info)
+
+            # --- Post-Action Observation and Mask Generation (Performed by Env) ---
+            # Generate a fresh observation using the environment's _get_obs method
+            obs = self._get_obs()
+            # Generate the next action mask based on the NEW game state
+            self.current_valid_actions = self.action_mask() # Generate and store
+            env_info["action_mask"] = self.current_valid_actions.astype(bool) # Update info dict
+
+            # --- Environment Level Updates ---
             # Update environment-level history/tracking
-            if hasattr(self, 'last_n_actions'):
-                self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
-            if hasattr(self, 'last_n_rewards'):
-                self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = reward
-            if hasattr(self, 'current_episode_actions'):
-                self.current_episode_actions.append(action_idx)
-            if hasattr(self, 'episode_rewards'):
-                self.episode_rewards.append(reward)
+            if hasattr(self, 'last_n_actions'): self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
+            if hasattr(self, 'last_n_rewards'): self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = reward
+            if hasattr(self, 'current_episode_actions'): self.current_episode_actions.append(action_idx)
+            if hasattr(self, 'episode_rewards'): self.episode_rewards.append(reward)
 
             # Ensure game result is recorded if 'done' flag is set
             if done and not getattr(self, '_game_result_recorded', False):
                 self.ensure_game_result_recorded()
 
-            # Final Action Mask in Info should come from the observation generated by ActionHandler
-            # apply_action should already include the latest mask in its returned info dict.
-            if "action_mask" not in info:
-                logging.warning("Info dict returned by ActionHandler.apply_action is missing 'action_mask'.")
-                # Regenerate as fallback
-                info["action_mask"] = self.action_mask().astype(bool)
-
-            # Add detailed logging if enabled
+            # Detailed logging
             if self.detailed_logging:
                 action_type, param = self.action_handler.get_action_info(action_idx)
                 logging.info(f"--- Env Step {self.current_step} ---")
                 logging.info(f"Action Taken: {action_idx} ({action_type}({param})) Context: {action_context}")
-                logging.info(f"Returned State: Turn {gs.turn}, Phase {self.game_state._PHASE_NAMES.get(gs.phase, gs.phase)}, Prio {getattr(gs.priority_player,'name','None')}")
+                logging.info(f"Returned State: Turn {gs.turn}, Phase {gs._PHASE_NAMES.get(gs.phase, gs.phase)}, Prio {getattr(gs.priority_player,'name','None')}")
                 logging.info(f"Reward: {reward:.4f}, Done: {done}, Truncated: {truncated}")
 
-            # Final verification for ALL observation keys (as a safeguard)
+            # Final validation of observation keys (remains useful)
             if hasattr(self, 'observation_space') and isinstance(self.observation_space, spaces.Dict):
-                # Check every key defined in the observation space
                 for key, space in self.observation_space.spaces.items():
                     if key not in obs:
                         logging.critical(f"{key} missing in step return observation! Adding default.")
-                        # Create zero array with correct shape and dtype
                         obs[key] = np.zeros(space.shape, dtype=space.dtype)
-                        
-                        # Add special handling for action_mask
                         if key == "action_mask":
-                            # Action mask should at least allow PASS and CONCEDE
-                            obs[key][11] = True  # PASS_PRIORITY
-                            obs[key][12] = True  # CONCEDE
+                            obs[key][11] = True; obs[key][12] = True # Ensure pass/concede
 
-            return obs, reward, done, truncated, info
+            return obs, reward, done, truncated, env_info
 
         except Exception as e:
             # --- Critical Error Handling within Step ---
-            logging.critical(f"CRITICAL error in step function (Action {action_idx}): {str(e)}", exc_info=True)
-            # Get safe observation
+            logging.critical(f"CRITICAL error in environment step function (Action {action_idx}): {str(e)}", exc_info=True)
+            # Get safe observation from Env
             obs = self._get_obs_safe()
             # Create minimal safe info with an error flag
             mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool); mask[11] = True; mask[12] = True # Pass/Concede
             final_info = {
                 "action_mask": mask,
                 "critical_error": True,
-                "error_message": f"Unhandled Exception: {str(e)}"
+                "error_message": f"Unhandled Exception in Environment Step: {str(e)}",
+                "game_result": "error"
             }
             # End the episode immediately due to critical failure
-            self.ensure_game_result_recorded() # Ensure some result is recorded, even if error
+            self.ensure_game_result_recorded() # Ensure some result is recorded
             return obs, -5.0, True, False, final_info
         
     def _get_obs_safe(self):
