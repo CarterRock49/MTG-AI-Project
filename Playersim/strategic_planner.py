@@ -5959,10 +5959,12 @@ class MTGStrategicPlanner:
 
         # Reduce for complex states to avoid timeouts
         battlefield_size = 0
+        # --- ADDED: Safety check for player objects ---
         if hasattr(gs, 'p1') and gs.p1 and 'battlefield' in gs.p1:
             battlefield_size += len(gs.p1["battlefield"])
         if hasattr(gs, 'p2') and gs.p2 and 'battlefield' in gs.p2:
             battlefield_size += len(gs.p2["battlefield"])
+        # --- END safety check ---
 
         if battlefield_size > 15:
             base_count = 50
@@ -5970,7 +5972,7 @@ class MTGStrategicPlanner:
             base_count = 75
 
         # Reduce for many valid actions (combinatorial explosion)
-        # --- ADDED Safety Check ---
+        # --- MODIFIED: Safety Check for action_handler ---
         if hasattr(gs, 'action_handler') and gs.action_handler:
             try:
                 valid_actions = gs.action_handler.generate_valid_actions()
@@ -5982,8 +5984,7 @@ class MTGStrategicPlanner:
                 # Use default action_count
         else:
             logging.warning("ActionHandler missing in _determine_simulation_count. Using default action count for complexity check.")
-        # --- END Safety Check ---
-
+        # --- END modification ---
 
         # Increase for critical game phases
         current_phase = getattr(gs, 'phase', -1) # Safely get phase
@@ -5991,7 +5992,7 @@ class MTGStrategicPlanner:
             getattr(gs, 'PHASE_DECLARE_ATTACKERS', -1),
             getattr(gs, 'PHASE_DECLARE_BLOCKERS', -1)
         ]
-        if current_phase in critical_phases:
+        if current_phase in critical_phases and current_phase != -1: # Ensure phase value is valid
             base_count = min(200, base_count + 50)
 
         # Scale based on turn (more computation for later turns)
@@ -6015,10 +6016,15 @@ class MTGStrategicPlanner:
         """
         try:
             gs = self.game_state
-            # --- ADDED: Initial GameState/Player validation ---
+            # --- ADDED: Initial GameState/Player/Handler validation ---
             if not gs or not hasattr(gs, 'p1') or not hasattr(gs, 'p2') or not gs.p1 or not gs.p2:
                 logging.error("Recommend action failed: GameState or players not properly initialized.")
                 return None if not valid_actions else valid_actions[0] # Basic fallback
+            if not hasattr(gs, 'action_handler') or not gs.action_handler:
+                logging.error("Recommend action failed: gs.action_handler is missing.")
+                 # Try to re-link if env has one? Unreliable. Fallback.
+                return None if not valid_actions else valid_actions[0] # Fallback if handler missing
+
 
             me = gs.p1 if gs.agent_is_p1 else gs.p2
             opp = gs.p2 if gs.agent_is_p1 else gs.p1
@@ -6033,16 +6039,14 @@ class MTGStrategicPlanner:
             if not valid_actions:
                 logging.warning("No valid actions provided to recommend_action")
                 # Check if PASS_PRIORITY or CONCEDE are possible as absolute fallback
-                if hasattr(gs,'action_handler') and gs.action_handler:
+                try:
                      mask = gs.action_handler.generate_valid_actions()
-                     if mask[11]: return 11 # PASS
-                     if mask[12]: return 12 # CONCEDE
+                     if 11 in mask.nonzero()[0]: return 11 # PASS
+                     if 12 in mask.nonzero()[0]: return 12 # CONCEDE
+                except Exception:
+                     pass # Ignore errors during absolute fallback check
                 return None # No valid actions and cannot generate new ones
 
-            # Ensure action handler exists for later steps
-            if not hasattr(gs, 'action_handler') or not gs.action_handler:
-                 logging.error("Recommend action failed: gs.action_handler is missing.")
-                 return valid_actions[0] # Fallback to first valid
 
             # 1. Analyze current game state
             self.analyze_game_state() # Assuming this handles missing planner/evaluator internally
@@ -6157,16 +6161,15 @@ class MTGStrategicPlanner:
                      return memory_suggestion
 
             # 6. Forward search / sequence evaluation (if MCTS didn't run or failed)
-            # --- Check if planner exists and has method ---
             if hasattr(self, 'strategic_planner') and self.strategic_planner and hasattr(self.strategic_planner, 'find_best_play_sequence'):
                 try:
-                    best_sequence, best_value = self.find_best_play_sequence(valid_actions, depth=2)
+                    # Pass list copy for safety
+                    best_sequence, best_value = self.find_best_play_sequence(list(valid_actions), depth=2)
                     if best_sequence:
                         logging.debug(f"Best play sequence found with value {best_value}")
                         return best_sequence[0]
                 except Exception as seq_e:
                      logging.warning(f"Error during find_best_play_sequence: {seq_e}")
-            # --- END check ---
 
             # 7. Individual action evaluation (Heuristics)
             action_evaluations = []
@@ -6187,23 +6190,20 @@ class MTGStrategicPlanner:
                         reason = "Block"
                     elif action_type == "ACTIVATE_ABILITY" and isinstance(param, tuple) and len(param)==2:
                         value, reason = self.evaluate_ability_activation(param[0], param[1]) if hasattr(self, 'evaluate_ability_activation') else (0.5, "Ability Activation")
-                    elif action_type == "END_TURN":
-                        value, reason = 0.1, "End Turn" # Low value default
-                    elif action_type == "PASS_PRIORITY":
-                        value, reason = 0.1, "Pass Priority" # Low value default unless stack requires pass
+                    elif action_type == "END_TURN" or action_type == "PASS_PRIORITY": # Combine pass/end turn
+                         value = 0.1 # Low value default, but non-zero
+                         reason = action_type # Use specific name
                     # Add other action types
                 except Exception as eval_e:
-                    logging.warning(f"Error evaluating action {action_idx}: {eval_e}")
-                    value, reason = 0.1, "Eval Error Fallback" # Low value on error
+                    logging.warning(f"Error evaluating action {action_idx} ({action_type}): {eval_e}")
+                    value, reason = 0.05, "Eval Error Fallback" # Very low value on error
 
                 action_evaluations.append((action_idx, value, reason))
 
             action_evaluations.sort(key=lambda x: x[1], reverse=True)
 
             # 8. Exploration vs Exploitation
-            # --- Check risk tolerance attr ---
             risk = getattr(self, 'risk_tolerance', 0.5) * 0.2 # Reduced exploration chance
-            # --- End check ---
             if random.random() < risk and len(action_evaluations) > 1:
                 # Choose randomly from top 3 (if available)
                 top_n = min(3, len(action_evaluations))
@@ -6217,14 +6217,16 @@ class MTGStrategicPlanner:
                 logging.debug(f"Best heuristic action: {reason} (value={value:.2f})")
                 return best_action
 
-            # 10. Absolute Fallback (should only happen if valid_actions was empty initially, but handled above)
-            logging.error("Recommend_action reached end without selecting an action.")
-            # Attempt to Pass or Concede as final measure
-            mask = gs.action_handler.generate_valid_actions() if hasattr(gs,'action_handler') and gs.action_handler else None
-            if mask is not None:
-                 if mask[11]: return 11 # PASS
-                 if mask[12]: return 12 # CONCEDE
-            return None # No action possible
+            # 10. Absolute Fallback (should be unreachable if valid_actions has PASS/CONCEDE)
+            logging.error("Recommend_action reached end without selecting an action, even PASS/CONCEDE seems missing.")
+            # Check again if PASS or CONCEDE are possible
+            try:
+                mask = gs.action_handler.generate_valid_actions()
+                if mask[11]: return 11
+                if mask[12]: return 12
+            except Exception:
+                pass
+            return None # Truly stuck
 
         except Exception as e:
             logging.error(f"CRITICAL Error in recommend_action: {str(e)}", exc_info=True)

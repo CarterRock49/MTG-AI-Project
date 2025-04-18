@@ -99,10 +99,16 @@ class AlphaZeroMTGEnv(gym.Env):
         self.game_state = GameState(self.card_db, max_turns, max_hand_size, max_battlefield)
 
         # Initialize action handler AFTER GameState
-        self.action_handler = ActionHandler(self.game_state)
-        # *** UPDATED: Set attribute AFTER confirming __slots__ allows it ***
-        self.game_state.action_handler = self.action_handler # This should now work
-        logging.debug("Linked ActionHandler instance to GameState.")
+        # --- Ensure ActionHandler exists and link it ---
+        try:
+             from .actions import ActionHandler # Ensure import
+             self.action_handler = ActionHandler(self.game_state)
+             self.game_state.action_handler = self.action_handler
+             logging.debug("Linked ActionHandler instance to GameState.")
+        except ImportError:
+             logging.error("ActionHandler class not found. Environment cannot function correctly.")
+             self.action_handler = None
+             # GameState action_handler will remain None or be set later by GS init
 
 
         # GameState initializes its own subsystems now
@@ -119,6 +125,7 @@ class AlphaZeroMTGEnv(gym.Env):
         logging.info(f"Using keyword dimension: {keyword_dimension}")
 
         # --- UPDATED: Observation Space with Context Facilitation Fields ---
+        # *** MODIFIED: Updated estimated_opponent_hand shape ***
         self.observation_space = spaces.Dict({
             # --- Existing Fields (mostly unchanged shapes) ---
             "phase": spaces.Box(low=0, high=MAX_PHASE, shape=(1,), dtype=np.int32),
@@ -194,7 +201,7 @@ class AlphaZeroMTGEnv(gym.Env):
             "ability_recommendations": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5, 2), dtype=np.float32),
             "strategic_metrics": spaces.Box(low=-1, high=1, shape=(10,), dtype=np.float32),
             "position_advantage": spaces.Box(low=-1, high=1, shape=(1,), dtype=np.float32),
-            "estimated_opponent_hand": spaces.Box(low=-1, high=50, shape=(self.max_hand_size, self._feature_dim), dtype=np.float32),
+            "estimated_opponent_hand": spaces.Box(low=-1, high=50, shape=(self.max_hand_size, self._feature_dim), dtype=np.float32), # Use dynamic feature dim
             "deck_composition_estimate": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
             "opponent_archetype": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
             "future_state_projections": spaces.Box(low=-1, high=1, shape=(7,), dtype=np.float32),
@@ -217,7 +224,7 @@ class AlphaZeroMTGEnv(gym.Env):
             "bottomable_cards": spaces.Box(low=0, high=1, shape=(self.max_hand_size,), dtype=bool),
             "dredgeable_cards_in_gy": spaces.Box(low=-1, high=100, shape=(6,), dtype=np.int32),
         })
-        # --- End Observation Space Update ---
+        # *** End Observation Space Modification ***
         self.action_space = spaces.Discrete(self.ACTION_SPACE_SIZE)
         # Add memory for actions and rewards
         self.last_n_actions = np.full(self.action_memory_size, -1, dtype=np.int32) # Use -1 for padding
@@ -1517,68 +1524,73 @@ class AlphaZeroMTGEnv(gym.Env):
         return weight
     
     def _estimate_opponent_hand(self):
-        """Create a probabilistic model of opponent's hand based on known information"""
+        """Create a probabilistic model of opponent's hand based on known information. Uses self._feature_dim."""
         gs = self.game_state
         opp = gs.p2 if gs.agent_is_p1 else gs.p1
-        
+
+        # --- Use the environment's stored feature dimension ---
+        feature_dim = self._feature_dim
+        # --- End modification ---
+
         # Get known cards in opponent's deck
         known_deck_cards = set()
+        # Check existence of zones safely
         for zone in ["battlefield", "graveyard", "exile"]:
-            for card_id in opp[zone]:
-                known_deck_cards.add(card_id)
-        
+            if opp and zone in opp: # Ensure player and zone exist
+                for card_id in opp[zone]:
+                    known_deck_cards.add(card_id)
+
         # Count cards by type in opponent's visible cards to infer deck strategy
         visible_creatures = 0
         visible_instants = 0
         visible_artifacts = 0
         color_count = np.zeros(5)  # WUBRG
-        
+
         for card_id in known_deck_cards:
             card = gs._safe_get_card(card_id)
-            if not card:
-                continue
-                
+            if not card: continue
+
             if hasattr(card, 'card_types'):
-                if 'creature' in card.card_types:
-                    visible_creatures += 1
-                if 'instant' in card.card_types:
-                    visible_instants += 1
-                if 'artifact' in card.card_types:
-                    visible_artifacts += 1
-                    
+                if 'creature' in card.card_types: visible_creatures += 1
+                if 'instant' in card.card_types: visible_instants += 1
+                if 'artifact' in card.card_types: visible_artifacts += 1
+
             if hasattr(card, 'colors'):
-                for i, color in enumerate(card.colors):
-                    color_count[i] += color
-        
+                # --- Ensure correct length before accessing ---
+                if len(card.colors) == 5:
+                     for i, color_val in enumerate(card.colors):
+                         color_count[i] += color_val
+                # --- End modification ---
+
         # Create estimated hand based on deck profile
-        estimated_hand = np.zeros((self.max_hand_size, 223), dtype=np.float32)
-        
+        estimated_hand = np.zeros((self.max_hand_size, feature_dim), dtype=np.float32) # Use correct feature_dim
+
         # Create pool of likely cards based on observed deck profile
         likely_cards = []
-        
+
         # Modified part: iterate over card_db differently depending on its type
-        # If card_db is a list
         if isinstance(gs.card_db, dict):
             for card_id, card in gs.card_db.items():
-                # Skip known cards
-                if card_id in known_deck_cards:
-                    continue
-                
-                # Card weighting logic
+                if card_id in known_deck_cards: continue # Skip known cards
                 weight = self._calculate_card_likelihood(card, color_count, visible_creatures, visible_instants, visible_artifacts)
                 likely_cards.append((card_id, weight))
         else:
             logging.warning("Unexpected card_db format")
-        
+
         # Sort by weight and select top cards
         likely_cards.sort(key=lambda x: x[1], reverse=True)
-        
+
         # Fill estimated hand with top weighted cards
-        hand_size = min(len(opp["hand"]), self.max_hand_size)
-        for i in range(hand_size):
+        opp_hand_size = len(opp.get("hand", [])) if opp else 0 # Safe get hand size
+        hand_size_to_fill = min(opp_hand_size, self.max_hand_size)
+        for i in range(hand_size_to_fill):
             if i < len(likely_cards):
-                estimated_hand[i] = self._get_card_feature(likely_cards[i][0], 223)
-        
+                # --- Pass the correct feature_dim ---
+                estimated_hand[i] = self._get_card_feature(likely_cards[i][0], feature_dim)
+            else: # Pad with zeros if likely_cards run out before filling estimated hand size
+                 estimated_hand[i] = np.zeros(feature_dim, dtype=np.float32)
+        # The rest of the estimated_hand array remains zeros
+
         return estimated_hand
     
     def _log_episode_summary(self):
