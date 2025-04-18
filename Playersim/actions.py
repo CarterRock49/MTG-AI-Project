@@ -1673,8 +1673,6 @@ class ActionHandler:
             return ACTION_MEANINGS.get(action_idx, ("INVALID", None))
         logging.error(f"Action index {action_idx} out of bounds (0-{self.ACTION_SPACE_SIZE-1})")
         return "INVALID", None
-    
-
       
     def apply_action(self, action_idx, **kwargs): # Add **kwargs to accept context from env
             """

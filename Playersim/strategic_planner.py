@@ -7,17 +7,18 @@ import re
 class MTGStrategicPlanner:
     """Advanced strategic decision making system for Magic: The Gathering AI."""
     
+
     def __init__(self, game_state, card_evaluator=None, combat_resolver=None):
-        self.game_state = game_state
+        self.game_state = game_state # Must be a valid GameState instance
         self.card_evaluator = card_evaluator
         self.combat_resolver = combat_resolver
-        
+
         # Initialize strategy parameters with safe defaults
         self.aggression_level = 0.5  # 0.0 = defensive, 1.0 = all-out aggression
         self.risk_tolerance = 0.5    # 0.0 = risk averse, 1.0 = high risk
         self.strategy_type = "midrange"  # Default strategy type
-        
-        # Strategy types
+
+        # Strategy types (Keep existing definitions)
         self.strategies = {
             "aggro": {
                 "description": "Aggressive strategy: Play fast creatures and attack quickly",
@@ -43,55 +44,59 @@ class MTGStrategicPlanner:
                 "risk_tolerance": 0.9,
                 "card_weights": {"creature": 0.8, "instant": 1.0, "sorcery": 1.2, "artifact": 1.3, "enchantment": 1.3, "planeswalker": 0.7, "land": 0.9}
             }
+            # Keep other strategies...
         }
-        
+
         # Always initialize with a default strategy first
         self._initialize_strategy_params("midrange")
-        
+
         # Remember the current game state analysis
         self.current_analysis = None
         self.opponent_archetype = None
-    
-        
-        # Initialize deck archetype detection
-        self._detect_deck_archetype()
-        
+
+        # Defer archetype detection until init_after_reset or when needed
+        logging.debug("Strategic Planner initialized. Deck archetype detection deferred.")
+
+
     def init_after_reset(self):
         """
-        Initialize the strategic planner after the game state has been reset 
-        and p1/p2 have been established.
+        Initialize the strategic planner after the game state has been reset
+        and p1/p2 have been established. Relies on GameState being fully ready.
         """
         try:
             gs = self.game_state
-            
-            # Check if game state is properly initialized
+
+            # Check if game state is properly initialized including action_handler
             if not hasattr(gs, 'p1') or not hasattr(gs, 'p2') or not gs.p1 or not gs.p2:
-                logging.debug("Cannot initialize strategic planner: game state not fully set up yet")
-                # Just return silently - we already have a default strategy from __init__
+                logging.warning("StrategicPlanner cannot init_after_reset: GS players not ready.")
                 return
-            
+            # --- Check if action_handler is available on the GameState ---
+            if not hasattr(gs, 'action_handler') or gs.action_handler is None:
+                logging.warning("StrategicPlanner cannot init_after_reset: GS action_handler not ready.")
+                return
+            # --- End Check ---
+
             # Ensure player states have minimum required attributes
             for player in [gs.p1, gs.p2]:
                 if not all(attr in player for attr in ["hand", "battlefield", "library"]):
-                    logging.debug("Player state missing required attributes, using default strategy")
+                    logging.warning(f"StrategicPlanner init_after_reset: Player state missing attributes ({player.get('name', 'Unknown')}). Using default strategy.")
+                    self._initialize_strategy_params('midrange')
                     return
-            
+
             # Detect deck archetype with proper error handling
             try:
                 archetype = self._detect_deck_archetype()
                 logging.debug(f"Strategic planner initialized with deck archetype: {archetype}")
             except Exception as e:
-                logging.warning(f"Error detecting deck archetype: {e}")
+                logging.warning(f"Error detecting deck archetype during init_after_reset: {e}")
                 import traceback
                 logging.debug(traceback.format_exc())
-                # Default to midrange strategy in case of errors
-                self._initialize_strategy_params('midrange')
+                self._initialize_strategy_params('midrange') # Default on error
         except Exception as e:
-            logging.error(f"Error initializing strategic planner: {e}")
+            logging.error(f"Error in strategic planner init_after_reset: {e}")
             import traceback
             logging.error(traceback.format_exc())
-            # Ensure a default strategy is always set
-            self._initialize_strategy_params('midrange')
+            self._initialize_strategy_params('midrange') # Ensure default
 
     def evaluate_special_card_types(self, battlefield, controller):
         """Evaluate the value and potential of special card types like Sagas and Battles"""
@@ -6016,19 +6021,31 @@ class MTGStrategicPlanner:
         """
         try:
             gs = self.game_state
-            # --- ADDED: Initial GameState/Player/Handler validation ---
+            # --- MODIFIED: Centralized Action Handler Check ---
+            # Access action_handler VIA the game_state instance
+            action_handler = getattr(gs, 'action_handler', None)
+            if not action_handler:
+                logging.error("Recommend action cannot proceed: gs.action_handler is missing.")
+                # Attempt safe fallback based only on valid_actions list
+                if valid_actions:
+                    # Ensure valid_actions is a list or convert from mask
+                    if isinstance(valid_actions, np.ndarray) and valid_actions.dtype == bool:
+                         valid_actions = np.where(valid_actions)[0].tolist()
+                    if not isinstance(valid_actions, list): valid_actions = [] # Ensure list
+
+                    if 11 in valid_actions: return 11 # Prioritize PASS
+                    if 12 in valid_actions: return 12 # Prioritize CONCEDE
+                    if valid_actions: return valid_actions[0] # Last resort: first valid
+                return None # No valid actions given either
+            # --- END Modification ---
+
+            # --- Initial GameState/Player validation ---
             if not gs or not hasattr(gs, 'p1') or not hasattr(gs, 'p2') or not gs.p1 or not gs.p2:
                 logging.error("Recommend action failed: GameState or players not properly initialized.")
-                return None if not valid_actions else valid_actions[0] # Basic fallback
-            if not hasattr(gs, 'action_handler') or not gs.action_handler:
-                logging.error("Recommend action failed: gs.action_handler is missing.")
-                 # Try to re-link if env has one? Unreliable. Fallback.
-                return None if not valid_actions else valid_actions[0] # Fallback if handler missing
-
+                return None if not valid_actions else valid_actions[0]
 
             me = gs.p1 if gs.agent_is_p1 else gs.p2
             opp = gs.p2 if gs.agent_is_p1 else gs.p1
-            # --- END validation ---
 
             # Handle case where no valid actions are provided
             if valid_actions is None: # Check for None explicitly
@@ -6036,32 +6053,39 @@ class MTGStrategicPlanner:
                  return None
             if isinstance(valid_actions, np.ndarray) and valid_actions.dtype == bool: # Handle mask case
                  valid_actions = np.where(valid_actions)[0].tolist()
+            if not isinstance(valid_actions, list): # Ensure list type
+                 logging.error(f"Valid actions provided is not a list or ndarray: {type(valid_actions)}")
+                 return None
             if not valid_actions:
                 logging.warning("No valid actions provided to recommend_action")
                 # Check if PASS_PRIORITY or CONCEDE are possible as absolute fallback
                 try:
-                     mask = gs.action_handler.generate_valid_actions()
-                     if 11 in mask.nonzero()[0]: return 11 # PASS
-                     if 12 in mask.nonzero()[0]: return 12 # CONCEDE
-                except Exception:
+                     # Use the verified handler instance
+                     mask = action_handler.generate_valid_actions()
+                     valid_now = mask.nonzero()[0]
+                     if 11 in valid_now: return 11 # PASS
+                     if 12 in valid_now: return 12 # CONCEDE
+                except Exception as e:
+                     logging.error(f"Error regenerating mask in recommend_action fallback: {e}")
                      pass # Ignore errors during absolute fallback check
                 return None # No valid actions and cannot generate new ones
 
 
             # 1. Analyze current game state
-            self.analyze_game_state() # Assuming this handles missing planner/evaluator internally
+            # Use self.analyze_game_state which checks if planner exists
+            self.analyze_game_state()
             self.adapt_strategy()
 
-            # 2. Check strategy memory for suggestions
+            # 2. Check strategy memory for suggestions (Keep existing logic)
             memory_suggestion = None
-            if hasattr(self, 'strategy_memory') and self.strategy_memory: # Check if memory exists
+            if hasattr(gs, 'strategy_memory') and gs.strategy_memory: # Check if memory exists on GS
                 try:
                     # Pass the list of valid actions
-                    memory_suggestion = self.strategy_memory.get_suggested_action(gs, valid_actions)
+                    memory_suggestion = gs.strategy_memory.get_suggested_action(gs, valid_actions)
                     if memory_suggestion is not None and memory_suggestion in valid_actions:
                         # High confidence check
-                        pattern = self.strategy_memory.extract_strategy_pattern(gs)
-                        strategy = self.strategy_memory.strategies.get(pattern)
+                        pattern = gs.strategy_memory.extract_strategy_pattern(gs)
+                        strategy = gs.strategy_memory.strategies.get(pattern)
                         if strategy and strategy.get('success_rate', 0) > 0.8 and strategy.get('count', 0) > 5:
                             logging.debug(f"Using high-confidence memory-suggested action: {memory_suggestion}")
                             return memory_suggestion
@@ -6078,32 +6102,33 @@ class MTGStrategicPlanner:
 
             if is_critical_decision and hasattr(self, 'monte_carlo_search'): # Check if MCTS exists
                 logging.info("Critical decision point detected - using Monte Carlo Tree Search")
-                simulation_count = self._determine_simulation_count()
-                mcts_action = self.monte_carlo_search(num_simulations=simulation_count)
+                simulation_count = self._determine_simulation_count() # Uses safe check inside
+                mcts_action = self.monte_carlo_search(num_simulations=simulation_count) # Assumes MCTS handles missing handler
 
                 if mcts_action is not None and mcts_action in valid_actions:
+                    logging.debug(f"MCTS recommendation: {mcts_action}")
                     return mcts_action
                 else:
                     logging.warning(f"MCTS selected invalid action {mcts_action} or failed. Falling back to heuristic.")
 
 
-            # 4. Action prioritization (Heuristic approach or MCTS fallback)
+            # 4. Action prioritization (Heuristic approach or MCTS fallback) (Keep existing logic)
             action_priorities = []
             high_priority_actions = []
 
             # Check land play
             if not me.get("land_played", False): # Safe get
                  for action_idx in valid_actions:
-                     # --- Use safe action info getter ---
-                     action_type, param = gs.action_handler.get_safe_action_info(action_idx)
-                     if action_type == "PLAY_CARD" and param is not None:
+                     # Use the verified handler instance
+                     action_type, param = action_handler.get_action_info(action_idx)
+                     if action_type == "PLAY_LAND" and param is not None:
                          card = gs._safe_get_card(param)
                          if card and 'land' in getattr(card, 'type_line', ''):
                              logging.debug("Prioritizing land play")
-                             return action_idx # Prioritize first available land play
+                             return action_idx # Immediate return for land drop
 
 
-            # Check for lethal damage or threat removal
+            # Check for lethal damage or threat removal (Keep existing logic)
             opp_life = opp.get('life', 20)
             try:
                  threats = self.assess_threats()[:3] # Assess threats safely
@@ -6111,129 +6136,153 @@ class MTGStrategicPlanner:
                  threats = []
 
             for action_idx in valid_actions:
-                action_type, param = gs.action_handler.get_safe_action_info(action_idx)
-                if action_type is None: continue # Skip if action info is invalid
+                # Use the verified handler instance
+                action_type, param = action_handler.get_action_info(action_idx)
+                if action_type is None: continue
 
                 # Evaluate potential lethal attack
                 if action_type == "DECLARE_ATTACKER" and param:
-                     my_power = 0
-                     for att_id in param:
-                          att_card = gs._safe_get_card(att_id)
-                          my_power += getattr(att_card,'power',0) if att_card else 0
-                     if my_power >= opp_life:
-                          attack_value = self.evaluate_attack_action(param) # Evaluate the specific attack
+                    my_power = 0
+                    # Correctly sum power based on param which should be attacker IDs or index?
+                    # Assuming param IS the battlefield index for now, matching action dict
+                    if isinstance(param, int) and param < len(me.get('battlefield',[])):
+                        attacker_id = me['battlefield'][param]
+                        att_card = gs._safe_get_card(attacker_id)
+                        my_power = getattr(att_card,'power',0) if att_card else 0
+                    elif isinstance(param, list): # If param is list of IDs
+                        for att_id in param:
+                            att_card = gs._safe_get_card(att_id)
+                            my_power += getattr(att_card,'power',0) if att_card else 0
+                    else: # Invalid param for attacker
+                        continue
+
+                    if my_power >= opp_life:
+                          attack_value = self.evaluate_attack_action([attacker_id] if isinstance(param, int) else param)
                           high_priority_actions.append((action_idx, attack_value + 2.0, "Potential lethal attack"))
 
                 # Evaluate removing top threat
-                elif action_type in ["PLAY_CARD", "ACTIVATE_ABILITY"]:
-                     if threats and threats[0]:
-                         top_threat = threats[0]
-                         top_threat_id = top_threat.get("card_id")
-                         can_remove = False
-                         text_to_check = ""
+                elif action_type in ["PLAY_SPELL", "ACTIVATE_ABILITY"]:
+                    if threats and threats[0]:
+                        top_threat = threats[0]
+                        top_threat_id = top_threat.get("card_id")
+                        can_remove = False
+                        text_to_check = ""
 
-                         if action_type == "PLAY_CARD" and param:
-                             card = gs._safe_get_card(param)
-                             text_to_check = getattr(card,'oracle_text','').lower() if card else ""
-                         elif action_type == "ACTIVATE_ABILITY" and isinstance(param, tuple) and len(param) == 2:
-                             ability = gs.action_handler.get_ability_object(param[0], param[1])
-                             text_to_check = getattr(ability, 'effect', getattr(ability, 'effect_text', '')).lower() if ability else ""
+                        # Adjust getting card/ability info
+                        if action_type == "PLAY_SPELL" and param is not None and isinstance(param, int) and param < len(me.get('hand',[])):
+                            card_id = me['hand'][param]
+                            card = gs._safe_get_card(card_id)
+                            text_to_check = getattr(card,'oracle_text','').lower() if card else ""
+                        elif action_type == "ACTIVATE_ABILITY" and isinstance(param, tuple) and len(param) == 2:
+                            ability = action_handler.get_ability_object(param[0], param[1]) # Use helper
+                            text_to_check = getattr(ability, 'effect', getattr(ability, 'effect_text', '')).lower() if ability else ""
+                        else: # Handle param being None for ACTIVATE_ABILITY if context used instead
+                            # Need access to context here? Complex. Assume basic structure for now.
+                            pass
 
-                         if any(term in text_to_check for term in ['destroy', 'exile', 'damage', 'return target']):
-                             can_remove = True
+                        if any(term in text_to_check for term in ['destroy', 'exile', 'damage', 'return target']):
+                            can_remove = True
 
-                         if can_remove:
-                              threat_level = top_threat.get('level', 1.0)
-                              value = 1.0 + threat_level * 0.5 # Base value + scaled threat level
-                              high_priority_actions.append((action_idx, value, f"Remove threat {top_threat.get('name','N/A')}"))
+                        if can_remove:
+                            threat_level = top_threat.get('level', 1.0)
+                            value = 1.0 + threat_level * 0.5
+                            high_priority_actions.append((action_idx, value, f"Remove threat {top_threat.get('name','N/A')}"))
 
             if high_priority_actions:
                 high_priority_actions.sort(key=lambda x: x[1], reverse=True)
                 logging.debug(f"Taking high priority action: {high_priority_actions[0][2]}")
                 return high_priority_actions[0][0]
 
-            # 5. Memory suggestion (re-checked)
+            # 5. Memory suggestion (re-checked) (Keep existing logic)
             if memory_suggestion is not None and memory_suggestion in valid_actions:
-                 pattern = self.strategy_memory.extract_strategy_pattern(gs)
-                 strategy = self.strategy_memory.strategies.get(pattern)
+                 pattern = gs.strategy_memory.extract_strategy_pattern(gs)
+                 strategy = gs.strategy_memory.strategies.get(pattern)
                  if strategy and strategy.get('success_rate', 0) > 0.6:
                      logging.debug(f"Using memory-suggested action: {memory_suggestion}")
                      return memory_suggestion
 
-            # 6. Forward search / sequence evaluation (if MCTS didn't run or failed)
-            if hasattr(self, 'strategic_planner') and self.strategic_planner and hasattr(self.strategic_planner, 'find_best_play_sequence'):
+            # 6. Forward search / sequence evaluation (Keep existing logic)
+            if hasattr(self, 'find_best_play_sequence') and self.find_best_play_sequence:
                 try:
-                    # Pass list copy for safety
                     best_sequence, best_value = self.find_best_play_sequence(list(valid_actions), depth=2)
                     if best_sequence:
-                        logging.debug(f"Best play sequence found with value {best_value}")
+                        logging.debug(f"Best play sequence found with value {best_value}, taking action {best_sequence[0]}")
                         return best_sequence[0]
                 except Exception as seq_e:
                      logging.warning(f"Error during find_best_play_sequence: {seq_e}")
 
-            # 7. Individual action evaluation (Heuristics)
+            # 7. Individual action evaluation (Heuristics) (Keep existing logic, ensure safe get_action_info)
             action_evaluations = []
             for action_idx in valid_actions:
-                action_type, param = gs.action_handler.get_safe_action_info(action_idx)
+                # Use the verified handler instance
+                action_type, param = action_handler.get_action_info(action_idx)
                 if action_type is None: continue
 
-                value, reason = 0.5, "Default Eval" # Default values
-                try: # Wrap evaluations in try-except
-                    if action_type == "PLAY_CARD" and param:
-                        value = self.evaluate_play_card_action(param) if hasattr(self, 'evaluate_play_card_action') else 0.5
+                value, reason = 0.5, "Default Eval"
+                try:
+                    # Keep existing evaluation logic, assume context handled correctly by get_ability_object etc.
+                    if action_type == "PLAY_SPELL" and param is not None and isinstance(param, int) and param < len(me.get("hand",[])):
+                        value = self.evaluate_play_card_action(me['hand'][param]) if hasattr(self, 'evaluate_play_card_action') else 0.5
                         reason = "Card Play"
-                    elif action_type == "DECLARE_ATTACKER" and param:
-                        value = self.evaluate_attack_action(param) if hasattr(self, 'evaluate_attack_action') else 0.5
-                        reason = "Attack"
+                    elif action_type == "DECLARE_ATTACKER" and param is not None: # Assuming param is battlefield_idx
+                         if isinstance(param, int) and param < len(me.get('battlefield',[])):
+                             value = self.evaluate_attack_action([me['battlefield'][param]]) if hasattr(self, 'evaluate_attack_action') else 0.5
+                             reason = "Attack"
+                         elif isinstance(param, list): # If action allows list of attackers
+                              value = self.evaluate_attack_action(param) if hasattr(self, 'evaluate_attack_action') else 0.5
+                              reason = "Multi-Attack"
                     elif action_type == "DECLARE_BLOCKER" and isinstance(param, tuple) and len(param)==2:
                         value = self.evaluate_block_action(param[0], param[1]) if hasattr(self, 'evaluate_block_action') else 0.5
                         reason = "Block"
-                    elif action_type == "ACTIVATE_ABILITY" and isinstance(param, tuple) and len(param)==2:
-                        value, reason = self.evaluate_ability_activation(param[0], param[1]) if hasattr(self, 'evaluate_ability_activation') else (0.5, "Ability Activation")
-                    elif action_type == "END_TURN" or action_type == "PASS_PRIORITY": # Combine pass/end turn
-                         value = 0.1 # Low value default, but non-zero
-                         reason = action_type # Use specific name
+                    elif action_type == "ACTIVATE_ABILITY":
+                        # Get ability object safely using handler helper
+                        ability_obj = action_handler.get_ability_object_from_context(action_idx) # Uses index lookup
+                        if ability_obj:
+                             bf_idx, internal_ability_idx = action_handler.get_indices_from_activate_action(action_idx)
+                             value, reason = self.evaluate_ability_activation(bf_idx, internal_ability_idx) if hasattr(self, 'evaluate_ability_activation') else (0.5, "Ability Activation")
+                    elif action_type in ["END_TURN", "PASS_PRIORITY"]:
+                         is_stack_empty = not gs.stack
+                         value = 0.2 if is_stack_empty else 0.1
+                         reason = action_type
                     # Add other action types
                 except Exception as eval_e:
                     logging.warning(f"Error evaluating action {action_idx} ({action_type}): {eval_e}")
-                    value, reason = 0.05, "Eval Error Fallback" # Very low value on error
+                    value, reason = 0.05, "Eval Error Fallback"
 
                 action_evaluations.append((action_idx, value, reason))
 
             action_evaluations.sort(key=lambda x: x[1], reverse=True)
 
-            # 8. Exploration vs Exploitation
-            risk = getattr(self, 'risk_tolerance', 0.5) * 0.2 # Reduced exploration chance
+            # 8. Exploration vs Exploitation (Keep existing logic)
+            risk = getattr(self, 'risk_tolerance', 0.5) * 0.2
             if random.random() < risk and len(action_evaluations) > 1:
-                # Choose randomly from top 3 (if available)
                 top_n = min(3, len(action_evaluations))
                 chosen_action, value, reason = random.choice(action_evaluations[:top_n])
-                logging.debug(f"Exploration choice: {reason} (value={value:.2f})")
+                logging.debug(f"Exploration choice: {reason} (value={value:.2f}), Action: {chosen_action}")
                 return chosen_action
 
-            # 9. Choose best heuristic action
+            # 9. Choose best heuristic action (Keep existing logic)
             if action_evaluations:
                 best_action, value, reason = action_evaluations[0]
-                logging.debug(f"Best heuristic action: {reason} (value={value:.2f})")
+                logging.debug(f"Best heuristic action: {reason} (value={value:.2f}), Action: {best_action}")
                 return best_action
 
-            # 10. Absolute Fallback (should be unreachable if valid_actions has PASS/CONCEDE)
-            logging.error("Recommend_action reached end without selecting an action, even PASS/CONCEDE seems missing.")
-            # Check again if PASS or CONCEDE are possible
+            # 10. Absolute Fallback (Keep existing logic)
+            logging.error("Recommend_action reached end without selecting an action. No heuristics passed.")
             try:
-                mask = gs.action_handler.generate_valid_actions()
-                if mask[11]: return 11
-                if mask[12]: return 12
-            except Exception:
-                pass
+                # Use verified handler instance
+                mask = action_handler.generate_valid_actions()
+                valid_now = mask.nonzero()[0]
+                if 11 in valid_now: return 11 # PASS
+                if 12 in valid_now: return 12 # CONCEDE
+            except Exception: pass
             return None # Truly stuck
 
         except Exception as e:
             logging.error(f"CRITICAL Error in recommend_action: {str(e)}", exc_info=True)
             # Attempt graceful fallback
             if valid_actions and isinstance(valid_actions, list) and len(valid_actions) > 0:
-                # Prioritize PASS if available
-                if 11 in valid_actions: return 11
+                if 11 in valid_actions: return 11 # Prioritize PASS if possible
                 return valid_actions[0] # Return first valid as absolute fallback
             return None # Truly stuck if no valid actions list available
 
@@ -6390,190 +6439,253 @@ class MTGStrategicPlanner:
         
         return normalized_similarity
     
+
     def monte_carlo_search(self, num_simulations=200, exploration_weight=1.0):
         """
         Perform Monte Carlo Tree Search to find the best action.
-        
+        Includes safety checks for action_handler.
+
         Args:
             num_simulations: Number of simulations to run
             exploration_weight: Weight for exploration in UCB formula
-            
+
         Returns:
-            Best action found by MCTS
+            Best action found by MCTS, or None on failure
         """
         gs = self.game_state
-        
+        # --- ADDED: Safety check for action handler ---
+        action_handler = getattr(gs, 'action_handler', None)
+        if not action_handler:
+            logging.error("MCTS cannot run: gs.action_handler is missing.")
+            return None
+        # --- END check ---
+
         # Create root node
-        root = MCTSNode(game_state=gs.clone())
-        
+        root = MCTSNode(game_state=gs.clone()) # Clone state for root
+
         # Get valid actions
-        valid_actions = gs.action_handler.generate_valid_actions()
-        valid_actions = np.where(valid_actions)[0].tolist()
-        
+        try:
+             valid_actions = action_handler.generate_valid_actions()
+             valid_actions = np.where(valid_actions)[0].tolist()
+             if not valid_actions:
+                 logging.warning("MCTS: No valid actions at root node.")
+                 return None
+        except Exception as e:
+             logging.error(f"MCTS Error getting valid actions at root: {e}")
+             return None
+
         # Use strategic evaluation to initialize action priors
         action_priors = {}
         for action in valid_actions:
-            action_type, param = gs.action_handler.get_action_info(action)
-            
-            # Get basic evaluation based on action type
-            if action_type == "PLAY_CARD":
-                value = self.evaluate_play_card_action(param)
-            elif action_type == "DECLARE_ATTACKER":
-                value = self.evaluate_attack_action(param)
-            elif action_type == "ACTIVATE_ABILITY":
-                card_id, ability_idx = param
-                value, _ = self.evaluate_ability_activation(card_id, ability_idx)
-            else:
-                value = self._quick_action_evaluation(gs, action_type, param)
-                
-            # Convert to probability (softmax)
-            action_priors[action] = max(0.01, value)  # Ensure non-zero probability
-        
+            # --- Use verified action_handler ---
+            action_type, param = action_handler.get_action_info(action)
+            value = 0.5 # Default value
+            try:
+                if action_type == "PLAY_CARD" and param:
+                    value = self.evaluate_play_card_action(param) if hasattr(self,'evaluate_play_card_action') else 0.5
+                elif action_type == "DECLARE_ATTACKER" and param:
+                    value = self.evaluate_attack_action(param) if hasattr(self,'evaluate_attack_action') else 0.5
+                elif action_type == "ACTIVATE_ABILITY" and isinstance(param,tuple) and len(param)==2:
+                    value, _ = self.evaluate_ability_activation(param[0], param[1]) if hasattr(self,'evaluate_ability_activation') else (0.5, "")
+                else:
+                    value = self._quick_action_evaluation(gs, action_type, param) if hasattr(self,'_quick_action_evaluation') else 0.5
+            except Exception as eval_e:
+                 logging.warning(f"MCTS Prior Eval Error for action {action}: {eval_e}")
+
+            action_priors[action] = max(0.01, value) # Ensure non-zero probability
+
         # Normalize priors
         total = sum(action_priors.values())
         if total > 0:
-            for action in action_priors:
-                action_priors[action] /= total
-        
+            for action in action_priors: action_priors[action] /= total
+        else: # Fallback to uniform if all evals failed
+             action_priors = {a: 1.0/len(valid_actions) for a in valid_actions}
+
         # Expand root with valid actions and priors
         root.expand(valid_actions, action_priors)
-        
+
         # Run simulations
         for i in range(num_simulations):
-            # Phase 1: Selection - traverse tree until unexpanded node
-            node = root
-            search_path = [node]
-            
-            # Clone game state for simulation
-            sim_gs = gs.clone()
-            
-            # Select actions until we reach a leaf node
-            while node.is_expanded and node.children:
-                action, node = node.select_child(c_puct=exploration_weight)
-                search_path.append(node)
-                
-                # Apply action in simulation
-                action_type, param = sim_gs.action_handler.get_action_info(action)
-                sim_gs.action_handler.apply_action(action_type, param)
-            
-            # Phase 2: Expansion - add new nodes if game not terminal
-            # Check if game is done
-            game_over = sim_gs.p1["life"] <= 0 or sim_gs.p2["life"] <= 0 or sim_gs.turn > gs.max_turns
-            
-            if not game_over:
-                # Get valid actions in this state
-                sim_valid_actions = sim_gs.action_handler.generate_valid_actions()
-                sim_valid_actions = np.where(sim_valid_actions)[0].tolist()
-                
-                # Expand node
-                node.expand(sim_valid_actions)
-                
-                # Phase 3: Simulation (rollout)
-                value = self._rollout(sim_gs)
-            else:
-                # Game is over, evaluate final state
-                me = sim_gs.p1 if sim_gs.agent_is_p1 else sim_gs.p2
-                opp = sim_gs.p2 if sim_gs.agent_is_p1 else sim_gs.p1
-                
-                if me["life"] <= 0:
-                    value = -1.0  # Loss
-                elif opp["life"] <= 0:
-                    value = 1.0  # Win
+            try: # Wrap simulation loop
+                # Phase 1: Selection
+                node = root
+                search_path = [node]
+                sim_gs = gs.clone() # Clone for each simulation run
+                # --- ADDED: Ensure cloned state also has handler linked ---
+                sim_action_handler = getattr(sim_gs, 'action_handler', None)
+                if not sim_action_handler:
+                     logging.error(f"MCTS Sim {i}: Cloned GameState missing action_handler. Aborting sim.")
+                     continue # Skip this simulation if clone failed
+                # --- END check ---
+
+                while node.is_expanded and node.children:
+                    action, node = node.select_child(c_puct=exploration_weight)
+                    search_path.append(node)
+
+                    # Apply action in simulation (Use sim_action_handler)
+                    action_type, param = sim_action_handler.get_action_info(action)
+                    if action_type is None:
+                         logging.warning(f"MCTS Sim {i}: Invalid action {action} encountered during selection. Breaking path.")
+                         break # Stop traversing this path
+                    # Need to apply action robustly
+                    sim_action_handler.apply_action(action) # Assume apply_action handles details internally now
+
+                # Check if the node traversal failed early
+                if not node:
+                     logging.warning(f"MCTS Sim {i}: Node selection failed unexpectedly.")
+                     continue
+
+                # Phase 2: Expansion
+                # Check game over status safely
+                game_over = False
+                if hasattr(sim_gs, 'p1') and hasattr(sim_gs, 'p2') and sim_gs.p1 and sim_gs.p2:
+                    game_over = sim_gs.p1.get("life", 20) <= 0 or sim_gs.p2.get("life", 20) <= 0 or getattr(sim_gs, 'turn', 1) > getattr(sim_gs, 'max_turns', 50)
                 else:
-                    # Draw or turn limit reached - slight advantage to higher life
-                    value = 0.1 * np.sign(me["life"] - opp["life"])
-            
-            # Phase 4: Backpropagation - update values up the tree
-            for node in reversed(search_path):
-                node.visit_count += 1
-                node.value_sum += value
-                value = -value  # Negate for alternating levels (assumes perfect play by opponent)
-        
+                     logging.error(f"MCTS Sim {i}: Player state missing in simulation. Ending sim.")
+                     game_over = True # Treat as ended
+
+                leaf_value = 0.0
+                if not game_over:
+                    # Get valid actions in sim state (Use sim_action_handler)
+                    sim_valid_actions_mask = sim_action_handler.generate_valid_actions()
+                    sim_valid_actions = np.where(sim_valid_actions_mask)[0].tolist()
+
+                    # Expand node (handle case where node already expanded?)
+                    if not node.is_expanded: # Only expand if not already done
+                         node.expand(sim_valid_actions) # Use uniform prior for expansion if not using policy network
+
+                    # Phase 3: Simulation (rollout)
+                    leaf_value = self._rollout(sim_gs) # Pass the sim state
+                else:
+                    # Evaluate final state
+                    me_sim = sim_gs.p1 if sim_gs.agent_is_p1 else sim_gs.p2
+                    opp_sim = sim_gs.p2 if sim_gs.agent_is_p1 else sim_gs.p1
+                    me_life = me_sim.get("life", 0) if me_sim else 0
+                    opp_life = opp_sim.get("life", 0) if opp_sim else 0
+
+                    if me_life <= 0: leaf_value = -1.0
+                    elif opp_life <= 0: leaf_value = 1.0
+                    else: leaf_value = 0.1 * np.sign(me_life - opp_life) if me_life != opp_life else 0.0 # Draw/Turn limit
+
+                # Phase 4: Backpropagation
+                current_value = leaf_value
+                for node_in_path in reversed(search_path):
+                    node_in_path.visit_count += 1
+                    node_in_path.value_sum += current_value
+                    current_value = -current_value # Alternate for opponent turns
+
+            except Exception as sim_e:
+                 logging.error(f"Error during MCTS simulation {i}: {sim_e}", exc_info=True)
+                 # Skip this simulation if an error occurs
+
         # Return best action based on visit count
-        max_visit_count = -1
+        best_visit_count = -1 # Changed from max_visit_count to avoid potential name clash
         best_action = None
-        
+
+        # Check if root has children before iterating
+        if not root.children:
+             logging.warning("MCTS finished but root node has no children. Returning first valid action or None.")
+             return valid_actions[0] if valid_actions else None
+
         for action, child in root.children.items():
-            if child.visit_count > max_visit_count:
-                max_visit_count = child.visit_count
+            if child.visit_count > best_visit_count:
+                best_visit_count = child.visit_count
                 best_action = action
-        
-        logging.debug(f"MCTS selected action {best_action} with {max_visit_count} visits")
+
+        # Fallback if no best action found (e.g., all visits are 0)
+        if best_action is None and valid_actions:
+             logging.warning("MCTS completed but no best action found based on visits. Returning first valid action.")
+             best_action = valid_actions[0]
+
+        logging.debug(f"MCTS selected action {best_action} with {best_visit_count} visits")
         return best_action
 
     def _rollout(self, game_state, max_steps=20):
         """
         Perform a rollout (simulated game) from the current state.
-        
+
         Args:
             game_state: The game state to start from
             max_steps: Maximum simulation steps
-            
+
         Returns:
             float: Estimated value of the final state
         """
         sim_gs = game_state.clone()
         me = sim_gs.p1 if sim_gs.agent_is_p1 else sim_gs.p2
         opp = sim_gs.p2 if sim_gs.agent_is_p1 else sim_gs.p1
-        
+
+        # Ensure action handler exists on the cloned state
+        if not hasattr(sim_gs, 'action_handler') or sim_gs.action_handler is None:
+            logging.error("MCTS Rollout: Cloned GameState missing action_handler.")
+            return 0.0 # Neutral value if handler is missing
+
         # Simulate random/strategic actions until game ends or step limit
         for _ in range(max_steps):
             # Check if game is done
-            if sim_gs.p1["life"] <= 0 or sim_gs.p2["life"] <= 0 or sim_gs.turn > sim_gs.max_turns:
+            if (me and me.get("life", 20) <= 0) or \
+               (opp and opp.get("life", 20) <= 0) or \
+               getattr(sim_gs, 'turn', 1) > getattr(sim_gs, 'max_turns', 50):
                 break
-            
+
             # Get valid actions
-            valid_actions = sim_gs.action_handler.generate_valid_actions()
-            valid_actions = np.where(valid_actions)[0].tolist()
-            
+            try:
+                valid_actions_mask = sim_gs.action_handler.generate_valid_actions()
+                valid_actions = np.where(valid_actions_mask)[0].tolist()
+            except Exception as e:
+                 logging.error(f"MCTS Rollout: Error generating valid actions - {e}")
+                 break # Stop rollout if actions can't be generated
+
             if not valid_actions:
+                # logging.debug("MCTS Rollout: No valid actions found.")
                 break
-            
+
             # Use strategic rollout policy
-            action = self._rollout_policy(sim_gs, valid_actions)
-            
-            # Apply action
-            action_type, param = sim_gs.action_handler.get_action_info(action)
-            sim_gs.action_handler.apply_action(action_type, param)
-        
-        # Evaluate final state
-        # Base eval on life totals, board state, and other factors
-        if me["life"] <= 0:
+            action_idx = self._rollout_policy(sim_gs, valid_actions) # Returns index
+            if action_idx is None:
+                logging.warning("MCTS Rollout: Rollout policy returned None.")
+                break # Stop if policy fails
+
+            # Apply action using the action index
+            try:
+                # *** FIXED: Call apply_action with action_idx ***
+                sim_gs.action_handler.apply_action(action_idx)
+            except TypeError as te:
+                 logging.error(f"MCTS Rollout: TypeError applying action {action_idx} - {te}")
+                 break # Stop rollout on type error
+            except Exception as e:
+                 logging.error(f"MCTS Rollout: Unexpected error applying action {action_idx} - {e}")
+                 break # Stop rollout on general error
+
+        # Evaluate final state safely
+        final_me_life = me.get("life", 0) if me else 0
+        final_opp_life = opp.get("life", 0) if opp else 0
+
+        if final_me_life <= 0:
             return -1.0  # Loss
-        elif opp["life"] <= 0:
+        elif final_opp_life <= 0:
             return 1.0  # Win
         else:
-            # Compute a heuristic value
-            my_creatures = [cid for cid in me["battlefield"] 
-                        if sim_gs._safe_get_card(cid) and 
-                        hasattr(sim_gs._safe_get_card(cid), 'card_types') and 
-                        'creature' in sim_gs._safe_get_card(cid).card_types]
-            
-            opp_creatures = [cid for cid in opp["battlefield"] 
-                        if sim_gs._safe_get_card(cid) and 
-                        hasattr(sim_gs._safe_get_card(cid), 'card_types') and 
-                        'creature' in sim_gs._safe_get_card(cid).card_types]
-            
-            my_power = sum(sim_gs._safe_get_card(cid).power for cid in my_creatures 
-                        if sim_gs._safe_get_card(cid) and hasattr(sim_gs._safe_get_card(cid), 'power'))
-            
-            opp_power = sum(sim_gs._safe_get_card(cid).power for cid in opp_creatures 
-                        if sim_gs._safe_get_card(cid) and hasattr(sim_gs._safe_get_card(cid), 'power'))
-            
-            life_diff = me["life"] - opp["life"]
-            card_diff = len(me["hand"]) - len(opp["hand"])
-            board_diff = len(me["battlefield"]) - len(opp["battlefield"])
-            power_diff = my_power - opp_power
-            
-            # Combine factors - weight can be adjusted based on strategic importance
-            value = (
-                0.4 * np.tanh(life_diff / 10) +
-                0.2 * np.tanh(card_diff / 2) +
-                0.2 * np.tanh(board_diff / 4) +
-                0.2 * np.tanh(power_diff / 5)
-            )
-            
-            return value
+            # Compute a heuristic value (can reuse parts of _calculate_board_state_reward or advanced_position_evaluation)
+            # Simplified version for rollout:
+            my_creatures = [cid for cid in getattr(me,'battlefield',[])
+                            if sim_gs._safe_get_card(cid) and 'creature' in getattr(sim_gs._safe_get_card(cid),'card_types',[])]
+            opp_creatures = [cid for cid in getattr(opp,'battlefield',[])
+                            if sim_gs._safe_get_card(cid) and 'creature' in getattr(sim_gs._safe_get_card(cid),'card_types',[])]
+            my_power = sum(getattr(sim_gs._safe_get_card(cid), 'power', 0) or 0 for cid in my_creatures)
+            opp_power = sum(getattr(sim_gs._safe_get_card(cid), 'power', 0) or 0 for cid in opp_creatures)
+            my_hand_size = len(getattr(me,'hand',[]))
+            opp_hand_size = len(getattr(opp,'hand',[]))
+            my_board_size = len(getattr(me,'battlefield',[]))
+            opp_board_size = len(getattr(opp,'battlefield',[]))
+
+            life_diff_val = (final_me_life - final_opp_life) / 20.0
+            card_adv_val = (my_hand_size - opp_hand_size) / 5.0
+            board_adv_val = (my_board_size - opp_board_size) / 10.0
+            power_adv_val = (my_power - opp_power) / 15.0
+
+            value = 0.4 * life_diff_val + 0.2 * card_adv_val + 0.2 * board_adv_val + 0.2 * power_adv_val
+            return np.clip(value, -1.0, 1.0)
 
     def _rollout_policy(self, game_state, valid_actions):
         """

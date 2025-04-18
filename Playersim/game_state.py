@@ -30,14 +30,14 @@ class GameState:
                  "strategic_planner", "attackers_this_turn", 'strategy_memory',
                  "_logged_card_ids", "_logged_errors", "targeting_system",
                  "_phase_action_count", "priority_player", "stats_tracker",
-                 "card_memory",
+                 "card_memory", 'original_p2_deck', 
                  # *** ADDED action_handler ***
                  "action_handler",
                  # Special card types
                  "adventure_cards", "saga_counters", "mdfc_cards", "battle_cards", 'battle_attack_targets',
                  "cards_castable_from_exile", "cast_as_back_face", 'planeswalker_attack_targets',
                  # Additional slots for various tracking variables
-                 "phased_out",
+                 "phased_out", 'original_p1_deck',
                  "suspended_cards",
                  "kicked_cards", "evoked_cards", 'planeswalker_protectors',
                  "foretold_cards", "blitz_cards", "dash_cards", "unearthed_cards",
@@ -209,7 +209,20 @@ class GameState:
         
     def _init_subsystems(self):
         """Initialize game subsystems with error handling and correct dependencies."""
-        # Layer System (Dependency for others)
+        logging.debug("Initializing GameState subsystems...")
+        # --- CRITICAL: Action Handler first if others depend on it during init ---
+        try:
+            from .actions import ActionHandler # Import inside to avoid circular?
+            self.action_handler = ActionHandler(self)
+            logging.debug("ActionHandler initialized successfully.")
+        except ImportError as e:
+            logging.error(f"ActionHandler module not available: {e}")
+            self.action_handler = None
+        except Exception as e:
+            logging.error(f"Error initializing ActionHandler: {e}")
+            self.action_handler = None
+
+        # --- Layer System (needed by many others) ---
         try:
             from .layer_system import LayerSystem
             self.layer_system = LayerSystem(self)
@@ -221,7 +234,7 @@ class GameState:
             logging.error(f"Error initializing LayerSystem: {e}")
             self.layer_system = None
 
-        # Replacement Effects (Depends on LayerSystem potentially)
+        # --- Replacement Effects ---
         try:
             from .replacement_effects import ReplacementEffectSystem
             self.replacement_effects = ReplacementEffectSystem(self)
@@ -233,7 +246,7 @@ class GameState:
             logging.error(f"Error initializing ReplacementEffectSystem: {e}")
             self.replacement_effects = None
 
-        # Targeting System (Dependency for AbilityHandler)
+        # --- Targeting System ---
         try:
             from .targeting import TargetingSystem
             self.targeting_system = TargetingSystem(self)
@@ -245,13 +258,11 @@ class GameState:
             logging.error(f"Error initializing TargetingSystem: {e}")
             self.targeting_system = None
 
-        # Ability Handler (Needs TargetingSystem, link Layer/Replacement)
+        # --- Ability Handler ---
         try:
             from .ability_handler import AbilityHandler
-            self.ability_handler = AbilityHandler(self) # Initializes its own targeting system ref now
+            self.ability_handler = AbilityHandler(self) # Init after its dependencies
             logging.debug("AbilityHandler initialized successfully.")
-            # Link other systems if handler expects them (though dependencies should be via GameState now)
-            # if self.targeting_system: self.ability_handler.targeting_system = self.targeting_system
         except ImportError as e:
             logging.warning(f"AbilityHandler module not available: {e}")
             self.ability_handler = None
@@ -259,7 +270,7 @@ class GameState:
             logging.error(f"Error initializing AbilityHandler: {e}")
             self.ability_handler = None
 
-        # Mana System
+        # --- Mana System ---
         try:
             from .enhanced_mana_system import EnhancedManaSystem
             self.mana_system = EnhancedManaSystem(self)
@@ -271,13 +282,10 @@ class GameState:
             logging.error(f"Error initializing EnhancedManaSystem: {e}")
             self.mana_system = None
 
-        # Combat Resolver (Needs Ability Handler potentially)
+        # --- Combat Resolver ---
         try:
             from .enhanced_combat import ExtendedCombatResolver
             self.combat_resolver = ExtendedCombatResolver(self)
-            # Link Ability Handler if needed by resolver
-            if self.ability_handler and hasattr(self.combat_resolver, 'ability_handler'):
-                 self.combat_resolver.ability_handler = self.ability_handler
             logging.debug("Combat resolver initialized successfully.")
         except ImportError as e:
             logging.warning(f"Combat resolver module not available: {e}")
@@ -286,10 +294,14 @@ class GameState:
             logging.error(f"Error initializing CombatResolver: {e}")
             self.combat_resolver = None
 
-        # Card Evaluator (Needs other systems)
+        # --- Card Evaluator (can be created even if external refs are missing initially) ---
         try:
             from .enhanced_card_evaluator import EnhancedCardEvaluator
-            self.card_evaluator = EnhancedCardEvaluator(self, self.stats_tracker, self.card_memory)
+            self.card_evaluator = EnhancedCardEvaluator(
+                self,
+                getattr(self, 'stats_tracker', None), # Pass potential external refs
+                getattr(self, 'card_memory', None)
+            )
             logging.debug("Card evaluator initialized successfully.")
         except ImportError as e:
             logging.warning(f"Card evaluator module not available: {e}")
@@ -298,7 +310,7 @@ class GameState:
             logging.error(f"Error initializing EnhancedCardEvaluator: {e}")
             self.card_evaluator = None
 
-        # Strategic Planner (Needs Evaluator, Resolver)
+        # --- Strategic Planner ---
         try:
             from .strategic_planner import MTGStrategicPlanner
             self.strategic_planner = MTGStrategicPlanner(self, self.card_evaluator, self.combat_resolver)
@@ -310,6 +322,7 @@ class GameState:
             logging.error(f"Error initializing MTGStrategicPlanner: {e}")
             self.strategic_planner = None
 
+        logging.info("Finished initializing GameState subsystems.")
         # Init tracking variables AFTER subsystems that might reference them
         self._init_tracking_variables()
         self.initialize_day_night_cycle()
@@ -460,6 +473,7 @@ class GameState:
             random.seed(seed)
             np.random.seed(seed)
 
+        logging.debug("Starting GameState reset...")
         # Reset basic game state
         self.turn = 1
         self.phase = self.PHASE_UNTAP # Start at UNTAP phase
@@ -472,23 +486,29 @@ class GameState:
         self.optimal_attackers = None
         self.attack_suggestion_used = False
         self.cards_played = {0: [], 1: []} # Explicit reset
+        self.exhaust_ability_used = {} # Reset exhaust tracking
 
         # Initialize player states AFTER resetting other state
-        self.p1 = self._init_player(p1_deck)
-        self.p2 = self._init_player(p2_deck)
+        # Store original decks for stats/memory later
+        self.original_p1_deck = p1_deck.copy()
+        self.original_p2_deck = p2_deck.copy()
+        self.p1 = self._init_player(self.original_p1_deck)
+        self.p2 = self._init_player(self.original_p2_deck)
         # Assign names after init
         if self.p1: self.p1['name'] = 'Player 1'
         if self.p2: self.p2['name'] = 'Player 2'
-        self.exhaust_ability_used = {} # Add this line to reset
+
         # Set initial priority player and agent identity AFTER player init
         self.priority_player = self.p1 # P1 starts with priority
         self.agent_is_p1 = True # Assume agent is P1 by default unless configured otherwise
 
-        # Initialize all tracking variables using the helper
-        # This resets keyword states, contexts, turn trackers, etc.
-        self._init_tracking_variables()
+        # --- Subsystem Initialization (Call helper method) ---
+        # This creates and links LayerSystem, TargetingSystem, AbilityHandler, ManaSystem etc.
+        # and critically, self.action_handler
+        self._init_subsystems()
 
-        # Initialize Day/Night Cycle
+        # Initialize all tracking variables using the helper AFTER subsystems exist
+        self._init_tracking_variables()
         self.initialize_day_night_cycle() # Call after tracking vars init
 
         # Initialize mulligan state correctly AFTER players exist
@@ -501,29 +521,30 @@ class GameState:
         self.cards_to_bottom = 0
         self.bottoming_count = 0
 
-        # Initialize subsystems (must happen AFTER base state and players)
-        # Create fresh instances linked to 'self' (this GameState instance)
-        self._init_subsystems()
-
         # Link external systems if they were passed or previously set
         # Ensure subsystems have access to these if needed
+        # These are expected to be set EXTERNALLY before calling reset
         self.strategy_memory = getattr(self, 'strategy_memory', None)
         self.stats_tracker = getattr(self, 'stats_tracker', None)
         self.card_memory = getattr(self, 'card_memory', None)
+        # Ensure links are set on GS itself for subsystems to access
+        if self.strategy_memory: self.game_state.strategy_memory = self.strategy_memory
+        if self.stats_tracker: self.game_state.stats_tracker = self.stats_tracker
+        if self.card_memory: self.game_state.card_memory = self.card_memory
+        # Link subsystems that depend on external trackers
         if self.card_evaluator:
              self.card_evaluator.stats_tracker = self.stats_tracker
              self.card_evaluator.card_memory = self.card_memory
-        # Link Strategy Memory to Planner if both exist
         if self.strategic_planner and self.strategy_memory:
              self.strategic_planner.strategy_memory = self.strategy_memory
 
-        # Final setup calls if subsystems exist
+        # Final setup calls if subsystems exist and need post-reset init
         if self.strategic_planner and hasattr(self.strategic_planner, 'init_after_reset'):
-            self.strategic_planner.init_after_reset()
+            self.strategic_planner.init_after_reset() # Now performs safe checks internally
 
+        # Ability Initialization via handler (only if handler exists)
         if self.ability_handler and hasattr(self.ability_handler, '_initialize_abilities'):
              logging.debug("Initializing card abilities via AbilityHandler.")
-             # Make sure card_db is properly set up before initializing abilities
              if isinstance(self.card_db, dict) and self.card_db:
                  self.ability_handler._initialize_abilities() # Parse abilities from DB
              else:
@@ -3187,6 +3208,9 @@ class GameState:
         cloned_state.progress_was_forced = self.progress_was_forced if hasattr(self, 'progress_was_forced') else False
         cloned_state._turn_limit_checked = self._turn_limit_checked if hasattr(self, '_turn_limit_checked') else False
         cloned_state.exhaust_ability_used = copy.deepcopy(self.exhaust_ability_used) if hasattr(self, 'exhaust_ability_used') else {}
+        cloned_state.original_p1_deck = self.original_p1_deck[:] if hasattr(self,'original_p1_deck') else []
+        cloned_state.original_p2_deck = self.original_p2_deck[:] if hasattr(self,'original_p2_deck') else []
+        
         # --- Deep Copy Player States ---
         # Player States (Critical to deep copy) - Need to handle potential None
         cloned_state.p1 = copy.deepcopy(self.p1) if self.p1 else None
@@ -3259,34 +3283,28 @@ class GameState:
         cloned_state.miracle_cost_parsed = copy.deepcopy(self.miracle_cost_parsed) if hasattr(self, 'miracle_cost_parsed') else None
 
         # --- Deep Copy Context Objects (Crucial for multi-step actions) ---
-        cloned_state.targeting_context = copy.deepcopy(self.targeting_context)
-        if cloned_state.targeting_context and 'controller' in cloned_state.targeting_context:
-            if cloned_state.targeting_context['controller'] == self.p1: cloned_state.targeting_context['controller'] = cloned_state.p1
-            elif cloned_state.targeting_context['controller'] == self.p2: cloned_state.targeting_context['controller'] = cloned_state.p2
-
-        cloned_state.sacrifice_context = copy.deepcopy(self.sacrifice_context)
-        if cloned_state.sacrifice_context and 'controller' in cloned_state.sacrifice_context:
-            if cloned_state.sacrifice_context['controller'] == self.p1: cloned_state.sacrifice_context['controller'] = cloned_state.p1
-            elif cloned_state.sacrifice_context['controller'] == self.p2: cloned_state.sacrifice_context['controller'] = cloned_state.p2
-
-        cloned_state.choice_context = copy.deepcopy(self.choice_context)
-        if cloned_state.choice_context and 'player' in cloned_state.choice_context:
-            if cloned_state.choice_context['player'] == self.p1: cloned_state.choice_context['player'] = cloned_state.p1
-            elif cloned_state.choice_context['player'] == self.p2: cloned_state.choice_context['player'] = cloned_state.p2
-
-        cloned_state.spree_context = copy.deepcopy(self.spree_context)
-        cloned_state.dredge_pending = copy.deepcopy(self.dredge_pending)
-        if cloned_state.dredge_pending and 'player' in cloned_state.dredge_pending:
-            if cloned_state.dredge_pending['player'] == self.p1: cloned_state.dredge_pending['player'] = cloned_state.p1
-            elif cloned_state.dredge_pending['player'] == self.p2: cloned_state.dredge_pending['player'] = cloned_state.p2
-
+        # Deep copy first
+        cloned_state.targeting_context = copy.deepcopy(self.targeting_context) if hasattr(self,'targeting_context') else None
+        cloned_state.sacrifice_context = copy.deepcopy(self.sacrifice_context) if hasattr(self,'sacrifice_context') else None
+        cloned_state.choice_context = copy.deepcopy(self.choice_context) if hasattr(self,'choice_context') else None
+        cloned_state.spree_context = copy.deepcopy(self.spree_context) if hasattr(self,'spree_context') else None
+        cloned_state.dredge_pending = copy.deepcopy(self.dredge_pending) if hasattr(self,'dredge_pending') else None
         cloned_state.madness_cast_available = copy.deepcopy(self.madness_cast_available) if hasattr(self, 'madness_cast_available') else None
-        if cloned_state.madness_cast_available and 'player' in cloned_state.madness_cast_available:
-             if cloned_state.madness_cast_available['player'] == self.p1: cloned_state.madness_cast_available['player'] = cloned_state.p1
-             elif cloned_state.madness_cast_available['player'] == self.p2: cloned_state.madness_cast_available['player'] = cloned_state.p2
+        cloned_state.pending_spell_context = copy.deepcopy(self.pending_spell_context) if hasattr(self,'pending_spell_context') else None
+        cloned_state.clash_context = copy.deepcopy(self.clash_context) if hasattr(self,'clash_context') else None
 
-        cloned_state.pending_spell_context = copy.deepcopy(self.pending_spell_context)
-        cloned_state.clash_context = copy.deepcopy(self.clash_context)
+        # Fix player references in contexts
+        context_keys_with_player = ["controller", "player", "bottoming_player", "surveiling_player", "scrying_player", "mulligan_player"]
+        contexts_to_fix = [cloned_state.targeting_context, cloned_state.sacrifice_context,
+                         cloned_state.choice_context, cloned_state.dredge_pending,
+                         cloned_state.madness_cast_available, cloned_state.pending_spell_context]
+        for ctx in contexts_to_fix:
+            if ctx and isinstance(ctx, dict):
+                for key in context_keys_with_player:
+                    if key in ctx and ctx[key] is not None:
+                        orig_player = ctx[key]
+                        ctx[key] = cloned_state.p1 if orig_player == self.p1 else cloned_state.p2 if orig_player == self.p2 else None
+
 
         # --- Deep Copy Surveil State ---
         cloned_state.surveil_in_progress = self.surveil_in_progress if hasattr(self, 'surveil_in_progress') else False
@@ -3332,86 +3350,105 @@ class GameState:
         cloned_state.priority_player = cloned_priority_player
 
         # --- Re-initialize Subsystems within the CLONED state ---
-        # This step is crucial: create new instances of subsystems linked to the cloned GameState
-        cloned_state._init_subsystems() # Re-populates subsystems on cloned_state
+        cloned_state._init_subsystems() # Creates NEW, EMPTY subsystems on cloned_state, linked to cloned_state
 
-        # --- Deep Copy Ability Handler State (if needed) ---
-        # registered_abilities cache is large, potentially re-parse instead of deep copy
-        if cloned_state.ability_handler:
-            # Option 1: Re-parse (Simpler, ensures links are correct, might be slow)
-            cloned_state.ability_handler.registered_abilities = {}
-            # We need to re-register static effects, replacements too
+        # --- Deep Copy Subsystem STATE (if original subsystems exist) ---
+        # This step requires copying the actual effect data from the original state's
+        # subsystems into the cloned state's subsystems.
+
+        # Copy Ability Handler State (Repopulate Approach - More Robust)
+        if cloned_state.ability_handler and self.ability_handler: # Check both handlers exist
+            # Repopulate Approach (Safer than deep copying potentially complex ability objects)
+            cloned_state.ability_handler.registered_abilities = {} # Clear default state
+            cloned_state.ability_handler.active_triggers = []    # Clear default state
+
+            # Re-parse and register abilities for all permanents on the cloned state's battlefield
             for player in [cloned_state.p1, cloned_state.p2]:
                 if player:
-                    for card_id in list(player.get("battlefield", [])): # Check battlefield cards
+                    for card_id in list(player.get("battlefield", [])): # Use list() for safe iteration
                         card = cloned_state._safe_get_card(card_id)
-                        if card:
-                            cloned_state.ability_handler._parse_and_register_abilities(card_id, card) # Re-parse and apply static
-                            if cloned_state.replacement_effects:
-                                cloned_state.replacement_effects.register_card_replacement_effects(card_id, player) # Re-register replacements
-            # Option 2: Attempt deep copy (Risky due to object references within Ability objects)
-            # cloned_state.ability_handler.registered_abilities = copy.deepcopy(self.ability_handler.registered_abilities)
-            # Fix source_card references in copied abilities (VERY complex)
-            cloned_state.ability_handler.active_triggers = copy.deepcopy(self.ability_handler.active_triggers) if hasattr(self.ability_handler,'active_triggers') else []
-            # Fix controller references in active_triggers
-            if hasattr(cloned_state.ability_handler,'active_triggers'):
-                for i in range(len(cloned_state.ability_handler.active_triggers)):
-                    ability, controller_orig = cloned_state.ability_handler.active_triggers[i]
-                    controller_cloned = cloned_state.p1 if controller_orig == self.p1 else cloned_state.p2 if controller_orig == self.p2 else None
-                    cloned_state.ability_handler.active_triggers[i] = (ability, controller_cloned)
+                        if card and hasattr(cloned_state.ability_handler, '_parse_and_register_abilities'):
+                            # Re-parse using the *cloned* handler instance
+                            cloned_state.ability_handler._parse_and_register_abilities(card_id, card)
+            # Copy Active Triggers (Queued) - Need to fix controller refs
+            if hasattr(self.ability_handler, 'active_triggers'):
+                 cloned_state.ability_handler.active_triggers = []
+                 for trigger_item in self.ability_handler.active_triggers:
+                     if isinstance(trigger_item, tuple) and len(trigger_item) >= 2:
+                         ability, controller_orig = trigger_item[:2]
+                         context = trigger_item[2] if len(trigger_item) > 2 else {}
+                         # Remap original controller to cloned controller object
+                         controller_cloned = cloned_state.p1 if controller_orig == self.p1 else cloned_state.p2 if controller_orig == self.p2 else None
+                         if controller_cloned:
+                             cloned_state.ability_handler.active_triggers.append((ability, controller_cloned, context))
+                         else:
+                              logging.warning(f"Could not clone controller reference for active trigger: {ability}")
+            else:
+                 cloned_state.ability_handler.active_triggers = [] # Ensure it exists
 
-        # --- Deep Copy Layer System State ---
-        if cloned_state.layer_system:
-            # Need to deep copy the layers structure and update references in effect_data
-            cloned_state.layers = {}
-            for layer_num, effects_list_or_dict in self.layers.items():
+        # Deep Copy Layer System State
+        # Only proceed if both original and cloned layer systems exist, and original has layers attribute
+        if cloned_state.layer_system and self.layer_system and hasattr(self.layer_system, 'layers'):
+            # logging.debug("Deep copying LayerSystem state...")
+            cloned_state.layer_system.layers = {} # Ensure layers dict exists on clone
+            # Iterate through original state's layers safely
+            for layer_num, effects_list_or_dict in self.layer_system.layers.items():
                 if isinstance(effects_list_or_dict, dict): # Layer 7
-                    cloned_state.layers[layer_num] = {}
+                    cloned_state.layer_system.layers[layer_num] = {}
                     for sublayer, effects_list in effects_list_or_dict.items():
                         cloned_sublayer = []
                         for eid, data in effects_list:
                             copied_data = copy.deepcopy(data)
-                            # Fix controller reference if present
-                            if 'controller_id' in copied_data:
-                                ctrl_orig = copied_data['controller_id']
-                                ctrl_cloned = cloned_state.p1 if ctrl_orig == self.p1 else cloned_state.p2 if ctrl_orig == self.p2 else None
-                                copied_data['controller_id'] = ctrl_cloned
-                            # Fix condition reference (if it captures 'self') - Very hard
-                            # Assume condition functions don't rely on implicit self for now
+                            # Fix controller references (player dict)
+                            ref_keys = ['_controller', 'controller_id', 'player', 'owner', 'new_controller'] # Keys that might hold player objects
+                            for key in ref_keys:
+                                if key in copied_data and copied_data[key] is not None:
+                                     orig_player = copied_data[key]
+                                     copied_data[key] = cloned_state.p1 if orig_player == self.p1 else cloned_state.p2 if orig_player == self.p2 else None # Map to cloned object
                             cloned_sublayer.append((eid, copied_data))
-                        cloned_state.layers[layer_num][sublayer] = cloned_sublayer
+                        cloned_state.layer_system.layers[layer_num][sublayer] = cloned_sublayer
                 else: # Layers 1-6
                     cloned_layer = []
                     for eid, data in effects_list_or_dict:
                          copied_data = copy.deepcopy(data)
-                         if 'controller_id' in copied_data:
-                             ctrl_orig = copied_data['controller_id']
-                             ctrl_cloned = cloned_state.p1 if ctrl_orig == self.p1 else cloned_state.p2 if ctrl_orig == self.p2 else None
-                             copied_data['controller_id'] = ctrl_cloned
+                         # Fix controller references (same logic)
+                         ref_keys = ['_controller', 'controller_id', 'player', 'owner', 'new_controller']
+                         for key in ref_keys:
+                             if key in copied_data and copied_data[key] is not None:
+                                 orig_player = copied_data[key]
+                                 copied_data[key] = cloned_state.p1 if orig_player == self.p1 else cloned_state.p2 if orig_player == self.p2 else None
                          cloned_layer.append((eid, copied_data))
-                    cloned_state.layers[layer_num] = cloned_layer
-            cloned_state.timestamps = self.timestamps.copy()
-            cloned_state.effect_counter = self.effect_counter
-            cloned_state.dependencies = copy.deepcopy(self.dependencies) # Dependencies might be complex
-            cloned_state._last_applied_state_hash = self._last_applied_state_hash # Can copy hash
+                    cloned_state.layer_system.layers[layer_num] = cloned_layer
 
-        # --- Deep Copy Replacement Effects State ---
-        if cloned_state.replacement_effects:
-             cloned_state.replacement_effects.active_effects = []
-             cloned_state.replacement_effects.effect_index = defaultdict(list)
-             for data in self.replacement_effects.active_effects:
+            # Copy other LayerSystem state attributes
+            cloned_state.layer_system.timestamps = self.layer_system.timestamps.copy()
+            cloned_state.layer_system.effect_counter = self.layer_system.effect_counter
+            cloned_state.layer_system.dependencies = copy.deepcopy(self.layer_system.dependencies)
+            cloned_state.layer_system._last_applied_state_hash = self.layer_system._last_applied_state_hash
+
+        # Deep Copy Replacement Effects State
+        if cloned_state.replacement_effects and self.replacement_effects:
+            # logging.debug("Deep copying ReplacementEffects state...")
+            cloned_state.replacement_effects.active_effects = []
+            cloned_state.replacement_effects.effect_index = defaultdict(list)
+            # Iterate through the ORIGINAL active effects
+            for data in self.replacement_effects.active_effects:
                  copied_data = copy.deepcopy(data)
-                 # Fix player references
-                 if 'controller_id' in copied_data:
-                     ctrl_orig = copied_data['controller_id']
-                     ctrl_cloned = cloned_state.p1 if ctrl_orig == self.p1 else cloned_state.p2 if ctrl_orig == self.p2 else None
-                     copied_data['controller_id'] = ctrl_cloned
+                 # Fix player references (controller, player, etc.)
+                 ref_keys = ['_controller', 'controller_id', 'player', 'owner']
+                 for key in ref_keys:
+                     if key in copied_data and copied_data[key] is not None:
+                          orig_player = copied_data[key]
+                          copied_data[key] = cloned_state.p1 if orig_player == self.p1 else cloned_state.p2 if orig_player == self.p2 else None
+
                  cloned_state.replacement_effects.active_effects.append(copied_data)
-                 # Rebuild index
+                 # Rebuild index on the cloned system
                  event_type = copied_data.get('event_type')
                  if event_type:
                      cloned_state.replacement_effects.effect_index[event_type].append(copied_data)
-             cloned_state.replacement_effects.effect_counter = self.replacement_effects.effect_counter
+
+            cloned_state.replacement_effects.effect_counter = self.replacement_effects.effect_counter
+
 
         # --- Link External Systems (Shallow Copy/Reference) ---
         cloned_state.strategy_memory = self.strategy_memory  # Just reference
@@ -3419,17 +3456,15 @@ class GameState:
         cloned_state.card_memory = self.card_memory          # Just reference
 
         # --- Ensure internal subsystem references point to the cloned state ---
-        if cloned_state.mana_system: cloned_state.mana_system.game_state = cloned_state
-        if cloned_state.combat_resolver: cloned_state.combat_resolver.game_state = cloned_state
-        if cloned_state.card_evaluator: cloned_state.card_evaluator.game_state = cloned_state
-        if cloned_state.targeting_system: cloned_state.targeting_system.game_state = cloned_state
-        if cloned_state.ability_handler: cloned_state.ability_handler.game_state = cloned_state
-        if cloned_state.layer_system: cloned_state.layer_system.game_state = cloned_state
-        if cloned_state.replacement_effects: cloned_state.replacement_effects.game_state = cloned_state
-        if cloned_state.strategic_planner: cloned_state.strategic_planner.game_state = cloned_state
-        # Ensure ability_handler subsystems also point to cloned state subsystems
-        if cloned_state.ability_handler and cloned_state.targeting_system:
-            cloned_state.ability_handler.targeting_system = cloned_state.targeting_system
+        # Subsystems initialized by _init_subsystems should already be linked correctly
+        # Re-iterate to ensure AbilityHandler links are correct
+        if cloned_state.ability_handler:
+             cloned_state.ability_handler.game_state = cloned_state # Already linked by _init_subsystems
+             # Link other subsystems to the handler if needed
+             cloned_state.ability_handler.targeting_system = cloned_state.targeting_system
+             cloned_state.ability_handler.layer_system = cloned_state.layer_system
+             cloned_state.ability_handler.mana_system = cloned_state.mana_system
+             cloned_state.ability_handler.replacement_effects = cloned_state.replacement_effects
 
         logging.debug("GameState cloned successfully.")
         return cloned_state
