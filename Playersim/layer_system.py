@@ -487,18 +487,26 @@ class LayerSystem:
     def _calculate_layer7b_set_specific(self, effect_data, calculated_characteristics):
          effect_type = effect_data.get('effect_type')
          value = effect_data.get('effect_value')
+         source_id = effect_data.get('source_id') # Get source for Impending check
+
          for target_id in effect_data.get('affected_ids', []):
-             # Check if target exists in calculated data BEFORE proceeding
              if target_id in calculated_characteristics:
                  chars = calculated_characteristics[target_id]
-                 # Only apply if it's a creature AFTER Layer 4 applied
-                 if 'creature' in chars.get('card_types', []):
-                     # Effects setting P/T to specific values (e.g., "becomes 1/1")
-                     if effect_type == 'set_pt' and isinstance(value, (tuple, list)) and len(value)==2:
-                         p, t = value
-                         # This sets current P/T but doesn't change the _base_ P/T
-                         chars['power'], chars['toughness'] = p, t
-                         logging.debug(f"Layer 7b: Set specific P/T of {target_id} to {p}/{t}")
+                 # --- ADDED: Check if creature *at this point* ---
+                 if 'creature' not in chars.get('card_types', []):
+                      # Logging moved inside check: If it's Impending setting to 0/0, don't log as skip.
+                      is_impending_set_pt_effect = effect_type == 'set_pt' and value == (0,0) and source_id == target_id # Specific check
+                      if not is_impending_set_pt_effect:
+                           logging.debug(f"Layer 7b: Skipping P/T set for {target_id} - no longer a creature.")
+                      continue # Skip P/T effects if not currently a creature
+                 # --- END ADDED ---
+
+                 # Apply standard P/T setting logic
+                 if effect_type == 'set_pt' and isinstance(value, (tuple, list)) and len(value)==2:
+                     p, t = value
+                     # This sets current P/T but doesn't change the _base_ P/T
+                     chars['power'], chars['toughness'] = p, t
+                     logging.debug(f"Layer 7b: Set specific P/T of {target_id} to {p}/{t}")
                           
         
     def _calculate_layer7a_cda_and_base(self, effect_data, calculated_characteristics): # Renamed from _calculate_layer7a_set
@@ -727,6 +735,9 @@ class LayerSystem:
 
                  logging.debug(f"Layer 4: {effect_type} {type_val} applied to {target_id}. New types: {chars['card_types']}, subtypes: {chars['subtypes']}")
 
+    def _is_impending_active(self, card_id):
+        """Delegates check to GameState to determine if Impending is active (has time counters)."""
+        return self.game_state._is_impending_active(card_id)
 
     def _calculate_layer5_color(self, effect_data, calculated_characteristics):
          effect_type = effect_data.get('effect_type')
@@ -1220,27 +1231,58 @@ class LayerSystem:
                 
         return list(reversed(result))  # Reverse to get correct order
     
-    def remove_effects_by_source(self, source_id):
-        """Remove all effects originating from a specific source card."""
+    def remove_effects_by_source(self, source_id_to_remove, effect_description_contains=None):
+        """Remove all continuous effects originating from a specific source."""
         ids_to_remove = []
-        for layer_num in range(1, 8):
-             if layer_num == 7:
-                  for sublayer in self.layers[7]:
-                       for eid, data in self.layers[7][sublayer]:
-                            if data.get('source_id') == source_id:
-                                 ids_to_remove.append(eid)
-             else:
-                  for eid, data in self.layers[layer_num]:
-                       if data.get('source_id') == source_id:
-                            ids_to_remove.append(eid)
+        removed_count = 0 # Track number removed
 
+        for layer_num in range(1, 8):
+             effects_pool = []
+             is_sublayer = False
+             if layer_num == 7: # Handle sublayers
+                 is_sublayer = True
+                 for sublayer in self.layers[7]:
+                     effects_pool.append((sublayer, self.layers[7][sublayer]))
+             else: # Handle regular layers
+                 effects_pool.append((None, self.layers.get(layer_num, [])))
+
+             for sublayer_key, effects_list in effects_pool:
+                  # Check effects in the current list
+                  for eid, data in effects_list:
+                       matches_source = data.get('source_id') == source_id_to_remove
+                       matches_desc = (not effect_description_contains or
+                                       (effect_description_contains in data.get('description','').lower()))
+
+                       if matches_source and matches_desc:
+                            ids_to_remove.append((layer_num, sublayer_key, eid))
+
+        # Perform removal
         if ids_to_remove:
-             logging.debug(f"Removing {len(ids_to_remove)} effects from source {source_id}")
-             for eid in ids_to_remove:
-                  self.remove_effect(eid) # Use remove_effect to handle cleanup and cache invalidation
-             self.invalidate_cache() # Explicitly invalidate after bulk removal
-             return True
-        return False
+             for layer_num, sublayer_key, eid in ids_to_remove:
+                  # Find and remove the effect (handle layer 7 sublayers)
+                  removed_this_pass = False
+                  if layer_num == 7 and sublayer_key:
+                      initial_len = len(self.layers[7][sublayer_key])
+                      self.layers[7][sublayer_key] = [(e_id, data) for e_id, data in self.layers[7][sublayer_key] if e_id != eid]
+                      if len(self.layers[7][sublayer_key]) < initial_len: removed_this_pass = True
+                  elif 1 <= layer_num <= 6:
+                      initial_len = len(self.layers[layer_num])
+                      self.layers[layer_num] = [(e_id, data) for e_id, data in self.layers[layer_num] if e_id != eid]
+                      if len(self.layers[layer_num]) < initial_len: removed_this_pass = True
+
+                  # Cleanup associated data if removed successfully
+                  if removed_this_pass:
+                      removed_count += 1
+                      if eid in self.timestamps: del self.timestamps[eid]
+                      if eid in self.dependencies: del self.dependencies[eid]
+                      for dep_list in self.dependencies.values():
+                           if eid in dep_list: dep_list.remove(eid)
+                      logging.debug(f"Removed effect {eid} from source {source_id_to_remove} (Layer {layer_num}{'/'+sublayer_key if sublayer_key else ''})")
+
+             if removed_count > 0:
+                  self.invalidate_cache() # Invalidate only if something was removed
+
+        return removed_count # Return how many effects were removed
     
     def _find_card_location(self, card_id):
         """Find which player controls a card and in which zone it is."""

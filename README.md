@@ -34,6 +34,12 @@ graph TD
 - Add support for "Start your engines"
 - Overhaul DeckStats_Viewer to work with the current versions of the deck_stat_tracker and card_memory.py
 - General Bug fixing needs to be done, need to integrate other stuff
+- Add support for Delirium
+- Add support for Domain
+- Add support for Valiant
+- Add support for Plot
+- Add support for Eerie
+
 
 ### Key Features
 

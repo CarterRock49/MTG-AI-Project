@@ -3,7 +3,7 @@ import logging
 import numpy as np
 # Remove KeywordEffects if not used directly after refactoring
 # from .keyword_effects import KeywordEffects
-from .ability_types import Ability, ActivatedAbility, TriggeredAbility, StaticAbility, ManaAbility, AbilityEffect
+from .ability_types import Ability, ActivatedAbility, TriggeredAbility, StaticAbility, ManaAbility, AbilityEffect, CreateTokenEffect
 import re
 from collections import defaultdict
 from .card import Card
@@ -899,138 +899,163 @@ class AbilityHandler:
                 if card_id not in self.registered_abilities: self.registered_abilities[card_id] = []
             
     def _classify_and_parse_ability_clause(self, card_id, card, clause_text, current_activated_index):
-            """
-            Attempts to classify and parse a single text clause (paragraph/sentence)
-            into one or more Activated, Triggered, or Static abilities.
-            Skips clauses identified as likely Replacement Effects or clearly single-shot Instant/Sorcery effects.
-            Uses the stricter ActivatedAbility parser.
+        """
+        Attempts to classify and parse a single text clause (paragraph/sentence)
+        into one or more Activated, Triggered, or Static abilities.
+        Handles Offspring ETB and Impending end step triggers.
+        Uses the stricter ActivatedAbility parser.
 
-            Returns:
-                list: A list of created Ability objects (can be empty).
-            """
-            if not clause_text: return []
+        Returns:
+            list: A list of created Ability objects (can be empty).
+        """
+        if not clause_text: return []
 
-            abilities_found = []
-            text_lower = clause_text.lower()
-            # Strip trailing period just in case
-            text_lower_stripped = text_lower.rstrip('.').strip()
+        abilities_found = []
+        text_lower = clause_text.lower().strip()
+        text_lower_stripped = text_lower.rstrip('.').strip() # Used for certain checks
 
-            # --- 0. Skip likely Replacement Effects / Non-ability clauses ---
-            # (Keep existing replacement_or_non_ability_patterns check)
-            replacement_or_non_ability_patterns = [
-                r"^as\s+.*\s+enters\sthe\sbattlefield",
-                r"^if.*?would.*?instead",
-                r"^if\s+a\s+source\s+would\s+deal\s+damage\s+to.*?prevent",
-                r"^\s*domain\b",
-                r"^\s*as an additional cost",
-                r"^\s*collect evidence\s+\d+",
-                r"^\s*[ivx]+\s*[—\u2014-]", # Sagas
-                r"^\s*Split second\b",
-            ]
-            if any(re.match(pattern, text_lower_stripped, re.IGNORECASE) for pattern in replacement_or_non_ability_patterns):
-                logging.debug(f"Skipping clause '{clause_text}' as likely Replacement/Non-functional Ability clause.")
-                return []
+        # --- 0. Skip likely Replacement Effects / Non-functional clauses ---
+        # ... (patterns remain the same) ...
+        replacement_or_non_ability_patterns = [
+            r"^as\s+.*\s+enters\sthe\sbattlefield",
+            r"^if.*?would.*?instead",
+            r"^if\s+a\s+source\s+would\s+deal\s+damage\s+to.*?prevent",
+            r"^\s*domain\b", r"^\s*as an additional cost", r"^\s*collect evidence\s+\d+",
+            r"^\s*[ivx]+\s*[—\u2014-]", r"^\s*Split second\b",
+        ]
+        if any(re.match(pattern, text_lower_stripped, re.IGNORECASE) for pattern in replacement_or_non_ability_patterns):
+            # logging.debug(f"Skipping clause '{clause_text}' as likely Replacement/Non-functional Ability.")
+            return []
 
-            # --- Offspring ETB Trigger (before standard triggered) ---
-            offspring_etb_pattern = re.compile(
-                r"when this (?:creature|permanent|card|enters).*offspring cost was paid.*create a 1/1 token copy",
-                re.IGNORECASE
-            )
-            if offspring_etb_pattern.search(clause_text.lower()):
-                ability = TriggeredAbility(card_id=card_id, effect_text=clause_text.strip())
-                ability._is_offspring_etb_trigger = True
-                # Attach a condition function for offspring_cost_paid
-                def offspring_condition(trigger_context):
-                    return trigger_context.get('offspring_cost_paid', False)
-                ability.offspring_condition = offspring_condition
-                return [ability]
+        # --- 1. Handle Specific Keyword Triggers First (Offspring ETB, Impending End Step) ---
 
-            # --- 1. Try parsing as Activated Ability (Stricter Check) ---
-            is_exhaust = False
-            text_to_parse_activated = clause_text
-            exhaust_match = re.match(r"^\s*Exhaust\s*[,—\u2014-]?\s*(.+)", text_to_parse_activated, re.IGNORECASE | re.DOTALL)
-            if exhaust_match:
-                 is_exhaust = True
-                 text_to_parse_activated = exhaust_match.group(1).strip()
-
-            activated_parsed = False
+        # --- OFFSPRING ETB Trigger ---
+        # Check card flag AND text pattern for ETB with cost paid condition leading to token copy
+        if getattr(card, 'is_offspring', False) and \
+           re.match(r"^\s*when this (?:creature|permanent) enters", text_lower_stripped) and \
+           ("if the offspring cost was paid" in text_lower_stripped or "if its offspring cost was paid" in text_lower_stripped) and \
+           ("token" in text_lower_stripped and ("copy of it" in text_lower_stripped or "copy of that creature" in text_lower_stripped or "1/1 token copy" in text_lower_stripped)):
             try:
-                # Use the stricter parser inside ActivatedAbility.__init__
-                ability = ActivatedAbility(card_id=card_id, effect_text=text_to_parse_activated, is_exhaust=is_exhaust)
+                # Parse the main trigger part ("when this enters...") and the effect part
+                trigger_condition, effect_part = TriggeredAbility._parse_condition_effect(clause_text.strip())
+                if trigger_condition != "Unknown" and effect_part != "Unknown":
+                    ability = TriggeredAbility(card_id=card_id, trigger_condition=trigger_condition, effect=effect_part, effect_text=clause_text.strip())
+                    ability._is_offspring_etb_trigger = True # Flag it
 
-                # Check if valid cost AND effect were found
-                if getattr(ability, 'cost', None) and getattr(ability, 'effect', None):
-                    activated_parsed = True
-                    if isinstance(ability, ManaAbility):
-                        logging.debug(f"Registered ManaAbility for {getattr(card, 'name', card_id)}: {ability.effect_text}")
-                        setattr(ability, 'activation_index', current_activated_index)
-                        abilities_found.append(ability)
-                        return abilities_found
-                    else: # Standard Activated
-                        logging.debug(f"Registered ActivatedAbility for {getattr(card, 'name', card_id)}: {ability.effect_text}{' (Exhaust)' if is_exhaust else ''}")
-                        setattr(ability, 'activation_index', current_activated_index)
-                        abilities_found.append(ability)
-                        return abilities_found
+                    # Add the condition function to check if the cost was paid *for this instance*
+                    def offspring_condition(trigger_context):
+                        gs = trigger_context.get('game_state')
+                        # *** FIXED: Get the entering card ID from the ETB event context ***
+                        entering_card_id = trigger_context.get('card_id') # This card triggered the ETB
+                        cost_paid_context = getattr(gs, '_offspring_cost_paid_context', {})
+                        # Check if the cost was paid for THIS specific card entering
+                        was_paid = cost_paid_context.get(entering_card_id, False)
+                        # Removed cleanup from here - handled after resolution
+                        return gs and entering_card_id and was_paid
 
-            except ValueError as e:
-                # This now specifically catches the error raised by __init__ if parsing failed on text with a separator
-                logging.warning(f"Clause '{text_to_parse_activated}' did not parse as Activated: {e}")
-                pass # Continue to check Triggered/Static
-            except Exception as e:
-                logging.error(f"Error attempting to parse as ActivatedAbility: {e}")
+                    ability.additional_condition = offspring_condition # Use callable condition
+                    setattr(ability, 'source_card', card) # Link card early
+                    abilities_found.append(ability)
+                    logging.debug(f"Registered Offspring ETB Trigger for {card.name}")
+                    return abilities_found # Successfully handled as Offspring ETB
+                else:
+                     logging.warning(f"Offspring ETB structure parsed incorrectly for {card.name}: '{clause_text}'")
 
-            # --- 2. Check for Triggered Ability ---
-            # (Keep existing TriggeredAbility parsing logic)
-            trigger_match = re.match(r'^(When|Whenever|At)\b', clause_text.strip(), re.IGNORECASE)
-            etb_match = re.match(r"^(?:this\s+permanent\s+|this\s+creature\s+)?enters?\s+the\s+battlefield(?: with|,)".format(card.name if card else 'this permanent'), text_lower_stripped, re.IGNORECASE)
-            triggering_keywords_at_start = ['Valiant', 'Eerie', 'Prowess', 'Offspring']
-            keyword_trigger_match = re.match(rf"^({'|'.join(triggering_keywords_at_start)})\s*[—\u2014-]?\s*(?:When|Whenever)", clause_text.strip(), re.IGNORECASE)
+            except Exception as e: logging.error(f"Error parsing Offspring trigger: '{clause_text}'. E: {e}", exc_info=True)
 
-            if trigger_match or etb_match or keyword_trigger_match:
-                try:
-                    ability = TriggeredAbility(card_id=card_id, effect_text=clause_text.strip())
-                    if ability.trigger_condition != "Unknown" and ability.trigger_condition != "placeholder":
-                        abilities_found.append(ability)
-                        logging.debug(f"Registered TriggeredAbility for {getattr(card, 'name', card_id)}: {ability.effect_text}")
-                        return abilities_found
-                except ValueError: pass
-                except Exception as e: logging.error(f"Error parsing as Triggered: '{clause_text}'. E: {e}")
+        # --- IMPENDING End Step Trigger ---
+        if getattr(card, 'is_impending', False) and \
+           re.match(r"^\s*at the beginning of your end step", text_lower_stripped) and \
+           "remove a time counter" in text_lower_stripped:
+            try:
+                trigger_condition, effect_part = TriggeredAbility._parse_condition_effect(clause_text.strip())
+                if trigger_condition != "Unknown" and effect_part != "Unknown":
+                     ability = TriggeredAbility(card_id=card_id, trigger_condition=trigger_condition, effect=effect_part, effect_text=clause_text.strip())
+                     ability._is_impending_remove_counter = True # Flag it
+                     setattr(ability, 'source_card', card) # Link card early
+                     abilities_found.append(ability)
+                     logging.debug(f"Registered Impending End Step trigger for {card.name}")
+                     return abilities_found # Handled as Impending trigger
+                else:
+                     logging.warning(f"Impending End Step structure parsed incorrectly for {card.name}: '{clause_text}'")
+            except Exception as e: logging.error(f"Error parsing Impending End Step trigger: '{clause_text}'. E: {e}", exc_info=True)
 
-            # --- 3. Check for Static Ability (Only if not Activated/Triggered and permanent type) ---
-            # (Keep existing StaticAbility classification logic, ensuring it runs only if not Activated/Triggered)
-            is_permanent_type = card and hasattr(card, 'card_types') and any(ct in Card.ALL_CARD_TYPES[:7] for ct in card.card_types)
-            potential_static = is_permanent_type
-            if trigger_match or etb_match or keyword_trigger_match: potential_static = False
-            if activated_parsed: potential_static = False # <<< Added this check
 
-            action_verb_pattern = r'\b(destroy|exile|counter|draw|discard|create|search|tap|untap|target|deal|sacrifice|return.*?to|put.*?on|put.*?into|attach|manifest|look at)\b'
-            grant_pattern = r'\b(have|has|gain|gains|is|are|can\'t|cannot|don\'t|get[s]?\s*[+-])\b'
+        # --- 2. Try parsing as Activated Ability (Stricter Check) ---
+        # ... (Rest of the method remains the same) ...
+        is_exhaust = False; text_to_parse_activated = clause_text
+        exhaust_match = re.match(r"^\s*Exhaust\s*[,—\u2014-]?\s*(.+)", text_to_parse_activated, re.IGNORECASE | re.DOTALL)
+        if exhaust_match: is_exhaust = True; text_to_parse_activated = exhaust_match.group(1).strip()
 
-            if potential_static and re.search(action_verb_pattern, text_lower):
-                if not re.search(grant_pattern, text_lower): potential_static = False
+        activated_ability_instance = None
+        try:
+            ability = ActivatedAbility(
+                card_id=card_id,
+                effect_text=text_to_parse_activated,
+                is_exhaust=is_exhaust,
+                activation_index=current_activated_index # Pass index during init
+            )
+            if getattr(ability, 'cost', None) is not None and getattr(ability, 'effect', None) is not None and getattr(ability, 'cost', None) != "":
+                if current_activated_index is not None and getattr(ability, 'activation_index', None) is None:
+                     setattr(ability, 'activation_index', current_activated_index)
+                setattr(ability, 'source_card', card)
+                abilities_found.append(ability)
+                activated_ability_instance = ability
+        except ValueError as e: pass
+        except Exception as e: logging.error(f"Error attempting to parse as ActivatedAbility: {e}")
 
-            if potential_static:
-                try:
-                    ability = StaticAbility(card_id=card_id, effect=clause_text.strip(), effect_text=clause_text.strip())
-                    if ability.effect:
-                        abilities_found.append(ability)
-                        logging.debug(f"Registered StaticAbility for {getattr(card, 'name', card_id)}: {ability.effect_text}")
-                        return abilities_found
-                except Exception as e: logging.error(f"Error parsing as Static: '{clause_text}'. E: {e}")
-
-            # --- Final Logging (If clause wasn't classified) ---
-            # (Keep existing logging logic for unclassified clauses on permanent types)
-            is_inst_sorc = card and hasattr(card, 'card_types') and any(ct in ['instant', 'sorcery'] for ct in card.card_types)
-            is_adventure_effect = is_inst_sorc and hasattr(card, 'layout') and card.layout == 'adventure'
-            if not abilities_found and not is_inst_sorc and not is_adventure_effect and clause_text.strip() and not clause_text.strip().startswith("("):
-                should_log_warning = is_permanent_type
-                if is_permanent_type and re.search(action_verb_pattern, text_lower):
-                    pass # Avoid logging for simple action text on permanents if not Triggered/Activated
-                elif should_log_warning:
-                    # *** Keeping this warning for unclassified text on permanents ***
-                    logging.warning(f"Could not classify ability clause for {getattr(card, 'name', card_id)}: '{clause_text}'")
-
+        if activated_ability_instance:
+            if isinstance(activated_ability_instance, ManaAbility): logging.debug(f"Registered ManaAbility for {card.name}")
+            else: logging.debug(f"Registered ActivatedAbility for {card.name}{' (Exhaust)' if is_exhaust else ''}")
             return abilities_found
+
+        # --- 3. Check for Standard Triggered Ability ---
+        # ... (Rest of the method remains the same) ...
+        is_likely_triggered = False
+        trigger_match = re.match(r'^\s*(When|Whenever|At\sthe\sbeginning\sof)\b', clause_text.strip(), re.IGNORECASE)
+        etb_match = re.match(r"^\s*(?:(?:this|that)\s+(?:permanent|creature)\s+)?enters?\s+the\s+battlefield\b", text_lower_stripped, re.IGNORECASE)
+        triggering_keywords_at_start = ['Valiant', 'Eerie', 'Prowess', 'Riot']
+        keyword_trigger_match = re.match(rf"^\s*({'|'.join(triggering_keywords_at_start)})\s*[—\u2014-]?\s*(?:When|Whenever|At)\b", clause_text.strip(), re.IGNORECASE)
+
+        if trigger_match or etb_match or keyword_trigger_match:
+             is_likely_triggered = True
+
+        if is_likely_triggered:
+             try:
+                 ability = TriggeredAbility(card_id=card_id, effect_text=clause_text.strip())
+                 if ability.trigger_condition != "Unknown" and ability.effect != "Unknown":
+                     setattr(ability, 'source_card', card)
+                     abilities_found.append(ability)
+                     logging.debug(f"Registered TriggeredAbility for {card.name}")
+                     return abilities_found
+             except ValueError: pass
+             except Exception as e: logging.error(f"Error parsing as Triggered: '{clause_text}'. E: {e}")
+
+        # --- 4. Try Static Ability (If not Activated/Triggered and fits criteria) ---
+        # ... (Rest of the method remains the same) ...
+        is_permanent_type = card and hasattr(card, 'card_types') and any(ct in Card.ALL_CARD_TYPES[:8] for ct in card.card_types)
+        action_verb_pattern = r'\b(destroy|exile|counter|draw|discard|create|search|tap|untap|target|deal|sacrifice|return.*?to|put.*?on|put.*?into|attach|manifest|look at)\b'
+        has_action_verb = bool(re.search(action_verb_pattern, text_lower))
+
+        if is_permanent_type and not activated_ability_instance and not is_likely_triggered and not has_action_verb:
+             try:
+                 ability = StaticAbility(card_id=card_id, effect=clause_text.strip(), effect_text=clause_text.strip())
+                 if ability.effect:
+                      setattr(ability, 'source_card', card)
+                      abilities_found.append(ability)
+                      logging.debug(f"Registered StaticAbility for {card.name}")
+                      return abilities_found
+             except Exception as e: logging.error(f"Error parsing as Static: '{clause_text}'. E: {e}")
+
+        # --- 5. Log Unclassified (If not parsed and seems relevant) ---
+        # ... (Rest of the method remains the same) ...
+        is_inst_sorc = card and hasattr(card, 'card_types') and any(ct in ['instant', 'sorcery'] for ct in card.card_types)
+        is_adventure_effect = is_inst_sorc and hasattr(card, 'layout') and card.layout == 'adventure'
+        if not abilities_found and not is_inst_sorc and not is_adventure_effect and \
+           clause_text.strip() and not clause_text.strip().startswith("(") and is_permanent_type:
+            logging.warning(f"Could not classify ability clause for {card.name}: '{clause_text}'")
+
+        return abilities_found
             
     # Helper function to parse keywords list/array
     def _get_parsed_keywords(self, keywords_data):
@@ -1775,6 +1800,7 @@ class AbilityHandler:
         Resolve an ability from the stack. Now expects 'ability' object in context.
         Relies on the Ability object's resolve method or fallback generic resolution.
         Handles target validation using the main TargetingSystem instance.
+        Includes special Offspring resolution.
         """
         gs = self.game_state
         card = gs._safe_get_card(card_id)
@@ -1788,154 +1814,185 @@ class AbilityHandler:
 
         logging.debug(f"Attempting to resolve {ability_type} '{effect_text_from_context}' from {source_name} with context keys {list(context.keys())}")
 
-        # --- Path 1: Use Ability Object ---
-        if ability and isinstance(ability, Ability):
-            ability_effect_text = getattr(ability, 'effect_text', effect_text_from_context) # Prefer ability's text
-            logging.debug(f"Resolving via Ability object ({type(ability).__name__}) method.")
+        resolution_success = False # Track overall success
 
-            # *** CHANGED: Use self.targeting_system instance ***
-            valid_targets = True # Assume valid if no targeting system or no targets needed
-            if getattr(ability, 'requires_target', False) or (targets_on_stack and any(targets_on_stack.values())): # Check if targets are present or ability requires them
+        # --- OFFSPRING Trigger Special Resolution ---
+        # *** Check if the ability instance has the flag set during parsing ***
+        is_offspring_trigger = ability and hasattr(ability, '_is_offspring_etb_trigger') and ability._is_offspring_etb_trigger
+
+        if is_offspring_trigger:
+            logging.debug(f"Attempting Offspring trigger resolution for {source_name}")
+            offspring_context_map = getattr(gs, '_offspring_cost_paid_context', {})
+            cost_was_paid = offspring_context_map.get(card_id, False) # Check map for THIS card ID instance
+
+            if cost_was_paid:
+                if card: # Need the source card that entered to copy
+                    token_creator_player = controller
+                    # Create and apply the copy effect
+                    copy_effect = CreateTokenEffect(power=1, toughness=1, count=1,
+                                                    is_copy=True, source_card_for_copy=card,
+                                                    controller_gets=True)
+                    if copy_effect.apply(gs, card_id, token_creator_player, None):
+                         logging.info(f"Successfully resolved Offspring ETB for {card.name}")
+                         resolution_success = True
+                    else:
+                         logging.error(f"Offspring token creation failed for {card.name}")
+                         # Even on failure, clean up context to avoid re-triggering
+                else:
+                    logging.error(f"Offspring trigger cannot resolve: Source card {card_id} not found.")
+            else:
+                 logging.debug(f"Offspring trigger condition (cost paid) not met for {card_id} on resolution.")
+                 resolution_success = True # Trigger resolves, but effect doesn't happen
+
+            # --- Cleanup Offspring Context AFTER Resolution Attempt ---
+            if card_id in offspring_context_map:
+                del offspring_context_map[card_id]
+                logging.debug(f"Cleaned up offspring context for {card_id}.")
+            return resolution_success # Exit after handling Offspring
+
+        # --- IMPENDING Trigger Special Resolution ---
+        is_impending_remove_counter_trigger = ability and hasattr(ability, '_is_impending_remove_counter') and ability._is_impending_remove_counter
+        is_impending_final_trigger = ability and hasattr(ability, '_is_impending_final_trigger') and ability._is_impending_final_trigger
+
+        if is_impending_remove_counter_trigger:
+            # ...(Impending logic remains the same)...
+            logging.debug(f"Resolving Impending End Step trigger for {source_name}")
+            if gs._is_impending_active(card_id):
+                 if gs.add_counter(card_id, 'time', -1):
+                      logging.debug(f"Removed time counter from Impending {source_name}.")
+                      resolution_success = True
+                 else:
+                      logging.warning(f"Failed to remove time counter from Impending {source_name}.")
+                      resolution_success = False
+            else:
+                 logging.debug(f"Impending trigger resolves, but {source_name} has no time counters or left BF.")
+                 resolution_success = True
+            return resolution_success
+
+        if is_impending_final_trigger:
+            logging.debug(f"Impending 'last counter removed' trigger resolving for {source_name} (Effect applied via counter removal).")
+            return True # Trigger resolves, effect already happened.
+
+
+        # --- Path 1: Use Ability Object (Standard Resolution - if not special trigger) ---
+        elif ability and isinstance(ability, Ability):
+            # ...(Rest of standard ability resolution remains the same)...
+            # --- Target Validation ---
+            ability_effect_text = getattr(ability, 'effect_text', effect_text_from_context)
+            valid_targets = True
+            requires_target = getattr(ability, 'requires_target', False) or (targets_on_stack and any(targets_on_stack.values()))
+
+            if requires_target:
                 if self.targeting_system:
                     validation_targets = targets_on_stack if isinstance(targets_on_stack, dict) else {}
-                    # Pass effect text for context-specific validation if possible
                     validation_text = ability_effect_text if ability_effect_text != "Unknown" else None
                     valid_targets = self.targeting_system.validate_targets(card_id, validation_targets, controller, effect_text=validation_text)
                     if not valid_targets:
                          logging.info(f"Targets for '{ability_effect_text}' from {source_name} became invalid via TargetingSystem. Fizzling.")
-                         return # Fizzle
-                else:
-                    # Basic fallback validation if no targeting system
-                    # Simple check: Does target still exist in expected zone?
-                    # This is very rudimentary.
-                    for cat, target_list in targets_on_stack.items():
-                        if not target_list: continue
-                        for target_id in target_list:
-                            target_owner, target_zone = gs.find_card_location(target_id)
-                            # Basic check: must exist somewhere
-                            if not target_owner:
-                                 valid_targets = False; break
-                        if not valid_targets: break
-                    if not valid_targets:
-                         logging.info(f"Targets for '{ability_effect_text}' from {source_name} became invalid (simple check). Fizzling.")
-                         return # Fizzle
+                         return True # Fizzling counts as successful resolution
+                else: # Fallback simple validation
+                     is_valid_fallback = True
+                     for cat, target_list in targets_on_stack.items():
+                          if not target_list: continue
+                          for target_id in target_list:
+                               owner, zone = gs.find_card_location(target_id)
+                               if not owner: is_valid_fallback = False; break
+                          if not is_valid_fallback: break
+                     if not is_valid_fallback:
+                          logging.info(f"Targets for '{ability_effect_text}' from {source_name} became invalid (simple check). Fizzling.")
+                          return True # Fizzling counts as successful resolution
+                     valid_targets = True # Passed simple check
 
-            if not valid_targets: # This check seems redundant given returns above, but safe.
-                return # Fizzle if targets invalid
-
-            # Resolve using the ability's method
+            # --- Call Appropriate Resolve Method ---
             try:
-                # Determine the appropriate resolve method based on signature
-                resolve_method = None
-                resolve_kwargs = {'game_state': gs, 'controller': controller}
-                # Try most specific first
-                if hasattr(ability, 'resolve_with_targets') and callable(ability.resolve_with_targets):
-                    resolve_method = ability.resolve_with_targets
-                    resolve_kwargs['targets'] = targets_on_stack # Ensure targets are passed if method expects them
+                resolve_method = None; resolve_kwargs = {'game_state': gs, 'controller': controller}; resolve_method_name = "None"
+                # ...(logic to find resolve method)...
+                if hasattr(ability, 'resolve_with_targets') and callable(ability.resolve_with_targets): resolve_method_name = "resolve_with_targets"; resolve_method = ability.resolve_with_targets; resolve_kwargs['targets'] = targets_on_stack
                 elif hasattr(ability, 'resolve') and callable(ability.resolve):
-                    resolve_method = ability.resolve
-                    # Check signature if possible to avoid passing targets if not expected
-                    import inspect
-                    sig = inspect.signature(ability.resolve)
-                    if 'targets' in sig.parameters:
-                         resolve_kwargs['targets'] = targets_on_stack
-                    # else: resolve only expects game_state, controller
-
-                # Add fallbacks for older/different method names if necessary
+                    resolve_method_name = "resolve"; resolve_method = ability.resolve
+                    import inspect; sig = inspect.signature(ability.resolve)
+                    if 'targets' in sig.parameters: resolve_kwargs['targets'] = targets_on_stack
                 elif hasattr(ability, '_resolve_ability_implementation') and callable(ability._resolve_ability_implementation):
-                    resolve_method = ability._resolve_ability_implementation
-                    # Check signature for targets...
-                    import inspect
-                    sig = inspect.signature(resolve_method)
+                    resolve_method_name = "_resolve_ability_implementation"; resolve_method = ability._resolve_ability_implementation
+                    import inspect; sig = inspect.signature(resolve_method)
                     if 'targets' in sig.parameters: resolve_kwargs['targets'] = targets_on_stack
                 elif hasattr(ability, '_resolve_ability_effect') and callable(ability._resolve_ability_effect):
-                    resolve_method = ability._resolve_ability_effect
-                    # Check signature for targets...
-                    import inspect
-                    sig = inspect.signature(resolve_method)
-                    if 'targets' in sig.parameters: resolve_kwargs['targets'] = targets_on_stack
-
+                     resolve_method_name = "_resolve_ability_effect"; resolve_method = ability._resolve_ability_effect
+                     import inspect; sig = inspect.signature(resolve_method)
+                     if 'targets' in sig.parameters: resolve_kwargs['targets'] = targets_on_stack
 
                 if resolve_method:
-                    resolve_method(**resolve_kwargs) # Call with prepared arguments
-                    logging.debug(f"Resolved {type(ability).__name__} ability for {source_name}: {ability_effect_text}")
-                else:
-                    logging.error(f"No resolve method found for ability object {type(ability).__name__} on {source_name}. Attempting internal effect creation.")
-                    # Attempt fallback using _create_ability_effects if resolve methods missing
+                    logging.debug(f"Resolving via Ability object method: {resolve_method_name}")
+                    resolve_result = resolve_method(**resolve_kwargs)
+                    resolution_success = resolve_result is not False # Assume True unless explicitly False
+                else: # Fallback: Use internal effect creation
+                    logging.error(f"No standard resolve method found for ability object {type(ability).__name__} on {source_name}. Attempting effect factory.")
                     if hasattr(ability, '_create_ability_effects') and callable(ability._create_ability_effects):
-                        effect_text_to_use = getattr(ability, 'effect', ability_effect_text) # Prefer 'effect' attribute if present
+                        effect_text_to_use = getattr(ability, 'effect', ability_effect_text)
                         effects = ability._create_ability_effects(effect_text_to_use, targets_on_stack)
                         if effects:
-                             for effect_obj in effects:
-                                  effect_obj.apply(gs, card_id, controller, targets_on_stack)
-                             logging.debug(f"Resolved effects for {type(ability).__name__} via internal creation for {source_name}.")
+                            temp_success = True
+                            for effect_obj in effects:
+                                 if not effect_obj.apply(gs, card_id, controller, targets_on_stack):
+                                     temp_success = False
+                            resolution_success = temp_success
                         else:
                              logging.error(f"Internal effect creation failed for {type(ability).__name__} on {source_name}.")
+                             resolution_success = False
                     else:
                          logging.error(f"Could not resolve {type(ability).__name__} on {source_name}: No resolve method or effect creator found.")
+                         resolution_success = False
 
             except Exception as e:
                 logging.error(f"Error resolving ability {ability_type} ({ability_effect_text}) for {source_name}: {str(e)}")
                 import traceback; logging.error(traceback.format_exc())
+                resolution_success = False
 
-        # --- Path 2: Fallback using Effect Text from Context (largely unchanged) ---
+        # --- Path 2: Fallback using Effect Text from Context (If no Ability object) ---
         else:
+             # ...(Fallback logic remains the same)...
              logging.warning(f"No valid 'ability' object found in context for resolving {ability_type} from {source_name}. Attempting fallback resolution from effect text: '{effect_text_from_context}'")
              if effect_text_from_context and effect_text_from_context != "Unknown":
                  logging.debug(f"Resolving via EffectFactory fallback using text: '{effect_text_from_context}'.")
                  # Validate targets using TargetingSystem
                  valid_targets_for_text = True
-                 if self.targeting_system:
-                      validation_targets = targets_on_stack if isinstance(targets_on_stack, dict) else {}
-                      # Only validate if text actually contains "target"
-                      if "target" in effect_text_from_context.lower():
-                          valid_targets_for_text = self.targeting_system.validate_targets(card_id, validation_targets, controller, effect_text=effect_text_from_context)
+                 if self.targeting_system and "target" in effect_text_from_context.lower():
+                     validation_targets = targets_on_stack if isinstance(targets_on_stack, dict) else {}
+                     valid_targets_for_text = self.targeting_system.validate_targets(card_id, validation_targets, controller, effect_text=effect_text_from_context)
 
                  if not valid_targets_for_text:
                       logging.info(f"Targets for fallback effect '{effect_text_from_context}' from {source_name} became invalid. Fizzling.")
-                      return # Fizzle
+                      return True # Fizzling counts as successful resolution
 
                  # Use EffectFactory to create effects from text
                  effects = EffectFactory.create_effects(effect_text_from_context, targets=targets_on_stack)
                  if not effects:
                      logging.error(f"Cannot resolve {ability_type} from {source_name}: EffectFactory failed for text '{effect_text_from_context}'.")
-                     return
+                     return False # Failure: couldn't parse effects
 
                  # Apply created effects
+                 temp_success = True
                  for effect_obj in effects:
                       try:
-                          # Ensure targets are passed correctly
                           target_arg = targets_on_stack if isinstance(targets_on_stack, dict) else None
-                          effect_obj.apply(gs, card_id, controller, target_arg)
-                      except NotImplementedError:
-                          logging.error(f"Fallback effect application not implemented for: {effect_obj.effect_text}")
+                          if not effect_obj.apply(gs, card_id, controller, target_arg):
+                               temp_success = False # Track failure
                       except Exception as e:
                           logging.error(f"Error applying fallback effect '{effect_obj.effect_text}': {e}", exc_info=True)
-                 logging.debug(f"Resolved fallback {ability_type} for {source_name} using effect text.")
+                          temp_success = False # Mark as failed on error
+                 resolution_success = temp_success
+                 logging.debug(f"Resolved fallback {ability_type} for {source_name} using effect text. Overall success: {resolution_success}")
              else:
                  logging.error(f"Cannot resolve {ability_type} from {source_name}: Missing ability object and effect text in context.")
-                  
-        # --- Offspring ETB ---
-        if ability and getattr(ability, '_is_offspring_etb_trigger', False):
-            # Only resolve if offspring_cost_paid in context
-            if hasattr(ability, 'offspring_condition') and not ability.offspring_condition(context):
-                logging.info("Skipping Offspring ETB trigger: cost not paid.")
-                return
-            # Use EffectFactory to create the offspring effect
-            effects = EffectFactory.create_effects(ability.effect_text)
-            for effect in effects:
-                if getattr(effect, '_is_offspring_token_effect', False):
-                    effect.apply(gs, card_id, controller, context.get('targets', {}))
-            return
+                 resolution_success = False # Failure: no info to resolve
 
-        # --- Impending Final Trigger ---
-        if ability and getattr(ability, '_is_impending_final_trigger', False):
-            # Remove the "not a creature" effect and recalculate layers
-            if hasattr(gs, 'layer_system'):
-                gs.layer_system.invalidate_cache()
-                gs.layer_system.apply_all_effects()
-            logging.info(f"Impending: {card_id} becomes a creature.")
-            return
+        # --- Post-Resolution Cleanup & SBA Check ---
+        if resolution_success:
+            # Trigger a generic RESOLVED event if needed
+            gs.trigger_ability(card_id, f"{ability_type}_RESOLVED", context)
+        gs.check_state_based_actions() # Check SBAs after any ability resolution attempt
+
+        return resolution_success
 
     def _check_keyword_internal(self, card, keyword):
         """

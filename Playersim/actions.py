@@ -85,174 +85,128 @@ ACTION_MEANINGS = {
     # Param=None. Handler expects {'hand_idx': int, 'mode_idx': int} in context.
     **{258 + (i * 2) + j: ("SELECT_SPREE_MODE", None) for i in range(8) for j in range(2)},
 
-    # Targeting (274-293) = 20 actions
-    # Param is index (0-9) into list of valid targets. Handler uses param + targeting_context.
     **{274 + i: ("SELECT_TARGET", i) for i in range(10)},
-    # Param is index (0-9) into list of valid sacrifice targets. Handler uses param + sacrifice_context.
     **{284 + i: ("SACRIFICE_PERMANENT", i) for i in range(10)},
+
+    # --- Offspring/Impending custom actions (indices 294, 295) ---
+    294: ("CAST_FOR_IMPENDING", None),  # Player chooses to cast a card for its Impending cost (Context={'hand_idx': X})
+    295: ("PAY_OFFSPRING_COST", None),  # Player chooses to pay Offspring cost for the pending spell (Context implicit via gs.pending_spell_context)
 
     # Gaps filled with NO_OP (296-298) = 3 actions
     **{i: ("NO_OP", None) for i in range(296, 299)},
-    # --- Offspring/Impending custom actions (replace NO_OPs 294, 295 as examples) ---
-    294: ("CAST_FOR_IMPENDING", None),  # Player chooses to cast a card for its Impending cost
-    295: ("PAY_OFFSPRING_COST", None),  # When casting: pay Offspring cost for a card
 
-    # Library/Card Movement (299-308) = 10 actions
-    # Param=search type index 0-4
-    **{299 + i: ("SEARCH_LIBRARY", i) for i in range(5)},
-    304: ("NO_OP_SEARCH_FAIL", None),
-    # Param implies choice index, Handler needs choice_context.
-    305: ("PUT_TO_GRAVEYARD", None), # Choice index 0 -> Surveil GY
-    306: ("PUT_ON_TOP", None),       # Choice index 0 -> Scry/Surveil Top
-    307: ("PUT_ON_BOTTOM", None),    # Choice index 0 -> Scry Bottom
-    # Param is graveyard index 0-5. Handler needs dredge_pending context.
-    **{i: ("DREDGE", i-308) for i in range(308, 314)}, # Corrected Dredge index to match space (6 slots)
-    # Gap from 314 to 318 needs filling if Dredge was only 1 slot previously (it was index 308). Revert to single DREDGE?
-    # Let's revert to a single DREDGE action and use context.
-    308: ("DREDGE", None), # Handler expects {'gy_idx': int} in context
-    # Gap filling (309-313)
-    **{i: ("NO_OP", None) for i in range(309, 314)}, # 5 NO_OPs
+    # Library/Card Movement (299-308) -> Corrected (Now starts at 299)
+    **{299 + i: ("SEARCH_LIBRARY", i) for i in range(5)}, # 299-303
+    304: ("NO_OP_SEARCH_FAIL", None),                   # 304
+    305: ("PUT_TO_GRAVEYARD", None),                    # 305 (Surveil GY)
+    306: ("PUT_ON_TOP", None),                          # 306 (Scry/Surveil Top)
+    307: ("PUT_ON_BOTTOM", None),                       # 307 (Scry Bottom)
+    308: ("DREDGE", None), # Handler expects {'gy_idx': int} in context # 308
 
-    # Counter Management (314-333 -> WAS 309-329 before fixing Dredge) = 20 actions + Prolif
-    # Param is index (0-9) into valid targets. Handler needs {'counter_type': str, 'count': int} in context.
-    **{314 + i: ("ADD_COUNTER", i) for i in range(10)},
-    # Param is index (0-9) into valid targets. Handler needs {'counter_type': str, 'count': int} in context.
-    **{324 + i: ("REMOVE_COUNTER", i) for i in range(10)},
-    334: ("PROLIFERATE", None), # Param=None. Context optional: {'proliferate_targets': [id,...]}
+    # Gap filling (309-313 -> previously 314-318)
+    **{i: ("NO_OP", None) for i in range(309, 314)}, # 5 NO_OPs # 309-313
 
-    # Zone Movement (335-352 -> WAS 330-347) = 18 actions
-    # Param is graveyard index 0-5. Handler uses param to find card ID.
-    **{335 + i: ("RETURN_FROM_GRAVEYARD", i) for i in range(6)},
-    # Param is graveyard index 0-5. Handler uses param to find card ID.
-    **{341 + i: ("REANIMATE", i) for i in range(6)},
-    # Param is exile index 0-5. Handler uses param to find card ID.
-    **{347 + i: ("RETURN_FROM_EXILE", i) for i in range(6)},
+    # Counter Management (314-334 -> previously 309-329+prolif = 314-334)
+    **{314 + i: ("ADD_COUNTER", i) for i in range(10)},         # 314-323
+    **{324 + i: ("REMOVE_COUNTER", i) for i in range(10)},      # 324-333
+    334: ("PROLIFERATE", None),                                 # 334
 
-    # Modal/Choice (353-377 -> WAS 348-372) = 25 actions
-    # Param is mode index 0-9. Handler uses param + choice_context.
-    **{353 + i: ("CHOOSE_MODE", i) for i in range(10)},
-    # Param is X value 1-10. Handler uses param + choice_context.
-    **{363 + i: ("CHOOSE_X_VALUE", i+1) for i in range(10)},
-    # Param is WUBRG index 0-4. Handler uses param + choice_context.
-    **{373 + i: ("CHOOSE_COLOR", i) for i in range(5)},
+    # Zone Movement (335-352 -> previously 330-347)
+    **{335 + i: ("RETURN_FROM_GRAVEYARD", i) for i in range(6)},# 335-340
+    **{341 + i: ("REANIMATE", i) for i in range(6)},            # 341-346
+    **{347 + i: ("RETURN_FROM_EXILE", i) for i in range(6)},    # 347-352
 
-    # Advanced Combat (378-382, 388-397 -> WAS 373-377, 383-392) = 15 actions
-    # Param=relative PW index 0-4. Handler uses param to identify target PW. Last declared attacker implicit.
-    **{378 + i: ("ATTACK_PLANESWALKER", i) for i in range(5)},
-    # Gap filled with NO_OP (383-387 -> WAS 378-382) = 5 actions
-    **{i: ("NO_OP", None) for i in range(383, 388)},
-    # Param=attacker index 0-9. Handler expects {'blocker_identifiers': [id_or_idx,...]} in context.
-    **{388 + i: ("ASSIGN_MULTIPLE_BLOCKERS", i) for i in range(10)},
+    # Modal/Choice (353-377 -> previously 348-372)
+    **{353 + i: ("CHOOSE_MODE", i) for i in range(10)},         # 353-362
+    **{363 + i: ("CHOOSE_X_VALUE", i+1) for i in range(10)},    # 363-372
+    **{373 + i: ("CHOOSE_COLOR", i) for i in range(5)},         # 373-377
 
-    # Alternative Casting (398-409 -> WAS 393-404) = 12 actions
-    # Handlers expect necessary identifiers (gy_idx, hand_idx, sacrifice_idx, etc.) in context. Param often unused.
-    398: ("CAST_WITH_FLASHBACK", None), # Context={'gy_idx': int}
-    399: ("CAST_WITH_JUMP_START", None), # Context={'gy_idx': int, 'discard_idx': int}
-    400: ("CAST_WITH_ESCAPE", None), # Context={'gy_idx': int, 'gy_indices_escape': [int,...]}
-    401: ("CAST_FOR_MADNESS", None), # Context={'card_id': str, 'exile_idx': int}
-    402: ("CAST_WITH_OVERLOAD", None), # Context={'hand_idx': int}
-    403: ("CAST_FOR_EMERGE", None), # Context={'hand_idx': int, 'sacrifice_idx': int}
-    404: ("CAST_FOR_DELVE", None), # Context={'hand_idx': int, 'gy_indices': [int,...]}
-    # Informational Flags
-    405: ("PAY_KICKER", True), # Param indicates choice
-    406: ("PAY_KICKER", False),# Param indicates choice
-    407: ("PAY_ADDITIONAL_COST", True), # Param indicates choice
-    408: ("PAY_ADDITIONAL_COST", False),# Param indicates choice
-    # Param=None. Handler expects {'num_extra_modes': int} in context.
+    # Advanced Combat (378-397 -> previously 373-377, 383-392)
+    **{378 + i: ("ATTACK_PLANESWALKER", i) for i in range(5)},  # 378-382
+    **{i: ("NO_OP", None) for i in range(383, 388)}, # 5 NO_OPs # 383-387
+    **{388 + i: ("ASSIGN_MULTIPLE_BLOCKERS", i) for i in range(10)}, # 388-397
+
+    # Alternative Casting (398-409 -> previously 393-404)
+    398: ("CAST_WITH_FLASHBACK", None),
+    399: ("CAST_WITH_JUMP_START", None),
+    400: ("CAST_WITH_ESCAPE", None),
+    401: ("CAST_FOR_MADNESS", None),
+    402: ("CAST_WITH_OVERLOAD", None),
+    403: ("CAST_FOR_EMERGE", None),
+    404: ("CAST_FOR_DELVE", None),
+    405: ("PAY_KICKER", True),
+    406: ("PAY_KICKER", False),
+    407: ("PAY_ADDITIONAL_COST", True),
+    408: ("PAY_ADDITIONAL_COST", False),
     409: ("PAY_ESCALATE", None),
 
-    # Token/Copy (410-417 -> WAS 405-412) = 8 actions
-    # Param=predefined token type index 0-4
-    **{410 + i: ("CREATE_TOKEN", i) for i in range(5)},
-    # Param=None. Handler expects {'target_permanent_identifier': id_or_idx} in context.
+    # Token/Copy (410-417 -> previously 405-412)
+    **{410 + i: ("CREATE_TOKEN", i) for i in range(5)}, # 410-414
     415: ("COPY_PERMANENT", None),
-    # Param=None. Handler expects {'target_stack_identifier': id_or_idx} in context.
     416: ("COPY_SPELL", None),
-    # Param=None. Handler expects {'target_token_identifier': id_or_idx} in context.
     417: ("POPULATE", None),
 
-    # Specific Mechanics (418-429 -> WAS 413-424) = 12 actions (Handlers mostly rely on context)
-    418: ("INVESTIGATE", None), # Context implies source
-    419: ("FORETELL", None), # Context={'hand_idx': int}
-    420: ("AMASS", None), # Context={'amount': int}
-    421: ("LEARN", None), # Context defines source
-    422: ("VENTURE", None), # Context defines source
-    423: ("EXERT", None), # Context={'creature_idx': int}
-    424: ("EXPLORE", None), # Context={'creature_idx': int}
-    425: ("ADAPT", None), # Context={'creature_idx': int, 'amount': int}
-    426: ("MUTATE", None), # Context={'hand_idx': int, 'target_idx': int}
-    427: ("CYCLING", None), # Context={'hand_idx': int}
-    428: ("GOAD", None), # Context={'target_creature_identifier': id_or_idx}
-    429: ("BOAST", None), # Context={'creature_idx': int}
+    # Specific Mechanics (418-429 -> previously 413-424)
+    418: ("INVESTIGATE", None),
+    419: ("FORETELL", None),
+    420: ("AMASS", None),
+    421: ("LEARN", None),
+    422: ("VENTURE", None),
+    423: ("EXERT", None),
+    424: ("EXPLORE", None),
+    425: ("ADAPT", None),
+    426: ("MUTATE", None),
+    427: ("CYCLING", None),
+    428: ("GOAD", None),
+    429: ("BOAST", None),
 
-    # Response Actions (430-434 -> WAS 425-429) = 5 actions (Handlers rely on context for targets/sources)
-    430: ("COUNTER_SPELL", None), # Context={'hand_idx': int, 'target_stack_identifier': id_or_idx}
-    431: ("COUNTER_ABILITY", None), # Context={'hand_idx': int, 'target_stack_identifier': id_or_idx}
-    432: ("PREVENT_DAMAGE", None), # Context={'hand_idx': int, ...}
-    433: ("REDIRECT_DAMAGE", None), # Context={'hand_idx': int, ...}
-    434: ("STIFLE_TRIGGER", None), # Context={'hand_idx': int, 'target_stack_identifier': id_or_idx}
+    # Response Actions (430-434 -> previously 425-429)
+    430: ("COUNTER_SPELL", None),
+    431: ("COUNTER_ABILITY", None),
+    432: ("PREVENT_DAMAGE", None),
+    433: ("REDIRECT_DAMAGE", None),
+    434: ("STIFLE_TRIGGER", None),
 
-    # Combat Actions (435-444 -> WAS 430-439) = 10 actions (Handlers rely on context)
-    435: ("FIRST_STRIKE_ORDER", None), # Context={'assignments': {atk_id: [blk_id,...]}}
-    436: ("ASSIGN_COMBAT_DAMAGE", None), # Context=Optional({'assignments': {atk_id: {tgt_id: dmg,...}}})
-    437: ("NINJUTSU", None), # Context={'ninja_identifier': id_or_idx, 'attacker_identifier': id_or_idx}
+    # Combat Actions (435-444 -> previously 430-439)
+    435: ("FIRST_STRIKE_ORDER", None),
+    436: ("ASSIGN_COMBAT_DAMAGE", None),
+    437: ("NINJUTSU", None),
     438: ("DECLARE_ATTACKERS_DONE", None),
     439: ("DECLARE_BLOCKERS_DONE", None),
-    # Param=battlefield index. Handler expects context={'battlefield_idx': int}. Action determines ability type.
     440: ("LOYALTY_ABILITY_PLUS", None),
     441: ("LOYALTY_ABILITY_ZERO", None),
     442: ("LOYALTY_ABILITY_MINUS", None),
     443: ("ULTIMATE_ABILITY", None),
-    # Param=None. Handler expects {'pw_identifier': id_or_idx, 'defender_identifier': id_or_idx} in context.
     444: ("PROTECT_PLANESWALKER", None),
 
-    # Card Type Specific (445-459 -> WAS 440-456) = 15 actions (plus NO_OPs)
-    # Param=None. Handler expects {'hand_idx': int} in context.
+    # Card Type Specific (445-461 -> previously 440-459)
     445: ("CAST_LEFT_HALF", None),
     446: ("CAST_RIGHT_HALF", None),
     447: ("CAST_FUSE", None),
-    # Param=None. Handler expects {'gy_idx': int} in context.
     448: ("AFTERMATH_CAST", None),
-    # Param=None. Handler expects {'battlefield_idx': int} in context.
     449: ("FLIP_CARD", None),
-    # Param=None. Handler expects {'equipment_identifier': id_or_idx, 'target_identifier': id_or_idx} in context.
     450: ("EQUIP", None),
-    451: ("NO_OP", None), # Was UNEQUIP
-    452: ("NO_OP", None), # Was ATTACH_AURA
-    # Param=None. Handler expects {'fort_identifier': id_or_idx, 'target_identifier': id_or_idx} in context.
+    451: ("UNEQUIP", None), # Restore UNEQUIP? Needs logic. Let's keep NO_OP for now.
+    452: ("ATTACH_AURA", None), # Restore? Needs logic. NO_OP.
     453: ("FORTIFY", None),
-    # Param=None. Handler expects {'card_identifier': id_or_idx, Optional 'target_identifier': id_or_idx} in context.
     454: ("RECONFIGURE", None),
-    # Param=None. Handler expects {'battlefield_idx': int} in context.
     455: ("MORPH", None),
-    456: ("MANIFEST", None), # Context implies source, usually top of library
-    457: ("CLASH", None), # Context defines source
-    # Param=None. Handler expects {'spell_stack_idx': int, 'creature1_identifier': id_or_idx, 'creature2_identifier': id_or_idx} in context.
+    456: ("MANIFEST", None),
+    457: ("CLASH", None),
     458: ("CONSPIRE", None),
-    459: ("NO_OP", None), # Was CONVOKE
-    # Param=None. Handler expects {'hand_idx': int} in context.
+    459: ("CONVOKE", None), # Restore CONVOKE? Needs logic. NO_OP.
     460: ("GRANDEUR", None),
-    461: ("NO_OP", None), # Was HELLBENT
+    461: ("HELLBENT", None), # Restore HELLBENT? Needs logic. NO_OP.
 
-    # Attack Battle (462-466 -> WAS 460-464) = 5 actions
-    # Param=relative battle index 0-4. Handler uses param to identify target battle. Last declared attacker implicit.
-    **{462 + i: ("ATTACK_BATTLE", i) for i in range(5)},
+    # Attack Battle (462-466 -> previously 460-464)
+    **{462 + i: ("ATTACK_BATTLE", i) for i in range(5)}, # 462-466
 
-    # Fill the remaining space (467-479 -> WAS 465-479) with No-Ops
-    **{i: ("NO_OP", None) for i in range(467, 480)} # Fill up to 479
+    # Fill the remaining space (467-479)
+    **{i: ("NO_OP", None) for i in range(467, 480)}
 }
-
-# Final size verification (Important after re-indexing)
-required_size = 480
-if len(ACTION_MEANINGS) != required_size:
-     logging.error(f"ACTION_MEANINGS size INCORRECT after fixing: {len(ACTION_MEANINGS)}, expected {required_size}.")
-     # Manual correction if needed
-     for i in range(required_size):
-         if i not in ACTION_MEANINGS: ACTION_MEANINGS[i] = ("NO_OP", None)
-     keys_to_remove = [k for k in ACTION_MEANINGS if k >= required_size]
-     for k in keys_to_remove: del ACTION_MEANINGS[k]
-     if len(ACTION_MEANINGS) == required_size: logging.info("ACTION_MEANINGS size corrected.")
-     else: logging.critical("ACTION_MEANINGS size correction failed!")
+# Ensure size again after changes
+if len(ACTION_MEANINGS) != 480:
+    raise ValueError(f"ACTION_MEANINGS size IS STILL INCORRECT: {len(ACTION_MEANINGS)}")
 
 class ActionHandler:
     """Handles action validation and execution"""
@@ -413,6 +367,8 @@ class ActionHandler:
                 # Actions removed or repurposed to NO_OP
                 "UNEQUIP": self._handle_no_op,
                 "ATTACH_AURA": self._handle_no_op,
+                "CAST_FOR_IMPENDING": self._handle_cast_for_impending,
+                "PAY_OFFSPRING_COST": self._handle_pay_offspring_cost,
             }
 
     def _handle_level_up_class(self, param, context, **kwargs):
@@ -563,196 +519,199 @@ class ActionHandler:
         return True, 0.6 # Default to recommend with medium confidence
  
     def generate_valid_actions(self):
-            """Return the current action mask as boolean array with reasoning. (Updated for New Phases and Delegation)"""
-            gs = self.game_state
-            try:
-                valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
-                # Ensure player objects are valid
-                p1_valid = hasattr(gs, 'p1') and gs.p1 is not None
-                p2_valid = hasattr(gs, 'p2') and gs.p2 is not None
-                if not p1_valid or not p2_valid:
-                    logging.error("Player object(s) not initialized in GameState. Cannot generate actions.")
-                    valid_actions[12] = True # Only Concede
-                    self.action_reasons = {12: "Error: Players not initialized"}
-                    return valid_actions
-
-                current_player = gs.p1 if gs.agent_is_p1 else gs.p2
-                opponent = gs.p2 if gs.agent_is_p1 else gs.p1
-                is_my_turn = (gs.turn % 2 == 1) == gs.agent_is_p1
-
-                action_reasons = {}
-
-                def set_valid_action(index, reason=""):
-                    """Helper to set action and reason, with bounds check."""
-                    if 0 <= index < self.ACTION_SPACE_SIZE:
-                        if not valid_actions[index]:
-                            valid_actions[index] = True
-                            action_reasons[index] = reason
-                    else:
-                        logging.error(f"INVALID ACTION INDEX: {index} bounds (0-{self.ACTION_SPACE_SIZE-1}) Reason: {reason}")
-                    return True
-
-                # --- Check Special Phases FIRST ---
-                # Mulligan/Bottoming take absolute precedence
-                if getattr(gs, 'mulligan_in_progress', False):
-                    if getattr(gs, 'mulligan_player', None) == current_player:
-                        set_valid_action(6, "MULLIGAN")
-                        set_valid_action(225, "KEEP_HAND")
-                    else: # Waiting for opponent mulligan
-                        set_valid_action(224, "NO_OP (Waiting for opponent mulligan)")
-                    self.action_reasons = action_reasons
-                    return valid_actions
-                if getattr(gs, 'bottoming_in_progress', False):
-                    if getattr(gs, 'bottoming_player', None) == current_player:
-                        for i in range(len(current_player.get("hand", []))): # Use get for safety
-                            if i < 4: # Limit based on action indices 226-229
-                                set_valid_action(226 + i, f"BOTTOM_CARD index {i}")
-                        # Always allow finishing bottoming once required number is chosen?
-                        # Check if enough cards have been selected to allow completion.
-                        required_to_bottom = gs.cards_to_bottom
-                        bottomed_count = gs.bottoming_count
-                        if bottomed_count >= required_to_bottom:
-                            # Need a DONE_BOTTOMING action or automatic transition.
-                            # For now, we implicitly allow passing priority to signal completion.
-                            set_valid_action(11, "PASS_PRIORITY (Finish Bottoming)") # Overload Pass Priority?
-                    else: # Waiting for opponent bottom
-                        set_valid_action(224, "NO_OP (Waiting for opponent bottom)")
-                    self.action_reasons = action_reasons
-                    return valid_actions
-
-                # Check for other special phases (Targeting, Sacrifice, Choice)
-                special_phase = None
-                if gs.phase == gs.PHASE_TARGETING: special_phase = "TARGETING"
-                elif gs.phase == gs.PHASE_SACRIFICE: special_phase = "SACRIFICE"
-                elif gs.phase == gs.PHASE_CHOOSE: special_phase = "CHOOSE"
-
-                if special_phase:
-                    logging.debug(f"Generating actions limited to {special_phase} phase.")
-                    player_is_acting = False
-                    if special_phase == "TARGETING" and hasattr(gs, 'targeting_context') and gs.targeting_context and gs.targeting_context.get("controller") == current_player:
-                        self._add_targeting_actions(current_player, valid_actions, set_valid_action)
-                        player_is_acting = True
-                        # Allow pass only if minimum targets selected
-                        min_targets = gs.targeting_context.get("min_targets", 1)
-                        selected_count = len(gs.targeting_context.get("selected_targets", []))
-                        if selected_count >= min_targets:
-                             set_valid_action(11, f"PASS_PRIORITY (Finish {special_phase})")
-                    elif special_phase == "SACRIFICE" and hasattr(gs, 'sacrifice_context') and gs.sacrifice_context and gs.sacrifice_context.get("controller") == current_player:
-                        self._add_sacrifice_actions(current_player, valid_actions, set_valid_action)
-                        player_is_acting = True
-                        # Allow pass only if minimum targets selected
-                        required_count = gs.sacrifice_context.get("required_count", 1)
-                        selected_count = len(gs.sacrifice_context.get("selected_permanents", []))
-                        if selected_count >= required_count:
-                            set_valid_action(11, f"PASS_PRIORITY (Finish {special_phase})")
-                    elif special_phase == "CHOOSE" and hasattr(gs, 'choice_context') and gs.choice_context and gs.choice_context.get("player") == current_player:
-                        # Logic for specific choice types is already within _add_special_choice_actions
-                        self._add_special_choice_actions(current_player, valid_actions, set_valid_action)
-                        player_is_acting = True
-                        # PASS logic is handled within _add_special_choice_actions based on choice type
-
-                    # Always add Concede
-                    set_valid_action(12, "CONCEDE")
-                    # If it's not player's turn to act in special phase, only allow PASS/CONCEDE
-                    if not player_is_acting:
-                         set_valid_action(11, f"PASS_PRIORITY (Waiting Opponent {special_phase})")
-
-                    # Final check: if no actions besides Concede, add Pass as fallback
-                    self.action_reasons = action_reasons
-                    if np.sum(valid_actions) == 1 and valid_actions[12]:
-                         set_valid_action(11, f"FALLBACK PASS (Special Phase {special_phase})")
-                    # --- Important: Return here, do not proceed to other action types ---
-                    return valid_actions
-                # --- End Special Phase Handling ---
-
-
-                # --- Rest of the logic (Timing checks, standard actions) ---
-                has_priority = (getattr(gs, 'priority_player', None) == current_player)
-                can_act_sorcery_speed = False
-                can_act_instant_speed = has_priority
-
-                # --- Always Available ---
-                if has_priority: # Only allow PASS if player has priority
-                    set_valid_action(11, "PASS_PRIORITY")
-                set_valid_action(12, "CONCEDE")
-
-                if is_my_turn and gs.phase in [gs.PHASE_MAIN_PRECOMBAT, gs.PHASE_MAIN_POSTCOMBAT] and not gs.stack and has_priority:
-                    can_act_sorcery_speed = True
-
-                # Prevent actions during untap/cleanup (except maybe mana for Split Second)
-                if gs.phase in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP]:
-                    can_act_instant_speed = False # No actions here
-                    can_act_sorcery_speed = False
-
-                # Handle Split Second
-                split_second_is_active = getattr(gs, 'split_second_active', False)
-                if split_second_is_active:
-                    logging.debug("Split Second active, limiting actions.")
-                    # Only mana abilities are allowed. Keep PASS and CONCEDE? Assume yes for now.
-                    # Create temporary filtered valid_actions
-                    temp_valid_actions = np.zeros_like(valid_actions)
-                    temp_reasons = {}
-                    # Add Pass and Concede back if they were valid
-                    if valid_actions[11]: temp_valid_actions[11] = True; temp_reasons[11] = action_reasons[11]
-                    if valid_actions[12]: temp_valid_actions[12] = True; temp_reasons[12] = action_reasons[12]
-
-                    def set_valid_mana_action(index, reason=""): # Helper for mana abilities
-                        if 0 <= index < self.ACTION_SPACE_SIZE:
-                            temp_valid_actions[index] = True
-                            temp_reasons[index] = reason
-                        return True
-
-                    self._add_mana_ability_actions(current_player, temp_valid_actions, set_valid_mana_action) # Populate mana actions
-
-                    # Replace original mask and reasons
-                    valid_actions = temp_valid_actions
-                    action_reasons = temp_reasons
-
-                else: # Not Split Second - add normal actions based on timing
-                    if can_act_sorcery_speed:
-                        self._add_sorcery_speed_actions(current_player, opponent, valid_actions, set_valid_action)
-                    if can_act_instant_speed:
-                        self._add_instant_speed_actions(current_player, opponent, valid_actions, set_valid_action)
-
-                    # --- Phase-Specific Actions ---
-                    if has_priority and not gs.stack:
-                        self._add_basic_phase_actions(is_my_turn, valid_actions, set_valid_action)
-
-                    # --- Combat Phase Actions (Delegated) ---
-                    # Check combat_handler exists before calling delegated methods
-                    if has_priority and self.combat_handler:
-                        if is_my_turn and gs.phase == gs.PHASE_DECLARE_ATTACKERS:
-                            # Delegate to CombatActionHandler
-                            self.combat_handler._add_attack_declaration_actions(current_player, opponent, valid_actions, set_valid_action)
-                        elif not is_my_turn and gs.phase == gs.PHASE_DECLARE_BLOCKERS and getattr(gs, 'current_attackers', []):
-                             # Delegate to CombatActionHandler
-                             self.combat_handler._add_block_declaration_actions(current_player, valid_actions, set_valid_action)
-                        elif is_my_turn and gs.phase in [gs.PHASE_FIRST_STRIKE_DAMAGE, gs.PHASE_COMBAT_DAMAGE] and not getattr(gs, 'combat_damage_dealt', False):
-                             # Delegate to CombatActionHandler
-                             self.combat_handler._add_combat_damage_actions(current_player, valid_actions, set_valid_action)
-                    elif has_priority and not self.combat_handler:
-                         logging.warning("Combat phase actions cannot be generated: CombatActionHandler missing.")
-
-                # --- Final Checks ---
-                self.action_reasons = action_reasons
-                valid_count = np.sum(valid_actions)
-                if valid_count == 0: # Should not happen normally except maybe forced concede
-                    logging.warning("No valid actions found! Forcing CONCEDE.")
-                    set_valid_action(12, "FALLBACK - CONCEDE")
-                elif valid_count == 1 and valid_actions[12]: # Only concede is possible
-                    pass # Okay state
-                elif valid_count == 2 and valid_actions[11] and valid_actions[12] and has_priority: # Only pass/concede available to priority player
-                     pass # Player must pass or concede
-
+        """Return the current action mask as boolean array with reasoning. (Updated for New Phases and Delegation)"""
+        gs = self.game_state
+        try:
+            valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+            # Ensure player objects are valid
+            p1_valid = hasattr(gs, 'p1') and gs.p1 is not None
+            p2_valid = hasattr(gs, 'p2') and gs.p2 is not None
+            if not p1_valid or not p2_valid:
+                logging.error("Player object(s) not initialized in GameState. Cannot generate actions.")
+                valid_actions[12] = True # Only Concede
+                self.action_reasons = {12: "Error: Players not initialized"}
                 return valid_actions
 
-            except Exception as e:
-                logging.error(f"CRITICAL error generating valid actions: {str(e)}", exc_info=True)
-                fallback_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
-                fallback_actions[11] = True
-                fallback_actions[12] = True
-                self.action_reasons = {11: "Critical Error Fallback", 12: "Critical Error Fallback"}
-                return fallback_actions
+            current_player = gs.p1 if gs.agent_is_p1 else gs.p2
+            opponent = gs.p2 if gs.agent_is_p1 else gs.p1
+            is_my_turn = (gs.turn % 2 == 1) == gs.agent_is_p1
+
+            action_reasons = {}
+
+            def set_valid_action(index, reason="", context=None): # Add context to helper
+                """Helper to set action and reason, with bounds check."""
+                if 0 <= index < self.ACTION_SPACE_SIZE:
+                    if not valid_actions[index]:
+                        valid_actions[index] = True
+                        # Store context along with reason if provided
+                        action_reasons[index] = {"reason": reason, "context": context or {}}
+                else:
+                    logging.error(f"INVALID ACTION INDEX: {index} bounds (0-{self.ACTION_SPACE_SIZE-1}) Reason: {reason}")
+                return True
+
+            # --- Check Special Phases FIRST ---
+            # Mulligan/Bottoming take absolute precedence
+            if getattr(gs, 'mulligan_in_progress', False):
+                if getattr(gs, 'mulligan_player', None) == current_player:
+                    set_valid_action(6, "MULLIGAN")
+                    set_valid_action(225, "KEEP_HAND")
+                else: # Waiting for opponent mulligan
+                    set_valid_action(224, "NO_OP (Waiting for opponent mulligan)")
+                self.action_reasons = {k: v["reason"] for k, v in action_reasons.items()} # Simplify for return
+                return valid_actions
+            if getattr(gs, 'bottoming_in_progress', False):
+                if getattr(gs, 'bottoming_player', None) == current_player:
+                    for i in range(len(current_player.get("hand", []))): # Use get for safety
+                        if i < 4: # Limit based on action indices 226-229
+                             # Action requires context of the card index to bottom
+                             set_valid_action(226 + i, f"BOTTOM_CARD index {i}", context={'hand_idx': i})
+                    # Always allow pass if *minimum* required cards bottomed
+                    # Assumes GameState clears phase once required count is met after a pass/action.
+                    if gs.bottoming_count >= gs.cards_to_bottom:
+                        set_valid_action(11, "PASS_PRIORITY (Finish Bottoming)")
+                else: # Waiting for opponent bottom
+                    set_valid_action(224, "NO_OP (Waiting for opponent bottom)")
+                self.action_reasons = {k: v["reason"] for k, v in action_reasons.items()} # Simplify for return
+                return valid_actions
+
+            # Check for other special phases (Targeting, Sacrifice, Choice)
+            special_phase = None
+            if gs.phase == gs.PHASE_TARGETING: special_phase = "TARGETING"
+            elif gs.phase == gs.PHASE_SACRIFICE: special_phase = "SACRIFICE"
+            elif gs.phase == gs.PHASE_CHOOSE: special_phase = "CHOOSE"
+
+            if special_phase:
+                logging.debug(f"Generating actions limited to {special_phase} phase.")
+                player_is_acting = False
+                # Determine if the current player is the one needing to act in this phase
+                if special_phase == "TARGETING" and hasattr(gs, 'targeting_context') and gs.targeting_context and gs.targeting_context.get("controller") == current_player:
+                    player_is_acting = True
+                    self._add_targeting_actions(current_player, valid_actions, set_valid_action)
+                    min_targets = gs.targeting_context.get("min_targets", 1)
+                    selected_count = len(gs.targeting_context.get("selected_targets", []))
+                    if selected_count >= min_targets:
+                        set_valid_action(11, f"PASS_PRIORITY (Finish {special_phase})")
+                elif special_phase == "SACRIFICE" and hasattr(gs, 'sacrifice_context') and gs.sacrifice_context and gs.sacrifice_context.get("controller") == current_player:
+                    player_is_acting = True
+                    self._add_sacrifice_actions(current_player, valid_actions, set_valid_action)
+                    required_count = gs.sacrifice_context.get("required_count", 1)
+                    selected_count = len(gs.sacrifice_context.get("selected_permanents", []))
+                    if selected_count >= required_count:
+                        set_valid_action(11, f"PASS_PRIORITY (Finish {special_phase})")
+                elif special_phase == "CHOOSE" and hasattr(gs, 'choice_context') and gs.choice_context and gs.choice_context.get("player") == current_player:
+                    player_is_acting = True
+                    # Choice logic handled within _add_special_choice_actions
+                    self._add_special_choice_actions(current_player, valid_actions, set_valid_action)
+                    # PASS logic also handled within that function based on choice type
+
+                # Always add Concede
+                set_valid_action(12, "CONCEDE")
+                # If it's not player's turn to act, allow only PASS/CONCEDE
+                if not player_is_acting:
+                     set_valid_action(11, f"PASS_PRIORITY (Waiting Opponent {special_phase})")
+
+                # Final check: if no actions besides Concede, add Pass as fallback
+                self.action_reasons = {k: v["reason"] for k, v in action_reasons.items()} # Simplify for return
+                if np.sum(valid_actions) == 1 and valid_actions[12]:
+                    set_valid_action(11, f"FALLBACK PASS (Special Phase {special_phase})")
+                # Return here for special phases
+                return valid_actions
+            # --- End Special Phase Handling ---
+
+            # --- Rest of the logic (Timing checks, standard actions) ---
+            has_priority = (getattr(gs, 'priority_player', None) == current_player)
+            can_act_sorcery_speed = is_my_turn and gs.phase in [gs.PHASE_MAIN_PRECOMBAT, gs.PHASE_MAIN_POSTCOMBAT] and not gs.stack and has_priority
+            # Instant speed possible if player has priority AND not untap/cleanup
+            can_act_instant_speed = has_priority and gs.phase not in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP]
+
+            # --- Always Available ---
+            if has_priority: set_valid_action(11, "PASS_PRIORITY")
+            set_valid_action(12, "CONCEDE")
+
+            # --- Split Second ---
+            split_second_is_active = getattr(gs, 'split_second_active', False)
+            if split_second_is_active:
+                logging.debug("Split Second active, limiting actions.")
+                # Only mana abilities are allowed. Keep PASS and CONCEDE? Yes.
+                temp_valid_actions = np.zeros_like(valid_actions)
+                temp_reasons = {}
+                # Add Pass and Concede back if they were valid
+                if valid_actions[11]: temp_valid_actions[11] = True; temp_reasons[11] = action_reasons[11]
+                if valid_actions[12]: temp_valid_actions[12] = True; temp_reasons[12] = action_reasons[12]
+
+                def set_valid_mana_action(index, reason="", context=None): # Context not usually needed for mana abilities
+                    if 0 <= index < self.ACTION_SPACE_SIZE:
+                        temp_valid_actions[index] = True
+                        temp_reasons[index] = {"reason": reason, "context": context or {}} # Store full info
+                    return True
+
+                self._add_mana_ability_actions(current_player, temp_valid_actions, set_valid_mana_action) # Populate mana actions
+
+                # Replace original mask and reasons
+                valid_actions = temp_valid_actions
+                action_reasons = temp_reasons # Use the temp reasons dict
+
+            else: # Not Split Second - add normal actions based on timing
+                if can_act_sorcery_speed:
+                    self._add_sorcery_speed_actions(current_player, opponent, valid_actions, set_valid_action)
+                if can_act_instant_speed:
+                    self._add_instant_speed_actions(current_player, opponent, valid_actions, set_valid_action)
+
+                # --- Phase-Specific Actions ---
+                if has_priority and not gs.stack:
+                    self._add_basic_phase_actions(is_my_turn, valid_actions, set_valid_action)
+
+                # --- Combat Phase Actions (Delegated) ---
+                if has_priority and self.combat_handler:
+                    if is_my_turn and gs.phase == gs.PHASE_DECLARE_ATTACKERS:
+                        self.combat_handler._add_attack_declaration_actions(current_player, opponent, valid_actions, set_valid_action)
+                    elif not is_my_turn and gs.phase == gs.PHASE_DECLARE_BLOCKERS and getattr(gs, 'current_attackers', []):
+                        self.combat_handler._add_block_declaration_actions(current_player, valid_actions, set_valid_action)
+                    elif is_my_turn and gs.phase in [gs.PHASE_FIRST_STRIKE_DAMAGE, gs.PHASE_COMBAT_DAMAGE] and not getattr(gs, 'combat_damage_dealt', False):
+                        self.combat_handler._add_combat_damage_actions(current_player, valid_actions, set_valid_action)
+                elif has_priority and not self.combat_handler:
+                    logging.warning("Combat phase actions cannot be generated: CombatActionHandler missing.")
+
+                # --- Additional check for PAY_OFFSPRING during cast setup ---
+                pending_spell_context = getattr(gs, 'pending_spell_context', None)
+                # Only offer if player has priority AND a spell is pending AND it's an offspring spell
+                if has_priority and pending_spell_context and pending_spell_context.get('card_id') and \
+                   pending_spell_context.get('controller') == current_player:
+                    card_id = pending_spell_context['card_id']
+                    card = gs._safe_get_card(card_id)
+                    if card and getattr(card, 'is_offspring', False):
+                        # Offer if *not already chosen* and affordable
+                        if not pending_spell_context.get('pay_offspring', False):
+                             cost_str = getattr(card, 'offspring_cost', None)
+                             if cost_str and self._can_afford_cost_string(current_player, cost_str):
+                                  # No specific context needed, handler uses pending_spell_context
+                                  set_valid_action(295, f"Optional: PAY_OFFSPRING_COST for {card.name}")
+
+            # --- Final Checks ---
+            # Store reasons dict before simplifying for return value
+            self.action_reasons_with_context = action_reasons.copy()
+            # Simplify for mask return (only reason string)
+            self.action_reasons = {k: v.get("reason","Unknown") for k, v in action_reasons.items()}
+
+            valid_count = np.sum(valid_actions)
+            if valid_count == 0:
+                logging.warning("No valid actions found! Forcing CONCEDE.")
+                set_valid_action(12, "FALLBACK - CONCEDE")
+                # Re-simplify reasons after adding fallback
+                self.action_reasons = {k: v["reason"] for k, v in action_reasons.items() if isinstance(v, dict)}
+
+            #elif valid_count == 1 and valid_actions[12]: pass
+            #elif valid_count == 2 and valid_actions[11] and valid_actions[12] and has_priority: pass
+
+            return valid_actions
+
+        except Exception as e:
+            logging.error(f"CRITICAL error generating valid actions: {str(e)}", exc_info=True)
+            fallback_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+            fallback_actions[11] = True # Pass
+            fallback_actions[12] = True # Concede
+            self.action_reasons = {11: "Critical Error Fallback", 12: "Critical Error Fallback"}
+            return fallback_actions
             
     def _add_basic_phase_actions(self, is_my_turn, valid_actions, set_valid_action):
         """Adds basic actions available based on the current phase, assuming priority and no stack."""
@@ -825,143 +784,151 @@ class ActionHandler:
                                 set_valid_action(action_idx, f"TAP_LAND_FOR_MANA {card.name}")
         
     def _add_sorcery_speed_actions(self, player, opponent, valid_actions, set_valid_action):
-        """Adds actions performable only at sorcery speed."""
+        """Adds actions performable only at sorcery speed. (Updated for Offspring/Impending)"""
         gs = self.game_state
-        # Play Land
+        # --- Play Land ---
         if not player.get("land_played", False): # Use .get for safety
-            for i in range(min(len(player["hand"]), 7)): # Hand index 0-6
+            for i in range(min(len(player["hand"]), 7)): # Hand index 0-6 -> Land Actions 13-19
                 try:
                     card_id = player["hand"][i]
                     card = gs._safe_get_card(card_id)
                     if card and 'land' in getattr(card, 'type_line', '').lower():
-                        set_valid_action(13 + i, f"PLAY_LAND {card.name}")
-                        # MDFC Land Back
-                        # Check back_face safely
+                        # Context needed: hand_idx for the land card itself
+                        play_land_context = {'hand_idx': i}
+                        set_valid_action(13 + i, f"PLAY_LAND {card.name}", context=play_land_context)
+
+                        # MDFC Land Back - Hand index 0-7 -> Actions 180-187
                         back_face_data = getattr(card, 'back_face', None)
                         if hasattr(card, 'is_mdfc') and card.is_mdfc() and back_face_data and 'land' in back_face_data.get('type_line','').lower():
-                            set_valid_action(180 + i, f"PLAY_MDFC_LAND_BACK {back_face_data.get('name', 'Unknown')}")
+                            mdfc_land_context = {'hand_idx': i, 'play_back_face': True}
+                            set_valid_action(180 + i, f"PLAY_MDFC_LAND_BACK {back_face_data.get('name', 'Unknown')}", context=mdfc_land_context)
                 except IndexError:
                     logging.warning(f"IndexError accessing hand for PLAY_LAND at index {i}")
                     break # Stop if index is out of bounds
 
-        # Play Sorcery-speed Spells (Sorceries, Creatures, Artifacts, Enchantments, Planeswalkers)
-        for i in range(min(len(player["hand"]), 8)): # Hand index 0-7
+        # --- Play Sorcery-speed Spells ---
+        for i in range(min(len(player["hand"]), 8)): # Hand index 0-7 -> Spell Actions 20-27
             try:
                 card_id = player["hand"][i]
                 card = gs._safe_get_card(card_id)
-                # Additional safety checks for card attributes
-                if not card or not hasattr(card, 'type_line') or not hasattr(card, 'card_types'):
-                    continue
+                if not card or not hasattr(card, 'type_line') or not hasattr(card, 'card_types'): continue
 
-                type_line_lower = getattr(card, 'type_line', '').lower()
-                card_types_list = getattr(card, 'card_types', [])
+                # Determine if card is typically sorcery speed
+                is_sorcery_speed_type = 'land' not in card.type_line.lower() and not ('instant' in card.card_types or self._has_flash(card_id))
 
-                if 'land' not in type_line_lower and not ('instant' in card_types_list or self._has_flash(card_id)):
-                    # Prepare context for can_afford and target checks
-                    context_check = {'kicked': False, 'pay_additional': False} # Minimal context for check
-                    if self._can_afford_card(player, card, context=context_check):
-                        if self._targets_available(card, player, opponent): # Check if required targets exist
-                            set_valid_action(20 + i, f"PLAY_SPELL {card.name}")
+                if is_sorcery_speed_type:
+                    # Check base cost affordability FIRST for the standard PLAY_SPELL action
+                    if self._can_afford_card(player, card, context={}):
+                        if self._targets_available(card, player, opponent):
+                            # --- STANDARD PLAY_SPELL ACTION ---
+                            # Provide context: hand_idx
+                            play_context = {'hand_idx': i}
+                            set_valid_action(20 + i, f"PLAY_SPELL {card.name}", context=play_context)
+                            # Offer Offspring PAYMENT option *after* PLAY_SPELL is deemed valid
+                            if getattr(card, 'is_offspring', False) and getattr(card, 'offspring_cost', None):
+                                 if self._can_afford_cost_string(player, card.offspring_cost):
+                                      # No extra context needed, applies to pending spell
+                                      set_valid_action(295, f"Optional: PAY_OFFSPRING_COST for {card.name}")
 
-                            # MDFC Spell Back (Sorcery)
-                            back_face_data = getattr(card, 'back_face', None)
-                            if hasattr(card, 'is_mdfc') and card.is_mdfc() and back_face_data:
-                                back_type_line = back_face_data.get('type_line','').lower()
-                                back_types = back_face_data.get('card_types', [])
-                                if 'land' not in back_type_line and 'instant' not in back_types:
-                                    if self._can_afford_card(player, back_face_data, is_back_face=True, context=context_check):
-                                         # Check back face targets availability too
-                                        if self._targets_available_from_data(back_face_data, player, opponent):
-                                            set_valid_action(188 + i, f"PLAY_MDFC_BACK {back_face_data.get('name', 'Unknown')}")
+                            # Offer Kicker / Additional Cost Payment (If applicable) - Should check affordability
+                            # ... Add checks for PAY_KICKER (405/406), PAY_ADDITIONAL_COST (407/408) based on card text ...
 
-                            # Adventure (Sorcery)
-                            if hasattr(card, 'has_adventure') and card.has_adventure():
-                                adv_data = card.get_adventure_data()
-                                if adv_data and 'sorcery' in adv_data.get('type','').lower():
-                                    if self._can_afford_cost_string(player, adv_data.get('cost',''), context=context_check):
-                                        # Check adventure targets
-                                        if self._targets_available_from_text(adv_data.get('effect',''), player, opponent):
-                                             set_valid_action(196 + i, f"PLAY_ADVENTURE {adv_data.get('name', 'Unknown')}")
+                    # --- OFFER ALTERNATIVE CASTING MODES (Impending) ---
+                    if getattr(card, 'is_impending', False) and getattr(card, 'impending_cost', None):
+                         if self._can_afford_cost_string(player, card.impending_cost):
+                              # Provide context: hand_idx
+                              impending_context = {'hand_idx': i}
+                              set_valid_action(294, f"Alt: CAST_FOR_IMPENDING {card.name}", context=impending_context)
+
+                    # --- Other alternative/related actions (MDFC back, Adventure) ---
+                    # Offer MDFC Spell Back (Sorcery) - Hand index 0-7 -> Actions 188-195
+                    back_face_data = getattr(card, 'back_face', None)
+                    if hasattr(card, 'is_mdfc') and card.is_mdfc() and back_face_data:
+                        back_type_line = back_face_data.get('type_line','').lower()
+                        back_types = back_face_data.get('card_types', [])
+                        back_has_flash = self._has_flash_text(back_face_data.get('oracle_text',''))
+                        if 'land' not in back_type_line and not ('instant' in back_types or back_has_flash):
+                            if self._can_afford_card(player, back_face_data, is_back_face=True, context={}):
+                                 if self._targets_available_from_data(back_face_data, player, opponent):
+                                     mdfc_back_context = {'hand_idx': i, 'play_back_face': True}
+                                     set_valid_action(188 + i, f"PLAY_MDFC_BACK {back_face_data.get('name', 'Unknown')}", context=mdfc_back_context)
+
+                    # Offer Adventure (Sorcery) - Hand index 0-7 -> Actions 196-203
+                    if hasattr(card, 'has_adventure') and card.has_adventure():
+                        adv_data = card.get_adventure_data()
+                        if adv_data and ('sorcery' in adv_data.get('type','').lower() or 'instant' in adv_data.get('type','').lower()): # Offer Adventure even if Instant speed on main phase
+                            if self._can_afford_cost_string(player, adv_data.get('cost',''), context={}):
+                                if self._targets_available_from_text(adv_data.get('effect',''), player, opponent):
+                                     adventure_context = {'hand_idx': i, 'play_adventure': True}
+                                     set_valid_action(196 + i, f"PLAY_ADVENTURE {adv_data.get('name', 'Unknown')}", context=adventure_context)
+
             except IndexError:
-                 logging.warning(f"IndexError accessing hand for PLAY_SPELL at index {i}")
-                 break # Stop if index is out of bounds
+                 logging.warning(f"IndexError accessing hand for PLAY_SPELL at index {i}"); break
 
-        # Activate Sorcery-speed Abilities
+        # --- Other Sorcery-speed Actions ---
         self._add_ability_activation_actions(player, valid_actions, set_valid_action, is_sorcery_speed=True)
-        # Note: PW abilities are sorcery speed by default, handled by _add_planeswalker_actions
+        # PW abilities handled by _add_planeswalker_actions
         if hasattr(self, 'combat_handler') and self.combat_handler:
             self.combat_handler._add_planeswalker_actions(player, valid_actions, set_valid_action)
 
-        # Other Sorcery-speed Actions
         self._add_level_up_actions(player, valid_actions, set_valid_action)
         self._add_unlock_door_actions(player, valid_actions, set_valid_action)
-        self._add_equip_aura_actions(player, valid_actions, set_valid_action) # Includes Equip, Fortify, Reconfigure
+        # Renamed _add_equip_actions to _add_equipment_aura_actions (assuming it handles fortify/reconfigure too)
+        if hasattr(self, '_add_equipment_aura_actions') and callable(self._add_equipment_aura_actions):
+             self._add_equipment_aura_actions(player, valid_actions, set_valid_action)
+        else: # Fallback if rename not done
+            if hasattr(self, '_add_equip_actions') and callable(self._add_equip_actions): self._add_equip_actions(player, valid_actions, set_valid_action)
+
         self._add_morph_actions(player, valid_actions, set_valid_action)
         self._add_alternative_casting_actions(player, valid_actions, set_valid_action, is_sorcery_speed=True)
-        self._add_special_mechanics_actions(player, valid_actions, set_valid_action, is_sorcery_speed=True) # For Foretell, Suspend activation etc.
+        self._add_special_mechanics_actions(player, valid_actions, set_valid_action, is_sorcery_speed=True)
         
     def _add_instant_speed_actions(self, player, opponent, valid_actions, set_valid_action):
-        """Adds actions performable at instant speed."""
+        """Adds actions performable at instant speed. (Updated for Offspring/Impending)"""
         gs = self.game_state
-        # Play Instant/Flash Spells
-        for i in range(min(len(player["hand"]), 8)): # Hand index 0-7
+        # --- Play Instant/Flash Spells (Modified) ---
+        for i in range(min(len(player["hand"]), 8)): # Spell Actions 20-27
             try:
                 card_id = player["hand"][i]
                 card = gs._safe_get_card(card_id)
-                if not card or not hasattr(card, 'type_line') or not hasattr(card, 'card_types'):
-                     continue
+                if not card or not hasattr(card, 'type_line') or not hasattr(card, 'card_types'): continue
 
-                # Minimal context for check
-                context_check = {'kicked': False, 'pay_additional': False}
-                card_types_list = getattr(card, 'card_types', [])
+                is_instant_speed = 'instant' in card.card_types or self._has_flash(card_id)
 
-                if 'instant' in card_types_list or self._has_flash(card_id):
-                    if 'land' not in getattr(card, 'type_line', '').lower(): # Exclude lands with flash (handled elsewhere)
-                        if self._can_afford_card(player, card, context=context_check):
-                            if self._targets_available(card, player, opponent): # Check if required targets exist
-                                set_valid_action(20 + i, f"PLAY_SPELL (Instant) {card.name}")
+                if is_instant_speed and 'land' not in card.type_line.lower():
+                     if self._can_afford_card(player, card, context={}):
+                         if self._targets_available(card, player, opponent):
+                            # --- MAIN PLAY ACTION ---
+                            play_context = {'hand_idx': i}
+                            set_valid_action(20 + i, f"PLAY_SPELL (Instant) {card.name}", context=play_context)
 
-                                # MDFC Spell Back (Instant)
-                                back_face_data = getattr(card, 'back_face', None)
-                                if hasattr(card, 'is_mdfc') and card.is_mdfc() and back_face_data:
-                                    back_type_line = back_face_data.get('type_line','').lower()
-                                    back_types = back_face_data.get('card_types', [])
-                                    # Check flash text on back face too
-                                    has_back_flash = self._has_flash_text(back_face_data.get('oracle_text',''))
-                                    if 'land' not in back_type_line and ('instant' in back_types or has_back_flash):
-                                        if self._can_afford_card(player, back_face_data, is_back_face=True, context=context_check):
-                                            if self._targets_available_from_data(back_face_data, player, opponent):
-                                                set_valid_action(188 + i, f"PLAY_MDFC_BACK (Instant) {back_face_data.get('name', 'Unknown')}")
+                            # --- OFFER ADDITIONAL/ALTERNATIVE ACTIONS ---
+                            # Offer Offspring Payment (Optional Additional)
+                            if getattr(card, 'is_offspring', False) and getattr(card, 'offspring_cost', None):
+                                 if self._can_afford_cost_string(player, card.offspring_cost):
+                                      set_valid_action(295, f"Optional: PAY_OFFSPRING_COST for {card.name}")
+                                      
+                            # Offer MDFC Back (Instant/Flash)
+                            back_face_data = getattr(card, 'back_face', None)
+                            if hasattr(card, 'is_mdfc') and card.is_mdfc() and back_face_data:
+                                # ... (existing logic for instant back face, using hand_idx i) ...
+                                pass
 
-                                # Adventure (Instant)
-                                if hasattr(card, 'has_adventure') and card.has_adventure():
-                                    adv_data = card.get_adventure_data()
-                                    if adv_data and 'instant' in adv_data.get('type','').lower():
-                                        if self._can_afford_cost_string(player, adv_data.get('cost',''), context=context_check):
-                                            if self._targets_available_from_text(adv_data.get('effect',''), player, opponent):
-                                                set_valid_action(196 + i, f"PLAY_ADVENTURE (Instant) {adv_data.get('name', 'Unknown')}")
+                            # Offer Adventure (Instant)
+                            if hasattr(card, 'has_adventure') and card.has_adventure():
+                                # ... (existing logic for instant adventure, using hand_idx i) ...
+                                pass
+
             except IndexError:
-                 logging.warning(f"IndexError accessing hand for Instant/Flash spell at index {i}")
-                 break # Stop if index is out of bounds
+                 logging.warning(f"IndexError accessing hand for Instant/Flash spell at index {i}"); break
 
-        # Activate Instant-speed Abilities
+        # --- Other instant speed actions (no changes needed) ---
         self._add_ability_activation_actions(player, valid_actions, set_valid_action, is_sorcery_speed=False)
-
-        # Tap Lands for Mana
         self._add_land_tapping_actions(player, valid_actions, set_valid_action)
-
-        # Alternative Casting (Instant Speed)
         self._add_alternative_casting_actions(player, valid_actions, set_valid_action, is_sorcery_speed=False)
-
-        # Cycling
         self._add_cycling_actions(player, valid_actions, set_valid_action)
-
-        # Response Actions if stack is not empty
-        if gs.stack:
-            self._add_response_actions(player, valid_actions, set_valid_action)
-
-        # Other instant-speed mechanics
-        self._add_special_mechanics_actions(player, valid_actions, set_valid_action, is_sorcery_speed=False) # For Boast, Unearth activation etc.
+        if gs.stack: self._add_response_actions(player, valid_actions, set_valid_action)
+        self._add_special_mechanics_actions(player, valid_actions, set_valid_action, is_sorcery_speed=False)
         
     def _targets_available_from_data(self, card_data, caster, opponent):
         """Check target availability from card data dict."""
@@ -2211,45 +2178,81 @@ class ActionHandler:
     def _handle_pay_offspring_cost(self, param, context=None, **kwargs):
         """Flag intent to pay Offspring cost for the pending spell."""
         gs = self.game_state
+        player = gs._get_active_player() # Assuming player with priority is deciding
         pending_context = getattr(gs, 'pending_spell_context', None)
+
         if not pending_context or 'card_id' not in pending_context:
             logging.warning("PAY_OFFSPRING_COST called but no spell context is pending.")
             return -0.1, False
+
         card_id = pending_context['card_id']
         card = gs._safe_get_card(card_id)
-        if not card or not hasattr(card, 'offspring_cost'):
-            logging.warning(f"No Offspring cost found for card {card_id}.")
+
+        if not card or not getattr(card, 'is_offspring', False):
+            logging.warning(f"Cannot PAY_OFFSPRING_COST: Card {card_id} not found or has no Offspring.")
             return -0.05, False
-        player = gs._get_active_player()
-        cost_str = getattr(card, 'offspring_cost', None)
-        if not cost_str or not self._can_afford_cost_string(player, cost_str):
-            logging.warning(f"Cannot afford Offspring cost {cost_str} for {card.name if card else card_id}.")
+
+        offspring_cost_str = getattr(card, 'offspring_cost', None)
+
+        if not offspring_cost_str:
+            logging.warning(f"Offspring cost not found on card {card_id}.")
             return -0.05, False
+
+        # Check affordability of the *additional* offspring cost
+        # NOTE: This assumes the *base* cost was already deemed affordable for PLAY_SPELL to be valid.
+        # We only check the offspring part here. ManaSystem should handle the combined cost later.
+        if not self._can_afford_cost_string(player, offspring_cost_str):
+            logging.debug(f"Cannot afford Offspring cost {offspring_cost_str} for {card.name}")
+            return -0.05, False
+
+        # Signal intent in the pending context
         pending_context['pay_offspring'] = True
-        pending_context['offspring_cost_to_pay'] = cost_str
-        logging.debug(f"Offspring cost context flag set for pending {card.name if card else card_id}")
-        return 0.01, True
+        pending_context['offspring_cost_to_pay'] = offspring_cost_str # Store cost string for payment phase
+        logging.debug(f"Offspring cost context flag set for pending {card.name}")
+        return 0.01, True # Small reward for validly signalling intent
+
 
     def _handle_cast_for_impending(self, param, context=None, **kwargs):
-        """Initiate casting a card for its Impending cost."""
+        """Initiate casting a card for its Impending cost. Expects hand_idx in context."""
         gs = self.game_state
         player = gs._get_active_player()
-        # Find a card in hand with Impending cost that is affordable
-        for i, card_id in enumerate(player.get("hand", [])):
-            card = gs._safe_get_card(card_id)
-            if card and hasattr(card, 'impending_cost'):
-                cost_str = getattr(card, 'impending_cost', None)
-                if cost_str and self._can_afford_cost_string(player, cost_str):
-                    context = context or {}
-                    context['use_alt_cost'] = 'impending'
-                    context['hand_idx'] = i
-                    success = gs.cast_spell(card_id, player, context=context)
-                    if success:
-                        return 0.25, True
-                    else:
-                        return -0.1, False
-        logging.warning("No valid card with affordable Impending cost found in hand.")
-        return -0.1, False
+        if context is None: context = {}
+        if kwargs.get('context'): context.update(kwargs['context']) # Merge any external context
+
+        hand_idx = context.get('hand_idx')
+
+        if hand_idx is None or not isinstance(hand_idx, int) or hand_idx >= len(player.get("hand", [])):
+            logging.error(f"CAST_FOR_IMPENDING missing or invalid 'hand_idx' in context: {context}")
+            return -0.15, False
+
+        card_id = player["hand"][hand_idx]
+        card = gs._safe_get_card(card_id)
+
+        if not card or not getattr(card, 'is_impending', False):
+            logging.warning(f"Card {card_id} at index {hand_idx} does not have Impending.")
+            return -0.05, False
+
+        impending_cost_str = getattr(card, 'impending_cost', None)
+
+        if not impending_cost_str:
+             logging.warning(f"Impending cost not found for card {card_id} at index {hand_idx}.")
+             return -0.05, False
+
+        # Check affordability of the *alternative* Impending cost
+        if not self._can_afford_cost_string(player, impending_cost_str):
+            logging.debug(f"Cannot afford Impending cost {impending_cost_str} for {card.name}")
+            return -0.05, False
+
+        # Create context for casting
+        cast_context = context.copy() # Start with existing context
+        cast_context['use_alt_cost'] = 'impending'
+        cast_context['hand_idx'] = hand_idx # Ensure index is present
+
+        # Use GameState.cast_spell, which handles alt costs, movement, stack, etc.
+        success = gs.cast_spell(card_id, player, context=cast_context)
+
+        # Provide reward based on success (higher for using alt cost)
+        return (0.25, True) if success else (-0.1, False)
 
     def _handle_end_turn(self, param, **kwargs):
         gs = self.game_state

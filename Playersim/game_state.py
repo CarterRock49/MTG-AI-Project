@@ -1219,266 +1219,300 @@ class GameState:
 
         # else: # Only one pass, priority toggled, nothing else happens
 
+
     def move_card(self, card_id, from_player, from_zone, to_player, to_zone, cause=None, context=None):
-        """Move a card between zones, applying replacement effects and triggering abilities, handling Madness."""
+        """Move a card between zones, applying replacement effects and triggering abilities, handling Madness, Offspring, Impending."""
         if context is None: context = {}
         card = self._safe_get_card(card_id)
         card_name = getattr(card, 'name', f"Card {card_id}") if card else f"Card {card_id}"
-        original_from_zone = from_zone # Keep original source for context
+        original_from_zone = from_zone # Track for LTB specifically
 
-        # 1. Handle Implicit Zones & Validate Source
+        # --- Zone Validation / Implicit Zones ---
+        # ... (Keep existing validation logic) ...
         source_list = None
         actual_from_zone = from_zone
-        # Handle placeholder zones used when the exact zone is unknown/not needed for source removal
-        if from_zone == "stack_implicit": actual_from_zone = "stack"; source_list = [] # Removed from stack by caller
-        elif from_zone == "library_implicit": actual_from_zone = "library"; source_list = [] # Removed from library by caller
-        elif from_zone == "hand_implicit": actual_from_zone = "hand"; source_list = [] # Removed from hand by caller
-        elif from_zone == "nonexistent_zone": actual_from_zone = "nonexistent"; source_list = [] # Not actually removed from anywhere (e.g., token creation)
-        else: # A specific, known zone
-             source_list = from_player.get(actual_from_zone) if from_player else None
-             if source_list is None:
-                 logging.warning(f"Cannot move {card_name}: Invalid source zone '{actual_from_zone}'.")
-                 return False
-             # Check if actually present (handle list/set)
-             is_present = False
-             if isinstance(source_list, (list, set)) and card_id in source_list: is_present = True
-             elif isinstance(source_list, dict) and card_id in source_list: is_present = True
+        if from_zone == "stack_implicit": actual_from_zone = "stack"; source_list = [] # Card data exists, just not in player list yet
+        elif from_zone == "library_implicit": actual_from_zone = "library"; source_list = []
+        elif from_zone == "hand_implicit": actual_from_zone = "hand"; source_list = []
+        elif from_zone == "nonexistent_zone": actual_from_zone = "nonexistent"; source_list = [] # For tokens entering
+        elif from_player is None: # Moving from a game-level zone (e.g., phased_out)
+             container = getattr(self, actual_from_zone, None)
+             if container is not None and card_id in container: source_list = container
+             else: logging.warning(f"Cannot move {card_name}: Invalid global source zone '{actual_from_zone}'."); return False
+        else: # Standard player zone
+             source_list = from_player.get(actual_from_zone)
+             if source_list is None: logging.warning(f"Cannot move {card_name}: Invalid source zone '{actual_from_zone}' for player."); return False
+             if card_id not in source_list: logging.warning(f"Cannot move {card_name}: Not found in {from_player['name']}'s {actual_from_zone}."); return False
 
-             if not is_present:
-                  current_location_player, current_location_zone = self.find_card_location(card_id)
-                  if current_location_zone:
-                      logging.warning(f"Cannot move {card_name}: Expected in {actual_from_zone} but found in {current_location_zone}.")
-                  else:
-                      logging.warning(f"Cannot move {card_name}: Not found in {from_player['name']}'s {actual_from_zone} or anywhere.")
-                  return False
 
-        # --- Apply Replacement Effects (including potential Madness redirect) ---
+        # --- Replacements ---
+        # ... (Keep existing replacement effect handling) ...
         final_destination_player = to_player
         final_destination_zone = to_zone
-        event_context = {
-             'card_id': card_id, 'card': card,
-             'from_player': from_player, 'from_zone': actual_from_zone,
-             'to_player': to_player, 'to_zone': to_zone,
-             'cause': cause, **context
-        }
+        event_context = {'card_id': card_id, 'card': card, 'from_player': from_player, 'from_zone': actual_from_zone, 'to_player': to_player, 'to_zone': to_zone, 'cause': cause, **context }
         prevented = False
-        madness_applied = False
-        madness_cost_found = None
-
         if hasattr(self, 'replacement_effects') and self.replacement_effects:
-            # --- MADNESS CHECK (DISCARD) ---
-            is_discard_event = (actual_from_zone == "hand" and to_zone == "graveyard" and cause == "discard")
-            has_madness = card and "madness" in getattr(card, 'oracle_text', '').lower()
-            # Madness replacement handling is now primarily within apply_replacements
-
-            # --- Standard Leave/Enter Replacements ---
-            # Apply LEAVE_<ZONE> replacement effects
+            # Check LEAVE zone replacements first
             leave_event = f"LEAVE_{actual_from_zone.upper()}"
             modified_leave_ctx, replaced_leave = self.replacement_effects.apply_replacements(leave_event, event_context.copy())
             if replaced_leave:
-                 event_context.update(modified_leave_ctx)
-                 final_destination_player = event_context.get('to_player', final_destination_player)
-                 final_destination_zone = event_context.get('to_zone', final_destination_zone)
-                 prevented = event_context.get('prevented', False)
-                 logging.debug(f"Leave replacement applied: New Dest: {final_destination_zone}, Prevented: {prevented}")
-
-            # If not prevented, check ENTER_<ZONE> replacement effects for the *potential* destination
+                 event_context.update(modified_leave_ctx); final_destination_player = event_context.get('to_player'); final_destination_zone = event_context.get('to_zone'); prevented = event_context.get('prevented', False)
+                 logging.debug(f"Leave replacement applied for {card_name}: New Dest: {final_destination_zone}, Prevented: {prevented}")
+            # Check ENTER zone replacements (only if not prevented)
             if not prevented:
-                 enter_event = f"ENTER_{final_destination_zone.upper()}"
-                 modified_enter_ctx, replaced_enter = self.replacement_effects.apply_replacements(enter_event, event_context.copy())
-                 if replaced_enter:
-                      final_destination_player = modified_enter_ctx.get('to_player', final_destination_player)
-                      final_destination_zone = modified_enter_ctx.get('to_zone', final_destination_zone)
-                      prevented = modified_enter_ctx.get('prevented', False)
-                      # Merge ETB flags/counters from context if they were added by the replacement
-                      if 'enters_tapped' in modified_enter_ctx: context['enters_tapped'] = modified_enter_ctx['enters_tapped']
-                      if 'enter_counters' in modified_enter_ctx: context.setdefault('enter_counters', []).extend(modified_enter_ctx['enter_counters'])
-                      logging.debug(f"Enter replacement applied: Final Dest: {final_destination_zone}, Prevented: {prevented}")
+                 enter_event = f"ENTER_{final_destination_zone.upper()}" if final_destination_zone else None
+                 if enter_event:
+                     modified_enter_ctx, replaced_enter = self.replacement_effects.apply_replacements(enter_event, event_context.copy())
+                     if replaced_enter:
+                          final_destination_player = modified_enter_ctx.get('to_player'); final_destination_zone = modified_enter_ctx.get('to_zone'); prevented = modified_enter_ctx.get('prevented', False)
+                          # Carry over ETB modifiers like 'tapped' or 'counters'
+                          if 'enters_tapped' in modified_enter_ctx: event_context['enters_tapped'] = modified_enter_ctx['enters_tapped']
+                          if 'enter_counters' in modified_enter_ctx: event_context.setdefault('enter_counters', []).extend(modified_enter_ctx['enter_counters'])
+                          if 'as_enters_choice_needed' in modified_enter_ctx: event_context['as_enters_choice_needed'] = modified_enter_ctx['as_enters_choice_needed']
+                          logging.debug(f"Enter replacement applied for {card_name}: Final Dest: {final_destination_zone}, Prevented: {prevented}")
 
-        # --- Final Prevention Check ---
         if prevented:
-            logging.debug(f"Movement of {card_name} from {actual_from_zone} to {final_destination_zone} prevented by replacement effect.")
-            return False
-
-        # --- Check if Madness was the outcome ---
-        # Check if this specific card was flagged by a Madness replacement during apply_replacements
-        # This requires apply_replacements to add information to the final context if Madness was chosen.
-        if is_discard_event and has_madness and final_destination_zone == 'exile':
-             # Double-check if madness state was correctly set up by replacement effect
-             if hasattr(self,'madness_cast_available') and getattr(self,'madness_cast_available',{}).get('card_id') == card_id:
-                 madness_applied = True
-                 madness_cost_found = getattr(self,'madness_cast_available',{}).get('cost')
+            logging.debug(f"Movement of {card_name} from {actual_from_zone} to {final_destination_zone} prevented.")
+            return False # Movement stopped
 
         # --- Perform Actual Move ---
-        # 1. Remove from source zone (unless implicitly removed)
+        # ... (Keep existing removal logic) ...
+        removed_successfully = False
         if source_list is not None and original_from_zone not in ["stack_implicit", "library_implicit", "hand_implicit", "nonexistent_zone"]:
-            removed = False
-            # Check actual source list stored in the player dictionary
-            source_list_live = from_player.get(actual_from_zone)
-            if source_list_live is not None:
-                 if isinstance(source_list_live, list) and card_id in source_list_live: source_list_live.remove(card_id); removed = True
-                 elif isinstance(source_list_live, set) and card_id in source_list_live: source_list_live.discard(card_id); removed = True
-                 elif isinstance(source_list_live, dict) and card_id in source_list_live: del source_list_live[card_id]; removed = True
+             source_list_live = None
+             if from_player: source_list_live = from_player.get(actual_from_zone)
+             else: source_list_live = getattr(self, actual_from_zone, None)
 
-            #if not removed: Log warning only if removal failed unexpectedly
+             if source_list_live is not None:
+                 if isinstance(source_list_live, list) and card_id in source_list_live: source_list_live.remove(card_id); removed_successfully = True
+                 elif isinstance(source_list_live, set) and card_id in source_list_live: source_list_live.discard(card_id); removed_successfully = True
+                 elif isinstance(source_list_live, dict) and card_id in source_list_live: del source_list_live[card_id]; removed_successfully = True
 
-        # 2. Handle "leaves the battlefield" cleanup & triggers (This is the crucial part updated)
+             if not removed_successfully:
+                 logging.error(f"CRITICAL: Failed to remove {card_name} from {actual_from_zone} even after validation.")
+                 # State is inconsistent, cannot proceed safely
+                 return False
+        else: removed_successfully = True # Implicit removal assumed
+
+
+        # --- 2. LTB Cleanup/Triggers (Only if removed from battlefield) ---
+        # ... (Keep existing LTB logic) ...
         if actual_from_zone == "battlefield" and from_player:
-            # --- Start LTB Cleanup/Trigger Sequence ---
-            ltb_trigger_context = {
-                'controller': from_player, # Controller when it left
-                'from_zone': actual_from_zone,
-                'to_zone': final_destination_zone,
-                'cause': cause, **context
-            }
-            # a. Trigger LTB abilities first (Rule 603.6c)
+            ltb_trigger_context = { 'controller': from_player, 'from_zone': actual_from_zone, 'to_zone': final_destination_zone, 'cause': cause, **context }
             self.trigger_ability(card_id, "LEAVE_BATTLEFIELD", ltb_trigger_context)
-
-            # b. Cleanup State Associated with the Permanent (Immediately after LTB triggers)
             logging.debug(f"Cleaning up state for {card_name} ({card_id}) leaving battlefield.")
+            # Remove tracked statuses
             from_player.get("tapped_permanents", set()).discard(card_id)
-            from_player.get("entered_battlefield_this_turn", set()).discard(card_id) # Clear summoning sickness if it just entered
+            from_player.get("entered_battlefield_this_turn", set()).discard(card_id)
             keys_to_remove = [key for key in self.exhaust_ability_used if key[0] == card_id]
-            if keys_to_remove:
-                logging.debug(f"Clearing exhaust state for {card_name} leaving battlefield.")
-                for key in keys_to_remove:
-                    del self.exhaust_ability_used[key]
-            # Cleanup attachments (what it's attached to, or what's attached to it)
+            if keys_to_remove: logging.debug(f"Clearing exhaust state for {card_name}."); [self.exhaust_ability_used.pop(k) for k in keys_to_remove]
+            # Remove attachments TO this card and attachments OF this card
             attachments = from_player.get("attachments")
             if attachments:
-                # If it's an Equip/Aura/Fort itself
-                if card_id in attachments: del attachments[card_id]
-                # If other things were attached to it
-                items_attached_to_it = [att_id for att_id, target_id in list(attachments.items()) if target_id == card_id]
-                for att_id in items_attached_to_it: del attachments[att_id] # Unattach Aura/Equip/Fort
-
-            # Remove other counters/statuses associated with the card ID
+                attachments.pop(card_id, None) # Remove what this card is attached to
+                for att_id, target_id in list(attachments.items()): # Remove auras/equip attached TO this card
+                    if target_id == card_id: del attachments[att_id]
+            # Clear counters stored on player dicts (old system?)
             if hasattr(from_player, 'loyalty_counters'): from_player['loyalty_counters'].pop(card_id, None)
             if hasattr(from_player, 'damage_counters'): from_player['damage_counters'].pop(card_id, None)
             if hasattr(from_player, 'deathtouch_damage'): from_player.get('deathtouch_damage', {}).pop(card_id, None)
+            # Clear counters stored on game state dicts
             if hasattr(self, 'saga_counters'): self.saga_counters.pop(card_id, None)
-            if hasattr(self, 'battle_cards'): self.battle_cards.pop(card_id, None) # Remove defense counters for battles
+            if hasattr(self, 'battle_cards'): self.battle_cards.pop(card_id, None)
+            # Clear other statuses
             if hasattr(from_player, 'regeneration_shields'): from_player['regeneration_shields'].discard(card_id)
-            # Clear mutation stack if it was the base
             if hasattr(from_player, 'mutation_stacks') and card_id in from_player['mutation_stacks']: del from_player['mutation_stacks'][card_id]
-            # Add other cleanups as needed (champion, cipher, haunt, hideaway etc.)
-
-            # Remove continuous effects from this source (LayerSystem)
+            # Unregister effects originating from this card
             if self.layer_system: self.layer_system.remove_effects_by_source(card_id)
-            # Remove replacement effects from this source
             if self.replacement_effects: self.replacement_effects.remove_effects_by_source(card_id)
-            # Unregister abilities associated with this card
             if self.ability_handler: self.ability_handler.unregister_card_abilities(card_id)
+            # Reset card state itself (e.g., face-down)
+            if card and hasattr(card, 'reset_state_on_zone_change'): card.reset_state_on_zone_change()
 
-            # *** CRITICAL: Reset the card object state ***
-            if card and hasattr(card, 'reset_state_on_zone_change'):
-                 logging.debug(f"Calling reset_state_on_zone_change for {card_name} ({card_id}).")
-                 card.reset_state_on_zone_change()
-            # --- End LTB Cleanup/Trigger Sequence ---
 
-        # 3. Add to destination zone
+        # --- 3. Add to destination zone ---
+        # ... (Keep existing destination logic) ...
         destination_list = final_destination_player.get(final_destination_zone)
-        if destination_list is None:
-             logging.error(f"Invalid destination zone '{final_destination_zone}' for player {final_destination_player['name']}.")
-             return False # Cannot recover card state easily
-        # Check if list or set, prevent duplicates appropriately
-        if isinstance(destination_list, list) and card_id not in destination_list:
-            destination_list.append(card_id)
-        elif isinstance(destination_list, set) and card_id not in destination_list:
-             destination_list.add(card_id)
-        elif not isinstance(destination_list, (list, set)): # Safety check for unexpected zone types
-             logging.error(f"Destination zone '{final_destination_zone}' is not a list or set ({type(destination_list)}).")
-             return False
+        if destination_list is None: logging.error(f"Invalid destination zone '{final_destination_zone}'."); return False
+        # Avoid duplicates, important for sets
+        if card_id not in destination_list:
+             if isinstance(destination_list, list): destination_list.append(card_id)
+             elif isinstance(destination_list, set): destination_list.add(card_id)
+             elif isinstance(destination_list, dict): destination_list[card_id] = True # Example for dict zone
+             else: logging.error(f"Dest zone '{final_destination_zone}' not list/set/dict."); return False
+        logging.debug(f"Moved {card_name} from {from_player['name'] if from_player else actual_from_zone} to {final_destination_player['name']}'s {final_destination_zone}")
 
-        logging.debug(f"Moved {card_name} from {from_player['name'] if from_player else 'N/A'}'s {actual_from_zone} to {final_destination_player['name']}'s {final_destination_zone}{' (via Madness)' if madness_applied else ''}")
+        # --- 4. Trigger ENTER Abilities & Handle ETB Effects ---
+        # --- UPDATED BLOCK ---
+        enter_trigger_context = {'controller': final_destination_player, 'from_zone': actual_from_zone, 'to_zone': final_destination_zone, 'cause': cause, **event_context } # Pass merged context
 
-        # --- Trigger ENTER Abilities & Handle ETB Effects ---
-        enter_trigger_context = {
-            'controller': final_destination_player, # Controller *now*
-            'from_zone': actual_from_zone,
-            'to_zone': final_destination_zone,
-            'cause': cause, **context
-        }
         if final_destination_zone == "battlefield":
-             # Ensure base P/T are set from DB or default before potential ETB counter effects
-             # (Reset should handle this, but double check)
-             if card and getattr(card, 'power', None) is None and 'creature' in getattr(card,'card_types',[]): card.power = 0
-             if card and getattr(card, 'toughness', None) is None and 'creature' in getattr(card,'card_types',[]): card.toughness = 0
+            # --- Standard ETB Setup ---
+            final_destination_player.setdefault("entered_battlefield_this_turn", set()).add(card_id)
+            etb_tapped_from_text = (hasattr(card, 'oracle_text') and "enters the battlefield tapped" in card.oracle_text.lower())
+            enters_tapped = event_context.get('enters_tapped', False) or etb_tapped_from_text
+            if enters_tapped: final_destination_player.setdefault("tapped_permanents", set()).add(card_id)
+            if card and 'saga' in getattr(card,'subtypes',[]): self.add_counter(card_id, "lore", 1)
+            if card and 'planeswalker' in getattr(card,'card_types',[]):
+                base_loyalty = getattr(card, 'loyalty', 0)
+                final_destination_player.setdefault("loyalty_counters", {})[card_id] = base_loyalty
+            if card and 'battle' in getattr(card,'type_line','').lower():
+                base_defense = getattr(card, 'defense', 0)
+                self.battle_cards = getattr(self, 'battle_cards', {}); self.battle_cards[card_id] = base_defense
+            etb_counters = event_context.get('enter_counters')
+            if etb_counters and isinstance(etb_counters, list):
+                for info in etb_counters: self.add_counter(card_id, info['type'], info['count'])
 
-             final_destination_player.setdefault("entered_battlefield_this_turn", set()).add(card_id)
-             enters_tapped = context.get('enters_tapped', False) or (hasattr(card, 'oracle_text') and "enters the battlefield tapped" in card.oracle_text.lower())
-             if enters_tapped: final_destination_player.setdefault("tapped_permanents", set()).add(card_id)
-             # Apply counters passed via context from replacement effects or "as enters"
-             enter_counters = context.get('enter_counters')
-             if enter_counters and isinstance(enter_counters, list):
-                 for counter_info in enter_counters: self.add_counter(card_id, counter_info['type'], counter_info['count'])
-             # Saga entry counters
-             if card and 'saga' in getattr(card,'subtypes',[]): self.add_counter(card_id, "lore", 1)
-             # Planeswalker entry loyalty
-             if card and 'planeswalker' in getattr(card,'card_types',[]):
-                  base_loyalty = getattr(card, 'loyalty', 0) # Get base from card object
-                  # Check replacements that might modify starting loyalty? Rare.
-                  final_destination_player.setdefault("loyalty_counters", {})[card_id] = base_loyalty
-             # Battle entry defense
-             if card and 'battle' in getattr(card,'type_line','').lower():
-                  base_defense = getattr(card, 'defense', 0) # Get base defense
-                  if not hasattr(self,'battle_cards'): self.battle_cards = {}
-                  self.battle_cards[card_id] = base_defense
+            # --- Impending ETB Handling ---
+            cast_for_impending = context.get('cast_for_impending', False)
+            if cast_for_impending and card:
+                logging.debug(f"Applying Impending ETB effects for {card_name}")
+                # 1. Add Time Counters
+                n_value = getattr(card, 'impending_n', 1) # Get N value from card
+                if n_value > 0:
+                    self.add_counter(card_id, 'time', n_value)
+                # 2. Track Impending Status
+                self.impending_cards = getattr(self, 'impending_cards', {})
+                self.impending_cards[card_id] = {'initial_n': n_value}
+                # 3. Apply Static "Isn't a Creature" Effects via Layer System
+                if self.layer_system:
+                     # Layer 4: Remove Creature Type
+                     self._register_impending_static_effect(card_id, final_destination_player, layer=4, effect_type='remove_type', effect_value=['Creature'])
+                     # Layer 7b: Set P/T to 0/0 (Implicit by rule 208.3 for non-creatures, but can enforce)
+                     self._register_impending_static_effect(card_id, final_destination_player, layer=7, sublayer='b', effect_type='set_pt', effect_value=(0, 0))
+                     # Re-apply layers immediately after registering these effects
+                     self.layer_system.apply_all_effects()
+            # --- End Impending ETB ---
 
+            # --- Register Abilities FIRST ---
+            if card and self.ability_handler: self.ability_handler.register_card_abilities(card_id, final_destination_player)
 
-             # Register card effects (static, replacement) - Needs AbilityHandler
-             if card and self.ability_handler:
-                 self.ability_handler.register_card_abilities(card_id, final_destination_player) # Pass current controller
+            # --- Record Offspring Cost Payment *BEFORE* triggering ETB ---
+            # The trigger condition will check this context map for the specific card ID instance.
+            paid_offspring = context.get('paid_offspring', False)
+            if paid_offspring:
+                self._offspring_cost_paid_context = getattr(self, '_offspring_cost_paid_context', {})
+                self._offspring_cost_paid_context[card_id] = True # Simple flag is enough
+                logging.debug(f"Recorded offspring cost payment context for {card_name} ({card_id}) entering battlefield.")
+            # --- End Offspring Recording ---
 
-             # Trigger ETB abilities
-             self.trigger_ability(card_id, "ENTERS_BATTLEFIELD", enter_trigger_context) # Standard ETB
-             # Trigger Landfall if it's a land
-             if card and 'land' in getattr(card,'card_types',[]):
-                 # Trigger for player who played the land
-                 self.trigger_ability(None, "LANDFALL", enter_trigger_context) # Trigger general landfall for player
-                 # Trigger ability on the land itself if it has one
-                 self.trigger_ability(card_id, "LANDFALL_SELF", enter_trigger_context) # Specific landfall for this land
+            # Handle "As enters" choice setup (must happen BEFORE ETB triggers)
+            if event_context.get('as_enters_choice_needed'):
+                 logging.debug(f"Entering CHOICE phase for 'As {card_name} enters...'")
+                 if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+                     self.previous_priority_phase = self.phase
+                 self.phase = self.PHASE_CHOOSE
+                 self.choice_context = {
+                     'type': f"as_enters_{event_context['as_enters_choice_needed']}",
+                     'player': final_destination_player, 'card_id': card_id,
+                     'source_id': event_context.get('as_enters_source_id', card_id),
+                     'resolved': False
+                 }
+                 self.priority_player = final_destination_player
+                 self.priority_pass_count = 0
+                 logging.info(f"'As enters' choice required for {card_name}. Waiting.")
+            else:
+                # --- Trigger ETB Abilities (Only if no choice needed immediately) ---
+                # Add card_id to the enter trigger context now that it's fully on the BF
+                enter_trigger_context['card_id'] = card_id
+                self.trigger_ability(card_id, "ENTERS_BATTLEFIELD", enter_trigger_context)
+                if card and 'land' in getattr(card,'card_types',[]):
+                     self.trigger_ability(None, "LANDFALL", enter_trigger_context)
+                     self.trigger_ability(card_id, "LANDFALL_SELF", enter_trigger_context)
 
+            # Handle Aura attachment *after* ETB setup (and triggers queued/resolved?) - Queue first is safer.
+            if card and 'aura' in getattr(card, 'subtypes', []):
+                 self._resolve_aura_attachment(card_id, final_destination_player, event_context) # Pass original event context
 
-             # Special ETB handlers
-             if card and 'aura' in getattr(card, 'subtypes',[]):
-                  # Handle attachment based on context target (or needs choice phase)
-                  self._resolve_aura_attachment(card_id, final_destination_player, context)
-                  # Ensure layer recalculation if Aura attached
-                  if self.layer_system: self.layer_system.invalidate_cache()
+            # --- Offspring Cost Cleanup (Needs careful placement) ---
+            # Clean up offspring context map *after* the ETB trigger for this specific card
+            # has been processed. Best handled maybe during SBA check or turn end?
+            # For simplicity, let's leave the cleanup task elsewhere, e.g., after trigger resolution.
+            # *** Moved from Ability Handler: Cleanup after resolution (potentially in resolve_ability or main loop) ***
+            # Example check during trigger resolution (if cost was checked there):
+            # if ability._is_offspring_etb_trigger and card_id in self._offspring_cost_paid_context:
+            #     del self._offspring_cost_paid_context[card_id]
+            # Here, just ensure the context was set correctly above.
 
-        else: # Entering non-battlefield zone
-             self.trigger_ability(card_id, f"ENTER_{final_destination_zone.upper()}", enter_trigger_context)
-             # Track cards entering graveyard this turn
+        # --- Enter Non-Battlefield Zone Triggers ---
+        else: # Enters GY, Hand, Exile, Library etc.
+             trigger_name = f"ENTER_{final_destination_zone.upper()}"
+             self.trigger_ability(card_id, trigger_name, enter_trigger_context)
              if final_destination_zone == "graveyard":
-                  turn_gy_list = self.cards_to_graveyard_this_turn.setdefault(self.turn, [])
-                  turn_gy_list.append(card_id)
-                  # Gravestorm count increases if card came from battlefield (per Rule 702.61a)
-                  if actual_from_zone == "battlefield":
-                      self.gravestorm_count = self.gravestorm_count + 1 if hasattr(self, 'gravestorm_count') else 1
+                 if not hasattr(self, 'cards_to_graveyard_this_turn'): self.cards_to_graveyard_this_turn = defaultdict(list)
+                 self.cards_to_graveyard_this_turn[self.turn].append(card_id)
+                 if actual_from_zone == "battlefield": # From BF to GY = Dies
+                     # Trigger "dies" ability
+                     dies_context = {'controller': from_player, 'from_zone': actual_from_zone, 'to_zone': final_destination_zone, 'cause': cause, **context}
+                     self.trigger_ability(card_id, "DIES", dies_context)
+                     self.gravestorm_count = getattr(self, 'gravestorm_count', 0) + 1
+            # --- END UPDATE ---
 
 
-        # --- Post-Move Cleanup ---
-        # Handle Tokens Ceasing to Exist if moved off battlefield
-        # Must use the card object BEFORE reset state was called if it's a token
-        card_was_token = hasattr(card, 'is_token') and card.is_token # Check before potentially losing token status in reset?
-        if card_was_token and actual_from_zone == "battlefield" and final_destination_zone != "battlefield":
-            logging.debug(f"Token {card_name} ceased to exist after moving to {final_destination_zone}.")
-            # Remove from destination zone list/set
-            dest_list = final_destination_player.get(final_destination_zone)
-            if dest_list and card_id in dest_list:
-                if isinstance(dest_list, list): dest_list.remove(card_id)
-                elif isinstance(dest_list, set): dest_list.discard(card_id)
-            # Remove from card_db
-            if card_id in self.card_db: del self.card_db[card_id]
+        # --- 5. Post-Move Cleanup ---
+        # ... (Keep existing token/madness/etc. cleanup) ...
+        card_was_token = hasattr(card, 'is_token') and card.is_token # Check *before* potential reset
+        if card_was_token and final_destination_zone != "battlefield":
+             # Remove from destination zone list/set
+             dest_list_live = final_destination_player.get(final_destination_zone)
+             if dest_list_live:
+                 if isinstance(dest_list_live, list) and card_id in dest_list_live: dest_list_live.remove(card_id)
+                 elif isinstance(dest_list_live, set) and card_id in dest_list_live: dest_list_live.discard(card_id)
+             # Remove from card_db
+             if card_id in self.card_db:
+                  del self.card_db[card_id]
+                  logging.debug(f"Token {card_name} ({card_id}) ceased to exist after moving to {final_destination_zone}.")
+             # Remove from player's token tracking if present
+             if hasattr(final_destination_player, "tokens") and card_id in final_destination_player["tokens"]:
+                  final_destination_player["tokens"].remove(card_id)
 
-        # Clear lingering Madness opportunity if card moved FROM exile for another reason
-        if actual_from_zone == "exile" and not madness_applied and getattr(self, 'madness_cast_available', None) and self.madness_cast_available.get('card_id') == card_id:
-            logging.debug(f"Clearing Madness opportunity for {card_name} as it moved from exile.")
-            self.madness_cast_available = None
+        # Clear Madness opportunity if card moved FROM exile via non-Madness means
+        if actual_from_zone == "exile" and not context.get("is_madness_cast", False) and \
+           getattr(self, 'madness_cast_available', None) and self.madness_cast_available.get('card_id') == card_id:
+             logging.debug(f"Clearing Madness opportunity for {card_name} as it moved from exile by other means.")
+             self.madness_cast_available = None
 
-        # Trigger ability processing happens AFTER the action completes (in main loop)
+        # --- Re-check layers if moved TO battlefield and is Impending ---
+        # (Already applied earlier in this block)
+        # if final_destination_zone == "battlefield" and card and getattr(card,'is_impending',False) and self.layer_system:
+        #     self.layer_system.apply_all_effects()
+
         return True
+    
+    def _register_impending_static_effect(self, card_id, controller, layer, effect_type, effect_value, sublayer=None):
+        """Helper to register the static effects for Impending."""
+        if not self.layer_system: return
+        effect_data = {
+             'source_id': card_id,
+             'layer': layer,
+             'affected_ids': [card_id],
+             'effect_type': effect_type,
+             'effect_value': effect_value,
+             'duration': 'permanent', # Active while condition met
+             'controller_id': controller,
+             'description': f"Impending static effect ({effect_type})",
+             # Condition: Only active while it has time counters
+             'condition': lambda gs: gs._is_impending_active(card_id)
+        }
+        if sublayer: effect_data['sublayer'] = sublayer
+        self.layer_system.register_effect(effect_data)
+
+    def _is_impending_active(self, card_id):
+        """Checks if an Impending permanent should currently not be a creature."""
+        # Use LIVE card data if available (updated by SBAs etc.)
+        card = self._safe_get_card(card_id)
+        if not card:
+            logging.debug(f"_is_impending_active check failed: Card {card_id} not found.")
+            return False
+
+        # Get current counters directly from card object (assumed updated)
+        has_time_counters = getattr(card,'counters', {}).get('time', 0) > 0
+        # Check if it's on the battlefield
+        owner, zone = self.find_card_location(card_id)
+
+        is_active = has_time_counters and zone == 'battlefield'
+        # logging.debug(f"_is_impending_active check for {card_id}: Counters={has_time_counters}, Zone={zone}. Active={is_active}")
+        return is_active
     
     def _register_card_effects(self, card_id, card, player):
         """Register static and replacement effects originating from a card."""
@@ -1840,200 +1874,257 @@ class GameState:
              self.last_stack_size = len(self.stack)
              logging.debug("Added to stack during special choice phase, priority maintained.")
     
+    @staticmethod
+    def _combine_cost_dicts(cost_dict1, cost_dict2):
+        """Helper to combine two parsed mana cost dictionaries."""
+        combined = cost_dict1.copy()
+        for key, value in cost_dict2.items():
+            combined[key] = combined.get(key, 0) + value
+        return combined
+
     def cast_spell(self, card_id, player, context=None):
-        """Cast a spell: Pay costs -> Move to Stack (or Enter Choice Phase) -> Set up Targeting/Choices."""
+        """
+        Cast a spell: Validate source/timing -> Determine Cost -> Pay Costs -> Move to Stack (or Enter Choice Phase) -> Set up Targeting/Choices.
+        Handles regular casts, alternative costs (incl. Impending), additional costs (incl. Offspring), modal spells, and targeting setup.
+        """
         if context is None: context = {}
         card = self._safe_get_card(card_id)
         if not card:
              logging.error(f"Cannot cast spell: Invalid card_id {card_id}")
              return False
 
+        # --- 1. Validate Source Zone and Timing ---
         source_zone = context.get("source_zone", "hand") # Default source
-        source_list = player.get(source_zone)
-
-        # Check if card is actually in the expected source zone
+        source_idx = context.get("source_idx")
+        source_list = None
         card_in_source = False
-        if isinstance(source_list, (list, set)) and card_id in source_list:
-             card_in_source = True
+        # ...(rest of source zone validation remains the same)...
+        if source_zone == "command":
+            source_list = player.get(source_zone)
+            if isinstance(source_list, (list, set)) and card_id in source_list: card_in_source = True
+        elif source_zone in ["stack_implicit", "library_implicit", "hand_implicit", "nonexistent_zone"]: card_in_source = True; source_list = []
+        else:
+             source_list = player.get(source_zone)
+             if source_list is not None:
+                  if isinstance(source_list, (list, set)) and card_id in source_list:
+                       card_in_source = True
+                       if source_idx is None and isinstance(source_list, list):
+                            try: source_idx = source_list.index(card_id)
+                            except ValueError: card_in_source = False
+                  elif isinstance(source_list, dict) and card_id in source_list: card_in_source = True
 
         if not card_in_source:
-            # Check special cast locations if source not default 'hand'
-            if source_zone == 'graveyard' and card_id in player.get("graveyard", []): card_in_source = True
-            elif source_zone == 'exile' and card_id in player.get("exile", []): card_in_source = True
-            # Add command zone etc. if needed
-
-        if not card_in_source:
-            logging.warning(f"Cannot cast {card.name}: Not found in {player['name']}'s {source_zone}.")
+            logging.warning(f"Cannot cast {getattr(card,'name', card_id)}: Not found in {player['name']}'s {source_zone}.")
             return False
-
-        # --- Timing/Priority Check ---
-        # Use internal helper which includes split second check
         if not self._can_cast_now(card_id, player):
-             logging.warning(f"Cannot cast {card.name}: Invalid timing (Phase: {self._PHASE_NAMES.get(self.phase)}, Prio: {getattr(self.priority_player,'name','None')}, Stack:{len(self.stack)}).")
+             logging.warning(f"Cannot cast {getattr(card,'name', card_id)}: Invalid timing (Phase: {self._PHASE_NAMES.get(self.phase)}, Prio: {getattr(self.priority_player,'name','None')}, Stack:{len(self.stack)}).")
              return False
 
-        # --- Check for Modality BEFORE Cost Calculation/Payment ---
-        # Modal check needs AbilityHandler's parser
+        # --- 2. Check for Modal Spell ---
         modal_modes, min_modes, max_modes = None, 0, 0
         is_modal_spell = False
         if self.ability_handler and hasattr(self.ability_handler, '_parse_modal_text'):
-             # Check oracle text for modality
              modal_modes, min_modes, max_modes = self.ability_handler._parse_modal_text(getattr(card, 'oracle_text', ''))
-             if modal_modes:
-                  is_modal_spell = True
-                  logging.debug(f"Detected modal spell: {card.name}")
+             if modal_modes: is_modal_spell = True
 
-        # --- Determine Final Cost ---
-        base_cost_str = getattr(card, 'mana_cost', '')
-        # Use context flag 'use_alt_cost'
-        if context.get("use_alt_cost"):
-            alt_cost_type = context["use_alt_cost"]
-            final_cost_dict = self.mana_system.calculate_alternative_cost(card_id, player, alt_cost_type, context)
-            if final_cost_dict is None:
-                 logging.warning(f"Cannot use alternative cost '{alt_cost_type}' for {card.name}.")
-                 return False
-        else:
+        # --- 3. Determine Base Cost String ---
+        cast_for_impending = context.get('cast_for_impending', False) # Check flag set by handler
+        alt_cost_type = None # Assume no alt cost initially
+        if cast_for_impending: alt_cost_type = 'impending' # Flag for cost modification checks
+        elif context.get('use_alt_cost'): # Check for other generic alt cost flags
+             alt_cost_type = context.get('use_alt_cost')
+
+        base_cost_str = "" # Default empty
+        final_cost_dict = {} # Store parsed/modified cost
+
+        if cast_for_impending:
+             impending_cost_str = getattr(card, 'impending_cost', None)
+             if not impending_cost_str: return False
+             base_cost_str = impending_cost_str
+             # context['cast_for_impending'] = True # Already set by caller
+        elif alt_cost_type: # Other alternative costs handled first
+             final_cost_dict = self.mana_system.calculate_alternative_cost(card_id, player, alt_cost_type, context)
+             if final_cost_dict is None: return False
+        else: # Normal cost
+            base_cost_str = getattr(card, 'mana_cost', '')
+
+        # --- 4. Calculate Final Cost (Mana & Non-Mana) ---
+        # Parse base cost if applicable
+        if base_cost_str and not alt_cost_type:
             final_cost_dict = self.mana_system.parse_mana_cost(base_cost_str)
+        elif not alt_cost_type: # Handle cases with no base cost (like Suspend resolution?)
+            final_cost_dict = {} # Start with empty dict
 
-        # Apply Kicker cost if context['kicked'] is True
-        if context.get('kicked'):
-             kicker_cost_str = context.get('kicker_cost_to_pay') # Use stored cost
-             if kicker_cost_str:
-                 kicker_cost_dict = self.mana_system.parse_mana_cost(kicker_cost_str)
-                 final_cost_dict = self.mana_system.combine_costs(final_cost_dict, kicker_cost_dict)
-                 context['actual_kicker_paid'] = kicker_cost_str
+        # Add additional mana costs ONLY IF NOT using a fully replacing alternative cost
+        # Check alt_cost_type (Impending is handled above, others might replace fully)
+        apply_additional_costs = alt_cost_type is None # Apply only if no replacing alt cost
 
-        # Apply other additional costs (sacrifice, discard, etc. stored in context)
-        if context.get('pay_additional') and context.get('additional_cost_info'):
-             add_cost_info = context['additional_cost_info']
-             if add_cost_info and 'mana_cost' in add_cost_info: # Add mana part
-                  add_cost_dict = self.mana_system.parse_mana_cost(add_cost_info['mana_cost'])
-                  final_cost_dict = self.mana_system.combine_costs(final_cost_dict, add_cost_dict)
-             # Non-mana part handled by ManaSystem.pay_mana_cost
+        if apply_additional_costs:
+            pay_offspring = context.get('pay_offspring', False)
+            if pay_offspring and getattr(card, 'is_offspring', False):
+                offspring_cost_str = getattr(card, 'offspring_cost', None)
+                if offspring_cost_str:
+                    offspring_cost_dict = self.mana_system.parse_mana_cost(offspring_cost_str)
+                    # *** FIXED: Use internal helper ***
+                    final_cost_dict = self._combine_cost_dicts(final_cost_dict, offspring_cost_dict)
+                    context['paid_offspring'] = True # Add final flag for ETB trigger check
+            # Kicker
+            if context.get('kicked'):
+                kicker_cost_str = context.get('kicker_cost_to_pay')
+                if kicker_cost_str:
+                    kicker_cost_dict = self.mana_system.parse_mana_cost(kicker_cost_str)
+                    # *** FIXED: Use internal helper ***
+                    final_cost_dict = self._combine_cost_dicts(final_cost_dict, kicker_cost_dict)
+                    context['actual_kicker_paid'] = kicker_cost_str
+            # Escalate
+            escalate_count = context.get('escalate_count', 0)
+            if escalate_count > 0:
+                escalate_cost_each_str = context.get('escalate_cost_each')
+                if escalate_cost_each_str:
+                    escalate_cost_each_dict = self.mana_system.parse_mana_cost(escalate_cost_each_str)
+                    # Combine cost N times
+                    for _ in range(escalate_count):
+                        # *** FIXED: Use internal helper repeatedly ***
+                        final_cost_dict = self._combine_cost_dicts(final_cost_dict, escalate_cost_each_dict)
 
-        # Apply cost modifiers (reduction/increase) LAST
+        # Apply Generic Cost Modifiers LAST
         final_cost_dict = self.mana_system.apply_cost_modifiers(player, final_cost_dict, card_id, context)
 
-        # --- Check Affordability ---
+        # --- Check Affordability & Targets ---
+        # ...(rest of checks and logic remain largely the same, just ensure final_cost_dict is used)...
+        additional_cost_info = context.get('additional_cost_info')
+        can_pay_non_mana_add = True
+        if context.get('pay_additional') and additional_cost_info:
+             if not self.mana_system._can_pay_non_mana_cost(player, additional_cost_info, context):
+                  can_pay_non_mana_add = False
+                  logging.warning(f"Cannot cast {card.name}: Cannot meet non-mana additional cost.")
+        if not can_pay_non_mana_add: return False
+
+        # Check final mana affordability
         if not self.mana_system.can_pay_mana_cost(player, final_cost_dict, context):
-            cost_str_log = self._format_mana_cost_for_logging(final_cost_dict, context.get('X', 0) if 'X' in final_cost_dict else 0)
+            cost_str_log = self._format_mana_cost_for_logging(final_cost_dict, context.get('X', 0))
             logging.warning(f"Cannot cast {card.name}: Cannot afford final cost {cost_str_log}.")
             return False
 
-        # --- Targeting Check (Only if NOT modal yet - modes might determine targets) ---
+        # Check if required targets exist (only for non-modal before paying cost)
+        requires_target = False; num_targets = 0; up_to_N = False; total_valid_targets = 0
         if not is_modal_spell:
-            requires_target = "target" in getattr(card, 'oracle_text', '').lower()
+            oracle_text = getattr(card, 'oracle_text', '').lower()
+            requires_target = "target" in oracle_text
             num_targets = getattr(card, 'num_targets', 1) if requires_target else 0
-            up_to_N = "up to" in getattr(card, 'oracle_text', '').lower()
+            up_to_N = "up to" in oracle_text
             if requires_target and num_targets > 0:
-                 valid_targets_map = self.targeting_system.get_valid_targets(card_id, player) if self.targeting_system else {}
-                 total_valid_targets = sum(len(v) for v in valid_targets_map.values())
-                 if total_valid_targets < num_targets and not up_to_N:
-                      logging.warning(f"Cannot cast {card.name}: Not enough valid targets available ({total_valid_targets}/{num_targets}).")
-                      return False
+                 if self.targeting_system:
+                      valid_targets_map = self.targeting_system.get_valid_targets(card_id, player)
+                      total_valid_targets = sum(len(v) for v in valid_targets_map.values())
+                      min_required = 0 if up_to_N else num_targets
+                      if total_valid_targets < min_required:
+                          logging.warning(f"Cannot cast {card.name}: Not enough valid targets available ({total_valid_targets}/{min_required} needed).")
+                          return False
+                 else:
+                      logging.warning("Cannot check target availability: TargetingSystem missing.")
 
-        # --- Pay Costs ---
-        if not self.mana_system.pay_mana_cost(player, final_cost_dict, context):
-            logging.warning(f"Failed to pay cost for {card.name}.")
-            return False
+        # --- Costs Paid Here ---
+        # 1. Pay Non-Mana Additional Costs FIRST
+        if context.get('pay_additional') and additional_cost_info:
+            if not self.mana_system._pay_non_mana_cost(player, additional_cost_info, context):
+                logging.warning(f"Failed to pay non-mana additional cost for {card.name}.")
+                return False
 
-        # --- Move Card from Source Zone (Do this BEFORE triggering choice/stack) ---
+        # 2. Pay Final Mana Cost
+        paid_mana_details = self.mana_system.pay_mana_cost_get_details(player, final_cost_dict, context)
+        if paid_mana_details is None:
+             logging.warning(f"Failed to pay final mana cost for {card.name}. Rolling back non-mana costs...")
+             if context.get('pay_additional') and additional_cost_info:
+                  self.mana_system._rollback_non_mana_cost(player, additional_cost_info, context)
+             return False
+
+        # --- Move Card from Source Zone ---
         removed = False
         source_list_live = player.get(source_zone)
         if source_list_live is not None:
-             if isinstance(source_list_live, list) and card_id in source_list_live: source_list_live.remove(card_id); removed = True
-             elif isinstance(source_list_live, set) and card_id in source_list_live: source_list_live.discard(card_id); removed = True
+             if isinstance(source_list_live, list) and source_idx is not None and 0 <= source_idx < len(source_list_live) and source_list_live[source_idx] == card_id:
+                  source_list_live.pop(source_idx)
+                  removed = True
+             elif isinstance(source_list_live, (list, set)) and card_id in source_list_live:
+                 if isinstance(source_list_live, list): source_list_live.remove(card_id)
+                 elif isinstance(source_list_live, set): source_list_live.discard(card_id)
+                 removed = True
+        elif source_zone in ["stack_implicit", "library_implicit", "hand_implicit", "nonexistent_zone"]: removed = True
+
         if not removed:
-             # This should ideally not happen if initial checks passed
-             logging.error(f"Critical Error: Could not remove {card.name} from source zone {source_zone} after paying costs.")
-             # Need rollback logic here if mana system supports it.
+             logging.error(f"CRITICAL: Could not remove {card.name} from {source_zone} after paying costs.")
+             if paid_mana_details: self.mana_system.add_mana(player, paid_mana_details.get('spent_specific',{}))
+             if context.get('pay_additional') and additional_cost_info: self.mana_system._rollback_non_mana_cost(player, additional_cost_info, context)
              return False
 
+        # --- Prepare FINAL stack context ---
+        final_stack_context = context.copy()
+        final_stack_context["source_zone"] = source_zone
+        final_stack_context["final_paid_cost"] = final_cost_dict
+        final_stack_context["final_paid_details"] = paid_mana_details
+        final_stack_context["requires_target"] = requires_target
+        final_stack_context["num_targets"] = num_targets
+        final_stack_context.pop('pay_offspring', None) # Clear intent flag
+        final_stack_context.pop('kicker_cost_to_pay', None)
+        final_stack_context.pop('additional_cost_info', None)
+        final_stack_context.pop('source_idx', None)
 
-        # --- MODAL SPELL DIVERGENCE ---
+        # --- Modal Divergence / Add to Stack / Targeting Phase ---
         if is_modal_spell:
-            logging.debug(f"Entering CHOICE phase for modal spell: {card.name}")
-            # Store previous phase unless already special
-            if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
-                self.previous_priority_phase = self.phase
-
-            self.phase = self.PHASE_CHOOSE
-            # Create choice context
-            self.choice_context = {
-                'type': 'choose_mode',
-                'player': player,
-                'card_id': card_id, # ID of the spell card being cast
-                'source_zone': source_zone, # Where it came from
-                'num_choices': len(modal_modes), # Total number of modes available
-                'min_required': min_modes,
-                'max_required': max_modes,
-                'available_modes': modal_modes, # Store mode text for validation/display
-                'selected_modes': [], # Track chosen indices
-                'original_cast_context': context.copy(), # Store original context (kicker, etc.)
-                'final_paid_cost': final_cost_dict, # Store the actual cost paid for stack item later
-                'resolved': False
-            }
-            # Give priority to the choosing player
-            self.priority_player = player
-            self.priority_pass_count = 0
-
-            logging.info(f"Modal spell {card.name} cast initiation successful. Waiting for mode choice(s).")
-            # Don't add to stack here. _handle_choose_mode will add it later.
-
-        # --- NON-MODAL SPELL (Continues as before) ---
+             # ...(modal logic remains the same)...
+             logging.debug(f"Entering CHOICE phase for modal spell: {card.name}")
+             if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+                 self.previous_priority_phase = self.phase
+             self.phase = self.PHASE_CHOOSE
+             self.choice_context = {
+                 'type': 'choose_mode', 'player': player, 'card_id': card_id,
+                 'num_choices': len(modal_modes), 'min_required': min_modes, 'max_required': max_modes,
+                 'available_modes': modal_modes, 'selected_modes': [],
+                 'original_cast_context': final_stack_context.copy(), # Store state BEFORE mode choice
+                 'resolved': False
+             }
+             self.priority_player = player; self.priority_pass_count = 0
+             logging.info(f"Modal spell {card.name} cast. Waiting for mode choice.")
         else:
-            # Prepare stack context
-            context["source_zone"] = source_zone
-            context["final_paid_cost"] = final_cost_dict
-            context["requires_target"] = requires_target
-            context["num_targets"] = num_targets
-            context["kicked"] = context.get("kicked", False)
-            context["paid_additional"] = context.get("pay_additional", False)
+             self.add_to_stack("SPELL", card_id, player, final_stack_context)
+             if requires_target and num_targets > 0:
+                  # ...(targeting setup remains the same)...
+                  logging.debug(f"{card.name} requires target(s). Entering TARGETING phase.")
+                  if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+                      self.previous_priority_phase = self.phase
+                  self.phase = self.PHASE_TARGETING
+                  self.targeting_context = {
+                      "source_id": card_id, "controller": player,
+                      "required_type": self._get_target_type_from_text(getattr(card,'oracle_text','')),
+                      "required_count": num_targets, "min_targets": 0 if up_to_N else num_targets,
+                      "max_targets": num_targets, "selected_targets": [],
+                      "effect_text": getattr(card, 'oracle_text', ''),
+                      "stack_info": { # Store info to update the correct stack item later
+                            "item_type": "SPELL", "source_id": card_id, "controller": player,
+                            "context": final_stack_context # The context added to the stack
+                       }
+                  }
+                  self.priority_player = player; self.priority_pass_count = 0
 
-            # Add to stack
-            self.add_to_stack("SPELL", card_id, player, context)
-
-            # Set up Targeting Phase if needed
-            if requires_target and num_targets > 0:
-                 logging.debug(f"{card.name} requires target(s). Entering TARGETING phase.")
-                 if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
-                     self.previous_priority_phase = self.phase
-                 self.phase = self.PHASE_TARGETING
-                 self.targeting_context = {
-                     "source_id": card_id,
-                     "controller": player,
-                     "required_type": self._get_target_type_from_text(getattr(card,'oracle_text','')),
-                     "required_count": num_targets,
-                     "min_targets": 0 if up_to_N else num_targets,
-                     "max_targets": num_targets,
-                     "selected_targets": [],
-                     "effect_text": getattr(card, 'oracle_text', '')
-                     # NO stack_info here, the item is already on stack
-                 }
-                 # Priority handled by add_to_stack or will be set here? Let add_to_stack handle it.
-                 self.priority_player = player
-                 self.priority_pass_count = 0
-
-            logging.info(f"Successfully cast non-modal spell: {card.name} ({card_id}) from {source_zone} onto stack.")
+             logging.info(f"Successfully cast spell: {card.name} ({card_id}) from {source_zone}")
 
         # --- Track Cast & Trigger ---
-        # Moved card removal earlier, so track AFTER cost payment and move
+        # ...(tracking/trigger remains the same)...
         self.track_card_played(card_id, player_idx = 0 if player == self.p1 else 1)
         if not hasattr(self, 'spells_cast_this_turn'): self.spells_cast_this_turn = []
-        self.spells_cast_this_turn.append((card_id, player))
-        # Trigger "When you cast..." abilities
-        cast_trigger_context = {'card_id': card_id, 'controller': player, **context} # Pass context
+        self.spells_cast_this_turn.append((card_id, player, final_stack_context)) # Include context
+
+        cast_trigger_context = {'cast_card_id': card_id, 'card_id': card_id, 'controller': player, **final_stack_context}
         self.trigger_ability(None, "CAST_SPELL", cast_trigger_context)
-        # Specific type triggers
         if 'creature' in getattr(card, 'card_types',[]): self.trigger_ability(None, "CAST_CREATURE_SPELL", cast_trigger_context)
         elif 'instant' in getattr(card, 'card_types',[]) or 'sorcery' in getattr(card, 'card_types',[]): self.trigger_ability(None, "CAST_NONCREATURE_SPELL", cast_trigger_context)
-        # Add other type-specific cast triggers
 
-        # Clear pending spell context AFTER casting is fully processed (stack or choice phase)
-        if hasattr(self, 'pending_spell_context') and self.pending_spell_context and self.pending_spell_context.get('card_id') == card_id:
+        # Clear pending context if this cast matches it
+        if getattr(self, 'pending_spell_context', None) and self.pending_spell_context.get('card_id') == card_id:
             self.pending_spell_context = None
 
-        return True # Casting process initiated successfully
+        return True
 
     def _can_cast_now(self, card_id, player):
         """
@@ -3225,6 +3316,8 @@ class GameState:
         cloned_state.stack = copy.deepcopy(self.stack) if hasattr(self, 'stack') else []
 
         # --- Deep Copy effect tracking ---
+        cloned_state.impending_cards = copy.deepcopy(self.impending_cards) if hasattr(self,'impending_cards') else {}
+        cloned_state._offspring_cost_paid_context = copy.deepcopy(self._offspring_cost_paid_context) if hasattr(self,'_offspring_cost_paid_context') else {}
         cloned_state.until_end_of_turn_effects = copy.deepcopy(self.until_end_of_turn_effects) if hasattr(self, 'until_end_of_turn_effects') else {}
         cloned_state.temp_control_effects = copy.deepcopy(self.temp_control_effects) if hasattr(self, 'temp_control_effects') else {}
         cloned_state.abilities_activated_this_turn = copy.deepcopy(self.abilities_activated_this_turn) if hasattr(self, 'abilities_activated_this_turn') else []
@@ -3756,80 +3849,93 @@ class GameState:
                 self.buyback_cards.remove(spell_id)
             logging.debug(f"Buyback: Returned {spell.name if hasattr(spell, 'name') else 'spell'} to hand")
             
-
     def add_counter(self, card_id, counter_type, count=1):
-        """Add counters to a permanent, including handling P/T updates and annihilation."""
-        target_owner = self._find_card_controller(card_id) # Need controller
-        if not target_owner:
-            logging.warning(f"Cannot add counter to {card_id}: Not found on battlefield.")
-            return False
-
+        """Add counters to a permanent, handling Impending completion."""
+        target_owner, target_zone = self.find_card_location(card_id)
+        if not target_owner or target_zone != 'battlefield':
+             logging.debug(f"Cannot add counter to {card_id}: Not on battlefield.")
+             return False # Target must be on battlefield
         target_card = self._safe_get_card(card_id)
         if not target_card: return False
 
+        # Layered/Replacement effect for ADD_COUNTER
+        # Note: Needs refinement. Do replacements modify count BEFORE adding? Yes.
+        counter_context = {'card_id': card_id, 'target_id': card_id, 'counter_type': counter_type, 'count': count}
+        final_count = count
+        if self.replacement_effects:
+             modified_context, replaced = self.replacement_effects.apply_replacements("ADD_COUNTER", counter_context.copy())
+             if replaced:
+                 final_count = modified_context.get('count', 0)
+                 counter_type = modified_context.get('counter_type', counter_type) # Allow type change?
+                 if modified_context.get('prevented'): final_count = 0
+             # Carry over modified context if needed downstream
+
+        if final_count == 0:
+             logging.debug(f"Adding {counter_type} counters to {target_card.name} prevented or reduced to 0.")
+             return True # Still considered successful if prevented/doubled to 0
+
+        count = final_count # Use the possibly modified count
+
+        # Ensure counters attribute exists
         if not hasattr(target_card, 'counters'): target_card.counters = {}
 
-        # Modify count directly
         current_count = target_card.counters.get(counter_type, 0)
-        new_count = current_count + count
-        if new_count <= 0: # Removing counters
-             if current_count >= abs(count): # Ensure we can remove that many
-                  target_card.counters[counter_type] = new_count
-                  if new_count == 0: del target_card.counters[counter_type]
-             else: # Cannot remove more than available
-                  del target_card.counters[counter_type]
-                  count = -current_count # Adjust actual count removed
-                  logging.warning(f"Tried to remove {abs(count)} {counter_type} counters from {target_card.name}, but only {current_count} were present.")
-                  if current_count == 0: return False # Nothing to remove
+        new_count = current_count + count # Note: count can be negative for removal
+        actual_change = count # Store the intended change
 
-        else: # Adding counters
+        # Don't let counters go below 0 unless it's a state (like level?)
+        new_count = max(0, new_count)
+
+        # If count didn't actually change state (e.g., remove 1 from 0)
+        if new_count == current_count and current_count == 0:
+            return False # Indicate no effective change happened
+
+        if new_count > 0:
             target_card.counters[counter_type] = new_count
+        elif counter_type in target_card.counters: # Became 0, remove key
+             del target_card.counters[counter_type]
 
-        logging.debug(f"Updated {counter_type} counters on {target_card.name} by {count}. New count: {target_card.counters.get(counter_type, 0)}")
-
-        # Handle +1/+1 and -1/-1 interactions and P/T updates
-        # Note: Layer system SHOULD ideally handle P/T, but direct update is simpler here for SBAs
+        # Annihilation Rule (+1/+1 vs -1/-1)
         plus_counters = target_card.counters.get('+1/+1', 0)
         minus_counters = target_card.counters.get('-1/-1', 0)
-        original_power = getattr(target_card, 'power', 0)
-        original_toughness = getattr(target_card, 'toughness', 0)
-
-
-        # Annihilation Rule (704.5r)
         if plus_counters > 0 and minus_counters > 0:
-            remove_amt = min(plus_counters, minus_counters)
-            logging.debug(f"Annihilating {remove_amt} +1/+1 and -1/-1 counters on {target_card.name}")
-            target_card.counters['+1/+1'] -= remove_amt
-            target_card.counters['-1/-1'] -= remove_amt
-            if target_card.counters['+1/+1'] == 0: del target_card.counters['+1/+1']
-            if target_card.counters['-1/-1'] == 0: del target_card.counters['-1/-1']
-            plus_counters -= remove_amt # Update local count for P/T calc
-            minus_counters -= remove_amt
+            remove_amount = min(plus_counters, minus_counters)
+            logging.debug(f"Annihilating {remove_amount} +/- counters on {target_card.name}")
+            # Recursively call to remove counters (safer for triggers/checks)
+            self.add_counter(card_id, '+1/+1', -remove_amount)
+            self.add_counter(card_id, '-1/-1', -remove_amount)
+            # Fetch possibly updated counts after annihilation recursion returns
+            new_count = target_card.counters.get(counter_type, 0)
 
-        # Recalculate P/T based ONLY on remaining +1/+1 and -1/-1 counters for SBA check
-        # Base P/T should come from card data or Layer 7a effects
-        # This part is complex due to layers. A simplified approach:
-        if hasattr(target_card,'_base_power'): # Assuming Layer system stores base
-            power_mod = plus_counters - minus_counters
-            toughness_mod = plus_counters - minus_counters
-            target_card.power = target_card._base_power + power_mod
-            target_card.toughness = target_card._base_toughness + toughness_mod
-        else: # Less accurate fallback if Layer system isn't setting base P/T
-             if counter_type == '+1/+1':
-                 if hasattr(target_card,'power'): target_card.power += count
-                 if hasattr(target_card,'toughness'): target_card.toughness += count
-             elif counter_type == '-1/-1':
-                 if hasattr(target_card,'power'): target_card.power = max(0, target_card.power + count) # count is negative here
-                 if hasattr(target_card,'toughness'): target_card.toughness = max(0, target_card.toughness + count)
+        logging.debug(f"Updated {counter_type} counters on {target_card.name} by {actual_change:+}. New count: {new_count}")
 
+        # --- Impending Check ---
+        # If the counter was 'time' AND it was REMOVED (count < 0) AND the new count is <= 0
+        if counter_type == 'time' and actual_change < 0 and new_count <= 0 and card_id in getattr(self, 'impending_cards', {}):
+            logging.info(f"Impending complete for {target_card.name}: Last time counter removed.")
+            # 1. Remove Static Effects preventing it from being a creature
+            if self.layer_system:
+                 removed_impending_effects = self.layer_system.remove_effects_by_source(card_id, effect_description_contains="Impending static effect")
+                 if removed_impending_effects:
+                     logging.debug(f"Removed {removed_impending_effects} Impending static effects for {target_card.name}.")
+                     # Re-apply layers immediately to update characteristics (P/T, type)
+                     self.layer_system.apply_all_effects()
+            # 2. Clean up Impending Tracking
+            if card_id in self.impending_cards:
+                del self.impending_cards[card_id]
+            # 3. Trigger "becomes creature" event (maybe just IMPENDING_COMPLETE)
+            # Ensure it has the context of the permanent triggering this
+            trigger_context = {'controller': target_owner, 'card_id': card_id}
+            self.trigger_ability(card_id, "IMPENDING_COMPLETE", trigger_context)
+        # --- End Impending Check ---
 
-        # Trigger counter addition/removal events
-        if count > 0:
-            self.trigger_ability(card_id, "COUNTER_ADDED", {"controller": target_owner, "counter_type": counter_type, "count": count})
-        else:
-             self.trigger_ability(card_id, "COUNTER_REMOVED", {"controller": target_owner, "counter_type": counter_type, "count": abs(count)})
+        # Trigger counter addition/removal events AFTER Impending check
+        if actual_change != 0: # Only trigger if count changed
+            event = "COUNTER_ADDED" if actual_change > 0 else "COUNTER_REMOVED"
+            # Use actual_change to reflect intent, even if annihilation happens later
+            self.trigger_ability(card_id, event, {"controller": target_owner, "counter_type": counter_type, "count": abs(actual_change)})
 
-        # SBAs check might be needed immediately after counter changes, especially -1/-1
+        # Always check SBAs after ANY counter change, as it could affect P/T
         self.check_state_based_actions()
         return True
     

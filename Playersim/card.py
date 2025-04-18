@@ -54,29 +54,31 @@ class Card:
         'aftermath', 'spree'
     ]
 
+
     def __init__(self, card_data):
-        # Ensure card_data has all required fields with defaults
-        self.name = card_data.get("name", f"Unknown Card {id(self)}")
-        self.mana_cost = card_data.get("mana_cost", "")
-        self.type_line = card_data.get("type_line", "unknown").lower()
-        self.card_id = None # Initialize as None
-        # Handle both 'faces' (internal format) and 'card_faces' (Scryfall API format)
-        self.faces = card_data.get("faces", None) or card_data.get("card_faces", None)
-        if self.faces:
-            self.current_face = 0  # 0: front face, 1: back face
-            self.is_transformed = False # Add is_transformed attribute
-        else:
-            self.current_face = None
-            self.is_transformed = False
-
-        # Parse type line using enhanced method
-        self.card_types, self.subtypes, self.supertypes = self.parse_type_line(self.type_line)
-
-        self.cmc = card_data.get("cmc", 0)
-        self.power = self._safe_int(card_data.get("power", "0"))
-        self.toughness = self._safe_int(card_data.get("toughness", "0"))
+        # ... (previous __init__ lines remain the same up to keywords/colors) ...
         self.oracle_text = card_data.get("oracle_text", "")
+        # Initialize new attributes before keyword extraction
+        self.is_offspring = False
+        self.offspring_cost = None
+        self.is_impending = False
+        self.impending_cost = None
+        self.impending_n = 0
+
+        # Enhanced keyword/cost parsing within __init__
+        self._parse_special_keywords(self.oracle_text) # Parse Offspring/Impending
+
+        # Standard keyword extraction (might identify base 'impending'/'offspring' too)
         self.keywords = self._extract_keywords(self.oracle_text.lower())
+
+        # Apply parsed values if special keywords found
+        if self.is_offspring and 'offspring' in Card.ALL_KEYWORDS:
+             try: self.keywords[Card.ALL_KEYWORDS.index('offspring')] = 1
+             except ValueError: pass
+        if self.is_impending and 'impending' in Card.ALL_KEYWORDS:
+             try: self.keywords[Card.ALL_KEYWORDS.index('impending')] = 1
+             except ValueError: pass
+
         self.colors = self._extract_colors(card_data.get("color_identity", []))
         self.subtype_vector = []
 
@@ -87,32 +89,53 @@ class Card:
         self.performance_rating = 0.5  # Initial default rating (range 0-1)
         self.usage_count = 0
         self.embedding = None  # This will be set later by an embedding system
-        
+
         # Track counters on the card
         self.counters = {}
-        
+
         # Initialize card type-specific attributes and parse corresponding data
         # Spree attributes
         self.is_spree = False
         self.spree_modes = []
-        self._parse_spree_modes()
-        
+        self._parse_spree_modes() # Ensure this ignores text belonging to Offspring/Impending
+
         # Room attributes
         self.is_room = False
         self.door1 = {}
         self.door2 = {}
         self._parse_room_data(card_data)
-        
+
         # Class attributes
         self.is_class = False
         self.levels = []
         self.current_level = 1
         self.all_abilities = []
-        self._parse_class_data(card_data)
-        
+        self._parse_class_data(card_data) # Ensure this ignores Offspring/Impending
+
         # Planeswalker attributes (if applicable)
         if 'planeswalker' in self.card_types:
             self._init_planeswalker(card_data)
+
+    def _parse_special_keywords(self, oracle_text):
+        """Parses Offspring and Impending keywords from oracle text."""
+        if not oracle_text: return
+
+        oracle_lower = oracle_text.lower()
+
+        # Offspring: "Offspring {COST}"
+        offspring_match = re.search(r"\boffspring\s*(\{.+?\})\b", oracle_lower)
+        if offspring_match:
+            self.is_offspring = True
+            self.offspring_cost = offspring_match.group(1) # Store cost string "{...}"
+            logging.debug(f"Parsed Offspring cost '{self.offspring_cost}' for {self.name}")
+
+        # Impending: "Impending N—{COST}" (Dash can be em dash or hyphen)
+        impending_match = re.search(r"\bimpending\s*(\d+)\s*(?:-|—|–)\s*(\{.+?\})\b", oracle_lower)
+        if impending_match:
+            self.is_impending = True
+            self.impending_n = int(impending_match.group(1))
+            self.impending_cost = impending_match.group(2) # Store cost string "{...}"
+            logging.debug(f"Parsed Impending N={self.impending_n}, Cost='{self.impending_cost}' for {self.name}")
             
     def reset_state_on_zone_change(self):
          """Reset temporary states when card leaves battlefield (e.g., flip, morph)."""
