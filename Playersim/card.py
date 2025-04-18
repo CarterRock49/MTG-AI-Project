@@ -54,9 +54,43 @@ class Card:
         'aftermath', 'spree'
     ]
 
-
     def __init__(self, card_data):
-        # ... (previous __init__ lines remain the same up to keywords/colors) ...
+        # Ensure card_data has all required fields with defaults
+        self.name = card_data.get("name", f"Unknown Card {id(self)}")
+        self.mana_cost = card_data.get("mana_cost", "")
+        self.type_line = card_data.get("type_line", "unknown").lower()
+        self.card_id = None # Initialize as None
+        # Handle both 'faces' (internal format) and 'card_faces' (Scryfall API format)
+        self.faces = card_data.get("faces", None) or card_data.get("card_faces", None)
+        if self.faces:
+            self.current_face = 0  # 0: front face, 1: back face
+            self.is_transformed = False # Add is_transformed attribute
+        else:
+            self.current_face = None
+            self.is_transformed = False
+
+        # Parse type line using enhanced method
+        self.card_types, self.subtypes, self.supertypes = self.parse_type_line(self.type_line)
+
+        self.cmc = card_data.get("cmc", 0)
+        self.power = self._safe_int(card_data.get("power", "0"))
+        self.toughness = self._safe_int(card_data.get("toughness", "0"))
+        self.oracle_text = card_data.get("oracle_text", "")
+        self.keywords = self._extract_keywords(self.oracle_text.lower())
+        self.colors = self._extract_colors(card_data.get("color_identity", []))
+        self.subtype_vector = []
+
+        # Add card_id property (will be set when the card is registered)
+        self.card_id = None
+
+        # Performance tracking and text embedding
+        self.performance_rating = 0.5  # Initial default rating (range 0-1)
+        self.usage_count = 0
+        self.embedding = None  # This will be set later by an embedding system
+        
+        # Track counters on the card
+        self.counters = {}
+        
         self.oracle_text = card_data.get("oracle_text", "")
         # Initialize new attributes before keyword extraction
         self.is_offspring = False
