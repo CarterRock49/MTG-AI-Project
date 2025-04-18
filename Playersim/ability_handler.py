@@ -479,109 +479,123 @@ class AbilityHandler:
         return True
     
     def _parse_modal_text(self, text):
-        """
-        Parse modal text to extract mode descriptions and choice requirements.
+            """
+            Parse modal text to extract mode descriptions and choice requirements.
 
-        Args:
-            text (str): The oracle text or ability effect text.
+            Args:
+                text (str): The oracle text or ability effect text.
 
-        Returns:
-            tuple: (modes_list, min_choices, max_choices) or (None, 0, 0) if not modal.
-                   modes_list contains the text of each mode.
-        """
-        modes = []
-        min_choices, max_choices = 0, 0
-        if not text:
-            return None, 0, 0
-
-        text_lower = text.lower()
-
-        # Define markers and their corresponding min/max choices
-        # Order matters - check more specific ones first
-        markers = [
-            ("choose two or more —", 2, float('inf')), # Very rare, treat max as inf for now
-            ("choose three —", 3, 3),
-            ("choose two —", 2, 2),
-            ("choose one or both —", 1, 2), # Specific handling needed later?
-            ("choose up to three —", 0, 3),
-            ("choose up to two —", 0, 2),
-            ("choose up to one —", 0, 1),
-            ("choose one —", 1, 1),
-            ("choose one •", 1, 1) # Alternative marker
-        ]
-
-        start_index = -1
-        marker_len = 0
-        chosen_marker_info = None
-
-        for marker_text, min_req, max_req in markers:
-            idx = text_lower.find(marker_text)
-            if idx != -1:
-                # Basic check: Is it preceded by text that might negate it being the primary modal?
-                # (e.g., part of another ability description) - Needs complex parsing. For now, assume first found marker is primary.
-                start_index = idx
-                marker_len = len(marker_text)
-                chosen_marker_info = (marker_text, min_req, max_req)
-                min_choices, max_choices = min_req, max_req
-                logging.debug(f"Found modal marker: '{marker_text}' in '{text[:100]}...'")
-                break
-
-        modal_text = ""
-        if start_index != -1:
-            modal_text = text[start_index + marker_len:]
-        # Handle case where modes use bullet points without a standard "Choose X" intro
-        elif '•' in text or '●' in text:
-            # Find first bullet point that seems part of a list (heuristic: preceded by newline or start)
-            bullet_match = re.search(r"(?:\n|^)\s*[•●]\s+", text)
-            if bullet_match:
-                # Assume standard "choose one" if no text marker found
-                min_choices, max_choices = 1, 1
-                modal_text = text[bullet_match.start():] # Start parsing from the first bullet
-                logging.debug(f"Found bullet point modes, assuming 'Choose one'.")
-            else: # Not a clear modal structure
+            Returns:
+                tuple: (modes_list, min_choices, max_choices) or (None, 0, 0) if not modal.
+                    modes_list contains the text of each mode.
+            """
+            modes = []
+            min_choices, max_choices = 0, 0
+            if not text:
                 return None, 0, 0
-        else: # No modal markers found
-            return None, 0, 0
 
-        modal_text = modal_text.strip()
+            text_lower = text.lower()
 
-        # Split by bullet points (primary method)
-        # Handle different bullet characters and whitespace robustly
-        mode_parts = re.split(r'\s*[•●]\s*', modal_text) # Split by bullet, trim whitespace
+            # Define markers and their corresponding min/max choices
+            # Order matters - check more specific ones first
+            markers = [
+                ("choose two or more —", 2, float('inf')), # Very rare, treat max as inf for now
+                ("choose three —", 3, 3),
+                ("choose two —", 2, 2),
+                ("choose one or both —", 1, 2), # Specific handling needed later?
+                ("choose up to three —", 0, 3),
+                ("choose up to two —", 0, 2),
+                ("choose up to one —", 0, 1),
+                ("choose one —", 1, 1),
+                # *** CHANGED: Added em dash variations and common bullet style ***
+                ("choose one\s*[-—\u2014]\s*", 1, 1),
+                ("choose one\s*[•●]\s*", 1, 1) # Alternative marker using bullet itself
+            ]
 
-        # Clean up modes
-        for part in mode_parts:
-            if not part.strip(): continue # Skip empty parts resulting from split
-            # Remove reminder text first
-            cleaned_part = re.sub(r'\s*\([^()]*?\)\s*', ' ', part).strip()
-             # Clean surrounding whitespace again after removal
-            cleaned_part = cleaned_part.strip()
-            # Remove leading/trailing punctuation like sentence ends, commas, etc.
-            cleaned_part = re.sub(r'^[;,\.]+|[;,\.]+$', '', cleaned_part).strip()
-            if cleaned_part:
-                modes.append(cleaned_part)
+            start_index = -1
+            marker_len = 0
+            chosen_marker_info = None
 
-        # If no modes found via bullets but a text marker *was* found, try sentence splitting (less reliable)
-        if not modes and chosen_marker_info:
-             logging.debug("No bullet points found after modal marker, trying sentence split.")
-             # Split by sentence ending punctuation followed by potential start of next mode (Cap letter, list marker)
-             sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z•●\d\+\-])', modal_text) # Split on sentence end + potential mode start
-             for sentence in sentences:
-                  cleaned_sentence = re.sub(r'\s*\([^()]*?\)\s*', ' ', sentence).strip()
-                  cleaned_sentence = re.sub(r'^[;,\.]+|[;,\.]+$', '', cleaned_sentence).strip()
-                  if cleaned_sentence:
-                       modes.append(cleaned_sentence)
+            for marker_text, min_req, max_req in markers:
+                # Use regex search for more flexible matching (handles whitespace variations)
+                match = re.search(marker_text, text_lower)
+                if match:
+                    # Basic check: Is it preceded by text that might negate it being the primary modal?
+                    # (e.g., part of another ability description) - Needs complex parsing. For now, assume first found marker is primary.
+                    start_index = match.start() # Use match start index
+                    marker_len = match.end() - match.start() # Use match length
+                    chosen_marker_info = (match.group(0), min_req, max_req) # Use matched marker text
+                    min_choices, max_choices = min_req, max_req
+                    logging.debug(f"Found modal marker: '{match.group(0)}' in '{text[:100]}...'")
+                    break
 
-        # Handle 'inf' max_choices if needed (replace with actual number of modes)
-        if max_choices == float('inf'):
-            max_choices = len(modes) if modes else 0
+            modal_text = ""
+            if start_index != -1:
+                # Extract text *after* the matched marker
+                modal_text = text[start_index + marker_len:]
+            # Handle case where modes use bullet points without a standard "Choose X" intro
+            # Ensure bullet is likely start of a list item (preceded by newline or start of text, possibly indented)
+            # Use MULTILINE flag for ^
+            elif re.search(r'(?:\n|^)\s*[•●]\s+', text, re.MULTILINE):
+                # Assume standard "choose one" if no text marker found but bullets exist
+                min_choices, max_choices = 1, 1
+                # Find first bullet point that seems part of a list
+                bullet_match = re.search(r"(?:\n|^)\s*[•●]\s+", text, re.MULTILINE)
+                if bullet_match:
+                    modal_text = text[bullet_match.start():] # Start parsing from the first bullet
+                    logging.debug(f"Found bullet point modes without standard intro, assuming 'Choose one'.")
+                else: # Should not happen if outer re.search passed, but safety check
+                    return None, 0, 0
+            else: # No modal markers or list-like bullets found
+                return None, 0, 0
 
-        if not modes:
-             logging.warning(f"Found modal marker but failed to parse mode texts from: '{modal_text[:100]}...'")
-             return None, 0, 0
+            modal_text = modal_text.strip()
 
-        logging.debug(f"Parsed modes: {modes}, MinChoices: {min_choices}, MaxChoices: {max_choices}")
-        return modes, min_choices, max_choices
+            # Split by bullet points (primary method)
+            # Handle different bullet characters and whitespace robustly
+            # Use regex that captures the content *after* the bullet, handles start/end string
+            mode_parts = re.split(r'(?:\n|^)\s*[•●]\s*', modal_text) # Split based on bullet at start of line
+
+            # Clean up modes
+            for part in mode_parts:
+                if not part.strip(): continue # Skip empty parts resulting from split
+
+                # Remove reminder text first
+                cleaned_part = re.sub(r'\s*\([^()]*?\)\s*', ' ', part).strip()
+                # Clean surrounding whitespace again after removal
+                cleaned_part = cleaned_part.strip()
+                # *** CHANGED: More robust cleanup - remove trailing punctuation AND any leading list-like markers if split didn't catch them ***
+                cleaned_part = re.sub(r'^[-•●\d\W]+', '', cleaned_part).strip() # Remove leading list markers/punct
+                cleaned_part = re.sub(r'[;,\.]+$', '', cleaned_part).strip() # Remove trailing punctuation
+
+                if cleaned_part:
+                    modes.append(cleaned_part)
+
+            # If no modes found via bullets but a text marker *was* found, try sentence splitting (less reliable)
+            if not modes and chosen_marker_info:
+                logging.debug("No bullet points found after modal marker, trying sentence split.")
+                # Split by sentence ending punctuation followed by potential start of next mode (Cap letter, list marker)
+                sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z•●\d\+\-])', modal_text) # Split on sentence end + potential mode start
+                for sentence in sentences:
+                    # Apply same cleanup logic
+                    cleaned_sentence = re.sub(r'\s*\([^()]*?\)\s*', ' ', sentence).strip()
+                    cleaned_sentence = re.sub(r'^[-•●\d\W]+', '', cleaned_sentence).strip()
+                    cleaned_sentence = re.sub(r'[;,\.]+$', '', cleaned_sentence).strip()
+                    if cleaned_sentence:
+                        modes.append(cleaned_sentence)
+
+            # Handle 'inf' max_choices if needed (replace with actual number of modes)
+            if max_choices == float('inf'):
+                max_choices = len(modes) if modes else 0
+
+            if not modes:
+                # Log specific marker info if available
+                marker_log = f" after marker '{chosen_marker_info[0]}'" if chosen_marker_info else ""
+                logging.warning(f"Found modal indication{marker_log} but failed to parse mode texts from: '{modal_text[:100]}...'")
+                return None, 0, 0
+
+            logging.debug(f"Parsed modes: {modes}, MinChoices: {min_choices}, MaxChoices: {max_choices}")
+            return modes, min_choices, max_choices
         
     def register_card_abilities(self, card_id, player):
         """
@@ -670,177 +684,219 @@ class AbilityHandler:
             
 
     def _parse_and_register_abilities(self, card_id, card):
-        """
-        Parse a card's text to identify and register its abilities.
-        Handles regular cards, Class cards, MDFCs, keywords, and multi-ability paragraphs.
-        Clears previous abilities first. Applies static abilities immediately after parsing.
-        Tracks activated ability indices.
-        """
-        if not card:
-            logging.warning(f"Attempted to parse abilities for non-existent card {card_id}.")
-            return
+            """
+            Parse a card's text to identify and register its abilities.
+            Handles regular cards, Class cards, MDFCs, keywords, and multi-ability paragraphs including bullet points.
+            Clears previous abilities first. Applies static abilities immediately after parsing.
+            Tracks activated ability indices.
+            """
+            if not card:
+                logging.warning(f"Attempted to parse abilities for non-existent card {card_id}.")
+                return
 
-        # Ensure card has game_state reference if missing
-        if not hasattr(card, 'game_state') or card.game_state is None:
-            setattr(card, 'game_state', self.game_state)
+            # Ensure card has game_state reference if missing
+            if not hasattr(card, 'game_state') or card.game_state is None:
+                setattr(card, 'game_state', self.game_state)
 
-        # Clear existing registered abilities for this card_id
-        self.registered_abilities[card_id] = []
-        abilities_list = self.registered_abilities[card_id]
-        activated_ability_counter = 0
+            # Clear existing registered abilities for this card_id
+            self.registered_abilities[card_id] = []
+            abilities_list = self.registered_abilities[card_id]
+            activated_ability_counter = 0 # Tracks the index for non-mana activated abilities
 
-        try:
-            oracle_text_sources = []
-            keywords_from_card_data = []
-            processed_special_text_markers = "" # Track text handled by Spree, Class etc.
+            try:
+                oracle_text_sources = []
+                keywords_from_card_data = []
+                processed_special_text_markers = "" # Track text handled by Spree, Class etc.
 
-            # --- Get Text Source(s) and Keywords ---
-            current_face_index = getattr(card, 'current_face', 0)
-            # *** FIXED: Safely access layout attribute ***
-            card_layout = getattr(card, 'layout', None)
-            is_mdfc = card_layout == 'modal_dfc'
+                # --- Get Text Source(s) and Keywords ---
+                current_face_index = getattr(card, 'current_face', 0)
+                card_layout = getattr(card, 'layout', None)
+                is_mdfc = card_layout == 'modal_dfc'
 
-            # MDFCs are complex - parse ONLY the current face for now.
-            # Full parsing would need to handle interactions between faces if any.
-            if hasattr(card, 'faces') and card.faces and current_face_index < len(card.faces):
-                face_data = card.faces[current_face_index]
-                oracle_text_sources.append(face_data.get('oracle_text', ''))
-                keywords_from_card_data = face_data.get('keywords', [])
-                 # Get Spree info if MDFC face is Spree
-                 # *** FIXED: Use card_layout variable ***
-                if is_mdfc and 'spree' in (kw.lower() for kw in keywords_from_card_data):
-                     # Re-parse spree on face change? Assume parsed earlier.
-                     processed_special_text_markers += getattr(card, '_spree_related_text_marker', '')
-
-            elif hasattr(card, 'is_class') and card.is_class:
-                current_level_data = card.get_current_class_data()
-                if current_level_data:
-                    # Get *all* abilities active at this level
-                    oracle_text_sources.extend(current_level_data.get('all_abilities', []))
-                    # Mark class text as handled (avoid parsing level indicators etc.)
-                    processed_special_text_markers = getattr(card, 'oracle_text', '') # Mark full original text
-                if hasattr(card, 'keywords'): keywords_from_card_data = card.keywords
-
-            else: # Normal card or current face of TDFC/Saga etc.
-                oracle_text_sources.append(getattr(card, 'oracle_text', ''))
-                if hasattr(card, 'keywords'): keywords_from_card_data = card.keywords
-                # *** FIXED: Use hasattr check for is_spree ***
-                if hasattr(card, 'is_spree') and card.is_spree:
-                     processed_special_text_markers = getattr(card, '_spree_related_text_marker', '')
+                # Handle different card layouts/types to get text sources
+                if hasattr(card, 'faces') and card.faces and current_face_index < len(card.faces):
+                    face_data = card.faces[current_face_index]
+                    oracle_text_sources.append(face_data.get('oracle_text', ''))
+                    keywords_from_card_data = face_data.get('keywords', [])
+                    # Special text handling for MDFC faces if needed (e.g., Spree)
+                    # if is_mdfc and 'spree' in (kw.lower() for kw in keywords_from_card_data):
+                        # processed_special_text_markers += getattr(card, '_spree_related_text_marker', '')
+                elif hasattr(card, 'is_class') and card.is_class:
+                    current_level_data = card.get_current_class_data()
+                    if current_level_data:
+                        # Class abilities are cumulative, get all abilities for the current level
+                        oracle_text_sources.extend(current_level_data.get('all_abilities', []))
+                        # Mark the original full oracle text as potentially processed by class logic
+                        # Avoids re-parsing level indicators like "Level 2 -" as static abilities
+                        processed_special_text_markers = getattr(card, 'oracle_text', '')
+                    if hasattr(card, 'keywords'): keywords_from_card_data = card.keywords
+                else: # Normal card or other layout type
+                    oracle_text_sources.append(getattr(card, 'oracle_text', ''))
+                    if hasattr(card, 'keywords'): keywords_from_card_data = card.keywords
+                    # Spree marker (check if base card itself is Spree)
+                    if hasattr(card, 'is_spree') and card.is_spree:
+                        processed_special_text_markers = getattr(card, '_spree_related_text_marker', '')
 
 
-            # --- Parse Keywords from Explicit Data ---
-            handled_keywords = set() # Keep track of keywords already handled by _create_keyword_ability
-            parsed_keywords_from_data = self._get_parsed_keywords(keywords_from_card_data)
-            for keyword_text in parsed_keywords_from_data:
-                # Store the base keyword found (e.g., 'flying' from 'flying, lifelink')
-                # _create_keyword_ability needs base keyword, not the full phrase
-                base_kw = keyword_text.split()[0].lower()
-                if base_kw in Card.ALL_KEYWORDS:
-                    # Only create if not already added from another source for this card
-                    if base_kw not in handled_keywords:
-                         if self._create_keyword_ability(card_id, card, base_kw, abilities_list, full_keyword_text=keyword_text):
-                              handled_keywords.add(base_kw)
-                elif ',' in keyword_text: # Handle comma lists explicitly
-                    for sub_kw in keyword_text.split(','):
-                        sub_kw_clean = sub_kw.strip().lower()
-                        base_sub_kw = sub_kw_clean.split()[0]
-                        if base_sub_kw in Card.ALL_KEYWORDS and base_sub_kw not in handled_keywords:
-                            if self._create_keyword_ability(card_id, card, base_sub_kw, abilities_list, full_keyword_text=sub_kw_clean):
-                                handled_keywords.add(base_sub_kw)
+                # --- Parse Keywords from Explicit Data ---
+                handled_keywords = set() # Keep track of keywords already handled by _create_keyword_ability
+                parsed_keywords_from_data = self._get_parsed_keywords(keywords_from_card_data)
+                for keyword_text in parsed_keywords_from_data:
+                    base_kw = keyword_text.split()[0].lower() # Get base keyword (e.g., 'flying')
+                    if base_kw in Card.ALL_KEYWORDS:
+                        if base_kw not in handled_keywords:
+                            if self._create_keyword_ability(card_id, card, base_kw, abilities_list, full_keyword_text=keyword_text):
+                                handled_keywords.add(base_kw)
+                    # Handle comma-separated keywords explicitly if base check fails
+                    elif ',' in keyword_text:
+                        for sub_kw in keyword_text.split(','):
+                            sub_kw_clean = sub_kw.strip().lower()
+                            base_sub_kw = sub_kw_clean.split()[0]
+                            if base_sub_kw in Card.ALL_KEYWORDS and base_sub_kw not in handled_keywords:
+                                if self._create_keyword_ability(card_id, card, base_sub_kw, abilities_list, full_keyword_text=sub_kw_clean):
+                                    handled_keywords.add(base_sub_kw)
 
-            # --- Process Oracle Text ---
-            processed_clauses_hashes = set()
-            for text_block in oracle_text_sources:
-                if not text_block or not isinstance(text_block, str): continue
+                # --- Process Oracle Text Blocks ---
+                processed_clauses_hashes = set()
+                for text_block in oracle_text_sources:
+                    if not text_block or not isinstance(text_block, str): continue
 
-                # Remove reminder text
-                cleaned_text_block = re.sub(r'\s*\([^()]*?\)\s*', ' ', text_block).strip()
-                if not cleaned_text_block: continue
+                    # Remove reminder text early
+                    cleaned_text_block = re.sub(r'\s*\([^()]*?\)\s*', ' ', text_block).strip()
+                    if not cleaned_text_block: continue
 
-                # Check if the whole block was handled by Spree/Class parser
-                if processed_special_text_markers and cleaned_text_block in processed_special_text_markers:
-                    continue
+                    # Check if the whole block was handled by special parser (Spree, Class)
+                    if processed_special_text_markers and cleaned_text_block in processed_special_text_markers:
+                        continue
 
-                # Split into paragraphs/clauses based on double newlines first, then single
-                # Preserve structure for cards like Beza where one sentence defines one ability
-                potential_clauses = re.split(r'\n{2,}', cleaned_text_block) # Split by blank lines first
-                final_clauses = []
-                for clause in potential_clauses:
-                     # Then split remaining paragraphs by single newline if needed (e.g., bullet points without bullets)
-                     final_clauses.extend(filter(None, [c.strip().rstrip('.').strip() for c in clause.split('\n')]))
-
-
-                for clause_text in final_clauses:
-                    if not clause_text: continue
-
-                    clause_hash = hash(clause_text)
-                    if clause_hash in processed_clauses_hashes: continue # Skip identical text blocks
-                    processed_clauses_hashes.add(clause_hash)
-
-                    original_length = len(abilities_list) # Track list length before parsing clause
-
-                    # Check if clause is handled by special parser text first
-                    if processed_special_text_markers and clause_text in processed_special_text_markers:
-                         continue
-
-                    # Check if the clause *only* contains keywords already handled
-                    # Split by common separators (, and) and check if all resulting words are handled keywords
-                    words_in_clause = set(re.findall(r'\b\w+\b', clause_text.lower()))
-                    is_just_handled_keywords = False
-                    if words_in_clause.issubset(handled_keywords):
-                        # Further check: Ensure it doesn't look like an activated/triggered ability text using these keywords
-                        if not (':' in clause_text or any(trig in clause_text.lower() for trig in ['when', 'whenever', 'at the beginning'])):
-                            is_just_handled_keywords = True
-
-                    if is_just_handled_keywords:
-                        # logging.debug(f"Skipping clause '{clause_text}' as it consists only of handled keywords.")
-                        continue # Skip parsing this clause further
+                    # Split into clauses (paragraphs first, then single newlines)
+                    potential_clauses = re.split(r'\n{2,}', cleaned_text_block) # Split by blank lines
+                    final_clauses = []
+                    for clause in potential_clauses:
+                        # Split remaining chunks by single newline if needed
+                        sub_clauses = clause.split('\n')
+                        # Clean up each resulting line/sub-clause
+                        final_clauses.extend(filter(None, [c.strip().rstrip('.').strip() for c in sub_clauses]))
 
 
-                    # --- DELEGATE TO NEW CLASSIFICATION LOGIC ---
-                    created_abilities = self._classify_and_parse_ability_clause(
-                         card_id, card, clause_text, current_activated_index=activated_ability_counter
-                    )
-                    # --- END DELEGATION ---
+                    # Process each resulting clause/line
+                    for clause_text in final_clauses:
+                        if not clause_text: continue
 
-                    # Process results
-                    if created_abilities:
-                         new_activated_count = 0
-                         for ability in created_abilities:
-                             # Attach card reference
-                             setattr(ability, 'source_card', card)
-                             abilities_list.append(ability)
-                             # Increment activated counter ONLY if a NEW ActivatedAbility was added by THIS clause processing
-                             if isinstance(ability, ActivatedAbility) and not isinstance(ability, ManaAbility):
-                                  new_activated_count += 1
-                         activated_ability_counter += new_activated_count # Update main counter
+                        clause_hash = hash(clause_text)
+                        if clause_hash in processed_clauses_hashes: continue # Skip identical text blocks
+                        processed_clauses_hashes.add(clause_hash) # Mark original clause as processed
+
+                        # Check if clause text was specifically handled by a marker
+                        if processed_special_text_markers and clause_text in processed_special_text_markers:
+                            continue
+
+                        # Check if the clause *only* contains keywords already handled
+                        words_in_clause = set(re.findall(r'\b\w+\b', clause_text.lower()))
+                        is_just_handled_keywords = False
+                        if words_in_clause.issubset(handled_keywords):
+                            # Further check: doesn't look like activated/triggered
+                            if not (':' in clause_text or any(trig in clause_text.lower() for trig in ['when', 'whenever', 'at the beginning'])):
+                                is_just_handled_keywords = True
+                        if is_just_handled_keywords: continue # Skip parsing this clause
+
+                        # --- *** NEW: Handle Bullet Points Within a Clause *** ---
+                        if '•' in clause_text or '●' in clause_text:
+                            # Check if this clause looks like a modal preamble (e.g., starts with "Choose one —")
+                            # We rely on _parse_modal_text to handle these structures during activation phase.
+                            # For registration, treat bullet points here as *potential* separate static/triggered abilities,
+                            # unless the context clearly makes them modal options.
+                            is_likely_modal_preamble = re.match(r"^\s*choose\s+(\w+)\s*[-—•●]", clause_text.lower())
+
+                            if is_likely_modal_preamble:
+                                # Don't split modal choices here; handle during activation.
+                                # Just try to classify the preamble itself if it grants static ability (rare)
+                                logging.debug(f"Skipping bullet split for likely modal preamble: '{clause_text[:50]}...'")
+                                # (Optionally, parse just the preamble text before the bullets if needed)
+                                # preamble_text = re.split(r'\s*[•●]', clause_text, 1)[0].strip()
+                                # created_abilities = self._classify_and_parse_ability_clause(...) # Parse preamble
+                                pass # Skip detailed parsing of modes here
+
+                            else:
+                                # Split by bullet points and process each part
+                                logging.debug(f"Found bullets in clause, splitting: '{clause_text[:50]}...'")
+                                # Use a regex that splits by the bullet and optional surrounding space, keeping content
+                                # Split on newline + optional space + bullet + optional space OR just bullet + optional space
+                                sub_parts = re.split(r'(?:\n|^)\s*[•●]\s*|\s*[•●]\s*', clause_text)
+
+                                processed_sub_parts = 0
+                                for sub_part in sub_parts:
+                                    cleaned_sub_part = sub_part.strip().rstrip('.').strip()
+                                    if not cleaned_sub_part: continue
+
+                                    # Re-check if sub-part was marked as handled
+                                    if processed_special_text_markers and cleaned_sub_part in processed_special_text_markers:
+                                        continue
+
+                                    # Classify and parse the sub-part
+                                    created_abilities_sub = self._classify_and_parse_ability_clause(
+                                        card_id, card, cleaned_sub_part, current_activated_index=activated_ability_counter
+                                    )
+
+                                    # Process results for sub-part
+                                    if created_abilities_sub:
+                                        processed_sub_parts += 1
+                                        new_activated_count_sub = 0
+                                        for ability in created_abilities_sub:
+                                            setattr(ability, 'source_card', card)
+                                            abilities_list.append(ability)
+                                            if isinstance(ability, ActivatedAbility) and not isinstance(ability, ManaAbility):
+                                                new_activated_count_sub += 1
+                                        activated_ability_counter += new_activated_count_sub
+                                # If we split by bullets and processed parts, skip processing the original full clause
+                                if processed_sub_parts > 0:
+                                    continue # Move to the next clause_text from final_clauses
+
+                        # --- End Bullet Point Handling ---
+
+                        # --- Process Clause as a Whole (If no bullets handled it) ---
+                        created_abilities = self._classify_and_parse_ability_clause(
+                            card_id, card, clause_text, current_activated_index=activated_ability_counter
+                        )
+
+                        # Process results
+                        if created_abilities:
+                            new_activated_count = 0
+                            for ability in created_abilities:
+                                # Attach card reference if not already done by classify function
+                                if not getattr(ability, 'source_card', None):
+                                    setattr(ability, 'source_card', card)
+                                abilities_list.append(ability)
+                                # Increment activated counter ONLY if a NEW ActivatedAbility was added
+                                if isinstance(ability, ActivatedAbility) and not isinstance(ability, ManaAbility):
+                                    new_activated_count += 1
+                            activated_ability_counter += new_activated_count # Update main counter
 
 
-            # --- Apply Static Abilities and Finalize ---
-            logging.debug(f"Parsed {len(abilities_list)} total functional abilities for {card.name} ({card_id})")
+                # --- Apply Static Abilities and Finalize ---
+                logging.debug(f"Parsed {len(abilities_list)} total functional abilities for {card.name} ({card_id})")
 
-            # Immediately apply newly registered Static Abilities
-            static_abilities_applied_texts = []
-            for ability in abilities_list:
-                if isinstance(ability, StaticAbility):
-                    try:
-                         # Ensure apply method exists before calling
-                         if hasattr(ability, 'apply') and callable(ability.apply):
-                              if ability.apply(self.game_state): # Apply returns True on successful registration
-                                  static_abilities_applied_texts.append(ability.effect_text)
-                    except Exception as static_apply_e:
-                         logging.error(f"Error applying static ability '{ability.effect_text}' for {card.name}: {static_apply_e}", exc_info=True)
-            if static_abilities_applied_texts:
-                logging.debug(f"Applied {len(static_abilities_applied_texts)} static abilities for {card.name}")
+                # Immediately apply newly registered Static Abilities
+                static_abilities_applied_texts = []
+                for ability in abilities_list:
+                    if isinstance(ability, StaticAbility):
+                        try:
+                            # Ensure apply method exists before calling
+                            if hasattr(ability, 'apply') and callable(ability.apply):
+                                if ability.apply(self.game_state): # Apply returns True on successful registration
+                                    static_abilities_applied_texts.append(ability.effect_text)
+                        except Exception as static_apply_e:
+                            logging.error(f"Error applying static ability '{ability.effect_text}' for {card.name}: {static_apply_e}", exc_info=True)
+                if static_abilities_applied_texts:
+                    logging.debug(f"Applied {len(static_abilities_applied_texts)} static abilities for {card.name}")
 
-        except Exception as e:
-            # Ensure card_id has an entry, even if empty, on error
-            card_name_log = getattr(card, 'name', 'Unknown') # Safely get name for logging
-            logging.error(f"Error parsing abilities for card {card_id} ({card_name_log}): {str(e)}")
-            import traceback
-            logging.error(traceback.format_exc())
-            if card_id not in self.registered_abilities: self.registered_abilities[card_id] = []
+            except Exception as e:
+                # Ensure card_id has an entry, even if empty, on error
+                card_name_log = getattr(card, 'name', 'Unknown') # Safely get name for logging
+                logging.error(f"Error parsing abilities for card {card_id} ({card_name_log}): {str(e)}")
+                import traceback
+                logging.error(traceback.format_exc())
+                if card_id not in self.registered_abilities: self.registered_abilities[card_id] = []
             
     def _classify_and_parse_ability_clause(self, card_id, card, clause_text, current_activated_index):
         """
