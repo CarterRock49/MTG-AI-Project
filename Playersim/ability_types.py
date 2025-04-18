@@ -154,67 +154,111 @@ class Ability:
 
 class ActivatedAbility(Ability):
     """Ability that can be activated by paying a cost"""
-    def __init__(self, card_id, cost=None, effect=None, effect_text=""):
-        super().__init__(card_id, effect_text)
-        # Allow parsing from effect_text if cost/effect not provided
-        parsed_cost, parsed_effect = None, None
-        if cost is None and effect is None and effect_text:
-            parsed_cost, parsed_effect = self._parse_cost_effect(effect_text) # Uses updated parser
+    def __init__(self, card_id, cost=None, effect=None, effect_text="", is_exhaust=False, activation_index=None):
+        # Ensure base __init__ gets original effect_text if available
+        super().__init__(card_id, effect_text or f"{cost or ''}: {effect or ''}".strip(': '))
 
-        # Ensure self.cost and self.effect are strings, default to empty string if None
+        # Determine cost and effect using parsing if not explicitly provided
+        parsed_cost, parsed_effect = None, None
+        if cost is None and effect is None and self.effect_text:
+            parsed_cost, parsed_effect = self._parse_cost_effect(self.effect_text) # Parse *before* using is_exhaust flag directly
+
+        # Prioritize provided args, then parsed values, then empty string
         self.cost = str(cost) if cost is not None else (str(parsed_cost) if parsed_cost is not None else "")
         self.effect = str(effect) if effect is not None else (str(parsed_effect) if parsed_effect is not None else "")
 
-        # Validation: Cost is required (unless it's an implicit cost like Morph)
-        if not self.cost and "morph" not in self.effect_text.lower(): # Allow no explicit cost for morph text
-            raise ValueError(f"ActivatedAbility requires a cost. Got text='{effect_text}'")
-        # Effect can sometimes be derived (e.g., Equip {1}) but should generally exist if parsed
-        # No explicit effect validation here, rely on EffectFactory later?
+        # --- Exhaust Handling: If cost starts with 'Exhaust', set flag and strip ---
+        # This assumes Exhaust marker is correctly included in the *parsed* cost by _parse_cost_effect
+        self.is_exhaust = is_exhaust # Initialize with passed flag
+        if self.cost.lower().startswith("exhaust"):
+            self.is_exhaust = True
+            # Remove "Exhaust" and separator (comma or dash)
+            self.cost = re.sub(r"^\s*Exhaust\s*[,—\u2014-]?\s*", "", self.cost, flags=re.IGNORECASE).strip()
 
-        # Store original text if not provided, constructing from potentially empty parts
-        if not effect_text:
-            self.effect_text = f"{self.cost}: {self.effect}".strip(': ') # Clean potential empty cost
+        self.activation_index = activation_index
+
+        # --- Validation Refinement ---
+        # Validate cost AFTER potential Exhaust stripping
+        # Cost usually required, unless implicit (handled by caller/handler) or keyword ability parsed this way
+        implicit_cost_keywords = ["morph", "manifest", "foretell", "channel", "transmute", "madness", "flashback", "cycling", "unearth", "retrace", "ninjutsu"] # Add more known implicit costs
+        if not self.cost:
+             if not any(kw in (self.effect_text or "").lower() for kw in implicit_cost_keywords):
+                 # Only log if cost is missing AND it doesn't seem like an implicit keyword ability
+                 # Check if original text HAD a separator - suggests parsing *should* have worked
+                 if parsed_cost is None and (":" in self.effect_text or "—" in self.effect_text or "\u2014" in self.effect_text):
+                     logging.debug(f"ActivatedAbility created for '{self.effect_text}', but cost parsing failed or yielded empty despite separator. Ability may be invalid.")
+                 # Else: Silently allow empty cost, maybe it's intentional or handled differently
+
+        # Update effect_text if needed based on final cost/effect/exhaust
+        prefix = "Exhaust, " if self.is_exhaust else ""
+        reconstructed_text = f"{prefix}{self.cost}: {self.effect}".strip(': ')
+        if reconstructed_text != self.effect_text and self.cost and self.effect: # Only update if parts found and different
+            self.effect_text = reconstructed_text
 
 
-    def _parse_cost_effect(self, text):
-        """Attempt to parse 'Cost: Effect' or 'Cost — Effect' format. Handles em dash."""
-        # Regex includes colon, en dash, em dash, unicode em dash
-        match = re.match(r'^\s*([^:—\u2014]+?)\s*[:—\u2014]\s*(.+)\s*$', text.strip())
-        if match:
-            cost_part = match.group(1).strip()
-            effect_part = match.group(2).strip()
-            # Basic validation: Cost should contain '{' or keyword like 'Tap' or number
-            if '{' in cost_part or re.search(r'\b(tap|sacrifice|discard|pay)\b|\d+', cost_part.lower()):
-                 return cost_part, effect_part
+    @staticmethod
+    def _parse_cost_effect(text):
+        """
+        Revised parser for Activated Abilities. Prioritizes explicit separators.
+        Less strict cost validation after separator found. Includes Exhaust in cost part.
+        """
+        if not text: return None, None
+        text = text.strip()
 
-        # Check for keyword costs without separator
-        # Handles common keyword costs followed by mana or number, possibly description
-        keyword_cost_pattern = r"^(cycling|equip|flashback|kicker|level up|morph|unearth|reconfigure|fortify|channel|adapt|monstrosity|ninjutsu)\s*(?:-|—|–|:)?\s*(\{.*?\}(?![0-9])|\d+|pay \d+ life|discard a card)" # Look for {cost}, number, or specific text costs
-        match_keyword_cost = re.match(keyword_cost_pattern, text.strip(), re.IGNORECASE)
-        if match_keyword_cost:
-            keyword = match_keyword_cost.group(1)
-            cost_part = match_keyword_cost.group(2).strip()
-            # Normalize numeric cost to {N}
-            if cost_part.isdigit(): cost_part = f"{{{cost_part}}}"
+        # --- 1. Prioritize Explicit Separators (Colon or Dash) ---
+        # Regex includes colon, en dash, em dash, unicode em dash, surrounded by optional spaces
+        separator_match = re.match(r'^\s*(.+?)\s*[:—\u2014-]\s*(.+)\s*$', text, re.DOTALL)
 
-            # Extract effect description AFTER the cost
-            effect_part_match = re.search(re.escape(cost_part) + r"\s*[:—\u2014]?\s*(.+)", text.strip(), re.IGNORECASE | re.DOTALL)
-            if effect_part_match:
-                 effect_part = effect_part_match.group(1).strip()
-            else: # Derive effect from keyword if no description found
-                # Refine derived effects
-                effect_map = {
-                    "cycling": "Discard this card: Draw a card.", "equip": "Attach to target creature.",
-                    "flashback": "Cast from graveyard, then exile.", "level up": "Put a level counter on this.",
-                    "morph": "Turn this face up.", "unearth": "Return to battlefield with haste, exile later.",
-                    "ninjutsu": "Return attacker, put this onto battlefield.", "channel": "Activate channel effect."
-                    # Add more default effects based on keywords
-                }
-                effect_part = effect_map.get(keyword, f"Perform {keyword} effect.")
-            return cost_part, effect_part
+        if separator_match:
+            cost_part = separator_match.group(1).strip()
+            effect_part = separator_match.group(2).strip().rstrip('.')
 
-        logging.warning(f"Could not parse Cost[:—\u2014] Effect from '{text}'")
-        return None, text # Assume entire text is the effect if cost not parsed
+            # --- 2. Flexible Cost Validation ---
+            # Does the cost part contain ANY plausible cost indicator?
+            # (Mana symbols {}, tap {T}/Tap, cost keywords, sacrifice/discard/pay life/remove counter, or Exhaust)
+            cost_indicators_pattern = r'\{[WUBRGCXSPMTQ0-9\/.]+\}|\(\{T\}\)|\b(Tap|Sacrifice|Discard|Pay\s+\d+\s+life|Remove\s+.*?\s+counter|Exhaust|Cycling|Equip|Flashback|Level\s+up)\b|^\s*\d+\s*$'
+            # --- Adjusted: check raw cost_part, don't use cost_lower ---
+            if re.search(cost_indicators_pattern, cost_part, re.IGNORECASE):
+                logging.debug(f"Parsed Separator Cost/Effect: Cost='{cost_part}', Effect='{effect_part}'")
+                return cost_part, effect_part
+            else:
+                # Found a separator, but the part before it doesn't look like a typical cost.
+                # Could be part of the effect (e.g., "Target creature gets +X/+0 until end of turn, where X is...")
+                # Or could be a less common cost type not captured by the regex.
+                # Treat as likely effect text to be safer than misinterpreting cost.
+                logging.debug(f"Found separator in '{text}', but left side '{cost_part}' not recognized as standard cost. Treating whole as effect.")
+                # Fall through to check keyword-only patterns
+
+        # --- 3. Check for Keyword-Only structures where Effect is Implicit ---
+        # Example: "Cycling {2}" or "Equip {1}" or "Flashback {B}" without explicit effect text following
+        keyword_cost_patterns = {
+            # Regex matches Keyword + Cost pattern at the START and consumes the WHOLE string (or ends near punctuation)
+            r"^\s*(Cycling|Equip|Fortify|Reconfigure|Unearth|Flashback|Bestow|Dash|Buyback|Madness|Transmute|Channel|Kicker|Entwine|Overload|Splice|Surge|Embalm|Eternalize|Jump-start|Escape|Awaken|Level up|Retrace|Ninjutsu)\s*(\{.+?\}|\d+|pay\s+\d+\s+life|discard\s+\S+\s+card|sacrifice\s+\S+\s+\S+|exile\s+\S+\s+\S+)\s*[.]?$": "keyword_with_explicit_cost",
+             r"^(Morph)\s*(?:\{(\d+|[Xx])\})?\s*[.]?$": "keyword_with_optional_cost", # Morph cost optional here
+             r"^(Outlast|Monstrosity|Adapt|Reinforce|Scavenge|Crew)\s*(\{\d+\}|\d+)\s*[.]?$": "keyword_with_numeric_value" # Value is intrinsic part
+        }
+        for pattern, pattern_type in keyword_cost_patterns.items():
+            match = re.match(pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                 keyword = match.group(1)
+                 # Reconstruct a plausible cost string from the matched group
+                 cost_str = match.group(2).strip() if len(match.groups()) > 1 and match.group(2) else "{0}" # Default {0} if no cost group
+                 if cost_str.isdigit(): cost_str = f"{{{cost_str}}}" # Normalize
+
+                 # Generate an implicit effect description
+                 effect_map = {
+                     "cycling": "Draw a card.", "equip": "Attach to target creature.",
+                     "flashback": "Cast from graveyard, then exile.", "level up": "Put a level counter on this.",
+                     # Add more standard effects...
+                 }
+                 effect_part = effect_map.get(keyword.lower(), f"Activate {keyword} ability.")
+                 logging.debug(f"Parsed Implicit Keyword Effect: Keyword='{keyword}', Cost='{cost_str}', ImplicitEffect='{effect_part}'")
+                 # Return the parsed COST and the generated implicit EFFECT
+                 return cost_str, effect_part
+
+        # --- 4. Fallback ---
+        logging.debug(f"Could not parse activated ability structure from '{text}'. Assuming static/triggered or malformed.")
+        return None, text # Return None for cost, full text as effect
 
     def resolve(self, game_state, controller, targets=None):
         """Resolve this activated ability using the default implementation."""
@@ -232,156 +276,192 @@ class ActivatedAbility(Ability):
 
     def pay_cost(self, game_state, controller):
         """Pay the activation cost of this ability with comprehensive cost handling."""
-        cost_text = self.cost.lower()
+        # Use self.cost (which has Exhaust prefix removed if applicable by __init__)
+        cost_text = self.cost
+        cost_lower = cost_text.lower() if cost_text else ""
         all_costs_paid = True
-        # --- Initialize rollback steps list ---
         rollback_steps = []
 
-        # --- Non-Mana Costs FIRST ---
-        # Tap Cost
-        if "{t}" in cost_text:
-             # Check if already tapped before attempting
-             if self.card_id in controller.get("tapped_permanents", set()):
-                 logging.debug(f"Cannot pay tap cost: {game_state._safe_get_card(self.card_id).name} already tapped.")
+        # --- Handle is_exhaust flag (set during init) ---
+        if self.is_exhaust:
+            activation_idx = getattr(self, 'activation_index', -1)
+            if activation_idx == -1:
+                 logging.error(f"Exhaust ability on {self.card_id} missing activation_index. Cannot pay cost.")
                  return False
+            if game_state.check_exhaust_used(self.card_id, activation_idx):
+                 logging.debug(f"Cannot pay cost: Exhaust ability {activation_idx} for {self.card_id} already used this turn.")
+                 return False
+            # Exhaust itself isn't 'paid' here, but marked later IF other costs succeed
+
+        # --- Non-Mana Costs FIRST (Logic mostly unchanged, uses cost_lower) ---
+        # Tap Cost ({T} or tap)
+        if "{t}" in cost_lower or re.search(r'\btap\b', cost_lower): # Added word boundary tap check
+             card_name = getattr(game_state._safe_get_card(self.card_id), 'name', self.card_id)
+             if self.card_id in controller.get("tapped_permanents", set()):
+                 logging.debug(f"Cannot pay tap cost: {card_name} already tapped.")
+                 return False # Cannot pay cost if already tapped
+             # --- ADDED: Check if card can be tapped (e.g., not summoning sick if tapping requires it as an action) ---
+             # Rule 302.6: A creature's activated ability with the tap symbol in its cost can't be activated unless the creature has been under its controller's control continuously since their most recent turn began. Ignore this restriction if the creature has haste.
+             # Check if card is creature AND lacks haste AND entered this turn
+             card_obj = game_state._safe_get_card(self.card_id)
+             is_creature = card_obj and 'creature' in getattr(card_obj,'card_types',[])
+             entered_this_turn = card_obj and self.card_id in controller.get("entered_battlefield_this_turn",set())
+             has_haste = game_state.check_keyword(self.card_id, 'haste') # Use central check
+
+             if is_creature and entered_this_turn and not has_haste:
+                  logging.debug(f"Cannot pay tap cost: {card_name} has summoning sickness.")
+                  return False # Summoning sickness prevents tapping for cost
+             # --- END ADDED CHECK ---
              if not game_state.tap_permanent(self.card_id, controller):
-                 logging.debug(f"Cannot pay tap cost: {game_state._safe_get_card(self.card_id).name} couldn't be tapped.")
+                 logging.debug(f"Cannot pay tap cost: {card_name} couldn't be tapped (e.g., 'can't be tapped' effect).")
                  self._perform_rollback(game_state, controller, rollback_steps)
                  return False
-             rollback_steps.append(("untap", self.card_id)) # Add untap step for rollback
-             logging.debug(f"Paid tap cost for {game_state._safe_get_card(self.card_id).name}")
-        # Untap Cost {Q} (Less common)
-        if "{q}" in cost_text:
+             rollback_steps.append(("untap", self.card_id))
+             logging.debug(f"Paid tap cost for {card_name}")
+
+        # ... (Untap, Sacrifice, Discard, Pay Life, Remove Counters logic remains the same, ensure they use cost_lower correctly) ...
+        # Untap Cost ({Q} or untap) - Use cost_lower for regex
+        if "{q}" in cost_lower or re.search(r'\buntap\b', cost_lower):
+             card_name = getattr(game_state._safe_get_card(self.card_id), 'name', self.card_id)
              if self.card_id not in controller.get("tapped_permanents", set()):
-                 logging.debug(f"Cannot pay untap cost: {game_state._safe_get_card(self.card_id).name} already untapped.")
+                 logging.debug(f"Cannot pay untap cost: {card_name} already untapped.")
                  return False
              if not game_state.untap_permanent(self.card_id, controller):
-                 logging.debug(f"Cannot pay untap cost for {game_state._safe_get_card(self.card_id).name}")
+                 logging.debug(f"Cannot pay untap cost for {card_name} (e.g., 'doesn't untap' effect)")
                  self._perform_rollback(game_state, controller, rollback_steps)
                  return False
-             rollback_steps.append(("tap", self.card_id)) # Add tap step for rollback
-             logging.debug(f"Paid untap cost for {game_state._safe_get_card(self.card_id).name}")
+             rollback_steps.append(("tap", self.card_id))
+             logging.debug(f"Paid untap cost for {card_name}")
 
-        # Sacrifice Cost
-        sac_match = re.search(r"sacrifice (a|an|another|\d*)?\s*([^:,{]+)", cost_text)
+        # Sacrifice Cost - Use cost_lower for regex
+        sac_match = re.search(r"sacrifice\s+((?:a|an|another|one|two|three|\d+)\s+)?(.*?)(?:$|,?\s*\{)", cost_lower)
         if sac_match:
-             sac_req = sac_match.group(0).replace("sacrifice ", "").strip() # Get the full requirement text
-             # Ensure ability handler exists and has the methods
-             # Delegate sacrifice logic, including rollback potential, to _pay_sacrifice_cost helper
-             sacrifice_paid, sacrificed_id = self._pay_sacrifice_cost_with_rollback(game_state, controller, sac_req, self.card_id, rollback_steps)
-             if not sacrifice_paid:
-                  self._perform_rollback(game_state, controller, rollback_steps)
-                  return False
-             # rollback_steps already appended by helper if successful
+             sac_req = sac_match.group(0).replace("sacrifice ", "").strip()
+             count_str = sac_match.group(1)
+             count = 1
+             if count_str: count = self._word_to_number(count_str.strip())
+             for i in range(count):
+                  sacrifice_paid, _ = self._pay_sacrifice_cost_with_rollback(game_state, controller, sac_req, self.card_id, rollback_steps)
+                  if not sacrifice_paid:
+                      logging.debug(f"Failed sacrifice cost: Required {count}, attempt {i+1} failed for '{sac_req}'.")
+                      self._perform_rollback(game_state, controller, rollback_steps); return False
+             logging.debug(f"Paid sacrifice cost ({count}x '{sac_req}').")
 
-        # Discard Cost
-        discard_match = re.search(r"discard (\w+|\d*) cards?", cost_text)
+        # Discard Cost - Use cost_lower for regex
+        discard_match = re.search(r"discard\s+((?:a|an|one|two|three|\d+)\s+)?(\w+\s+)?cards?(?:\s+at random)?(?:$|,?\s*\{)", cost_lower)
         if discard_match:
              count_str = discard_match.group(1)
-             count = text_to_number(count_str)
-             if len(controller["hand"]) < count:
-                 logging.debug("Cannot pay discard cost: not enough cards.")
-                 self._perform_rollback(game_state, controller, rollback_steps)
-                 return False
+             count = 1 if not count_str else self._word_to_number(count_str.strip())
+             is_random = "at random" in cost_lower
+             discard_paid, _ = self._pay_discard_cost_with_rollback(game_state, controller, count, is_random, rollback_steps)
+             if not discard_paid: self._perform_rollback(game_state, controller, rollback_steps); return False
+             logging.debug(f"Paid discard cost ({count} cards{' randomly' if is_random else ''}).")
 
-             # Delegate discard logic to helper for better rollback handling
-             discard_paid, discarded_ids = self._pay_discard_cost_with_rollback(game_state, controller, count, rollback_steps)
-             if not discard_paid:
-                  self._perform_rollback(game_state, controller, rollback_steps)
-                  return False
-             # rollback_steps already appended by helper if successful
-
-        # Pay Life Cost
-        life_match = re.search(r"pay (\d+) life", cost_text)
+        # Pay Life Cost - Use cost_lower for regex
+        life_match = re.search(r"pay\s+(\d+)\s+life", cost_lower)
         if life_match:
              amount = int(life_match.group(1))
-             if controller["life"] < amount:
-                 logging.debug("Cannot pay life cost: not enough life.")
-                 self._perform_rollback(game_state, controller, rollback_steps)
-                 return False
+             if controller["life"] < amount: # Rule: Can pay life even if it brings you to 0 or less. Only prevent if already 0 or less? Re-check 119.4. Need > 0 to pay.
+                  # Corrected: Cannot pay if life is less than cost, unless an effect allows paying with life you don't have (very rare). Rule 119.4
+                  logging.debug(f"Cannot pay life cost {amount}: Only have {controller['life']} life.")
+                  self._perform_rollback(game_state, controller, rollback_steps)
+                  return False
              controller["life"] -= amount
-             rollback_steps.append(("gain_life", amount)) # Add gain life step for rollback
-             logging.debug(f"Paid {amount} life.")
-             # TODO: Consider effects reducing life payment cost
-             # TODO: Consider triggering life loss events here if rules require
+             rollback_steps.append(("gain_life", amount))
+             logging.debug(f"Paid {amount} life. Life is now {controller['life']}")
+             # Trigger life loss event
+             if hasattr(game_state, 'trigger_ability'):
+                 game_state.trigger_ability(self.card_id, "LOSE_LIFE", {"player": controller, "amount": amount, "cause": "cost"})
 
-        # Remove Counters Cost
-        counter_match = re.search(r"remove (\w+|\d*) ([\w\s\-]+) counters?", cost_text)
+
+        # Remove Counters Cost - Use cost_lower for regex
+        counter_match = re.search(r"remove\s+(?:(?:a|an|one|two|three|\d+)\s+)?(\w+|[+\-]\d+/[+\-]\d+)\s+counters?(?: from.*?)?(?:$|,?\s*\{)", cost_lower)
         if counter_match:
-             count_str, counter_type = counter_match.groups()
-             count = text_to_number(count_str)
-             counter_type = counter_type.strip().upper().replace('_','/') # Normalize
+            count_word_match = re.search(r"remove\s+(a|an|one|two|three|\d+)", cost_lower)
+            count = 1
+            if count_word_match: count = self._word_to_number(count_word_match.group(1))
+            counter_type = counter_match.group(1)
+            if '/' in counter_type and counter_type.replace('/','').replace('+','').replace('-','').isdigit(): pass
+            else: counter_type = counter_type.upper()
+            # Check source of counters (default: self, but could be target)
+            counter_source_id = self.card_id # Assume self unless "from TARGET" specified
+            from_match = re.search(r"from (.*?)($|,?\s*\{)", cost_lower)
+            if from_match: # Needs to resolve target specification based on context
+                logging.warning(f"Parsing 'remove counter from TARGET' cost is complex and not fully supported.")
+                # For now, assume source is self if 'from' part exists but isn't parsed
+                # Better implementation would need target context here.
 
-             # Check if enough counters exist *before* attempting removal
-             source_card = game_state._safe_get_card(self.card_id)
-             current_counter_count = 0
-             if source_card and hasattr(source_card, 'counters'):
-                  current_counter_count = source_card.counters.get(counter_type, 0)
+            source_card = game_state._safe_get_card(counter_source_id)
+            current_counter_count = 0
+            if counter_source_id == self.card_id and source_card and hasattr(source_card, 'counters'): # Check self
+                 current_counter_count = source_card.counters.get(counter_type, 0)
+            # Check other permanents/players if source differs and is implemented
 
-             if current_counter_count < count:
-                 logging.debug(f"Cannot pay remove counter cost: Only {current_counter_count}/{count} {counter_type} counters available.")
-                 self._perform_rollback(game_state, controller, rollback_steps)
-                 return False
+            if current_counter_count < count:
+                logging.debug(f"Cannot remove {count} {counter_type}: Only {current_counter_count} available on {counter_source_id}.")
+                self._perform_rollback(game_state, controller, rollback_steps); return False
+            if not game_state.add_counter(counter_source_id, counter_type, -count): # Use add_counter for removal
+                logging.warning(f"Failed to remove {count} {counter_type} counters from {counter_source_id}.")
+                self._perform_rollback(game_state, controller, rollback_steps); return False
+            rollback_steps.append(("add_counter", counter_source_id, counter_type, count))
+            logging.debug(f"Paid by removing {count} {counter_type} counters from {counter_source_id}.")
 
-             # Use add_counter with negative count for consistency
-             if not game_state.add_counter(self.card_id, counter_type, -count):
-                 logging.warning(f"Failed to remove {count} {counter_type} counters during cost payment.")
-                 self._perform_rollback(game_state, controller, rollback_steps) # Perform rollback if add_counter failed
-                 return False
-             rollback_steps.append(("add_counter", self.card_id, counter_type, count)) # Rollback: Add counters back
-             logging.debug(f"Paid by removing {count} {counter_type} counters.")
 
-        # --- Mana Costs LAST ---
-        mana_cost_paid = False
+        # --- Mana Costs LAST (uses cost_text for parsing) ---
+        mana_cost_paid = True
         paid_mana_details = None
-        if hasattr(game_state, 'mana_system') and game_state.mana_system:
-             mana_symbols = re.findall(r'\{[WUBRGCXSPMTQA0-9\/\.]+\}', self.cost)
-             if mana_symbols:
-                 mana_cost_str = "".join(mana_symbols)
-                 if mana_cost_str:
-                     parsed_cost = game_state.mana_system.parse_mana_cost(mana_cost_str)
-                     # Attempt to pay mana and get details of payment for rollback
-                     can_pay_mana = game_state.mana_system.can_pay_mana_cost(controller, parsed_cost)
-                     if can_pay_mana:
-                         paid_mana_details = game_state.mana_system.pay_mana_cost_get_details(controller, parsed_cost) # Use method that returns payment details
-                         if paid_mana_details:
-                             mana_cost_paid = True
-                             # Add mana refund to rollback steps
-                             rollback_steps.append(("refund_mana", paid_mana_details))
-                             logging.debug(f"Paid mana cost: {mana_cost_str}")
-                         else:
-                             logging.warning(f"Failed to pay mana cost '{mana_cost_str}' (pay_mana_cost_get_details returned None).")
-                     else:
-                         logging.warning(f"Cannot afford mana cost '{mana_cost_str}'.")
+        # Regex for standard mana symbols {.}
+        mana_symbols = re.findall(r'\{([WUBRGCXSPMTQA0-9\/\.]+)\}', cost_text)
+        if mana_symbols:
+            if hasattr(game_state, 'mana_system') and game_state.mana_system:
+                mana_cost_str = "".join(f"{{{s}}}" for s in mana_symbols) # Reconstruct from found symbols only
+                if mana_cost_str: # Ensure non-empty mana cost string
+                    parsed_cost = game_state.mana_system.parse_mana_cost(mana_cost_str)
+                    can_pay_mana = game_state.mana_system.can_pay_mana_cost(controller, parsed_cost)
+                    if can_pay_mana:
+                        # --- PAY MANA ---
+                        paid_mana_details = game_state.mana_system.pay_mana_cost_get_details(controller, parsed_cost)
+                        if paid_mana_details:
+                            mana_cost_paid = True
+                            rollback_steps.append(("refund_mana", paid_mana_details))
+                            logging.debug(f"Paid mana cost: {mana_cost_str}")
+                        else: # Payment failed internally
+                            mana_cost_paid = False
+                            logging.warning(f"Failed to pay mana cost '{mana_cost_str}' (pay_mana_cost_get_details returned None).")
+                    else: # Cannot afford
+                        mana_cost_paid = False
+                        logging.debug(f"Cannot afford mana cost '{mana_cost_str}'.")
+            else: # No mana system fallback
+                logging.warning("Mana system not found, cannot handle mana costs properly.")
+                mana_cost_paid = False # Cannot pay mana without system
 
-                     if not mana_cost_paid: # Mana payment failed after non-mana costs paid
-                          logging.error(f"Rolling back non-mana costs due to failed mana payment for '{self.cost}'.")
-                          self._perform_rollback(game_state, controller, rollback_steps) # Perform rollback
-                          return False
-             else:
-                 mana_cost_paid = True # No mana cost part
-                 logging.debug("No mana symbols found in cost string.")
-        else:
-             # Basic mana check/payment fallback (less reliable for rollback)
-             if any(c in cost_text for c in "WUBRGC123456789X"):
-                 if sum(controller["mana_pool"].values()) == 0:
-                      logging.warning("Failed to pay mana cost (fallback): Mana pool empty.")
-                      self._perform_rollback(game_state, controller, rollback_steps)
-                      return False
-                 # Store original pool for basic rollback
-                 original_pool = controller["mana_pool"].copy()
-                 controller["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
-                 rollback_steps.append(("restore_mana_pool", original_pool))
-                 mana_cost_paid = True
-             else: # No mana cost symbols
-                 mana_cost_paid = True
+            if not mana_cost_paid:
+                logging.error(f"Rolling back costs due to failed mana payment for '{self.cost}'.")
+                self._perform_rollback(game_state, controller, rollback_steps)
+                return False
 
-        # If all costs (including mana) were paid successfully
+        # --- Mark Exhaust AFTER other costs paid ---
+        if self.is_exhaust:
+             activation_idx = getattr(self, 'activation_index', -1)
+             if activation_idx == -1: # Should have index if is_exhaust was set
+                  logging.error("CRITICAL: Exhaust activation_index lost during cost payment.")
+                  self._perform_rollback(game_state, controller, rollback_steps)
+                  return False
+             if not game_state.mark_exhaust_used(self.card_id, activation_idx):
+                  logging.error(f"Failed to mark Exhaust used for {self.card_id} index {activation_idx} AFTER paying costs.")
+                  self._perform_rollback(game_state, controller, rollback_steps)
+                  return False
+             rollback_steps.append(("clear_exhaust", self.card_id, activation_idx))
+             logging.debug(f"Marked Exhaust as used for {self.card_id} ability {activation_idx}.")
+
+        # --- Final Check ---
         if all_costs_paid and mana_cost_paid:
-             logging.debug(f"Successfully paid cost '{self.cost}' for {game_state._safe_get_card(self.card_id).name}")
+             card_name = getattr(game_state._safe_get_card(self.card_id), 'name', self.card_id)
+             logging.debug(f"Successfully paid cost '{self.effect_text}' for {card_name}")
              return True
-        else: # Should have been caught earlier, but safety check
-             logging.error("Cost payment reached end state incorrectly.")
+        else:
+             # This path shouldn't be reached due to early returns on failure
+             logging.error(f"Cost payment check reached end incorrectly for '{self.cost}'. Rolling back.")
              self._perform_rollback(game_state, controller, rollback_steps)
              return False
          
