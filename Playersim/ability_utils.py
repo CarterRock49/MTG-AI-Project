@@ -284,13 +284,28 @@ class EffectFactory:
             SearchLibraryEffect, AddCountersEffect, ReturnToHandEffect,
             ScryEffect, SurveilEffect, LifeDrainEffect, CopySpellEffect, TransformEffect, FightEffect)
 
+        # --- Offspring ETB Trigger Detection (before standard token creation) ---
+        offspring_trigger_pattern = re.compile(
+            r"when this (?:creature|permanent|card|enters).*offspring cost was paid.*create a 1/1 token copy",
+            re.IGNORECASE
+        )
+
         for clause in processed_clauses:
-            # Process individual clauses case-insensitively
-            # Remove reminder text AFTER potential keyword matching? No, remove before general parsing.
-            # Ensure removal handles nested parentheses correctly if needed.
             clause_clean = re.sub(r'\s*\([^()]*?\)\s*', ' ', clause).strip() # Basic reminder text removal
             clause_lower = clause_clean.lower()
             created_effect = None
+
+            # --- Offspring ETB special handling ---
+            if offspring_trigger_pattern.search(clause_lower):
+                # Create a generic AbilityEffect but mark it as an offspring token effect
+                effect = AbilityEffect(clause_clean)
+                effect._is_offspring_token_effect = True
+                # Attach a condition function to check context for offspring_cost_paid
+                def offspring_condition(trigger_context):
+                    return trigger_context.get('offspring_cost_paid', False)
+                effect.offspring_condition = offspring_condition
+                effects.append(effect)
+                continue
 
             # Draw Card
             match = re.search(r"(?:target player|you)?\s*\b(draw(?:s)?)\b\s+(a|an|one|two|three|four|five|six|seven|eight|nine|ten|x|\d+)\s+cards?", clause_lower)

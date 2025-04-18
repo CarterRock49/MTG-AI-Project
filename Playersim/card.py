@@ -24,7 +24,7 @@ class Card:
         'first strike', 'double strike', 'vigilance', 'flash', 'haste',
         'menace', 'reach', 'defender', 'indestructible', 'protection',
         'ward', 'prowess', 'scry', 'cascade', 'unblockable', 'shroud',
-        'regenerate', 'persist', 'undying', 'riot', 'enrage', 'afflict', 
+        'regenerate', 'persist', 'undying', 'riot', 'enrage', 'afflict',
         'exalted', 'mentor', 'convoke', 'absorb', 'affinity', 'afterlife',
         'amplify', 'annihilator', 'ascend', 'assist', 'aura swap',
         'awaken', 'battle cry', 'bestow', 'blitz', 'bloodthirst', 'boast',
@@ -48,6 +48,9 @@ class Card:
         'storm', 'sunburst', 'surge', 'suspend', 'totem armor', 'training',
         'transfigure', 'transmute', 'tribute', 'undaunted', 'unearth',
         'unleash', 'vanishing', 'wither', 'cumulative upkeep', 'banding',
+        # Added keywords below
+        'offspring', 'impending',
+        # Existing keywords continued
         'aftermath', 'spree'
     ]
 

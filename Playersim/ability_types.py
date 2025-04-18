@@ -161,15 +161,16 @@ class ActivatedAbility(Ability):
         # Determine cost and effect using parsing if not explicitly provided
         parsed_cost, parsed_effect = None, None
         if cost is None and effect is None and self.effect_text:
-            parsed_cost, parsed_effect = self._parse_cost_effect(self.effect_text) # Parse *before* using is_exhaust flag directly
+            # *** CHANGED: Use the updated, stricter parser ***
+            parsed_cost, parsed_effect = self._parse_cost_effect_strict(self.effect_text) # Use stricter parser
 
         # Prioritize provided args, then parsed values, then empty string
         self.cost = str(cost) if cost is not None else (str(parsed_cost) if parsed_cost is not None else "")
         self.effect = str(effect) if effect is not None else (str(parsed_effect) if parsed_effect is not None else "")
 
         # --- Exhaust Handling: If cost starts with 'Exhaust', set flag and strip ---
-        # This assumes Exhaust marker is correctly included in the *parsed* cost by _parse_cost_effect
         self.is_exhaust = is_exhaust # Initialize with passed flag
+        # --- CHANGED: Check cost *after* assigning it ---
         if self.cost.lower().startswith("exhaust"):
             self.is_exhaust = True
             # Remove "Exhaust" and separator (comma or dash)
@@ -177,88 +178,89 @@ class ActivatedAbility(Ability):
 
         self.activation_index = activation_index
 
-        # --- Validation Refinement ---
-        # Validate cost AFTER potential Exhaust stripping
-        # Cost usually required, unless implicit (handled by caller/handler) or keyword ability parsed this way
-        implicit_cost_keywords = ["morph", "manifest", "foretell", "channel", "transmute", "madness", "flashback", "cycling", "unearth", "retrace", "ninjutsu"] # Add more known implicit costs
-        if not self.cost:
-             if not any(kw in (self.effect_text or "").lower() for kw in implicit_cost_keywords):
-                 # Only log if cost is missing AND it doesn't seem like an implicit keyword ability
-                 # Check if original text HAD a separator - suggests parsing *should* have worked
-                 if parsed_cost is None and (":" in self.effect_text or "—" in self.effect_text or "\u2014" in self.effect_text):
-                     logging.debug(f"ActivatedAbility created for '{self.effect_text}', but cost parsing failed or yielded empty despite separator. Ability may be invalid.")
-                 # Else: Silently allow empty cost, maybe it's intentional or handled differently
+        # --- Validation: Only raise error if parsing failed *despite* finding separator ---
+        # Implicit cost keywords are handled by _parse_cost_effect_strict
+        if not self.cost and not self.effect:
+             # If parsing failed completely (returned None, None) and the original text
+             # *looked* like it should have been activated (had ':'), raise the error.
+             if parsed_cost is None and parsed_effect is None and (":" in self.effect_text or "—" in self.effect_text or "\u2014" in self.effect_text or "-" in self.effect_text):
+                  # *** This error indicates a potential parsing issue for seemingly valid activated text ***
+                  # Keep this as an error because it points to a problem needing fixing.
+                  raise ValueError(f"Failed to parse cost/effect from text with separator: '{self.effect_text}'")
+             # Otherwise, it likely wasn't an activated ability text, which is fine (no error/warning needed here).
 
-        # Update effect_text if needed based on final cost/effect/exhaust
-        prefix = "Exhaust, " if self.is_exhaust else ""
-        reconstructed_text = f"{prefix}{self.cost}: {self.effect}".strip(': ')
-        if reconstructed_text != self.effect_text and self.cost and self.effect: # Only update if parts found and different
-            self.effect_text = reconstructed_text
-
+        # Reconstruct effect_text only if parsing was successful and changed something
+        if parsed_cost is not None or parsed_effect is not None:
+             prefix = "Exhaust, " if self.is_exhaust else ""
+             reconstructed_text = f"{prefix}{self.cost}: {self.effect}".strip(': ')
+             if reconstructed_text != self.effect_text:
+                 self.effect_text = reconstructed_text
 
     @staticmethod
-    def _parse_cost_effect(text):
+    def _parse_cost_effect_strict(text):
         """
-        Revised parser for Activated Abilities. Prioritizes explicit separators.
-        Less strict cost validation after separator found. Includes Exhaust in cost part.
+        Strict parser for Activated Abilities. Requires a valid cost indicator
+        followed by a separator (:, —, -, –) OR a known keyword-cost pattern.
+        Includes warning if separator found but cost pattern not matched.
+        Returns (cost_str, effect_str) or (None, None).
         """
         if not text: return None, None
         text = text.strip()
 
-        # --- 1. Prioritize Explicit Separators (Colon or Dash) ---
-        # Regex includes colon, en dash, em dash, unicode em dash, surrounded by optional spaces
+        # 1. Check for Explicit Separators (Colon or Dash variants)
         separator_match = re.match(r'^\s*(.+?)\s*[:—\u2014-]\s*(.+)\s*$', text, re.DOTALL)
 
         if separator_match:
             cost_part = separator_match.group(1).strip()
-            effect_part = separator_match.group(2).strip().rstrip('.')
+            effect_part = separator_match.group(2).strip().rstrip('.') # Clean effect
 
-            # --- 2. Flexible Cost Validation ---
-            # Does the cost part contain ANY plausible cost indicator?
-            # (Mana symbols {}, tap {T}/Tap, cost keywords, sacrifice/discard/pay life/remove counter, or Exhaust)
-            cost_indicators_pattern = r'\{[WUBRGCXSPMTQ0-9\/.]+\}|\(\{T\}\)|\b(Tap|Sacrifice|Discard|Pay\s+\d+\s+life|Remove\s+.*?\s+counter|Exhaust|Cycling|Equip|Flashback|Level\s+up)\b|^\s*\d+\s*$'
-            # --- Adjusted: check raw cost_part, don't use cost_lower ---
+            # Validate cost part: Does it contain known cost elements?
+            cost_indicators_pattern = r'\{[WUBRGCXSPMTQ0-9\/\.]+\}|\(\{T\}\)|\b(Tap|Sacrifice|Discard|Pay\s+\d+\s+life|Remove\s+.*?\s+counter|Exhaust|Cycling|Equip|Flashback|Level\s+up)\b|^\s*\d+\s*$'
             if re.search(cost_indicators_pattern, cost_part, re.IGNORECASE):
-                logging.debug(f"Parsed Separator Cost/Effect: Cost='{cost_part}', Effect='{effect_part}'")
+                logging.debug(f"_parse_cost_effect_strict: Parsed Separator Cost='{cost_part}', Effect='{effect_part}'")
                 return cost_part, effect_part
             else:
-                # Found a separator, but the part before it doesn't look like a typical cost.
-                # Could be part of the effect (e.g., "Target creature gets +X/+0 until end of turn, where X is...")
-                # Or could be a less common cost type not captured by the regex.
-                # Treat as likely effect text to be safer than misinterpreting cost.
-                logging.debug(f"Found separator in '{text}', but left side '{cost_part}' not recognized as standard cost. Treating whole as effect.")
-                # Fall through to check keyword-only patterns
+                # *** RE-ADDED WARNING ***
+                # Separator found, but no standard cost before it. Log as warning.
+                logging.warning(f"_parse_cost_effect_strict: Found separator in '{text}', but left side '{cost_part}' not recognized as standard cost. Treating as non-activated.")
+                return None, None # Return None, None as it's not a clearly parsed activated ability
 
-        # --- 3. Check for Keyword-Only structures where Effect is Implicit ---
-        # Example: "Cycling {2}" or "Equip {1}" or "Flashback {B}" without explicit effect text following
+        # 2. Check for Keyword-Only Structures (No explicit separator)
+        # (Keep existing keyword pattern logic)
         keyword_cost_patterns = {
-            # Regex matches Keyword + Cost pattern at the START and consumes the WHOLE string (or ends near punctuation)
-            r"^\s*(Cycling|Equip|Fortify|Reconfigure|Unearth|Flashback|Bestow|Dash|Buyback|Madness|Transmute|Channel|Kicker|Entwine|Overload|Splice|Surge|Embalm|Eternalize|Jump-start|Escape|Awaken|Level up|Retrace|Ninjutsu)\s*(\{.+?\}|\d+|pay\s+\d+\s+life|discard\s+\S+\s+card|sacrifice\s+\S+\s+\S+|exile\s+\S+\s+\S+)\s*[.]?$": "keyword_with_explicit_cost",
-             r"^(Morph)\s*(?:\{(\d+|[Xx])\})?\s*[.]?$": "keyword_with_optional_cost", # Morph cost optional here
-             r"^(Outlast|Monstrosity|Adapt|Reinforce|Scavenge|Crew)\s*(\{\d+\}|\d+)\s*[.]?$": "keyword_with_numeric_value" # Value is intrinsic part
+            r"^\s*(Cycling|Equip|Fortify|Reconfigure|Unearth|Flashback|Bestow|Dash|Buyback|Madness|Transmute|Channel|Kicker|Entwine|Overload|Splice|Surge|Embalm|Eternalize|Jump-start|Escape|Awaken|Level up|Retrace|Ninjutsu)\s*(\{.*?\})": "kw_explicit_cost",
+            r"^\s*(Cycling|Equip|Fortify|Reconfigure|Unearth|Flashback|Bestow|Dash|Buyback|Madness|Transmute|Channel|Kicker|Entwine|Overload|Splice|Surge|Embalm|Eternalize|Jump-start|Escape|Awaken|Level up|Retrace|Ninjutsu)\s*(\d+)": "kw_digit_cost", # Handle plain number cost
+             r"^\s*(Outlast|Monstrosity|Adapt|Reinforce|Scavenge|Crew)\s*(\{?\d+\}?)": "kw_numeric_value", # {N} or N
+             r"^\s*(Morph)\s*(\{.*?\})?": "kw_optional_cost", # Optional cost for Morph
+             r"^\s*(Boast)\b": "kw_no_cost_parsed",
         }
         for pattern, pattern_type in keyword_cost_patterns.items():
-            match = re.match(pattern, text, re.IGNORECASE | re.DOTALL)
+            match = re.match(pattern + r'\s*\.?$', text, re.IGNORECASE | re.DOTALL) # Ensure pattern consumes whole string (approx)
             if match:
-                 keyword = match.group(1)
-                 # Reconstruct a plausible cost string from the matched group
-                 cost_str = match.group(2).strip() if len(match.groups()) > 1 and match.group(2) else "{0}" # Default {0} if no cost group
-                 if cost_str.isdigit(): cost_str = f"{{{cost_str}}}" # Normalize
+                keyword = match.group(1)
+                cost_str = "{0}"
+                if pattern_type == "kw_explicit_cost" and len(match.groups()) > 1:
+                     cost_str = match.group(2)
+                elif pattern_type == "kw_digit_cost" and len(match.groups()) > 1:
+                     cost_str = f"{{{match.group(2)}}}"
+                elif pattern_type == "kw_numeric_value" and len(match.groups()) > 1:
+                     cost_str = "{0}"
+                elif pattern_type == "kw_optional_cost" and len(match.groups()) > 1 and match.group(2):
+                     cost_str = match.group(2)
+                elif pattern_type == "kw_no_cost_parsed":
+                    cost_str = "{0}"
 
-                 # Generate an implicit effect description
-                 effect_map = {
-                     "cycling": "Draw a card.", "equip": "Attach to target creature.",
-                     "flashback": "Cast from graveyard, then exile.", "level up": "Put a level counter on this.",
-                     # Add more standard effects...
-                 }
-                 effect_part = effect_map.get(keyword.lower(), f"Activate {keyword} ability.")
-                 logging.debug(f"Parsed Implicit Keyword Effect: Keyword='{keyword}', Cost='{cost_str}', ImplicitEffect='{effect_part}'")
-                 # Return the parsed COST and the generated implicit EFFECT
-                 return cost_str, effect_part
+                effect_map = {
+                    "cycling": "Draw a card.", "equip": "Attach to target creature.",
+                    "flashback": "Cast from graveyard, then exile.", "level up": "Put a level counter on this.",
+                    "morph": "Turn this face up.", "boast": "Activate boast effect.",
+                }
+                effect_part = effect_map.get(keyword.lower(), f"Activate {keyword} ability.")
+                logging.debug(f"_parse_cost_effect_strict: Parsed Keyword Activation: Keyword='{keyword}', Cost='{cost_str}', Effect='{effect_part}'")
+                return cost_str, effect_part
 
-        # --- 4. Fallback ---
-        logging.debug(f"Could not parse activated ability structure from '{text}'. Assuming static/triggered or malformed.")
-        return None, text # Return None for cost, full text as effect
+        # 3. No Standard Pattern Found
+        return None, None
 
     def resolve(self, game_state, controller, targets=None):
         """Resolve this activated ability using the default implementation."""
@@ -1663,18 +1665,10 @@ class ManaAbility(ActivatedAbility):
 class AbilityEffect:
     """Base class for ability effects with improved targeting integration."""
     def __init__(self, effect_text, condition=None):
-        """
-        Initialize the ability effect.
-
-        Args:
-            effect_text: Description of the effect
-            condition: Optional condition for the effect (default: None)
-        """
         self.effect_text = effect_text
         self.condition = condition
-        # Check if "target" appears outside of quotes or parenthetical remarks for more accuracy
-        cleaned_text = re.sub(r'\([^()]*?\)', '', effect_text.lower()) # Remove parenthetical text
-        cleaned_text = re.sub(r'"[^"]*?"', '', cleaned_text) # Remove quoted text
+        cleaned_text = re.sub(r'\([^()]*?\)', '', effect_text.lower())
+        cleaned_text = re.sub(r'"[^"]*?"', '', cleaned_text)
         self.requires_target = "target" in cleaned_text
 
     def apply(self, game_state, source_id, controller, targets=None):
@@ -1690,6 +1684,23 @@ class AbilityEffect:
         Returns:
             bool: Whether the effect was successfully applied
         """
+        if getattr(self, '_is_offspring_token_effect', False):
+            # Assume `source_id` is the creature that entered the battlefield.
+            source_creature = game_state._safe_get_card(source_id)
+            if source_creature:
+                 # The TriggeredAbility should have already checked the 'offspring_cost_paid' context.
+                 # Here, we just perform the effect.
+                 logging.debug(f"Applying Offspring effect: creating 1/1 copy of {source_creature.name}")
+                 # Dynamically create the specialized copy effect. Pass the original creature card.
+                 copy_effect = CreateTokenEffect(power=1, toughness=1, count=1,
+                                                 is_copy=True, source_card_for_copy=source_creature,
+                                                 controller_gets=True)
+                 # Apply the copy effect.
+                 return copy_effect._apply_effect(game_state, source_id, controller, targets)
+            else:
+                 logging.error(f"Offspring effect cannot find source creature {source_id}")
+                 return False
+             
         effective_targets = targets if targets is not None else {} # Ensure targets is a dict
 
         # Resolve targets if required and not provided/empty
@@ -1762,20 +1773,11 @@ class AbilityEffect:
 
 
     def _evaluate_condition(self, game_state, source_id, controller):
-        """
-        Evaluate if condition is met. (Implementation remains similar)
-        """
-        if not self.condition:
-            return True
-
-        # Implement sophisticated condition parsing and evaluation here if needed
-        # Example placeholder:
-        condition_text = str(self.condition).lower() # Convert condition (potentially a function) to string for basic check
-        if "if you control a creature" in condition_text:
-            return any('creature' in getattr(game_state._safe_get_card(cid),'card_types',[]) for cid in controller["battlefield"])
-
-        # Default to true for unrecognized conditions or non-string conditions
-        return True
+         if not self.condition: return True
+         condition_text = str(self.condition).lower()
+         if "if you control a creature" in condition_text:
+             return any('creature' in getattr(game_state._safe_get_card(cid),'card_types',[]) for cid in controller["battlefield"])
+         return True
 
 
 
@@ -2099,106 +2101,156 @@ class AddCountersEffect(AbilityEffect):
 
         return success_count > 0
 
-# BuffEffect requires no changes, it registers with LayerSystem
 
 class CreateTokenEffect(AbilityEffect):
-    """Effect that creates token creatures."""
-    def __init__(self, power, toughness, creature_type="Creature", count=1, keywords=None, colors=None, is_legendary=False, controller_gets=True, condition=None):
-        token_desc = f"{count} {power}/{toughness} {','.join(colors) if colors else ''} {creature_type} token{' with ' + ', '.join(keywords) if keywords else ''}"
+    """Effect that creates token creatures. Can handle copies with modified P/T."""
+    # ADDED: is_copy flag and source_card_for_copy attribute
+    def __init__(self, power, toughness, creature_type="Creature", count=1, keywords=None, colors=None, is_legendary=False, controller_gets=True, condition=None, is_copy=False, source_card_for_copy=None):
+        self.is_copy = is_copy
+        self.source_card_for_copy = source_card_for_copy # Should be the Card object
+
+        if is_copy and source_card_for_copy and isinstance(source_card_for_copy, Card):
+             # Use getattr for safer access to name
+             token_desc = f"{count} 1/1 token copy of {getattr(source_card_for_copy, 'name', 'original creature')}"
+        elif is_copy: # source_card_for_copy is missing or invalid
+            token_desc = f"{count} 1/1 token copy of original" # Fallback description
+            logging.warning("CreateTokenEffect init: is_copy=True but source_card_for_copy is missing or invalid.")
+        else:
+            # Ensure colors and keywords are lists for join
+            colors_str = ','.join(colors) if colors else ''
+            keywords_str = ' with ' + ', '.join(keywords) if keywords else ''
+            token_desc = f"{count} {power}/{toughness} {colors_str} {creature_type} token{keywords_str}"
+
         super().__init__(f"Create {token_desc}", condition)
-        self.power = power
-        self.toughness = toughness
-        self.creature_type = creature_type
+        # Store power/toughness relevant for *this* effect (e.g., 1/1 for Offspring)
+        self.power = 1 if self.is_copy else power
+        self.toughness = 1 if self.is_copy else toughness
+        self.creature_type = creature_type # Base type if not copy
         self.count = count
-        self.keywords = keywords or []
-        self.colors = colors # List of 'white', 'blue' etc. or None
-        self.is_legendary = is_legendary
+        self.keywords = keywords or [] # Base keywords if not copy
+        self.colors = colors # Base colors if not copy
+        self.is_legendary = is_legendary # Base legendary status if not copy
         self.controller_gets = controller_gets
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         target_player = controller
-        if not self.controller_gets: # e.g., "opponent creates..."
+        if not self.controller_gets:
             target_player = game_state.p2 if controller == game_state.p1 else game_state.p1
 
-        # Convert color names to the 5-dim list format
-        color_list = [0] * 5
-        if self.colors:
-            color_map = {'white': 0, 'blue': 1, 'black': 2, 'red': 3, 'green': 4}
-            for color_name in self.colors:
-                if color_name.lower() in color_map:
-                     color_list[color_map[color_name.lower()]] = 1
-
-        # Handle "artifact creature" type line properly
-        card_types_list = ["token"] # Always a token
-        subtypes_list = []
-        base_type = "Creature"
-        if "artifact" in self.creature_type.lower(): card_types_list.append("artifact")
-        if "creature" in self.creature_type.lower(): card_types_list.append("creature")
-        # Extract base type and subtypes
-        parts = self.creature_type.split()
-        # Assume the last part is the main creature type, preceding are artifact/etc. or subtypes?
-        # Heuristic: Check against known creature types
-        main_type_found = False
-        for part in reversed(parts):
-             if part.capitalize() in Card.SUBTYPE_VOCAB and not main_type_found:
-                  # Assuming the *last* subtype listed is the main creature type for naming
-                  # unless it's 'artifact' or similar card type word.
-                  if part.lower() not in ["artifact", "enchantment", "creature"]: # Needs more robust check
-                      base_type = part.capitalize()
-                      subtypes_list.append(base_type)
-                      main_type_found = True
-             elif part.capitalize() in Card.SUBTYPE_VOCAB:
-                  subtypes_list.append(part.capitalize())
-
-        if not main_type_found and parts: # If only "artifact" or similar given, use name
-            base_type = parts[-1].capitalize()
-
-        # Build type line
-        type_line = "Token "
-        if self.is_legendary: type_line += "Legendary "
-        if "artifact" in card_types_list: type_line += "Artifact "
-        if "creature" in card_types_list: type_line += "Creature "
-        if "enchantment" in card_types_list: type_line += "Enchantment "
-        type_line += f"— {' '.join(sorted(list(set(subtypes_list))))}" # Use sorted unique subtypes
-
-        token_data = {
-            "name": f"{base_type} Token",
-            "type_line": type_line.strip(),
-            "card_types": list(set(card_types_list)),
-            "subtypes": sorted(list(set(subtypes_list))),
-            "supertypes": ["legendary", "token"] if self.is_legendary else ["token"],
-            "power": self.power,
-            "toughness": self.toughness,
-            "oracle_text": " ".join(self.keywords) if self.keywords else "",
-            "keywords": [0] * len(Card.ALL_KEYWORDS),
-            "colors": color_list,
-            "is_token": True,
-        }
-
-        # Map keywords
-        kw_indices = {kw.lower(): i for i, kw in enumerate(Card.ALL_KEYWORDS)}
-        for kw in self.keywords:
-             if kw.lower() in kw_indices:
-                  token_data["keywords"][kw_indices[kw.lower()]] = 1
-
         created_token_ids = []
-        for _ in range(self.count):
-             if hasattr(game_state, 'create_token'):
-                 token_id = game_state.create_token(target_player, token_data.copy())
-                 if token_id: created_token_ids.append(token_id)
-             else: # Fallback
-                 # Simplified fallback, doesn't use full game_state methods
-                 token_id = f"TOKEN_{random.randint(1000,9999)}_{token_data['name']}"
-                 new_token = Card(token_data)
-                 game_state.card_db[token_id] = new_token
-                 target_player.setdefault("tokens",[]).append(token_id)
-                 target_player["battlefield"].append(token_id)
-                 created_token_ids.append(token_id)
+
+        # --- Handle Copy Case (Offspring) ---
+        if self.is_copy and self.source_card_for_copy and isinstance(self.source_card_for_copy, Card):
+            original_card = self.source_card_for_copy
+            logging.debug(f"Applying CreateTokenCopyEffect for {original_card.name}")
+            token_data = None # Initialize token_data
+            try:
+                import copy # Import copy locally if not already imported
+                # Get copyable characteristics based on Rule 707.2
+                # Make sure to use getattr for safety and handle potential None values
+                token_data = {
+                    "name": getattr(original_card, 'name', 'Unknown'),
+                    "mana_cost": getattr(original_card, 'mana_cost', ""),
+                    "color_identity": copy.deepcopy(getattr(original_card, 'colors', [0]*5)), # Use colors for copy identity
+                    "card_types": copy.deepcopy(getattr(original_card, 'card_types', [])),
+                    "subtypes": copy.deepcopy(getattr(original_card, 'subtypes', [])),
+                    "supertypes": copy.deepcopy(getattr(original_card, 'supertypes', [])),
+                    "oracle_text": getattr(original_card, 'oracle_text', ''),
+                    # *** OFFSPRING Specific: Set P/T to 1/1 ***
+                    "power": 1,
+                    "toughness": 1,
+                    # Keywords: Copy the *final* keyword state from the original (post-layers?)
+                    # Simpler: copy the base keyword array/list from original Card object
+                    "keywords": copy.deepcopy(getattr(original_card, 'keywords', [])),
+                    "is_token": True,
+                }
+                # Rebuild typeline (assuming helper exists and handles supertypes/types/subtypes)
+                token_data["type_line"] = game_state._build_type_line(token_data) if hasattr(game_state, '_build_type_line') else "Token Creature" # Fallback typeline
+                # Ensure copied 'keywords' has the correct dimension
+                if len(token_data['keywords']) != len(Card.ALL_KEYWORDS):
+                     token_data['keywords'] = [0] * len(Card.ALL_KEYWORDS) # Reset if wrong size
+
+
+            except Exception as e:
+                logging.error(f"Error preparing token copy data for {original_card.name}: {e}", exc_info=True)
+                return False
+
+            # Create the specified number of token copies
+            for _ in range(self.count):
+                 if token_data: # Ensure data was prepared
+                     # Use GameState.create_token method
+                     token_id = game_state.create_token(target_player, token_data.copy()) # Pass copy
+                     if token_id: created_token_ids.append(token_id)
+
+        # --- Handle Normal Token Creation (Existing Logic) ---
+        else:
+            # Convert color names to the 5-dim list format
+            color_list = [0] * 5
+            if self.colors:
+                color_map = {'white': 0, 'blue': 1, 'black': 2, 'red': 3, 'green': 4}
+                for color_name in self.colors:
+                    if color_name.lower() in color_map:
+                         color_list[color_map[color_name.lower()]] = 1
+
+            # Handle "artifact creature" type line properly
+            card_types_list = ["token"] # Always a token
+            subtypes_list = []
+            base_type = "Creature" # Default unless specified
+            if isinstance(self.creature_type, str):
+                ct_lower = self.creature_type.lower()
+                if "artifact" in ct_lower: card_types_list.append("artifact")
+                if "creature" in ct_lower: card_types_list.append("creature")
+                if "enchantment" in ct_lower: card_types_list.append("enchantment")
+
+                parts = self.creature_type.split()
+                # Improved heuristic for base type and subtypes
+                # Check Card static lists for accuracy
+                non_type_parts = [p.capitalize() for p in parts if p.lower() not in Card.ALL_CARD_TYPES]
+                valid_subtypes = [s for s in non_type_parts if s in Card.SUBTYPE_VOCAB]
+                subtypes_list.extend(valid_subtypes)
+                if valid_subtypes: base_type = valid_subtypes[-1] # Guess base type from last subtype
+                elif parts: base_type = parts[-1].capitalize() # Fallback
+
+            # Build type line
+            type_line = "Token "
+            if self.is_legendary: type_line += "Legendary "
+            # Order types conventionally
+            type_order = {"artifact": 1, "enchantment": 2, "creature": 3}
+            sorted_types = sorted([ct for ct in card_types_list if ct != "token"], key=lambda t: type_order.get(t, 99))
+            type_line += " ".join(t.capitalize() for t in sorted_types) + " "
+            if subtypes_list:
+                 type_line += f"— {' '.join(sorted(list(set(subtypes_list))))}"
+
+            token_data = {
+                "name": f"{base_type} Token",
+                "type_line": type_line.strip(),
+                "card_types": list(set(card_types_list)),
+                "subtypes": sorted(list(set(subtypes_list))),
+                "supertypes": ["legendary", "token"] if self.is_legendary else ["token"],
+                "power": self.power,
+                "toughness": self.toughness,
+                "oracle_text": " ".join(self.keywords) if self.keywords else "",
+                "keywords": [0] * len(Card.ALL_KEYWORDS), # Initialize keyword array
+                "colors": color_list,
+                "is_token": True,
+            }
+            # Ensure correct keyword array size before mapping
+            if len(token_data['keywords']) != len(Card.ALL_KEYWORDS):
+                token_data['keywords'] = [0] * len(Card.ALL_KEYWORDS)
+            # Map keywords
+            kw_indices = {kw.lower(): i for i, kw in enumerate(Card.ALL_KEYWORDS)}
+            for kw in self.keywords:
+                kw_lower = kw.lower()
+                if kw_lower in kw_indices:
+                    token_data["keywords"][kw_indices[kw_lower]] = 1
+
+            for _ in range(self.count):
+                # Use GameState.create_token
+                token_id = game_state.create_token(target_player, token_data.copy()) # Pass copy
+                if token_id: created_token_ids.append(token_id)
 
 
         return len(created_token_ids) > 0
-
-
 
 class ReturnToHandEffect(AbilityEffect):
     """Effect that returns cards to their owner's hand."""

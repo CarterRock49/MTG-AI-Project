@@ -91,8 +91,11 @@ ACTION_MEANINGS = {
     # Param is index (0-9) into list of valid sacrifice targets. Handler uses param + sacrifice_context.
     **{284 + i: ("SACRIFICE_PERMANENT", i) for i in range(10)},
 
-    # Gaps filled with NO_OP (294-298) = 5 actions
-    **{i: ("NO_OP", None) for i in range(294, 299)},
+    # Gaps filled with NO_OP (296-298) = 3 actions
+    **{i: ("NO_OP", None) for i in range(296, 299)},
+    # --- Offspring/Impending custom actions (replace NO_OPs 294, 295 as examples) ---
+    294: ("CAST_FOR_IMPENDING", None),  # Player chooses to cast a card for its Impending cost
+    295: ("PAY_OFFSPRING_COST", None),  # When casting: pay Offspring cost for a card
 
     # Library/Card Movement (299-308) = 10 actions
     # Param=search type index 0-4
@@ -2204,6 +2207,49 @@ class ActionHandler:
     def _handle_no_op(self, param, **kwargs):
         logging.debug("Executed NO_OP action.")
         return 0.0
+
+    def _handle_pay_offspring_cost(self, param, context=None, **kwargs):
+        """Flag intent to pay Offspring cost for the pending spell."""
+        gs = self.game_state
+        pending_context = getattr(gs, 'pending_spell_context', None)
+        if not pending_context or 'card_id' not in pending_context:
+            logging.warning("PAY_OFFSPRING_COST called but no spell context is pending.")
+            return -0.1, False
+        card_id = pending_context['card_id']
+        card = gs._safe_get_card(card_id)
+        if not card or not hasattr(card, 'offspring_cost'):
+            logging.warning(f"No Offspring cost found for card {card_id}.")
+            return -0.05, False
+        player = gs._get_active_player()
+        cost_str = getattr(card, 'offspring_cost', None)
+        if not cost_str or not self._can_afford_cost_string(player, cost_str):
+            logging.warning(f"Cannot afford Offspring cost {cost_str} for {card.name if card else card_id}.")
+            return -0.05, False
+        pending_context['pay_offspring'] = True
+        pending_context['offspring_cost_to_pay'] = cost_str
+        logging.debug(f"Offspring cost context flag set for pending {card.name if card else card_id}")
+        return 0.01, True
+
+    def _handle_cast_for_impending(self, param, context=None, **kwargs):
+        """Initiate casting a card for its Impending cost."""
+        gs = self.game_state
+        player = gs._get_active_player()
+        # Find a card in hand with Impending cost that is affordable
+        for i, card_id in enumerate(player.get("hand", [])):
+            card = gs._safe_get_card(card_id)
+            if card and hasattr(card, 'impending_cost'):
+                cost_str = getattr(card, 'impending_cost', None)
+                if cost_str and self._can_afford_cost_string(player, cost_str):
+                    context = context or {}
+                    context['use_alt_cost'] = 'impending'
+                    context['hand_idx'] = i
+                    success = gs.cast_spell(card_id, player, context=context)
+                    if success:
+                        return 0.25, True
+                    else:
+                        return -0.1, False
+        logging.warning("No valid card with affordable Impending cost found in hand.")
+        return -0.1, False
 
     def _handle_end_turn(self, param, **kwargs):
         gs = self.game_state

@@ -32,7 +32,7 @@ class GameState:
                  "_phase_action_count", "priority_player", "stats_tracker",
                  "card_memory", 'original_p2_deck', 
                  # *** ADDED action_handler ***
-                 "action_handler",
+                 "action_handler", "impending_cards", "_offspring_cost_paid_context",
                  # Special card types
                  "adventure_cards", "saga_counters", "mdfc_cards", "battle_cards", 'battle_attack_targets',
                  "cards_castable_from_exile", "cast_as_back_face", 'planeswalker_attack_targets',
@@ -384,7 +384,8 @@ class GameState:
         self.clash_context = None
         self.dredge_pending = None
         self.spree_context = None
-
+        self.impending_cards = {}
+        self._offspring_cost_paid_context = {}
         # Surveil/Scry state
         self.surveil_in_progress = False
         self.cards_being_surveiled = []

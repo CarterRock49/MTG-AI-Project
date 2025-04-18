@@ -903,6 +903,7 @@ class AbilityHandler:
             Attempts to classify and parse a single text clause (paragraph/sentence)
             into one or more Activated, Triggered, or Static abilities.
             Skips clauses identified as likely Replacement Effects or clearly single-shot Instant/Sorcery effects.
+            Uses the stricter ActivatedAbility parser.
 
             Returns:
                 list: A list of created Ability objects (can be empty).
@@ -915,14 +916,7 @@ class AbilityHandler:
             text_lower_stripped = text_lower.rstrip('.').strip()
 
             # --- 0. Skip likely Replacement Effects / Non-ability clauses ---
-            # Pattern Explanation:
-            #   ^as\s+.*\s+enters\sthe\sbattlefield -> "As X enters..."
-            #   ^if.*?would.*?instead           -> "If X would Y, instead Z"
-            #   ^if\s+a\s+source\s+would\s+deal\s+damage\s+to.*?prevent -> Damage prevention
-            #   ^domain\b                     -> Domain keyword is rule-modifying, not a static/triggered/activated ability itself
-            #   ^as an additional cost        -> Part of casting cost, not separate ability
-            #   ^collect evidence \d+         -> Cost payment mechanic
-            #   ^[IVX]+ —                     -> Saga chapter indicator, handled by Saga logic
+            # (Keep existing replacement_or_non_ability_patterns check)
             replacement_or_non_ability_patterns = [
                 r"^as\s+.*\s+enters\sthe\sbattlefield",
                 r"^if.*?would.*?instead",
@@ -930,95 +924,93 @@ class AbilityHandler:
                 r"^\s*domain\b",
                 r"^\s*as an additional cost",
                 r"^\s*collect evidence\s+\d+",
-                r"^\s*[ivx]+\s*[—\u2014-]", # Match Roman numerals followed by dash/emdash/hyphen for Sagas
-                r"^\s*Split second\b", # Split second is rule modifying keyword handled elsewhere
+                r"^\s*[ivx]+\s*[—\u2014-]", # Sagas
+                r"^\s*Split second\b",
             ]
             if any(re.match(pattern, text_lower_stripped, re.IGNORECASE) for pattern in replacement_or_non_ability_patterns):
                 logging.debug(f"Skipping clause '{clause_text}' as likely Replacement/Non-functional Ability clause.")
-                return [] # Handled by specific systems or not an ability
+                return []
 
-            # --- 1. Check for Activated Ability ---
-            # Includes Exhaust prefix check and checks for cost format {X}, Tap, Pay N life, etc.
+            # --- Offspring ETB Trigger (before standard triggered) ---
+            offspring_etb_pattern = re.compile(
+                r"when this (?:creature|permanent|card|enters).*offspring cost was paid.*create a 1/1 token copy",
+                re.IGNORECASE
+            )
+            if offspring_etb_pattern.search(clause_text.lower()):
+                ability = TriggeredAbility(card_id=card_id, effect_text=clause_text.strip())
+                ability._is_offspring_etb_trigger = True
+                # Attach a condition function for offspring_cost_paid
+                def offspring_condition(trigger_context):
+                    return trigger_context.get('offspring_cost_paid', False)
+                ability.offspring_condition = offspring_condition
+                return [ability]
+
+            # --- 1. Try parsing as Activated Ability (Stricter Check) ---
             is_exhaust = False
-            text_to_parse_activated = clause_text # Use original case for constructor
-            # Allow for various dashes after Exhaust
-            exhaust_match = re.match(r"^\s*Exhaust\s*(?:—|-|–|\u2014)\s*(.+)", text_to_parse_activated, re.IGNORECASE | re.DOTALL)
+            text_to_parse_activated = clause_text
+            exhaust_match = re.match(r"^\s*Exhaust\s*[,—\u2014-]?\s*(.+)", text_to_parse_activated, re.IGNORECASE | re.DOTALL)
             if exhaust_match:
-                is_exhaust = True
-                text_to_parse_activated = exhaust_match.group(1).strip() # Use text after Exhaust
+                 is_exhaust = True
+                 text_to_parse_activated = exhaust_match.group(1).strip()
 
+            activated_parsed = False
             try:
-                # Use constructor's parsing logic
-                ability = ActivatedAbility(card_id=card_id, effect_text=text_to_parse_activated)
-                # Check if valid cost/effect was parsed (Cost exists, Effect exists)
-                # Need a stricter check: cost is not empty AND effect is not empty
-                if getattr(ability, 'cost', None) and getattr(ability, 'effect', None): # Check attributes exist and are not None/empty
-                    # Check Mana Ability subtype
-                    if "add {" in ability.effect.lower() or "add mana" in ability.effect.lower():
-                        mana_produced = self._parse_mana_produced(ability.effect)
-                        if mana_produced and any(mana_produced.values()):
-                            mana_ability = ManaAbility(card_id=card_id, cost=ability.cost, mana_produced=mana_produced, effect_text=ability.effect_text)
-                            if is_exhaust: setattr(mana_ability, 'is_exhaust', True) # Carry over exhaust flag
-                            setattr(mana_ability, 'activation_index', current_activated_index) # Store index
-                            abilities_found.append(mana_ability)
-                            logging.debug(f"Registered ManaAbility for {getattr(card, 'name', card_id)}: {mana_ability.effect_text}")
-                            return abilities_found # Assume whole clause is just this mana ability
-                    # Standard Activated
-                    if is_exhaust: setattr(ability, 'is_exhaust', True)
-                    setattr(ability, 'activation_index', current_activated_index) # Store index
-                    abilities_found.append(ability)
-                    logging.debug(f"Registered ActivatedAbility for {getattr(card, 'name', card_id)}: {ability.effect_text}{' (Exhaust)' if is_exhaust else ''}")
-                    return abilities_found # Assume whole clause is just this activated ability
-            except ValueError: pass # Didn't match activated pattern
-            except Exception as e: logging.error(f"Error parsing as Activated: '{clause_text}'. E: {e}")
+                # Use the stricter parser inside ActivatedAbility.__init__
+                ability = ActivatedAbility(card_id=card_id, effect_text=text_to_parse_activated, is_exhaust=is_exhaust)
+
+                # Check if valid cost AND effect were found
+                if getattr(ability, 'cost', None) and getattr(ability, 'effect', None):
+                    activated_parsed = True
+                    if isinstance(ability, ManaAbility):
+                        logging.debug(f"Registered ManaAbility for {getattr(card, 'name', card_id)}: {ability.effect_text}")
+                        setattr(ability, 'activation_index', current_activated_index)
+                        abilities_found.append(ability)
+                        return abilities_found
+                    else: # Standard Activated
+                        logging.debug(f"Registered ActivatedAbility for {getattr(card, 'name', card_id)}: {ability.effect_text}{' (Exhaust)' if is_exhaust else ''}")
+                        setattr(ability, 'activation_index', current_activated_index)
+                        abilities_found.append(ability)
+                        return abilities_found
+
+            except ValueError as e:
+                # This now specifically catches the error raised by __init__ if parsing failed on text with a separator
+                logging.warning(f"Clause '{text_to_parse_activated}' did not parse as Activated: {e}")
+                pass # Continue to check Triggered/Static
+            except Exception as e:
+                logging.error(f"Error attempting to parse as ActivatedAbility: {e}")
 
             # --- 2. Check for Triggered Ability ---
-            # Includes common ETB patterns, "Whenever X...", "At the beginning..."
-            # Check for "When/Whenever/At..."
+            # (Keep existing TriggeredAbility parsing logic)
             trigger_match = re.match(r'^(When|Whenever|At)\b', clause_text.strip(), re.IGNORECASE)
-            # Check ETB triggers more reliably (includes ETB with counters/roles etc.)
             etb_match = re.match(r"^(?:this\s+permanent\s+|this\s+creature\s+)?enters?\s+the\s+battlefield(?: with|,)".format(card.name if card else 'this permanent'), text_lower_stripped, re.IGNORECASE)
-            # Also check ability keywords that function as triggers (Valiant, Eerie, Prowess, Offspring etc.)
-            triggering_keywords_at_start = ['Valiant', 'Eerie', 'Prowess', 'Offspring'] # Add more as needed
+            triggering_keywords_at_start = ['Valiant', 'Eerie', 'Prowess', 'Offspring']
             keyword_trigger_match = re.match(rf"^({'|'.join(triggering_keywords_at_start)})\s*[—\u2014-]?\s*(?:When|Whenever)", clause_text.strip(), re.IGNORECASE)
 
             if trigger_match or etb_match or keyword_trigger_match:
                 try:
-                    # Use constructor's parsing logic
                     ability = TriggeredAbility(card_id=card_id, effect_text=clause_text.strip())
-                    # Check if valid trigger/effect was parsed
                     if ability.trigger_condition != "Unknown" and ability.trigger_condition != "placeholder":
-                        # No need to split multi-sentence effects here; EffectFactory handles that.
                         abilities_found.append(ability)
                         logging.debug(f"Registered TriggeredAbility for {getattr(card, 'name', card_id)}: {ability.effect_text}")
-                        return abilities_found # Assume one trigger per clause
-
-                except ValueError: pass # Didn't match triggered pattern
+                        return abilities_found
+                except ValueError: pass
                 except Exception as e: logging.error(f"Error parsing as Triggered: '{clause_text}'. E: {e}")
 
-            # --- 3. Check for Static Ability (Only for Permanent Types) ---
-            is_permanent_type = card and hasattr(card, 'card_types') and any(ct in Card.ALL_CARD_TYPES[:7] for ct in card.card_types) # Check creature, artifact, enchantment, land, planeswalker, battle, class
-
+            # --- 3. Check for Static Ability (Only if not Activated/Triggered and permanent type) ---
+            # (Keep existing StaticAbility classification logic, ensuring it runs only if not Activated/Triggered)
+            is_permanent_type = card and hasattr(card, 'card_types') and any(ct in Card.ALL_CARD_TYPES[:7] for ct in card.card_types)
             potential_static = is_permanent_type
-            if trigger_match or etb_match or keyword_trigger_match or exhaust_match: potential_static = False
-            if ':' in clause_text: potential_static = False # Exclude activated cost marker
+            if trigger_match or etb_match or keyword_trigger_match: potential_static = False
+            if activated_parsed: potential_static = False # <<< Added this check
 
-            # Basic action verb check - exclude common instant/sorcery/activated/triggered effects
-            # If text contains an action targeting something, it's likely not purely static.
-            # Allow grants like "have", "gains", "is", "are", "can't", "don't".
             action_verb_pattern = r'\b(destroy|exile|counter|draw|discard|create|search|tap|untap|target|deal|sacrifice|return.*?to|put.*?on|put.*?into|attach|manifest|look at)\b'
             grant_pattern = r'\b(have|has|gain|gains|is|are|can\'t|cannot|don\'t|get[s]?\s*[+-])\b'
 
             if potential_static and re.search(action_verb_pattern, text_lower):
-                if not re.search(grant_pattern, text_lower): # Only disallow if NO grant pattern is present
-                    potential_static = False
-                    # Log if it looks like an action but wasn't classified as triggered/activated
-                    # logging.debug(f"Skipping static classification for '{clause_text}' due to action verb without grant.")
+                if not re.search(grant_pattern, text_lower): potential_static = False
 
             if potential_static:
                 try:
-                    # Assume it's static if it's a permanent type and not clearly Triggered/Activated/Action/Replacement
-                    # This will catch keyword grants, rule modifications etc.
                     ability = StaticAbility(card_id=card_id, effect=clause_text.strip(), effect_text=clause_text.strip())
                     if ability.effect:
                         abilities_found.append(ability)
@@ -1026,19 +1018,16 @@ class AbilityHandler:
                         return abilities_found
                 except Exception as e: logging.error(f"Error parsing as Static: '{clause_text}'. E: {e}")
 
-            # If none matched, log warning IF it wasn't likely an instant/sorcery effect text
-            # Instant/Sorcery effects are handled by EffectFactory during resolution.
+            # --- Final Logging (If clause wasn't classified) ---
+            # (Keep existing logging logic for unclassified clauses on permanent types)
             is_inst_sorc = card and hasattr(card, 'card_types') and any(ct in ['instant', 'sorcery'] for ct in card.card_types)
-            is_adventure_effect = is_inst_sorc and hasattr(card, 'layout') and card.layout == 'adventure' # Rough check
-
+            is_adventure_effect = is_inst_sorc and hasattr(card, 'layout') and card.layout == 'adventure'
             if not abilities_found and not is_inst_sorc and not is_adventure_effect and clause_text.strip() and not clause_text.strip().startswith("("):
-                # Only log if it's a permanent type and doesn't contain obvious action verbs that would be on an instant/sorcery
                 should_log_warning = is_permanent_type
                 if is_permanent_type and re.search(action_verb_pattern, text_lower):
-                    # If it contains verbs like 'destroy target', it's more likely an ETB effect or similar, not static.
-                    pass # Avoid logging warning for these cases if they weren't caught as triggered
+                    pass # Avoid logging for simple action text on permanents if not Triggered/Activated
                 elif should_log_warning:
-                    # This might still be a complex static ability or rule modification not yet parsed.
+                    # *** Keeping this warning for unclassified text on permanents ***
                     logging.warning(f"Could not classify ability clause for {getattr(card, 'name', card_id)}: '{clause_text}'")
 
             return abilities_found
@@ -1354,6 +1343,29 @@ class AbilityHandler:
             setattr(ability, 'keyword_value', kw_value)
             # Append handled in final check
 
+        # --- Impending Keyword ---
+        if keyword_name.lower().startswith("impending"):
+            # Parse N from "Impending N"
+            match = re.match(r"impending\s+(\d+)", full_keyword_text or keyword_name, re.IGNORECASE)
+            n = int(match.group(1)) if match else 1
+            # Register two triggers: one for end step to remove a time counter, one for last counter removed
+            # 1. End step: remove a time counter
+            end_step_trigger = TriggeredAbility(
+                card_id, "at the beginning of your end step", f"remove a time counter from this permanent.",
+                effect_text=f"Impending {n} - Remove time counter at end step"
+            )
+            end_step_trigger._is_impending_remove_counter = True
+            end_step_trigger.impending_n = n
+            abilities_list.append(end_step_trigger)
+            # 2. Last counter removed: becomes a creature
+            last_counter_trigger = TriggeredAbility(
+                card_id, "when the last time counter is removed from this permanent", "it becomes a creature.",
+                effect_text=f"Impending {n} - Becomes creature when last counter removed"
+            )
+            last_counter_trigger._is_impending_final_trigger = True
+            last_counter_trigger.impending_n = n
+            abilities_list.append(last_counter_trigger)
+            return True
 
         # --- Final Append and Logging ---
         if ability:
@@ -1464,7 +1476,7 @@ class AbilityHandler:
                 # StaticAbility.apply() called later by _parse_and_register_abilities
                 return # Parsed as Static, EXITS function
             except Exception as e:
-                logging.error(f"Error parsing as StaticAbility: {e}")
+                logging.error(f"Error attempting to parse as StaticAbility: {e}")
 
         # If none of the above worked, log it unless it was handled keyword or a non-permanent
         if not is_permanent_type:
@@ -1903,6 +1915,28 @@ class AbilityHandler:
              else:
                  logging.error(f"Cannot resolve {ability_type} from {source_name}: Missing ability object and effect text in context.")
                   
+        # --- Offspring ETB ---
+        if ability and getattr(ability, '_is_offspring_etb_trigger', False):
+            # Only resolve if offspring_cost_paid in context
+            if hasattr(ability, 'offspring_condition') and not ability.offspring_condition(context):
+                logging.info("Skipping Offspring ETB trigger: cost not paid.")
+                return
+            # Use EffectFactory to create the offspring effect
+            effects = EffectFactory.create_effects(ability.effect_text)
+            for effect in effects:
+                if getattr(effect, '_is_offspring_token_effect', False):
+                    effect.apply(gs, card_id, controller, context.get('targets', {}))
+            return
+
+        # --- Impending Final Trigger ---
+        if ability and getattr(ability, '_is_impending_final_trigger', False):
+            # Remove the "not a creature" effect and recalculate layers
+            if hasattr(gs, 'layer_system'):
+                gs.layer_system.invalidate_cache()
+                gs.layer_system.apply_all_effects()
+            logging.info(f"Impending: {card_id} becomes a creature.")
+            return
+
     def _check_keyword_internal(self, card, keyword):
         """
         Centralized keyword check. PREFERS GameState's check_keyword method.
