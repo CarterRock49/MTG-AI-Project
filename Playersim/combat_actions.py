@@ -48,8 +48,6 @@ class CombatActionHandler:
 
         logging.debug("CombatActionHandler initialized")
 
-        
-    
     def _add_planeswalker_actions(self, player, valid_actions, set_valid_action):
         """Add actions for planeswalker loyalty abilities."""
         # Ensure planeswalker abilities can only be activated at sorcery speed
@@ -61,7 +59,7 @@ class CombatActionHandler:
             return # Can only activate at sorcery speed
 
         for idx, card_id in enumerate(player["battlefield"]):
-            if idx >= 5: break # ACTION_MEANINGS only maps up to index 4 for ATTACK_PLANESWALKER/DEFEND_BATTLE, reuse? Unclear limit.
+            if idx >= 5: break # ACTION_MEANINGS only maps up to index 4 for ATTACK_PLANESWALKER/DEFEND_BATTLE
             card = gs._safe_get_card(card_id)
             if card and hasattr(card, 'card_types') and 'planeswalker' in card.card_types:
                 already_activated = card_id in player.get("activated_this_turn", set())
@@ -81,17 +79,18 @@ class CombatActionHandler:
                         param_for_action = idx # Use the battlefield index as parameter
 
                         if cost > 0:
-                            # Need a way to map (PW index, ability_idx) or just (PW index) to actions 435-438.
-                            # Let's assume param=PW index (idx here) maps correctly for now.
-                            # Need context to differentiate which ability (+/-/0/ult) is chosen by the agent.
-                            set_valid_action(435, f"LOYALTY_ABILITY_PLUS for {card.name}{warning} (Index {idx})")
+                            # Corrected from 435 to 440 to match ACTION_MEANINGS
+                            set_valid_action(440, f"LOYALTY_ABILITY_PLUS for {card.name}{warning} (Index {idx})")
                         elif cost == 0:
-                            set_valid_action(436, f"LOYALTY_ABILITY_ZERO for {card.name}{warning} (Index {idx})")
+                            # Corrected from 436 to 441 to match ACTION_MEANINGS
+                            set_valid_action(441, f"LOYALTY_ABILITY_ZERO for {card.name}{warning} (Index {idx})")
                         else: # cost < 0
                             if is_ultimate:
-                                set_valid_action(438, f"ULTIMATE_ABILITY for {card.name}{warning} (Index {idx})")
+                                # Corrected from 438 to 443 to match ACTION_MEANINGS
+                                set_valid_action(443, f"ULTIMATE_ABILITY for {card.name}{warning} (Index {idx})")
                             else:
-                                set_valid_action(437, f"LOYALTY_ABILITY_MINUS for {card.name}{warning} (Index {idx})")
+                                # Corrected from 437 to 442 to match ACTION_MEANINGS
+                                set_valid_action(442, f"LOYALTY_ABILITY_MINUS for {card.name}{warning} (Index {idx})")
 
     def _add_equipment_aura_actions(self, player, valid_actions, set_valid_action):
         """Add actions for equipment and aura manipulation with improved cost handling."""
@@ -156,16 +155,13 @@ class CombatActionHandler:
                   for l_idx, land_id in land_indices:
                        set_valid_action(448, f"FORTIFY {fort_card.name} (Idx {fort_idx}) onto {gs._safe_get_card(land_id).name} (Idx {l_idx}) Cost: {fort_cost_str}")
 
-
-
     def _add_ninjutsu_actions(self, player, valid_actions, set_valid_action):
         """Add actions for using Ninjutsu."""
         gs = self.game_state
 
         # Check if in the correct phase (after blockers declared, before damage)
-        # Can be activated anytime an attacker you control is unblocked. Usually checked after blockers are declared.
-        if gs.phase != gs.PHASE_DECLARE_BLOCKERS: # Or maybe also during damage steps before resolution? Rules check. Let's assume just after blockers declared.
-             return
+        if gs.phase != gs.PHASE_DECLARE_BLOCKERS:
+            return
 
         # Find unblocked attackers controlled by the player
         unblocked_attackers = []
@@ -179,7 +175,7 @@ class CombatActionHandler:
                         for i, cid in enumerate(player["battlefield"]):
                             if cid == attacker_id: bf_idx = i; break
                         if bf_idx != -1:
-                             unblocked_attackers.append((bf_idx, attacker_id))
+                            unblocked_attackers.append((bf_idx, attacker_id))
 
         if not unblocked_attackers: return # No unblocked attackers to swap
 
@@ -187,12 +183,12 @@ class CombatActionHandler:
         for hand_idx, card_id in enumerate(player["hand"]):
             card = gs._safe_get_card(card_id)
             if card and hasattr(card, 'oracle_text') and "ninjutsu" in card.oracle_text.lower():
-                 ninjutsu_cost_str = self._get_ninjutsu_cost_str(card) # Get cost
-                 if ninjutsu_cost_str and self._can_afford_cost_string(player, ninjutsu_cost_str):
-                      # Allow Ninjutsu action for each possible swap
-                      for atk_bf_idx, attacker_id in unblocked_attackers:
-                          # Action 432 needs params (hand_idx, atk_bf_idx)
-                          set_valid_action(432, f"NINJUTSU with {card.name} (H:{hand_idx}) for {gs._safe_get_card(attacker_id).name} (B:{atk_bf_idx}) Cost:{ninjutsu_cost_str}")
+                ninjutsu_cost_str = self._get_ninjutsu_cost_str(card) # Get cost
+                if ninjutsu_cost_str and self._can_afford_cost_string(player, ninjutsu_cost_str):
+                    # Allow Ninjutsu action for each possible swap
+                    for atk_bf_idx, attacker_id in unblocked_attackers:
+                        # Corrected from 432 to 437 to match ACTION_MEANINGS for NINJUTSU
+                        set_valid_action(437, f"NINJUTSU with {card.name} (H:{hand_idx}) for {gs._safe_get_card(attacker_id).name} (B:{atk_bf_idx}) Cost:{ninjutsu_cost_str}")
         
     def _add_multiple_blocker_actions(self, player, valid_actions, set_valid_action):
         """Add actions for assigning multiple blockers."""
