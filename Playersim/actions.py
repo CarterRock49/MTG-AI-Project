@@ -5922,94 +5922,170 @@ class ActionHandler:
         """Add actions for specialized MTG mechanics, considering timing."""
         gs = self.game_state
         
-        # --- Investigate (Usually triggered, but could be activated) ---
-        # If an ability exists allowing Investigate activation:
-        # (Example - Needs actual card ability check)
-        # for idx, card_id in enumerate(player["battlefield"][:20]): ... check card for "Activate: Investigate" ...
-        # Needs ACTIVATE_ABILITY mapping instead if it's activated.
-        # Let's assume Investigate action (413) is only valid if context demands it (not auto-added here).
+        # --- Investigate (Action 418) ---
+        # Check for cards with "Investigate" as an activated ability
+        for i in range(min(len(player["battlefield"]), 20)):
+            card_id = player["battlefield"][i]
+            card = gs._safe_get_card(card_id)
+            if card and hasattr(card, 'oracle_text') and "investigate" in card.oracle_text.lower():
+                # Check if the card has an activated ability that causes investigation
+                investigate_pattern = re.search(r"\{[^\}]+\}:.*?investigate", getattr(card, 'oracle_text', '').lower())
+                if investigate_pattern and not card_id in player.get("tapped_permanents", set()):
+                    # Only add if we can pay the cost (simplified check)
+                    investigate_context = {'battlefield_idx': i}
+                    set_valid_action(418, f"INVESTIGATE with {card.name}", context=investigate_context)
 
-        # --- Foretell (Sorcery speed only) ---
+        # --- Foretell (Action 419 - Sorcery speed only) ---
         if is_sorcery_speed:
-            for i in range(min(len(player.get("hand",[])), 8)): # Assuming max 8 cards checkable for this
+            for i in range(min(len(player.get("hand",[])), 8)):
                 card_id = player["hand"][i]
                 card = gs._safe_get_card(card_id)
                 if card and hasattr(card, 'oracle_text') and "foretell" in card.oracle_text.lower():
-                     # Foretell cost is always {2} mana
-                     if self._can_afford_cost_string(player, "{2}"):
-                          context = {'hand_idx': i}
-                          set_valid_action(419, f"FORETELL {card.name}", context=context) # Action 419
+                    # Foretell cost is always {2} mana
+                    if self._can_afford_cost_string(player, "{2}"):
+                        context = {'hand_idx': i}
+                        set_valid_action(419, f"FORETELL {card.name}", context=context)
 
-        # --- Amass (Usually from spells/abilities, check if activatable) ---
-        # (Example - Needs actual card ability check)
-        # for idx, card_id in enumerate(player["battlefield"][:20]): ... check for "Activate: Amass N" ...
-        # Action 420 likely context-dependent, not added generically.
+        # --- Amass (Action 420) ---
+        # Check for cards with "Amass" as an activated ability
+        for i in range(min(len(player["battlefield"]), 20)):
+            card_id = player["battlefield"][i]
+            card = gs._safe_get_card(card_id)
+            if card and hasattr(card, 'oracle_text') and "amass" in card.oracle_text.lower():
+                amass_pattern = re.search(r"\{[^\}]+\}:.*?amass (\d+)", getattr(card, 'oracle_text', '').lower())
+                if amass_pattern and not card_id in player.get("tapped_permanents", set()):
+                    amount = int(amass_pattern.group(1)) if amass_pattern.group(1).isdigit() else 1
+                    amass_context = {'battlefield_idx': i, 'amount': amount}
+                    set_valid_action(420, f"AMASS {amount} with {card.name}", context=amass_context)
 
-        # --- Learn (Usually from spells/abilities resolution) ---
-        # Action 421 not typically a player choice, happens on effect resolution.
+        # --- Learn (Action 421) ---
+        # Adding this if there's a "Learn" trigger waiting for resolution
+        if hasattr(gs, 'learn_pending') and gs.learn_pending and gs.learn_pending.get('player') == player:
+            set_valid_action(421, "LEARN (Draw and discard or get Lesson)")
 
-        # --- Venture (Triggered or Activated) ---
-        # (Example - Needs actual card ability check)
-        # Action 422 usually context-dependent.
+        # --- Venture (Action 422) ---
+        # Check for cards with "Venture into the dungeon" as an activated ability
+        for i in range(min(len(player["battlefield"]), 20)):
+            card_id = player["battlefield"][i]
+            card = gs._safe_get_card(card_id)
+            if card and hasattr(card, 'oracle_text') and "venture into the dungeon" in card.oracle_text.lower():
+                venture_pattern = re.search(r"\{[^\}]+\}:.*?venture", getattr(card, 'oracle_text', '').lower())
+                if venture_pattern and not card_id in player.get("tapped_permanents", set()):
+                    venture_context = {'battlefield_idx': i}
+                    set_valid_action(422, f"VENTURE with {card.name}", context=venture_context)
 
-        # --- Exert (Activated as part of attack declaration) ---
-        # Logic tied to DECLARE_ATTACKERS step, not added generically here.
-        # Action 423 likely implicit in ATTACK action context.
+        # --- Exert (Action 423) ---
+        # Only available during combat for attackers
+        if gs.phase == gs.PHASE_DECLARE_ATTACKERS:
+            for i in range(min(len(player["battlefield"]), 20)):
+                card_id = player["battlefield"][i]
+                card = gs._safe_get_card(card_id)
+                if card and hasattr(card, 'oracle_text') and "exert" in card.oracle_text.lower():
+                    # Only for creatures that can attack and aren't already being exerted
+                    if 'creature' in getattr(card, 'card_types', []) and card_id not in player.get("tapped_permanents", set()):
+                        if not hasattr(gs, 'exerted_this_combat') or card_id not in gs.exerted_this_combat:
+                            exert_context = {'creature_idx': i}
+                            set_valid_action(423, f"EXERT {card.name}", context=exert_context)
 
-        # --- Explore (Triggered or Activated) ---
-        # Action 424 context-dependent.
+        # --- Explore (Action 424) ---
+        # Check for cards with "Explore" as an activated ability
+        for i in range(min(len(player["battlefield"]), 20)):
+            card_id = player["battlefield"][i]
+            card = gs._safe_get_card(card_id)
+            if card and hasattr(card, 'oracle_text') and "explore" in card.oracle_text.lower():
+                explore_pattern = re.search(r"\{[^\}]+\}:.*?explore", getattr(card, 'oracle_text', '').lower())
+                if explore_pattern and not card_id in player.get("tapped_permanents", set()):
+                    explore_context = {'creature_idx': i}
+                    set_valid_action(424, f"EXPLORE with {card.name}", context=explore_context)
 
-        # --- Adapt (Activated Ability - Sorcery speed) ---
+        # --- Adapt (Action 425 - Sorcery speed) ---
         if is_sorcery_speed:
             for i in range(min(len(player["battlefield"]), 20)):
                 card_id = player["battlefield"][i]
                 card = gs._safe_get_card(card_id)
-                if card and hasattr(card, 'oracle_text') and "adapt" in card.oracle_text.lower():
-                    match = re.search(r"adapt (\d+)", card.oracle_text.lower())
-                    adapt_n = int(match.group(1)) if match else 1
-                    # Need to find the corresponding *activated ability* on the card
-                    # Assume it's the first ability for simplicity here (requires AbilityHandler integration)
-                    ability_idx = 0 # Placeholder
-                    if hasattr(gs, 'ability_handler') and gs.ability_handler.can_activate_ability(card_id, ability_idx, player):
-                         # Action uses ACTIVATE_ABILITY mapping, not 425 directly
-                         action_idx = 100 + (i * 3) + ability_idx
-                         if action_idx < 160:
-                              set_valid_action(action_idx, f"ACTIVATE (Adapt) {card.name}")
+                if card and hasattr(card, 'oracle_text') and "adapt " in card.oracle_text.lower():
+                    match = re.search(r"\{[^\}]+\}:.*?adapt (\d+)", card.oracle_text.lower())
+                    adapt_n = int(match.group(1)) if match and match.group(1).isdigit() else 1
+                    
+                    # Check if creature already has +1/+1 counters (can't adapt if it does)
+                    has_counters = False
+                    if hasattr(card, 'counters') and getattr(card, 'counters', {}).get('+1/+1', 0) > 0:
+                        has_counters = True
+                    
+                    if not has_counters and self._can_afford_card(player, card):
+                        adapt_context = {'creature_idx': i, 'amount': adapt_n}
+                        set_valid_action(425, f"ADAPT {adapt_n} for {card.name}", context=adapt_context)
 
+        # --- Mutate (Action 426 - Sorcery speed) ---
+        if is_sorcery_speed:
+            # Check for mutate cards in hand
+            for hand_idx, card_id in enumerate(player["hand"][:8]):
+                card = gs._safe_get_card(card_id)
+                if card and hasattr(card, 'oracle_text') and "mutate " in card.oracle_text.lower():
+                    # Check for valid targets on the battlefield (non-Human creatures)
+                    has_valid_target = False
+                    for target_idx, target_id in enumerate(player["battlefield"]):
+                        target_card = gs._safe_get_card(target_id)
+                        if (target_card and 'creature' in getattr(target_card, 'card_types', []) and 
+                                'human' not in getattr(target_card, 'subtypes', [])):
+                            has_valid_target = True
+                            break
+                    
+                    if has_valid_target:
+                        # Extract mutate cost
+                        match = re.search(r"mutate (\{[^\}]+\})", card.oracle_text.lower())
+                        mutate_cost = match.group(1) if match else None
+                        
+                        if mutate_cost and self._can_afford_cost_string(player, mutate_cost):
+                            mutate_context = {'hand_idx': hand_idx}
+                            set_valid_action(426, f"MUTATE {card.name}", context=mutate_context)
 
-        # --- Mutate (Casting Alternate Cost - check castability) ---
-        # Handled via alternative casting checks. Action 426 not used directly?
+        # --- Cycling (Action 427 - Instant speed) ---
+        if not is_sorcery_speed:  # Only at instant speed
+            for i in range(min(len(player["hand"]), 8)):
+                card_id = player["hand"][i]
+                card = gs._safe_get_card(card_id)
+                if card and hasattr(card, 'oracle_text') and "cycling" in card.oracle_text.lower():
+                    cycling_match = re.search(r"cycling (\{[^\}]+\}|[0-9]+)", card.oracle_text.lower())
+                    if cycling_match:
+                        cost_str = cycling_match.group(1)
+                        if cost_str.isdigit(): 
+                            cost_str = f"{{{cost_str}}}"
+                        
+                        if self._can_afford_cost_string(player, cost_str):
+                            cycling_context = {'hand_idx': i}
+                            set_valid_action(427, f"CYCLING {card.name}", context=cycling_context)
 
+        # --- Goad (Action 428) ---
+        # Check for cards that can goad
+        for i in range(min(len(player["battlefield"]), 20)):
+            card_id = player["battlefield"][i]
+            card = gs._safe_get_card(card_id)
+            if card and hasattr(card, 'oracle_text') and "goad" in card.oracle_text.lower():
+                goad_pattern = re.search(r"\{[^\}]+\}:.*?goad", getattr(card, 'oracle_text', '').lower())
+                if goad_pattern and not card_id in player.get("tapped_permanents", set()):
+                    # Check if there are valid targets (opponent's creatures)
+                    opponent = gs.p2 if player == gs.p1 else gs.p1
+                    valid_targets = [
+                        idx for idx, creature_id in enumerate(opponent.get("battlefield", []))
+                        if 'creature' in getattr(gs._safe_get_card(creature_id), 'card_types', [])
+                    ]
+                    
+                    if valid_targets:
+                        goad_context = {'battlefield_idx': i}
+                        set_valid_action(428, f"GOAD with {card.name}", context=goad_context)
 
-        # --- Cycling (Activated Ability - Instant speed) ---
-        if not is_sorcery_speed:
-             # Cycling actions added by _add_cycling_actions based on hand cards.
-             # Action 427 not used directly here.
-             pass
-
-        # --- Goad (Usually from spells/abilities effect) ---
-        # Action 428 not a player choice, happens on resolution.
-
-        # --- Boast (Activated Ability - Only after attacking) ---
-        if not is_sorcery_speed and gs.phase >= gs.PHASE_DECLARE_ATTACKERS: # Combat or later
+        # --- Boast (Action 429 - Only after attacking) ---
+        if gs.phase >= gs.PHASE_DECLARE_ATTACKERS:  # After declare attackers phase
             for i in range(min(len(player["battlefield"]), 20)):
                 card_id = player["battlefield"][i]
-                if card_id in getattr(gs, 'attackers_this_turn', set()): # Check if it attacked
-                     card = gs._safe_get_card(card_id)
-                     if card and "boast —" in getattr(card, 'oracle_text','').lower():
-                          # Find the actual Boast ability index
-                           ability_idx_to_activate = -1
-                           if hasattr(gs, 'ability_handler'):
-                               abilities = gs.ability_handler.get_activated_abilities(card_id)
-                               for idx, ab in enumerate(abilities):
-                                   if "boast —" in getattr(ab, 'effect_text', '').lower():
-                                       ability_idx_to_activate = idx; break
-                           if ability_idx_to_activate != -1:
-                                if gs.ability_handler.can_activate_ability(card_id, ability_idx_to_activate, player):
-                                     # Boast is an activated ability
-                                     action_idx = 100 + (i * 3) + ability_idx_to_activate
-                                     if action_idx < 160:
-                                          set_valid_action(action_idx, f"ACTIVATE (Boast) {card.name}")
+                if card_id in getattr(gs, 'attackers_this_turn', set()):  # Check if it attacked
+                    card = gs._safe_get_card(card_id)
+                    if card and hasattr(card, 'oracle_text') and "boast —" in card.oracle_text.lower():
+                        # Check if already boasted this turn
+                        if not hasattr(gs, 'boast_activated') or card_id not in gs.boast_activated:
+                            boast_context = {'creature_idx': i}
+                            set_valid_action(429, f"BOAST with {card.name}", context=boast_context)
         
     def _tap_land_for_effect(self, player, land_id):
         """Tap a land to activate abilities (excluding mana production)."""
@@ -6285,45 +6361,37 @@ class ActionHandler:
                 has_left_half = hasattr(card, 'left_half')
                 has_right_half = hasattr(card, 'right_half')
                 
-                # Left half casting
+                # Left half casting - Use correct action index 445
                 if has_left_half:
                     left_cost = card.left_half.get('mana_cost', card.mana_cost)
-                    can_afford_left = False
-                    if hasattr(gs, 'mana_system'):
-                        can_afford_left = gs.mana_system.can_pay_mana_cost(player, left_cost)
-                    else:
-                        can_afford_left = sum(player["mana_pool"].values()) > 0
+                    can_afford_left = self._can_afford_cost_string(player, left_cost)
                     
                     if can_afford_left:
-                        set_valid_action(440, f"CAST_LEFT_HALF of {card.name}")
+                        context = {'hand_idx': idx}
+                        set_valid_action(445, f"CAST_LEFT_HALF of {card.name}", context=context)
                 
-                # Right half casting
+                # Right half casting - Use correct action index 446
                 if has_right_half:
                     right_cost = card.right_half.get('mana_cost', card.mana_cost)
-                    can_afford_right = False
-                    if hasattr(gs, 'mana_system'):
-                        can_afford_right = gs.mana_system.can_pay_mana_cost(player, right_cost)
-                    else:
-                        can_afford_right = sum(player["mana_pool"].values()) > 0
+                    can_afford_right = self._can_afford_cost_string(player, right_cost)
                     
                     if can_afford_right:
-                        set_valid_action(441, f"CAST_RIGHT_HALF of {card.name}")
+                        context = {'hand_idx': idx}
+                        set_valid_action(446, f"CAST_RIGHT_HALF of {card.name}", context=context)
                 
-                # Fuse (both halves)
-                if has_left_half and has_right_half and "fuse" in card.oracle_text.lower():
+                # Fuse (both halves) - Use correct action index 447
+                if has_left_half and has_right_half and "fuse" in getattr(card, 'oracle_text', '').lower():
                     # Need to afford both costs
                     left_cost = card.left_half.get('mana_cost', card.mana_cost)
                     right_cost = card.right_half.get('mana_cost', card.mana_cost)
                     
-                    total_cost = left_cost + right_cost  # This is a simplification
-                    can_afford_both = False
-                    if hasattr(gs, 'mana_system'):
-                        can_afford_both = gs.mana_system.can_pay_mana_cost(player, total_cost)
-                    else:
-                        can_afford_both = sum(player["mana_pool"].values()) > 1  # At least 2 mana
+                    # This is simplistic; a real implementation should combine costs correctly
+                    total_cost = left_cost + right_cost  
+                    can_afford_both = self._can_afford_cost_string(player, total_cost)
                     
                     if can_afford_both:
-                        set_valid_action(442, f"CAST_FUSE of {card.name}")
+                        context = {'hand_idx': idx}
+                        set_valid_action(447, f"CAST_FUSE of {card.name}", context=context)
             
             # Check if it's an aftermath card
             is_aftermath = False
@@ -6332,7 +6400,7 @@ class ActionHandler:
             elif card and hasattr(card, 'oracle_text') and "aftermath" in card.oracle_text.lower():
                 is_aftermath = True
             
-            # Add aftermath actions for graveyard
+            # Add aftermath actions for graveyard - Use correct action index 448
             if is_aftermath:
                 for g_idx, g_card_id in enumerate(player["graveyard"][:6]):  # First 6 in graveyard
                     g_card = gs._safe_get_card(g_card_id)
@@ -6340,14 +6408,11 @@ class ActionHandler:
                         # Check if it has a castable aftermath half
                         if hasattr(g_card, 'right_half'):
                             right_cost = g_card.right_half.get('mana_cost', g_card.mana_cost)
-                            can_afford = False
-                            if hasattr(gs, 'mana_system'):
-                                can_afford = gs.mana_system.can_pay_mana_cost(player, right_cost)
-                            else:
-                                can_afford = sum(player["mana_pool"].values()) > 0
+                            can_afford = self._can_afford_cost_string(player, right_cost)
                             
                             if can_afford:
-                                set_valid_action(443, f"AFTERMATH_CAST of {g_card.name}")
+                                context = {'gy_idx': g_idx}
+                                set_valid_action(448, f"AFTERMATH_CAST of {g_card.name}", context=context)
 
     def _add_damage_prevention_actions(self, player, valid_actions, set_valid_action):
         """Add actions for preventing or redirecting damage."""
