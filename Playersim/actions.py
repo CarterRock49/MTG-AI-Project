@@ -517,202 +517,224 @@ class ActionHandler:
         # Fallback heuristic
         return True, 0.6 # Default to recommend with medium confidence
 
-
     def generate_valid_actions(self):
-        """Return the current action mask as boolean array with reasoning. (Updated Mulligan/Bottoming Logic)"""
+        """Return the current action mask as boolean array with reasoning. CONCEDE is now a last resort. (Revised)"""
         gs = self.game_state
         try:
             valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
-            p1_valid = hasattr(gs, 'p1') and gs.p1 is not None
-            p2_valid = hasattr(gs, 'p2') and gs.p2 is not None
-            if not p1_valid or not p2_valid:
-                logging.error("Player object(s) not initialized in GameState. Cannot generate actions.")
-                valid_actions[12] = True # Only Concede
-                self.action_reasons = {12: "Error: Players not initialized"}
-                return valid_actions
-
-            current_player = gs.p1 if gs.agent_is_p1 else gs.p2
-            opponent = gs.p2 if gs.agent_is_p1 else gs.p1
-            is_my_turn = (gs.turn % 2 == 1) == gs.agent_is_p1
-
-            action_reasons = {}
+            action_reasons = {} # Reset reasons for this generation
 
             def set_valid_action(index, reason="", context=None):
-                if 0 <= index < self.ACTION_SPACE_SIZE:
-                    if not valid_actions[index]:
-                        valid_actions[index] = True
-                        action_reasons[index] = {"reason": reason, "context": context or {}}
-                else:
-                    logging.error(f"INVALID ACTION INDEX: {index} bounds (0-{self.ACTION_SPACE_SIZE-1}) Reason: {reason}")
-                return True
+                if 0 <= index < self.ACTION_SPACE_SIZE and index != 12: # Exclude CONCEDE index
+                    valid_actions[index] = True
+                    action_reasons[index] = {"reason": reason, "context": context or {}}
+                    # logging.debug(f"  Set action {index} VALID: {reason}") # Optional detailed logging
+                elif index != 12: # Log invalid indices *except* CONCEDE
+                    logging.error(f"INVALID ACTION INDEX during generation: {index} bounds (0-{self.ACTION_SPACE_SIZE-1}) Reason: {reason}")
+                # Do not return True here, just set the action
 
-            # --- Special Phase: Mulligan ---
-            if getattr(gs, 'mulligan_in_progress', False):
-                if getattr(gs, 'bottoming_in_progress', False): # Bottoming Phase
-                    if getattr(gs, 'bottoming_player', None) == current_player:
-                        # Add BOTTOM_CARD actions for valid hand indices
-                        hand_size = len(current_player.get("hand", []))
-                        # Limit based on action space AND remaining needed
-                        num_remaining_to_bottom = max(0, gs.cards_to_bottom - gs.bottoming_count)
-                        logging.debug(f"Bottoming: {gs.bottoming_count}/{gs.cards_to_bottom} chosen. Needs {num_remaining_to_bottom} more.")
-                        for i in range(min(hand_size, 4)): # Check indices 0-3 (Actions 226-229)
-                            # Action needs context of the hand index to bottom
-                            set_valid_action(226 + i, f"BOTTOM_CARD index {i}", context={'hand_idx': i})
-                        # NOTE: Passing priority to finish bottoming is not a separate action.
-                        # Choosing the final required card automatically ends the state via gs.bottom_card().
-                    else: # Waiting for opponent to bottom
-                        set_valid_action(224, "NO_OP (Waiting for opponent bottoming)")
-                elif getattr(gs, 'mulligan_player', None) == current_player: # Mulligan Decision Phase
-                    # Allow KEEP_HAND (Action 225)
-                    set_valid_action(225, "KEEP_HAND")
-                    # Allow MULLIGAN (Action 6) if player can still mulligan (e.g., based on hand size > 0?)
-                    # London Mulligan allows mulligan to 0, so always allow theoretically?
-                    set_valid_action(6, "MULLIGAN")
-                else: # Waiting for opponent mulligan decision
-                    set_valid_action(224, "NO_OP (Waiting for opponent mulligan)")
+            # --- Player Validation ---
+            # Determine which player's perspective we are generating actions for (usually the agent)
+            # Note: This assumes generation happens for the agent's turn or when agent has priority.
+            # For MCTS/simulation, this might need to be called for both perspectives.
+            perspective_player = gs.p1 if gs.agent_is_p1 else gs.p2 # Who is the "me"?
 
-                # Always add Concede during mulligan phase
-                set_valid_action(12, "CONCEDE")
-                # Finalize and return the mask for the mulligan phase
-                self.action_reasons_with_context = action_reasons.copy()
-                self.action_reasons = {k: v.get("reason","Unknown") for k, v in action_reasons.items()}
+            current_player_candidate = gs._get_active_player() # Whose turn is it?
+            priority_player_obj = getattr(gs, 'priority_player', None) # Who currently has priority?
+
+            # Basic validation that players exist
+            if not gs.p1 or not gs.p2 or not perspective_player:
+                logging.error("Player object(s) missing or invalid. Defaulting to CONCEDE.")
+                valid_actions[12] = True
+                action_reasons[12] = {"reason": "Error: Players not initialized", "context": {}}
+                self.action_reasons_with_context = action_reasons; self.action_reasons = {k: v.get("reason","Err") for k, v in action_reasons.items()}
                 return valid_actions
-            # --- End Mulligan Phase ---
 
+            # --- Mulligan Phase Logic ---
+            if getattr(gs, 'mulligan_in_progress', False):
+                mulligan_decision_player = getattr(gs, 'mulligan_player', None)
+                bottoming_active_player = getattr(gs, 'bottoming_player', None)
 
-            # --- Rest of the logic (Targeting, Sacrifice, Choose, Regular play) ---
+                if bottoming_active_player == perspective_player:
+                    # Perspective player needs to choose cards to bottom
+                    hand_size = len(perspective_player.get("hand", []))
+                    needed = max(0, gs.cards_to_bottom - gs.bottoming_count)
+                    logging.debug(f"Bottoming Phase: Player {perspective_player.get('name')} needs to bottom {needed} cards.")
+                    for i in range(min(hand_size, 4)): # Action indices 226-229 map to hand indices 0-3
+                        # Ensure card hasn't already been chosen implicitly (state management needed here)
+                        set_valid_action(226 + i, f"BOTTOM_CARD index {i}", context={'hand_idx': i})
+                    if needed == 0: # Already chose enough, allow finishing (maybe implicit?)
+                       set_valid_action(11, "PASS_PRIORITY (Finish Bottoming)") # Or implicit finish?
+                elif bottoming_active_player is not None and bottoming_active_player != perspective_player:
+                    # Waiting for opponent to bottom
+                    set_valid_action(224, "NO_OP (Waiting for opponent bottoming)")
+                elif mulligan_decision_player == perspective_player:
+                    # Perspective player needs to decide Keep or Mulligan
+                    logging.debug(f"Mulligan Phase: Player {perspective_player.get('name')} deciding.")
+                    set_valid_action(225, "KEEP_HAND")
+                    # Allow mulligan only if not down to 0 cards implicitly
+                    current_hand_size = len(perspective_player.get("hand", []))
+                    mulls_taken = gs.mulligan_count.get('p1' if perspective_player == gs.p1 else 'p2', 0)
+                    if current_hand_size > mulls_taken: # Basic check: can draw fewer cards
+                        set_valid_action(6, "MULLIGAN")
+                elif mulligan_decision_player is not None and mulligan_decision_player != perspective_player:
+                    # Waiting for opponent mulligan decision
+                    set_valid_action(224, "NO_OP (Waiting for opponent mulligan)")
+                else: # Fallback state during mulligan?
+                    logging.warning("Unexpected mulligan state. Defaulting to NO_OP.")
+                    set_valid_action(224, "NO_OP (Mulligan State Fallback)")
+
+                # Final check for mulligan phase actions
+                self.action_reasons_with_context = action_reasons.copy(); self.action_reasons = {k: v.get("reason","Mull") for k, v in action_reasons.items()}
+                if np.sum(valid_actions) == 0: # Only add CONCEDE if NO other actions are valid
+                     valid_actions[12] = True
+                     action_reasons[12] = {"reason": "CONCEDE (Mulligan - No Actions)", "context": {}}
+                     self.action_reasons_with_context[12] = action_reasons[12] # Update full context map too
+                     self.action_reasons[12] = action_reasons[12]["reason"] # Update simple reason map too
+                return valid_actions
+
+            # --- Special Choice Phase Logic (Targeting, Sacrifice, Choose) ---
             special_phase = None
-            if gs.phase == gs.PHASE_TARGETING: special_phase = "TARGETING"
-            elif gs.phase == gs.PHASE_SACRIFICE: special_phase = "SACRIFICE"
-            elif gs.phase == gs.PHASE_CHOOSE: special_phase = "CHOOSE"
+            acting_player = None # Player required to make the choice
+            if gs.phase == gs.PHASE_TARGETING and hasattr(gs, 'targeting_context') and gs.targeting_context:
+                special_phase = "TARGETING"; acting_player = gs.targeting_context.get("controller")
+            elif gs.phase == gs.PHASE_SACRIFICE and hasattr(gs, 'sacrifice_context') and gs.sacrifice_context:
+                special_phase = "SACRIFICE"; acting_player = gs.sacrifice_context.get("controller")
+            elif gs.phase == gs.PHASE_CHOOSE and hasattr(gs, 'choice_context') and gs.choice_context:
+                special_phase = "CHOOSE"; acting_player = gs.choice_context.get("player")
 
             if special_phase:
-                # ... (keep existing special phase logic) ...
-                 logging.debug(f"Generating actions limited to {special_phase} phase.")
-                 player_is_acting = False
-                 # Determine if the current player is the one needing to act in this phase
-                 if special_phase == "TARGETING" and hasattr(gs, 'targeting_context') and gs.targeting_context and gs.targeting_context.get("controller") == current_player:
-                    player_is_acting = True
-                    self._add_targeting_actions(current_player, valid_actions, set_valid_action)
-                    min_targets = gs.targeting_context.get("min_targets", 1)
-                    selected_count = len(gs.targeting_context.get("selected_targets", []))
-                    if selected_count >= min_targets:
-                        set_valid_action(11, f"PASS_PRIORITY (Finish {special_phase})")
-                 elif special_phase == "SACRIFICE" and hasattr(gs, 'sacrifice_context') and gs.sacrifice_context and gs.sacrifice_context.get("controller") == current_player:
-                     player_is_acting = True
-                     self._add_sacrifice_actions(current_player, valid_actions, set_valid_action)
-                     required_count = gs.sacrifice_context.get("required_count", 1)
-                     selected_count = len(gs.sacrifice_context.get("selected_permanents", []))
-                     if selected_count >= required_count:
-                         set_valid_action(11, f"PASS_PRIORITY (Finish {special_phase})")
-                 elif special_phase == "CHOOSE" and hasattr(gs, 'choice_context') and gs.choice_context and gs.choice_context.get("player") == current_player:
-                     player_is_acting = True
-                     self._add_special_choice_actions(current_player, valid_actions, set_valid_action)
-                     # PASS logic also handled within that function based on choice type
+                if acting_player == perspective_player:
+                    logging.debug(f"Generating actions limited to {special_phase} phase for player {perspective_player.get('name')}.")
+                    if special_phase == "TARGETING":
+                        self._add_targeting_actions(perspective_player, valid_actions, set_valid_action)
+                        # Allow passing ONLY if minimum targets met (for "up to N" or finalizing multi-target)
+                        min_req = gs.targeting_context.get("min_targets", 1)
+                        if len(gs.targeting_context.get("selected_targets", [])) >= min_req:
+                             set_valid_action(11, f"PASS_PRIORITY (Finish {special_phase})")
+                    elif special_phase == "SACRIFICE":
+                        self._add_sacrifice_actions(perspective_player, valid_actions, set_valid_action)
+                        # Allow passing ONLY if minimum sacrifices met
+                        min_req = gs.sacrifice_context.get("required_count", 1)
+                        if len(gs.sacrifice_context.get("selected_permanents", [])) >= min_req:
+                             set_valid_action(11, f"PASS_PRIORITY (Finish {special_phase})")
+                    elif special_phase == "CHOOSE":
+                        self._add_special_choice_actions(perspective_player, valid_actions, set_valid_action)
+                        # Pass action added within _add_special_choice_actions if applicable
+                else:
+                    # Not this player's turn to act in special phase
+                    set_valid_action(11, f"PASS_PRIORITY (Waiting Opponent {special_phase})")
 
-                 # Always add Concede
-                 set_valid_action(12, "CONCEDE")
-                 # If it's not player's turn to act, allow only PASS/CONCEDE
-                 if not player_is_acting:
-                      set_valid_action(11, f"PASS_PRIORITY (Waiting Opponent {special_phase})")
+                # Final check for special phase actions
+                self.action_reasons_with_context = action_reasons.copy(); self.action_reasons = {k: v.get("reason","Choice") for k, v in action_reasons.items()}
+                if np.sum(valid_actions) == 0:
+                     valid_actions[12] = True
+                     action_reasons[12] = {"reason": f"CONCEDE ({special_phase} - No Actions)", "context": {}}
+                     self.action_reasons_with_context[12] = action_reasons[12]
+                     self.action_reasons[12] = action_reasons[12]["reason"]
+                return valid_actions
 
-                 # Final check: if no actions besides Concede, add Pass as fallback
-                 self.action_reasons_with_context = action_reasons.copy()
-                 self.action_reasons = {k: v.get("reason","Unknown") for k, v in action_reasons.items()}
-                 if np.sum(valid_actions) == 1 and valid_actions[12]:
-                     set_valid_action(11, f"FALLBACK PASS (Special Phase {special_phase})")
-                 return valid_actions
+            # --- Regular Game Play (Requires Priority) ---
+            if priority_player_obj != perspective_player:
+                # If perspective player doesn't have priority, the only valid action is usually NO_OP
+                # However, PASS_PRIORITY should still be handled by the environment logic (passing twice resolves stack/advances phase).
+                # An agent waiting for priority might pass (action 11), but usually we generate for the player WITH priority.
+                # For now, let's assume this function is called for the player who SHOULD have priority or can act.
+                # If it's called for the wrong player, returning just CONCEDE might be appropriate.
+                logging.debug(f"generate_valid_actions called for {perspective_player.get('name')}, but priority is with {getattr(priority_player_obj, 'name', 'None')}. No actions available.")
+                # Should we allow passing here? Rule 117.4 says non-priority player CAN'T pass.
+                # Let's return an empty mask except for CONCEDE if called for wrong player.
+                valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool) # Reset
+                valid_actions[12] = True
+                action_reasons = {12: {"reason": "CONCEDE (No Priority)", "context": {}}}
+                self.action_reasons_with_context = action_reasons.copy(); self.action_reasons = {k: v.get("reason","Priority") for k, v in action_reasons.items()}
+                return valid_actions
 
-            # --- Regular Game Play ---
-            has_priority = (getattr(gs, 'priority_player', None) == current_player)
-            can_act_sorcery_speed = is_my_turn and gs.phase in [gs.PHASE_MAIN_PRECOMBAT, gs.PHASE_MAIN_POSTCOMBAT] and not gs.stack and has_priority
-            can_act_instant_speed = has_priority and gs.phase not in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP]
-
-            # --- Always Available ---
-            if has_priority: set_valid_action(11, "PASS_PRIORITY")
-            set_valid_action(12, "CONCEDE")
-
-            # --- Split Second ---
+            # --- Player HAS Priority ---
+            # Pass Priority is always an option if you have priority (unless split second)
             split_second_is_active = getattr(gs, 'split_second_active', False)
-            if split_second_is_active:
-                # ... (keep existing split second logic) ...
-                 logging.debug("Split Second active, limiting actions.")
-                 # Only mana abilities are allowed. Keep PASS and CONCEDE? Yes.
-                 temp_valid_actions = np.zeros_like(valid_actions)
-                 temp_reasons = {}
-                 # Add Pass and Concede back if they were valid
-                 if valid_actions[11]: temp_valid_actions[11] = True; temp_reasons[11] = action_reasons.get(11, {"reason":"PASS", "context":{}})
-                 if valid_actions[12]: temp_valid_actions[12] = True; temp_reasons[12] = action_reasons.get(12, {"reason":"CONCEDE", "context":{}})
+            if not split_second_is_active:
+                set_valid_action(11, "PASS_PRIORITY")
+            else: # Can pass during Split Second, but other actions restricted
+                set_valid_action(11, "PASS_PRIORITY (Split Second)")
+                self._add_mana_ability_actions(perspective_player, valid_actions, set_valid_action)
+                # Skip adding other actions below if split second active
+                self.action_reasons_with_context = action_reasons.copy(); self.action_reasons = {k: v.get("reason","SS") for k, v in action_reasons.items()}
+                if np.sum(valid_actions) == 0: valid_actions[12] = True; action_reasons[12] = {"reason": "CONCEDE (Split Second - No Actions)", "context": {}}; self.action_reasons_with_context[12] = action_reasons[12]; self.action_reasons[12] = action_reasons[12]["reason"]
+                return valid_actions # Return only mana abilities and pass
 
-                 def set_valid_mana_action(index, reason="", context=None): # Context not usually needed for mana abilities
-                    if 0 <= index < self.ACTION_SPACE_SIZE:
-                        temp_valid_actions[index] = True
-                        temp_reasons[index] = {"reason": reason, "context": context or {}} # Store full info
-                    return True
+            # Determine timing legality
+            is_my_turn = (current_player_candidate == perspective_player)
+            can_act_sorcery_speed = is_my_turn and gs.phase in [gs.PHASE_MAIN_PRECOMBAT, gs.PHASE_MAIN_POSTCOMBAT] and not gs.stack
+            can_act_instant_speed = gs.phase not in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP] # Priority check already done
 
-                 self._add_mana_ability_actions(current_player, temp_valid_actions, set_valid_mana_action) # Populate mana actions
+            # Add actions based on timing
+            opponent_player = gs.p2 if perspective_player == gs.p1 else gs.p1
+            if can_act_sorcery_speed:
+                self._add_sorcery_speed_actions(perspective_player, opponent_player, valid_actions, set_valid_action)
+            if can_act_instant_speed:
+                self._add_instant_speed_actions(perspective_player, opponent_player, valid_actions, set_valid_action)
 
-                 # Replace original mask and reasons
-                 valid_actions = temp_valid_actions
-                 action_reasons = temp_reasons # Use the temp reasons dict
-            else: # Not Split Second - add normal actions based on timing
-                if can_act_sorcery_speed:
-                    self._add_sorcery_speed_actions(current_player, opponent, valid_actions, set_valid_action)
-                if can_act_instant_speed:
-                    self._add_instant_speed_actions(current_player, opponent, valid_actions, set_valid_action)
+            # Add phase transition actions (only if sorcery speed appropriate)
+            if can_act_sorcery_speed:
+                 self._add_basic_phase_actions(is_my_turn, valid_actions, set_valid_action)
 
-                # --- Phase-Specific Actions ---
-                if has_priority and not gs.stack:
-                    self._add_basic_phase_actions(is_my_turn, valid_actions, set_valid_action)
+            # Add combat actions (must have priority)
+            if self.combat_handler:
+                # Ensure correct player objects are passed
+                active_player = gs._get_active_player() # Player whose turn it is
+                non_active_player = gs._get_non_active_player() # Player whose turn it isn't
 
-                # --- Combat Phase Actions (Delegated) ---
-                if has_priority and self.combat_handler:
-                    if is_my_turn and gs.phase == gs.PHASE_DECLARE_ATTACKERS:
-                        self.combat_handler._add_attack_declaration_actions(current_player, opponent, valid_actions, set_valid_action)
-                    elif not is_my_turn and gs.phase == gs.PHASE_DECLARE_BLOCKERS and getattr(gs, 'current_attackers', []):
-                        self.combat_handler._add_block_declaration_actions(current_player, valid_actions, set_valid_action)
-                    elif is_my_turn and gs.phase in [gs.PHASE_FIRST_STRIKE_DAMAGE, gs.PHASE_COMBAT_DAMAGE] and not getattr(gs, 'combat_damage_dealt', False):
-                         # Delegate damage assignment choices if manual assignment is used
-                         # Or just ensure PASS is available to move past the step
-                        pass # Keep basic pass action available
+                # Check phase and player who needs to declare
+                if gs.phase == gs.PHASE_DECLARE_ATTACKERS and perspective_player == active_player:
+                     self.combat_handler._add_attack_declaration_actions(perspective_player, non_active_player, valid_actions, set_valid_action)
+                elif gs.phase == gs.PHASE_DECLARE_BLOCKERS and perspective_player == non_active_player and getattr(gs, 'current_attackers', []):
+                     self.combat_handler._add_block_declaration_actions(perspective_player, valid_actions, set_valid_action)
+                # Add other combat phase actions like damage assignment order if needed
 
-                elif has_priority and not self.combat_handler:
-                    logging.warning("Combat phase actions cannot be generated: CombatActionHandler missing.")
-
-                 # --- Additional check for PAY_OFFSPRING during cast setup ---
-                pending_spell_context = getattr(gs, 'pending_spell_context', None)
-                # Only offer if player has priority AND a spell is pending AND it's an offspring spell
-                if has_priority and pending_spell_context and pending_spell_context.get('card_id') and \
-                   pending_spell_context.get('controller') == current_player:
-                    card_id = pending_spell_context['card_id']
-                    card = gs._safe_get_card(card_id)
-                    if card and getattr(card, 'is_offspring', False):
-                        # Offer if *not already chosen* and affordable
-                        if not pending_spell_context.get('pay_offspring', False):
-                             cost_str = getattr(card, 'offspring_cost', None)
-                             if cost_str and self._can_afford_cost_string(current_player, cost_str):
-                                  # No specific context needed, handler uses pending_spell_context
-                                  set_valid_action(295, f"Optional: PAY_OFFSPRING_COST for {card.name}")
+            # Check optional Offspring cost payment (can do this at instant speed)
+            pending_spell_context = getattr(gs, 'pending_spell_context', None)
+            if pending_spell_context and pending_spell_context.get('card_id') and \
+               pending_spell_context.get('controller') == perspective_player:
+                card_id = pending_spell_context['card_id']
+                card = gs._safe_get_card(card_id)
+                if card and getattr(card, 'is_offspring', False):
+                    if not pending_spell_context.get('pay_offspring', False):
+                        cost_str = getattr(card, 'offspring_cost', None)
+                        if cost_str and self._can_afford_cost_string(perspective_player, cost_str):
+                            set_valid_action(295, f"Optional: PAY_OFFSPRING_COST for {card.name}")
 
 
-            # --- Final Checks ---
+            # --- Final CONCEDE Logic ---
             self.action_reasons_with_context = action_reasons.copy()
             self.action_reasons = {k: v.get("reason","Unknown") for k, v in action_reasons.items()}
+            num_valid_non_concede_actions = np.sum(valid_actions)
 
-            valid_count = np.sum(valid_actions)
-            if valid_count == 0:
-                logging.warning("No valid actions found! Forcing CONCEDE.")
-                set_valid_action(12, "FALLBACK - CONCEDE")
-                self.action_reasons = {k: v.get("reason", "Unknown") for k, v in action_reasons.items()}
+            if num_valid_non_concede_actions == 0: # Only add CONCEDE if NO other actions found
+                valid_actions[12] = True
+                concede_reason = "CONCEDE (No other valid actions)"
+                if 12 not in action_reasons: # Avoid overwriting error messages
+                    action_reasons[12] = {"reason": concede_reason, "context": {}}
+                    self.action_reasons_with_context[12] = action_reasons[12]
+                    self.action_reasons[12] = concede_reason # Update simple reason map too
+                logging.warning("generate_valid_actions: No valid actions found, only CONCEDE is available.")
+            else:
+                # If other actions exist, ensure CONCEDE is NOT valid (unless set by earlier error)
+                if 12 not in action_reasons or action_reasons[12].get("reason") != "Critical Error Fallback - CONCEDE":
+                     valid_actions[12] = False # Explicitly ensure it's false if other actions exist
 
             return valid_actions
 
         except Exception as e:
-            logging.error(f"CRITICAL error generating valid actions: {str(e)}", exc_info=True)
+            logging.critical(f"CRITICAL error generating valid actions: {str(e)}", exc_info=True)
             fallback_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
-            fallback_actions[11] = True # Pass
+            fallback_actions[11] = True # Pass Priority
             fallback_actions[12] = True # Concede
-            self.action_reasons = {11: "Critical Error Fallback", 12: "Critical Error Fallback"}
+            self.action_reasons = {11: "Crit Err - PASS", 12: "Crit Err - CONCEDE"}
+            self.action_reasons_with_context = {
+                11: {"reason": "Crit Err - PASS", "context": {}},
+                12: {"reason": "Crit Err - CONCEDE", "context": {}}
+            }
             return fallback_actions
             
     def _add_basic_phase_actions(self, is_my_turn, valid_actions, set_valid_action):

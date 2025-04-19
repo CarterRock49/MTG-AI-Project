@@ -469,15 +469,15 @@ class GameState:
 
     
     def reset(self, p1_deck, p2_deck, seed=None):
-        """Reset the game state with new decks and initialize all subsystems"""
+        """Reset the game state with new decks and initialize all subsystems (Revised Priority)"""
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
 
         logging.debug("Starting GameState reset...")
         # Reset basic game state
-        self.turn = 1
-        self.phase = self.PHASE_UNTAP # Start at UNTAP phase
+        self.turn = 0 # Start at turn 0 to allow mulligan before turn 1 begins
+        self.phase = self.PHASE_UNTAP # Start conceptually before turn 1
         self.combat_damage_dealt = False
         self.stack = []
         self.priority_pass_count = 0
@@ -490,30 +490,17 @@ class GameState:
         self.exhaust_ability_used = {} # Reset exhaust tracking
 
         # Initialize player states AFTER resetting other state
-        # Store original decks for stats/memory later
         self.original_p1_deck = p1_deck.copy()
         self.original_p2_deck = p2_deck.copy()
-        self.p1 = self._init_player(self.original_p1_deck)
-        self.p2 = self._init_player(self.original_p2_deck)
-        # Assign names after init
-        if self.p1: self.p1['name'] = 'Player 1'
-        if self.p2: self.p2['name'] = 'Player 2'
-
-        # Set initial priority player and agent identity AFTER player init
-        self.priority_player = self.p1 # P1 starts with priority
+        # Pass player number/agent status if needed for init logic
+        self.p1 = self._init_player(self.original_p1_deck, player_num=1) # Pass player number
+        self.p2 = self._init_player(self.original_p2_deck, player_num=2) # Pass player number
+        # Set agent identity *after* players are created
         self.agent_is_p1 = True # Assume agent is P1 by default unless configured otherwise
 
-        # --- Subsystem Initialization (Call helper method) ---
-        # This creates and links LayerSystem, TargetingSystem, AbilityHandler, ManaSystem etc.
-        # and critically, self.action_handler
-        self._init_subsystems()
-
-        # Initialize all tracking variables using the helper AFTER subsystems exist
-        self._init_tracking_variables()
-        self.initialize_day_night_cycle() # Call after tracking vars init
-
-        # Initialize mulligan state correctly AFTER players exist
-        self.mulligan_in_progress = True # Start with mulligan phase
+        # --- Mulligan State Setup (CRITICAL) ---
+        # After players exist, before subsystems that might query mulligan state
+        self.mulligan_in_progress = True # Start with mulligan phase active
         self.mulligan_player = self.p1 # P1 mulligans first
         self.mulligan_count = {'p1': 0, 'p2': 0} # Reset counts
         self.mulligan_data = {'p1': 0, 'p2': 0} # Reset separate tracker
@@ -521,35 +508,36 @@ class GameState:
         self.bottoming_player = None
         self.cards_to_bottom = 0
         self.bottoming_count = 0
+        self.priority_player = None # No player has priority during mulligan decisions typically
 
-        # Link external systems if they were passed or previously set
-        # Ensure subsystems have access to these if needed
-        # These are expected to be set EXTERNALLY before calling reset
+        # --- Subsystem Initialization (Call helper method) ---
+        self._init_subsystems() # ActionHandler created here
+
+        # Initialize all tracking variables using the helper AFTER subsystems exist
+        self._init_tracking_variables()
+        self.initialize_day_night_cycle() # Call after tracking vars init
+
+        # Link external systems AFTER local subsystems are initialized
         self.strategy_memory = getattr(self, 'strategy_memory', None)
         self.stats_tracker = getattr(self, 'stats_tracker', None)
         self.card_memory = getattr(self, 'card_memory', None)
-        # Ensure links are set on GS itself for subsystems to access
-        if self.strategy_memory: self.game_state.strategy_memory = self.strategy_memory
-        if self.stats_tracker: self.game_state.stats_tracker = self.stats_tracker
-        if self.card_memory: self.game_state.card_memory = self.card_memory
-        # Link subsystems that depend on external trackers
+        # Update links on subsystems if they use these
         if self.card_evaluator:
-             self.card_evaluator.stats_tracker = self.stats_tracker
-             self.card_evaluator.card_memory = self.card_memory
+            self.card_evaluator.stats_tracker = self.stats_tracker
+            self.card_evaluator.card_memory = self.card_memory
         if self.strategic_planner and self.strategy_memory:
-             self.strategic_planner.strategy_memory = self.strategy_memory
+            self.strategic_planner.strategy_memory = self.strategy_memory
 
-        # Final setup calls if subsystems exist and need post-reset init
+        # Final setup calls
         if self.strategic_planner and hasattr(self.strategic_planner, 'init_after_reset'):
-            self.strategic_planner.init_after_reset() # Now performs safe checks internally
+            self.strategic_planner.init_after_reset()
 
-        # Ability Initialization via handler (only if handler exists)
+        # Initialize card abilities via AbilityHandler AFTER it's linked
         if self.ability_handler and hasattr(self.ability_handler, '_initialize_abilities'):
-             logging.debug("Initializing card abilities via AbilityHandler.")
-             if isinstance(self.card_db, dict) and self.card_db:
-                 self.ability_handler._initialize_abilities() # Parse abilities from DB
-             else:
-                 logging.error("Cannot initialize abilities: card_db is not a valid dictionary.")
+            logging.debug("Initializing card abilities via AbilityHandler.")
+            if isinstance(self.card_db, dict) and self.card_db:
+                self.ability_handler._initialize_abilities()
+            else: logging.error("Cannot initialize abilities: card_db is not valid.")
 
         # Initial Layer application to set base characteristics correctly
         if self.layer_system:
@@ -558,7 +546,7 @@ class GameState:
 
         logging.debug("GameState reset complete.")
     
-    def _init_player(self, deck):
+    def _init_player(self, deck, player_num):
         """Initialize a player's state with a given deck and draw 7 cards for the starting hand."""
         import copy # Moved import inside
 
@@ -614,6 +602,7 @@ class GameState:
              player["name"] = "Player 1"
         else: # Otherwise it's p2
              player["name"] = "Player 2"
+        player["name"] = f"Player {player_num}"
         return player
         
     def track_card_played(self, card_id, player_idx):
@@ -1168,104 +1157,90 @@ class GameState:
         return self.check_priority(player)
 
     def _pass_priority(self):
-        """Handle passing priority between players or advancing state."""
+        """Handle passing priority between players or advancing state. (Revised Phase Advance & Priority Logic)"""
         gs = self # Alias for convenience
 
-        # Check if anyone actually has priority
+        # If no one has priority, this action is likely meaningless, but check if state should progress.
         if gs.priority_player is None:
-            # This might happen during resolution or untap/cleanup where no priority exists yet.
-            # If stack empty, we might need to assign priority to AP to start the next step.
-            if not gs.stack and gs.phase not in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP]:
-                 gs.priority_player = gs._get_active_player()
-                 gs.priority_pass_count = 0 # Reset count when assigning priority
-                 logging.debug(f"Assigned priority to AP ({gs.priority_player['name']}) as it was None.")
+            # Check if we are in a state where priority SHOULD be assigned (e.g., empty stack, standard phase)
+            if not gs.stack and gs.phase not in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP, gs.PHASE_TARGETING, gs.PHASE_SACRIFICE, gs.PHASE_CHOOSE]:
+                gs.priority_player = gs._get_active_player()
+                gs.priority_pass_count = 0 # Reset count when assigning priority
+                logging.debug(f"Pass called with no priority: Assigned priority to AP ({gs.priority_player['name']})")
+                # We assigned priority, let the game proceed without incrementing pass count yet.
+                return
             else:
-                 # If stack not empty, or in untap/cleanup, just return. State progresses differently.
-                 logging.debug("Pass priority called when no player had priority (expected during resolution/untap/cleanup).")
-                 return # Let other game loop mechanics handle state change
+                logging.debug("Pass priority called when no player had priority (expected during resolution/untap/cleanup/special phase).")
+                return # State progresses elsewhere or is waiting for choice
 
-        # --- Standard Priority Passing ---
+        # --- Player with Priority is Passing ---
         gs.priority_pass_count += 1
         current_prio_player = gs.priority_player
         next_prio_player = gs._get_non_active_player() if current_prio_player == gs._get_active_player() else gs._get_active_player()
-        gs.priority_player = next_prio_player
-        logging.debug(f"Priority passed from {current_prio_player['name']} to {next_prio_player['name']} (Pass #{gs.priority_pass_count})")
+        gs.priority_player = next_prio_player # Tentatively pass priority
+        logging.debug(f"Priority passed from {getattr(current_prio_player, 'name', 'Unknown')} to {getattr(next_prio_player, 'name', 'Unknown')} (Pass #{gs.priority_pass_count})")
 
-        # --- Check for Stack Resolution or Phase Advance ---
+        # --- Check if State Should Change (Both Passed) ---
         if gs.priority_pass_count >= 2:
-            # --- Split Second Check ---
+            logging.debug("Both players passed priority sequentially.")
+            gs.priority_pass_count = 0 # Reset pass count FIRST
+
+            # --- Check Split Second ---
             if getattr(gs, 'split_second_active', False):
-                # Find the Split Second spell
+                # Find the Split Second spell/ability on top (it must be the top item if active)
                 split_second_item = None
-                for item in gs.stack:
-                    if isinstance(item, tuple) and len(item) > 3 and item[3].get("is_split_second", False):
-                        split_second_item = item
-                        break
-                # If SS spell still exists, resolve it. Nothing else can be added.
+                if gs.stack and isinstance(gs.stack[-1], tuple) and len(gs.stack[-1]) > 3 and gs.stack[-1][3].get("is_split_second", False):
+                    split_second_item = gs.stack[-1]
+
                 if split_second_item:
                     logging.debug("Split Second active: Resolving split second spell/ability.")
-                    resolved = gs.resolve_top_of_stack() # Should resolve the SS item
-                    # resolve_top_of_stack resets priority to AP. Split second ends AFTER resolution.
+                    resolved = gs.resolve_top_of_stack() # Resolves and RESETS PRIORITY to AP
+                    # Check if other SS items remain after resolution (unlikely but possible)
                     if resolved:
-                        logging.debug("Split Second spell resolved.")
-                        # Mark split second as no longer active AFTER resolution
-                        gs.split_second_active = False
-                    else:
-                         logging.warning("Split second resolution failed. Game state might be inconsistent.")
-                    # Do not proceed to normal stack/phase logic yet. Loop continues.
-                else: # SS was active, but spell is gone? Error state. Clear flag.
-                    logging.warning("Split Second was active, but no corresponding spell found on stack.")
+                         any_other_ss = any(isinstance(i,tuple) and len(i)>3 and i[3].get('is_split_second') for i in gs.stack)
+                         if not any_other_ss:
+                             gs.split_second_active = False; logging.info("Split Second is now INACTIVE.")
+                    else: logging.warning("Split second resolution failed.")
+                    # Do NOT advance phase here, priority was reset by resolve_top_of_stack
+                    return # Loop might continue if state changed
+                else:
+                    logging.warning("Split Second was active, but no corresponding spell/ability found on stack top.")
                     gs.split_second_active = False
-                    # Fall through to normal check? Risky. For now, clear pass count and return.
-                    gs.priority_player = gs._get_active_player()
-                    gs.priority_pass_count = 0
+                    gs.priority_player = gs._get_active_player() # Reset priority safely
                     return
-            # --- Regular Stack Resolution ---
-            elif gs.stack:
-                # Process triggers FIRST that might have been put on queue by passing priority (unlikely but possible)
-                # Example: Ability says "Whenever a player passes priority..."
-                if gs.ability_handler: triggers_processed = gs.ability_handler.process_triggered_abilities()
-                else: triggers_processed = False
 
-                # If triggers were added, reset priority
-                if len(gs.stack) > gs.last_stack_size:
-                    gs.priority_player = gs._get_active_player()
-                    gs.priority_pass_count = 0
-                    gs.last_stack_size = len(gs.stack)
-                    logging.debug("Triggers added to stack after priority pass, priority back to AP.")
+            # --- Check Stack Resolution ---
+            elif gs.stack:
+                # Process triggers FIRST that might have resulted from the passes
+                triggers_processed = False
+                initial_stack_size_before_triggers = len(gs.stack) # Store size before processing
+                if gs.ability_handler: triggers_processed = gs.ability_handler.process_triggered_abilities()
+
+                # Check if new triggers were added
+                if len(gs.stack) > initial_stack_size_before_triggers:
+                    gs.priority_player = gs._get_active_player() # Reset priority to AP
+                    gs.last_stack_size = len(gs.stack) # Update tracked size
+                    logging.debug("Triggers added after pass, priority back to AP.")
                 else: # No new triggers, resolve the stack
                     logging.debug("Both passed, resolving stack...")
-                    resolved = gs.resolve_top_of_stack() # This resets priority to AP internally
-                    # SBAs are checked after resolution within the main loop, not here
-                    # --- MODIFIED: Check if choice context still needs handling ---
-                    if not gs.stack and (gs.targeting_context or gs.sacrifice_context or gs.choice_context):
-                         logging.debug("Stack resolved, but special context remains. Priority to choosing player.")
-                         if gs.targeting_context: gs.priority_player = gs.targeting_context.get("controller")
-                         elif gs.sacrifice_context: gs.priority_player = gs.sacrifice_context.get("controller")
-                         elif gs.choice_context: gs.priority_player = gs.choice_context.get("player")
-                         else: gs.priority_player = gs._get_active_player() # Fallback
-                         gs.priority_pass_count = 0 # Player needs to act on choice
-                         self.phase = gs.targeting_context and self.PHASE_TARGETING or \
-                                      gs.sacrifice_context and self.PHASE_SACRIFICE or \
-                                      gs.choice_context and self.PHASE_CHOOSE or self.PHASE_PRIORITY
-                    # --- END MODIFICATION ---
-                    # else: resolve_top_of_stack handled phase return if needed
-            # --- Advance Phase ---
-            # --- ADDED CHECK FOR PENDING CHOICE BEFORE ADVANCING ---
+                    gs.resolve_top_of_stack() # This resets priority to AP internally
+                    # State Based Actions are checked in the main loop after this returns
+
+            # --- Check Phase Advance ---
+            # Advance phase only if stack is empty AND no choice context is pending
             elif not (gs.targeting_context or gs.sacrifice_context or gs.choice_context):
-            # --- END ADDED CHECK ---
-                 logging.debug("Both passed with empty stack, advancing phase.")
-                 gs._advance_phase()
-                 # _advance_phase handles resetting priority_player and pass_count
-            else:
+                 logging.debug("Both passed with empty stack & no choices pending, advancing phase.")
+                 gs._advance_phase() # This resets priority and handles next phase start
+            else: # Choice pending, cannot advance phase
                 logging.debug("Both passed, but choice context pending. Waiting for action.")
-                # Keep priority with the player who needs to choose
+                # Assign priority back to the player who needs to make the choice
                 if gs.targeting_context: gs.priority_player = gs.targeting_context.get("controller")
                 elif gs.sacrifice_context: gs.priority_player = gs.sacrifice_context.get("controller")
                 elif gs.choice_context: gs.priority_player = gs.choice_context.get("player")
-                gs.priority_pass_count = 0 # Reset passes, player must act
+                else: gs.priority_player = None # Should not happen if context exists
+                # gs.priority_pass_count remains 0 because we just reset it
 
-        # else: # Only one pass, priority toggled, nothing else happens
+        # If only one player passed, priority is now with the next_prio_player. Pass count is 1.
 
 
     def move_card(self, card_id, from_player, from_zone, to_player, to_zone, cause=None, context=None):
@@ -3117,7 +3092,7 @@ class GameState:
                     if self.previous_priority_phase in [self.PHASE_UNTAP, self.PHASE_CLEANUP] and old_phase == self.PHASE_PRIORITY:
                          # If we were in cleanup's priority check and nothing happened, proceed to next turn's untap
                          if self.previous_priority_phase == self.PHASE_CLEANUP:
-                              self.phase = self.PHASE_UNTAP # Set next phase explicitly
+                              self.phase = self.PHASE_UNTAP # Set next phase explicitly, loop below will handle auto-advance
                          # If we were somehow in untap's priority check (shouldn't happen), move to upkeep
                          else: # self.previous_priority_phase == self.PHASE_UNTAP
                               self.phase = self.PHASE_UPKEEP
@@ -3133,7 +3108,7 @@ class GameState:
                 new_phase_name = self._PHASE_NAMES.get(self.phase, '?')
                 logging.debug(f"Returning from special phase {old_phase_name} to {new_phase_name}")
                 self._phase_action_count = 0 # Reset phase action count when returning
-                # Continue to the phase advancement loop below to handle skips/start actions for the *returned* phase
+                # Fall through to the phase advancement loop below to handle the *returned* phase
             else:
                  # Stay in the current special phase if stack/context still active
                  logging.debug(f"Staying in special phase {old_phase_name} (Stack/Choice Context still active).")
@@ -3141,14 +3116,14 @@ class GameState:
 
 
         # --- Phase Advancement Loop (handles skipping) ---
-        # Start the loop checking FROM the current phase (which might have just been restored)
-        current_phase_before_loop = self.phase
+        # Start the loop checking FROM the current phase (which might have just been restored or set)
+        current_phase_for_check = self.phase
         while True: # Loop to handle potential phase skips
             # Find current phase index in the standard sequence
             try:
-                current_idx = phase_sequence.index(current_phase_before_loop)
+                current_idx = phase_sequence.index(current_phase_for_check)
             except ValueError:
-                logging.error(f"Current phase {self._PHASE_NAMES.get(current_phase_before_loop)} not found in standard sequence. Resetting.")
+                logging.error(f"Current phase {self._PHASE_NAMES.get(current_phase_for_check)} not found in standard sequence. Resetting.")
                 # Force to a known state to avoid infinite loops
                 self.phase = self.PHASE_MAIN_PRECOMBAT
                 self.priority_player = self._get_active_player()
@@ -3162,7 +3137,7 @@ class GameState:
             next_phase_name = self._PHASE_NAMES.get(next_phase_in_sequence, '?')
 
             # Identify the player whose phase it would be (critical for skip checks)
-            is_new_turn_starting = (current_phase_before_loop == self.PHASE_CLEANUP and next_phase_in_sequence == self.PHASE_UNTAP)
+            is_new_turn_starting = (current_phase_for_check == self.PHASE_CLEANUP and next_phase_in_sequence == self.PHASE_UNTAP)
             active_player_for_next_phase = self._get_next_turn_player() if is_new_turn_starting else self._get_active_player()
 
             # --- Check for Phase Skipping ---
@@ -3185,138 +3160,213 @@ class GameState:
                 should_skip_phase = True
                 logging.debug("Skipping First Strike Damage phase (no first/double strike).")
 
+            # 3. Skip Untap Step explicitly (it's handled by turn transition below)
+            # This prevents advancing *into* Untap during the regular phase sequence,
+            # ensuring it only happens when transitioning from Cleanup.
+            if not should_skip_phase and next_phase_in_sequence == self.PHASE_UNTAP and not is_new_turn_starting:
+                 # This case means we somehow tried to advance into Untap without it being a new turn
+                 logging.error(f"Invalid state: Tried to enter UNTAP phase from {old_phase_name}. Resetting to Upkeep.")
+                 self.phase = self.PHASE_UPKEEP
+                 current_phase_before_loop = self.phase # Adjust loop tracker
+                 continue # Restart loop from Upkeep
+
             if should_skip_phase:
                 # If skipped, advance the internal tracker and loop again to check the *next* phase
-                current_phase_before_loop = next_phase_in_sequence # Continue loop FROM the skipped phase index
+                logging.debug(f"Auto-skipping phase: {next_phase_name}")
+                current_phase_for_check = next_phase_in_sequence # Continue loop FROM the skipped phase index
                 continue # Check the phase AFTER the skipped one
             else:
                 # --- This is the phase we are ACTUALLY entering ---
-                self.phase = next_phase_in_sequence
-                # Recalculate active player based on the ACTUAL new phase/turn
-                active_player = self._get_active_player()
-                non_active_player = self._get_non_active_player()
 
-                # --- Handle Turn Transition ---
-                if is_new_turn_starting: # Use the flag set earlier
+                # --- Handle Turn Transition FIRST ---
+                if is_new_turn_starting:
                     prev_turn = self.turn
                     self.turn += 1
                     logging.info(f"=== ADVANCING FROM TURN {prev_turn} TO TURN {self.turn} ===")
                     # Reset turn-based tracking variables
-                    self.combat_damage_dealt = False
-                    self.day_night_checked_this_turn = False # Reset day/night check flag
-                    self.spells_cast_this_turn = []
-                    self.attackers_this_turn = set()
-                    # Properly reset/initialize turn-specific graveyard tracking
-                    if not hasattr(self, 'cards_to_graveyard_this_turn'): self.cards_to_graveyard_this_turn = {}
-                    self.cards_to_graveyard_this_turn[self.turn] = []
-                    # Only keep recent history (e.g., last turn's graveyard contents)
-                    turns_to_keep = 1
-                    keys_to_delete = [t for t in self.cards_to_graveyard_this_turn if t < self.turn - turns_to_keep]
-                    for t in keys_to_delete: del self.cards_to_graveyard_this_turn[t]
+                    self._reset_turn_tracking_variables()
+                    active_player = self._get_active_player() # Get the *new* active player
 
-                    self.gravestorm_count = 0 # Reset gravestorm
-                    self.boast_activated = set()
-                    self.forecast_used = set()
-                    self.life_gained_this_turn = {}
-                    self.damage_this_turn = {}
-                    self.cards_drawn_this_turn = {'p1': 0, 'p2': 0} # Reset draw counts
+                    # --- Start of Turn Logic: UNTAP + Auto-Advance to UPKEEP ---
+                    logging.debug(f"Performing Turn {self.turn} Untap Step for {active_player['name']}...")
+                    self._untap_phase(active_player) # Perform untap actions
+                    self.check_state_based_actions() # Rule 502.4
 
-                    # Reset relevant player flags
-                    for player in [self.p1, self.p2]:
-                        if player:
-                            player["land_played"] = False
-                            player["entered_battlefield_this_turn"] = set() # Clear summoning sickness flags
-                            player["activated_this_turn"] = set()
-                            player["lost_life_this_turn"] = False
-                            player["pw_activations"] = {} # Reset PW activations per turn
+                    # Now, automatically transition to Upkeep and grant priority
+                    self.phase = self.PHASE_UPKEEP
+                    logging.debug(f"Automatically advanced to Upkeep Step.")
+                    self._phase_action_count = 0 # Reset count for new phase
 
+                    # Trigger "beginning of upkeep"
+                    self._handle_beginning_of_phase_triggers() # Use helper
 
-                    # Turn limit check
+                    # AP gets priority in Upkeep
+                    self.priority_player = active_player
+                    self.priority_pass_count = 0
+                    self.last_stack_size = len(self.stack)
+                    logging.debug(f"Entering Upkeep. Priority to AP ({self.priority_player['name']})")
+
+                    # --- Game Turn Limit Check ---
                     if self.turn > self.max_turns and not getattr(self, '_turn_limit_checked', False):
                         logging.info(f"Turn limit ({self.max_turns}) reached! Ending game.")
                         self._turn_limit_checked = True
                         # Set game end flags based on life totals
                         if self.p1 and self.p2:
-                            if self.p1["life"] > self.p2["life"]: self.p1["won_game"] = True; self.p2["lost_game"] = True
-                            elif self.p2["life"] > self.p1["life"]: self.p2["won_game"] = True; self.p1["lost_game"] = True
+                            if self.p1.get("life",0) > self.p2.get("life",0): self.p1["won_game"] = True; self.p2["lost_game"] = True
+                            elif self.p2.get("life",0) > self.p1.get("life",0): self.p2["won_game"] = True; self.p1["lost_game"] = True
                             else: self.p1["game_draw"] = True; self.p2["game_draw"] = True
                         # SBAs checked later will finalize the game end
-                # --- End Turn Transition ---
+                    break # Exit loop after handling turn transition
 
+                # --- Not a new turn, entering next_phase_in_sequence ---
+                self.phase = next_phase_in_sequence
                 logging.debug(f"Advanced from {old_phase_name} to {next_phase_name}")
                 self._phase_action_count = 0 # Reset counter for new phase
+                active_player = self._get_active_player() # Get current AP
 
-                # --- Phase Start Actions & Trigger Checks ---
-                self.priority_player = None # No priority during these state changes
-
-                if self.phase == self.PHASE_UNTAP:
-                    # Phasing handled within _untap_phase now
-                    self._untap_phase(active_player)
-                    self.check_state_based_actions() # Rule 502.4
-                    # Automatically move to Upkeep, check skips targeting Upkeep in next loop iteration
-                    current_phase_before_loop = self.phase
-                    continue # Re-run loop check starting from Upkeep
-
-                # If we reached here, it's not Untap. Perform other phase start actions.
-                if self.phase == self.PHASE_UPKEEP:
-                    if hasattr(self, 'check_day_night_transition') and not self.day_night_checked_this_turn:
-                         self.check_day_night_transition() # Must happen before upkeep triggers (Rule 503.1)
-                    # Trigger "at beginning of upkeep" - check_abilities handles APNAP queueing
-                    self.trigger_ability(None, "BEGINNING_OF_UPKEEP", {"controller": active_player}) # Trigger for active player first
-                    self.trigger_ability(None, "BEGINNING_OF_UPKEEP", {"controller": non_active_player})# Then non-active
-                    # Process queued triggers before giving priority
-                    if self.ability_handler: self.ability_handler.process_triggered_abilities()
-                    self.check_state_based_actions() # Rule 503.1b
-
-                elif self.phase == self.PHASE_DRAW:
-                    # Dredge choice handled by check_abilities replacement effect interaction?
-                    # If dredge replacement active, it might pause here and enter PHASE_CHOOSE.
-                    # For now, assume normal draw:
-                    self._draw_phase(active_player)
-                    self.check_state_based_actions() # Rule 504.2
-                    # "at beginning of draw" triggers
-                    self.trigger_ability(None, "BEGINNING_OF_DRAW", {"controller": active_player})
-                    self.trigger_ability(None, "BEGINNING_OF_DRAW", {"controller": non_active_player})
-                    if self.ability_handler: self.ability_handler.process_triggered_abilities()
-
-                elif self.phase == self.PHASE_MAIN_PRECOMBAT:
-                    # Add Saga counters (Rule 714.2b)
-                    if hasattr(self, 'advance_saga_counters'): self.advance_saga_counters(active_player)
-                    # Check SBAs after saga counters
-                    self.check_state_based_actions()
-
-                elif self.phase == self.PHASE_BEGIN_COMBAT:
-                     # "at beginning of combat" triggers
-                     self.trigger_ability(None, "BEGINNING_OF_COMBAT", {"controller": active_player})
-                     self.trigger_ability(None, "BEGINNING_OF_COMBAT", {"controller": non_active_player})
-                     if self.ability_handler: self.ability_handler.process_triggered_abilities()
+                # --- Phase Start Actions & Trigger Checks (Excluding Untap) ---
+                if self.phase == self.PHASE_CLEANUP:
+                     logging.debug(f"Entering Cleanup Step for player {active_player['name']}.")
+                     self._cleanup_step_actions(active_player)
+                     self._cleanup_step_actions(self._get_non_active_player())
+                     # After cleanup actions, check for triggers/SBAs. If none, loop proceeds to turn end.
                      self.check_state_based_actions()
+                     self.priority_player = None # No priority received initially
+                     # Re-run loop check to potentially pass priority or advance turn if state is stable
+                     current_phase_for_check = self.phase
+                     continue
+                else: # Phases other than Cleanup/Untap
+                     # Perform phase-start triggers/actions
+                     self._handle_beginning_of_phase_triggers() # Use helper for upkeep, draw, combat, end step
+                     # Set Priority
+                     if self.phase not in [self.PHASE_CLEANUP]: # Shouldn't be needed after cleanup handling above
+                         self.priority_player = active_player # AP gets priority first
+                         self.priority_pass_count = 0
+                         self.last_stack_size = len(self.stack)
+                         logging.debug(f"Entering {next_phase_name}. Priority to AP ({active_player['name']})")
+                     else:
+                          logging.debug(f"Entering {next_phase_name}. No priority automatically given.")
 
-                elif self.phase == self.PHASE_END_STEP:
-                    # Check day/night transition at end step if not already checked this turn
-                    if hasattr(self, 'check_day_night_transition') and not self.day_night_checked_this_turn:
-                         self.check_day_night_transition()
-
-                    # "at beginning of end step" triggers
-                    self.trigger_ability(None, "BEGINNING_OF_END_STEP", {"controller": active_player})
-                    self.trigger_ability(None, "BEGINNING_OF_END_STEP", {"controller": non_active_player})
-                    if self.ability_handler: self.ability_handler.process_triggered_abilities()
-                    self.check_state_based_actions()
-
-                # --- Set Priority After Phase Start Actions ---
-                if self.phase not in [self.PHASE_UNTAP, self.PHASE_CLEANUP]:
-                    self.priority_player = active_player # AP gets priority first
-                    self.priority_pass_count = 0
-                    self.last_stack_size = len(self.stack)
-                    logging.debug(f"Entering {next_phase_name}. Priority to AP ({active_player['name']})")
-                else:
-                     logging.debug(f"Entering {next_phase_name}. No priority automatically given.")
-
-
-                # Update stack size again if triggers added during phase start resolved immediately
-                if len(self.stack) != self.last_stack_size: self.last_stack_size = len(self.stack)
+                     # Update stack size tracking if needed
+                     if len(self.stack) != self.last_stack_size: self.last_stack_size = len(self.stack)
 
                 break # Exit the while loop, phase transition complete successfully
+
+    def _reset_turn_tracking_variables(self):
+        """Helper to reset variables at the start of a new turn."""
+        self.combat_damage_dealt = False
+        self.day_night_checked_this_turn = False
+        self.spells_cast_this_turn = []
+        self.attackers_this_turn = set()
+        self.damage_dealt_this_turn = {}
+        self.cards_drawn_this_turn = {'p1': 0, 'p2': 0} # Reset draw counts
+        # Proper graveyard tracking reset
+        if not hasattr(self, 'cards_to_graveyard_this_turn'): self.cards_to_graveyard_this_turn = {}
+        self.cards_to_graveyard_this_turn[self.turn] = []
+        turns_to_keep = 1
+        keys_to_delete = [t for t in self.cards_to_graveyard_this_turn if t < self.turn - turns_to_keep]
+        for t in keys_to_delete: del self.cards_to_graveyard_this_turn[t]
+        self.gravestorm_count = 0
+        self.boast_activated = set()
+        self.forecast_used = set()
+        self.life_gained_this_turn = {}
+        self.damage_this_turn = {}
+        # Player flags
+        for player in [self.p1, self.p2]:
+            if player:
+                player["land_played"] = False
+                player["entered_battlefield_this_turn"] = set()
+                player["activated_this_turn"] = set()
+                player["lost_life_this_turn"] = False
+                player["pw_activations"] = {} # Reset PW activations per turn
+        logging.debug(f"Turn {self.turn}: Reset turn tracking variables.")
+
+    def _handle_beginning_of_phase_triggers(self):
+        """Handles 'at the beginning of <phase>' triggers and related actions."""
+        gs = self # Alias
+        active_player = gs._get_active_player()
+        non_active_player = gs._get_non_active_player()
+        trigger_context_ap = {"controller": active_player}
+        trigger_context_nap = {"controller": non_active_player}
+
+        # Trigger correct event based on phase
+        if self.phase == self.PHASE_UPKEEP:
+            # Check Day/Night (Rule 503.1)
+            if hasattr(gs, 'check_day_night_transition') and not self.day_night_checked_this_turn:
+                 self.check_day_night_transition()
+            self.trigger_ability(None, "BEGINNING_OF_UPKEEP", trigger_context_ap)
+            self.trigger_ability(None, "BEGINNING_OF_UPKEEP", trigger_context_nap)
+        elif self.phase == self.PHASE_DRAW:
+            self.trigger_ability(None, "BEGINNING_OF_DRAW", trigger_context_ap)
+            self.trigger_ability(None, "BEGINNING_OF_DRAW", trigger_context_nap)
+        elif self.phase == self.PHASE_MAIN_PRECOMBAT:
+            # Saga Counters (Rule 714.2b)
+            if hasattr(gs, 'advance_saga_counters'): self.advance_saga_counters(active_player)
+            # Add other "at beginning of precombat main" triggers if any exist
+        elif self.phase == self.PHASE_BEGIN_COMBAT:
+             self.trigger_ability(None, "BEGINNING_OF_COMBAT", trigger_context_ap)
+             self.trigger_ability(None, "BEGINNING_OF_COMBAT", trigger_context_nap)
+        elif self.phase == self.PHASE_END_STEP:
+            # Check Day/Night (Rule 513.2) - Only if not done earlier
+            if hasattr(gs, 'check_day_night_transition') and not self.day_night_checked_this_turn:
+                 self.check_day_night_transition()
+            self.trigger_ability(None, "BEGINNING_OF_END_STEP", trigger_context_ap)
+            self.trigger_ability(None, "BEGINNING_OF_END_STEP", trigger_context_nap)
+
+        # Process any queued triggers immediately
+        if self.ability_handler: self.ability_handler.process_triggered_abilities()
+        # Check SBAs after triggers
+        self.check_state_based_actions()
+
+    def _cleanup_step_actions(self, player):
+        """Handles the Cleanup Step actions for a given player."""
+        if not player: return
+
+        # 1. Discard down to maximum hand size
+        max_hand = self.max_hand_size # Can be modified by effects
+        if len(player.get("hand", [])) > max_hand:
+            num_to_discard = len(player["hand"]) - max_hand
+            logging.info(f"{player['name']} discarding {num_to_discard} card(s) due to hand size.")
+            # TODO: Implement AI/Player choice for discard
+            # Simple: Discard last N cards drawn/added
+            for _ in range(num_to_discard):
+                if player["hand"]:
+                    card_id = player["hand"].pop(-1) # Discard last card
+                    self.move_card(card_id, player, "hand_implicit", player, "graveyard", cause="cleanup_discard")
+            self.check_state_based_actions() # Check immediately after discard
+
+        # 2. Remove damage marked on permanents
+        player["damage_counters"] = {}
+        player["deathtouch_damage"] = {}
+        logging.debug(f"Removed damage from {player['name']}'s creatures.")
+
+        # 3. "Until end of turn" and "this turn" effects end
+        # --- LayerSystem handles duration removal ---
+        if hasattr(self, 'layer_system'):
+            removed_count = self.layer_system.remove_temporary_effects(self.turn)
+            if removed_count > 0: logging.debug(f"Cleanup: Removed {removed_count} temporary layer effects.")
+        # Clear other temporary game state trackers (need specific cleanup logic)
+        if hasattr(self, 'haste_until_eot'): self.haste_until_eot.clear()
+        # Clear exhaust status (typically done at start of controller's untap)
+        # Let's move exhaust clear to UNTAP phase
+        # self.exhaust_ability_used.clear()
+
+    def _get_next_turn_player(self):
+        """Determines who the active player will be on the next turn."""
+        # Simple 2-player toggle based on current turn and agent assignment
+        current_turn_player_is_p1 = (self.turn % 2 == 1) == self.agent_is_p1
+        return self.p2 if current_turn_player_is_p1 else self.p1
+
+    def _combat_has_first_strike(self):
+        """Checks if any attacking or blocking creature has first strike or double strike."""
+        for creature_id in self.current_attackers:
+             if self.check_keyword(creature_id, "first strike") or self.check_keyword(creature_id, "double strike"):
+                 return True
+        for blockers in self.current_block_assignments.values():
+             for blocker_id in blockers:
+                  if self.check_keyword(blocker_id, "first strike") or self.check_keyword(blocker_id, "double strike"):
+                      return True
+        return False
 
     def _get_active_player(self):
         """Returns the active player (whose turn it is)."""
@@ -3348,298 +3398,307 @@ class GameState:
         return False
 
     def clone(self):
-        """Create a deep copy of the game state for lookahead simulation."""
-        import copy # Ensure copy is imported
+        """
+        Create a deep copy of the game state for lookahead simulation.
+        Handles deep copying mutable state, re-linking subsystems, and
+        correcting object references within the cloned state.
+        """
+        import copy # Ensure copy module is available
 
+        logging.debug("Cloning GameState starting...")
         # 1. Create a new instance with basic parameters (card_db is shared reference)
         cloned_state = GameState(self.card_db, self.max_turns, self.max_hand_size, self.max_battlefield)
 
-        # --- Deep Copy Attributes that change ---
-        # Primitive types are fine with shallow copy / direct assignment
-        cloned_state.turn = self.turn
-        cloned_state.phase = self.phase
-        cloned_state.agent_is_p1 = self.agent_is_p1
-        cloned_state.combat_damage_dealt = self.combat_damage_dealt if hasattr(self, 'combat_damage_dealt') else False
-        cloned_state.day_night_state = self.day_night_state if hasattr(self, 'day_night_state') else None
-        cloned_state.day_night_checked_this_turn = self.day_night_checked_this_turn if hasattr(self, 'day_night_checked_this_turn') else False
-        cloned_state.priority_pass_count = self.priority_pass_count if hasattr(self, 'priority_pass_count') else 0
-        cloned_state.last_stack_size = self.last_stack_size if hasattr(self, 'last_stack_size') else 0
-        cloned_state.previous_priority_phase = self.previous_priority_phase if hasattr(self, 'previous_priority_phase') else None
-        # Copy other simple state variables
-        cloned_state.mulligan_in_progress = self.mulligan_in_progress if hasattr(self, 'mulligan_in_progress') else False
-        cloned_state.bottoming_in_progress = self.bottoming_in_progress if hasattr(self, 'bottoming_in_progress') else False
-        cloned_state.cards_to_bottom = self.cards_to_bottom if hasattr(self, 'cards_to_bottom') else 0
-        cloned_state.bottoming_count = self.bottoming_count if hasattr(self, 'bottoming_count') else 0
-        cloned_state.split_second_active = self.split_second_active if hasattr(self, 'split_second_active') else False
-        cloned_state.gravestorm_count = self.gravestorm_count if hasattr(self, 'gravestorm_count') else 0
-        cloned_state.miracle_active = self.miracle_active if hasattr(self, 'miracle_active') else False
-        cloned_state.miracle_card_id = self.miracle_card_id if hasattr(self, 'miracle_card_id') else None
-        cloned_state.progress_was_forced = self.progress_was_forced if hasattr(self, 'progress_was_forced') else False
-        cloned_state._turn_limit_checked = self._turn_limit_checked if hasattr(self, '_turn_limit_checked') else False
-        cloned_state.exhaust_ability_used = copy.deepcopy(self.exhaust_ability_used) if hasattr(self, 'exhaust_ability_used') else {}
+        # --- Copy Primitive/Immutable Attributes ---
+        # List all attributes expected to be simple types (int, float, bool, str, None)
+        primitive_attrs = [
+            "turn", "phase", "agent_is_p1", "combat_damage_dealt", "day_night_state",
+            "day_night_checked_this_turn", "priority_pass_count", "last_stack_size",
+            "previous_priority_phase", "mulligan_in_progress", "bottoming_in_progress",
+            "cards_to_bottom", "bottoming_count", "split_second_active", "gravestorm_count",
+            "miracle_active", "miracle_card_id", "miracle_cost",
+            "progress_was_forced", "_turn_limit_checked", "_phase_action_count"
+        ]
+        for attr in primitive_attrs:
+            if hasattr(self, attr):
+                setattr(cloned_state, attr, getattr(self, attr))
+            # else: # Attribute might not exist, skip silently or log warning if expected
+            #     logging.warning(f"Clone: Primitive attribute '{attr}' not found on original state.")
+
+        # --- Deep Copy Player States (MUST be deep) ---
+        try:
+            cloned_state.p1 = copy.deepcopy(self.p1) if self.p1 else None
+            cloned_state.p2 = copy.deepcopy(self.p2) if self.p2 else None
+            logging.debug("Cloned players p1 and p2.")
+        except Exception as e:
+            logging.error(f"CRITICAL Error deep copying player states: {e}", exc_info=True)
+            # If players fail to copy, clone is likely unusable
+            return None
+
+        # --- Deep Copy Other Mutable Top-Level Attributes ---
+        # Use deepcopy for dictionaries and lists/sets that might contain mutable items or need full separation.
+        # Use shallow copy (.copy() or [:]) only if absolutely sure elements are immutable (like IDs) AND no nested mutables exist.
+        mutable_attrs_deepcopy = [
+            "stack", "current_block_assignments", "exhaust_ability_used",
+            "impending_cards", "_offspring_cost_paid_context", "until_end_of_turn_effects",
+            "temp_control_effects", "abilities_activated_this_turn", "spells_cast_this_turn",
+            "cards_played", "damage_dealt_this_turn", "cards_drawn_this_turn",
+            "life_gained_this_turn", "damage_this_turn", "cards_to_graveyard_this_turn",
+            "saga_counters", "battle_cards", "suspended_cards", "rebounded_cards",
+            "foretold_cards", "epic_spells", "morphed_cards", "manifested_cards",
+            "planeswalker_attack_targets", "battle_attack_targets", "planeswalker_protectors",
+            "mulligan_count", "mulligan_data" # Dicts need deepcopy
+            # Contexts will be handled separately due to player references
+        ]
+        mutable_attrs_copy = [ # Attributes safe for shallow copy (typically sets/lists of IDs/primitives)
+            "current_attackers", "attackers_this_turn", "adventure_cards", "mdfc_cards",
+            "cards_castable_from_exile", "cast_as_back_face", "phased_out", "kicked_cards",
+            "evoked_cards", "blitz_cards", "dash_cards", "unearthed_cards", "jump_start_cards",
+            "buyback_cards", "flashback_cards", "exile_at_end_of_combat", "haste_until_eot",
+            "banding_creatures", "crewed_vehicles", "boast_activated", "forecast_used",
+            "myriad_tokens", "persist_returned", "undying_returned",
+            "_phase_history", # List of simple ints
+            "first_strike_ordering", # List of simple IDs likely
+            # Logging sets (copying is fine, doesn't affect game logic)
+             "_logged_card_ids", "_logged_errors"
+        ]
+
+        for attr in mutable_attrs_deepcopy:
+            if hasattr(self, attr):
+                try:
+                    setattr(cloned_state, attr, copy.deepcopy(getattr(self, attr)))
+                except Exception as e:
+                    logging.error(f"Error deep copying attribute '{attr}': {e}")
+                    setattr(cloned_state, attr, {} if isinstance(getattr(self, attr), dict) else []) # Fallback empty
+            # else: # Attribute might not exist
+            #     logging.debug(f"Clone: Mutable attribute '{attr}' not found on original state.")
+
+        for attr in mutable_attrs_copy:
+            if hasattr(self, attr):
+                val = getattr(self, attr)
+                try:
+                    if isinstance(val, list): setattr(cloned_state, attr, val[:])
+                    elif isinstance(val, set): setattr(cloned_state, attr, val.copy())
+                    # Add dict if safe: elif isinstance(val, dict): setattr(cloned_state, attr, val.copy())
+                    else: setattr(cloned_state, attr, val) # Should not happen based on list contents
+                except Exception as e:
+                    logging.error(f"Error copying attribute '{attr}': {e}")
+                    setattr(cloned_state, attr, [] if isinstance(val, (list, set)) else {}) # Fallback empty
+
+        # --- Special Handling for Original Decks (Shallow list copy is fine) ---
         cloned_state.original_p1_deck = self.original_p1_deck[:] if hasattr(self,'original_p1_deck') else []
         cloned_state.original_p2_deck = self.original_p2_deck[:] if hasattr(self,'original_p2_deck') else []
-        
-        # --- Deep Copy Player States ---
-        # Player States (Critical to deep copy) - Need to handle potential None
-        cloned_state.p1 = copy.deepcopy(self.p1) if self.p1 else None
-        cloned_state.p2 = copy.deepcopy(self.p2) if self.p2 else None
 
-        # --- Deep Copy Combat State ---
-        cloned_state.current_attackers = self.current_attackers[:] if hasattr(self, 'current_attackers') else [] # Shallow copy list ok
-        cloned_state.current_block_assignments = copy.deepcopy(self.current_block_assignments) if hasattr(self, 'current_block_assignments') else {}
+        # --- Deep Copy Contexts and Fix Player References ---
+        logging.debug("Cloning contexts and fixing player references...")
+        context_attrs = ["targeting_context", "sacrifice_context", "choice_context",
+                         "spree_context", "dredge_pending", "madness_cast_available",
+                         "pending_spell_context", "clash_context"]
+        context_keys_with_player_refs = ["controller", "player", "target_obj", "activator",
+                                    "original_caster", "player_gaining_life", # Add keys that hold player refs
+                                    "from_player", "to_player", # For move_card context if stored
+                                    # Specific context player references:
+                                    "mulligan_player", "bottoming_player", "surveiling_player", "scrying_player"
+                                   ]
 
-        # --- Deep Copy Stack ---
-        cloned_state.stack = copy.deepcopy(self.stack) if hasattr(self, 'stack') else []
-
-        # --- Deep Copy effect tracking ---
-        cloned_state.impending_cards = copy.deepcopy(self.impending_cards) if hasattr(self,'impending_cards') else {}
-        cloned_state._offspring_cost_paid_context = copy.deepcopy(self._offspring_cost_paid_context) if hasattr(self,'_offspring_cost_paid_context') else {}
-        cloned_state.until_end_of_turn_effects = copy.deepcopy(self.until_end_of_turn_effects) if hasattr(self, 'until_end_of_turn_effects') else {}
-        cloned_state.temp_control_effects = copy.deepcopy(self.temp_control_effects) if hasattr(self, 'temp_control_effects') else {}
-        cloned_state.abilities_activated_this_turn = copy.deepcopy(self.abilities_activated_this_turn) if hasattr(self, 'abilities_activated_this_turn') else []
-        cloned_state.spells_cast_this_turn = copy.deepcopy(self.spells_cast_this_turn) if hasattr(self, 'spells_cast_this_turn') else []
-        cloned_state.attackers_this_turn = self.attackers_this_turn.copy() if hasattr(self, 'attackers_this_turn') else set() # Copy set
-        cloned_state.cards_played = copy.deepcopy(self.cards_played) if hasattr(self, 'cards_played') else {}
-        cloned_state.damage_dealt_this_turn = copy.deepcopy(self.damage_dealt_this_turn) if hasattr(self, 'damage_dealt_this_turn') else {}
-        cloned_state.cards_drawn_this_turn = copy.deepcopy(self.cards_drawn_this_turn) if hasattr(self, 'cards_drawn_this_turn') else {}
-        cloned_state.life_gained_this_turn = copy.deepcopy(self.life_gained_this_turn) if hasattr(self, 'life_gained_this_turn') else {}
-        cloned_state.damage_this_turn = copy.deepcopy(self.damage_this_turn) if hasattr(self, 'damage_this_turn') else {}
-        cloned_state.cards_to_graveyard_this_turn = copy.deepcopy(self.cards_to_graveyard_this_turn) if hasattr(self, 'cards_to_graveyard_this_turn') else {}
-
-        # --- Deep Copy Special Card States ---
-        cloned_state.adventure_cards = self.adventure_cards.copy() if hasattr(self, 'adventure_cards') else set()
-        cloned_state.saga_counters = copy.deepcopy(self.saga_counters) if hasattr(self, 'saga_counters') else {}
-        cloned_state.mdfc_cards = self.mdfc_cards.copy() if hasattr(self, 'mdfc_cards') else set()
-        cloned_state.battle_cards = copy.deepcopy(self.battle_cards) if hasattr(self, 'battle_cards') else {}
-        cloned_state.cards_castable_from_exile = self.cards_castable_from_exile.copy() if hasattr(self, 'cards_castable_from_exile') else set()
-        cloned_state.cast_as_back_face = self.cast_as_back_face.copy() if hasattr(self, 'cast_as_back_face') else set()
-
-        # --- Deep Copy Special Status Tracking ---
-        cloned_state.phased_out = self.phased_out.copy() if hasattr(self, 'phased_out') else set()
-        cloned_state.suspended_cards = copy.deepcopy(self.suspended_cards) if hasattr(self, 'suspended_cards') else {}
-        cloned_state.rebounded_cards = copy.deepcopy(self.rebounded_cards) if hasattr(self, 'rebounded_cards') else {}
-        cloned_state.kicked_cards = self.kicked_cards.copy() if hasattr(self, 'kicked_cards') else set()
-        cloned_state.evoked_cards = self.evoked_cards.copy() if hasattr(self, 'evoked_cards') else set()
-        cloned_state.foretold_cards = copy.deepcopy(self.foretold_cards) if hasattr(self, 'foretold_cards') else {} # Deepcopy dict
-        cloned_state.blitz_cards = self.blitz_cards.copy() if hasattr(self, 'blitz_cards') else set()
-        cloned_state.dash_cards = self.dash_cards.copy() if hasattr(self, 'dash_cards') else set()
-        cloned_state.unearthed_cards = self.unearthed_cards.copy() if hasattr(self, 'unearthed_cards') else set()
-        cloned_state.jump_start_cards = self.jump_start_cards.copy() if hasattr(self, 'jump_start_cards') else set()
-        cloned_state.buyback_cards = self.buyback_cards.copy() if hasattr(self, 'buyback_cards') else set()
-        cloned_state.flashback_cards = self.flashback_cards.copy() if hasattr(self, 'flashback_cards') else set()
-        cloned_state.exile_at_end_of_combat = self.exile_at_end_of_combat[:] if hasattr(self, 'exile_at_end_of_combat') else []
-        cloned_state.haste_until_eot = self.haste_until_eot.copy() if hasattr(self, 'haste_until_eot') else set()
-        # Removed redundant haste tracker: cloned_state.has_haste_until_eot = self.has_haste_until_eot.copy() if hasattr(self, 'has_haste_until_eot') else set()
-        cloned_state.banding_creatures = self.banding_creatures.copy() if hasattr(self, 'banding_creatures') else set()
-        cloned_state.crewed_vehicles = self.crewed_vehicles.copy() if hasattr(self, 'crewed_vehicles') else set()
-        cloned_state.morphed_cards = copy.deepcopy(self.morphed_cards) if hasattr(self, 'morphed_cards') else {}
-        cloned_state.manifested_cards = copy.deepcopy(self.manifested_cards) if hasattr(self, 'manifested_cards') else {}
-        cloned_state.boast_activated = self.boast_activated.copy() if hasattr(self, 'boast_activated') else set()
-        cloned_state.forecast_used = self.forecast_used.copy() if hasattr(self, 'forecast_used') else set()
-        cloned_state.epic_spells = copy.deepcopy(self.epic_spells) if hasattr(self, 'epic_spells') else {}
-        # Note: city_blessing moved to player state
-        cloned_state.myriad_tokens = self.myriad_tokens[:] if hasattr(self, 'myriad_tokens') else []
-        cloned_state.persist_returned = self.persist_returned.copy() if hasattr(self, 'persist_returned') else set()
-        cloned_state.undying_returned = self.undying_returned.copy() if hasattr(self, 'undying_returned') else set()
-
-        # --- Deep Copy Miracle State ---
-        # Correctly link cloned player objects if original players existed
-        cloned_miracle_player = None
-        if hasattr(self, 'miracle_player') and self.miracle_player:
-            if self.miracle_player == self.p1: cloned_miracle_player = cloned_state.p1
-            elif self.miracle_player == self.p2: cloned_miracle_player = cloned_state.p2
-        cloned_state.miracle_player = cloned_miracle_player
-        cloned_state.miracle_cost = self.miracle_cost if hasattr(self, 'miracle_cost') else None
-        cloned_state.miracle_cost_parsed = copy.deepcopy(self.miracle_cost_parsed) if hasattr(self, 'miracle_cost_parsed') else None
-
-        # --- Deep Copy Context Objects (Crucial for multi-step actions) ---
-        # Deep copy first
-        cloned_state.targeting_context = copy.deepcopy(self.targeting_context) if hasattr(self,'targeting_context') else None
-        cloned_state.sacrifice_context = copy.deepcopy(self.sacrifice_context) if hasattr(self,'sacrifice_context') else None
-        cloned_state.choice_context = copy.deepcopy(self.choice_context) if hasattr(self,'choice_context') else None
-        cloned_state.spree_context = copy.deepcopy(self.spree_context) if hasattr(self,'spree_context') else None
-        cloned_state.dredge_pending = copy.deepcopy(self.dredge_pending) if hasattr(self,'dredge_pending') else None
-        cloned_state.madness_cast_available = copy.deepcopy(self.madness_cast_available) if hasattr(self, 'madness_cast_available') else None
-        cloned_state.pending_spell_context = copy.deepcopy(self.pending_spell_context) if hasattr(self,'pending_spell_context') else None
-        cloned_state.clash_context = copy.deepcopy(self.clash_context) if hasattr(self,'clash_context') else None
-
-        # Fix player references in contexts
-        context_keys_with_player = ["controller", "player", "bottoming_player", "surveiling_player", "scrying_player", "mulligan_player"]
-        contexts_to_fix = [cloned_state.targeting_context, cloned_state.sacrifice_context,
-                         cloned_state.choice_context, cloned_state.dredge_pending,
-                         cloned_state.madness_cast_available, cloned_state.pending_spell_context]
-        for ctx in contexts_to_fix:
-            if ctx and isinstance(ctx, dict):
-                for key in context_keys_with_player:
-                    if key in ctx and ctx[key] is not None:
-                        orig_player = ctx[key]
-                        ctx[key] = cloned_state.p1 if orig_player == self.p1 else cloned_state.p2 if orig_player == self.p2 else None
+        for attr in context_attrs:
+            if hasattr(self, attr):
+                 orig_ctx = getattr(self, attr)
+                 if orig_ctx:
+                      try:
+                           cloned_ctx = copy.deepcopy(orig_ctx)
+                           # Fix player references within the copied context dict
+                           if isinstance(cloned_ctx, dict):
+                               for key in context_keys_with_player_refs:
+                                   if key in cloned_ctx and cloned_ctx[key] is not None:
+                                       # Handle direct player objects or potentially player IDs ('p1', 'p2')
+                                       if cloned_ctx[key] == self.p1: cloned_ctx[key] = cloned_state.p1
+                                       elif cloned_ctx[key] == self.p2: cloned_ctx[key] = cloned_state.p2
+                                       # Add checks for 'p1'/'p2' string IDs if needed
+                                       # else if cloned_ctx[key] == 'p1': # No change needed if storing IDs
+                                       # else if cloned_ctx[key] == 'p2': # No change needed
+                                       else: # Potential complex object reference? Keep for now unless known error.
+                                           pass # logging.debug(f"Keeping non-player object reference in context '{attr}' key '{key}': {type(cloned_ctx[key])}")
+                               # Fix ability references if contexts store them
+                               if 'ability' in cloned_ctx and cloned_ctx['ability'] is not None:
+                                    # Ability objects are hard to deep copy correctly.
+                                    # Best approach: Remove from context, rely on resolution re-finding it.
+                                    # OR: Store minimal info (card_id, ability_idx) instead of object.
+                                    logging.debug(f"Removing Ability object reference from cloned context '{attr}'.")
+                                    cloned_ctx['ability'] = None # Clear complex object reference
+                           setattr(cloned_state, attr, cloned_ctx)
+                      except Exception as e:
+                           logging.error(f"Error deep copying context '{attr}': {e}", exc_info=True)
+                           setattr(cloned_state, attr, None) # Set to None on error
+                 else:
+                      setattr(cloned_state, attr, None)
 
 
-        # --- Deep Copy Surveil State ---
-        cloned_state.surveil_in_progress = self.surveil_in_progress if hasattr(self, 'surveil_in_progress') else False
-        cloned_state.cards_being_surveiled = self.cards_being_surveiled[:] if hasattr(self, 'cards_being_surveiled') else []
-        cloned_surveiling_player = None
-        if hasattr(self, 'surveiling_player') and self.surveiling_player:
-            if self.surveiling_player == self.p1: cloned_surveiling_player = cloned_state.p1
-            elif self.surveiling_player == self.p2: cloned_surveiling_player = cloned_state.p2
-        cloned_state.surveiling_player = cloned_surveiling_player
+        # --- Fix Top-Level Player References ---
+        player_ref_attrs = ["priority_player", "mulligan_player", "bottoming_player",
+                            "miracle_player", "surveiling_player", "scrying_player"]
+        for attr in player_ref_attrs:
+             if hasattr(self, attr):
+                 orig_player = getattr(self, attr)
+                 cloned_player = None
+                 if orig_player == self.p1: cloned_player = cloned_state.p1
+                 elif orig_player == self.p2: cloned_player = cloned_state.p2
+                 setattr(cloned_state, attr, cloned_player)
 
-        # --- Deep Copy Scry State ---
-        cloned_state.scry_in_progress = self.scry_in_progress if hasattr(self, 'scry_in_progress') else False
-        cloned_state.scrying_cards = self.scrying_cards[:] if hasattr(self, 'scrying_cards') else []
-        cloned_scrying_player = None
-        if hasattr(self, 'scrying_player') and self.scrying_player:
-             if self.scrying_player == self.p1: cloned_scrying_player = cloned_state.p1
-             elif self.scrying_player == self.p2: cloned_scrying_player = cloned_state.p2
-        cloned_state.scrying_player = cloned_scrying_player
-        cloned_state.scrying_tops = self.scrying_tops[:] if hasattr(self, 'scrying_tops') else []
-        cloned_state.scrying_bottoms = self.scrying_bottoms[:] if hasattr(self, 'scrying_bottoms') else []
+        # --- IMPORTANT: Re-initialize Subsystems LINKED TO THE CLONE ---
+        # Subsystems must be created *after* players and basic state are copied.
+        logging.debug("Re-initializing subsystems for the clone...")
+        cloned_state._init_subsystems() # Creates NEW, EMPTY subsystems linked to cloned_state
 
-        # --- Deep Copy Mulligan State ---
-        cloned_mulligan_player = None
-        if hasattr(self, 'mulligan_player') and self.mulligan_player:
-             if self.mulligan_player == self.p1: cloned_mulligan_player = cloned_state.p1
-             elif self.mulligan_player == self.p2: cloned_mulligan_player = cloned_state.p2
-        cloned_state.mulligan_player = cloned_mulligan_player
-        cloned_state.mulligan_count = copy.deepcopy(self.mulligan_count) if hasattr(self, 'mulligan_count') else {'p1':0, 'p2':0}
-        cloned_state.mulligan_data = copy.deepcopy(self.mulligan_data) if hasattr(self, 'mulligan_data') else {'p1':0, 'p2':0}
-
-        cloned_bottoming_player = None
-        if hasattr(self, 'bottoming_player') and self.bottoming_player:
-             if self.bottoming_player == self.p1: cloned_bottoming_player = cloned_state.p1
-             elif self.bottoming_player == self.p2: cloned_bottoming_player = cloned_state.p2
-        cloned_state.bottoming_player = cloned_bottoming_player
-
-
-        # --- Restore priority player reference correctly ---
-        cloned_priority_player = None
-        if hasattr(self, 'priority_player') and self.priority_player:
-             if self.priority_player == self.p1: cloned_priority_player = cloned_state.p1
-             elif self.priority_player == self.p2: cloned_priority_player = cloned_state.p2
-        cloned_state.priority_player = cloned_priority_player
-
-        # --- Re-initialize Subsystems within the CLONED state ---
-        cloned_state._init_subsystems() # Creates NEW, EMPTY subsystems on cloned_state, linked to cloned_state
-
-        # --- Deep Copy Subsystem STATE (if original subsystems exist) ---
-        # This step requires copying the actual effect data from the original state's
-        # subsystems into the cloned state's subsystems.
-
-        # Copy Ability Handler State (Repopulate Approach - More Robust)
-        if cloned_state.ability_handler and self.ability_handler: # Check both handlers exist
-            # Repopulate Approach (Safer than deep copying potentially complex ability objects)
-            cloned_state.ability_handler.registered_abilities = {} # Clear default state
-            cloned_state.ability_handler.active_triggers = []    # Clear default state
-
-            # Re-parse and register abilities for all permanents on the cloned state's battlefield
-            for player in [cloned_state.p1, cloned_state.p2]:
-                if player:
-                    for card_id in list(player.get("battlefield", [])): # Use list() for safe iteration
-                        card = cloned_state._safe_get_card(card_id)
-                        if card and hasattr(cloned_state.ability_handler, '_parse_and_register_abilities'):
-                            # Re-parse using the *cloned* handler instance
-                            cloned_state.ability_handler._parse_and_register_abilities(card_id, card)
-            # Copy Active Triggers (Queued) - Need to fix controller refs
-            if hasattr(self.ability_handler, 'active_triggers'):
-                 cloned_state.ability_handler.active_triggers = []
-                 for trigger_item in self.ability_handler.active_triggers:
-                     if isinstance(trigger_item, tuple) and len(trigger_item) >= 2:
-                         ability, controller_orig = trigger_item[:2]
-                         context = trigger_item[2] if len(trigger_item) > 2 else {}
-                         # Remap original controller to cloned controller object
-                         controller_cloned = cloned_state.p1 if controller_orig == self.p1 else cloned_state.p2 if controller_orig == self.p2 else None
-                         if controller_cloned:
-                             cloned_state.ability_handler.active_triggers.append((ability, controller_cloned, context))
-                         else:
-                              logging.warning(f"Could not clone controller reference for active trigger: {ability}")
-            else:
-                 cloned_state.ability_handler.active_triggers = [] # Ensure it exists
-
-        # Deep Copy Layer System State
-        # Only proceed if both original and cloned layer systems exist, and original has layers attribute
+        # --- Copy Subsystem STATE (The most complex part) ---
+        logging.debug("Copying subsystem states...")
+        # Layer System (Deep copy effects, fix player references)
         if cloned_state.layer_system and self.layer_system and hasattr(self.layer_system, 'layers'):
-            # logging.debug("Deep copying LayerSystem state...")
-            cloned_state.layer_system.layers = {} # Ensure layers dict exists on clone
-            # Iterate through original state's layers safely
-            for layer_num, effects_list_or_dict in self.layer_system.layers.items():
-                if isinstance(effects_list_or_dict, dict): # Layer 7
-                    cloned_state.layer_system.layers[layer_num] = {}
-                    for sublayer, effects_list in effects_list_or_dict.items():
-                        cloned_sublayer = []
-                        for eid, data in effects_list:
-                            copied_data = copy.deepcopy(data)
-                            # Fix controller references (player dict)
-                            ref_keys = ['_controller', 'controller_id', 'player', 'owner', 'new_controller'] # Keys that might hold player objects
-                            for key in ref_keys:
-                                if key in copied_data and copied_data[key] is not None:
-                                     orig_player = copied_data[key]
-                                     copied_data[key] = cloned_state.p1 if orig_player == self.p1 else cloned_state.p2 if orig_player == self.p2 else None # Map to cloned object
-                            cloned_sublayer.append((eid, copied_data))
-                        cloned_state.layer_system.layers[layer_num][sublayer] = cloned_sublayer
-                else: # Layers 1-6
-                    cloned_layer = []
-                    for eid, data in effects_list_or_dict:
-                         copied_data = copy.deepcopy(data)
-                         # Fix controller references (same logic)
-                         ref_keys = ['_controller', 'controller_id', 'player', 'owner', 'new_controller']
-                         for key in ref_keys:
-                             if key in copied_data and copied_data[key] is not None:
-                                 orig_player = copied_data[key]
-                                 copied_data[key] = cloned_state.p1 if orig_player == self.p1 else cloned_state.p2 if orig_player == self.p2 else None
-                         cloned_layer.append((eid, copied_data))
-                    cloned_state.layer_system.layers[layer_num] = cloned_layer
+            try:
+                cloned_state.layer_system.layers = {} # Start fresh
+                cloned_state.layer_system.effect_counter = self.layer_system.effect_counter # Copy simple counter
+                cloned_state.layer_system._last_applied_state_hash = self.layer_system._last_applied_state_hash
+                cloned_state.layer_system.timestamps = self.layer_system.timestamps.copy()
+                cloned_state.layer_system.dependencies = copy.deepcopy(self.layer_system.dependencies)
 
-            # Copy other LayerSystem state attributes
-            cloned_state.layer_system.timestamps = self.layer_system.timestamps.copy()
-            cloned_state.layer_system.effect_counter = self.layer_system.effect_counter
-            cloned_state.layer_system.dependencies = copy.deepcopy(self.layer_system.dependencies)
-            cloned_state.layer_system._last_applied_state_hash = self.layer_system._last_applied_state_hash
+                for layer_num, effects_dict_or_list in self.layer_system.layers.items():
+                    if isinstance(effects_dict_or_list, dict): # Layer 7 has sublayers
+                        cloned_state.layer_system.layers[layer_num] = defaultdict(list) # Recreate defaultdict
+                        for sublayer, effects_list in effects_dict_or_list.items():
+                             cloned_sublayer = []
+                             for eid, data in effects_list:
+                                  copied_data = copy.deepcopy(data)
+                                  # Fix player references
+                                  ref_keys = ['_controller', 'controller_id', 'player', 'owner', 'new_controller']
+                                  for key in ref_keys:
+                                       if key in copied_data and copied_data[key] is not None:
+                                            orig_player = copied_data[key]
+                                            copied_data[key] = cloned_state.p1 if orig_player == self.p1 else cloned_state.p2 if orig_player == self.p2 else None
+                                  cloned_sublayer.append((eid, copied_data))
+                             cloned_state.layer_system.layers[layer_num][sublayer] = cloned_sublayer
+                    else: # Layers 1-6 are lists
+                        cloned_layer = []
+                        for eid, data in effects_dict_or_list:
+                             copied_data = copy.deepcopy(data)
+                             # Fix player references
+                             ref_keys = ['_controller', 'controller_id', 'player', 'owner', 'new_controller']
+                             for key in ref_keys:
+                                  if key in copied_data and copied_data[key] is not None:
+                                       orig_player = copied_data[key]
+                                       copied_data[key] = cloned_state.p1 if orig_player == self.p1 else cloned_state.p2 if orig_player == self.p2 else None
+                             cloned_layer.append((eid, copied_data))
+                        cloned_state.layer_system.layers[layer_num] = cloned_layer
+                logging.debug("Cloned LayerSystem state.")
+            except Exception as e:
+                 logging.error(f"Error cloning LayerSystem state: {e}", exc_info=True)
 
-        # Deep Copy Replacement Effects State
+        # Replacement Effects (Deep copy effects, fix player references)
         if cloned_state.replacement_effects and self.replacement_effects:
-            # logging.debug("Deep copying ReplacementEffects state...")
-            cloned_state.replacement_effects.active_effects = []
-            cloned_state.replacement_effects.effect_index = defaultdict(list)
-            # Iterate through the ORIGINAL active effects
-            for data in self.replacement_effects.active_effects:
-                 copied_data = copy.deepcopy(data)
-                 # Fix player references (controller, player, etc.)
-                 ref_keys = ['_controller', 'controller_id', 'player', 'owner']
-                 for key in ref_keys:
-                     if key in copied_data and copied_data[key] is not None:
-                          orig_player = copied_data[key]
-                          copied_data[key] = cloned_state.p1 if orig_player == self.p1 else cloned_state.p2 if orig_player == self.p2 else None
+            try:
+                cloned_state.replacement_effects.active_effects = [] # Reset
+                cloned_state.replacement_effects.effect_index = defaultdict(list) # Reset
+                cloned_state.replacement_effects.effect_counter = self.replacement_effects.effect_counter # Copy counter
 
-                 cloned_state.replacement_effects.active_effects.append(copied_data)
-                 # Rebuild index on the cloned system
-                 event_type = copied_data.get('event_type')
-                 if event_type:
-                     cloned_state.replacement_effects.effect_index[event_type].append(copied_data)
+                for data in self.replacement_effects.active_effects:
+                    copied_data = copy.deepcopy(data)
+                    ref_keys = ['_controller', 'controller_id', 'player', 'owner']
+                    for key in ref_keys:
+                         if key in copied_data and copied_data[key] is not None:
+                              orig_player = copied_data[key]
+                              copied_data[key] = cloned_state.p1 if orig_player == self.p1 else cloned_state.p2 if orig_player == self.p2 else None
+                    # Re-register in the cloned system to build index correctly
+                    cloned_state.replacement_effects.active_effects.append(copied_data)
+                    event_type = copied_data.get('event_type')
+                    if event_type:
+                        cloned_state.replacement_effects.effect_index[event_type].append(copied_data)
+                logging.debug("Cloned ReplacementEffects state.")
+            except Exception as e:
+                 logging.error(f"Error cloning ReplacementEffects state: {e}", exc_info=True)
 
-            cloned_state.replacement_effects.effect_counter = self.replacement_effects.effect_counter
+        # Ability Handler (Repopulate Abilities - safest)
+        if cloned_state.ability_handler and self.ability_handler:
+            logging.debug("Repopulating AbilityHandler registered abilities for clone...")
+            try:
+                 cloned_state.ability_handler.registered_abilities = {} # Clear default
+                 for player in [cloned_state.p1, cloned_state.p2]:
+                     if player:
+                         # Check all potential zones for permanents with abilities
+                         zones_to_check = ["battlefield", "graveyard"] # Add hand/exile if abilities can function there
+                         for zone in zones_to_check:
+                             for card_id in list(player.get(zone, [])): # Iterate copy
+                                  card = cloned_state._safe_get_card(card_id) # Use clone's DB ref
+                                  if card:
+                                      # Ensure card object points to CLONED state
+                                      setattr(card, 'game_state', cloned_state)
+                                      cloned_state.ability_handler._parse_and_register_abilities(card_id, card)
+
+                 # Copy active triggers, fixing controller references
+                 cloned_state.ability_handler.active_triggers = []
+                 if hasattr(self.ability_handler, 'active_triggers'):
+                     for trigger_item in self.ability_handler.active_triggers:
+                         if isinstance(trigger_item, tuple) and len(trigger_item) >= 2:
+                             ability, controller_orig = trigger_item[:2]
+                             context_orig = trigger_item[2] if len(trigger_item) > 2 else {}
+                             controller_cloned = cloned_state.p1 if controller_orig == self.p1 else cloned_state.p2 if controller_orig == self.p2 else None
+                             if controller_cloned:
+                                 # Ability objects themselves are complex to deepcopy, reference original for now
+                                 # Context needs deepcopy + player reference fixing
+                                 context_cloned = copy.deepcopy(context_orig)
+                                 ref_keys = ['controller', 'player', 'owner', 'activator', 'event_card', 'source_card'] # Look for player or card object refs
+                                 for key in ref_keys:
+                                     if key in context_cloned and context_cloned[key] is not None:
+                                         if context_cloned[key] == self.p1: context_cloned[key] = cloned_state.p1
+                                         elif context_cloned[key] == self.p2: context_cloned[key] = cloned_state.p2
+                                         elif isinstance(context_cloned[key], Card):
+                                             # Card objects are generally okay to shallow copy (point to DB template)
+                                             pass
+                                 cloned_state.ability_handler.active_triggers.append((ability, controller_cloned, context_cloned))
+                     logging.debug(f"Copied {len(cloned_state.ability_handler.active_triggers)} active triggers to clone.")
+
+            except Exception as e:
+                 logging.error(f"Error cloning AbilityHandler state: {e}", exc_info=True)
 
 
-        # --- Link External Systems (Shallow Copy/Reference) ---
-        cloned_state.strategy_memory = self.strategy_memory  # Just reference
-        cloned_state.stats_tracker = self.stats_tracker      # Just reference
-        cloned_state.card_memory = self.card_memory          # Just reference
+        # Other subsystems: Most likely stateless or state handled elsewhere (e.g., player mana pool for ManaSystem)
+        # Just ensure they are linked to the CLONED state (done by _init_subsystems)
+        if cloned_state.mana_system: cloned_state.mana_system.game_state = cloned_state
+        if cloned_state.combat_resolver: cloned_state.combat_resolver.game_state = cloned_state
+        if cloned_state.targeting_system: cloned_state.targeting_system.game_state = cloned_state
+        if cloned_state.card_evaluator: cloned_state.card_evaluator.game_state = cloned_state
+        if cloned_state.strategic_planner: cloned_state.strategic_planner.game_state = cloned_state
 
-        # --- Ensure internal subsystem references point to the cloned state ---
-        # Subsystems initialized by _init_subsystems should already be linked correctly
-        # Re-iterate to ensure AbilityHandler links are correct
-        if cloned_state.ability_handler:
-             cloned_state.ability_handler.game_state = cloned_state # Already linked by _init_subsystems
-             # Link other subsystems to the handler if needed
-             cloned_state.ability_handler.targeting_system = cloned_state.targeting_system
-             cloned_state.ability_handler.layer_system = cloned_state.layer_system
-             cloned_state.ability_handler.mana_system = cloned_state.mana_system
-             cloned_state.ability_handler.replacement_effects = cloned_state.replacement_effects
+        # ActionHandler *must* be the one created by the clone's _init_subsystems
+        if cloned_state.action_handler:
+            cloned_state.action_handler.game_state = cloned_state
+            # Link combat handler if needed (created by ActionHandler init)
+            if hasattr(cloned_state.action_handler, 'combat_handler') and cloned_state.action_handler.combat_handler:
+                cloned_state.action_handler.combat_handler.game_state = cloned_state
+        else:
+             logging.error("CRITICAL: Clone ActionHandler is None after subsystem initialization!")
 
-        logging.debug("GameState cloned successfully.")
+
+        # --- Link External Systems (Reference copy) ---
+        cloned_state.strategy_memory = self.strategy_memory
+        cloned_state.stats_tracker = self.stats_tracker
+        cloned_state.card_memory = self.card_memory
+        # Update internal references in cloned subsystems if they use external trackers
+        if cloned_state.card_evaluator:
+             cloned_state.card_evaluator.stats_tracker = cloned_state.stats_tracker
+             cloned_state.card_evaluator.card_memory = cloned_state.card_memory
+        if cloned_state.strategic_planner and hasattr(cloned_state.strategic_planner, 'strategy_memory'):
+             cloned_state.strategic_planner.strategy_memory = cloned_state.strategy_memory
+
+
+        # Re-apply layers on the clone to ensure all characteristics are correct
+        # Crucial if card objects weren't deep copied or if repopulating abilities happened
+        if cloned_state.layer_system:
+             logging.debug("Applying all layer effects on the cloned state...")
+             cloned_state.layer_system.apply_all_effects()
+
+
+        logging.info("GameState cloned successfully.")
         return cloned_state
-        
+ 
     def _safe_get_card(self, card_id, default_value=None):
         """Safely get a card with proper error handling and type checking"""
         try:

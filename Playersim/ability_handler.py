@@ -1566,128 +1566,126 @@ class AbilityHandler:
         """
         Checks all registered triggered abilities to see if they should trigger based on the event.
         Adds valid triggers to the self.active_triggers queue. Now checks graveyard.
-        Handles EXHAUST_ABILITY_ACTIVATED event and checks activator relationship.
+        Handles EXHAUST_ABILITY_ACTIVATED event and checks activator relationship. (Revised Zone Logic)
         """
         if context is None: context = {}
         gs = self.game_state
+        if not gs: logging.error("check_abilities: GameState missing!"); return False
 
         # Add game state and event type to context for condition checks
         context['game_state'] = gs
-        context['event_type'] = event_type # Ensure event type is consistently available
+        context['event_type'] = event_type
 
         event_card = gs._safe_get_card(event_origin_card_id)
         context['event_card_id'] = event_origin_card_id
         context['event_card'] = event_card
 
-        # Debug logging for the event check initiation
         event_card_name = getattr(event_card, 'name', event_origin_card_id) if event_origin_card_id else "Game Event"
-        logging.debug(f"Checking triggers for event: {event_type} (Origin: {event_card_name}) Context keys: {list(context.keys())}")
-        if event_type == "EXHAUST_ABILITY_ACTIVATED":
-            logging.debug(f"  (Exhaust activation by {context.get('activator', {}).get('name', 'Unknown')})")
+        # logging.debug(f"Checking triggers for event: {event_type} (Origin: {event_card_name}) Context keys: {list(context.keys())}")
+        # if event_type == "EXHAUST_ABILITY_ACTIVATED": logging.debug(f"  (Exhaust activation by {context.get('activator', {}).get('name', 'Unknown')})")
 
+        # Collect ALL registered abilities first, regardless of zone initially
+        abilities_to_check = []
+        player_refs = {'p1': gs.p1, 'p2': gs.p2}
+        # Iterate through players and their owned cards that *might* have abilities functioning in certain zones
+        # Battlefield is primary, Graveyard is common, Hand/Library/Exile are rare but possible
+        potential_zones = ["battlefield", "graveyard", "hand"] # Add others if needed
+        for player_id, player_obj in player_refs.items():
+             if player_obj:
+                 for zone_name in potential_zones:
+                     for card_id in player_obj.get(zone_name, []):
+                          if card_id in self.registered_abilities:
+                               # Store (card_id, ability, player_controlling_ability, zone_name)
+                               abilities_to_check.extend([(card_id, ab, player_obj, zone_name) for ab in self.registered_abilities[card_id]])
 
-        # Determine zones to check based on event type
-        zones_to_check = {"battlefield"} # Default zone
-        # Add graveyard checks for specific events
-        graveyard_trigger_events = ["DISCARD", "DIES", "CAST_SPELL", "MILL"] # Added MILL
-        if event_type in graveyard_trigger_events:
-            zones_to_check.add("graveyard")
+        # Iterate through collected potential triggers
+        queued_trigger_count = 0
+        for card_id, ability, controller, zone_name in abilities_to_check:
+             if not isinstance(ability, TriggeredAbility): continue
 
-        # Check abilities on permanents in relevant zones
-        cards_to_check_ids = set()
-        for p in [gs.p1, gs.p2]:
-            if p: # Ensure player exists
-                for zone_name in zones_to_check:
-                    cards_to_check_ids.update(p.get(zone_name, []))
-            # Consider adding hand/library/exile if specific triggers warrant it
+             source_card = gs._safe_get_card(card_id) # Fetch card for context checks
+             if not source_card: continue # Card disappeared?
 
-        for ability_source_id in cards_to_check_ids:
-            source_card = gs._safe_get_card(ability_source_id)
-            if not source_card: continue
+             # --- Zone Filtering Logic ---
+             # Check if the ability can trigger from its *current* zone for the *given* event
+             # Abilities generally function from the battlefield unless specified otherwise.
+             triggering_zone = getattr(ability, 'zone', 'battlefield').lower() # e.g., 'graveyard' for escapes
+             trigger_text = getattr(ability, 'trigger_condition', '').lower()
+             can_trigger_from_current_zone = False
 
-            registered_abilities = self.registered_abilities.get(ability_source_id, [])
-            source_controller, source_zone = gs.find_card_location(ability_source_id) # Get current location
+             # 1. Standard Zone Match: If ability trigger zone matches current card zone
+             if triggering_zone == zone_name:
+                 can_trigger_from_current_zone = True
 
-            for ability in registered_abilities:
-                if isinstance(ability, TriggeredAbility):
-                    # --- Check if the ability can trigger from its current zone ---
-                    can_trigger_from_zone = False
-                    ability_zone = getattr(ability, 'zone', 'battlefield').lower() # Where the ability normally functions from
-                    trigger_text = getattr(ability, 'trigger_condition', '').lower()
+             # 2. Zone Change Triggers: Check if event involves a zone change relevant to the ability.
+             #    Uses LTB rule: Ability triggers based on game state *before* the event.
+             elif event_type == "DIES": # Moving from Battlefield to Graveyard
+                 # Dies trigger must originate from Battlefield, even though card is now in GY
+                 if triggering_zone == 'battlefield' and ("dies" in trigger_text or ("put into a graveyard from the battlefield" in trigger_text)):
+                     can_trigger_from_current_zone = True
+             elif event_type == "LEAVE_BATTLEFIELD": # Moving from Battlefield to somewhere else
+                 if triggering_zone == 'battlefield' and ("leaves the battlefield" in trigger_text):
+                     can_trigger_from_current_zone = True
+             elif event_type == "CAST_SPELL":
+                  # Cast triggers can be on the card itself (trigger zone = source zone) or on other cards
+                  if zone_name == triggering_zone and ("when you cast" in trigger_text or "whenever you cast" in trigger_text):
+                       # Needs to check if the card being cast *is this card* OR if it triggers on *any* cast
+                       cast_source_id = context.get('cast_card_id')
+                       if cast_source_id == card_id: # It triggered itself being cast
+                            can_trigger_from_current_zone = True
+                       elif "a spell" in trigger_text or "noncreature spell" in trigger_text: # Triggers on other spells cast
+                            # Condition needs controller check (e.g. "Whenever YOU cast")
+                            # This ability source needs to be in its trigger zone (e.g., BF) when *another* spell is cast.
+                            if zone_name == triggering_zone: # Check zone again for this case
+                                can_trigger_from_current_zone = True
+             # 3. "From Anywhere" Triggers
+             elif "from anywhere" in trigger_text: # Handles zone-independent triggers
+                  can_trigger_from_current_zone = True
+             # 4. Other Specific Cases (Add as needed)
+             # e.g., Madness discard trigger from hand moving to exile
 
-                    # Define conditions for triggering from zones
-                    zone_conditions = {
-                        'battlefield': source_zone == 'battlefield',
-                        'graveyard': source_zone == 'graveyard',
-                        'hand': source_zone == 'hand',
-                        # Add more zones as needed (exile, stack)
-                    }
-                    # Standard zone check
-                    if zone_conditions.get(ability_zone, False):
-                        can_trigger_from_zone = True
-                    # Special zone-crossing triggers (e.g., Dies triggers check LTB event)
-                    elif ability_zone == 'battlefield' and "dies" in trigger_text and event_type == "DIES":
-                        can_trigger_from_zone = True
-                    # "Leaves the battlefield" triggers
-                    elif ability_zone == 'battlefield' and "leaves the battlefield" in trigger_text and event_type == "LEAVE_BATTLEFIELD":
-                         can_trigger_from_zone = True
-                    # Cast triggers from Hand (or other zones like GY/Exile if applicable)
-                    elif ability_zone == source_zone and ("when you cast" in trigger_text or "whenever you cast" in trigger_text) and event_type == "CAST_SPELL":
-                        # Needs to check if the cast source *is this ability source*
-                        if context.get('cast_card_id') == ability_source_id:
-                             can_trigger_from_zone = True
-                    # "From anywhere" triggers
-                    elif "from anywhere" in trigger_text:
-                        can_trigger_from_zone = True
+             if not can_trigger_from_current_zone:
+                 continue # Ability cannot trigger based on zone/event combination
 
-                    if not can_trigger_from_zone:
-                        continue # Skip this ability, can't trigger from its current zone
+             # --- Prepare Context for this Specific Trigger Check ---
+             trigger_check_context = context.copy()
+             trigger_check_context['source_card_id'] = card_id
+             trigger_check_context['source_card'] = source_card
+             trigger_check_context['controller'] = controller # Player controlling the source
+             trigger_check_context['source_zone'] = zone_name # Pass current zone
 
-                    # Prepare context specific to this ability check
-                    trigger_check_context = context.copy()
-                    trigger_check_context['source_card_id'] = ability_source_id
-                    trigger_check_context['source_card'] = source_card
-                    trigger_check_context['source_zone'] = source_zone # Pass current zone
+             # --- Event Matching & Condition Check ---
+             try:
+                 should_check_event = False
+                 if event_type == "EXHAUST_ABILITY_ACTIVATED":
+                     # ... (Exhaust specific check logic remains the same) ...
+                     if "activate an exhaust ability" in trigger_text:
+                        activator = context.get("activator")
+                        if activator:
+                            if "you activate" in trigger_text and activator == controller: should_check_event = True
+                            elif "an opponent activates" in trigger_text and activator != controller: should_check_event = True
+                            elif "you activate" not in trigger_text and "opponent activates" not in trigger_text: should_check_event = True # Any activation
 
-                    try:
-                        # Determine if the ability's condition matches the event type
-                        should_check_event = False
-                        # --- MODIFIED: Check for exhaust trigger text BEFORE general can_trigger ---
-                        if event_type == "EXHAUST_ABILITY_ACTIVATED":
-                            if "activate an exhaust ability" in trigger_text:
-                                activator = context.get("activator")
-                                trigger_controller_obj = source_controller # Use controller from find_card_location
-                                if activator and trigger_controller_obj:
-                                    if "you activate" in trigger_text:
-                                        should_check_event = (activator == trigger_controller_obj)
-                                    elif "an opponent activates" in trigger_text:
-                                        should_check_event = (activator != trigger_controller_obj)
-                                    else: # No specific player mentioned, applies to any exhaust activation
-                                        should_check_event = True
-                        # --- END MODIFIED ---
-                        else: # Use standard trigger check for other events
-                             should_check_event = ability.can_trigger(event_type, trigger_check_context)
+                 else: # Standard event matching via TriggeredAbility.can_trigger
+                     should_check_event = ability.can_trigger(event_type, trigger_check_context)
 
-                        # If event type matches, queue the trigger
-                        if should_check_event:
-                            ability_controller = source_controller # Use controller from find_card_location
-                            if ability_controller:
-                                self.active_triggers.append((ability, ability_controller))
-                                logging.debug(f"Queued trigger: '{ability.trigger_condition}' from {source_card.name} ({ability_source_id} in {source_zone}) due to {event_type}")
-                            else:
-                                # This might happen if card is not controlled (e.g., in GY owned by other player?)
-                                # Fallback to owner
-                                owner = gs.get_card_owner(ability_source_id)
-                                if owner:
-                                    self.active_triggers.append((ability, owner))
-                                    logging.debug(f"Queued trigger (owner fallback): '{ability.trigger_condition}' from {source_card.name}")
-                                else:
-                                     logging.warning(f"Trigger source {ability_source_id} has no controller/owner, cannot queue trigger.")
-                    except Exception as e:
-                        logging.error(f"Error checking trigger condition for {ability.effect_text} from {source_card.name}: {e}")
-                        import traceback; logging.error(traceback.format_exc())
+                 # --- Queue Trigger ---
+                 if should_check_event:
+                     if controller: # Ensure controller is valid
+                         # Make a copy of the context at the time of triggering
+                         context_for_queue = trigger_check_context.copy()
+                         # Add additional info if needed by resolution
+                         context_for_queue['original_zone'] = zone_name # Zone at time of trigger
+                         self.active_triggers.append((ability, controller, context_for_queue)) # Store context too
+                         queued_trigger_count += 1
+                         # logging.debug(f"Queued trigger: '{ability.trigger_condition}' from {getattr(source_card,'name','Unknown')} ({card_id} in {zone_name}) for {controller.get('name','?')}")
+                     else:
+                         logging.warning(f"Trigger source {card_id} has no valid controller, cannot queue trigger.")
+             except Exception as e:
+                 logging.error(f"Error checking trigger condition for {ability.effect_text} from {getattr(source_card,'name','Unknown')}: {e}", exc_info=True)
 
-        return bool(self.active_triggers) # Return value indicates if any triggers were added
+        # if queued_trigger_count > 0: logging.info(f"Queued {queued_trigger_count} triggers for event {event_type}")
+        return queued_trigger_count > 0
 
     def get_activated_abilities(self, card_id):
         """Get all activated abilities for a given card"""
@@ -1746,7 +1744,7 @@ class AbilityHandler:
     def process_triggered_abilities(self):
         """
         Process all pending triggered abilities from the queue, adding them to the stack in APNAP order.
-        Ensures GameState context is passed correctly.
+        Ensures GameState context is passed correctly. (Revised context passing)
         """
         gs = self.game_state
         if not self.active_triggers:
@@ -1756,44 +1754,51 @@ class AbilityHandler:
         nap_triggers = []
         active_player = gs._get_active_player()
 
-        # Sort triggers by Active Player (AP) and Non-Active Player (NAP)
-        for ability, controller in self.active_triggers:
-             if controller == active_player: ap_triggers.append((ability, controller))
-             else: nap_triggers.append((ability, controller))
+        # Sort triggers by Active Player (AP) and Non-Active Player (NAP) based on the controller at time of trigger
+        # Use controller from the stored tuple: (ability, controller, context_at_trigger)
+        for ability, controller, context_at_trigger in self.active_triggers:
+             if controller == active_player: ap_triggers.append((ability, controller, context_at_trigger))
+             else: nap_triggers.append((ability, controller, context_at_trigger))
 
         # Clear the queue *before* adding to stack to prevent potential re-trigger loops within resolution
         queued_triggers = ap_triggers + nap_triggers
         self.active_triggers = [] # Clear the processing queue
 
-        # Add AP triggers to stack first
-        for ability, controller in ap_triggers:
-            if not ability or not hasattr(ability, 'card_id'): continue # Safety check
+        # --- TODO: Implement choice for ordering simultaneous triggers ---
+        # Rule 603.3b: If multiple abilities triggered, AP puts theirs on stack in chosen order, then NAP does.
+        # For now, add in the order they were processed.
 
-            # Pass the ability object itself in the context for resolution
-            context_for_stack = {
-                "ability": ability, # Pass the specific instance
-                "source_id": ability.card_id,
-                "trigger_condition": getattr(ability, 'trigger_condition', 'Unknown Trigger'),
-                "effect_text": getattr(ability, 'effect_text', 'Unknown Effect'),
-                # Add any original context items needed for resolution if not captured by ability?
-            }
-            gs.add_to_stack("TRIGGER", ability.card_id, controller, context_for_stack)
-            logging.debug(f"Added AP Triggered Ability to stack: {context_for_stack['effect_text']}")
+        # Add AP triggers to stack first
+        num_ap_added = 0
+        for ability, controller, context_at_trigger in ap_triggers:
+            if not ability or not hasattr(ability, 'card_id'): continue # Safety check
+            # Ensure the context passed to the stack includes the ability object itself
+            if 'ability' not in context_at_trigger: context_at_trigger['ability'] = ability
+            # Add essential context keys if missing from trigger time (less ideal, but safe)
+            if 'source_id' not in context_at_trigger: context_at_trigger['source_id'] = ability.card_id
+            if 'effect_text' not in context_at_trigger: context_at_trigger['effect_text'] = getattr(ability,'effect_text','Unknown Effect')
+
+            gs.add_to_stack("TRIGGER", ability.card_id, controller, context_at_trigger) # Pass original captured context
+            num_ap_added += 1
 
         # Add NAP triggers to stack
-        for ability, controller in nap_triggers:
+        num_nap_added = 0
+        for ability, controller, context_at_trigger in nap_triggers:
             if not ability or not hasattr(ability, 'card_id'): continue # Safety check
+            if 'ability' not in context_at_trigger: context_at_trigger['ability'] = ability
+            if 'source_id' not in context_at_trigger: context_at_trigger['source_id'] = ability.card_id
+            if 'effect_text' not in context_at_trigger: context_at_trigger['effect_text'] = getattr(ability,'effect_text','Unknown Effect')
 
-            context_for_stack = {
-                 "ability": ability, # Pass the specific instance
-                 "source_id": ability.card_id,
-                 "trigger_condition": getattr(ability, 'trigger_condition', 'Unknown Trigger'),
-                 "effect_text": getattr(ability, 'effect_text', 'Unknown Effect'),
-            }
-            gs.add_to_stack("TRIGGER", ability.card_id, controller, context_for_stack)
-            logging.debug(f"Added NAP Triggered Ability to stack: {context_for_stack['effect_text']}")
+            gs.add_to_stack("TRIGGER", ability.card_id, controller, context_at_trigger) # Pass original captured context
+            num_nap_added += 1
 
-        # After adding triggers, the main game loop should handle stack resolution.
+        total_added = num_ap_added + num_nap_added
+        if total_added > 0:
+             logging.debug(f"Added {num_ap_added} AP / {num_nap_added} NAP ({total_added} total) Triggered Abilities to stack.")
+
+        # After adding triggers, the main game loop handles stack resolution.
+        # add_to_stack resets priority correctly.
+
 
     def resolve_ability(self, ability_type, card_id, controller, context=None):
         """
