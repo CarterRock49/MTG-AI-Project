@@ -306,24 +306,24 @@ class ActionHandler:
                 "ATTACK": self._handle_attack,
                 "BLOCK": self._handle_block,
                 # Delegated Combat Actions (Remapped indices based on review)
-                "DECLARE_ATTACKERS_DONE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "DECLARE_ATTACKERS_DONE", p, context=context), # Index 433
-                "DECLARE_BLOCKERS_DONE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "DECLARE_BLOCKERS_DONE", p, context=context), # Index 434
+                "DECLARE_ATTACKERS_DONE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "DECLARE_ATTACKERS_DONE", p, context=context), # Index 438
+                "DECLARE_BLOCKERS_DONE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "DECLARE_BLOCKERS_DONE", p, context=context), # Index 439 
                 "ATTACK_PLANESWALKER": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ATTACK_PLANESWALKER", p, context=context), # Indices 378-382
-                "ASSIGN_MULTIPLE_BLOCKERS": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ASSIGN_MULTIPLE_BLOCKERS", p, context=context), # Indices 388-397
-                "FIRST_STRIKE_ORDER": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "FIRST_STRIKE_ORDER", p, context=context), # Index 430
-                "ASSIGN_COMBAT_DAMAGE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ASSIGN_COMBAT_DAMAGE", p, context=context), # Index 431
-                "PROTECT_PLANESWALKER": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "PROTECT_PLANESWALKER", p, context=context), # Index 439
+                "ASSIGN_MULTIPLE_BLOCKERS": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ASSIGN_MULTIPLE_BLOCKERS", p, context=context), # Indices 383-392
+                "FIRST_STRIKE_ORDER": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "FIRST_STRIKE_ORDER", p, context=context), # Index 435
+                "ASSIGN_COMBAT_DAMAGE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ASSIGN_COMBAT_DAMAGE", p, context=context), # Index 436
+                "PROTECT_PLANESWALKER": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "PROTECT_PLANESWALKER", p, context=context), # Index 444
                 "ATTACK_BATTLE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ATTACK_BATTLE", p, context=context), # Indices 462-466
                 "DEFEND_BATTLE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "DEFEND_BATTLE", p, context=context), # Index 204
-                "NINJUTSU": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "NINJUTSU", p, context=context), # Index 432
+                "NINJUTSU": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "NINJUTSU", p, context=context), # Index 437
                 # Abilities & Mana
                 "TAP_LAND_FOR_MANA": self._handle_tap_land_for_mana,
                 "TAP_LAND_FOR_EFFECT": self._handle_tap_land_for_effect,
                 "ACTIVATE_ABILITY": self._handle_activate_ability, # Indices 100-159
-                "LOYALTY_ABILITY_PLUS": lambda p=None, context=None, **k: self._handle_loyalty_ability(p, context=context, action_type="LOYALTY_ABILITY_PLUS", **k), # Index 435
-                "LOYALTY_ABILITY_ZERO": lambda p=None, context=None, **k: self._handle_loyalty_ability(p, context=context, action_type="LOYALTY_ABILITY_ZERO", **k), # Index 436
-                "LOYALTY_ABILITY_MINUS": lambda p=None, context=None, **k: self._handle_loyalty_ability(p, context=context, action_type="LOYALTY_ABILITY_MINUS", **k),# Index 437
-                "ULTIMATE_ABILITY": lambda p=None, context=None, **k: self._handle_loyalty_ability(p, context=context, action_type="ULTIMATE_ABILITY", **k), # Index 438
+                "LOYALTY_ABILITY_PLUS": lambda p=None, context=None, **k: self._handle_loyalty_ability(p, context=context, action_type="LOYALTY_ABILITY_PLUS", **k), # Index 440
+                "LOYALTY_ABILITY_ZERO": lambda p=None, context=None, **k: self._handle_loyalty_ability(p, context=context, action_type="LOYALTY_ABILITY_ZERO", **k), # Index 441
+                "LOYALTY_ABILITY_MINUS": lambda p=None, context=None, **k: self._handle_loyalty_ability(p, context=context, action_type="LOYALTY_ABILITY_MINUS", **k),# Index 442
+                "ULTIMATE_ABILITY": lambda p=None, context=None, **k: self._handle_loyalty_ability(p, context=context, action_type="ULTIMATE_ABILITY", **k), # Index 443
                 # Targeting & Choices
                 "SELECT_TARGET": self._handle_select_target, # Indices 274-283
                 "SACRIFICE_PERMANENT": self._handle_sacrifice_permanent, # Indices 284-293
@@ -1137,12 +1137,11 @@ class ActionHandler:
         # ... add more basic checks
         return True # Assume available if check is simple
                      
-
     def _add_special_choice_actions(self, player, valid_actions, set_valid_action):
         """Add actions for Scry, Surveil, Dredge, Choose Mode, Choose X, Choose Color."""
         gs = self.game_state
-        # Only generate these during the dedicated CHOICE phase
-        if gs.phase != gs.PHASE_CHOOSE: return
+        if gs.phase != gs.PHASE_CHOOSE: # Only generate these during the dedicated CHOICE phase
+            return
 
         if hasattr(gs, 'choice_context') and gs.choice_context:
             context = gs.choice_context
@@ -1154,99 +1153,90 @@ class ActionHandler:
                 set_valid_action(11, "PASS_PRIORITY (Waiting for opponent choice)")
                 return
 
-            # --- Scry / Surveil ---
+            # Scry / Surveil
             if choice_type in ["scry", "surveil"] and context.get("cards"):
                 card_id = context["cards"][0] # Process one card at a time
                 card = gs._safe_get_card(card_id)
                 card_name = getattr(card, 'name', card_id)
-                set_valid_action(306, f"PUT_ON_TOP {card_name}") # Action for Top
+                set_valid_action(306, f"PUT_ON_TOP {card_name}") # Action for Top - Index 306 maps to PUT_ON_TOP
                 if choice_type == "scry":
-                    set_valid_action(307, f"PUT_ON_BOTTOM {card_name}") # Action for Bottom (Scry only)
+                    set_valid_action(307, f"PUT_ON_BOTTOM {card_name}") # Action for Bottom - Index 307 maps to PUT_ON_BOTTOM
                 else: # Surveil
-                     set_valid_action(305, f"PUT_TO_GRAVEYARD {card_name}") # Action for Graveyard (Surveil only)
+                    set_valid_action(305, f"PUT_TO_GRAVEYARD {card_name}") # Action for GY - Index 305 maps to PUT_TO_GRAVEYARD
 
-            # --- Dredge (Replace Draw) ---
+            # Dredge (Replace Draw)
             elif choice_type == "dredge" and context.get("card_id"):
-                 # ... (keep existing Dredge logic for action 308) ...
-                 card_id = context.get("card_id")
-                 dredge_val = context.get("value")
-                 if len(player["library"]) >= dredge_val:
-                     # Validate card is still in GY? Probably not needed, context source is reliable
-                     gy_idx = -1
-                     for idx, gy_id in enumerate(player.get("graveyard", [])):
-                         if gy_id == card_id: gy_idx = idx; break
-                     if gy_idx != -1:
-                         # We need context for the DREDGE action handler now
-                         dredge_action_context = {'gy_idx': gy_idx}
-                         set_valid_action(308, f"DREDGE {gs._safe_get_card(card_id).name}", context=dredge_action_context)
-                 # Always allow skipping the dredge replacement
-                 set_valid_action(11, "Skip Dredge") # PASS_PRIORITY effectively skips
+                card_id = context.get("card_id")
+                dredge_val = context.get("value")
+                if len(player["library"]) >= dredge_val:
+                    # Find card index in graveyard
+                    gy_idx = -1
+                    for idx, gy_id in enumerate(player.get("graveyard", [])):
+                        if gy_id == card_id and idx < 6: # GY Index 0-5 (Action space limited)
+                            gy_idx = idx
+                            break
+                    if gy_idx != -1:
+                        # Provide context for DREDGE action handler
+                        dredge_action_context = {'gy_idx': gy_idx}
+                        set_valid_action(308, f"DREDGE {gs._safe_get_card(card_id).name}", context=dredge_action_context)
+                # Allow skipping the dredge replacement
+                set_valid_action(11, "Skip Dredge") # PASS_PRIORITY effectively skips
 
-            # --- Choose Mode ---
+            # Choose Mode
             elif choice_type == "choose_mode":
-                 num_choices = context.get("num_choices", 0)
-                 max_modes = context.get("max_required", 1)
-                 min_modes = context.get("min_required", 1)
-                 selected_count = len(context.get("selected_modes", []))
+                num_choices = context.get("num_choices", 0)
+                max_modes = context.get("max_required", 1)
+                min_modes = context.get("min_required", 1)
+                selected_count = len(context.get("selected_modes", []))
 
-                 # Allow choosing another mode if max not reached
-                 if selected_count < max_modes:
-                     for i in range(min(num_choices, 10)): # Mode index 0-9 (Action 353-362)
-                          # Prevent selecting the same mode twice if only choosing 1 or 2 unless allowed
-                          if i not in context.get("selected_modes", []): # Basic duplicate check
-                               # Action needs context: { 'battlefield_idx': ?, 'ability_idx': ?} NO - context is in gs.choice_context
-                               set_valid_action(353 + i, f"CHOOSE_MODE {i+1}")
+                # Allow choosing another mode if max not reached
+                if selected_count < max_modes:
+                    for i in range(min(num_choices, 10)): # Mode index 0-9
+                        # Prevent selecting the same mode twice unless allowed
+                        if i not in context.get("selected_modes", []):
+                            # FIXED: Use correct index range 353-362 for CHOOSE_MODE
+                            set_valid_action(353 + i, f"CHOOSE_MODE {i+1}")
 
-                 # Allow finalizing choice if minimum met (and min != max)
-                 if selected_count >= min_modes and min_modes != max_modes:
-                      set_valid_action(11, "PASS_PRIORITY (Finish Mode Choice)") # Allow passing to finalize if optional modes remain
+                # Allow finalizing choice if minimum met (and min != max)
+                if selected_count >= min_modes and min_modes != max_modes:
+                    set_valid_action(11, "PASS_PRIORITY (Finish Mode Choice)")
 
-            # --- Choose X ---
+            # Choose X
             elif choice_type == "choose_x":
-                 max_x = context.get("max_x", 0)
-                 min_x = context.get("min_x", 0)
-                 for i in range(min(max_x, 10)): # X value 1-10 (Actions 363-372)
-                      x_val = i + 1
-                      if x_val >= min_x: # Only allow valid X choices based on min
-                           # Action needs context: { 'X_Value': x_val } - This is embedded in param
-                           set_valid_action(363 + i, f"CHOOSE_X_VALUE {x_val}")
-                 # No PASS needed, choosing X implicitly finalizes
+                max_x = context.get("max_x", 0)
+                min_x = context.get("min_x", 0)
+                for i in range(min(max_x, 10)): # X value 1-10
+                    x_val = i + 1
+                    if x_val >= min_x:
+                        # FIXED: Use correct index range 363-372 for CHOOSE_X_VALUE
+                        set_valid_action(363 + i, f"CHOOSE_X_VALUE {x_val}")
 
-            # --- Choose Color ---
+            # Choose Color
             elif choice_type == "choose_color":
-                 for i in range(5): # Color index 0-4 (WUBRG -> Actions 373-377)
-                      # Action needs context: { 'color_index': i } - Embedded in param
-                      set_valid_action(373 + i, f"CHOOSE_COLOR {['W','U','B','R','G'][i]}")
-                 # No PASS needed, choosing color implicitly finalizes
+                for i in range(5): # Color index 0-4 (WUBRG)
+                    # FIXED: Use correct index range 373-377 for CHOOSE_COLOR
+                    set_valid_action(373 + i, f"CHOOSE_COLOR {['W','U','B','R','G'][i]}")
 
-            # --- Kicker / Additional Cost / Escalate Choices ---
+            # Kicker / Additional Cost / Escalate Choices (Using correct indices now)
             elif choice_type == "pay_kicker":
                 set_valid_action(405, "PAY_KICKER") # Param=True
                 set_valid_action(406, "DONT_PAY_KICKER") # Param=False
             elif choice_type == "pay_additional":
-                 set_valid_action(407, "PAY_ADDITIONAL_COST") # Param=True
-                 set_valid_action(408, "DONT_PAY_ADDITIONAL_COST") # Param=False
+                set_valid_action(407, "PAY_ADDITIONAL_COST") # Param=True
+                set_valid_action(408, "DONT_PAY_ADDITIONAL_COST") # Param=False
             elif choice_type == "pay_escalate":
-                 # Context needed: num_modes, num_selected, max_allowed_extra
-                 # This logic is complex for generating distinct actions.
-                 # Simplified: Offer PAY_ESCALATE action, handler decides how many based on cost/context.
-                 # Param = number of *extra* modes to pay for (1 or more)
-                 max_extra = context.get('max_modes', 1) - context.get('num_selected', 1)
-                 for i in range(min(max_extra, 3)): # Allow paying for 1, 2, or 3 extra modes max (adjust as needed)
-                      num_extra = i + 1
-                      # Check affordability of paying N times (simplistic check)
-                      escalate_cost = context.get('escalate_cost_each')
-                      if escalate_cost and gs.mana_system.can_pay_mana_cost(player, f"{escalate_cost}*{num_extra}"):
+                max_extra = context.get('max_modes', 1) - context.get('num_selected', 1)
+                for i in range(min(max_extra, 3)): # Allow paying for 1, 2, or 3 extra modes max
+                    num_extra = i + 1
+                    # Check affordability of paying N times
+                    escalate_cost = context.get('escalate_cost_each')
+                    if escalate_cost and gs.mana_system.can_pay_mana_cost(player, f"{escalate_cost}*{num_extra}"):
                             escalate_action_context = {'num_extra_modes': num_extra}
-                            # Needs dedicated actions if param doesn't support count.
-                            # Reuse action 409, use context.
                             set_valid_action(409, f"PAY_ESCALATE for {num_extra} extra mode(s)", context=escalate_action_context)
-                 set_valid_action(11, "PASS_PRIORITY (Finish Escalate/Don't pay)") # Finish Escalate choice
-
-            # Add more choice types (Distribute counters, choose order, etc.) here
+                set_valid_action(11, "PASS_PRIORITY (Finish Escalate/Don't pay)")
 
         else:
-            # If no choice context is active during PHASE_CHOOSE (shouldn't happen), allow PASS
+            # If no choice context is active during PHASE_CHOOSE, allow PASS
             set_valid_action(11, "PASS_PRIORITY (No choices pending?)")
         
     def _add_sacrifice_actions(self, player, valid_actions, set_valid_action):
@@ -1451,46 +1441,84 @@ class ActionHandler:
         stack_has_opponent_spell = any(isinstance(item, tuple) and item[0] == "SPELL" and item[2] != player for item in gs.stack)
         stack_has_opponent_ability = any(isinstance(item, tuple) and item[0] == "ABILITY" and item[2] != player for item in gs.stack)
 
-        # Counter Spell
+        # Counter Spell - Using correct action index 430
         if stack_has_opponent_spell:
             for i in range(min(len(player["hand"]), 8)):
                 card_id = player["hand"][i]
                 card = gs._safe_get_card(card_id)
                 if card and hasattr(card, 'oracle_text') and "counter target spell" in card.oracle_text.lower():
-                     if self._can_afford_card(player, card):
-                         set_valid_action(425, f"COUNTER_SPELL with {card.name}") # Param = (hand_idx, stack_idx)
+                    if self._can_afford_card(player, card):
+                        # Create context with hand_idx and any targets needed in handler
+                        counter_context = {'hand_idx': i}
+                        # Find a valid target spell to include in context
+                        for stack_idx, item in enumerate(gs.stack):
+                            if isinstance(item, tuple) and item[0] == "SPELL" and item[2] != player:
+                                counter_context['target_spell_idx'] = stack_idx
+                                break
+                        set_valid_action(430, f"COUNTER_SPELL with {card.name}", context=counter_context)
 
-        # Counter Ability
+        # Counter Ability - Using correct action index 431
         if stack_has_opponent_ability:
             for i in range(min(len(player["hand"]), 8)):
                 card_id = player["hand"][i]
                 card = gs._safe_get_card(card_id)
-                if card and hasattr(card, 'oracle_text') and ("counter target ability" in card.oracle_text.lower() or "counter target activated ability" in card.oracle_text.lower()):
-                     if self._can_afford_card(player, card):
-                         set_valid_action(426, f"COUNTER_ABILITY with {card.name}") # Param = (hand_idx, stack_idx)
+                if card and hasattr(card, 'oracle_text') and ("counter target ability" in card.oracle_text.lower() or 
+                                                            "counter target activated ability" in card.oracle_text.lower()):
+                    if self._can_afford_card(player, card):
+                        # Include necessary context for handler
+                        counter_ability_context = {'hand_idx': i}
+                        # Find a valid target ability to include in context
+                        for stack_idx, item in enumerate(gs.stack):
+                            if isinstance(item, tuple) and item[0] == "ABILITY" and item[2] != player:
+                                counter_ability_context['target_ability_idx'] = stack_idx
+                                break
+                        set_valid_action(431, f"COUNTER_ABILITY with {card.name}", context=counter_ability_context)
 
-        # Prevent Damage
+        # Prevent Damage - Using correct action index 432
         # Check if a damage spell/ability is on stack or if combat damage is pending
         damage_pending = gs.phase in [gs.PHASE_COMBAT_DAMAGE, gs.PHASE_FIRST_STRIKE_DAMAGE] or \
-                         any(isinstance(item, tuple) and "damage" in getattr(gs._safe_get_card(item[1]), 'oracle_text', '').lower() for item in gs.stack)
+                        any(isinstance(item, tuple) and "damage" in getattr(gs._safe_get_card(item[1]), 'oracle_text', '').lower() for item in gs.stack)
         if damage_pending:
-             for i in range(min(len(player["hand"]), 8)):
+            for i in range(min(len(player["hand"]), 8)):
                 card_id = player["hand"][i]
                 card = gs._safe_get_card(card_id)
                 if card and hasattr(card, 'oracle_text') and "prevent" in card.oracle_text.lower() and "damage" in card.oracle_text.lower():
-                     if self._can_afford_card(player, card):
-                         set_valid_action(427, f"PREVENT_DAMAGE with {card.name}") # Param = (hand_idx, source_idx?)
+                    if self._can_afford_card(player, card):
+                        prevent_context = {'hand_idx': i}
+                        # Find damage source if applicable
+                        for stack_idx, item in enumerate(gs.stack):
+                            if isinstance(item, tuple) and "damage" in getattr(gs._safe_get_card(item[1]), 'oracle_text', '').lower():
+                                prevent_context['damage_source_idx'] = stack_idx
+                                break
+                        set_valid_action(432, f"PREVENT_DAMAGE with {card.name}", context=prevent_context)
 
-        # Stifle Trigger (More complex - needs trigger stack)
+        # Redirect Damage - Using correct action index 433
+        # Similar to prevent damage, check for damage sources
+        if damage_pending:
+            for i in range(min(len(player["hand"]), 8)):
+                card_id = player["hand"][i]
+                card = gs._safe_get_card(card_id)
+                if card and hasattr(card, 'oracle_text') and "redirect" in card.oracle_text.lower() and "damage" in card.oracle_text.lower():
+                    if self._can_afford_card(player, card):
+                        redirect_context = {'hand_idx': i}
+                        set_valid_action(433, f"REDIRECT_DAMAGE with {card.name}", context=redirect_context)
+
+        # Stifle Trigger - Using correct action index 434
         # For now, enable if a triggered ability is on stack
         stack_has_trigger = any(isinstance(item, tuple) and item[0] == "TRIGGER" for item in gs.stack)
         if stack_has_trigger:
-             for i in range(min(len(player["hand"]), 8)):
-                 card_id = player["hand"][i]
-                 card = gs._safe_get_card(card_id)
-                 if card and hasattr(card, 'oracle_text') and "counter target triggered ability" in card.oracle_text.lower():
-                      if self._can_afford_card(player, card):
-                          set_valid_action(429, f"STIFLE_TRIGGER with {card.name}") # Param = (hand_idx, stack_idx)
+            for i in range(min(len(player["hand"]), 8)):
+                card_id = player["hand"][i]
+                card = gs._safe_get_card(card_id)
+                if card and hasattr(card, 'oracle_text') and "counter target triggered ability" in card.oracle_text.lower():
+                    if self._can_afford_card(player, card):
+                        stifle_context = {'hand_idx': i}
+                        # Find a valid target trigger to include in context
+                        for stack_idx, item in enumerate(gs.stack):
+                            if isinstance(item, tuple) and item[0] == "TRIGGER":
+                                stifle_context['target_trigger_idx'] = stack_idx
+                                break
+                        set_valid_action(434, f"STIFLE_TRIGGER with {card.name}", context=stifle_context)
         
     def _add_cycling_actions(self, player, valid_actions, set_valid_action):
         """Add cycling actions."""
@@ -6083,38 +6111,38 @@ class ActionHandler:
         """Add actions for alternative casting costs."""
         gs = self.game_state
         # Flashback
-        for i in range(min(len(player.get("graveyard",[])), 6)): # Use get for safety
+        for i in range(min(len(player.get("graveyard",[])), 6)):
             card_id = player["graveyard"][i]
             card = gs._safe_get_card(card_id)
             if card and hasattr(card, 'oracle_text') and "flashback" in card.oracle_text.lower():
-                 is_instant = 'instant' in getattr(card, 'card_types', [])
-                 if is_sorcery_speed or is_instant: # Check timing
+                is_instant = 'instant' in getattr(card, 'card_types', [])
+                if is_sorcery_speed or is_instant: # Check timing
                     cost_match = re.search(r"flashback (\{[^\}]+\})", card.oracle_text.lower())
                     if cost_match and self._can_afford_cost_string(player, cost_match.group(1)):
-                         # Context needs gy_idx
-                         context = {'gy_idx': i}
-                         set_valid_action(393, f"CAST_WITH_FLASHBACK {card.name}", context=context)
+                        # Context needs gy_idx
+                        context = {'gy_idx': i}
+                        # FIXED: Use correct action ID for CAST_WITH_FLASHBACK (398)
+                        set_valid_action(398, f"CAST_WITH_FLASHBACK {card.name}", context=context)
 
         # Jump-start
         for i in range(min(len(player.get("graveyard",[])), 6)):
             card_id = player["graveyard"][i]
             card = gs._safe_get_card(card_id)
             if card and hasattr(card, 'oracle_text') and "jump-start" in card.oracle_text.lower():
-                 is_instant = 'instant' in getattr(card, 'card_types', [])
-                 if is_sorcery_speed or is_instant: # Check timing
+                is_instant = 'instant' in getattr(card, 'card_types', [])
+                if is_sorcery_speed or is_instant: # Check timing
                     if len(player["hand"]) > 0 and self._can_afford_card(player, card):
-                        # Context needs gy_idx and choice of card to discard
-                        # For now, enable action assuming agent will provide discard target later
+                        # FIXED: Use correct action ID for CAST_WITH_JUMP_START (399)
                         context = {'gy_idx': i}
-                        set_valid_action(394, f"CAST_WITH_JUMP_START {card.name}", context=context)
+                        set_valid_action(399, f"CAST_WITH_JUMP_START {card.name}", context=context)
 
         # Escape
         for i in range(min(len(player.get("graveyard",[])), 6)):
             card_id = player["graveyard"][i]
             card = gs._safe_get_card(card_id)
             if card and hasattr(card, 'oracle_text') and "escape" in card.oracle_text.lower():
-                 is_instant = 'instant' in getattr(card, 'card_types', [])
-                 if is_sorcery_speed or is_instant: # Check timing
+                is_instant = 'instant' in getattr(card, 'card_types', [])
+                if is_sorcery_speed or is_instant: # Check timing
                     cost_match = re.search(r"escape—([^\,]+), exile ([^\.]+)", card.oracle_text.lower())
                     if cost_match:
                         cost_str = cost_match.group(1).strip()
@@ -6123,31 +6151,30 @@ class ActionHandler:
 
                         # Check if enough *other* cards exist in GY
                         if len(player["graveyard"]) > exile_count and self._can_afford_cost_string(player, cost_str):
-                             # Agent needs to provide list of GY indices to exile later
-                             context = {'gy_idx': i}
-                             set_valid_action(395, f"CAST_WITH_ESCAPE {card.name}", context=context)
+                            # FIXED: Use correct action ID for CAST_WITH_ESCAPE (400)
+                            context = {'gy_idx': i}
+                            set_valid_action(400, f"CAST_WITH_ESCAPE {card.name}", context=context)
 
         # Madness (Triggered when discarded, check if castable)
         if hasattr(gs, 'madness_cast_available') and gs.madness_cast_available:
             madness_info = gs.madness_cast_available
-            # Only make action available if the player matches and it's *their* turn/priority?
-            # Rule 702.34a: Casts it as the triggered ability resolves. Let's allow if player matches.
             if madness_info['player'] == player:
                 card_id = madness_info['card_id']
                 cost_str = madness_info['cost']
                 card = gs._safe_get_card(card_id)
 
-                # Find the card in exile to provide context for handler
+                # Find the card in exile
                 exile_idx = -1
                 for idx, exiled_id in enumerate(player.get("exile", [])):
                     if exiled_id == card_id:
-                         exile_idx = idx
-                         break
+                        exile_idx = idx
+                        break
 
                 # Check affordability
                 if exile_idx != -1 and self._can_afford_cost_string(player, cost_str):
-                    context = {'exile_idx': exile_idx, 'card_id': card_id} # Pass required context
-                    set_valid_action(396, f"CAST_FOR_MADNESS {card.name if card else card_id}", context=context)
+                    # FIXED: Use correct action ID for CAST_FOR_MADNESS (401)
+                    context = {'exile_idx': exile_idx, 'card_id': card_id}
+                    set_valid_action(401, f"CAST_FOR_MADNESS {card.name if card else card_id}", context=context)
 
         # Overload
         for i in range(min(len(player["hand"]), 8)):
@@ -6321,50 +6348,6 @@ class ActionHandler:
                             
                             if can_afford:
                                 set_valid_action(443, f"AFTERMATH_CAST of {g_card.name}")
-
-    def _add_counter_actions(self, player, valid_actions, set_valid_action):
-        """Add actions for countering spells and abilities."""
-        gs = self.game_state
-        
-        # Check if there are spells on the stack
-        if gs.stack:
-            # Check for counter spells in hand
-            for idx, card_id in enumerate(player["hand"][:8]):  # Limit to first 8
-                card = gs._safe_get_card(card_id)
-                if card and hasattr(card, 'oracle_text') and "counter target spell" in card.oracle_text.lower():
-                    # Check if we can afford it
-                    can_afford = False
-                    if hasattr(gs, 'mana_system'):
-                        can_afford = gs.mana_system.can_pay_mana_cost(player, card.mana_cost if hasattr(card, 'mana_cost') else "")
-                    else:
-                        can_afford = sum(player["mana_pool"].values()) > 0
-                    
-                    if can_afford:
-                        set_valid_action(425, f"COUNTER_SPELL with {card.name}")
-                
-                # Check for ability counters
-                if card and hasattr(card, 'oracle_text') and "counter target activated ability" in card.oracle_text.lower():
-                    # Check if we can afford it
-                    can_afford = False
-                    if hasattr(gs, 'mana_system'):
-                        can_afford = gs.mana_system.can_pay_mana_cost(player, card.mana_cost if hasattr(card, 'mana_cost') else "")
-                    else:
-                        can_afford = sum(player["mana_pool"].values()) > 0
-                    
-                    if can_afford:
-                        set_valid_action(426, f"COUNTER_ABILITY with {card.name}")
-                        
-                # Check for stifle effects
-                if card and hasattr(card, 'oracle_text') and "counter target triggered ability" in card.oracle_text.lower():
-                    # Check if we can afford it
-                    can_afford = False
-                    if hasattr(gs, 'mana_system'):
-                        can_afford = gs.mana_system.can_pay_mana_cost(player, card.mana_cost if hasattr(card, 'mana_cost') else "")
-                    else:
-                        can_afford = sum(player["mana_pool"].values()) > 0
-                    
-                    if can_afford:
-                        set_valid_action(429, f"STIFLE_TRIGGER with {card.name}")
 
     def _add_damage_prevention_actions(self, player, valid_actions, set_valid_action):
         """Add actions for preventing or redirecting damage."""
