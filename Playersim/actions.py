@@ -1279,7 +1279,6 @@ class ActionHandler:
              else:
                   set_valid_action(11, "PASS_PRIORITY (Sacrifices selected)")
 
-    
     def _add_targeting_actions(self, player, valid_actions, set_valid_action):
         """Add SELECT_TARGET actions when in the targeting phase."""
         gs = self.game_state
@@ -1294,7 +1293,7 @@ class ActionHandler:
 
             # Get valid targets using TargetingSystem if possible
             valid_targets_map = {}
-            if gs.targeting_system:
+            if hasattr(gs, 'targeting_system') and gs.targeting_system:
                 valid_targets_map = gs.targeting_system.get_valid_targets(source_id, player, target_type)
             else:
                 # Fallback: Add basic logic here or assume it's handled by agent
@@ -1305,6 +1304,10 @@ class ActionHandler:
             valid_targets_list = []
             for category, targets in valid_targets_map.items():
                 valid_targets_list.extend(targets)
+                
+            # Remove already selected targets to avoid duplicates
+            already_selected = context.get('selected_targets', [])
+            valid_targets_list = [target for target in valid_targets_list if target not in already_selected]
 
             # Generate SELECT_TARGET actions for available targets
             if selected_count < required_count:
@@ -1313,7 +1316,7 @@ class ActionHandler:
                     target_card = gs._safe_get_card(target_id)
                     target_name = target_card.name if target_card and hasattr(target_card, 'name') else target_id
                     if isinstance(target_id, str) and target_id in ["p1", "p2"]: # Handle player targets
-                         target_name = "Player 1" if target_id == "p1" else "Player 2"
+                        target_name = "Player 1" if target_id == "p1" else "Player 2"
                     set_valid_action(274 + i, f"SELECT_TARGET ({i}): {target_name} for {source_name}")
             else:
                 # If enough targets are selected, allow passing priority
@@ -2223,7 +2226,7 @@ class ActionHandler:
         if action_index == 305: # PUT_TO_GRAVEYARD (Surveil specific)
             destination = "graveyard"
         elif action_index == 307: # PUT_ON_BOTTOM (Scry specific)
-             destination = "bottom"
+            destination = "bottom"
 
         # Get current context
         if not hasattr(gs, 'choice_context') or gs.choice_context is None:
@@ -2250,11 +2253,11 @@ class ActionHandler:
 
         # Validate action matches context type (e.g., cannot PUT_TO_GRAVEYARD during scry)
         if current_choice_type == "scry" and destination == "graveyard":
-             logging.warning("Invalid action: Cannot PUT_TO_GRAVEYARD during Scry.")
-             return -0.1, False
+            logging.warning("Invalid action: Cannot PUT_TO_GRAVEYARD during Scry.")
+            return -0.1, False
         if current_choice_type == "surveil" and destination == "bottom":
-             logging.warning("Invalid action: Cannot PUT_ON_BOTTOM during Surveil.")
-             return -0.1, False
+            logging.warning("Invalid action: Cannot PUT_ON_BOTTOM during Surveil.")
+            return -0.1, False
 
 
         # --- Process the Choice ---
@@ -2265,31 +2268,31 @@ class ActionHandler:
         reward = 0.05 # Base reward for valid choice
         card_eval_score = 0
         if self.card_evaluator and card:
-             card_eval_score = self.card_evaluator.evaluate_card(card_id, "general", context_details={"destination": destination})
+            card_eval_score = self.card_evaluator.evaluate_card(card_id, "general", context_details={"destination": destination})
 
 
         if destination == "top":
-             if current_choice_type == "scry":
-                  # Add to list to be ordered later (by AI/rules)
-                  context.setdefault("kept_on_top", []).append(card_id)
-                  logging.debug(f"Scry: Keeping {card_name} on top (pending order).")
-                  reward += card_eval_score * 0.05 # Reward keeping good cards
-             else: # Surveil
-                  # Put back onto library directly (no reordering for Surveil top choice)
-                  player["library"].insert(0, card_id)
-                  logging.debug(f"Surveil: Kept {card_name} on top.")
-                  reward += card_eval_score * 0.05
+            if current_choice_type == "scry":
+                # Add to list to be ordered later (by AI/rules)
+                context.setdefault("kept_on_top", []).append(card_id)
+                logging.debug(f"Scry: Keeping {card_name} on top (pending order).")
+                reward += card_eval_score * 0.05 # Reward keeping good cards
+            else: # Surveil
+                # Put back onto library directly (no reordering for Surveil top choice)
+                player["library"].insert(0, card_id)
+                logging.debug(f"Surveil: Kept {card_name} on top.")
+                reward += card_eval_score * 0.05
         elif destination == "bottom": # Scry only
-             context.setdefault("put_on_bottom", []).append(card_id)
-             logging.debug(f"Scry: Putting {card_name} on bottom.")
-             reward -= card_eval_score * 0.05 # Penalize bottoming good cards
+            context.setdefault("put_on_bottom", []).append(card_id)
+            logging.debug(f"Scry: Putting {card_name} on bottom.")
+            reward -= card_eval_score * 0.05 # Penalize bottoming good cards
         elif destination == "graveyard": # Surveil only
-             success_move = gs.move_card(card_id, player, "library_implicit", player, "graveyard", cause="surveil")
-             if not success_move:
-                 logging.error(f"Failed to move {card_name} to graveyard during surveil.")
-                 gs.choice_context = None; gs.phase = gs.PHASE_PRIORITY; return -0.1, False
-             logging.debug(f"Surveil: Put {card_name} into graveyard.")
-             reward -= card_eval_score * 0.03 # Smaller penalty for GY vs bottom? Depends.
+            success_move = gs.move_card(card_id, player, "library_implicit", player, "graveyard", cause="surveil")
+            if not success_move:
+                logging.error(f"Failed to move {card_name} to graveyard during surveil.")
+                gs.choice_context = None; gs.phase = gs.PHASE_PRIORITY; return -0.1, False
+            logging.debug(f"Surveil: Put {card_name} into graveyard.")
+            reward -= card_eval_score * 0.03 # Smaller penalty for GY vs bottom? Depends.
 
 
         # --- Check if Choice Phase Ends ---
@@ -2298,28 +2301,27 @@ class ActionHandler:
 
             # Finalize Scry: Put bottom cards, then ordered top cards back
             if current_choice_type == "scry":
-                 bottom_cards = context.get("put_on_bottom", [])
-                 top_cards = context.get("kept_on_top", [])
-                 # AI needs to choose order for top_cards
-                 # Simple: keep original relative order
-                 ordered_top_cards = top_cards # Placeholder for ordering logic
-                 # Add cards back to library
-                 player["library"] = ordered_top_cards + player["library"] # Top first
-                 player["library"].extend(bottom_cards) # Then bottom
-                 logging.debug(f"Scry final: Top=[{','.join(ordered_top_cards)}], Bottom=[{','.join(bottom_cards)}]")
+                bottom_cards = context.get("put_on_bottom", [])
+                top_cards = context.get("kept_on_top", [])
+                # AI needs to choose order for top_cards
+                # Simple: keep original relative order
+                ordered_top_cards = top_cards # Placeholder for ordering logic
+                # Add cards back to library
+                player["library"] = ordered_top_cards + player["library"] # Top first
+                player["library"].extend(bottom_cards) # Then bottom
+                logging.debug(f"Scry final: Top=[{','.join(ordered_top_cards)}], Bottom=[{','.join(bottom_cards)}]")
 
             # Clear context and return to previous phase
             gs.choice_context = None
             if hasattr(gs, 'previous_priority_phase') and gs.previous_priority_phase is not None:
-                 gs.phase = gs.previous_priority_phase
-                 gs.previous_priority_phase = None
+                gs.phase = gs.previous_priority_phase
+                gs.previous_priority_phase = None
             else:
-                 gs.phase = gs.PHASE_PRIORITY # Fallback
+                gs.phase = gs.PHASE_PRIORITY # Fallback
             gs.priority_pass_count = 0 # Reset priority
             gs.priority_player = gs._get_active_player()
 
         return reward, True
-
 
     def _handle_scry_choice(self, param, **kwargs):
         """Handle Scry choice: PUT_ON_BOTTOM"""
@@ -2890,12 +2892,12 @@ class ActionHandler:
         activated_ability_list_idx = context.get('ability_idx')
 
         if bf_idx is None or activated_ability_list_idx is None:
-             logging.error(f"ACTIVATE_ABILITY missing 'battlefield_idx' or 'ability_idx' in context: {context}")
-             return -0.15, False
+            logging.error(f"ACTIVATE_ABILITY missing 'battlefield_idx' or 'ability_idx' in context: {context}")
+            return -0.15, False
 
         if not isinstance(bf_idx, int) or not isinstance(activated_ability_list_idx, int):
-             logging.error(f"ACTIVATE_ABILITY context indices are not integers: {context}")
-             return -0.15, False
+            logging.error(f"ACTIVATE_ABILITY context indices are not integers: {context}")
+            return -0.15, False
         # --- End Context Check ---
 
         if bf_idx >= len(player.get("battlefield", [])):
@@ -2922,17 +2924,17 @@ class ActionHandler:
         activation_idx_on_card = getattr(ability_to_activate, 'activation_index', -1)
 
         if activation_idx_on_card == -1:
-             logging.error(f"Internal activation_index missing for ability {activated_ability_list_idx} on {card.name}! Cannot track exhaust.")
-             # Fail activation if it's supposed to be exhaust
-             if getattr(ability_to_activate, 'is_exhaust', False): return -0.15, False
+            logging.error(f"Internal activation_index missing for ability {activated_ability_list_idx} on {card.name}! Cannot track exhaust.")
+            # Fail activation if it's supposed to be exhaust
+            if getattr(ability_to_activate, 'is_exhaust', False): return -0.15, False
 
         # --- EXHAUST CHECK ---
         is_exhaust = getattr(ability_to_activate, 'is_exhaust', False)
 
         if is_exhaust:
-             if gs.check_exhaust_used(card_id, activation_idx_on_card): # Use the internal index
-                  logging.debug(f"Cannot activate Exhaust ability index {activation_idx_on_card} for {card.name}: Already used.")
-                  return -0.05, False # Penalty for trying used exhaust
+            if gs.check_exhaust_used(card_id, activation_idx_on_card): # Use the internal index
+                logging.debug(f"Cannot activate Exhaust ability index {activation_idx_on_card} for {card.name}: Already used.")
+                return -0.05, False # Penalty for trying used exhaust
         # --- END EXHAUST CHECK ---
 
         # --- PERMISSION CHECK (Timing, Priority - already done by action mask gen) ---
@@ -2953,9 +2955,9 @@ class ActionHandler:
             # Ensure cost string exists
             cost_str = getattr(ability_to_activate, 'cost', None)
             if cost_str is not None:
-                 costs_paid = gs.mana_system.pay_mana_cost(player, cost_str, cost_context)
+                costs_paid = gs.mana_system.pay_mana_cost(player, cost_str, cost_context)
             else:
-                 logging.error(f"Ability object for {card.name} missing 'cost' attribute.")
+                logging.error(f"Ability object for {card.name} missing 'cost' attribute.")
         else: # Fallback if no mana system
             logging.warning("Mana system missing, cannot properly handle cost payment.")
             costs_paid = True # Assume costs paid if no system to check (risky)
@@ -2964,22 +2966,22 @@ class ActionHandler:
             # --- MARK EXHAUST USED (AFTER paying cost, before adding to stack) ---
             if is_exhaust:
                 if not gs.mark_exhaust_used(card_id, activation_idx_on_card): # Use internal index
-                     logging.error(f"Failed to mark exhaust used for {card.name} index {activation_idx_on_card} despite successful payment!")
-                     # Rollback costs? Complex. Fail activation for safety.
-                     # gs.mana_system._refund_payment(player, cost_context.get('payment_details')) # Requires payment details stored
-                     return -0.2, False
+                    logging.error(f"Failed to mark exhaust used for {card.name} index {activation_idx_on_card} despite successful payment!")
+                    # Rollback costs? Complex. Fail activation for safety.
+                    # gs.mana_system._refund_payment(player, cost_context.get('payment_details')) # Requires payment details stored
+                    return -0.2, False
             # --- END MARK EXHAUST USED ---
 
             # --- TRIGGER EXHAUST ACTIVATED EVENT ---
             if is_exhaust:
-                 exhaust_context = {"activator": player, "source_card_id": card_id, "ability_index": activation_idx_on_card}
-                 # Make sure ability_handler exists before triggering
-                 if gs.ability_handler:
+                exhaust_context = {"activator": player, "source_card_id": card_id, "ability_index": activation_idx_on_card}
+                # Make sure ability_handler exists before triggering
+                if gs.ability_handler:
                     gs.ability_handler.check_abilities(card_id, "EXHAUST_ABILITY_ACTIVATED", exhaust_context)
                     # Immediately process triggers resulting from activation
                     gs.ability_handler.process_triggered_abilities()
-                 else:
-                     logging.warning("Cannot trigger EXHAUST_ABILITY_ACTIVATED: AbilityHandler missing.")
+                else:
+                    logging.warning("Cannot trigger EXHAUST_ABILITY_ACTIVATED: AbilityHandler missing.")
             # --- END TRIGGER EXHAUST ACTIVATED EVENT ---
 
             # --- ADD TO STACK (Handle Targeting) ---
@@ -2987,60 +2989,60 @@ class ActionHandler:
             requires_target = "target" in effect_text_for_stack.lower()
 
             if requires_target:
-                 # Ability needs targets, set up targeting phase
-                 logging.debug(f"Activated ability requires target. Entering TARGETING phase.")
-                 # Store previous phase unless already in a special phase
-                 if gs.phase not in [gs.PHASE_TARGETING, gs.PHASE_SACRIFICE, gs.PHASE_CHOOSE]:
+                # Ability needs targets, set up targeting phase
+                logging.debug(f"Activated ability requires target. Entering TARGETING phase.")
+                # Store previous phase unless already in a special phase
+                if gs.phase not in [gs.PHASE_TARGETING, gs.PHASE_SACRIFICE, gs.PHASE_CHOOSE]:
                     gs.previous_priority_phase = gs.phase
-                 else:
+                else:
                     gs.previous_priority_phase = gs.PHASE_MAIN_PRECOMBAT # Fallback if already special
 
-                 gs.phase = gs.PHASE_TARGETING
-                 gs.targeting_context = {
-                      "source_id": card_id,
-                      "controller": player,
-                      "effect_text": effect_text_for_stack,
-                      "required_type": gs._get_target_type_from_text(effect_text_for_stack), # Use helper
-                      "required_count": 1, # Default, need better parsing for >1 target
-                      "min_targets": 1, # Assume required if "target" present
-                      "max_targets": 1,
-                      "selected_targets": [],
-                      # Store info to put the *actual ability instance* on stack AFTER targeting
-                      "stack_info": {
-                           "item_type": "ABILITY",
-                           "source_id": card_id,
-                           "controller": player,
-                           "context": {
+                gs.phase = gs.PHASE_TARGETING
+                gs.targeting_context = {
+                    "source_id": card_id,
+                    "controller": player,
+                    "effect_text": effect_text_for_stack,
+                    "required_type": gs._get_target_type_from_text(effect_text_for_stack), # Use helper
+                    "required_count": 1, # Default, need better parsing for >1 target
+                    "min_targets": 1, # Assume required if "target" present
+                    "max_targets": 1,
+                    "selected_targets": [],
+                    # Store info to put the *actual ability instance* on stack AFTER targeting
+                    "stack_info": {
+                        "item_type": "ABILITY",
+                        "source_id": card_id,
+                        "controller": player,
+                        "context": {
                                 "ability_index": activation_idx_on_card, # Use internal index
                                 "effect_text": effect_text_for_stack,
                                 "ability": ability_to_activate, # <<< Pass the ability object itself
                                 "is_exhaust": is_exhaust, # Pass exhaust status if needed for resolution
                                 "targets": {} # To be filled
-                           }
-                      }
-                 }
-                 # Set priority to the choosing player
-                 gs.priority_player = player
-                 gs.priority_pass_count = 0
-                 logging.debug(f"Set up targeting for ability: {effect_text_for_stack}")
+                        }
+                    }
+                }
+                # Set priority to the choosing player
+                gs.priority_player = player
+                gs.priority_pass_count = 0
+                logging.debug(f"Set up targeting for ability: {effect_text_for_stack}")
 
             else: # No targets needed, add directly to stack
-                 stack_context = {
-                     "ability_index": activation_idx_on_card, # Use internal index
-                     "effect_text": effect_text_for_stack,
-                     "ability": ability_to_activate, # <<< Pass the ability object itself
-                     "is_exhaust": is_exhaust, # Pass exhaust status
-                     "targets": {}
-                 }
-                 gs.add_to_stack("ABILITY", card_id, player, stack_context)
-                 logging.debug(f"Added non-targeting ability index {activated_ability_list_idx} ({activation_idx_on_card}) for {card.name} to stack{' (Exhaust)' if is_exhaust else ''}.")
+                stack_context = {
+                    "ability_index": activation_idx_on_card, # Use internal index
+                    "effect_text": effect_text_for_stack,
+                    "ability": ability_to_activate, # <<< Pass the ability object itself
+                    "is_exhaust": is_exhaust, # Pass exhaust status
+                    "targets": {}
+                }
+                gs.add_to_stack("ABILITY", card_id, player, stack_context)
+                logging.debug(f"Added non-targeting ability index {activated_ability_list_idx} ({activation_idx_on_card}) for {card.name} to stack{' (Exhaust)' if is_exhaust else ''}.")
 
             # --- Calculate Reward ---
             ability_value = 0
             if self.card_evaluator:
                 try:
-                     # Pass correct ability index (internal activation_idx_on_card)
-                     ability_value, _ = self.evaluate_ability_activation(card_id, activation_idx_on_card)
+                    # Pass correct ability index (internal activation_idx_on_card)
+                    ability_value, _ = self.evaluate_ability_activation(card_id, activation_idx_on_card)
                 except Exception as eval_e:
                     logging.error(f"Error evaluating ability activation {card_id}, {activation_idx_on_card}: {eval_e}")
 
@@ -4647,7 +4649,7 @@ class ActionHandler:
         player = gs._get_active_player()
         if context is None: context = {}
 
-        equip_identifier = context.get('equipment_identifier')
+        equip_identifier = context.get('equipment_identifier', context.get('equip_identifier'))
         target_identifier = context.get('target_identifier')
 
         if equip_identifier is None or target_identifier is None:
@@ -4658,14 +4660,19 @@ class ActionHandler:
         target_id = self._find_permanent_id(player, target_identifier)
 
         if not equip_id or not target_id:
-             logging.warning(f"Equip failed: Invalid identifiers. Equip:'{equip_identifier}', Target:'{target_identifier}'")
-             return -0.15, False
+            logging.warning(f"Equip failed: Invalid identifiers. Equip:'{equip_identifier}', Target:'{target_identifier}'")
+            return -0.15, False
 
         equip_card = gs._safe_get_card(equip_id)
-        equip_cost_str = self._get_equip_cost_str(equip_card)
+        # Get equip cost from card text
+        equip_cost_str = None
+        match = re.search(r"equip (\{[^\}]+\}|[0-9]+)", getattr(equip_card, 'oracle_text', '').lower())
+        if match:
+            equip_cost_str = match.group(1)
+            if equip_cost_str.isdigit(): equip_cost_str = f"{{{equip_cost_str}}}" # Normalize cost
 
         if not equip_cost_str or not self._can_afford_cost_string(player, equip_cost_str):
-            logging.debug(f"Cannot afford equip cost {equip_cost_str or 'N/A'} for {equip_id}")
+            logging.debug(f"Cannot afford equip cost {equip_cost_str or 'N/A'} for {getattr(equip_card, 'name', equip_id)}")
             return -0.05, False
 
         if not gs.mana_system.pay_mana_cost(player, equip_cost_str):
@@ -4809,43 +4816,48 @@ class ActionHandler:
         return (0.2 if success else -0.1), success
 
     def _handle_morph(self, param, context, **kwargs):
+        """Handle turning morphed card face up. Expects battlefield_idx in context."""
         gs = self.game_state
-        player = gs._get_active_player() # Player controlling face-down card
-        card_idx = context.get('battlefield_idx') # Use context
+        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        # context passed from apply_action
+        card_idx = context.get('battlefield_idx') # Get from context
 
-        if card_idx is None: logging.warning(f"Morph context missing 'battlefield_idx'"); return -0.15, False
-        try: card_idx = int(card_idx)
-        except (ValueError, TypeError): logging.warning(f"Morph context has non-integer index: {context}"); return -0.15, False
+        if card_idx is not None:
+            try: card_idx = int(card_idx)
+            except (ValueError, TypeError):
+                logging.warning(f"Morph context has non-integer index: {context}")
+                return (-0.15, False)
 
-        if card_idx >= len(player["battlefield"]): logging.warning(f"Morph index out of bounds: {card_idx}"); return -0.15, False
-
-        card_id = player["battlefield"][card_idx]
-        success = False
-        if hasattr(gs, 'turn_face_up'):
-            # GS method handles checks, cost payment, state change
-            success = gs.turn_face_up(player, card_id, pay_morph_cost=True)
-        else: logging.error("turn_face_up method missing in GameState.")
-
-        return (0.3 if success else -0.1), success
+            if card_idx < len(player["battlefield"]):
+                card_id = player["battlefield"][card_idx]
+                # GS method checks if morphed, face down, and pays cost
+                success = gs.turn_face_up(player, card_id, pay_morph_cost=True)
+                return (0.3, success) if success else (-0.1, False)
+            else: logging.warning(f"Morph index out of bounds: {card_idx}")
+        else: logging.warning(f"Morph context missing 'battlefield_idx'")
+        return (-0.15, False)
 
     def _handle_manifest(self, param, context, **kwargs):
+        """Handle turning a manifested card face up. Expects battlefield_idx in context."""
         gs = self.game_state
-        player = gs._get_active_player()
-        card_idx = context.get('battlefield_idx')
+        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        # context passed from apply_action
+        card_idx = context.get('battlefield_idx') # Get from context
 
-        if card_idx is None: logging.warning(f"Manifest context missing 'battlefield_idx'"); return -0.15, False
-        try: card_idx = int(card_idx)
-        except (ValueError, TypeError): logging.warning(f"Manifest context has non-integer index: {context}"); return -0.15, False
+        if card_idx is not None:
+            try: card_idx = int(card_idx)
+            except (ValueError, TypeError):
+                logging.warning(f"Manifest context has non-integer index: {context}")
+                return (-0.15, False)
 
-        if card_idx >= len(player["battlefield"]): logging.warning(f"Manifest index out of bounds: {card_idx}"); return -0.15, False
-
-        card_id = player["battlefield"][card_idx]
-        success = False
-        if hasattr(gs, 'turn_face_up'):
-            success = gs.turn_face_up(player, card_id, pay_manifest_cost=True)
-        else: logging.error("turn_face_up method missing in GameState.")
-
-        return (0.25 if success else -0.1), success
+            if card_idx < len(player["battlefield"]):
+                card_id = player["battlefield"][card_idx]
+                # GS method checks if manifested, face down, is creature, and pays cost
+                success = gs.turn_face_up(player, card_id, pay_manifest_cost=True)
+                return (0.25, success) if success else (-0.1, False)
+            else: logging.warning(f"Manifest index out of bounds: {card_idx}")
+        else: logging.warning(f"Manifest context missing 'battlefield_idx'")
+        return (-0.15, False)
 
     def _handle_clash(self, param, **kwargs):
         gs = self.game_state
