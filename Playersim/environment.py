@@ -113,6 +113,19 @@ class AlphaZeroMTGEnv(gym.Env):
 
         # GameState initializes its own subsystems now
         self.combat_resolver = getattr(self.game_state, 'combat_resolver', None) # Get ref if needed
+        
+        self.strategic_planner = None
+        try:
+            self.strategic_planner = MTGStrategicPlanner(
+                self.game_state, # Pass GS
+                getattr(self.game_state, 'card_evaluator', None), # Pass evaluator from GS
+                self.combat_resolver # Pass combat resolver
+            )
+            self.game_state.strategic_planner = self.strategic_planner # Link planner to GS
+            logging.debug("StrategicPlanner initialized in Env __init__.")
+        except Exception as e:
+            logging.error(f"Failed to initialize StrategicPlanner in Env __init__: {e}")
+        
         integrate_combat_actions(self.game_state) # Integrate after GS subsystems are ready
 
         # Feature dimension determined dynamically above
@@ -357,7 +370,7 @@ class AlphaZeroMTGEnv(gym.Env):
 
             # --- Link Subsystems to GameState and Environment ---
             # External systems (passed or previously set)
-            self.initialize_strategic_memory()
+            self.initialize_strategic_memory() # Ensures self.strategy_memory exists if available
             if self.strategy_memory: gs.strategy_memory = self.strategy_memory # Link GS to env's memory
             if self.has_stats_tracker and self.stats_tracker:
                 gs.stats_tracker = self.stats_tracker # Link GS to env's tracker
@@ -365,7 +378,8 @@ class AlphaZeroMTGEnv(gym.Env):
                 self.stats_tracker.current_deck_name_p2 = self.current_deck_name_p2
             if self.has_card_memory and self.card_memory:
                 gs.card_memory = self.card_memory # Link GS to env's card memory
-                self.card_memory.clear_temporary_data() # Clear card memory for new game
+                # *** REMOVED problematic clear_temporary_data call ***
+                # self.card_memory.clear_temporary_data() # Replaced with cache clear if needed
 
             # Internal subsystems (created by gs.reset -> _init_subsystems)
             # Get references from the NEWLY created GameState instance
@@ -382,11 +396,16 @@ class AlphaZeroMTGEnv(gym.Env):
                     # Ensure subsystem is linked back to the *current* GameState instance
                     setattr(subsystem_instance, 'game_state', gs)
                     logging.debug(f"Relinked {system_name} to current GameState.")
+                # Ensure Env's strategic planner points to the one just created/linked from GS
+                if system_name == 'strategic_planner':
+                     self.strategic_planner = subsystem_instance
+
 
             # Ensure critical ActionHandler is set AND linked to THIS environment instance
             if not self.action_handler:
                 logging.error("ActionHandler is None after GameState reset and subsystem linking!")
                 # Attempt recreation (should not be necessary if GS init works)
+                from .actions import ActionHandler # Import locally if needed
                 self.action_handler = ActionHandler(gs) # Use the gs instance created above
                 gs.action_handler = self.action_handler
             else:
@@ -407,14 +426,17 @@ class AlphaZeroMTGEnv(gym.Env):
                  self.card_evaluator.stats_tracker = self.stats_tracker
                  self.card_evaluator.card_memory = self.card_memory
                  self.card_evaluator.game_state = gs # Ensure linked to new GS
-            if self.strategic_planner:
+            if self.strategic_planner: # Check if planner exists before accessing
                  self.strategic_planner.game_state = gs # Ensure linked to new GS
                  self.strategic_planner.card_evaluator = self.card_evaluator # Ensure linked
                  if self.strategy_memory:
                      self.strategic_planner.strategy_memory = self.strategy_memory
+                 # Call init_after_reset here, AFTER linking and other setup
+                 self.strategic_planner.init_after_reset()
+
 
             # --- Final Reset Steps ---
-            # Perform initial analysis if planner exists
+            # Perform initial analysis AFTER planner is initialized
             if self.strategic_planner:
                 try:
                     self.strategic_planner.analyze_game_state()
@@ -451,6 +473,7 @@ class AlphaZeroMTGEnv(gym.Env):
 
             return obs, info
 
+        # ... (rest of reset error handling remains the same) ...
         except Exception as e:
             # --- Critical Error Handling during Reset ---
             logging.critical(f"CRITICAL error during environment reset: {str(e)}", exc_info=True)
@@ -478,6 +501,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 # Initialize minimal subsystems AFTER setting basic state
                 self.game_state._init_subsystems()
                 # Link handler
+                from .actions import ActionHandler # Ensure import
                 self.action_handler = getattr(self.game_state, 'action_handler', ActionHandler(self.game_state))
                 self.game_state.action_handler = self.action_handler # Ensure GS has link
                 # Set priority AFTER subsystems are in place
@@ -496,160 +520,124 @@ class AlphaZeroMTGEnv(gym.Env):
                  # If even fallback fails, re-raise the original exception.
                  raise e from fallback_e
         
-
-    def ensure_game_result_recorded(self):
-        """Make sure game result is recorded if it hasn't been already"""
+    def ensure_game_result_recorded(self, forced_result=None):
+        """Make sure game result is recorded if it hasn't been already (Added None checks)."""
         if getattr(self, '_game_result_recorded', False):
             return  # Already recorded
 
         gs = self.game_state
         # Ensure players exist
-        if not hasattr(gs, 'p1') or not hasattr(gs, 'p2'):
-            logging.error("Cannot record game result: Player data missing.")
+        if not hasattr(gs, 'p1') or not hasattr(gs, 'p2') or gs.p1 is None or gs.p2 is None:
+            logging.error("Cannot record game result: Player data missing or not initialized.")
             return
 
-        me = gs.p1 if gs.agent_is_p1 else gs.p2
-        opp = gs.p2 if gs.agent_is_p1 else gs.p1
-
-        # Check if players are initialized before accessing attributes
-        if me is None or opp is None:
-            logging.error("Cannot record game result: Player object(s) are None.")
-            return
-
+        # Set _game_result attribute based on game state or forced result
         is_p1_winner = False
         winner_life = 0
         is_draw = False
 
-        # Determine the winner based on game state
-        # Safely access player states using .get()
-        my_lost = me.get("lost_game", False) or me.get("life", 20) <= 0 or me.get("attempted_draw_from_empty", False) or me.get("poison_counters", 0) >= 10
-        opp_lost = opp.get("lost_game", False) or opp.get("life", 20) <= 0 or opp.get("attempted_draw_from_empty", False) or opp.get("poison_counters", 0) >= 10
-
-        if my_lost:
-            is_p1_winner = not gs.agent_is_p1
-            winner_life = opp.get("life", 0)
-        elif opp_lost:
-            is_p1_winner = gs.agent_is_p1
-            winner_life = me.get("life", 0)
-        elif me.get("won_game", False):
-            is_p1_winner = gs.agent_is_p1
-            winner_life = me.get("life", 0)
-        elif opp.get("won_game", False):
-            is_p1_winner = not gs.agent_is_p1
-            winner_life = opp.get("life", 0)
-        elif me.get("game_draw", False) or opp.get("game_draw", False): # Explicit draw condition
+        if forced_result == "error":
+            logging.info("Game ended due to error.")
+            is_draw = True # Treat errors as draws? Or a separate category? Draw is safer for stats.
+            self._game_result = "error" # Store specific result string
+        elif forced_result == "invalid_limit":
+             logging.info("Game ended due to invalid action limit.")
              is_draw = True
-             winner_life = me.get("life", 0) # Record life even in draw
-        elif gs.turn > gs.max_turns: # Game ended due to turn limit
-            my_final_life = me.get("life", 0)
-            opp_final_life = opp.get("life", 0)
-            if my_final_life > opp_final_life:
-                is_p1_winner = gs.agent_is_p1
-                winner_life = my_final_life
-            elif opp_final_life > my_final_life:
-                is_p1_winner = not gs.agent_is_p1
-                winner_life = opp_final_life
-            else: # Draw by life at turn limit
-                is_draw = True
-                winner_life = my_final_life
-        else: # If no end condition met but function called, possibly an issue elsewhere
-            logging.warning("ensure_game_result_recorded called but no definitive game end condition met.")
-            # Decide how to handle - assume draw for now? Or determine based on current life?
-            # Defaulting to draw if life is equal, otherwise higher life wins.
-            my_final_life = me.get("life", 0)
-            opp_final_life = opp.get("life", 0)
-            if my_final_life > opp_final_life:
-                is_p1_winner = gs.agent_is_p1; winner_life = my_final_life
-            elif opp_final_life > my_final_life:
-                is_p1_winner = not gs.agent_is_p1; winner_life = opp_final_life
-            else: is_draw = True; winner_life = my_final_life
+             self._game_result = "invalid_limit"
+        else:
+            # Determine the winner based on game state (use .get with defaults)
+            me = gs.p1 if gs.agent_is_p1 else gs.p2
+            opp = gs.p2 if gs.agent_is_p1 else gs.p1
 
-        # --- Record the game result (FIXED: Removed winner_is_p1 keyword arg) ---
+            my_lost = me.get("lost_game", False) or me.get("life", 20) <= 0 or me.get("attempted_draw_from_empty", False) or me.get("poison_counters", 0) >= 10
+            opp_lost = opp.get("lost_game", False) or opp.get("life", 20) <= 0 or opp.get("attempted_draw_from_empty", False) or opp.get("poison_counters", 0) >= 10
+
+            if my_lost and opp_lost: # Both lost simultaneously
+                is_draw = True; winner_life = me.get("life", 0); self._game_result = "draw_both_loss"
+            elif my_lost:
+                is_p1_winner = not gs.agent_is_p1; winner_life = opp.get("life", 0); self._game_result = "win" if is_p1_winner else "loss"
+            elif opp_lost:
+                is_p1_winner = gs.agent_is_p1; winner_life = me.get("life", 0); self._game_result = "win" if is_p1_winner else "loss"
+            elif me.get("won_game", False): # Explicit win flag
+                 is_p1_winner = gs.agent_is_p1; winner_life = me.get("life", 0); self._game_result = "win"
+            elif opp.get("won_game", False):
+                 is_p1_winner = not gs.agent_is_p1; winner_life = opp.get("life", 0); self._game_result = "loss"
+            elif me.get("game_draw", False) or opp.get("game_draw", False):
+                is_draw = True; winner_life = me.get("life", 0); self._game_result = "draw_flag"
+            elif gs.turn > gs.max_turns:
+                my_final_life = me.get("life", 0); opp_final_life = opp.get("life", 0)
+                if my_final_life > opp_final_life:
+                    is_p1_winner = gs.agent_is_p1; winner_life = my_final_life; self._game_result = "win_turn_limit"
+                elif opp_final_life > my_final_life:
+                    is_p1_winner = not gs.agent_is_p1; winner_life = opp_final_life; self._game_result = "loss_turn_limit"
+                else: is_draw = True; winner_life = my_final_life; self._game_result = "draw_turn_limit"
+            else:
+                # No definitive end condition met - DO NOT RECORD yet.
+                logging.debug("ensure_game_result_recorded called but no definitive game end condition met. Waiting.")
+                return # Do not proceed with recording
+
+        # --- Record the game result ---
         if self.has_stats_tracker and self.stats_tracker:
             try:
-                # Determine winner/loser decks and names BEFORE the call
-                winner_deck_obj = gs.p1 if is_p1_winner else gs.p2
-                loser_deck_obj = gs.p2 if is_p1_winner else gs.p1
-                # Use original decks stored at reset
-                winner_deck_list = getattr(self, 'original_p1_deck', winner_deck_obj.get("library", []).copy()) if is_p1_winner else getattr(self, 'original_p2_deck', loser_deck_obj.get("library", []).copy())
-                loser_deck_list = getattr(self, 'original_p2_deck', loser_deck_obj.get("library", []).copy()) if is_p1_winner else getattr(self, 'original_p1_deck', winner_deck_obj.get("library", []).copy())
-                winner_name = getattr(self, 'current_deck_name_p1', "Unknown Deck 1") if is_p1_winner else getattr(self, 'current_deck_name_p2', "Unknown Deck 2")
-                loser_name = getattr(self, 'current_deck_name_p2', "Unknown Deck 2") if is_p1_winner else getattr(self, 'current_deck_name_p1', "Unknown Deck 1")
+                # --- ADDED: Robust determination of decks and names ---
+                # Use original decks stored at reset, default to empty list if missing
+                original_p1_deck = getattr(self, 'original_p1_deck', [])
+                original_p2_deck = getattr(self, 'original_p2_deck', [])
+                p1_name = getattr(self, 'current_deck_name_p1', "Unknown_P1")
+                p2_name = getattr(self, 'current_deck_name_p2', "Unknown_P2")
 
-                # Handle draws explicitly by not assigning a winner/loser
+                # Prepare arguments based on win/loss/draw
                 if is_draw:
-                     # For draws, the concept of winner/loser deck/name/life doesn't strictly apply.
-                     # Pass both decks, but maybe set winner_life=None or pass average?
-                     # DeckStatsTracker.record_game needs logic to handle this. Let's pass winner deck as p1's and loser as p2's for consistency, and the draw flag.
-                     p1_deck_list = getattr(self, 'original_p1_deck', gs.p1.get("library", []).copy())
-                     p2_deck_list = getattr(self, 'original_p2_deck', gs.p2.get("library", []).copy())
-                     p1_name = getattr(self, 'current_deck_name_p1', "Unknown Deck 1")
-                     p2_name = getattr(self, 'current_deck_name_p2', "Unknown Deck 2")
-
-                     self.stats_tracker.record_game(
-                         # Pass both decks in a consistent order, e.g., p1 then p2
-                         winner_deck=p1_deck_list,
-                         loser_deck=p2_deck_list,
-                         card_db=self.card_db, # Pass card_db if needed by tracker
-                         turn_count=gs.turn,
-                         winner_life=winner_life, # Record the life total at the end of the draw
-                         winner_deck_name=p1_name, # Name consistency
-                         loser_deck_name=p2_name, # Name consistency
-                         cards_played=getattr(gs, 'cards_played', {0: [], 1: []}),
-                         is_draw=is_draw # Crucial flag for the tracker
-                     )
+                    winner_deck_list, loser_deck_list = original_p1_deck, original_p2_deck
+                    winner_name, loser_name = p1_name, p2_name
                 else:
-                     # Normal win/loss case
-                     self.stats_tracker.record_game(
-                         winner_deck=winner_deck_list,
-                         loser_deck=loser_deck_list,
-                         card_db=self.card_db, # Pass card_db if needed by tracker
-                         turn_count=gs.turn,
-                         winner_life=winner_life,
-                         winner_deck_name=winner_name,
-                         loser_deck_name=loser_name,
-                         cards_played=getattr(gs, 'cards_played', {0: [], 1: []}),
-                         is_draw=is_draw
-                     )
+                    winner_deck_list = original_p1_deck if is_p1_winner else original_p2_deck
+                    loser_deck_list = original_p2_deck if is_p1_winner else original_p1_deck
+                    winner_name = p1_name if is_p1_winner else p2_name
+                    loser_name = p2_name if is_p1_winner else p1_name
 
+                # --- ADDED: None check before call ---
+                if winner_deck_list is None or loser_deck_list is None or winner_name is None or loser_name is None:
+                     logging.error("Cannot record game result: Deck list or name is None.")
+                     return
+
+                self.stats_tracker.record_game(
+                    winner_deck=winner_deck_list,
+                    loser_deck=loser_deck_list,
+                    card_db=self.card_db,
+                    turn_count=gs.turn,
+                    winner_life=winner_life,
+                    winner_deck_name=winner_name,
+                    loser_deck_name=loser_name,
+                    cards_played=getattr(gs, 'cards_played', {0: [], 1: []}),
+                    is_draw=is_draw
+                )
                 self._game_result_recorded = True
-            except TypeError as type_err: # Catch the specific error
-                 logging.error(f"TypeError during stats_tracker.record_game (maybe another signature issue?): {type_err}")
-                 logging.error(traceback.format_exc()) # Log traceback for debugging
             except Exception as stat_e:
-                 logging.error(f"Error during stats_tracker.record_game: {stat_e}")
-                 logging.error(traceback.format_exc()) # Log traceback for debugging
+                 logging.error(f"Error during stats_tracker.record_game: {stat_e}", exc_info=True)
 
         # Record cards to card memory system
         if self.has_card_memory and self.card_memory:
             try:
-                winner_deck_list_mem = getattr(self, 'original_p1_deck', []) if is_p1_winner else getattr(self, 'original_p2_deck', [])
-                loser_deck_list_mem = getattr(self, 'original_p2_deck', []) if is_p1_winner else getattr(self, 'original_p1_deck', [])
-                winner_archetype_mem = self.current_deck_name_p1 if is_p1_winner else self.current_deck_name_p2
-                loser_archetype_mem = self.current_deck_name_p2 if is_p1_winner else self.current_deck_name_p1
-
-                cards_played_data = getattr(self, 'cards_played', {0: [], 1: []})
-                opening_hands_data = getattr(self.game_state, 'opening_hands', {}) # Assuming GS tracks this
-                draw_history_data = getattr(self.game_state, 'draw_history', {}) # Assuming GS tracks this
-
-                if is_draw:
-                    # Record stats for both decks as a draw
+                 # --- Use the same robust determination as above ---
+                 if is_draw:
                     p1_deck_list_mem = getattr(self, 'original_p1_deck', [])
                     p2_deck_list_mem = getattr(self, 'original_p2_deck', [])
                     p1_name_mem = self.current_deck_name_p1
                     p2_name_mem = self.current_deck_name_p2
-                    self._record_cards_to_memory(p1_deck_list_mem, p2_deck_list_mem, cards_played_data, gs.turn,
-                                           p1_name_mem, p2_name_mem, opening_hands_data, draw_history_data, is_draw=True, player_idx=0) # P1 perspective
-                    self._record_cards_to_memory(p2_deck_list_mem, p1_deck_list_mem, cards_played_data, gs.turn,
-                                           p2_name_mem, p1_name_mem, opening_hands_data, draw_history_data, is_draw=True, player_idx=1) # P2 perspective
-                else:
-                    # Record winner/loser normally
-                    self._record_cards_to_memory(winner_deck_list_mem, loser_deck_list_mem, cards_played_data, gs.turn,
-                                               winner_archetype_mem, loser_archetype_mem, opening_hands_data, draw_history_data, is_draw=False, player_idx=(0 if is_p1_winner else 1))
-
+                    self._record_cards_to_memory(p1_deck_list_mem, p2_deck_list_mem, getattr(gs, 'cards_played', {0: [], 1: []}), gs.turn,
+                                           p1_name_mem, p2_name_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), is_draw=True, player_idx=0) # P1 perspective
+                    self._record_cards_to_memory(p2_deck_list_mem, p1_deck_list_mem, getattr(gs, 'cards_played', {0: [], 1: []}), gs.turn,
+                                           p2_name_mem, p1_name_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), is_draw=True, player_idx=1) # P2 perspective
+                 else:
+                    winner_deck_list_mem = original_p1_deck if is_p1_winner else original_p2_deck
+                    loser_deck_list_mem = original_p2_deck if is_p1_winner else original_p1_deck
+                    winner_archetype_mem = p1_name if is_p1_winner else p2_name
+                    loser_archetype_mem = p2_name if is_p1_winner else p1_name
+                    self._record_cards_to_memory(winner_deck_list_mem, loser_deck_list_mem, getattr(gs, 'cards_played', {0: [], 1: []}), gs.turn,
+                                               winner_archetype_mem, loser_archetype_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), is_draw=False, player_idx=(0 if is_p1_winner else 1))
             except Exception as mem_e:
-                 logging.error(f"Error recording cards to memory: {mem_e}")
-                 import traceback; logging.error(traceback.format_exc())
+                 logging.error(f"Error recording cards to memory: {mem_e}", exc_info=True)
                  
     def _get_strategic_advice(self):
         """
@@ -921,33 +909,32 @@ class AlphaZeroMTGEnv(gym.Env):
     
     def step(self, action_idx, context=None):
         """
-        Execute the action, run the game engine until control returns to the agent
-        or the game ends, and return the next state information.
-        Combines robust checks and game logic handling.
-
-        Args:
-            action_idx: Index of the action selected by the agent.
-            context: Optional dictionary with additional context for complex actions.
-
-        Returns:
-            tuple: (observation, reward, done, truncated, info)
+        Execute the agent's action, simulate opponent actions until control returns
+        or the game ends, and return the next state information. (Corrected Final Mask Generation)
         """
         gs = self.game_state
-        action_context = {} # Local dict for passing context
+        action_context = {}
         if context: action_context.update(context)
 
-        # --- Initialize Info Dict ---
-        # Get the action mask valid *before* this action is taken.
-        # Regenerate here to ensure it reflects the state the agent saw.
-        try:
-            initial_mask = self.action_mask().astype(bool)
-        except Exception as initial_mask_e:
-            logging.error(f"Error generating initial mask at step start: {initial_mask_e}. Using fallback.", exc_info=True)
-            initial_mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
-            initial_mask[11] = True; initial_mask[12] = True # Pass/Concede fallback
+        # Store initial agent perspective
+        initial_agent_is_p1 = gs.agent_is_p1
 
+        # --- Get initial state for reward calculation ---
+        agent_player_obj = gs.p1 if gs.agent_is_p1 else gs.p2
+        opp_player_obj = gs.p2 if gs.agent_is_p1 else gs.p1
+        prev_state_for_reward = {}
+        if agent_player_obj and opp_player_obj: # Check players exist
+            prev_state_for_reward = {
+                "my_life": agent_player_obj.get("life", 0), "opp_life": opp_player_obj.get("life", 0),
+                "my_hand": len(agent_player_obj.get("hand", [])), "opp_hand": len(opp_player_obj.get("hand", [])),
+                "my_board": len(agent_player_obj.get("battlefield", [])), "opp_board": len(opp_player_obj.get("battlefield", [])),
+                "my_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) or 0 for cid in agent_player_obj.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
+                "opp_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) or 0 for cid in opp_player_obj.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
+            }
+
+        # --- Initialize Info Dict ---
         env_info = {
-            "action_mask": initial_mask,
+            "action_mask": None, # Will be set at the end or on error
             "game_result": "undetermined",
             "critical_error": False,
             "invalid_action": False,
@@ -955,211 +942,292 @@ class AlphaZeroMTGEnv(gym.Env):
         }
 
         try:
-            # --- 1. Action Index Bounds Validation ---
-            if not (0 <= action_idx < self.ACTION_SPACE_SIZE):
-                logging.error(f"Step {self.current_step}: Action index {action_idx} is out of bounds (0-{self.ACTION_SPACE_SIZE-1}).")
-                obs = self._get_obs_safe() # Get safe obs
-                env_info["critical_error"] = True
-                env_info["error_message"] = "Action index out of bounds"
-                # Use the initial_mask for info as no valid action was attempted
-                return obs, -0.5, False, False, env_info
+            self.current_step += 1 # Increment step counter
 
-            # --- 2. Action Mask Validation (Using Freshly Generated Mask) ---
-            # Regenerate the mask *just before* validation for maximum accuracy.
+            # --- 1 & 2: Action Index and Mask Validation ---
             try:
+                 # Regenerate mask FOR THE CURRENT AGENT perspective before validation
+                 gs.agent_is_p1 = initial_agent_is_p1 # Ensure perspective is correct
                  current_mask = self.action_mask().astype(bool)
             except Exception as current_mask_e:
                 logging.error(f"Error regenerating mask for validation: {current_mask_e}. Using fallback.", exc_info=True)
-                current_mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
-                current_mask[11] = True; current_mask[12] = True # Pass/Concede fallback
+                current_mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool); current_mask[11]=True; current_mask[12]=True
 
-            # Update info dict immediately with the mask used for validation
-            env_info["action_mask"] = current_mask
+            if not (0 <= action_idx < self.ACTION_SPACE_SIZE):
+                logging.error(f"Step {self.current_step}: Action index {action_idx} out of bounds.")
+                obs = self._get_obs_safe() # Ensure perspective is agent's
+                env_info["critical_error"] = True; env_info["error_message"] = "Action index OOB"
+                env_info["action_mask"] = current_mask # Provide the mask that was current when error occurred
+                return obs, -0.5, False, False, env_info # Fail step
 
             if not current_mask[action_idx]:
                 invalid_reason = self.action_handler.action_reasons.get(action_idx, 'Not Valid / Unknown Reason')
-                valid_indices = np.where(current_mask)[0]
-                logging.warning(f"Step {self.current_step}: Invalid action {action_idx} selected (Mask False). Reason: [{invalid_reason}]. Valid: {valid_indices}")
+                logging.warning(f"Step {self.current_step}: Invalid action {action_idx} selected (Mask False). Reason: [{invalid_reason}]")
                 self.invalid_action_count += 1
-                if hasattr(self, 'episode_invalid_actions'): self.episode_invalid_actions += 1
-                step_reward = -0.1 # Standard penalty for invalid mask selection
-
-                # Update Env history even for invalid mask selection
-                if hasattr(self, 'last_n_actions'): self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
-                if hasattr(self, 'last_n_rewards'): self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = step_reward
-                if hasattr(self, 'current_episode_actions'): self.current_episode_actions.append(action_idx)
-
-                done, truncated = False, False
-                if self.invalid_action_count >= self.invalid_action_limit:
-                    logging.error(f"Exceeded invalid action limit ({self.invalid_action_count}/{self.invalid_action_limit}). Terminating episode.")
-                    done, truncated, step_reward = True, True, -2.0 # Truncated = True
-
-                obs = self._get_obs_safe() # Get safe obs
-                # Update info dict before returning
                 env_info["invalid_action"] = True
                 env_info["invalid_action_reason"] = invalid_reason
-                # Ensure game result recorded if terminated
-                if done: self.ensure_game_result_recorded(forced_result="invalid_limit")
+                env_info["action_mask"] = current_mask # Return the *current* mask when action is invalid
+                done, truncated = False, False
+                step_reward = -0.1 # Apply penalty
+                if self.invalid_action_count >= self.invalid_action_limit:
+                     logging.warning(f"Invalid action limit ({self.invalid_action_limit}) reached. Terminating episode.")
+                     done, truncated, step_reward = True, True, -2.0
+                     self.ensure_game_result_recorded(forced_result="invalid_limit") # Record specific result
+                gs.agent_is_p1 = initial_agent_is_p1 # Ensure perspective before getting obs
+                obs = self._get_obs_safe() # Get current observation
                 return obs, step_reward, done, truncated, env_info
 
-            # Reset invalid action counter on valid action
+            # Reset counter if action is valid
             self.invalid_action_count = 0
 
-            # --- 3. Execute Action using ActionHandler ---
-            self.current_step += 1
-            if not hasattr(self, 'action_handler') or self.action_handler is None:
-                raise RuntimeError("ActionHandler is not initialized.")
+            # --- 3. Execute VALID AGENT's Action using ActionHandler ---
+            # Set perspective correctly before applying agent action
+            gs.agent_is_p1 = initial_agent_is_p1
+            reward, done, truncated, handler_info = self.action_handler.apply_action(action_idx, context=action_context)
+            env_info.update(handler_info) # Merge info
 
-            # >>> Call ActionHandler.apply_action - this handles the game loop <<<
-            action_handler_result = self.action_handler.apply_action(action_idx, context=action_context)
-            # Unpack the result: reward, done, truncated, handler_specific_info
-            reward, done, truncated, handler_info = action_handler_result
+            # --- 4. Opponent Simulation Loop (Only if agent's action was valid and game not over) ---
+            opponent_loop_count = 0
+            max_opponent_loops = 50 # Safety break
+            while not done and not truncated and opponent_loop_count < max_opponent_loops:
+                opponent_loop_count += 1
+                # --- a. Check if opponent needs to act ---
+                opponent_player, opponent_context = self._opponent_needs_to_act()
+                if not opponent_player:
+                    # logging.debug(f"Opponent loop {opponent_loop_count}: No opponent action needed.")
+                    break # Agent needs to act next, exit loop
 
-            # Merge the handler's info into the environment's info dict
-            env_info.update(handler_info)
+                # --- b. Get Opponent's Valid Actions ---
+                # Set perspective to opponent for mask generation
+                gs.agent_is_p1 = (opponent_player == gs.p1)
+                try:
+                     opponent_mask = self.action_mask().astype(bool)
+                except Exception as opp_mask_e:
+                     logging.error(f"Error generating opponent mask: {opp_mask_e}. Opponent skips turn.", exc_info=True)
+                     gs.agent_is_p1 = initial_agent_is_p1 # Restore perspective before breaking
+                     break
+                # --- PERSPECTIVE RESTORED LATER ---
 
-            # --- 4. Post-Action Game State Checks (e.g., Mulligan Transition) ---
-            # Detect mulligan phase ending and ensure proper transition (from V2)
-            if hasattr(gs, 'mulligan_in_progress') and not gs.mulligan_in_progress and \
-               hasattr(gs, '_phase_history') and not gs._phase_history and gs.turn == 1:
-                # If mulligan has just ended (flag is False) but phase history is empty
-                # (meaning we haven't properly started turn 1 phases yet),
-                # ensure proper phase transition occurs if needed.
-                # This often happens if the last mulligan action didn't auto-advance phase.
-                if gs.phase == gs.PHASE_UNTAP: # Check if stuck in a phase before priority pass expected
-                    logging.info("Detected potential post-mulligan state; ensuring game advances to Upkeep.")
-                    try:
-                        active_player = gs._get_active_player()
-                        # Ensure untap effects happen if needed (though often none turn 1)
-                        gs._untap_phase(active_player)
-                        # Force progression to Upkeep phase
-                        gs.phase = gs.PHASE_UPKEEP
-                        gs.priority_player = active_player
-                        gs.priority_pass_count = 0
-                        # Trigger beginning of upkeep abilities
-                        gs._handle_beginning_of_phase_triggers()
-                        logging.debug("Forced transition from Untap to Upkeep after mulligan.")
-                    except Exception as transition_e:
-                        logging.error(f"Error during forced post-mulligan transition: {transition_e}", exc_info=True)
-                        # Decide if this error is critical enough to end the episode
-                        # For now, log and continue, but it might indicate deeper issues.
-                        env_info["critical_error"] = True
-                        env_info["error_message"] = f"Post-mulligan transition failed: {transition_e}"
+                # --- c. Choose Scripted Opponent Action ---
+                opponent_action_idx, opponent_action_context = self._get_scripted_opponent_action(opponent_player, opponent_mask, opponent_context)
+                if opponent_action_idx is None:
+                     logging.warning(f"Scripted opponent couldn't choose valid action. Breaking opponent loop.")
+                     gs.agent_is_p1 = initial_agent_is_p1 # Restore perspective before breaking
+                     break
+
+                # --- d. Apply Opponent's Action using ActionHandler ---
+                # Apply action from the OPPONENT'S perspective (mask was generated above)
+                _, opp_done, opp_truncated, opp_handler_info = self.action_handler.apply_action(opponent_action_idx, context=opponent_action_context)
+
+                # Check if the opponent's action ended the game
+                done = done or opp_done # Update global done flag
+                truncated = truncated or opp_truncated # Update global truncated flag
+                if opp_handler_info.get("critical_error"): # Propagate critical errors
+                    env_info["critical_error"] = True
+                    env_info["error_message"] = opp_handler_info.get("error_message", "Opponent action critical error")
+                    logging.error(f"Critical error during opponent action {opponent_action_idx}. Ending step.")
+                    gs.agent_is_p1 = initial_agent_is_p1 # Restore perspective before breaking
+                    break # Exit opponent loop on critical error
+
+                # Restore perspective AFTER applying opponent action successfully
+                gs.agent_is_p1 = initial_agent_is_p1
+
+            # Safety break check for loop
+            if opponent_loop_count >= max_opponent_loops:
+                 logging.error(f"Opponent simulation loop exceeded max iterations ({max_opponent_loops}). Terminating episode.")
+                 done = True; truncated = True # Mark as truncated due to loop limit
+                 env_info["game_result"] = "error_opponent_loop" # Set specific result string
+                 gs.agent_is_p1 = initial_agent_is_p1 # Restore perspective before exiting
 
 
-            # --- 5. Post-Action Observation and Mask Generation ---
-            # Generate a fresh observation using the environment's method
+            # --- 5. Final State Calculations (After agent + opponent simulation) ---
+            step_reward = reward # Start with agent action's direct reward (if any)
+            current_state_for_reward = {}
+            if agent_player_obj and opp_player_obj: # Recalculate state AFTER opponent sim
+                current_state_for_reward = {
+                    "my_life": agent_player_obj.get("life", 0), "opp_life": opp_player_obj.get("life", 0),
+                    "my_hand": len(agent_player_obj.get("hand", [])), "opp_hand": len(opp_player_obj.get("hand", [])),
+                    "my_board": len(agent_player_obj.get("battlefield", [])), "opp_board": len(opp_player_obj.get("battlefield", [])),
+                    "my_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) or 0 for cid in agent_player_obj.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
+                    "opp_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) or 0 for cid in opp_player_obj.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
+                }
+
+            # Add state change reward comparing initial state to final state of the step
+            if hasattr(self, '_add_state_change_rewards') and prev_state_for_reward and current_state_for_reward:
+                 state_change_reward = self._add_state_change_rewards(0.0, prev_state_for_reward, current_state_for_reward)
+                 step_reward += state_change_reward
+                 env_info["state_change_reward"] = state_change_reward
+
+            # Add board state reward component based on the final board state
+            if hasattr(self, '_calculate_board_state_reward'):
+                 board_reward = self._calculate_board_state_reward()
+                 step_reward += board_reward
+                 env_info["board_state_reward"] = board_reward
+
+            # --- 6. Check Final Game End Conditions ---
+            if not done:
+                 game_ended_by_check = self._check_game_end_conditions(env_info)
+                 done = done or game_ended_by_check
+
+            # --- 7. Get Final Observation and Mask for the AGENT ---
+            # *** Ensure perspective is set to agent BEFORE getting obs and mask ***
+            gs.agent_is_p1 = initial_agent_is_p1
+            obs = self._get_obs_safe()
+            # *** Regenerate mask AFTER perspective is confirmed ***
             try:
-                obs = self._get_obs()
-            except Exception as obs_e:
-                 logging.error(f"Error generating observation after action {action_idx}: {obs_e}. Using safe obs.", exc_info=True)
-                 obs = self._get_obs_safe()
-                 env_info["critical_error"] = True # Flag that observation might be compromised
-                 env_info["error_message"] = f"Observation generation failed: {obs_e}"
+                final_agent_mask = self.action_mask().astype(bool)
+            except Exception as final_mask_e:
+                 logging.error(f"Error generating final agent mask: {final_mask_e}. Using fallback.", exc_info=True)
+                 final_agent_mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool); final_agent_mask[11]=True; final_agent_mask[12]=True
+            env_info["action_mask"] = final_agent_mask # This mask is for the NEXT agent action
 
-
-            # Generate the action mask for the NEXT state
-            try:
-                next_mask = self.action_mask()
-                 # Store the generated mask for potential use next step (V2 feature)
-                if hasattr(self, 'current_valid_actions'):
-                    self.current_valid_actions = next_mask
-                env_info["action_mask"] = next_mask.astype(bool) # Update info with the mask for the NEXT step
-            except Exception as next_mask_e:
-                logging.error(f"Error generating next action mask: {next_mask_e}. Using fallback.", exc_info=True)
-                fallback_mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
-                fallback_mask[11] = True; fallback_mask[12] = True # Pass/Concede
-                env_info["action_mask"] = fallback_mask
-                if hasattr(self, 'current_valid_actions'):
-                    self.current_valid_actions = fallback_mask.astype(float) # Store as float if needed elsewhere
-                # Potentially flag error if mask generation fails consistently
-                # env_info["critical_error"] = True
-
-
-            # --- 6. Environment Level Updates & History ---
+            # --- 8. Record History and Finalize ---
             if hasattr(self, 'last_n_actions'): self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
-            if hasattr(self, 'last_n_rewards'): self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = reward
+            if hasattr(self, 'last_n_rewards'): self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = step_reward
             if hasattr(self, 'current_episode_actions'): self.current_episode_actions.append(action_idx)
-            if hasattr(self, 'episode_rewards'): self.episode_rewards.append(reward)
+            if hasattr(self, 'episode_rewards'): self.episode_rewards.append(step_reward)
 
-            # Ensure game result is recorded if 'done' flag is set by the handler
+            # Record game result if ended
             if done and not getattr(self, '_game_result_recorded', False):
-                # Use result from info if available, otherwise determine default
-                result = env_info.get("game_result", "undetermined")
-                if result == "undetermined": result = None # ensure_game_result handles None
-                self.ensure_game_result_recorded(forced_result=result)
-                # Update env_info["game_result"] if it was determined by ensure_game_result_recorded
+                final_result_string = env_info.get("game_result", "undetermined")
+                self.ensure_game_result_recorded(forced_result=final_result_string)
                 env_info["game_result"] = getattr(self, '_game_result', 'undetermined')
 
+            # Log step summary
+            if self.detailed_logging or DEBUG_ACTION_STEPS:
+                action_type_log, param_log = self.action_handler.get_action_info(action_idx)
+                logging.info(f"--- Env Step {self.current_step} COMPLETE ---")
+                logging.info(f"Agent Action: {action_idx} ({action_type_log}({param_log}))")
+                logging.info(f"Opponent Loops: {opponent_loop_count}")
+                logging.info(f"Final State: Turn {gs.turn}, Phase {gs._PHASE_NAMES.get(gs.phase, gs.phase)}, Prio {getattr(gs.priority_player,'name','None')}")
+                logging.info(f"Returned Reward: {step_reward:.4f}, Done: {done}, Truncated: {truncated}")
 
-            # --- 7. Detailed Logging ---
-            if self.detailed_logging or DEBUG_ACTION_STEPS: # Use flags from V1
-                action_type, param = self.action_handler.get_action_info(action_idx)
-                logging.info(f"--- Env Step {self.current_step} ---")
-                logging.info(f"Action Taken: {action_idx} ({action_type}({param})) Context: {action_context}")
-                logging.info(f"Returned State: Turn {gs.turn}, Phase {gs._PHASE_NAMES.get(gs.phase, gs.phase)}, Prio {getattr(gs.priority_player,'name','None')}")
-                logging.info(f"Reward: {reward:.4f}, Done: {done}, Truncated: {truncated}")
-                # Logging next mask sum can be noisy, optionally add back if needed:
-                # logging.info(f"Next Action Mask (sum): {np.sum(env_info['action_mask'])}")
-
-
-            # --- 8. Final Observation Validation & Patching (from V2) ---
-            if hasattr(self, 'observation_space') and isinstance(self.observation_space, spaces.Dict):
-                missing_keys = False
-                for key, space in self.observation_space.spaces.items():
-                    if key not in obs:
-                        logging.warning(f"Observation key '{key}' missing in step return! Patching with default.")
-                        missing_keys = True
-                        # Attempt to create a default value matching the space
-                        try:
-                            obs[key] = np.zeros(space.shape, dtype=space.dtype)
-                            # Special case for action mask - ensure basic actions possible
-                            if key == "action_mask":
-                                if 11 < len(obs[key]): obs[key][11] = 1.0 # Pass
-                                if 12 < len(obs[key]): obs[key][12] = 1.0 # Concede
-                        except Exception as patch_e:
-                            logging.error(f"Failed to patch missing key '{key}': {patch_e}. Observation may be incomplete.")
-                            env_info["critical_error"] = True
-                            env_info["error_message"] = env_info.get("error_message", "") + f"; Failed to patch obs key '{key}'"
-                if missing_keys:
-                     logging.warning(f"Completed patching missing observation keys for step {self.current_step}.")
-
-
-            return obs, reward, done, truncated, env_info
+            return obs, step_reward, done, truncated, env_info
 
         except Exception as e:
-            # --- Critical Error Handling within Step ---
-            logging.critical(f"CRITICAL error in environment step function (Action {action_idx}, Step {self.current_step}): {str(e)}", exc_info=True)
-            # Get safe observation
-            try:
-                obs = self._get_obs_safe()
-            except Exception as safe_obs_e:
-                logging.critical(f"Failed even to get safe observation: {safe_obs_e}", exc_info=True)
-                # Create a minimal fallback observation if possible
-                obs = {}
-                if hasattr(self, 'observation_space') and isinstance(self.observation_space, spaces.Dict):
-                     for key, space in self.observation_space.spaces.items():
-                         try:
-                             obs[key] = np.zeros(space.shape, dtype=space.dtype)
-                             if key == "action_mask":
-                                 if 11 < len(obs[key]): obs[key][11] = 1.0
-                                 if 12 < len(obs[key]): obs[key][12] = 1.0
-                         except: pass # Best effort
-
-            # Create a *new*, minimal safe info dict (like V2)
+            # Critical error during step execution
+            logging.critical(f"CRITICAL error in environment step {self.current_step} (Agent Action {action_idx}): {str(e)}", exc_info=True)
+            gs.agent_is_p1 = initial_agent_is_p1 # Ensure perspective is agent before fallback obs
+            obs = self._get_obs_safe()
             fallback_mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool); fallback_mask[11] = True; fallback_mask[12] = True
             final_info = {
                 "action_mask": fallback_mask,
                 "critical_error": True,
                 "error_message": f"Unhandled Exception in Environment Step: {str(e)}",
-                "game_result": "error", # Mark game result as error
-                # Copy minimal relevant info if available from potentially corrupted env_info
-                "turn": gs.turn if gs else -1,
-                "phase": gs.phase if gs else -1,
+                "game_result": "error",
+                "turn": gs.turn if hasattr(self,'game_state') and gs else -1,
+                "phase": gs.phase if hasattr(self,'game_state') and gs else -1,
             }
-            # End the episode immediately due to critical failure
-            self.ensure_game_result_recorded(forced_result="error")
+            self.ensure_game_result_recorded(forced_result="error") # Record error result
             return obs, -5.0, True, False, final_info # done=True, truncated=False
+
+    # --- ADDED Helper Methods for Opponent Simulation ---
+
+    def _opponent_needs_to_act(self):
+        """Checks if the game state requires the opponent to act."""
+        gs = self.game_state
+        agent_player_obj = gs.p1 if gs.agent_is_p1 else gs.p2
+        opponent_player_obj = gs.p2 if gs.agent_is_p1 else gs.p1
+
+        # Check if players exist
+        if not agent_player_obj or not opponent_player_obj:
+            return None, None # Error condition
+
+        # Mulligan/Bottoming Phase
+        mulligan_target = getattr(gs, 'mulligan_player', None)
+        if mulligan_target == opponent_player_obj:
+            return opponent_player_obj, {"phase_context": "mulligan_decision"}
+
+        bottoming_target = getattr(gs, 'bottoming_player', None)
+        if bottoming_target == opponent_player_obj:
+            return opponent_player_obj, {"phase_context": "bottoming"}
+
+        # Special Choice Phase (Targeting, Sacrifice, etc.)
+        if gs.phase in [gs.PHASE_TARGETING, gs.PHASE_SACRIFICE, gs.PHASE_CHOOSE]:
+            context = None
+            if gs.phase == gs.PHASE_TARGETING: context = getattr(gs, 'targeting_context', None)
+            elif gs.phase == gs.PHASE_SACRIFICE: context = getattr(gs, 'sacrifice_context', None)
+            elif gs.phase == gs.PHASE_CHOOSE: context = getattr(gs, 'choice_context', None)
+
+            if context:
+                 acting_player = context.get('controller') or context.get('player')
+                 if acting_player == opponent_player_obj:
+                     return opponent_player_obj, {"phase_context": gs._PHASE_NAMES.get(gs.phase)}
+
+        # Priority Check (Outside Mulligan/Choice)
+        priority_target = getattr(gs, 'priority_player', None)
+        if priority_target == opponent_player_obj and gs.phase not in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP]:
+             # Ensure opponent actually *has* valid actions other than NO_OP/Pass
+             # Generate their mask temporarily
+             original_agent_is_p1 = gs.agent_is_p1
+             gs.agent_is_p1 = (opponent_player_obj == gs.p1)
+             try: opp_mask = self.action_mask()
+             finally: gs.agent_is_p1 = original_agent_is_p1
+
+             if np.sum(opp_mask) > 2: # More than just Pass (11) and Concede (12) likely available
+                 return opponent_player_obj, {"phase_context": "priority"}
+             else: # Opponent only has Pass/Concede, no real action needed yet
+                 pass
+
+        return None, None # Agent needs to act or game state error
+
+    def _get_scripted_opponent_action(self, opponent_player, opponent_mask, opponent_context):
+        """Simple scripted policy for opponent actions."""
+        gs = self.game_state
+        phase_ctx = opponent_context.get("phase_context")
+
+        # 1. Handle Mulligan/Bottoming First
+        if phase_ctx == "mulligan_decision":
+            # Always Keep (simplest strategy for opponent simulation)
+            if opponent_mask[225]: # KEEP_HAND
+                logging.debug("Scripted Opponent: KEEP_HAND")
+                return 225, {}
+            elif opponent_mask[6]: # MULLIGAN (if keep not possible, unlikely)
+                 logging.debug("Scripted Opponent: MULLIGAN (Forced)")
+                 return 6, {}
+            else: # Should not happen if mask is correct
+                logging.warning("Scripted Opponent: No mulligan decision action valid!")
+                return opponent_mask[11] if opponent_mask[11] else None, {} # Try Pass
+
+        elif phase_ctx == "bottoming":
+            # Bottom the first available card (index 0, maps to action 226)
+            if opponent_mask[226]:
+                 logging.debug("Scripted Opponent: BOTTOM_CARD (Index 0)")
+                 return 226, {}
+            else:
+                 # If card 0 can't be bottomed, try Pass (should auto-advance if no more needed)
+                 logging.warning("Scripted Opponent: Cannot bottom card 0, trying Pass.")
+                 return opponent_mask[11] if opponent_mask[11] else None, {} # Try Pass
+
+
+        # 2. Handle Other Choice Phases (simple pass for now)
+        if phase_ctx in ["TARGETING", "SACRIFICE", "CHOOSE"]:
+            # Simple: Opponent just finishes the choice (Passes)
+            if opponent_mask[11]:
+                logging.debug(f"Scripted Opponent: PASS_PRIORITY (Finish {phase_ctx})")
+                return 11, {}
+            else:
+                 logging.warning(f"Scripted Opponent: No PASS available during {phase_ctx}?")
+                 # Maybe CONCEDE if truly stuck?
+                 return opponent_mask[12] if opponent_mask[12] else None, {}
+
+
+        # 3. Handle Standard Priority
+        if phase_ctx == "priority":
+             # Simple Opponent: Always pass priority
+            if opponent_mask[11]:
+                logging.debug("Scripted Opponent: PASS_PRIORITY")
+                return 11, {}
+            else: # No pass available? Extremely rare. Try NO_OP or Concede.
+                logging.warning("Scripted Opponent: No PASS_PRIORITY available?")
+                if opponent_mask[224]: return 224, {}
+                return opponent_mask[12] if opponent_mask[12] else None, {}
+
+        # 4. Fallback (If context unknown or logic missed)
+        logging.warning(f"Scripted Opponent: Unknown phase context '{phase_ctx}', defaulting to PASS.")
+        if opponent_mask[11]: return 11, {}
+        if opponent_mask[224]: return 224, {}
+        return opponent_mask[12] if opponent_mask[12] else None, {} # Concede last resort
         
     def _get_obs_safe(self):
         """Return a minimal, safe observation dictionary in case of errors. (Reinforced)"""
@@ -2423,12 +2491,15 @@ class AlphaZeroMTGEnv(gym.Env):
         """Populate the ability recommendations tensor."""
         # Fallback: Return zeros if planner is not available
         recs = np.zeros((self.max_battlefield, 5, 2), dtype=np.float32) # shape (bf_size, max_abilities, [recommend, conf])
-        if not self.strategic_planner or not self.action_handler.game_state.ability_handler:
+        if not hasattr(self, 'strategic_planner') or not self.strategic_planner or not hasattr(self.action_handler, 'game_state') or not self.action_handler.game_state.ability_handler:
+            logging.debug("Planner or ability handler missing for ability recommendations.")
             return recs
 
         gs = self.game_state
         ability_handler = gs.ability_handler
-        if not ability_handler: return recs # Double check handler exists
+        if not ability_handler:
+            logging.warning("Ability handler is None inside _get_ability_recommendations.")
+            return recs # Double check handler exists
 
         for i, card_id in enumerate(bf_ids):
              if i >= self.max_battlefield: break
@@ -2439,15 +2510,19 @@ class AlphaZeroMTGEnv(gym.Env):
                       # Check if actually activatable first
                       can_activate = ability_handler.can_activate_ability(card_id, j, player)
                       if can_activate:
-                           recommended, confidence = self.strategic_planner.recommend_ability_activation(card_id, j)
-                           recs[i, j, 0] = float(recommended)
-                           recs[i, j, 1] = confidence
+                           # Ensure planner method exists before calling
+                           if hasattr(self.strategic_planner, 'recommend_ability_activation'):
+                               recommended, confidence = self.strategic_planner.recommend_ability_activation(card_id, j)
+                               recs[i, j, 0] = float(recommended)
+                               recs[i, j, 1] = confidence
+                           else: # Fallback if method missing on planner
+                               logging.warning("Planner missing recommend_ability_activation method.")
+                               recs[i, j, 0] = 0.5; recs[i, j, 1] = 0.5 # Default neutral
                       # else leave as 0.0, 0.0
                   except Exception as e:
                       logging.warning(f"Error getting ability rec for {card_id} ability {j}: {e}")
                       # Leave as zeros
         return recs
-
         
     # --- Observation Helper Methods ---
     
@@ -2871,21 +2946,24 @@ class AlphaZeroMTGEnv(gym.Env):
 
     def _analysis_to_metrics(self, analysis):
         """Convert strategic analysis dict to metrics vector."""
-        # Fallback: Return zeros if strategic planner is not available
-        if not self.strategic_planner:
+        # Fallback: Return zeros if strategic planner is not available or analysis is None
+        if not hasattr(self, 'strategic_planner') or not self.strategic_planner or not analysis:
             return np.zeros(10, dtype=np.float32)
 
         metrics = np.zeros(10, dtype=np.float32)
-        if not analysis: return metrics
+        # --- Safely access analysis keys with .get() ---
         metrics[0] = analysis.get("position", {}).get("score", 0)
         metrics[1] = analysis.get("board_state", {}).get("board_advantage", 0)
-        metrics[2] = analysis.get("resources", {}).get("card_advantage", 0) / 5.0 # Normalize
-        metrics[3] = analysis.get("resources", {}).get("mana_advantage", 0) / 3.0 # Normalize
-        metrics[4] = analysis.get("life", {}).get("life_diff", 0) / 20.0 # Normalize
+        card_adv = analysis.get("resources", {}).get("card_advantage", 0)
+        metrics[2] = card_adv / max(1, abs(card_adv) * 2) # Normalize better
+        mana_adv = analysis.get("resources", {}).get("mana_advantage", 0)
+        metrics[3] = mana_adv / max(1, abs(mana_adv) * 2) # Normalize better
+        life_diff = analysis.get("life", {}).get("life_diff", 0)
+        metrics[4] = life_diff / 20.0 # Normalize by starting life
         metrics[5] = analysis.get("tempo", {}).get("tempo_advantage", 0)
         stage = analysis.get("game_info", {}).get("game_stage", 'mid')
         metrics[6] = 0.0 if stage == 'early' else 0.5 if stage == 'mid' else 1.0
-        # Metrics 7, 8, 9 can be used for other aspects (e.g., threat level, combo proximity)
+        # --- END safe access ---
         metrics[7] = 0.0 # Opponent Archetype Confidence
         metrics[8] = 0.0 # Win Condition Proximity
         metrics[9] = 0.0 # Overall Threat Level
@@ -2950,16 +3028,20 @@ class AlphaZeroMTGEnv(gym.Env):
     def _get_threat_assessment(self, opp_bf_ids):
         """Assess threat level of opponent's board."""
         # Fallback: Return zeros if strategic planner is not available
-        if not self.strategic_planner:
+        if not hasattr(self, 'strategic_planner') or not self.strategic_planner:
             return np.zeros(self.max_battlefield, dtype=np.float32)
 
         threats = np.zeros(self.max_battlefield, dtype=np.float32)
-        if self.strategic_planner and hasattr(self.strategic_planner, 'assess_threats'):
-            threat_list = self.strategic_planner.assess_threats() # Get list of dicts
-            threat_map = {t['card_id']: t['level'] for t in threat_list}
-            for i, card_id in enumerate(opp_bf_ids):
-                 if i >= self.max_battlefield: break
-                 threats[i] = threat_map.get(card_id, 0.0) / 10.0 # Normalize
+        if hasattr(self.strategic_planner, 'assess_threats'):
+            try:
+                threat_list = self.strategic_planner.assess_threats() # Get list of dicts
+                threat_map = {t['card_id']: t['level'] for t in threat_list}
+                for i, card_id in enumerate(opp_bf_ids):
+                    if i >= self.max_battlefield: break
+                    threats[i] = threat_map.get(card_id, 0.0) / 10.0 # Normalize
+            except Exception as e:
+                logging.warning(f"Error getting threat assessment from planner: {e}")
+                # Return zeros on error
         return threats
 
     def _get_opportunity_assessment(self, hand_ids, player):
@@ -3150,6 +3232,7 @@ class AlphaZeroMTGEnv(gym.Env):
                  logging.warning(f"Error getting mulligan recommendation: {mull_e}")
         return recommendation, reasons_arr, reason_count
 
+
     def _get_recommendations(self, valid_actions_list): # Renamed argument
         """Get action recommendations from planner and memory."""
         rec_action = -1
@@ -3158,19 +3241,28 @@ class AlphaZeroMTGEnv(gym.Env):
         matches = 0
 
         # Planner Recommendation (Check existence first)
-        if self.strategic_planner and hasattr(self.strategic_planner, 'recommend_action'):
+        if hasattr(self, 'strategic_planner') and self.strategic_planner and hasattr(self.strategic_planner, 'recommend_action'):
              try:
-                 rec_action = self.strategic_planner.recommend_action(valid_actions_list) # Pass the list
+                 # Pass the list of valid actions
+                 rec_action = self.strategic_planner.recommend_action(valid_actions_list)
                  # Crude confidence based on position
-                 analysis = getattr(self.strategic_planner, 'current_analysis', {})
+                 # --- Check if current_analysis exists before using it ---
+                 analysis = getattr(self, 'current_analysis', None) or getattr(self.strategic_planner, 'current_analysis', {})
+                 # --- End Check ---
                  score = analysis.get('position', {}).get('score', 0)
                  rec_conf = 0.5 + abs(score) * 0.4 # Map score [-1, 1] to confidence [0.5, 0.9]
-             except Exception: pass # Ignore errors
+             except Exception as e:
+                 logging.warning(f"Error getting recommendation from planner: {e}")
+                 pass # Ignore errors
 
         # Memory Recommendation (Check existence first)
-        if self.strategy_memory and hasattr(self.strategy_memory, 'get_suggested_action'):
-            try: mem_action = self.strategy_memory.get_suggested_action(self.game_state, valid_actions_list) # Pass list
-            except Exception: pass
+        if hasattr(self, 'strategy_memory') and self.strategy_memory and hasattr(self.strategy_memory, 'get_suggested_action'):
+            try:
+                # Pass the list of valid actions
+                mem_action = self.strategy_memory.get_suggested_action(self.game_state, valid_actions_list)
+            except Exception as e:
+                logging.warning(f"Error getting recommendation from memory: {e}")
+                pass
 
         if rec_action is not None and rec_action == mem_action:
              matches = 1
@@ -3183,27 +3275,30 @@ class AlphaZeroMTGEnv(gym.Env):
 
     def _get_attacker_values(self, bf_ids, player):
         """Evaluate the strategic value of attacking with each potential attacker."""
-        # Fallback: Return zeros if planner is not available
+        # Fallback: Return zeros if strategic planner is not available
         gs = self.game_state
-        if not self.strategic_planner or not hasattr(self.strategic_planner, 'evaluate_attack_action'):
-             return np.zeros(self.max_battlefield, dtype=np.float32)
+        if not hasattr(self, 'strategic_planner') or not self.strategic_planner or not hasattr(self.strategic_planner, 'evaluate_attack_action'):
+            logging.debug("Strategic planner or evaluate_attack_action missing for attacker values.")
+            return np.zeros(self.max_battlefield, dtype=np.float32)
 
         values = np.zeros(self.max_battlefield, dtype=np.float32)
         # Use self.action_handler for attacker check
-        if not self.action_handler: return values # Need action handler for validation
+        if not hasattr(self, 'action_handler') or not self.action_handler:
+            logging.warning("Action handler missing for attacker check.")
+            return values # Need action handler for validation
 
         for i, card_id in enumerate(bf_ids):
-             if i >= self.max_battlefield: break
-             # Check if valid attacker first
-             if self.action_handler.is_valid_attacker(card_id):
-                 try:
-                      value = self.strategic_planner.evaluate_attack_action([card_id]) # Evaluate attacking alone
-                      values[i] = np.clip(value, -10.0, 10.0) # Clip to bounds
-                 except Exception as atk_eval_e:
-                      logging.warning(f"Error evaluating single attacker {card_id}: {atk_eval_e}")
-                      # Fallback value based on power?
-                      card = gs._safe_get_card(card_id)
-                      values[i] = getattr(card, 'power', 0) * 0.5 if card else 0.0
+            if i >= self.max_battlefield: break
+            # Check if valid attacker first
+            if self.action_handler.is_valid_attacker(card_id):
+                try:
+                    value = self.strategic_planner.evaluate_attack_action([card_id]) # Evaluate attacking alone
+                    values[i] = np.clip(value, -10.0, 10.0) # Clip to bounds
+                except Exception as atk_eval_e:
+                    logging.warning(f"Error evaluating single attacker {card_id}: {atk_eval_e}")
+                    # Fallback value based on power?
+                    card = gs._safe_get_card(card_id)
+                    values[i] = getattr(card, 'power', 0) * 0.5 if card else 0.0
         return values
 
     def _phase_to_onehot(self, phase):

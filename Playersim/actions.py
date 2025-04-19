@@ -517,8 +517,9 @@ class ActionHandler:
         # Fallback heuristic
         return True, 0.6 # Default to recommend with medium confidence
     
+
     def generate_valid_actions(self):
-        """Return the current action mask as boolean array with reasoning. CONCEDE is now a last resort. (Revised Mulligan/Priority/Logging/Waiting v4 - Added Recovery)"""
+        """Return the current action mask as boolean array with reasoning. CONCEDE is now a last resort. (Revised Mulligan/Priority/Logging/Waiting v5 - Bottoming Mask Fix)"""
         gs = self.game_state
         try:
             valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
@@ -558,17 +559,45 @@ class ActionHandler:
                 # Check if the perspective player needs to bottom cards
                 if bottoming_active_player == perspective_player:
                     hand_size = len(perspective_player.get("hand", []))
-                    # Use getattr safely for potentially missing attrs during state issues
-                    needed = max(0, getattr(gs, 'cards_to_bottom', 0) - getattr(gs, 'bottoming_count', 0))
-                    logging.debug(f"Bottoming Phase (Perspective): Needs to bottom {needed} cards.")
-                    if needed > 0:
-                        for i in range(min(hand_size, 4)): # BOTTOM_CARD actions 226-229 for hand indices 0-3
-                            set_valid_action(226 + i, f"BOTTOM_CARD index {i}", context={'hand_idx': i})
-                        action_found_in_mulligan = True
-                    else: # Needed is 0, but player still assigned (should transition via apply_action/bottom_card)
-                        logging.warning("Mulligan Stuck? Current player assigned bottoming, but no cards needed. Allowing NO_OP.")
-                        set_valid_action(224, "NO_OP (Bottoming Stuck?)")
-                        action_found_in_mulligan = True
+                    current_bottomed = getattr(gs, 'bottoming_count', 0)
+                    total_needed = getattr(gs, 'cards_to_bottom', 0)
+                    needed_now = max(0, total_needed - current_bottomed)
+
+                    logging.debug(f"Bottoming Phase (Perspective {perspective_player.get('name')}): Hand Size: {hand_size}, Total Needed: {total_needed}, Already Bottomed: {current_bottomed}, Needed Now: {needed_now}")
+
+                    if needed_now > 0:
+                        # Generate BOTTOM_CARD actions for valid hand indices
+                        max_hand_idx_for_action = 3 # Actions 226-229 correspond to hand indices 0-3
+                        any_bottom_action_set = False # Track if any bottom action was actually added
+                        for i in range(min(hand_size, max_hand_idx_for_action + 1)):
+                            # Check if the hand index is valid
+                            if i < hand_size:
+                                set_valid_action(226 + i, f"BOTTOM_CARD index {i}", context={'hand_idx': i})
+                                any_bottom_action_set = True
+                        action_found_in_mulligan = any_bottom_action_set
+                        # Fallback if no actions generated despite needing to bottom
+                        if not any_bottom_action_set:
+                             logging.warning("Bottoming needed, but no BOTTOM_CARD actions set (check hand size/action space mapping). Allowing NO_OP fallback.")
+                             set_valid_action(224, "NO_OP (Bottoming Fallback - Hand Index?)")
+                             action_found_in_mulligan = True
+
+
+                    else: # Needed is 0 for this player
+                        logging.debug(f"Bottoming requirement met for {perspective_player_name} ({current_bottomed}/{total_needed}). Checking opponent.")
+                        # This player doesn't need to bottom more. Determine if waiting for opponent or if phase should end.
+                        opponent = gs.p2 if perspective_player == gs.p1 else gs.p1
+                        opp_needs_to_bottom = opponent and opponent.get('_needs_to_bottom_next', False) and not opponent.get('_bottoming_complete', False)
+
+                        if opp_needs_to_bottom:
+                            # Player is done, waiting for opponent
+                            set_valid_action(224, f"NO_OP (Finished bottoming, waiting for {getattr(opponent,'name','Opponent')})")
+                            action_found_in_mulligan = True
+                        else:
+                            # Player is done, opponent is done/doesn't need to. Mulligan phase should end via handler.
+                            # If we are generating actions here, it means the phase *didn't* end correctly after the last action.
+                            logging.error("Mulligan Stuck? In bottoming mask generation, but current player needs 0 and opponent is done. Allowing NO_OP. Check state transition logic in GameState.bottom_card.")
+                            set_valid_action(224, "NO_OP (Bottoming Phase Stuck? Should have ended)")
+                            action_found_in_mulligan = True
 
                 # Check if the perspective player needs to make a mulligan decision
                 elif mulligan_decision_player == perspective_player:
@@ -584,8 +613,7 @@ class ActionHandler:
                 elif bottoming_active_player is None and mulligan_decision_player is None:
                     # We are in mulligan_in_progress=True, but no player assigned. This IS the error state seen in logs.
                     logging.error("MULLIGAN STATE ERROR: In Progress, but mulligan_player AND bottoming_player are None! Attempting ENHANCED recovery.")
-                    
-                    # First try checking mulligan state - this will try to find undecided players or force end
+
                     try:
                         fixed = False
                         if hasattr(gs, 'check_mulligan_state'):
@@ -605,7 +633,18 @@ class ActionHandler:
                                     set_valid_action(6, "MULLIGAN")
                                 action_found_in_mulligan = True
                                 fixed = True
-                        
+                            elif gs.bottoming_player == perspective_player:
+                                 # If check assigned current player to bottoming, let this function continue
+                                 logging.info("Recovery: bottoming_player is now assigned to perspective player.")
+                                 # Re-run bottoming logic
+                                 hand_size = len(perspective_player.get("hand", [])); needed_now = max(0, getattr(gs,'cards_to_bottom',0) - getattr(gs,'bottoming_count',0))
+                                 if needed_now > 0:
+                                     max_hand_idx_for_action = 3
+                                     for i in range(min(hand_size, max_hand_idx_for_action + 1)):
+                                         if i < hand_size: set_valid_action(226 + i, f"BOTTOM_CARD index {i} (Recovery)", context={'hand_idx': i})
+                                     action_found_in_mulligan = True
+                                 fixed = True
+
                         # If check failed to fix, try direct end
                         if not fixed:
                             logging.warning("check_mulligan_state() didn't resolve issue, trying direct _end_mulligan_phase()")
@@ -613,19 +652,26 @@ class ActionHandler:
                                 gs._end_mulligan_phase()
                                 logging.info("Mulligan phase force-ended via direct call. Re-generating actions.")
                                 fixed = True
-                        
+
                         # If any recovery happened, return temporary actions
                         if fixed:
-                            temp_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
-                            temp_actions[224] = True # Allow NO_OP
-                            return temp_actions
-                            
+                            # Recalculate mask *after* fix attempts, or just return basic NO_OP
+                            # If a player was assigned, the standard logic above would have set actions.
+                            # If phase was ended, subsequent call to generate_valid_actions will reflect non-mulligan state.
+                            # So, just return the actions SET by the standard logic within this check.
+                            if not action_found_in_mulligan: # If fix didn't assign player/actions
+                                 temp_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+                                 temp_actions[224] = True # Allow NO_OP after failed recovery
+                                 logging.warning("Mulligan recovery attempted, but still no specific actions. Returning NO_OP.")
+                                 return temp_actions
+
                     except Exception as recovery_e:
                         logging.critical(f"CRITICAL: Enhanced recovery failed: {recovery_e}", exc_info=True)
-                    
-                    # If all recovery attempts fail, allow NO_OP as a last resort
-                    set_valid_action(224, "NO_OP (Mulligan State Error - After recovery attempts)")
-                    action_found_in_mulligan = True
+
+                    # If all recovery attempts fail or don't assign player/actions, allow NO_OP as a last resort
+                    if not action_found_in_mulligan:
+                        set_valid_action(224, "NO_OP (Mulligan State Error - After recovery attempts)")
+                        action_found_in_mulligan = True
                 # *** END OF ENHANCED CHECK ***
 
                 # Check if perspective player is waiting for opponent
@@ -648,6 +694,7 @@ class ActionHandler:
                     self.action_reasons_with_context[224] = action_reasons[224]; self.action_reasons[224] = "NO_OP (Fallback Mulligan)"
 
                 # --- Add CONCEDE as last resort for mulligan phase ---
+                # Count actions again before deciding on CONCEDE
                 if np.sum(valid_actions) == 0: # Check if ONLY CONCEDE would be valid
                     valid_actions[12] = True
                     action_reasons[12] = {"reason": "CONCEDE (Mulligan - Final)", "context": {}}
@@ -687,7 +734,8 @@ class ActionHandler:
                     action_found_in_special = np.sum(valid_actions) > 0 # Check if any actions were set
                 else:
                     # Not this player's turn to act in special phase, allow NO_OP
-                    set_valid_action(224, f"NO_OP (Waiting for opponent {special_phase})")
+                    opp_name = getattr(acting_player, 'name', 'opponent')
+                    set_valid_action(224, f"NO_OP (Waiting for {opp_name} during {special_phase})")
                     action_found_in_special = True
 
                 # Final check for special phase actions
@@ -771,16 +819,14 @@ class ActionHandler:
                         card_id = pending_spell_context['card_id']
                         card = gs._safe_get_card(card_id)
                         # Check if the spell is waiting for this specific decision (offspring cost)
-                        # Assumes pending_spell_context signals waiting for choices (like Kicker/Offspring)
                         if card and getattr(card, 'is_offspring', False) and \
-                        not pending_spell_context.get('pay_offspring', None) and \
+                        pending_spell_context.get('pay_offspring') is None and \
                         pending_spell_context.get('waiting_for_choice') == 'offspring_cost': # Add specific wait flag
                             cost_str = getattr(card, 'offspring_cost', None)
                             # Use pending_context for affordability check
                             if cost_str and self._can_afford_cost_string(player=perspective_player, cost_string=cost_str, context=pending_spell_context):
                                 offspring_context = {'action_source': 'offspring_payment_opportunity'}
-                                set_valid_action(295, f"Optional: PAY_OFFSPRING_COST for {card.name}", context=offspring_context)
-
+                                set_valid_action(295, f"Optional: PAY_OFFSPRING_COST for {getattr(card, 'name', card_id)}", context=offspring_context)
 
             # --- Final CONCEDE Logic ---
             self.action_reasons_with_context = action_reasons.copy()
@@ -977,7 +1023,7 @@ class ActionHandler:
 
         self._add_morph_actions(player, valid_actions, set_valid_action)
         self._add_alternative_casting_actions(player, valid_actions, set_valid_action, is_sorcery_speed=True)
-        self._add_special_mechanics_actions(player, valid_actions, set_valid_action, is_sorcery_speed=True)
+        self._add_specific_mechanics_actions(player, valid_actions, set_valid_action, is_sorcery_speed=True)
         
     def _add_instant_speed_actions(self, player, opponent, valid_actions, set_valid_action):
         """Adds actions performable at instant speed. (Updated for Offspring/Impending)"""
@@ -1024,7 +1070,7 @@ class ActionHandler:
         self._add_alternative_casting_actions(player, valid_actions, set_valid_action, is_sorcery_speed=False)
         self._add_cycling_actions(player, valid_actions, set_valid_action)
         if gs.stack: self._add_response_actions(player, valid_actions, set_valid_action)
-        self._add_special_mechanics_actions(player, valid_actions, set_valid_action, is_sorcery_speed=False)
+        self._add_specific_mechanics_actions(player, valid_actions, set_valid_action, is_sorcery_speed=False)
         
     def _targets_available_from_data(self, card_data, caster, opponent):
         """Check target availability from card data dict."""
@@ -2044,8 +2090,6 @@ class ActionHandler:
             # *** IMPORTANT: Fix final return statement to return 4 values ***
             return -5.0, True, False, info # Return values for Env
         
-    # --- Individual Action Handlers ---
-    # These methods will be called by apply_action based on action_type
     
     def _handle_surveil_choice(self, param, **kwargs):
         """Handle Surveil choice: PUT_TO_GRAVEYARD"""
@@ -2273,10 +2317,13 @@ class ActionHandler:
         logging.warning("PUT_ON_BOTTOM called outside of Scry context.")
         return -0.1, False
 
-    def _handle_no_op(self, param, **kwargs):
+    def _handle_no_op(self, param, context=None, **kwargs):
+        """Handles NO_OP. Does nothing to the game state."""
+        gs = self.game_state
         logging.debug("Executed NO_OP action.")
+        # The simulation of opponent turns is now handled by the Environment's step loop
+        # if this NO_OP was chosen while waiting for the opponent.
         return 0.0, True # Return (reward, success_flag)
-
 
     def _handle_pay_offspring_cost(self, param, context=None, **kwargs):
         gs = self.game_state

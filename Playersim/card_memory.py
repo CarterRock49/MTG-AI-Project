@@ -21,7 +21,7 @@ class CardMemory:
     def __init__(self, storage_path: str = "./card_memory", use_compression: bool = True):
         """
         Initialize card memory system.
-        
+
         Args:
             storage_path: Directory to store card memory files
             use_compression: Whether to compress stored data
@@ -39,9 +39,26 @@ class CardMemory:
         self.save_frequency = 50  # Save after every 50 updates by default
         # Create storage directory if it doesn't exist
         os.makedirs(self.storage_path, exist_ok=True)
-        
+
         # Load existing card data
         self.load_all_card_data()
+        
+    def clear_temporary_data(self) -> None:
+        """
+        Clears any temporary or game-specific data from the memory.
+        Currently, this clears the internal cache.
+        """
+        with self.memory_lock:
+            self.cache_clear() # Call existing cache clear method
+            self.last_cache_cleanup = time.time() # Reset cleanup timer
+            logging.info("Cleared temporary data (cache) from CardMemory.")
+
+    def cache_clear(self) -> None:
+        """Clear the entire cache"""
+        with self.memory_lock:
+            self.cache.clear()
+            logging.debug("CardMemory cache cleared.")
+
         
     def cache_get(self, key):
         """Get a value from the cache if it exists and is not expired."""
