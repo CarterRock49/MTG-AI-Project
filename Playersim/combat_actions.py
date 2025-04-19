@@ -101,20 +101,17 @@ class CombatActionHandler:
         if not is_my_turn or not is_main_phase_empty_stack: return
 
         creature_indices = [(idx, cid) for idx, cid in enumerate(player["battlefield"])
-                             if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])]
+                            if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])]
         equipment_indices = [(idx, cid) for idx, cid in enumerate(player["battlefield"])
-                              if gs._safe_get_card(cid) and 'equipment' in getattr(gs._safe_get_card(cid), 'subtypes', [])]
-        aura_indices = [(idx, cid) for idx, cid in enumerate(player["battlefield"])
-                         if gs._safe_get_card(cid) and 'aura' in getattr(gs._safe_get_card(cid), 'subtypes', [])]
+                            if gs._safe_get_card(cid) and 'equipment' in getattr(gs._safe_get_card(cid), 'subtypes', [])]
         fortification_indices = [(idx, cid) for idx, cid in enumerate(player["battlefield"])
                                 if gs._safe_get_card(cid) and 'fortification' in getattr(gs._safe_get_card(cid), 'subtypes', [])]
 
-        # Equip/Reconfigure
+        # Equip (Action 450)
         for eq_idx, equip_id in equipment_indices:
             equip_card = gs._safe_get_card(equip_id)
-            is_equipped = equip_id in getattr(player, "attachments", {}) # Check if key exists
+            is_equipped = equip_id in getattr(player, "attachments", {})
 
-            # Check Equip
             equip_cost_str = self._get_equip_cost_str(equip_card)
             if equip_cost_str and self._can_afford_cost_string(player, equip_cost_str):
                 for c_idx, creature_id in creature_indices:
@@ -122,38 +119,28 @@ class CombatActionHandler:
                     if equip_id == creature_id: continue
                     # Don't allow re-equipping to the same target
                     if is_equipped and player["attachments"][equip_id] == creature_id: continue
-                    # Set action 445, assuming handler uses context for params (eq_idx, c_idx)
-                    set_valid_action(445, f"EQUIP {equip_card.name} (Idx {eq_idx}) to {gs._safe_get_card(creature_id).name} (Idx {c_idx}) Cost: {equip_cost_str}")
-                    # For simplicity, only allow targeting one creature? No, let agent choose.
+                    # Use context with both identifiers
+                    context = {'equip_identifier': equip_id, 'target_identifier': creature_id}
+                    set_valid_action(450, f"EQUIP {equip_card.name} to {gs._safe_get_card(creature_id).name}", context=context)
 
-            # Check Reconfigure
+        # Fortify (Action 453)
+        land_indices = [(idx, cid) for idx, cid in enumerate(player["battlefield"])
+                        if gs._safe_get_card(cid) and 'land' in getattr(gs._safe_get_card(cid), 'type_line', '')]
+        for fort_idx, fort_id in fortification_indices:
+            fort_card = gs._safe_get_card(fort_id)
+            fort_cost_str = self._get_fortify_cost_str(fort_card)
+            if fort_cost_str and self._can_afford_cost_string(player, fort_cost_str):
+                for l_idx, land_id in land_indices:
+                    context = {'fort_identifier': fort_id, 'target_identifier': land_id}
+                    set_valid_action(453, f"FORTIFY {fort_card.name} onto {gs._safe_get_card(land_id).name}", context=context)
+
+        # Reconfigure (Action 454)
+        for eq_idx, equip_id in equipment_indices:
+            equip_card = gs._safe_get_card(equip_id)
             reconf_cost_str = self._get_reconfigure_cost_str(equip_card)
             if reconf_cost_str and self._can_afford_cost_string(player, reconf_cost_str):
-                 set_valid_action(449, f"RECONFIGURE {equip_card.name} (Idx {eq_idx}) Cost: {reconf_cost_str}") # Param=eq_idx
-
-        # Unequip (This isn't a standard action, usually done via reconfigure or replacement)
-        # Action 446 (UNEQUIP) might be misleading. Remove? Or map to Reconfigure?
-        # Let's comment it out unless there's a specific need.
-        # if hasattr(player, "attachments"):
-        #     for equip_id, target_id in player["attachments"].items():
-        #         equip_card = gs._safe_get_card(equip_id)
-        #         if equip_card and 'equipment' in getattr(equip_card, 'subtypes', []):
-        #             eq_idx = -1; ... find eq_idx ...
-        #             if eq_idx != -1: set_valid_action(446, f"UNEQUIP {equip_card.name} (Idx {eq_idx})")
-
-        # Attach Aura (Usually happens on cast, or via activated abilities?)
-        # Action 447 seems misplaced for direct attachment outside casting/abilities.
-        # Revisit if there are abilities that say "Attach CARDNAME to target creature".
-
-        # Fortify
-        land_indices = [(idx, cid) for idx, cid in enumerate(player["battlefield"])
-                         if gs._safe_get_card(cid) and 'land' in getattr(gs._safe_get_card(cid), 'type_line', '')]
-        for fort_idx, fort_id in fortification_indices:
-             fort_card = gs._safe_get_card(fort_id)
-             fort_cost_str = self._get_fortify_cost_str(fort_card)
-             if fort_cost_str and self._can_afford_cost_string(player, fort_cost_str):
-                  for l_idx, land_id in land_indices:
-                       set_valid_action(448, f"FORTIFY {fort_card.name} (Idx {fort_idx}) onto {gs._safe_get_card(land_id).name} (Idx {l_idx}) Cost: {fort_cost_str}")
+                context = {'card_identifier': equip_id}
+                set_valid_action(454, f"RECONFIGURE {equip_card.name}", context=context)
 
     def _add_ninjutsu_actions(self, player, valid_actions, set_valid_action):
         """Add actions for using Ninjutsu."""
@@ -889,22 +876,20 @@ class CombatActionHandler:
         if possible_attackers:
             # Add actions for attacking Planeswalkers (action indices 378-382, corrected from 373-377)
             opponent_planeswalkers = [(idx, card_id) for idx, card_id in enumerate(opponent.get("battlefield", []))
-                                        if gs._safe_get_card(card_id) and 'planeswalker' in getattr(gs._safe_get_card(card_id), 'card_types', [])]
+                                    if gs._safe_get_card(card_id) and 'planeswalker' in getattr(gs._safe_get_card(card_id), 'card_types', [])]
             for pw_rel_idx in range(min(len(opponent_planeswalkers), 5)): # PW relative index 0-4
                 pw_abs_idx, pw_id = opponent_planeswalkers[pw_rel_idx]
                 pw_card = gs._safe_get_card(pw_id)
                 pw_name = getattr(pw_card, 'name', f'PW {pw_rel_idx}')
-                # Corrected action index to match ACTION_MEANINGS (378-382)
                 set_valid_action(378 + pw_rel_idx, f"Target PLANESWALKER: {pw_name}")
 
-            # Add actions for attacking Battles (action indices 462-466, corrected from 460-464)
+            # Add actions for attacking Battles (action indices 462-466)
             opponent_battles = [(idx, card_id) for idx, card_id in enumerate(opponent.get("battlefield", []))
                                 if gs._safe_get_card(card_id) and 'battle' in getattr(gs._safe_get_card(card_id), 'type_line', '')]
             for battle_rel_idx in range(min(len(opponent_battles), 5)): # Battle relative index 0-4
                 battle_abs_idx, battle_id = opponent_battles[battle_rel_idx]
                 battle_card = gs._safe_get_card(battle_id)
                 battle_name = getattr(battle_card, 'name', f'Battle {battle_rel_idx}')
-                # Corrected action index to match ACTION_MEANINGS (462-466)
                 set_valid_action(462 + battle_rel_idx, f"Target BATTLE: {battle_name}")
 
         # Always allow finishing declaration if player has declared at least one action or no valid attacks

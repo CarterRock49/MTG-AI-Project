@@ -65,7 +65,26 @@ ACTION_MEANINGS = {
     # Current map assumes Battle 0-4, Def 0-3. Simple approach: Just use 204.
     # Param=None. Handler expects {'battle_identifier': id_or_idx, 'defender_identifier': id_or_idx} in context.
     204: ("DEFEND_BATTLE", None), # Simplified: one action, needs context
-    **{i: ("NO_OP", None) for i in range(205, 224)}, # Pad with NO_OPs
+    
+    205: ("DISTURB_CAST", None),         # Cast from graveyard (Spirit/enchantment side)
+    206: ("DASH_CAST", None),            # Cast with haste and return to hand EOT
+    207: ("SPECTACLE_CAST", None),       # Alternative cost if opponent lost life
+    208: ("BESTOW_CAST", None),          # Cast as Aura or creature
+    209: ("BLITZ_CAST", None),           # Cast with haste, sacrifice & draw
+    210: ("ETERNALIZE", None),           # Bring back as 4/4 black zombie
+    211: ("EMBALM", None),               # Create token copy from graveyard
+    212: ("REINFORCE", None),            # Discard to put counters
+    213: ("CHANNEL", None),              # Discard for alternative effect
+    214: ("TRANSMUTE", None),            # Discard to tutor same CMC
+    215: ("FORECAST", None),             # Activate from hand during upkeep
+    216: ("SUSPEND_CAST", None),         # Exile with time counters to cast later
+    217: ("UNEARTH", None),              # Temporarily reanimate
+    218: ("ENCORE", None),               # Create token attacks
+    219: ("PARTNER_WITH", None),         # Tutor specific card
+    220: ("COMPANION_CHECK", None),      # Check companion requirements
+    221: ("EVOKE_CAST", None),           # Cast for less with sacrifice
+    222: ("MIRACLE_CAST", None),         # Cast at reduced cost when drawn
+    223: ("FORETELL_CAST", None),        # Cast from exile after foretelling
 
     # NO_OP (224)
     224: ("NO_OP", None),
@@ -5369,8 +5388,8 @@ class ActionHandler:
             if gs.cast_spell(card_id, player, context=context):
                 return 0.15 + card_value * 0.2, True # Base reward + value mod
             else:
-                 logging.warning(f"Cast split failed ({action_type}) for {card_id}. Handled by gs.cast_spell.")
-                 return -0.1, False
+                logging.warning(f"Cast split failed ({action_type}) for {card_id}. Handled by gs.cast_spell.")
+                return -0.1, False
         return -0.2, False # Invalid hand index
 
     # --- Combat Handler Wrappers ---
@@ -5816,19 +5835,21 @@ class ActionHandler:
         # If we need to show token/copy actions, add them based on the context
         if context_requires_token_action:
             if action_type == "CREATE_TOKEN":
-                # Auto-create token based on the card text - no action needed
-                # This is typically automatic, but we could add options for token types if needed
-                set_valid_action(405, "CREATE_TOKEN as specified by the spell/ability")
-            
+                # Add create token action for predefined token types 
+                for token_idx in range(5):  # Token indices 0-4 map to actions 410-414
+                    set_valid_action(410 + token_idx, f"CREATE_TOKEN type {token_idx}")
+                    
             elif action_type == "COPY_PERMANENT":
                 # Add actions for copying permanents on the battlefield
                 for idx, perm_id in enumerate(player["battlefield"][:5]):  # Limit to 5
                     card = gs._safe_get_card(perm_id)
                     if card:
-                        set_valid_action(405 + idx, f"COPY_PERMANENT {card.name}")
+                        context = {'target_identifier': perm_id}
+                        set_valid_action(415, f"COPY_PERMANENT {card.name}", context=context)
+                        break  # Just one action is enough, context will specify target
             
             elif action_type == "COPY_SPELL":
-                # Add actions for copying spells on the stack
+                # Find valid spells on the stack to copy
                 spells_on_stack = []
                 for i, item in enumerate(gs.stack):
                     if item != stack_item and isinstance(item, tuple) and item[0] == "SPELL":
@@ -5836,23 +5857,26 @@ class ActionHandler:
                         spell = gs._safe_get_card(spell_id)
                         if spell:
                             spells_on_stack.append((i, spell_id, spell))
+                            break  # Just need one valid target to enable the action
                 
-                # Add action for each copyable spell
                 if spells_on_stack:
-                    for idx, (stack_idx, spell_id, spell) in enumerate(spells_on_stack[:5]):  # Limit to 5
-                        set_valid_action(411, f"COPY_SPELL {spell.name} on the stack")
+                    stack_idx, spell_id, spell = spells_on_stack[0]
+                    context = {'target_stack_identifier': stack_idx}
+                    set_valid_action(416, f"COPY_SPELL on the stack", context=context)
                 
             elif action_type == "POPULATE":
                 # Check if there are any token creatures to copy
                 token_creatures = []
                 for perm_id in player["battlefield"]:
                     card = gs._safe_get_card(perm_id)
-                    if card and hasattr(card, 'is_token') and card.is_token and hasattr(card, 'card_types') and 'creature' in card.card_types:
+                    if card and hasattr(card, 'is_token') and card.is_token and 'creature' in getattr(card, 'card_types', []):
                         token_creatures.append((perm_id, card))
+                        break  # Just need one valid target
                 
-                # Add populate action if there are token creatures
                 if token_creatures:
-                    set_valid_action(412, "POPULATE to create a copy of a creature token you control")
+                    token_id, token_card = token_creatures[0]
+                    context = {'target_token_identifier': token_id}
+                    set_valid_action(417, "POPULATE to copy a creature token", context=context)
 
     def _add_specific_mechanics_actions(self, player, valid_actions, set_valid_action, is_sorcery_speed):
         """Add actions for specialized MTG mechanics, considering timing."""
