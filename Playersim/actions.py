@@ -6316,31 +6316,86 @@ class ActionHandler:
                             set_valid_action(358 + i, f"CHOOSE_X_VALUE {x_value} for {card.name}")
 
     def _add_kicker_options(self, player, valid_actions, set_valid_action):
-         """Add options for paying kicker."""
-         gs = self.game_state
-         # Check spells currently on the stack that belong to the player
-         for item in gs.stack:
-             if isinstance(item, tuple) and len(item) >= 3:
-                 spell_type, card_id, controller = item[:3]
-                 if spell_type == "SPELL" and controller == player:
-                     card = gs._safe_get_card(card_id)
-                     if card and hasattr(card, 'oracle_text') and "kicker" in card.oracle_text.lower():
-                         # Check if kicker cost can be paid
-                         cost_match = re.search(r"kicker (\{[^\}]+\})", card.oracle_text.lower())
-                         if cost_match and self._can_afford_cost_string(player, cost_match.group(1)):
-                             set_valid_action(400, f"PAY_KICKER for {card.name}")
-                         # Always allow not paying kicker if kicker is optional
-                         set_valid_action(401, f"DON'T_PAY_KICKER for {card.name}")
-                     # Check for additional costs similarly
-                     if card and hasattr(card, 'oracle_text') and "additional cost" in card.oracle_text.lower():
-                         # Simplified check for now
-                         set_valid_action(402, f"PAY_ADDITIONAL_COST for {card.name}")
-                         set_valid_action(403, f"DON'T_PAY_ADDITIONAL_COST for {card.name}")
-                     # Check for escalate
-                     if card and hasattr(card, 'oracle_text') and "escalate" in card.oracle_text.lower():
-                          cost_match = re.search(r"escalate (\{[^\}]+\})", card.oracle_text.lower())
-                          if cost_match and self._can_afford_cost_string(player, cost_match.group(1)):
-                              set_valid_action(404, f"PAY_ESCALATE for {card.name}")
+        """Add options for paying kicker and related additional costs."""
+        gs = self.game_state
+        
+        # Check for pending spell context that might need kicker decisions
+        pending_context = getattr(gs, 'pending_spell_context', None)
+        if pending_context and pending_context.get('card_id') and pending_context.get('controller') == player:
+            card_id = pending_context['card_id']
+            card = gs._safe_get_card(card_id)
+            
+            # Kicker options - Use correct indices 405 and 406
+            if card and hasattr(card, 'oracle_text') and "kicker" in card.oracle_text.lower():
+                kicker_match = re.search(r"kicker (\{[^\}]+\}|[0-9]+)", card.oracle_text.lower())
+                if kicker_match:
+                    cost_str = kicker_match.group(1)
+                    if cost_str.isdigit(): 
+                        cost_str = f"{{{cost_str}}}"
+                    
+                    # Only show PAY_KICKER if it's affordable
+                    if self._can_afford_cost_string(player, cost_str, context=pending_context):
+                        set_valid_action(405, f"PAY_KICKER for {card.name}")
+                    
+                    # Always allow NOT paying kicker (it's optional)
+                    set_valid_action(406, f"DONT_PAY_KICKER for {card.name}")
+            
+            # Additional Cost options - Use correct indices 407 and 408
+            if card and hasattr(card, 'oracle_text') and "additional cost" in card.oracle_text.lower():
+                # Parse the additional cost to determine if it's optional or mandatory
+                cost_info = self._get_additional_cost_info(card)
+                is_optional = cost_info.get("optional", True) if cost_info else True
+                
+                # Only show PAY_ADDITIONAL_COST if it's payable
+                if cost_info and self._can_pay_specific_additional_cost(player, cost_info, pending_context):
+                    set_valid_action(407, f"PAY_ADDITIONAL_COST for {card.name}")
+                
+                # Only show DON'T_PAY option if the cost is optional
+                if is_optional:
+                    set_valid_action(408, f"DONT_PAY_ADDITIONAL_COST for {card.name}")
+            
+            # Escalate options - Use correct index 409
+            if card and hasattr(card, 'oracle_text') and "escalate" in card.oracle_text.lower():
+                escalate_match = re.search(r"escalate (\{[^\}]+\}|[0-9]+)", card.oracle_text.lower())
+                if escalate_match:
+                    cost_str = escalate_match.group(1)
+                    if cost_str.isdigit(): 
+                        cost_str = f"{{{cost_str}}}"
+                    
+                    # Extract info about available modes
+                    num_modes = 0
+                    if hasattr(card, 'modes'):
+                        num_modes = len(card.modes)
+                    elif "choose one" in card.oracle_text.lower():
+                        num_modes = card.oracle_text.lower().count("•")
+                    
+                    # Only show PAY_ESCALATE if more than one mode exists and cost is affordable
+                    if num_modes > 1 and self._can_afford_cost_string(player, cost_str, context=pending_context):
+                        # For each possible extra mode (up to 3)
+                        for extra_modes in range(1, min(num_modes, 4)):
+                            # Check if we can afford the cost multiple times
+                            if self._can_afford_cost_string(player, f"{cost_str}*{extra_modes}", context=pending_context):
+                                escalate_context = {'num_extra_modes': extra_modes}
+                                set_valid_action(409, f"PAY_ESCALATE for {extra_modes} extra mode(s)", context=escalate_context)
+                                break  # Just add one action; context will specify how many modes
+        
+        # Check spells currently on the stack that belong to the player
+        # This handles cases where the spell is already on stack but needs kicker decision
+        for item in gs.stack:
+            if isinstance(item, tuple) and len(item) >= 3:
+                stack_type, card_id, controller = item[:3]
+                if stack_type == "SPELL" and controller == player:
+                    card = gs._safe_get_card(card_id)
+                    context = item[3] if len(item) > 3 else {}
+                    
+                    # Check if this spell is waiting for kicker decision
+                    if context.get('waiting_for_kicker_choice'):
+                        # Similar logic as above, but for stack items
+                        if card and hasattr(card, 'oracle_text') and "kicker" in card.oracle_text.lower():
+                            kicker_match = re.search(r"kicker (\{[^\}]+\}|[0-9]+)", card.oracle_text.lower())
+                            if kicker_match and self._can_afford_cost_string(player, kicker_match.group(1), context=context):
+                                set_valid_action(405, f"PAY_KICKER for {card.name}")
+                            set_valid_action(406, f"DONT_PAY_KICKER for {card.name}")
 
     def _add_split_card_actions(self, player, valid_actions, set_valid_action):
         """Add actions for split cards."""
