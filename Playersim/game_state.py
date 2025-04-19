@@ -489,12 +489,18 @@ class GameState:
         self.exhaust_ability_used = {} # Reset exhaust tracking
         self.priority_player = None # No priority during mulligan decisions
 
+        # Ensure decks exist and are at least copy-able, with fallbacks if necessary
+        p1_deck_safe = p1_deck.copy() if isinstance(p1_deck, list) else []
+        p2_deck_safe = p2_deck.copy() if isinstance(p2_deck, list) else []
+        
+        # Ensure original deck references exist even if empty
+        self.original_p1_deck = p1_deck_safe
+        self.original_p2_deck = p2_deck_safe
+
         # Initialize player states AFTER resetting other state
-        self.original_p1_deck = p1_deck.copy()
-        self.original_p2_deck = p2_deck.copy()
-        # Pass player number/agent status if needed for init logic
-        self.p1 = self._init_player(self.original_p1_deck, player_num=1)
-        self.p2 = self._init_player(self.original_p2_deck, player_num=2)
+        self.p1 = self._init_player(p1_deck_safe, player_num=1)
+        self.p2 = self._init_player(p2_deck_safe, player_num=2)
+        
         # Set agent identity *after* players are created
         self.agent_is_p1 = True # Assume agent is P1 by default unless configured otherwise
 
@@ -512,13 +518,20 @@ class GameState:
         if self.p1: self.p1.pop('_mulligan_decision_made', None); self.p1.pop('_needs_to_bottom_next', None); self.p1.pop('_bottoming_complete', None)
         if self.p2: self.p2.pop('_mulligan_decision_made', None); self.p2.pop('_needs_to_bottom_next', None); self.p2.pop('_bottoming_complete', None)
 
-
         # --- Subsystem Initialization ---
-        self._init_subsystems() # ActionHandler created here
+        try:
+            self._init_subsystems() # ActionHandler created here
+        except Exception as e:
+            logging.error(f"Error initializing subsystems: {e}")
+            # Continue with reset even if subsystem init fails
 
         # Initialize all tracking variables using the helper AFTER subsystems exist
-        self._init_tracking_variables()
-        self.initialize_day_night_cycle() # Call after tracking vars init
+        try:
+            self._init_tracking_variables()
+            self.initialize_day_night_cycle() # Call after tracking vars init
+        except Exception as e:
+            logging.error(f"Error initializing tracking variables: {e}")
+            # Continue with reset even if tracking var init fails
 
         # Link external systems AFTER local subsystems are initialized
         self.strategy_memory = getattr(self, 'strategy_memory', None)
@@ -529,10 +542,10 @@ class GameState:
         if self.card_memory: self.card_memory.game_state = self # Link if needed
         # Link subsystems that depend on external trackers
         if self.card_evaluator:
-             self.card_evaluator.stats_tracker = self.stats_tracker
-             self.card_evaluator.card_memory = self.card_memory
+            self.card_evaluator.stats_tracker = self.stats_tracker
+            self.card_evaluator.card_memory = self.card_memory
         if self.strategic_planner and self.strategy_memory:
-             self.strategic_planner.strategy_memory = self.strategy_memory
+            self.strategic_planner.strategy_memory = self.strategy_memory
 
         # Final setup calls
         if self.strategic_planner and hasattr(self.strategic_planner, 'init_after_reset'):
@@ -540,15 +553,18 @@ class GameState:
 
         # Initialize card abilities via AbilityHandler AFTER it's linked
         if self.ability_handler and hasattr(self.ability_handler, '_initialize_abilities'):
-             logging.debug("Initializing card abilities via AbilityHandler.")
-             if isinstance(self.card_db, dict) and self.card_db:
-                 self.ability_handler._initialize_abilities()
-             else: logging.error("Cannot initialize abilities: card_db is not valid.")
+            logging.debug("Initializing card abilities via AbilityHandler.")
+            if isinstance(self.card_db, dict) and self.card_db:
+                self.ability_handler._initialize_abilities()
+            else: logging.error("Cannot initialize abilities: card_db is not valid.")
 
         # Initial Layer application
         if self.layer_system:
             logging.debug("Applying initial layer effects after reset.")
             self.layer_system.apply_all_effects()
+
+        # Verify mulligan state is consistent before proceeding
+        self.check_mulligan_state()
 
         logging.debug("GameState reset complete. Mulligan phase active.")
         # Do NOT advance phase/turn here. Let mulligan actions handle transition.
@@ -558,7 +574,28 @@ class GameState:
         import copy # Moved import inside
 
         if not deck:
-            raise ValueError("Tried to initialize player with empty deck!")
+            logging.warning(f"Initializing player {player_num} with empty deck! Creating minimal fallback deck.")
+            # Create minimal fallback deck to avoid crashes
+            fallback_deck = ["fallback_card_1", "fallback_card_2", "fallback_card_3", 
+                            "fallback_card_4", "fallback_card_5", "fallback_card_6", 
+                            "fallback_card_7", "fallback_card_8", "fallback_card_9"]
+            for i, card_id in enumerate(fallback_deck):
+                if card_id not in self.card_db:
+                    # Create minimal card
+                    self.card_db[card_id] = Card({
+                        "name": f"Fallback Card {i+1}",
+                        "type_line": "Creature",
+                        "card_types": ["creature"],
+                        "power": 1,
+                        "toughness": 1,
+                        "mana_cost": "{1}",
+                        "cmc": 1,
+                        "colors": [0,0,0,0,0],
+                        "keywords": [0]*11,
+                        "subtypes": [],
+                        "oracle_text": ""
+                    })
+            deck = fallback_deck
 
         player = {
             "library": copy.deepcopy(deck), # Deep copy deck list
@@ -593,23 +630,25 @@ class GameState:
             "haunted_by": {}, # For Haunt mechanic {haunted_id: [haunter_id,...]}
             "hideaway_cards": {}, # For Hideaway mechanic {land_id: exiled_card_id}
             "mutation_stacks": {}, # For Mutate {base_creature_id: [top_card_id, ..., base_card_id]}
-            "name": "Player?" # Placeholder name, will be set
-            # ... other player-specific states ...
+            "name": f"Player {player_num}" # Set name based on player number
         }
+        
+        # Ensure library exists and has cards
+        if not player["library"]:
+            logging.error(f"Critical error: Player {player_num} has empty library after initialization!")
+            return player
+            
         random.shuffle(player["library"])
 
-        for _ in range(7):
+        # Draw 7 cards, handling case where library has fewer than 7 cards
+        cards_to_draw = min(7, len(player["library"]))
+        for _ in range(cards_to_draw):
             if player["library"]:
                 player["hand"].append(player["library"].pop(0))
             else:
-                logging.warning("Not enough cards in the deck to draw 7 cards!")
+                logging.warning(f"Not enough cards in Player {player_num}'s deck to draw 7 cards!")
                 break
-        # Set name based on which player this is during reset
-        if not hasattr(self, 'p1'): # If p1 doesn't exist yet, this is p1
-             player["name"] = "Player 1"
-        else: # Otherwise it's p2
-             player["name"] = "Player 2"
-        player["name"] = f"Player {player_num}"
+                
         return player
         
     def track_card_played(self, card_id, player_idx):
@@ -1038,22 +1077,63 @@ class GameState:
     def perform_mulligan(self, player, keep_hand=False):
         """
         Implement the London Mulligan rule. Transitions between mulliganing and bottoming.
-        Handles turn switching during the mulligan phase and game start. (Corrected State Assignment v3)
+        Handles turn switching during the mulligan phase and game start. (Corrected State Assignment v4)
         """
         if not self.mulligan_in_progress:
             logging.warning("Attempted mulligan action when not in mulligan phase.")
             return False
 
+        # Safety check for null player
+        if player is None:
+            logging.error("Mulligan error: Null player object passed to perform_mulligan.")
+            return False
+
         player_id_str = 'p1' if player == self.p1 else 'p2'
         opponent = self.p2 if player == self.p1 else self.p1
-        opponent_id_str = 'p2' if player == self.p1 else 'p1'
 
-        if not opponent:
-            logging.error("Mulligan error: Opponent object is None.")
-            self._end_mulligan_phase() # Attempt recovery by ending phase
-            return False # Indicate failure
+        # Check if opponent exists, handle gracefully if not
+        if opponent is None:
+            logging.warning("Mulligan warning: Opponent object is None, simulating single-player mode.")
+            # In single-player mode, proceed directly to game start after this player's decision
+            if keep_hand:
+                mulligan_count = self.mulligan_count.get(player_id_str, 0)
+                logging.debug(f"{player['name']} decided to keep hand after {mulligan_count} mulligan(s).")
+                player['_mulligan_decision_made'] = True
+                
+                # Set bottom cards if needed
+                if mulligan_count > 0:
+                    current_hand_size = len(player.get("hand", []))
+                    num_to_bottom = min(mulligan_count, current_hand_size)
+                    if num_to_bottom > 0:
+                        # Skip bottoming in single-player mode, auto-bottom worst cards
+                        self._auto_bottom_cards(player, num_to_bottom)
+                
+                # End mulligan phase and start game
+                self._end_mulligan_phase()
+                return True
+            else:
+                # Handle mulligan in single-player mode
+                self.track_mulligan(player)
+                current_mull_count = self.mulligan_count.get(player_id_str, 0) + 1
+                self.mulligan_count[player_id_str] = current_mull_count
+                
+                # Redraw hand
+                if not player.get('library'): player['library'] = []
+                player["library"].extend(player.get("hand", []))
+                player["hand"] = []
+                random.shuffle(player["library"])
+                for _ in range(7):
+                    if player["library"]:
+                        player["hand"].append(player["library"].pop(0))
+                    else:
+                        logging.warning(f"Attempted to draw during mulligan but library became empty.")
+                        break
+                
+                player['_mulligan_decision_made'] = False
+                self.mulligan_player = player
+                return True
 
-        # Safely get decision status, default to False if key missing
+        # Rest of the original function code continues from here...
         opponent_has_decided = opponent.get('_mulligan_decision_made', False)
 
         if keep_hand:
@@ -1146,6 +1226,100 @@ class GameState:
             self.bottoming_in_progress = False
             # Return True because a mulligan action (drawing new hand) was performed.
             return True
+        
+    def check_mulligan_state(self):
+        """
+        Helper function to diagnose mulligan state inconsistencies and force recovery.
+        Returns True if state is valid, False otherwise and attempts recovery.
+        (Enhanced with stronger recovery v2)
+        """
+        # Case 1: Both mulligan_player and bottoming_player are None but still in mulligan phase
+        if self.mulligan_in_progress and self.mulligan_player is None and not self.bottoming_in_progress:
+            logging.error("Inconsistent state: In mulligan phase with no active mulligan player")
+            # Count remaining players who haven't decided
+            unmade_decisions = 0
+            for p, p_id in [(self.p1, 'p1'), (self.p2, 'p2')]:
+                if p and not p.get('_mulligan_decision_made', False):
+                    unmade_decisions += 1
+                    self.mulligan_player = p
+                    logging.info(f"Recovering mulligan state by assigning {p_id} as mulligan player")
+            
+            # If no undecided players were found OR we found multiple (inconsistent), force end mulligan
+            if unmade_decisions != 1:
+                logging.warning(f"Found {unmade_decisions} players with undecided mulligans. Forcing end of mulligan phase.")
+                self._end_mulligan_phase()
+                return False
+            return True
+        
+        # Case 2: In bottoming phase but no bottoming player
+        if self.bottoming_in_progress and self.bottoming_player is None:
+            logging.error("Inconsistent state: In bottoming phase with no active bottoming player")
+            # Find a player who needs to bottom
+            needs_bottom_found = 0
+            for p, p_id in [(self.p1, 'p1'), (self.p2, 'p2')]:
+                if p and p.get('_needs_to_bottom_next', False) and not p.get('_bottoming_complete', False):
+                    needs_bottom_found += 1
+                    self.bottoming_player = p
+                    self.bottoming_count = 0
+                    self.cards_to_bottom = min(self.mulligan_count.get(p_id, 0), len(p.get("hand", [])))
+                    logging.info(f"Recovering bottoming state by assigning {p_id} as bottoming player")
+            
+            # If no players need to bottom OR multiple (inconsistent), force end bottoming
+            if needs_bottom_found != 1:
+                logging.warning(f"Found {needs_bottom_found} players needing to bottom. Forcing end of mulligan phase.")
+                self._end_mulligan_phase()
+                return False
+            return True
+        
+        # Case 3: Neither mulligan nor bottoming in progress, but mulligan_in_progress flag is still set
+        if self.mulligan_in_progress and not self.bottoming_in_progress and self.mulligan_player is None:
+            # Check if all players have completed their mulligan decisions
+            all_decided = True
+            for p in [self.p1, self.p2]:
+                if p and not p.get('_mulligan_decision_made', False):
+                    all_decided = False
+                    break
+                    
+            if all_decided:
+                logging.info("All players have made mulligan decisions but phase not ended. Ending mulligan.")
+                self._end_mulligan_phase()
+                return False
+            else:
+                # Inconsistent state - someone still needs to decide but mulligan_player is None
+                logging.error("Inconsistent mulligan state: No bottoming, not all decided, but no mulligan_player")
+                self._end_mulligan_phase()  # Safety: force end the phase
+                return False
+        
+        # Case 4: Bottoming needed but stalled - check counters
+        if self.bottoming_in_progress and self.bottoming_player:
+            # Check if bottoming is stalled (no cards to bottom or count inconsistency)
+            if self.cards_to_bottom <= 0 or self.bottoming_count >= self.cards_to_bottom:
+                logging.error(f"Bottoming stalled: to_bottom={self.cards_to_bottom}, count={self.bottoming_count}")
+                # Mark this player as complete and check if we need to move to the next player
+                self.bottoming_player['_bottoming_complete'] = True
+                
+                # Check if other player needs to bottom
+                other_player = self.p2 if self.bottoming_player == self.p1 else self.p1
+                if other_player and other_player.get('_needs_to_bottom_next', False) and not other_player.get('_bottoming_complete', False):
+                    self.bottoming_player = other_player
+                    self.bottoming_count = 0
+                    other_id = 'p2' if other_player == self.p2 else 'p1'
+                    self.cards_to_bottom = min(self.mulligan_count.get(other_id, 0), len(other_player.get("hand", [])))
+                    logging.info(f"Transitioning bottoming to next player: {other_player['name']}")
+                else:
+                    # No other player needs to bottom, end mulligan
+                    logging.info("No more players need to bottom. Ending mulligan phase.")
+                    self._end_mulligan_phase()
+                    return False
+        
+        # Case 5: Final safety check - if in limbo, force end
+        if (self.mulligan_in_progress or self.bottoming_in_progress) and self.turn >= 1:
+            logging.error("Critical inconsistency: In mulligan/bottoming but turn >= 1. Forcing end.")
+            self._end_mulligan_phase()
+            return False
+        
+        # In non-error cases, continue
+        return True
     
     def _can_respond_to_stack(self, player=None):
         """
@@ -2370,19 +2544,21 @@ class GameState:
             return True # Incremental bottoming action was successful
 
     def _end_mulligan_phase(self):
-        """Helper to clean up mulligan state and transition to Turn 1. (Revised Priority Assignment v2)"""
+        """Helper to clean up mulligan state and transition to Turn 1. (Revised Priority Assignment v5 - Improved State Cleanup)"""
         # Check if already ended to prevent potential recursion/double execution
         if not self.mulligan_in_progress and not self.bottoming_in_progress:
             logging.debug("_end_mulligan_phase called, but mulligan/bottoming already inactive.")
             return # Avoid running logic again if already ended
 
-        logging.info("Both players finished mulligans/bottoming. Starting game.")
+        # IMPORTANT: Force end mulligan regardless of unfinished business
+        logging.info("Ending mulligan phase - transitioning to main game.")
+        # Reset all mulligan tracking flags first - do this before any other logic
         self.mulligan_in_progress = False
         self.mulligan_player = None
         self.bottoming_in_progress = False
         self.bottoming_player = None
 
-        # Clean up temporary flags using dict.pop
+        # Force clean up temporary flags using dict.pop
         for p in [self.p1, self.p2]:
             if p: # Check if player exists
                 p.pop('_mulligan_decision_made', None)
@@ -2392,40 +2568,63 @@ class GameState:
         # --- Set State for Start of Game ---
         self.turn = 1 # Officially Turn 1
         self.phase = self.PHASE_UNTAP # Start with Untap
-        self._reset_turn_tracking_variables() # Reset turn vars for Turn 1
+        
+        try:
+            self._reset_turn_tracking_variables() # Reset turn vars for Turn 1
+        except Exception as e:
+            logging.error(f"Error resetting turn tracking variables: {e}")
+            # Continue even if this fails
+        
+        # Get active player with fallback
         active_player = self._get_active_player() # P1 is active player on Turn 1
-
-        # Ensure active_player is valid before proceeding
         if not active_player:
-             logging.critical("CRITICAL ERROR in _end_mulligan_phase: _get_active_player() returned None!")
-             # Handle error gracefully - perhaps set priority to None and log?
-             self.priority_player = None
-             return
+            logging.critical("CRITICAL ERROR in _end_mulligan_phase: _get_active_player() returned None!")
+            active_player = self.p1 if self.p1 else self.p2
+            if not active_player:
+                logging.critical("FATAL ERROR: No valid players available for active player!")
+                # Create minimal player as last resort
+                active_player = self.p1 = {"name": "Player 1", "library": [], "hand": [], 
+                                        "battlefield": [], "graveyard": [], "exile": [],
+                                        "life": 20, "tapped_permanents": set()}
 
         logging.debug(f"Performing Turn {self.turn} Untap Step for {active_player['name']}...")
-        self._untap_phase(active_player)
-        self.check_state_based_actions() # Check SBAs after untap
+        try:
+            self._untap_phase(active_player)
+        except Exception as e:
+            logging.error(f"Error in untap phase: {e}")
+            # Continue even if untap fails
+        
+        try:
+            self.check_state_based_actions() # Check SBAs after untap
+        except Exception as e:
+            logging.error(f"Error checking state-based actions: {e}")
+            # Continue even if SBA check fails
 
         # ** Automatically advance to Upkeep and assign priority **
         self.phase = self.PHASE_UPKEEP
         logging.debug(f"Automatically advanced to Upkeep Step.")
+        
         # IMPORTANT: Trigger abilities *before* assigning priority, as they might affect state or add to stack
-        self._handle_beginning_of_phase_triggers() # Trigger upkeep abilities (includes SBA check)
+        try:
+            self._handle_beginning_of_phase_triggers() # Trigger upkeep abilities (includes SBA check)
+        except Exception as e:
+            logging.error(f"Error handling beginning of phase triggers: {e}")
+            # Continue even if trigger handling fails
 
-        # ** Assign priority to Active Player **
+        # ** Ensure Priority is Assigned to Active Player **
         self.priority_player = active_player
         self.priority_pass_count = 0
         self.last_stack_size = len(self.stack) # Initialize stack size tracking
-        logging.debug(f"Entering Upkeep. Priority to AP ({self.priority_player['name']})")
+        logging.debug(f"Entering Upkeep. Priority to AP ({active_player['name']})")
 
-        # Game Turn Limit Check (can stay here)
+        # Game Turn Limit Check
         if self.turn > self.max_turns and not getattr(self, '_turn_limit_checked', False):
             logging.info(f"Turn limit ({self.max_turns}) reached! Ending game.")
             self._turn_limit_checked = True
             if self.p1 and self.p2:
-                 if self.p1.get("life",0) > self.p2.get("life",0): self.p1["won_game"] = True; self.p2["lost_game"] = True
-                 elif self.p2.get("life",0) > self.p1.get("life",0): self.p2["won_game"] = True; self.p1["lost_game"] = True
-                 else: self.p1["game_draw"] = True; self.p2["game_draw"] = True
+                if self.p1.get("life",0) > self.p2.get("life",0): self.p1["won_game"] = True; self.p2["lost_game"] = True
+                elif self.p2.get("life",0) > self.p1.get("life",0): self.p2["won_game"] = True; self.p1["lost_game"] = True
+                else: self.p1["game_draw"] = True; self.p2["game_draw"] = True
             # SBAs checked later will finalize the game end
 
     def _determine_target_category(self, target_id):
@@ -3420,8 +3619,23 @@ class GameState:
         return False
 
     def _get_active_player(self):
-        """Returns the active player (whose turn it is)."""
-        return self.p1 if (self.turn % 2 == 1) == self.agent_is_p1 else self.p2
+        """Returns the active player (whose turn it is) with strict error checking."""
+        # Determine active player based on turn number and agent assignment
+        active_is_p1 = (self.turn % 2 == 1) == self.agent_is_p1
+        
+        # Check if player exists and return with robust logging
+        if active_is_p1:
+            if self.p1 is None:
+                logging.critical("CRITICAL ERROR: p1 is None in _get_active_player!")
+                # Try to return any valid player
+                return self.p2 if self.p2 is not None else None
+            return self.p1
+        else:
+            if self.p2 is None:
+                logging.critical("CRITICAL ERROR: p2 is None in _get_active_player!")
+                # Try to return any valid player
+                return self.p1 if self.p1 is not None else None
+            return self.p2
 
     def _get_non_active_player(self):
         """Returns the non-active player."""

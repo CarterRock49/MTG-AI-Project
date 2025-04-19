@@ -580,29 +580,53 @@ class ActionHandler:
                         set_valid_action(6, "MULLIGAN")
                     action_found_in_mulligan = True
 
-                # *** CHECK FOR STALLED MULLIGAN & ATTEMPT RECOVERY ***
+                # *** ENHANCED CHECK FOR STALLED MULLIGAN & ATTEMPT RECOVERY ***
                 elif bottoming_active_player is None and mulligan_decision_player is None:
                     # We are in mulligan_in_progress=True, but no player assigned. This IS the error state seen in logs.
-                    logging.error("MULLIGAN STATE ERROR: In Progress, but mulligan_player AND bottoming_player are None! Attempting recovery by ending mulligan phase.")
+                    logging.error("MULLIGAN STATE ERROR: In Progress, but mulligan_player AND bottoming_player are None! Attempting ENHANCED recovery.")
+                    
+                    # First try checking mulligan state - this will try to find undecided players or force end
                     try:
-                        # Directly attempt to end the phase
-                        gs._end_mulligan_phase()
-                        # After ending the phase, the game state (turn/phase/priority) should be updated.
-                        # Re-generate actions based on the *new* state (which shouldn't be mulligan anymore).
-                        # Returning here will cause the outer loop/environment to call generate_valid_actions again.
-                        # Do not set any actions for the *current* invalid state.
-                        logging.info("Mulligan phase force-ended due to invalid state. Re-generating actions.")
-                        # Create a temporary valid_actions just to return, caller should re-evaluate.
-                        # Note: This might briefly allow CONCEDE if recovery fails, which is okay.
-                        temp_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
-                        if np.sum(temp_actions) == 0: temp_actions[12] = True # Allow concede if recovery yields nothing immediately
-                        return temp_actions
-                    except Exception as end_mull_e:
-                        logging.critical(f"CRITICAL: Failed to recover from mulligan state error: {end_mull_e}", exc_info=True)
-                        # If recovery fails, allow NO_OP as a last resort to maybe avoid total crash.
-                        set_valid_action(224, "NO_OP (Mulligan State Error - Recovery FAILED)")
-                        action_found_in_mulligan = True
-                # *** END OF NEW CHECK ***
+                        fixed = False
+                        if hasattr(gs, 'check_mulligan_state'):
+                            # Check returns True if valid, False if forced recovery
+                            valid_state = gs.check_mulligan_state()
+                            if not valid_state:
+                                # Recovery was forced - return temp actions for this call, next call will have updated state
+                                logging.info("Mulligan state fixed via check_mulligan_state(). Re-generating actions.")
+                                fixed = True
+                            elif gs.mulligan_player == perspective_player:
+                                # If check assigned current player, let this function continue
+                                logging.info("Recovery: mulligan_player is now assigned to perspective player.")
+                                # Re-run decision logic with new assignment
+                                set_valid_action(225, "KEEP_HAND")
+                                mulls_taken = gs.mulligan_count.get('p1' if perspective_player == gs.p1 else 'p2', 0)
+                                if mulls_taken < 7:
+                                    set_valid_action(6, "MULLIGAN")
+                                action_found_in_mulligan = True
+                                fixed = True
+                        
+                        # If check failed to fix, try direct end
+                        if not fixed:
+                            logging.warning("check_mulligan_state() didn't resolve issue, trying direct _end_mulligan_phase()")
+                            if hasattr(gs, '_end_mulligan_phase'):
+                                gs._end_mulligan_phase()
+                                logging.info("Mulligan phase force-ended via direct call. Re-generating actions.")
+                                fixed = True
+                        
+                        # If any recovery happened, return temporary actions
+                        if fixed:
+                            temp_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+                            temp_actions[224] = True # Allow NO_OP
+                            return temp_actions
+                            
+                    except Exception as recovery_e:
+                        logging.critical(f"CRITICAL: Enhanced recovery failed: {recovery_e}", exc_info=True)
+                    
+                    # If all recovery attempts fail, allow NO_OP as a last resort
+                    set_valid_action(224, "NO_OP (Mulligan State Error - After recovery attempts)")
+                    action_found_in_mulligan = True
+                # *** END OF ENHANCED CHECK ***
 
                 # Check if perspective player is waiting for opponent
                 elif bottoming_active_player: # Opponent is bottoming

@@ -340,7 +340,6 @@ class AlphaZeroMTGEnv(gym.Env):
             if hasattr(self, '_last_phase_progressed'): self._last_phase_progressed = -1
             if hasattr(self, '_phase_stuck_count'): self._phase_stuck_count = 0
 
-
             # --- Reset GameState and Player Setup ---
             # Choose decks
             p1_deck_data = random.choice(self.decks)
@@ -366,6 +365,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 self.stats_tracker.current_deck_name_p2 = self.current_deck_name_p2
             if self.has_card_memory and self.card_memory:
                 gs.card_memory = self.card_memory # Link GS to env's card memory
+                self.card_memory.clear_temporary_data() # Clear card memory for new game
 
             # Internal subsystems (created by gs.reset -> _init_subsystems)
             # Get references from the NEWLY created GameState instance
@@ -383,12 +383,17 @@ class AlphaZeroMTGEnv(gym.Env):
                     setattr(subsystem_instance, 'game_state', gs)
                     logging.debug(f"Relinked {system_name} to current GameState.")
 
-            # Ensure critical ActionHandler is set
+            # Ensure critical ActionHandler is set AND linked to THIS environment instance
             if not self.action_handler:
                 logging.error("ActionHandler is None after GameState reset and subsystem linking!")
                 # Attempt recreation (should not be necessary if GS init works)
-                self.action_handler = ActionHandler(gs)
+                self.action_handler = ActionHandler(gs) # Use the gs instance created above
                 gs.action_handler = self.action_handler
+            else:
+                # Ensure the existing handler is linked to the *new* game_state
+                self.action_handler.game_state = gs
+                self.action_handler.card_evaluator = gs.card_evaluator # Relink evaluator
+                self.action_handler.combat_handler = gs.combat_action_handler # Relink combat handler
 
             # Integrate combat actions after subsystems are linked
             integrate_combat_actions(self.game_state)
@@ -401,9 +406,12 @@ class AlphaZeroMTGEnv(gym.Env):
             if self.card_evaluator:
                  self.card_evaluator.stats_tracker = self.stats_tracker
                  self.card_evaluator.card_memory = self.card_memory
-            if self.strategic_planner and self.strategy_memory:
-                 self.strategic_planner.strategy_memory = self.strategy_memory
-
+                 self.card_evaluator.game_state = gs # Ensure linked to new GS
+            if self.strategic_planner:
+                 self.strategic_planner.game_state = gs # Ensure linked to new GS
+                 self.strategic_planner.card_evaluator = self.card_evaluator # Ensure linked
+                 if self.strategy_memory:
+                     self.strategic_planner.strategy_memory = self.strategy_memory
 
             # --- Final Reset Steps ---
             # Perform initial analysis if planner exists
@@ -414,7 +422,7 @@ class AlphaZeroMTGEnv(gym.Env):
                     logging.warning(f"Error during initial game state analysis: {analysis_e}")
 
             # Generate the FIRST action mask based on the MULLIGAN state
-            self.current_valid_actions = self.action_mask()
+            self.current_valid_actions = self.action_mask() # Calls handler.generate_valid_actions()
 
             # Get the initial observation
             obs = self._get_obs_safe() # Ensure safety during initial obs generation
@@ -427,13 +435,16 @@ class AlphaZeroMTGEnv(gym.Env):
             }
             # Ensure mulligan actions are valid in the initial mask
             if gs.mulligan_in_progress and info["action_mask"] is not None:
-                 expected_mull_actions = [6, 225] # MULLIGAN, KEEP_HAND
-                 if not any(info["action_mask"][idx] for idx in expected_mull_actions):
-                     logging.warning("Initial mask generated during mulligan phase doesn't include KEEP/MULLIGAN.")
-                     # Attempt to regenerate or force basic options
-                     self.current_valid_actions = self.action_mask()
+                 expected_mull_actions = [6, 225] # MULLIGAN, KEEP_HAND (Also potentially BOTTOM_CARD or NO_OP)
+                 if not np.any(info["action_mask"]): # Check if mask is entirely false
+                     logging.error("Initial mask generated during mulligan is EMPTY! Attempting regeneration/fallback.")
+                     self.current_valid_actions = self.action_mask() # Retry generation
                      info["action_mask"] = self.current_valid_actions.astype(bool)
-
+                     if not np.any(info["action_mask"]): # Still empty?
+                         logging.critical("Initial mulligan mask STILL empty! Forcing basic options.")
+                         info["action_mask"][225] = True # Keep
+                         info["action_mask"][6] = True # Mulligan
+                         info["action_mask"][12] = True # Concede
 
             logging.info(f"Environment {env_id} reset complete. Mulligan phase active for {getattr(gs.mulligan_player,'name','N/A')}.")
             logging.info(f"P1 Deck: {self.current_deck_name_p1}, P2 Deck: {self.current_deck_name_p2}")
@@ -446,7 +457,6 @@ class AlphaZeroMTGEnv(gym.Env):
             try:
                 logging.warning("Attempting emergency fallback reset...")
                 # --- Fallback State Setup ---
-                # Initialize GameState minimally
                 self.game_state = GameState(self.card_db, self.max_turns, self.max_hand_size, self.max_battlefield)
                 deck = self.decks[0]["cards"].copy() if self.decks else ["dummy_card"]*60 # Minimal deck
                 if "dummy_card" not in self.card_db and self.decks: # Add card if missing
@@ -911,14 +921,13 @@ class AlphaZeroMTGEnv(gym.Env):
     
     def step(self, action_idx, context=None):
         """
-        Execute the action and run the game engine until control returns to the agent,
-        or the game ends. Returns the next observation, reward, done status, and info.
-        Action execution and game state progression are handled by ActionHandler.apply_action.
+        Execute the action, run the game engine until control returns to the agent
+        or the game ends, and return the next state information.
+        Combines robust checks and game logic handling.
 
         Args:
             action_idx: Index of the action selected by the agent.
             context: Optional dictionary with additional context for complex actions.
-                    This context will be merged with relevant game state context by ActionHandler.
 
         Returns:
             tuple: (observation, reward, done, truncated, info)
@@ -927,36 +936,53 @@ class AlphaZeroMTGEnv(gym.Env):
         action_context = {} # Local dict for passing context
         if context: action_context.update(context)
 
-        # Ensure initial mask is generated if needed for info dict even if action invalidates immediately
-        if not hasattr(self, 'current_valid_actions') or self.current_valid_actions is None:
-            logging.warning("current_valid_actions missing or invalid at step start. Regenerating.")
-            try:
-                self.current_valid_actions = self.action_mask()
-            except Exception as mask_regen_e:
-                logging.error(f"Error regenerating mask at step start: {mask_regen_e}")
-                self.current_valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
-                self.current_valid_actions[11] = True; self.current_valid_actions[12] = True # Pass/Concede
+        # --- Initialize Info Dict ---
+        # Get the action mask valid *before* this action is taken.
+        # Regenerate here to ensure it reflects the state the agent saw.
+        try:
+            initial_mask = self.action_mask().astype(bool)
+        except Exception as initial_mask_e:
+            logging.error(f"Error generating initial mask at step start: {initial_mask_e}. Using fallback.", exc_info=True)
+            initial_mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+            initial_mask[11] = True; initial_mask[12] = True # Pass/Concede fallback
 
-        initial_mask = self.current_valid_actions.astype(bool) if self.current_valid_actions is not None else np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
-        env_info = {"action_mask": initial_mask, "game_result": "undetermined"} # Start fresh info dict
+        env_info = {
+            "action_mask": initial_mask,
+            "game_result": "undetermined",
+            "critical_error": False,
+            "invalid_action": False,
+            "invalid_action_reason": None
+        }
 
         try:
-            # --- Action Validation (Performed by Env before calling Handler) ---
+            # --- 1. Action Index Bounds Validation ---
             if not (0 <= action_idx < self.ACTION_SPACE_SIZE):
-                logging.error(f"Action index {action_idx} is out of bounds (0-{self.ACTION_SPACE_SIZE-1}).")
-                obs = self._get_obs_safe() # Get safe obs from Env
+                logging.error(f"Step {self.current_step}: Action index {action_idx} is out of bounds (0-{self.ACTION_SPACE_SIZE-1}).")
+                obs = self._get_obs_safe() # Get safe obs
                 env_info["critical_error"] = True
                 env_info["error_message"] = "Action index out of bounds"
-                return obs, -0.5, False, False, env_info # Use Env info dict
+                # Use the initial_mask for info as no valid action was attempted
+                return obs, -0.5, False, False, env_info
 
-            # Validate against the *current* action mask (regenerate mask just before check)
-            current_mask = self.action_mask() # Regenerate mask
-            env_info["action_mask"] = current_mask.astype(bool) # Update info dict immediately
+            # --- 2. Action Mask Validation (Using Freshly Generated Mask) ---
+            # Regenerate the mask *just before* validation for maximum accuracy.
+            try:
+                 current_mask = self.action_mask().astype(bool)
+            except Exception as current_mask_e:
+                logging.error(f"Error regenerating mask for validation: {current_mask_e}. Using fallback.", exc_info=True)
+                current_mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+                current_mask[11] = True; current_mask[12] = True # Pass/Concede fallback
+
+            # Update info dict immediately with the mask used for validation
+            env_info["action_mask"] = current_mask
+
             if not current_mask[action_idx]:
-                logging.warning(f"Step {self.current_step}: Invalid action {action_idx} selected (Mask False). Reason: {self.action_handler.action_reasons.get(action_idx, 'Not valid')}. Available: {np.where(current_mask)[0]}")
+                invalid_reason = self.action_handler.action_reasons.get(action_idx, 'Not Valid / Unknown Reason')
+                valid_indices = np.where(current_mask)[0]
+                logging.warning(f"Step {self.current_step}: Invalid action {action_idx} selected (Mask False). Reason: [{invalid_reason}]. Valid: {valid_indices}")
                 self.invalid_action_count += 1
-                self.episode_invalid_actions += 1
-                step_reward = -0.1 # Standard penalty
+                if hasattr(self, 'episode_invalid_actions'): self.episode_invalid_actions += 1
+                step_reward = -0.1 # Standard penalty for invalid mask selection
 
                 # Update Env history even for invalid mask selection
                 if hasattr(self, 'last_n_actions'): self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
@@ -965,84 +991,175 @@ class AlphaZeroMTGEnv(gym.Env):
 
                 done, truncated = False, False
                 if self.invalid_action_count >= self.invalid_action_limit:
-                    logging.error(f"Exceeded invalid action limit ({self.invalid_action_count}). Terminating episode.")
-                    done, truncated, step_reward = True, True, -2.0
+                    logging.error(f"Exceeded invalid action limit ({self.invalid_action_count}/{self.invalid_action_limit}). Terminating episode.")
+                    done, truncated, step_reward = True, True, -2.0 # Truncated = True
 
-                obs = self._get_obs_safe() # Get safe obs from Env
+                obs = self._get_obs_safe() # Get safe obs
+                # Update info dict before returning
                 env_info["invalid_action"] = True
-                env_info["invalid_action_reason"] = self.action_handler.action_reasons.get(action_idx, 'Not valid')
-                if done: self.ensure_game_result_recorded() # Record if terminated due to invalid limit
+                env_info["invalid_action_reason"] = invalid_reason
+                # Ensure game result recorded if terminated
+                if done: self.ensure_game_result_recorded(forced_result="invalid_limit")
                 return obs, step_reward, done, truncated, env_info
 
             # Reset invalid action counter on valid action
             self.invalid_action_count = 0
 
-            # --- Execute Action using ActionHandler ---
+            # --- 3. Execute Action using ActionHandler ---
             self.current_step += 1
             if not hasattr(self, 'action_handler') or self.action_handler is None:
                 raise RuntimeError("ActionHandler is not initialized.")
 
-            # Call ActionHandler.apply_action - it modifies gs and returns results
+            # >>> Call ActionHandler.apply_action - this handles the game loop <<<
             action_handler_result = self.action_handler.apply_action(action_idx, context=action_context)
-            # Unpack results: reward, done, truncated, action_info
+            # Unpack the result: reward, done, truncated, handler_specific_info
             reward, done, truncated, handler_info = action_handler_result
 
-            # Update env_info with results from the handler
+            # Merge the handler's info into the environment's info dict
             env_info.update(handler_info)
 
-            # --- Post-Action Observation and Mask Generation (Performed by Env) ---
-            # Generate a fresh observation using the environment's _get_obs method
-            obs = self._get_obs()
-            # Generate the next action mask based on the NEW game state
-            self.current_valid_actions = self.action_mask() # Generate and store
-            env_info["action_mask"] = self.current_valid_actions.astype(bool) # Update info dict
+            # --- 4. Post-Action Game State Checks (e.g., Mulligan Transition) ---
+            # Detect mulligan phase ending and ensure proper transition (from V2)
+            if hasattr(gs, 'mulligan_in_progress') and not gs.mulligan_in_progress and \
+               hasattr(gs, '_phase_history') and not gs._phase_history and gs.turn == 1:
+                # If mulligan has just ended (flag is False) but phase history is empty
+                # (meaning we haven't properly started turn 1 phases yet),
+                # ensure proper phase transition occurs if needed.
+                # This often happens if the last mulligan action didn't auto-advance phase.
+                if gs.phase == gs.PHASE_UNTAP: # Check if stuck in a phase before priority pass expected
+                    logging.info("Detected potential post-mulligan state; ensuring game advances to Upkeep.")
+                    try:
+                        active_player = gs._get_active_player()
+                        # Ensure untap effects happen if needed (though often none turn 1)
+                        gs._untap_phase(active_player)
+                        # Force progression to Upkeep phase
+                        gs.phase = gs.PHASE_UPKEEP
+                        gs.priority_player = active_player
+                        gs.priority_pass_count = 0
+                        # Trigger beginning of upkeep abilities
+                        gs._handle_beginning_of_phase_triggers()
+                        logging.debug("Forced transition from Untap to Upkeep after mulligan.")
+                    except Exception as transition_e:
+                        logging.error(f"Error during forced post-mulligan transition: {transition_e}", exc_info=True)
+                        # Decide if this error is critical enough to end the episode
+                        # For now, log and continue, but it might indicate deeper issues.
+                        env_info["critical_error"] = True
+                        env_info["error_message"] = f"Post-mulligan transition failed: {transition_e}"
 
-            # --- Environment Level Updates ---
-            # Update environment-level history/tracking
+
+            # --- 5. Post-Action Observation and Mask Generation ---
+            # Generate a fresh observation using the environment's method
+            try:
+                obs = self._get_obs()
+            except Exception as obs_e:
+                 logging.error(f"Error generating observation after action {action_idx}: {obs_e}. Using safe obs.", exc_info=True)
+                 obs = self._get_obs_safe()
+                 env_info["critical_error"] = True # Flag that observation might be compromised
+                 env_info["error_message"] = f"Observation generation failed: {obs_e}"
+
+
+            # Generate the action mask for the NEXT state
+            try:
+                next_mask = self.action_mask()
+                 # Store the generated mask for potential use next step (V2 feature)
+                if hasattr(self, 'current_valid_actions'):
+                    self.current_valid_actions = next_mask
+                env_info["action_mask"] = next_mask.astype(bool) # Update info with the mask for the NEXT step
+            except Exception as next_mask_e:
+                logging.error(f"Error generating next action mask: {next_mask_e}. Using fallback.", exc_info=True)
+                fallback_mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+                fallback_mask[11] = True; fallback_mask[12] = True # Pass/Concede
+                env_info["action_mask"] = fallback_mask
+                if hasattr(self, 'current_valid_actions'):
+                    self.current_valid_actions = fallback_mask.astype(float) # Store as float if needed elsewhere
+                # Potentially flag error if mask generation fails consistently
+                # env_info["critical_error"] = True
+
+
+            # --- 6. Environment Level Updates & History ---
             if hasattr(self, 'last_n_actions'): self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
             if hasattr(self, 'last_n_rewards'): self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = reward
             if hasattr(self, 'current_episode_actions'): self.current_episode_actions.append(action_idx)
             if hasattr(self, 'episode_rewards'): self.episode_rewards.append(reward)
 
-            # Ensure game result is recorded if 'done' flag is set
+            # Ensure game result is recorded if 'done' flag is set by the handler
             if done and not getattr(self, '_game_result_recorded', False):
-                self.ensure_game_result_recorded()
+                # Use result from info if available, otherwise determine default
+                result = env_info.get("game_result", "undetermined")
+                if result == "undetermined": result = None # ensure_game_result handles None
+                self.ensure_game_result_recorded(forced_result=result)
+                # Update env_info["game_result"] if it was determined by ensure_game_result_recorded
+                env_info["game_result"] = getattr(self, '_game_result', 'undetermined')
 
-            # Detailed logging
-            if self.detailed_logging:
+
+            # --- 7. Detailed Logging ---
+            if self.detailed_logging or DEBUG_ACTION_STEPS: # Use flags from V1
                 action_type, param = self.action_handler.get_action_info(action_idx)
                 logging.info(f"--- Env Step {self.current_step} ---")
                 logging.info(f"Action Taken: {action_idx} ({action_type}({param})) Context: {action_context}")
                 logging.info(f"Returned State: Turn {gs.turn}, Phase {gs._PHASE_NAMES.get(gs.phase, gs.phase)}, Prio {getattr(gs.priority_player,'name','None')}")
                 logging.info(f"Reward: {reward:.4f}, Done: {done}, Truncated: {truncated}")
+                # Logging next mask sum can be noisy, optionally add back if needed:
+                # logging.info(f"Next Action Mask (sum): {np.sum(env_info['action_mask'])}")
 
-            # Final validation of observation keys (remains useful)
+
+            # --- 8. Final Observation Validation & Patching (from V2) ---
             if hasattr(self, 'observation_space') and isinstance(self.observation_space, spaces.Dict):
+                missing_keys = False
                 for key, space in self.observation_space.spaces.items():
                     if key not in obs:
-                        logging.critical(f"{key} missing in step return observation! Adding default.")
-                        obs[key] = np.zeros(space.shape, dtype=space.dtype)
-                        if key == "action_mask":
-                            obs[key][11] = True; obs[key][12] = True # Ensure pass/concede
+                        logging.warning(f"Observation key '{key}' missing in step return! Patching with default.")
+                        missing_keys = True
+                        # Attempt to create a default value matching the space
+                        try:
+                            obs[key] = np.zeros(space.shape, dtype=space.dtype)
+                            # Special case for action mask - ensure basic actions possible
+                            if key == "action_mask":
+                                if 11 < len(obs[key]): obs[key][11] = 1.0 # Pass
+                                if 12 < len(obs[key]): obs[key][12] = 1.0 # Concede
+                        except Exception as patch_e:
+                            logging.error(f"Failed to patch missing key '{key}': {patch_e}. Observation may be incomplete.")
+                            env_info["critical_error"] = True
+                            env_info["error_message"] = env_info.get("error_message", "") + f"; Failed to patch obs key '{key}'"
+                if missing_keys:
+                     logging.warning(f"Completed patching missing observation keys for step {self.current_step}.")
+
 
             return obs, reward, done, truncated, env_info
 
         except Exception as e:
             # --- Critical Error Handling within Step ---
-            logging.critical(f"CRITICAL error in environment step function (Action {action_idx}): {str(e)}", exc_info=True)
-            # Get safe observation from Env
-            obs = self._get_obs_safe()
-            # Create minimal safe info with an error flag
-            mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool); mask[11] = True; mask[12] = True # Pass/Concede
+            logging.critical(f"CRITICAL error in environment step function (Action {action_idx}, Step {self.current_step}): {str(e)}", exc_info=True)
+            # Get safe observation
+            try:
+                obs = self._get_obs_safe()
+            except Exception as safe_obs_e:
+                logging.critical(f"Failed even to get safe observation: {safe_obs_e}", exc_info=True)
+                # Create a minimal fallback observation if possible
+                obs = {}
+                if hasattr(self, 'observation_space') and isinstance(self.observation_space, spaces.Dict):
+                     for key, space in self.observation_space.spaces.items():
+                         try:
+                             obs[key] = np.zeros(space.shape, dtype=space.dtype)
+                             if key == "action_mask":
+                                 if 11 < len(obs[key]): obs[key][11] = 1.0
+                                 if 12 < len(obs[key]): obs[key][12] = 1.0
+                         except: pass # Best effort
+
+            # Create a *new*, minimal safe info dict (like V2)
+            fallback_mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool); fallback_mask[11] = True; fallback_mask[12] = True
             final_info = {
-                "action_mask": mask,
+                "action_mask": fallback_mask,
                 "critical_error": True,
                 "error_message": f"Unhandled Exception in Environment Step: {str(e)}",
-                "game_result": "error"
+                "game_result": "error", # Mark game result as error
+                # Copy minimal relevant info if available from potentially corrupted env_info
+                "turn": gs.turn if gs else -1,
+                "phase": gs.phase if gs else -1,
             }
             # End the episode immediately due to critical failure
-            self.ensure_game_result_recorded() # Ensure some result is recorded
-            return obs, -5.0, True, False, final_info
+            self.ensure_game_result_recorded(forced_result="error")
+            return obs, -5.0, True, False, final_info # done=True, truncated=False
         
     def _get_obs_safe(self):
         """Return a minimal, safe observation dictionary in case of errors. (Reinforced)"""
