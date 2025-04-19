@@ -3536,37 +3536,52 @@ class GameState:
         gs = self # Alias
         active_player = gs._get_active_player()
         non_active_player = gs._get_non_active_player()
+        if not active_player or not non_active_player: # Safety check if players are None
+            logging.error("Cannot handle phase triggers: player object is None.")
+            return
+
         trigger_context_ap = {"controller": active_player}
         trigger_context_nap = {"controller": non_active_player}
 
-        # Trigger correct event based on phase
-        if self.phase == self.PHASE_UPKEEP:
-            # Check Day/Night (Rule 503.1)
-            if hasattr(gs, 'check_day_night_transition') and not self.day_night_checked_this_turn:
-                 self.check_day_night_transition()
-            self.trigger_ability(None, "BEGINNING_OF_UPKEEP", trigger_context_ap)
-            self.trigger_ability(None, "BEGINNING_OF_UPKEEP", trigger_context_nap)
-        elif self.phase == self.PHASE_DRAW:
-            self.trigger_ability(None, "BEGINNING_OF_DRAW", trigger_context_ap)
-            self.trigger_ability(None, "BEGINNING_OF_DRAW", trigger_context_nap)
-        elif self.phase == self.PHASE_MAIN_PRECOMBAT:
-            # Saga Counters (Rule 714.2b)
-            if hasattr(gs, 'advance_saga_counters'): self.advance_saga_counters(active_player)
-            # Add other "at beginning of precombat main" triggers if any exist
-        elif self.phase == self.PHASE_BEGIN_COMBAT:
-             self.trigger_ability(None, "BEGINNING_OF_COMBAT", trigger_context_ap)
-             self.trigger_ability(None, "BEGINNING_OF_COMBAT", trigger_context_nap)
-        elif self.phase == self.PHASE_END_STEP:
-            # Check Day/Night (Rule 513.2) - Only if not done earlier
-            if hasattr(gs, 'check_day_night_transition') and not self.day_night_checked_this_turn:
-                 self.check_day_night_transition()
-            self.trigger_ability(None, "BEGINNING_OF_END_STEP", trigger_context_ap)
-            self.trigger_ability(None, "BEGINNING_OF_END_STEP", trigger_context_nap)
+        # --- Get the correct event type string ---
+        phase_event_map = {
+            self.PHASE_UPKEEP: "BEGINNING_OF_UPKEEP",
+            self.PHASE_DRAW: "BEGINNING_OF_DRAW", # Usually no triggers, but possible
+            self.PHASE_MAIN_PRECOMBAT: "BEGINNING_OF_PRECOMBAT_MAIN", # Specific event
+            self.PHASE_BEGIN_COMBAT: "BEGINNING_OF_COMBAT",
+            self.PHASE_END_STEP: "BEGINNING_OF_END_STEP"
+            # Add other phases if they have standard beginning triggers
+        }
+        event_type = phase_event_map.get(self.phase)
 
-        # Process any queued triggers immediately
-        if self.ability_handler: self.ability_handler.process_triggered_abilities()
-        # Check SBAs after triggers
-        self.check_state_based_actions()
+        if event_type:
+            # Check Day/Night (handle based on phase)
+            if self.phase == self.PHASE_UPKEEP and hasattr(gs, 'check_day_night_transition') and not self.day_night_checked_this_turn:
+                self.check_day_night_transition()
+            elif self.phase == self.PHASE_END_STEP and hasattr(gs, 'check_day_night_transition') and not self.day_night_checked_this_turn:
+                 # Rule 513.2 allows day/night check here too
+                 self.check_day_night_transition()
+
+            # Saga Counters (Beginning of Precombat Main - Rule 714.2b) - Should happen AFTER upkeep triggers resolve
+            if self.phase == self.PHASE_MAIN_PRECOMBAT and hasattr(gs, 'advance_saga_counters'):
+                 self.advance_saga_counters(active_player)
+
+            # Trigger abilities via AbilityHandler - Pass None as source_id for general phase triggers
+            # *** CORRECTED CALL: Use self.ability_handler.check_abilities ***
+            if self.ability_handler:
+                self.ability_handler.check_abilities(None, event_type, trigger_context_ap)
+                self.ability_handler.check_abilities(None, event_type, trigger_context_nap)
+                # Process any queued triggers immediately AFTER checking
+                self.ability_handler.process_triggered_abilities()
+            else:
+                 logging.warning("Cannot trigger beginning of phase abilities: AbilityHandler missing.")
+
+            # Check SBAs after triggers have been processed
+            self.check_state_based_actions()
+        else:
+             # Handle phases without standard beginning triggers if necessary
+             # e.g., DECLARE_ATTACKERS might have its own triggers checked elsewhere
+             pass
 
     def _cleanup_step_actions(self, player):
         """Handles the Cleanup Step actions for a given player."""

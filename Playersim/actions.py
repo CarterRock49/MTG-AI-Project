@@ -17,8 +17,11 @@ from .combat_actions import CombatActionHandler
 ACTION_MEANINGS = {
     # Basic game flow (0-12) = 13 actions
     0: ("END_TURN", None), 1: ("UNTAP_NEXT", None), 2: ("DRAW_NEXT", None), 3: ("MAIN_PHASE_END", None),
-    4: ("COMBAT_DAMAGE", None), 5: ("END_PHASE", None), 6: ("MULLIGAN", None), 7: ("UPKEEP_PASS", None),
-    8: ("BEGIN_COMBAT_END", None), 9: ("END_COMBAT", None), 10: ("END_STEP", None), 11: ("PASS_PRIORITY", None),
+    4: ("NO_OP", None), # COMBAT_DAMAGE (4) is now NO_OP, handled by 431
+    5: ("END_PHASE", None), # Should be deprecated in favor of END_STEP (10) or pass priority. Keep as NO_OP? Let's keep definition but handler might ignore.
+    6: ("MULLIGAN", None), 7: ("UPKEEP_PASS", None),
+    8: ("BEGIN_COMBAT_END", None), 9: ("END_COMBAT", None), 10: ("END_STEP", None), # END_STEP means pass prio during end step
+    11: ("PASS_PRIORITY", None),
     12: ("CONCEDE", None),
 
     # Play land (13-19) = 7 actions (param=hand index 0-6)
@@ -43,6 +46,7 @@ ACTION_MEANINGS = {
 
     # Activate Ability (100-159) = 60 actions
     # Param=None. Handler expects {'battlefield_idx': int, 'ability_idx': int} in context.
+    # ability_idx here is 0, 1, or 2 (relative index of activatable abilities on that permanent)
     **{100 + (i * 3) + j: ("ACTIVATE_ABILITY", None) for i in range(20) for j in range(3)},
 
     # Transform (160-179) = 20 actions (param=battlefield index 0-19)
@@ -57,9 +61,11 @@ ACTION_MEANINGS = {
     # Adventure (196-203) = 8 actions (param=hand index 0-7)
     **{i: ("PLAY_ADVENTURE", i-196) for i in range(196, 204)},
 
-    # Defend Battle (204-223) = 20 actions
+    # Defend Battle (204-223) = 20 actions - RETHINK MAPPING LATER IF NEEDED
+    # Current map assumes Battle 0-4, Def 0-3. Simple approach: Just use 204.
     # Param=None. Handler expects {'battle_identifier': id_or_idx, 'defender_identifier': id_or_idx} in context.
-    **{204 + (i * 4) + j: ("DEFEND_BATTLE", None) for i in range(5) for j in range(4)},
+    204: ("DEFEND_BATTLE", None), # Simplified: one action, needs context
+    **{i: ("NO_OP", None) for i in range(205, 224)}, # Pad with NO_OPs
 
     # NO_OP (224)
     224: ("NO_OP", None),
@@ -72,7 +78,7 @@ ACTION_MEANINGS = {
     # Cast from Exile (230-237) = 8 actions (param=relative index 0-7 into castable exile list)
     **{i: ("CAST_FROM_EXILE", i-230) for i in range(230, 238)},
 
-    # Discard (238-247) = 10 actions (param=hand index 0-9)
+    # Discard (238-247) = 10 actions (param=hand index 0-9) - Handled by DISCARD_CARD choice
     **{238 + i: ("DISCARD_CARD", i) for i in range(10)},
 
     # Room/Class (248-257) = 10 actions
@@ -83,130 +89,145 @@ ACTION_MEANINGS = {
 
     # Spree Mode (258-273) = 16 actions
     # Param=None. Handler expects {'hand_idx': int, 'mode_idx': int} in context.
+    # Maps Hand Index 0-7, Mode Index 0-1 -> Action Index 258-273
     **{258 + (i * 2) + j: ("SELECT_SPREE_MODE", None) for i in range(8) for j in range(2)},
 
+    # Targeting / Sacrifice Choices (274-293) = 20 actions
+    # Param = Choice Index (0-9) relative to available valid options for the current context
     **{274 + i: ("SELECT_TARGET", i) for i in range(10)},
     **{284 + i: ("SACRIFICE_PERMANENT", i) for i in range(10)},
 
     # --- Offspring/Impending custom actions (indices 294, 295) ---
-    294: ("CAST_FOR_IMPENDING", None),  # Player chooses to cast a card for its Impending cost (Context={'hand_idx': X})
-    295: ("PAY_OFFSPRING_COST", None),  # Player chooses to pay Offspring cost for the pending spell (Context implicit via gs.pending_spell_context)
+    294: ("CAST_FOR_IMPENDING", None),  # Context={'hand_idx': X}
+    295: ("PAY_OFFSPRING_COST", None),  # Context implicit via gs.pending_spell_context
 
     # Gaps filled with NO_OP (296-298) = 3 actions
     **{i: ("NO_OP", None) for i in range(296, 299)},
 
-    # Library/Card Movement (299-308) -> Corrected (Now starts at 299)
+    # Library/Card Movement (299-308) = 10 actions
+    # Param = Choice index 0-4 for specific library search
     **{299 + i: ("SEARCH_LIBRARY", i) for i in range(5)}, # 299-303
-    304: ("NO_OP_SEARCH_FAIL", None),                   # 304
-    305: ("PUT_TO_GRAVEYARD", None),                    # 305 (Surveil GY)
-    306: ("PUT_ON_TOP", None),                          # 306 (Scry/Surveil Top)
-    307: ("PUT_ON_BOTTOM", None),                       # 307 (Scry Bottom)
-    308: ("DREDGE", None), # Handler expects {'gy_idx': int} in context # 308
+    304: ("NO_OP_SEARCH_FAIL", None), # Unused action? Handler returns success even on fail. NO_OP.
+    305: ("PUT_TO_GRAVEYARD", None), # Surveil Choice - Contextual
+    306: ("PUT_ON_TOP", None), # Scry/Surveil Choice - Contextual
+    307: ("PUT_ON_BOTTOM", None), # Scry Choice - Contextual
+    308: ("DREDGE", None), # Param = GY index 0-5? Or Contextual? Use context.
 
-    # Gap filling (309-313 -> previously 314-318)
-    **{i: ("NO_OP", None) for i in range(309, 314)}, # 5 NO_OPs # 309-313
+    # Gaps filled with NO_OP (309-313) = 5 actions
+    **{i: ("NO_OP", None) for i in range(309, 314)}, # 309-313
 
-    # Counter Management (314-334 -> previously 309-329+prolif = 314-334)
+    # Counter Management (314-334) = 21 actions
+    # Param = Target Index 0-9 (relative to valid targets?) Context needed: {'counter_type': X}
     **{314 + i: ("ADD_COUNTER", i) for i in range(10)},         # 314-323
     **{324 + i: ("REMOVE_COUNTER", i) for i in range(10)},      # 324-333
-    334: ("PROLIFERATE", None),                                 # 334
+    334: ("PROLIFERATE", None), # Param = None, Context maybe for target selection? Handler implements simple.
 
-    # Zone Movement (335-352 -> previously 330-347)
+    # Zone Movement (335-352) = 18 actions
+    # Param = Zone Index 0-5
     **{335 + i: ("RETURN_FROM_GRAVEYARD", i) for i in range(6)},# 335-340
     **{341 + i: ("REANIMATE", i) for i in range(6)},            # 341-346
     **{347 + i: ("RETURN_FROM_EXILE", i) for i in range(6)},    # 347-352
 
-    # Modal/Choice (353-377 -> previously 348-372)
+    # Modal/Choice (353-377) = 25 actions
+    # Param = Choice index 0-9
     **{353 + i: ("CHOOSE_MODE", i) for i in range(10)},         # 353-362
+    # Param = X value (1-10)
     **{363 + i: ("CHOOSE_X_VALUE", i+1) for i in range(10)},    # 363-372
+    # Param = Color index 0-4 (WUBRG)
     **{373 + i: ("CHOOSE_COLOR", i) for i in range(5)},         # 373-377
 
-    # Advanced Combat (378-397 -> previously 373-377, 383-392)
+    # Advanced Combat (378-387 = 10 Actions -> MAPPING INCORRECT IN ORIGINAL?)
+    # Original Docstring: 378-397 (20 actions)
+    # Attack Planeswalker 0-4 (relative index)
     **{378 + i: ("ATTACK_PLANESWALKER", i) for i in range(5)},  # 378-382
-    **{i: ("NO_OP", None) for i in range(383, 388)}, # 5 NO_OPs # 383-387
-    **{388 + i: ("ASSIGN_MULTIPLE_BLOCKERS", i) for i in range(10)}, # 388-397
+    # Assign Multiple Blockers 0-9 (relative to current attackers)
+    **{383 + i: ("ASSIGN_MULTIPLE_BLOCKERS", i) for i in range(10)}, # 383-392
+    # Gaps filled (393-397) = 5 actions
+    **{i: ("NO_OP", None) for i in range(393, 398)},            # 393-397
 
-    # Alternative Casting (398-409 -> previously 393-404)
-    398: ("CAST_WITH_FLASHBACK", None),
-    399: ("CAST_WITH_JUMP_START", None),
-    400: ("CAST_WITH_ESCAPE", None),
-    401: ("CAST_FOR_MADNESS", None),
-    402: ("CAST_WITH_OVERLOAD", None),
-    403: ("CAST_FOR_EMERGE", None),
-    404: ("CAST_FOR_DELVE", None),
-    405: ("PAY_KICKER", True),
-    406: ("PAY_KICKER", False),
-    407: ("PAY_ADDITIONAL_COST", True),
-    408: ("PAY_ADDITIONAL_COST", False),
-    409: ("PAY_ESCALATE", None),
+    # Alternative Casting (398-409) = 12 actions -> Some require context
+    398: ("CAST_WITH_FLASHBACK", None), # Context={'gy_idx': X}
+    399: ("CAST_WITH_JUMP_START", None), # Context={'gy_idx': X, 'discard_idx': Y}
+    400: ("CAST_WITH_ESCAPE", None), # Context={'gy_idx': X, 'gy_indices_escape': [...]}
+    401: ("CAST_FOR_MADNESS", None), # Context={'card_id': X, 'exile_idx': Y}
+    402: ("CAST_WITH_OVERLOAD", None), # Context={'hand_idx': X}
+    403: ("CAST_FOR_EMERGE", None), # Context={'hand_idx': X, 'sacrifice_idx': Y}
+    404: ("CAST_FOR_DELVE", None), # Context={'hand_idx': X, 'gy_indices': [...]}
+    405: ("PAY_KICKER", True), # Implicitly uses pending_spell_context
+    406: ("PAY_KICKER", False),# Implicitly uses pending_spell_context
+    407: ("PAY_ADDITIONAL_COST", True), # Implicitly uses pending_spell_context
+    408: ("PAY_ADDITIONAL_COST", False),# Implicitly uses pending_spell_context
+    409: ("PAY_ESCALATE", None), # Context={'num_extra_modes': X}, Implicitly uses pending_spell_context
 
-    # Token/Copy (410-417 -> previously 405-412)
+    # Token/Copy (410-417) = 8 actions
+    # Param = Predefined token type index (0-4)
     **{410 + i: ("CREATE_TOKEN", i) for i in range(5)}, # 410-414
-    415: ("COPY_PERMANENT", None),
-    416: ("COPY_SPELL", None),
-    417: ("POPULATE", None),
+    415: ("COPY_PERMANENT", None), # Context={'target_identifier':X}
+    416: ("COPY_SPELL", None), # Context={'target_stack_identifier':X}
+    417: ("POPULATE", None), # Context={'target_token_identifier':X}
 
-    # Specific Mechanics (418-429 -> previously 413-424)
-    418: ("INVESTIGATE", None),
-    419: ("FORETELL", None),
-    420: ("AMASS", None),
-    421: ("LEARN", None),
-    422: ("VENTURE", None),
-    423: ("EXERT", None),
-    424: ("EXPLORE", None),
-    425: ("ADAPT", None),
-    426: ("MUTATE", None),
-    427: ("CYCLING", None),
-    428: ("GOAD", None),
-    429: ("BOAST", None),
+    # Specific Mechanics (418-429) = 12 actions -> Mostly need context
+    418: ("INVESTIGATE", None), # Usually result of effect, not direct action? Can be activated. Needs context.
+    419: ("FORETELL", None), # Context={'hand_idx':X}
+    420: ("AMASS", None), # Usually result of effect. Needs context if activated.
+    421: ("LEARN", None), # Result of effect.
+    422: ("VENTURE", None), # Can be activated. Needs context.
+    423: ("EXERT", None), # Choice during attack declaration. Needs context {'creature_idx':X}.
+    424: ("EXPLORE", None), # Usually result of effect. Needs context if activated.
+    425: ("ADAPT", None), # Activated. Needs context {'creature_idx':X, 'amount':Y}
+    426: ("MUTATE", None), # Casting cost. Needs context {'hand_idx':X, 'target_idx':Y}
+    427: ("CYCLING", None), # Activated from hand. Needs context {'hand_idx':X}
+    428: ("GOAD", None), # Usually result of effect. Needs context {'target_creature_identifier':X} if activated.
+    429: ("BOAST", None), # Activated after attack. Needs context {'creature_idx':X}.
 
-    # Response Actions (430-434 -> previously 425-429)
-    430: ("COUNTER_SPELL", None),
-    431: ("COUNTER_ABILITY", None),
-    432: ("PREVENT_DAMAGE", None),
-    433: ("REDIRECT_DAMAGE", None),
-    434: ("STIFLE_TRIGGER", None),
+    # Response Actions (430-434) = 5 actions -> Need context
+    430: ("COUNTER_SPELL", None), # Context={'hand_idx':X, 'target_spell_idx':Y}
+    431: ("COUNTER_ABILITY", None), # Context={'hand_idx':X, 'target_ability_idx':Y}
+    432: ("PREVENT_DAMAGE", None), # Needs context if casting spell.
+    433: ("REDIRECT_DAMAGE", None),# Needs context if casting spell.
+    434: ("STIFLE_TRIGGER", None), # Context={'hand_idx':X, 'target_trigger_idx':Y}
 
-    # Combat Actions (435-444 -> previously 430-439)
-    435: ("FIRST_STRIKE_ORDER", None),
-    436: ("ASSIGN_COMBAT_DAMAGE", None),
-    437: ("NINJUTSU", None),
-    438: ("DECLARE_ATTACKERS_DONE", None),
-    439: ("DECLARE_BLOCKERS_DONE", None),
-    440: ("LOYALTY_ABILITY_PLUS", None),
-    441: ("LOYALTY_ABILITY_ZERO", None),
-    442: ("LOYALTY_ABILITY_MINUS", None),
-    443: ("ULTIMATE_ABILITY", None),
-    444: ("PROTECT_PLANESWALKER", None),
+    # Combat Actions (435-444) = 10 actions -> Delegated, need context
+    435: ("FIRST_STRIKE_ORDER", None), # Delegated to CombatActionHandler
+    436: ("ASSIGN_COMBAT_DAMAGE", None), # Delegated to CombatActionHandler
+    437: ("NINJUTSU", None), # Delegated to CombatActionHandler
+    438: ("DECLARE_ATTACKERS_DONE", None),# Delegated to CombatActionHandler
+    439: ("DECLARE_BLOCKERS_DONE", None), # Delegated to CombatActionHandler
+    440: ("LOYALTY_ABILITY_PLUS", None), # Param=bf_idx. Needs context {'ability_idx':X} maybe? Handler finds correct ability.
+    441: ("LOYALTY_ABILITY_ZERO", None), # Param=bf_idx.
+    442: ("LOYALTY_ABILITY_MINUS", None),# Param=bf_idx.
+    443: ("ULTIMATE_ABILITY", None), # Param=bf_idx.
+    444: ("PROTECT_PLANESWALKER", None), # Delegated to CombatActionHandler
 
-    # Card Type Specific (445-461 -> previously 440-459)
-    445: ("CAST_LEFT_HALF", None),
-    446: ("CAST_RIGHT_HALF", None),
-    447: ("CAST_FUSE", None),
-    448: ("AFTERMATH_CAST", None),
-    449: ("FLIP_CARD", None),
-    450: ("EQUIP", None),
-    451: ("UNEQUIP", None), # Restore UNEQUIP? Needs logic. Let's keep NO_OP for now.
-    452: ("ATTACH_AURA", None), # Restore? Needs logic. NO_OP.
-    453: ("FORTIFY", None),
-    454: ("RECONFIGURE", None),
-    455: ("MORPH", None),
-    456: ("MANIFEST", None),
+    # Card Type Specific (445-461) = 17 actions -> Mostly need context
+    445: ("CAST_LEFT_HALF", None), # Param=hand_idx
+    446: ("CAST_RIGHT_HALF", None), # Param=hand_idx
+    447: ("CAST_FUSE", None), # Param=hand_idx
+    448: ("AFTERMATH_CAST", None), # Context={'gy_idx':X}
+    449: ("FLIP_CARD", None), # Context={'battlefield_idx':X}
+    450: ("EQUIP", None), # Context={'equip_identifier':X, 'target_identifier':Y}
+    451: ("NO_OP", None), # UNEQUIP removed (rarely a direct action)
+    452: ("NO_OP", None), # ATTACH_AURA removed (happens on resolution)
+    453: ("FORTIFY", None), # Context={'fort_identifier':X, 'target_identifier':Y}
+    454: ("RECONFIGURE", None), # Context={'card_identifier':X, 'target_identifier':Y (optional)}
+    455: ("MORPH", None), # Context={'battlefield_idx':X} (Turn face up)
+    456: ("MANIFEST", None), # Context={'battlefield_idx':X} (Turn face up)
     457: ("CLASH", None),
-    458: ("CONSPIRE", None),
-    459: ("CONVOKE", None), # Restore CONVOKE? Needs logic. NO_OP.
-    460: ("GRANDEUR", None),
-    461: ("HELLBENT", None), # Restore HELLBENT? Needs logic. NO_OP.
+    458: ("CONSPIRE", None), # Context={'spell_stack_idx':X, 'creature1_identifier':Y, 'creature2_identifier':Z}
+    459: ("NO_OP", None), # CONVOKE removed (passive cost reduction)
+    460: ("GRANDEUR", None), # Context={'hand_idx':X}
+    461: ("NO_OP", None), # HELLBENT removed (passive check)
 
-    # Attack Battle (462-466 -> previously 460-464)
+    # Attack Battle (462-466) = 5 actions
+    # Param = Relative battle index (0-4). Handler uses context to know which attacker.
     **{462 + i: ("ATTACK_BATTLE", i) for i in range(5)}, # 462-466
 
-    # Fill the remaining space (467-479)
-    **{i: ("NO_OP", None) for i in range(467, 480)}
+    # Fill the remaining space (467-479) = 13 actions
+    **{i: ("NO_OP", None) for i in range(467, 480)} # 467-479
 }
-# Ensure size again after changes
+# Ensure size is correct after updates
 if len(ACTION_MEANINGS) != 480:
-    raise ValueError(f"ACTION_MEANINGS size IS STILL INCORRECT: {len(ACTION_MEANINGS)}")
+    raise ValueError(f"ACTION_MEANINGS size is WRONG after update: {len(ACTION_MEANINGS)} expected 480")
 
 class ActionHandler:
     """Handles action validation and execution"""
@@ -244,12 +265,13 @@ class ActionHandler:
         self.action_handlers = self._get_action_handlers() # Initialize handlers
         
     def _get_action_handlers(self):
-            """Maps action type strings to their handler methods. (Updated)"""
+            """Maps action type strings to their handler methods. (Updated for new mapping)"""
             return {
                 # Basic Flow
                 "END_TURN": self._handle_end_turn, "UNTAP_NEXT": self._handle_untap_next,
                 "DRAW_NEXT": self._handle_draw_next, "MAIN_PHASE_END": self._handle_main_phase_end,
-                "COMBAT_DAMAGE": self._handle_combat_damage, "END_PHASE": self._handle_end_phase,
+                # "COMBAT_DAMAGE": self._handle_combat_damage, # Mapped to NO_OP(4) now
+                "END_PHASE": self._handle_end_phase, # Keep handler but action may be unused
                 "MULLIGAN": self._handle_mulligan, "KEEP_HAND": self._handle_keep_hand,
                 "BOTTOM_CARD": self._handle_bottom_card, "UPKEEP_PASS": self._handle_upkeep_pass,
                 "BEGIN_COMBAT_END": self._handle_begin_combat_end, "END_COMBAT": self._handle_end_combat,
@@ -261,114 +283,111 @@ class ActionHandler:
                 "PLAY_MDFC_BACK": self._handle_play_mdfc_back,
                 "PLAY_ADVENTURE": self._handle_play_adventure,
                 "CAST_FROM_EXILE": self._handle_cast_from_exile,
-                # Simple Combat
+                # Combat
                 "ATTACK": self._handle_attack,
                 "BLOCK": self._handle_block,
-                # Delegated Combat Actions (Passed through apply_combat_action)
-                "DECLARE_ATTACKERS_DONE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "DECLARE_ATTACKERS_DONE", p, context=context),
-                "DECLARE_BLOCKERS_DONE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "DECLARE_BLOCKERS_DONE", p, context=context),
-                "ATTACK_PLANESWALKER": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ATTACK_PLANESWALKER", p, context=context),
-                "ASSIGN_MULTIPLE_BLOCKERS": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ASSIGN_MULTIPLE_BLOCKERS", p, context=context),
-                "FIRST_STRIKE_ORDER": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "FIRST_STRIKE_ORDER", p, context=context),
-                "ASSIGN_COMBAT_DAMAGE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ASSIGN_COMBAT_DAMAGE", p, context=context),
-                "PROTECT_PLANESWALKER": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "PROTECT_PLANESWALKER", p, context=context),
-                "ATTACK_BATTLE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ATTACK_BATTLE", p, context=context),
-                "DEFEND_BATTLE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "DEFEND_BATTLE", p, context=context),
-                "NINJUTSU": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "NINJUTSU", p, context=context),
+                # Delegated Combat Actions (Remapped indices based on review)
+                "DECLARE_ATTACKERS_DONE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "DECLARE_ATTACKERS_DONE", p, context=context), # Index 433
+                "DECLARE_BLOCKERS_DONE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "DECLARE_BLOCKERS_DONE", p, context=context), # Index 434
+                "ATTACK_PLANESWALKER": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ATTACK_PLANESWALKER", p, context=context), # Indices 378-382
+                "ASSIGN_MULTIPLE_BLOCKERS": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ASSIGN_MULTIPLE_BLOCKERS", p, context=context), # Indices 388-397
+                "FIRST_STRIKE_ORDER": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "FIRST_STRIKE_ORDER", p, context=context), # Index 430
+                "ASSIGN_COMBAT_DAMAGE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ASSIGN_COMBAT_DAMAGE", p, context=context), # Index 431
+                "PROTECT_PLANESWALKER": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "PROTECT_PLANESWALKER", p, context=context), # Index 439
+                "ATTACK_BATTLE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ATTACK_BATTLE", p, context=context), # Indices 462-466
+                "DEFEND_BATTLE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "DEFEND_BATTLE", p, context=context), # Index 204
+                "NINJUTSU": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "NINJUTSU", p, context=context), # Index 432
                 # Abilities & Mana
                 "TAP_LAND_FOR_MANA": self._handle_tap_land_for_mana,
                 "TAP_LAND_FOR_EFFECT": self._handle_tap_land_for_effect,
-                "ACTIVATE_ABILITY": self._handle_activate_ability, # Now expects action_index in kwargs
-                "LOYALTY_ABILITY_PLUS": lambda p=None, context=None, **k: self._handle_loyalty_ability(p, context=context, action_type="LOYALTY_ABILITY_PLUS", **k),
-                "LOYALTY_ABILITY_ZERO": lambda p=None, context=None, **k: self._handle_loyalty_ability(p, context=context, action_type="LOYALTY_ABILITY_ZERO", **k),
-                "LOYALTY_ABILITY_MINUS": lambda p=None, context=None, **k: self._handle_loyalty_ability(p, context=context, action_type="LOYALTY_ABILITY_MINUS", **k),
-                "ULTIMATE_ABILITY": lambda p=None, context=None, **k: self._handle_loyalty_ability(p, context=context, action_type="ULTIMATE_ABILITY", **k),
+                "ACTIVATE_ABILITY": self._handle_activate_ability, # Indices 100-159
+                "LOYALTY_ABILITY_PLUS": lambda p=None, context=None, **k: self._handle_loyalty_ability(p, context=context, action_type="LOYALTY_ABILITY_PLUS", **k), # Index 435
+                "LOYALTY_ABILITY_ZERO": lambda p=None, context=None, **k: self._handle_loyalty_ability(p, context=context, action_type="LOYALTY_ABILITY_ZERO", **k), # Index 436
+                "LOYALTY_ABILITY_MINUS": lambda p=None, context=None, **k: self._handle_loyalty_ability(p, context=context, action_type="LOYALTY_ABILITY_MINUS", **k),# Index 437
+                "ULTIMATE_ABILITY": lambda p=None, context=None, **k: self._handle_loyalty_ability(p, context=context, action_type="ULTIMATE_ABILITY", **k), # Index 438
                 # Targeting & Choices
-                "SELECT_TARGET": self._handle_select_target, # Param is index into valid choices
-                "SACRIFICE_PERMANENT": self._handle_sacrifice_permanent, # Param is index into valid choices
-                "CHOOSE_MODE": self._handle_choose_mode, # Param is mode index
-                "CHOOSE_X_VALUE": self._handle_choose_x, # Param is X value
-                "CHOOSE_COLOR": self._handle_choose_color, # Param is color index 0-4
-                "PUT_TO_GRAVEYARD": self._handle_scry_surveil_choice, # Updated mapping for surveil GY choice
-                "PUT_ON_TOP": self._handle_scry_surveil_choice, # Updated mapping
-                "PUT_ON_BOTTOM": self._handle_scry_surveil_choice, # Updated mapping
+                "SELECT_TARGET": self._handle_select_target, # Indices 274-283
+                "SACRIFICE_PERMANENT": self._handle_sacrifice_permanent, # Indices 284-293
+                "CHOOSE_MODE": self._handle_choose_mode, # Indices 353-362
+                "CHOOSE_X_VALUE": self._handle_choose_x, # Indices 363-372
+                "CHOOSE_COLOR": self._handle_choose_color, # Indices 373-377
+                "PUT_TO_GRAVEYARD": self._handle_scry_surveil_choice, # Index 305
+                "PUT_ON_TOP": self._handle_scry_surveil_choice, # Index 306
+                "PUT_ON_BOTTOM": self._handle_scry_surveil_choice, # Index 307
                 # Library/Card Movement
-                "SEARCH_LIBRARY": self._handle_search_library, # Param is search type 0-4
-                "DREDGE": self._handle_dredge, # Handler expects {'gy_idx': int} in context
+                "SEARCH_LIBRARY": self._handle_search_library, # Indices 299-303
+                "DREDGE": self._handle_dredge, # Index 308
                 # Counter Management
-                "ADD_COUNTER": self._handle_add_counter, # Param is target index 0-9, context needed
-                "REMOVE_COUNTER": self._handle_remove_counter, # Param is target index 0-9, context needed
-                "PROLIFERATE": self._handle_proliferate,
+                "ADD_COUNTER": self._handle_add_counter, # Indices 314-323
+                "REMOVE_COUNTER": self._handle_remove_counter, # Indices 324-333
+                "PROLIFERATE": self._handle_proliferate, # Index 334
                 # Zone Movement
-                "RETURN_FROM_GRAVEYARD": self._handle_return_from_graveyard, # Param is GY index 0-5
-                "REANIMATE": self._handle_reanimate, # Param is GY index 0-5
-                "RETURN_FROM_EXILE": self._handle_return_from_exile, # Param is Exile index 0-5
+                "RETURN_FROM_GRAVEYARD": self._handle_return_from_graveyard, # Indices 335-340
+                "REANIMATE": self._handle_reanimate, # Indices 341-346
+                "RETURN_FROM_EXILE": self._handle_return_from_exile, # Indices 347-352
                 # Alternative Casting
-                "CAST_WITH_FLASHBACK": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_FLASHBACK", context=context, **k),
-                "CAST_WITH_JUMP_START": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_JUMP_START", context=context, **k),
-                "CAST_WITH_ESCAPE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_ESCAPE", context=context, **k),
-                "CAST_FOR_MADNESS": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_MADNESS", context=context, **k),
-                "CAST_WITH_OVERLOAD": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_OVERLOAD", context=context, **k),
-                "CAST_FOR_EMERGE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_EMERGE", context=context, **k),
-                "CAST_FOR_DELVE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_DELVE", context=context, **k),
-                "AFTERMATH_CAST": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="AFTERMATH_CAST", context=context, **k),
+                "CAST_WITH_FLASHBACK": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_FLASHBACK", context=context, **k), # Index 398
+                "CAST_WITH_JUMP_START": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_JUMP_START", context=context, **k), # Index 399
+                "CAST_WITH_ESCAPE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_ESCAPE", context=context, **k), # Index 400
+                "CAST_FOR_MADNESS": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_MADNESS", context=context, **k), # Index 401
+                "CAST_WITH_OVERLOAD": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_OVERLOAD", context=context, **k), # Index 402
+                "CAST_FOR_EMERGE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_EMERGE", context=context, **k), # Index 403
+                "CAST_FOR_DELVE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_DELVE", context=context, **k), # Index 404
+                "AFTERMATH_CAST": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="AFTERMATH_CAST", context=context, **k), # Index 448
                 # Informational Flags
-                "PAY_KICKER": self._handle_pay_kicker, # Param=True/False
-                "PAY_ADDITIONAL_COST": self._handle_pay_additional_cost, # Param=True/False
-                "PAY_ESCALATE": self._handle_pay_escalate, # Param=count
+                "PAY_KICKER": self._handle_pay_kicker, # Index 405/406
+                "PAY_ADDITIONAL_COST": self._handle_pay_additional_cost, # Index 407/408
+                "PAY_ESCALATE": self._handle_pay_escalate, # Index 409
                 # Token/Copy
-                "CREATE_TOKEN": self._handle_create_token, # Param is predefined token index 0-4
-                "COPY_PERMANENT": self._handle_copy_permanent, # Param=None, Context={'target_permanent_identifier':X}
-                "COPY_SPELL": self._handle_copy_spell, # Param=None, Context={'target_stack_identifier':X}
-                "POPULATE": self._handle_populate, # Param=None, Context={'target_token_identifier':X}
+                "CREATE_TOKEN": self._handle_create_token, # Indices 410-414
+                "COPY_PERMANENT": self._handle_copy_permanent, # Index 415
+                "COPY_SPELL": self._handle_copy_spell, # Index 416
+                "POPULATE": self._handle_populate, # Index 417
                 # Specific Mechanics
-                "INVESTIGATE": self._handle_investigate,
-                "FORETELL": self._handle_foretell, # Param=None, Context={'hand_idx':X}
-                "AMASS": self._handle_amass, # Param=None, Context={'amount':X}
-                "LEARN": self._handle_learn,
-                "VENTURE": self._handle_venture,
-                "EXERT": self._handle_exert, # Param=None, Context={'creature_idx':X}
-                "EXPLORE": self._handle_explore, # Param=None, Context={'creature_idx':X}
-                "ADAPT": self._handle_adapt, # Param=None, Context={'creature_idx':X, 'amount':Y}
-                "MUTATE": self._handle_mutate, # Param=None, Context={'hand_idx':X, 'target_idx':Y}
-                "CYCLING": self._handle_cycling, # Param=None, Context={'hand_idx':X}
-                "GOAD": self._handle_goad, # Param=None, Context={'target_creature_identifier':X}
-                "BOAST": self._handle_boast, # Param=None, Context={'creature_idx':X}
+                "INVESTIGATE": self._handle_investigate, # Index 418
+                "FORETELL": self._handle_foretell, # Index 419
+                "AMASS": self._handle_amass, # Index 420
+                "LEARN": self._handle_learn, # Index 421
+                "VENTURE": self._handle_venture, # Index 422
+                "EXERT": self._handle_exert, # Index 423
+                "EXPLORE": self._handle_explore, # Index 424
+                "ADAPT": self._handle_adapt, # Index 425
+                "MUTATE": self._handle_mutate, # Index 426
+                "CYCLING": self._handle_cycling, # Index 427
+                "GOAD": self._handle_goad, # Index 428
+                "BOAST": self._handle_boast, # Index 429
                 # Response Actions
-                "COUNTER_SPELL": self._handle_counter_spell, # Param=None, Context={'hand_idx':X, 'target_spell_idx':Y}
-                "COUNTER_ABILITY": self._handle_counter_ability, # Param=None, Context={'hand_idx':X, 'target_ability_idx':Y}
-                "PREVENT_DAMAGE": self._handle_prevent_damage, # Param=None, Context={'hand_idx':X, ...}
-                "REDIRECT_DAMAGE": self._handle_redirect_damage, # Param=None, Context={'hand_idx':X, ...}
-                "STIFLE_TRIGGER": self._handle_stifle_trigger, # Param=None, Context={'hand_idx':X, 'target_trigger_idx':Y}
+                "COUNTER_SPELL": self._handle_counter_spell, # Index 430
+                "COUNTER_ABILITY": self._handle_counter_ability, # Index 431
+                "PREVENT_DAMAGE": self._handle_prevent_damage, # Index 432
+                "REDIRECT_DAMAGE": self._handle_redirect_damage, # Index 433
+                "STIFLE_TRIGGER": self._handle_stifle_trigger, # Index 434
                 # Card Type Specific
-                "CAST_LEFT_HALF": lambda p=None, context=None, **k: self._handle_cast_split(p, context=context, action_type="CAST_LEFT_HALF", **k), # Param is hand_idx
-                "CAST_RIGHT_HALF": lambda p=None, context=None, **k: self._handle_cast_split(p, context=context, action_type="CAST_RIGHT_HALF", **k),# Param is hand_idx
-                "CAST_FUSE": lambda p=None, context=None, **k: self._handle_cast_split(p, context=context, action_type="CAST_FUSE", **k),# Param is hand_idx
-                "FLIP_CARD": self._handle_flip_card, # Param=None, Context={'battlefield_idx':X}
-                "EQUIP": self._handle_equip, # Param=None, Context={'equip_identifier':X, 'target_identifier':Y}
-                "FORTIFY": self._handle_fortify, # Param=None, Context={'fort_identifier':X, 'target_identifier':Y}
-                "RECONFIGURE": self._handle_reconfigure, # Param=None, Context={'card_identifier':X}
-                "MORPH": self._handle_morph, # Param=None, Context={'battlefield_idx':X}
-                "MANIFEST": self._handle_manifest, # Param=None, Context={'battlefield_idx':X}
-                "CLASH": self._handle_clash,
-                "CONSPIRE": self._handle_conspire, # Param=None, Context={'spell_stack_idx':X, 'creature1_identifier':Y, 'creature2_identifier':Z}
-                "GRANDEUR": self._handle_grandeur, # Param=None, Context={'hand_idx':X}
-                # Room/Class (Delegated to _handle_ methods)
-                "UNLOCK_DOOR": self._handle_unlock_door, # Param is room battlefield_idx
-                "LEVEL_UP_CLASS": self._handle_level_up_class, # Param is class battlefield_idx
+                "CAST_LEFT_HALF": lambda p=None, context=None, **k: self._handle_cast_split(p, context=context, action_type="CAST_LEFT_HALF", **k), # Index 445
+                "CAST_RIGHT_HALF": lambda p=None, context=None, **k: self._handle_cast_split(p, context=context, action_type="CAST_RIGHT_HALF", **k),# Index 446
+                "CAST_FUSE": lambda p=None, context=None, **k: self._handle_cast_split(p, context=context, action_type="CAST_FUSE", **k),# Index 447
+                "FLIP_CARD": self._handle_flip_card, # Index 449
+                "EQUIP": self._handle_equip, # Index 450
+                "FORTIFY": self._handle_fortify, # Index 453
+                "RECONFIGURE": self._handle_reconfigure, # Index 454
+                "MORPH": self._handle_morph, # Index 455
+                "MANIFEST": self._handle_manifest, # Index 456
+                "CLASH": self._handle_clash, # Index 457
+                "CONSPIRE": self._handle_conspire, # Index 458
+                "GRANDEUR": self._handle_grandeur, # Index 460
+                # Room/Class
+                "UNLOCK_DOOR": self._handle_unlock_door, # Indices 248-252
+                "LEVEL_UP_CLASS": self._handle_level_up_class, # Indices 253-257
                 # Discard / Spree
-                "DISCARD_CARD": self._handle_discard_card, # Param is hand_idx
-                "SELECT_SPREE_MODE": self._handle_select_spree_mode, # Param=None, Context={'hand_idx':X, 'mode_idx':Y}
+                "DISCARD_CARD": self._handle_discard_card, # Indices 238-247
+                "SELECT_SPREE_MODE": self._handle_select_spree_mode, # Indices 258-273
                 # Transform
-                "TRANSFORM": self._handle_transform, # Param is battlefield index
+                "TRANSFORM": self._handle_transform, # Indices 160-179
                 # NO_OP variants
-                "NO_OP": self._handle_no_op,
-                "NO_OP_SEARCH_FAIL": self._handle_no_op,
-                # Actions removed or repurposed to NO_OP
-                "UNEQUIP": self._handle_no_op,
-                "ATTACH_AURA": self._handle_no_op,
-                "CAST_FOR_IMPENDING": self._handle_cast_for_impending,
-                "PAY_OFFSPRING_COST": self._handle_pay_offspring_cost,
+                "NO_OP": self._handle_no_op, # Various indices
+                # Offspring/Impending
+                "CAST_FOR_IMPENDING": self._handle_cast_for_impending, # Index 294
+                "PAY_OFFSPRING_COST": self._handle_pay_offspring_cost, # Index 295
             }
 
     def _handle_level_up_class(self, param, context, **kwargs):
@@ -5835,94 +5854,98 @@ class ActionHandler:
                 if token_creatures:
                     set_valid_action(412, "POPULATE to create a copy of a creature token you control")
 
-    def _add_specific_mechanics_actions(self, player, valid_actions, set_valid_action):
-        """Add actions for specialized MTG mechanics."""
+    def _add_specific_mechanics_actions(self, player, valid_actions, set_valid_action, is_sorcery_speed):
+        """Add actions for specialized MTG mechanics, considering timing."""
         gs = self.game_state
         
-        # Investigate - when checking battlefield
-        for idx in range(min(len(player["battlefield"]), 20)):
-            card_id = player["battlefield"][idx]
-            card = gs._safe_get_card(card_id)
-            if card and hasattr(card, 'oracle_text') and "investigate" in card.oracle_text.lower():
-                set_valid_action(413, f"INVESTIGATE with {card.name}")
+        # --- Investigate (Usually triggered, but could be activated) ---
+        # If an ability exists allowing Investigate activation:
+        # (Example - Needs actual card ability check)
+        # for idx, card_id in enumerate(player["battlefield"][:20]): ... check card for "Activate: Investigate" ...
+        # Needs ACTIVATE_ABILITY mapping instead if it's activated.
+        # Let's assume Investigate action (413) is only valid if context demands it (not auto-added here).
 
-        # Foretell - when checking hand
-        for i in range(20, 28):
-            hand_idx = i - 20
-            if hand_idx < len(player["hand"]):
-                card_id = player["hand"][hand_idx]
+        # --- Foretell (Sorcery speed only) ---
+        if is_sorcery_speed:
+            for i in range(min(len(player.get("hand",[])), 8)): # Assuming max 8 cards checkable for this
+                card_id = player["hand"][i]
                 card = gs._safe_get_card(card_id)
                 if card and hasattr(card, 'oracle_text') and "foretell" in card.oracle_text.lower():
-                    set_valid_action(414, f"FORETELL {card.name}")
+                     # Foretell cost is always {2} mana
+                     if self._can_afford_cost_string(player, "{2}"):
+                          context = {'hand_idx': i}
+                          set_valid_action(419, f"FORETELL {card.name}", context=context) # Action 419
 
-        # Adapt - when checking battlefield creatures
-        for idx in range(min(len(player["battlefield"]), 20)):
-            card_id = player["battlefield"][idx]
-            card = gs._safe_get_card(card_id)
-            if card and hasattr(card, 'oracle_text') and "adapt" in card.oracle_text.lower():
-                set_valid_action(420, f"ADAPT {card.name}")
+        # --- Amass (Usually from spells/abilities, check if activatable) ---
+        # (Example - Needs actual card ability check)
+        # for idx, card_id in enumerate(player["battlefield"][:20]): ... check for "Activate: Amass N" ...
+        # Action 420 likely context-dependent, not added generically.
 
-        # Mutate - when checking battlefield creatures
-        for idx in range(min(len(player["battlefield"]), 20)):
-            card_id = player["battlefield"][idx]
-            card = gs._safe_get_card(card_id)
-            if card and hasattr(card, 'oracle_text') and "mutate" in card.oracle_text.lower():
-                set_valid_action(421, f"MUTATE {card.name}")
+        # --- Learn (Usually from spells/abilities resolution) ---
+        # Action 421 not typically a player choice, happens on effect resolution.
 
-                
-        # Boast - when checking battlefield creatures
-        for idx in range(min(len(player["battlefield"]), 20)):
-            card_id = player["battlefield"][idx]
-            card = gs._safe_get_card(card_id)
-            if card and hasattr(card, 'oracle_text') and "boast" in card.oracle_text.lower():
-                # Only allow boast if the creature attacked this turn
-                if hasattr(gs, 'ability_handler'):
-                    can_boast = gs.ability_handler._apply_boast(card_id, "ACTIVATE", {"controller": player})
-                    if can_boast:
-                        set_valid_action(424, f"BOAST with {card.name}")
-                        
-        
-        # Amass - check for amass cards
-        for idx in range(min(len(player["battlefield"]), 20)):
-            card_id = player["battlefield"][idx]
-            card = gs._safe_get_card(card_id)
-            if card and hasattr(card, 'oracle_text') and "amass" in card.oracle_text.lower():
-                set_valid_action(415, f"AMASS with {card.name}")
-        
-        # Learn - check for learn cards
-        for idx in range(min(len(player["hand"]), 8)):
-            card_id = player["hand"][idx]
-            card = gs._safe_get_card(card_id)
-            if card and hasattr(card, 'oracle_text') and "learn" in card.oracle_text.lower():
-                set_valid_action(416, f"LEARN with {card.name}")
-        
-        # Venture - check for venture cards
-        for idx in range(min(len(player["battlefield"]), 20)):
-            card_id = player["battlefield"][idx]
-            card = gs._safe_get_card(card_id)
-            if card and hasattr(card, 'oracle_text') and "venture into the dungeon" in card.oracle_text.lower():
-                set_valid_action(417, f"VENTURE with {card.name}")
-        
-        # Explore - check for explore cards
-        for idx in range(min(len(player["battlefield"]), 20)):
-            card_id = player["battlefield"][idx]
-            card = gs._safe_get_card(card_id)
-            if card and hasattr(card, 'oracle_text') and "explore" in card.oracle_text.lower():
-                set_valid_action(419, f"EXPLORE with {card.name}")
-        
-        # Morph - check for face-down cards that can be morphed
-        for idx in range(min(len(player["battlefield"]), 20)):
-            card_id = player["battlefield"][idx]
-            card = gs._safe_get_card(card_id)
-            if card and hasattr(card, 'is_face_down') and card.is_face_down:
-                set_valid_action(455, f"MORPH {card.name}")
-        
-        # Manifest - check for manifested cards
-        for idx in range(min(len(player["battlefield"]), 20)):
-            card_id = player["battlefield"][idx]
-            card = gs._safe_get_card(card_id)
-            if card and hasattr(card, 'is_manifested') and card.is_manifested:
-                set_valid_action(456, f"MANIFEST {card.name}")
+        # --- Venture (Triggered or Activated) ---
+        # (Example - Needs actual card ability check)
+        # Action 422 usually context-dependent.
+
+        # --- Exert (Activated as part of attack declaration) ---
+        # Logic tied to DECLARE_ATTACKERS step, not added generically here.
+        # Action 423 likely implicit in ATTACK action context.
+
+        # --- Explore (Triggered or Activated) ---
+        # Action 424 context-dependent.
+
+        # --- Adapt (Activated Ability - Sorcery speed) ---
+        if is_sorcery_speed:
+            for i in range(min(len(player["battlefield"]), 20)):
+                card_id = player["battlefield"][i]
+                card = gs._safe_get_card(card_id)
+                if card and hasattr(card, 'oracle_text') and "adapt" in card.oracle_text.lower():
+                    match = re.search(r"adapt (\d+)", card.oracle_text.lower())
+                    adapt_n = int(match.group(1)) if match else 1
+                    # Need to find the corresponding *activated ability* on the card
+                    # Assume it's the first ability for simplicity here (requires AbilityHandler integration)
+                    ability_idx = 0 # Placeholder
+                    if hasattr(gs, 'ability_handler') and gs.ability_handler.can_activate_ability(card_id, ability_idx, player):
+                         # Action uses ACTIVATE_ABILITY mapping, not 425 directly
+                         action_idx = 100 + (i * 3) + ability_idx
+                         if action_idx < 160:
+                              set_valid_action(action_idx, f"ACTIVATE (Adapt) {card.name}")
+
+
+        # --- Mutate (Casting Alternate Cost - check castability) ---
+        # Handled via alternative casting checks. Action 426 not used directly?
+
+
+        # --- Cycling (Activated Ability - Instant speed) ---
+        if not is_sorcery_speed:
+             # Cycling actions added by _add_cycling_actions based on hand cards.
+             # Action 427 not used directly here.
+             pass
+
+        # --- Goad (Usually from spells/abilities effect) ---
+        # Action 428 not a player choice, happens on resolution.
+
+        # --- Boast (Activated Ability - Only after attacking) ---
+        if not is_sorcery_speed and gs.phase >= gs.PHASE_DECLARE_ATTACKERS: # Combat or later
+            for i in range(min(len(player["battlefield"]), 20)):
+                card_id = player["battlefield"][i]
+                if card_id in getattr(gs, 'attackers_this_turn', set()): # Check if it attacked
+                     card = gs._safe_get_card(card_id)
+                     if card and "boast —" in getattr(card, 'oracle_text','').lower():
+                          # Find the actual Boast ability index
+                           ability_idx_to_activate = -1
+                           if hasattr(gs, 'ability_handler'):
+                               abilities = gs.ability_handler.get_activated_abilities(card_id)
+                               for idx, ab in enumerate(abilities):
+                                   if "boast —" in getattr(ab, 'effect_text', '').lower():
+                                       ability_idx_to_activate = idx; break
+                           if ability_idx_to_activate != -1:
+                                if gs.ability_handler.can_activate_ability(card_id, ability_idx_to_activate, player):
+                                     # Boast is an activated ability
+                                     action_idx = 100 + (i * 3) + ability_idx_to_activate
+                                     if action_idx < 160:
+                                          set_valid_action(action_idx, f"ACTIVATE (Boast) {card.name}")
         
     def _tap_land_for_effect(self, player, land_id):
         """Tap a land to activate abilities (excluding mana production)."""
