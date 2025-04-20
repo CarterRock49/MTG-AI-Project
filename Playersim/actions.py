@@ -1036,11 +1036,11 @@ class ActionHandler:
                     # Offer Adventure (Sorcery) - Hand index 0-7 -> Actions 196-203
                     if hasattr(card, 'has_adventure') and card.has_adventure():
                         adv_data = card.get_adventure_data()
-                        if adv_data and ('sorcery' in adv_data.get('type','').lower() or 'instant' in adv_data.get('type','').lower()): # Offer Adventure even if Instant speed on main phase
+                        if adv_data and ('sorcery' in adv_data.get('type','').lower() or 'instant' in adv_data.get('type','').lower()):
                             if self._can_afford_cost_string(player, adv_data.get('cost',''), context={}):
                                 if self._targets_available_from_text(adv_data.get('effect',''), player, opponent):
-                                     adventure_context = {'hand_idx': i, 'play_adventure': True}
-                                     set_valid_action(196 + i, f"PLAY_ADVENTURE {adv_data.get('name', 'Unknown')}", context=adventure_context)
+                                    adventure_context = {'hand_idx': i, 'play_adventure': True}
+                                    set_valid_action(196 + i, f"PLAY_ADVENTURE {adv_data.get('name', 'Unknown')}", context=adventure_context)
 
             except IndexError:
                  logging.warning(f"IndexError accessing hand for PLAY_SPELL at index {i}"); break
@@ -1529,11 +1529,13 @@ class ActionHandler:
             if card and hasattr(card, 'oracle_text') and "cycling" in card.oracle_text.lower():
                 cost_match = re.search(r"cycling (\{[^\}]+\}|[0-9]+)", card.oracle_text.lower())
                 if cost_match:
-                     cost_str = cost_match.group(1)
-                     # Normalize cost string if it's just a number
-                     if cost_str.isdigit(): cost_str = f"{{{cost_str}}}"
-                     if self._can_afford_cost_string(player, cost_str):
-                          set_valid_action(422, f"CYCLING {card.name}") # Param needs hand index `i`
+                    cost_str = cost_match.group(1)
+                    # Normalize cost string if it's just a number
+                    if cost_str.isdigit(): cost_str = f"{{{cost_str}}}"
+                    if self._can_afford_cost_string(player, cost_str):
+                        # FIXED: Use correct action index 427 for CYCLING
+                        cycling_context = {'hand_idx': i}
+                        set_valid_action(427, f"CYCLING {card.name}", context=cycling_context)
 
     def _add_room_door_actions(self, player, valid_actions, set_valid_action, is_sorcery_timing):
         """Add actions for Room doors, only at sorcery speed."""
@@ -1600,108 +1602,81 @@ class ActionHandler:
                     set_valid_action(253 + idx, f"LEVEL_UP_CLASS to level {next_level} for {card.name}")
                     
     def _add_counter_management_actions(self, player, valid_actions, set_valid_action):
-        """Add actions for counter management based on current game context."""
+        """Add actions for counter management."""
         gs = self.game_state
         
-        # Only show counter management actions if we're in an appropriate context
-        context_requires_counter_action = False
-        counter_type = None
-        action_type = None
-        
-        # Check if there's a spell or ability on the stack that requires counter placement
-        if gs.stack and len(gs.stack) > 0:
-            stack_item = gs.stack[-1]
+        # Only show counter actions if we're in a context that requires them
+        if hasattr(gs, 'counter_context') and gs.counter_context:
+            context = gs.counter_context
+            counter_type = context.get('counter_type', '+1/+1')
+            action_type = context.get('action_type', 'ADD_COUNTER')
             
-            if isinstance(stack_item, tuple) and len(stack_item) >= 3:
-                stack_type, card_id, controller = stack_item[:3]
-                if controller == player:  # Only process if it's this player's spell/ability
-                    card = gs._safe_get_card(card_id)
-                    if card and hasattr(card, 'oracle_text'):
-                        oracle_text = card.oracle_text.lower()
-                        
-                        # Check for various counter patterns
-                        if "put a +1/+1 counter" in oracle_text or "place a +1/+1 counter" in oracle_text:
-                            context_requires_counter_action = True
-                            counter_type = "+1/+1"
-                            action_type = "ADD_COUNTER"
-                        elif "put a -1/-1 counter" in oracle_text or "place a -1/-1 counter" in oracle_text:
-                            context_requires_counter_action = True
-                            counter_type = "-1/-1"
-                            action_type = "ADD_COUNTER"
-                        elif "remove a counter" in oracle_text:
-                            context_requires_counter_action = True
-                            action_type = "REMOVE_COUNTER"
-                        elif "proliferate" in oracle_text:
-                            context_requires_counter_action = True
-                            action_type = "PROLIFERATE"
-        
-        # If we need to show counter actions, add them based on the context
-        if context_requires_counter_action:
+            # ADD_COUNTER actions (indices 314-323)
             if action_type == "ADD_COUNTER":
-                # Add actions for adding counters to permanents
-                target_text = ""
-                targets = []
+                valid_targets = []
+                # Target determination based on counter type
+                if counter_type == '+1/+1':
+                    # Creatures can get +1/+1 counters
+                    for perm_id in player["battlefield"]:
+                        perm_card = gs._safe_get_card(perm_id)
+                        if perm_card and 'creature' in getattr(perm_card, 'card_types', []):
+                            valid_targets.append(perm_id)
+                elif counter_type == 'loyalty':
+                    # Planeswalkers get loyalty counters
+                    for perm_id in player["battlefield"]:
+                        perm_card = gs._safe_get_card(perm_id)
+                        if perm_card and 'planeswalker' in getattr(perm_card, 'card_types', []):
+                            valid_targets.append(perm_id)
+                # Generic case for other counter types
+                else:
+                    for perm_id in player["battlefield"]:
+                        valid_targets.append(perm_id)
                 
-                # Determine valid targets based on counter type
-                if counter_type == "+1/+1":
-                    # +1/+1 counters typically go on creatures
-                    target_text = "creature"
-                    targets = [cid for cid in player["battlefield"] 
-                            if gs._safe_get_card(cid) and 
-                            hasattr(gs._safe_get_card(cid), 'card_types') and 
-                            'creature' in gs._safe_get_card(cid).card_types]
-                elif counter_type == "-1/-1":
-                    # -1/-1 counters typically go on opponent's creatures
-                    opponent = gs.p2 if player == gs.p1 else gs.p1
-                    target_text = "opponent's creature"
-                    targets = [cid for cid in opponent["battlefield"] 
-                            if gs._safe_get_card(cid) and 
-                            hasattr(gs._safe_get_card(cid), 'card_types') and 
-                            'creature' in gs._safe_get_card(cid).card_types]
-                
-                # Add action for each valid target
-                for idx, target_id in enumerate(targets[:10]):  # Limit to 10 targets
-                    card = gs._safe_get_card(target_id)
-                    if card:
-                        set_valid_action(309 + idx, 
-                                        f"ADD_{counter_type}_COUNTER to {card.name}")
-            
+                # Generate ADD_COUNTER actions
+                for i, perm_id in enumerate(valid_targets[:10]):  # Limit to 10 targets
+                    perm_card = gs._safe_get_card(perm_id)
+                    perm_name = getattr(perm_card, 'name', perm_id) if perm_card else str(perm_id)
+                    counter_context = {'counter_type': counter_type, 'target_identifier': perm_id}
+                    set_valid_action(314 + i, f"ADD {counter_type} COUNTER to {perm_name}", context=counter_context)
+                    
+            # REMOVE_COUNTER actions (indices 324-333)
             elif action_type == "REMOVE_COUNTER":
-                # Add actions for removing counters from permanents
-                # First check player's permanents
-                for idx, perm_id in enumerate(player["battlefield"][:10]):  # Limit to 10
-                    card = gs._safe_get_card(perm_id)
-                    if card and hasattr(card, 'counters') and card.counters:
-                        # Show an action for each counter type on this permanent
-                        for counter_type, count in card.counters.items():
-                            if count > 0:
-                                set_valid_action(319 + idx, 
-                                            f"REMOVE_{counter_type}_COUNTER from {card.name}")
-                                break  # Just one action per permanent for simplicity
-            
+                valid_targets = []
+                # Find permanents that have the specified counter type
+                for perm_id in player["battlefield"]:
+                    perm_card = gs._safe_get_card(perm_id)
+                    if perm_card and hasattr(perm_card, 'counters') and perm_card.counters.get(counter_type, 0) > 0:
+                        valid_targets.append(perm_id)
+                
+                # Generate REMOVE_COUNTER actions
+                for i, perm_id in enumerate(valid_targets[:10]):  # Limit to 10 targets
+                    perm_card = gs._safe_get_card(perm_id)
+                    perm_name = getattr(perm_card, 'name', perm_id) if perm_card else str(perm_id)
+                    counter_context = {'counter_type': counter_type, 'target_identifier': perm_id}
+                    set_valid_action(324 + i, f"REMOVE {counter_type} COUNTER from {perm_name}", context=counter_context)
+                    
+            # PROLIFERATE action (index 334)
             elif action_type == "PROLIFERATE":
-                # Check if there are any permanents with counters to proliferate
+                # Check if there are any permanents with counters
                 has_permanents_with_counters = False
                 
-                # Check player's permanents
                 for perm_id in player["battlefield"]:
-                    card = gs._safe_get_card(perm_id)
-                    if card and hasattr(card, 'counters') and any(count > 0 for count in card.counters.values()):
+                    perm_card = gs._safe_get_card(perm_id)
+                    if perm_card and hasattr(perm_card, 'counters') and any(count > 0 for count in perm_card.counters.values()):
                         has_permanents_with_counters = True
                         break
                 
-                # Check opponent's permanents
                 if not has_permanents_with_counters:
+                    # Check opponent's permanents
                     opponent = gs.p2 if player == gs.p1 else gs.p1
                     for perm_id in opponent["battlefield"]:
-                        card = gs._safe_get_card(perm_id)
-                        if card and hasattr(card, 'counters') and any(count > 0 for count in card.counters.values()):
+                        perm_card = gs._safe_get_card(perm_id)
+                        if perm_card and hasattr(perm_card, 'counters') and any(count > 0 for count in perm_card.counters.values()):
                             has_permanents_with_counters = True
                             break
                 
-                # Add proliferate action if there are targets
                 if has_permanents_with_counters:
-                    set_valid_action(329, "PROLIFERATE to add counters to all permanents with counters")
+                    set_valid_action(334, "PROLIFERATE to add counters to all permanents with counters")
         
     def _check_valid_targets_exist(self, card, current_player, opponent):
         """
@@ -3386,103 +3361,85 @@ class ActionHandler:
         else: # Invalid index 'param' provided by agent
             logging.error(f"Invalid SACRIFICE_PERMANENT action parameter: {sacrifice_choice_index}. Valid indices: 0-{len(valid_perms)-1}")
             return -0.1, False
-    
-    def _handle_special_choice_actions(self, player, valid_actions, set_valid_action):
-        """Add actions for Scry, Surveil, Dredge, Choose Mode, Choose X, Choose Color."""
+        
+    def _handle_special_choice_actions(self, param, context, **kwargs):
+        """
+        Handle special choice actions like mode selection, color selection, X value choice, etc.
+        Delegates to specific handlers based on the context type.
+        """
         gs = self.game_state
-        if gs.phase != gs.PHASE_CHOOSE: # Only generate these during the dedicated CHOICE phase
-            return
-
-        if hasattr(gs, 'choice_context') and gs.choice_context:
-            context = gs.choice_context
-            choice_type = context.get("type")
-            source_id = context.get("source_id")
-            choice_player = context.get("player")
-
-            if choice_player != player: # Not this player's choice
-                set_valid_action(11, "PASS_PRIORITY (Waiting for opponent choice)")
-                return
-
-            # Scry / Surveil
-            if choice_type in ["scry", "surveil"] and context.get("cards"):
-                card_id = context["cards"][0] # Process one card at a time
-                card = gs._safe_get_card(card_id)
-                card_name = card.name if card else card_id
-                set_valid_action(306, f"PUT_ON_TOP {card_name}") # Put on Top
+        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        choice_type = None
+        
+        # Get choice context
+        if not hasattr(gs, 'choice_context') or not gs.choice_context:
+            logging.warning("Special choice action called, but no choice context found.")
+            return -0.2, False
+        
+        choice_type = gs.choice_context.get("type")
+        
+        # Verify player has authority to make this choice
+        if gs.choice_context.get("player") != player:
+            logging.warning("Received choice action for non-active choice player.")
+            return -0.2, False
+        
+        # Delegate to appropriate choice handler based on type
+        if choice_type == "scry" or choice_type == "surveil":
+            # Handle scry/surveil choices (PUT_ON_TOP, PUT_ON_BOTTOM, PUT_TO_GRAVEYARD)
+            action_index = kwargs.get('action_index')
+            
+            if action_index == 306:  # PUT_ON_TOP
+                return self._handle_scry_surveil_choice(param, context, action_index=306)
+            elif action_index == 307:  # PUT_ON_BOTTOM
+                if choice_type == "surveil":
+                    logging.warning("Cannot PUT_ON_BOTTOM during Surveil choice.")
+                    return -0.1, False
+                return self._handle_scry_surveil_choice(param, context, action_index=307)
+            elif action_index == 305:  # PUT_TO_GRAVEYARD
                 if choice_type == "scry":
-                    set_valid_action(307, f"PUT_ON_BOTTOM {card_name}") # Put on Bottom (Scry only)
-                else: # Surveil
-                     set_valid_action(305, f"PUT_TO_GRAVEYARD {card_name}") # Put to GY (Surveil only)
-
-            # Dredge (Replace Draw)
-            elif choice_type == "dredge" and context.get("card_id"):
-                 card_id = context["card_id"]
-                 dredge_val = context.get("value")
-                 if len(player["library"]) >= dredge_val:
-                     # Find card index in graveyard
-                     gy_idx = -1
-                     for idx, gy_id in enumerate(player["graveyard"]):
-                          if gy_id == card_id and idx < 6: # GY Index 0-5 ? Action space limited
-                               gy_idx = idx
-                               break
-                     if gy_idx != -1:
-                         # Param for DREDGE needs to be the graveyard index.
-                         # This needs adjustment in ACTION_MEANINGS or handler.
-                         # Assuming DREDGE action takes GY index via context for now.
-                         set_valid_action(308, f"DREDGE {gs._safe_get_card(card_id).name}")
-                 set_valid_action(11, "Skip Dredge") # Option to not dredge
-
-            # Choose Mode
-            elif choice_type == "choose_mode" and context.get("num_choices") and context.get("max_modes"):
-                num_choices = context.get("num_choices")
-                max_modes = context.get("max_modes")
-                selected_count = len(context.get("selected_modes", []))
-                if selected_count < max_modes:
-                     for i in range(min(num_choices, 10)): # Mode index 0-9
-                          # Prevent selecting the same mode twice unless allowed
-                          if i not in context.get("selected_modes", []):
-                               set_valid_action(348 + i, f"CHOOSE_MODE {i+1}")
-                set_valid_action(11, "PASS_PRIORITY (Finish Mode Choice)") # Finish choosing
-
-            # Choose X
-            elif choice_type == "choose_x" and context.get("max_x") is not None:
-                 max_x = context.get("max_x")
-                 for i in range(min(max_x, 10)): # X value 1-10
-                      set_valid_action(358 + i, f"CHOOSE_X_VALUE {i+1}")
-                 if context.get("min_x", 0) == 0: # Allow X=0 if minimum is 0
-                      pass # Need an action for X=0 or handle via PASS?
-                 # set_valid_action(11, "PASS_PRIORITY (X selected)") # Assume choosing X transitions automatically
-
-            # Choose Color
-            elif choice_type == "choose_color":
-                 for i in range(5): # Color index 0-4 (WUBRG)
-                      set_valid_action(368 + i, f"CHOOSE_COLOR {['W','U','B','R','G'][i]}")
-                 # set_valid_action(11, "PASS_PRIORITY (Color selected)") # Assume choosing transitions
-
-            # Kicker / Additional Cost / Escalate Choices
-            elif choice_type == "pay_kicker":
-                set_valid_action(400, "PAY_KICKER") # Param = True
-                set_valid_action(401, "DONT_PAY_KICKER") # Param = False
-            elif choice_type == "pay_additional":
-                 set_valid_action(402, "PAY_ADDITIONAL_COST") # Param = True
-                 set_valid_action(403, "DONT_PAY_ADDITIONAL_COST") # Param = False
-            elif choice_type == "pay_escalate" and context.get("num_modes") and context.get("num_selected"):
-                 max_extra = context.get("num_modes") - 1
-                 selected = context.get("num_selected")
-                 # Allow paying for more modes if affordable and available
-                 for i in range(max_extra):
-                      num_to_pay = i + 1
-                      if selected + num_to_pay <= context.get("num_modes"):
-                           set_valid_action(404, f"PAY_ESCALATE for {num_to_pay} extra modes") # Param = num_extra_modes
-                 set_valid_action(11, "PASS_PRIORITY (Finish Escalate)") # Don't pay escalate
-
-            # Spree Mode Selection (handled separately in _add_spree_mode_actions, or move here?)
-
-        else:
-             # If no choice context, just allow passing priority
-             set_valid_action(11, "PASS_PRIORITY (No choices pending)")
-             
-    
+                    logging.warning("Cannot PUT_TO_GRAVEYARD during Scry choice.")
+                    return -0.1, False
+                return self._handle_scry_surveil_choice(param, context, action_index=305)
+        
+        elif choice_type == "dredge":
+            # Use the specific dredge handler - Index 308
+            return self._handle_dredge(param, context)
+        
+        elif choice_type == "choose_mode":
+            # Handle choosing modes from options - Indices 353-362
+            return self._handle_choose_mode(param, context)
+        
+        elif choice_type == "choose_x":
+            # Handle choosing X value - Indices 363-372
+            return self._handle_choose_x(param, context)
+        
+        elif choice_type == "choose_color":
+            # Handle choosing color - Indices 373-377
+            return self._handle_choose_color(param, context)
+        
+        elif choice_type == "pay_kicker":
+            # Handle kicker payment choice - Indices 405-406
+            action_index = kwargs.get('action_index')
+            if action_index == 405:  # PAY_KICKER
+                return self._handle_pay_kicker(True, context)
+            elif action_index == 406:  # DONT_PAY_KICKER
+                return self._handle_pay_kicker(False, context)
+        
+        elif choice_type == "pay_additional":
+            # Handle additional cost payment choice - Indices 407-408
+            action_index = kwargs.get('action_index')
+            if action_index == 407:  # PAY_ADDITIONAL_COST
+                return self._handle_pay_additional_cost(True, context)
+            elif action_index == 408:  # DONT_PAY_ADDITIONAL_COST
+                return self._handle_pay_additional_cost(False, context)
+        
+        elif choice_type == "pay_escalate":
+            # Handle escalate payment - Index 409
+            return self._handle_pay_escalate(param, context)
+        
+        # If we reach here, either the choice type is unrecognized or the action doesn't match the choice
+        logging.warning(f"Unhandled special choice type: {choice_type} or mismatched action")
+        return -0.1, False
 
     def _add_spree_mode_actions(self, player, valid_actions, set_valid_action):
         """Add actions for Spree mode selection during casting."""
@@ -5840,83 +5797,76 @@ class ActionHandler:
                         set_valid_action(230 + i, f"CAST_FROM_EXILE {card.name}")
                         
     def _add_token_copy_actions(self, player, valid_actions, set_valid_action):
-        """Add actions for token creation and copying based on game context."""
+        """Add actions for token creation and copying."""
         gs = self.game_state
         
-        # Only show token/copy actions if we're in an appropriate context
-        context_requires_token_action = False
-        action_type = None
-        
-        # Check if there's a spell or ability on the stack that requires token/copy creation
-        if gs.stack and len(gs.stack) > 0:
-            stack_item = gs.stack[-1]
-            
-            if isinstance(stack_item, tuple) and len(stack_item) >= 3:
-                stack_type, card_id, controller = stack_item[:3]
-                if controller == player:  # Only process if it's this player's spell/ability
-                    card = gs._safe_get_card(card_id)
-                    if card and hasattr(card, 'oracle_text'):
-                        oracle_text = card.oracle_text.lower()
+        # Check for cards or effects that can create tokens
+        for i in range(min(len(player["battlefield"]), 20)):
+            card_id = player["battlefield"][i]
+            card = gs._safe_get_card(card_id)
+            if card and hasattr(card, 'oracle_text'):
+                oracle_text = card.oracle_text.lower()
+                
+                # CREATE_TOKEN actions (indices 410-414)
+                if "create a token" in oracle_text and not card_id in player.get("tapped_permanents", set()):
+                    # Check for activated ability that creates tokens
+                    create_pattern = re.search(r"\{[^\}]+\}:.*?create a", oracle_text)
+                    if create_pattern:
+                        # Determine token type (up to 5 predefined types)
+                        token_types = ["creature", "treasure", "clue", "food", "blood"]
+                        for idx, token_type in enumerate(token_types):
+                            if token_type in oracle_text:
+                                token_context = {'battlefield_idx': i, 'token_type': idx}
+                                set_valid_action(410 + idx, f"CREATE_{token_type.upper()}_TOKEN with {card.name}", context=token_context)
+                                break
+                
+                # COPY_PERMANENT action (index 415)
+                if "copy target" in oracle_text and "permanent" in oracle_text and not card_id in player.get("tapped_permanents", set()):
+                    # Check for activated ability
+                    copy_pattern = re.search(r"\{[^\}]+\}:.*?copy target", oracle_text)
+                    if copy_pattern:
+                        # Find valid targets to copy
+                        for target_idx, target_id in enumerate(player["battlefield"]):
+                            if target_id != card_id:  # Can't copy itself
+                                target_card = gs._safe_get_card(target_id)
+                                if target_card:
+                                    copy_context = {'battlefield_idx': i, 'target_identifier': target_id}
+                                    set_valid_action(415, f"COPY_PERMANENT {target_card.name}", context=copy_context)
+                                    break  # Just one action is enough, context will specify target
+                
+                # COPY_SPELL action (index 416)
+                if "copy target" in oracle_text and "spell" in oracle_text and not card_id in player.get("tapped_permanents", set()):
+                    # Check for activated ability
+                    copy_pattern = re.search(r"\{[^\}]+\}:.*?copy target", oracle_text)
+                    if copy_pattern and gs.stack:
+                        # Find valid spells on stack
+                        for stack_idx, item in enumerate(gs.stack):
+                            if isinstance(item, tuple) and item[0] == "SPELL" and item[2] != player:
+                                spell_id = item[1]
+                                spell = gs._safe_get_card(spell_id)
+                                if spell:
+                                    copy_context = {'battlefield_idx': i, 'target_stack_identifier': stack_idx}
+                                    set_valid_action(416, f"COPY_SPELL {spell.name}", context=copy_context)
+                                    break
+                
+                # POPULATE action (index 417)
+                if "populate" in oracle_text and not card_id in player.get("tapped_permanents", set()):
+                    # Check for activated ability
+                    populate_pattern = re.search(r"\{[^\}]+\}:.*?populate", oracle_text)
+                    if populate_pattern:
+                        # Find valid token creatures to copy
+                        has_token = False
+                        for token_idx, token_id in enumerate(player["battlefield"]):
+                            token_card = gs._safe_get_card(token_id)
+                            if token_card and getattr(token_card, 'is_token', False) and 'creature' in getattr(token_card, 'card_types', []):
+                                populate_context = {'battlefield_idx': i, 'target_token_identifier': token_id}
+                                set_valid_action(417, f"POPULATE to copy {token_card.name}", context=populate_context)
+                                has_token = True
+                                break
                         
-                        # Check for various token/copy patterns
-                        if "create a" in oracle_text and "token" in oracle_text:
-                            context_requires_token_action = True
-                            action_type = "CREATE_TOKEN"
-                        elif "copy target" in oracle_text and "permanent" in oracle_text:
-                            context_requires_token_action = True
-                            action_type = "COPY_PERMANENT"
-                        elif "copy target" in oracle_text and "spell" in oracle_text:
-                            context_requires_token_action = True
-                            action_type = "COPY_SPELL"
-                        elif "populate" in oracle_text:
-                            context_requires_token_action = True
-                            action_type = "POPULATE"
-        
-        # If we need to show token/copy actions, add them based on the context
-        if context_requires_token_action:
-            if action_type == "CREATE_TOKEN":
-                # Add create token action for predefined token types 
-                for token_idx in range(5):  # Token indices 0-4 map to actions 410-414
-                    set_valid_action(410 + token_idx, f"CREATE_TOKEN type {token_idx}")
-                    
-            elif action_type == "COPY_PERMANENT":
-                # Add actions for copying permanents on the battlefield
-                for idx, perm_id in enumerate(player["battlefield"][:5]):  # Limit to 5
-                    card = gs._safe_get_card(perm_id)
-                    if card:
-                        context = {'target_identifier': perm_id}
-                        set_valid_action(415, f"COPY_PERMANENT {card.name}", context=context)
-                        break  # Just one action is enough, context will specify target
-            
-            elif action_type == "COPY_SPELL":
-                # Find valid spells on the stack to copy
-                spells_on_stack = []
-                for i, item in enumerate(gs.stack):
-                    if item != stack_item and isinstance(item, tuple) and item[0] == "SPELL":
-                        spell_id = item[1]
-                        spell = gs._safe_get_card(spell_id)
-                        if spell:
-                            spells_on_stack.append((i, spell_id, spell))
-                            break  # Just need one valid target to enable the action
-                
-                if spells_on_stack:
-                    stack_idx, spell_id, spell = spells_on_stack[0]
-                    context = {'target_stack_identifier': stack_idx}
-                    set_valid_action(416, f"COPY_SPELL on the stack", context=context)
-                
-            elif action_type == "POPULATE":
-                # Check if there are any token creatures to copy
-                token_creatures = []
-                for perm_id in player["battlefield"]:
-                    card = gs._safe_get_card(perm_id)
-                    if card and hasattr(card, 'is_token') and card.is_token and 'creature' in getattr(card, 'card_types', []):
-                        token_creatures.append((perm_id, card))
-                        break  # Just need one valid target
-                
-                if token_creatures:
-                    token_id, token_card = token_creatures[0]
-                    context = {'target_token_identifier': token_id}
-                    set_valid_action(417, "POPULATE to copy a creature token", context=context)
+                        if not has_token:
+                            # Can't populate without token creatures
+                            continue
 
     def _add_specific_mechanics_actions(self, player, valid_actions, set_valid_action, is_sorcery_speed):
         """Add actions for specialized MTG mechanics, considering timing."""
@@ -6111,77 +6061,80 @@ class ActionHandler:
         return True
                     
     def _add_zone_movement_actions(self, player, valid_actions, set_valid_action):
-        """Add actions for zone movement based on current game context."""
+        """Add actions for zone movement."""
         gs = self.game_state
         
-        # Only show zone movement actions if we're in an appropriate context
-        context_requires_zone_action = False
-        target_zone = None
-        source_zone = None
-        action_type = None
+        # RETURN_FROM_GRAVEYARD actions (indices 335-340)
+        for i, card_id in enumerate(player.get("graveyard", [])[:6]):  # Limit to first 6
+            card = gs._safe_get_card(card_id)
+            if not card: continue
+            
+            # Check if a card in hand or on battlefield can return this card
+            can_return = False
+            return_source = None
+            
+            # Check hand for cards that can return from graveyard
+            for hand_card_id in player.get("hand", []):
+                hand_card = gs._safe_get_card(hand_card_id)
+                if hand_card and hasattr(hand_card, 'oracle_text') and "return target" in hand_card.oracle_text.lower() and "from your graveyard" in hand_card.oracle_text.lower():
+                    # Determine if this card is a valid target based on type
+                    card_type_pattern = re.search(r"return target ([a-z]+) card from your graveyard", hand_card.oracle_text.lower())
+                    if card_type_pattern:
+                        required_type = card_type_pattern.group(1)
+                        if required_type in getattr(card, 'card_types', []) or required_type in getattr(card, 'subtypes', []):
+                            can_return = True
+                            return_source = hand_card.name
+                            break
+                    else:
+                        can_return = True  # No type restriction found
+                        return_source = hand_card.name
+                        break
+            
+            if can_return:
+                context = {'gy_idx': i, 'source': return_source}
+                set_valid_action(335 + i, f"RETURN_FROM_GRAVEYARD {card.name}", context=context)
         
-        # Check if there's a spell or ability on the stack that requires zone movement
-        if gs.stack and len(gs.stack) > 0:
-            stack_item = gs.stack[-1]
+        # REANIMATE actions (indices 341-346)
+        for i, card_id in enumerate(player.get("graveyard", [])[:6]):  # Limit to first 6
+            card = gs._safe_get_card(card_id)
+            if not card or 'creature' not in getattr(card, 'card_types', []): continue
             
-            if isinstance(stack_item, tuple) and len(stack_item) >= 3:
-                stack_type, card_id, controller = stack_item[:3]
-                if controller == player:  # Only process if it's this player's spell/ability
-                    card = gs._safe_get_card(card_id)
-                    if card and hasattr(card, 'oracle_text'):
-                        oracle_text = card.oracle_text.lower()
-                        
-                        # Check for various zone movement patterns
-                        if "return target" in oracle_text and "from your graveyard" in oracle_text:
-                            context_requires_zone_action = True
-                            target_zone = "hand"
-                            source_zone = "graveyard"
-                            action_type = "RETURN_FROM_GRAVEYARD"
-                        elif "return target" in oracle_text and "from exile" in oracle_text:
-                            context_requires_zone_action = True
-                            target_zone = "hand"
-                            source_zone = "exile"
-                            action_type = "RETURN_FROM_EXILE"
-                        elif "return" in oracle_text and "to the battlefield" in oracle_text and "from your graveyard" in oracle_text:
-                            context_requires_zone_action = True
-                            target_zone = "battlefield"
-                            source_zone = "graveyard"
-                            action_type = "REANIMATE"
+            # Check if a card in hand or on battlefield can reanimate this creature
+            can_reanimate = False
+            reanimate_source = None
+            
+            # Check hand for cards that can reanimate
+            for hand_card_id in player.get("hand", []):
+                hand_card = gs._safe_get_card(hand_card_id)
+                if hand_card and hasattr(hand_card, 'oracle_text') and ("return target creature" in hand_card.oracle_text.lower() and "to the battlefield" in hand_card.oracle_text.lower()):
+                    can_reanimate = True
+                    reanimate_source = hand_card.name
+                    break
+            
+            if can_reanimate:
+                context = {'gy_idx': i, 'source': reanimate_source}
+                set_valid_action(341 + i, f"REANIMATE {card.name}", context=context)
         
-        # Also check if we're in a specific phase that requires zone choices (like discard during cleanup)
-        if gs.phase == gs.PHASE_CLEANUP and len(player["hand"]) > 7:
-            context_requires_zone_action = True
-            action_type = "DISCARD_CARD"
-        
-        # If we need to show zone movement actions, add them based on the context
-        if context_requires_zone_action:
-            if action_type == "RETURN_FROM_GRAVEYARD":
-                # Add actions for selecting cards from graveyard
-                for idx, card_id in enumerate(player["graveyard"][:6]):  # Limit to first 6 in graveyard
-                    card = gs._safe_get_card(card_id)
-                    if card:
-                        set_valid_action(330 + idx, f"RETURN_FROM_GRAVEYARD {card.name} to hand")
+        # RETURN_FROM_EXILE actions (indices 347-352)
+        for i, card_id in enumerate(player.get("exile", [])[:6]):  # Limit to first 6
+            card = gs._safe_get_card(card_id)
+            if not card: continue
             
-            elif action_type == "RETURN_FROM_EXILE":
-                # Add actions for selecting cards from exile
-                for idx, card_id in enumerate(player["exile"][:6]):  # Limit to first 6 in exile
-                    card = gs._safe_get_card(card_id)
-                    if card:
-                        set_valid_action(342 + idx, f"RETURN_FROM_EXILE {card.name} to hand")
+            # Check if a card in hand or on battlefield can return this card from exile
+            can_return_from_exile = False
+            return_exile_source = None
             
-            elif action_type == "REANIMATE":
-                # Add actions for reanimating creatures from graveyard
-                for idx, card_id in enumerate(player["graveyard"][:6]):  # Limit to first 6 in graveyard
-                    card = gs._safe_get_card(card_id)
-                    if card and hasattr(card, 'card_types') and 'creature' in card.card_types:
-                        set_valid_action(336 + idx, f"REANIMATE {card.name} to battlefield")
+            # Check hand for cards that can return from exile
+            for hand_card_id in player.get("hand", []):
+                hand_card = gs._safe_get_card(hand_card_id)
+                if hand_card and hasattr(hand_card, 'oracle_text') and "return target" in hand_card.oracle_text.lower() and "from exile" in hand_card.oracle_text.lower():
+                    can_return_from_exile = True
+                    return_exile_source = hand_card.name
+                    break
             
-            elif action_type == "DISCARD_CARD":
-                # Add actions for discarding cards during cleanup
-                for idx, card_id in enumerate(player["hand"][:10]):  # Support up to 10 hand positions
-                    card = gs._safe_get_card(card_id)
-                    if card:
-                        set_valid_action(238 + idx, f"DISCARD_CARD {card.name}")
+            if can_return_from_exile:
+                context = {'exile_idx': i, 'source': return_exile_source}
+                set_valid_action(347 + i, f"RETURN_FROM_EXILE {card.name}", context=context)
             
     def _add_alternative_casting_actions(self, player, valid_actions, set_valid_action, is_sorcery_speed):
         """Add actions for alternative casting costs."""
