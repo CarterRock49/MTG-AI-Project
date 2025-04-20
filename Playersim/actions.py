@@ -2219,111 +2219,140 @@ class ActionHandler:
         return 0.05 - card_eval_score * 0.05, True
 
     def _handle_scry_surveil_choice(self, param, context, **kwargs):
-        """Unified handler for Scry/Surveil PUT_ON_TOP action."""
+        """
+        Unified and improved handler for Scry/Surveil actions with better validation and outcomes tracking.
+        
+        Args:
+            param: The action parameter (unused directly)
+            context: Context including card index information
+            
+        Returns:
+            tuple: (reward, success_flag)
+        """
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
         action_index = kwargs.get('action_index')
-        # Determine destination based on action index
-        destination = "top" # Default for PUT_ON_TOP (306)
 
-        if action_index == 305: # PUT_TO_GRAVEYARD (Surveil specific)
+        # Determine action type based on action index
+        if action_index == 305:  # PUT_TO_GRAVEYARD (Surveil only)
             destination = "graveyard"
-        elif action_index == 307: # PUT_ON_BOTTOM (Scry specific)
+            action_name = "PUT_TO_GRAVEYARD"
+        elif action_index == 306:  # PUT_ON_TOP (Both Scry and Surveil)
+            destination = "top"
+            action_name = "PUT_ON_TOP"
+        elif action_index == 307:  # PUT_ON_BOTTOM (Scry only)
             destination = "bottom"
+            action_name = "PUT_ON_BOTTOM"
+        else:
+            logging.error(f"Invalid scry/surveil action index: {action_index}")
+            return -0.2, False
 
-        # Get current context
+        # Validate context existence and structure
         if not hasattr(gs, 'choice_context') or gs.choice_context is None:
-            logging.warning(f"Scry/Surveil choice ({destination}) called outside of CHOOSE context.")
+            logging.warning(f"{action_name} called outside of CHOOSE context")
             return -0.2, False
 
         context = gs.choice_context
         current_choice_type = context.get("type")
 
-        # Validate context type
+        # Validate context type matches action
         if current_choice_type not in ["scry", "surveil"]:
-            logging.warning(f"Choice ({destination}) called during wrong context type: {current_choice_type}")
+            logging.warning(f"{action_name} called in incorrect context: {current_choice_type}")
             return -0.2, False
-        # Validate player
+            
+        # Validate player is the one making the choice
         if context.get("player") != player:
-            logging.warning("Received Scry/Surveil choice for non-active choice player.")
+            logging.warning(f"{action_name} called for incorrect player")
             return -0.2, False
-        # Validate card availability
+            
+        # Validate cards available to process
         if not context.get("cards"):
-            logging.warning(f"Choice ({destination}) made but no cards left to process.")
+            logging.warning(f"{action_name} called but no cards to process")
             gs.choice_context = None
             gs.phase = gs.PHASE_PRIORITY
-            return -0.1, False # Invalid state
-
-        # Validate action matches context type (e.g., cannot PUT_TO_GRAVEYARD during scry)
-        if current_choice_type == "scry" and destination == "graveyard":
-            logging.warning("Invalid action: Cannot PUT_TO_GRAVEYARD during Scry.")
-            return -0.1, False
-        if current_choice_type == "surveil" and destination == "bottom":
-            logging.warning("Invalid action: Cannot PUT_ON_BOTTOM during Surveil.")
             return -0.1, False
 
+        # Validate action type against context type
+        if (destination == "graveyard" and current_choice_type != "surveil") or \
+        (destination == "bottom" and current_choice_type != "scry"):
+            logging.warning(f"Invalid action {action_name} for {current_choice_type}")
+            return -0.1, False
 
-        # --- Process the Choice ---
-        card_id = context["cards"].pop(0) # Process first card
+        # Process the card choice
+        card_id = context["cards"].pop(0)
         card = gs._safe_get_card(card_id)
         card_name = getattr(card, 'name', card_id)
-
-        reward = 0.05 # Base reward for valid choice
-        card_eval_score = 0
+        
+        # Evaluate card value in current context
+        card_value = 0.0
         if self.card_evaluator and card:
-            card_eval_score = self.card_evaluator.evaluate_card(card_id, "general", context_details={"destination": destination})
+            card_value = self.card_evaluator.evaluate_card(card_id, "general", 
+                                                        context_details={"destination": destination,
+                                                                        "action": current_choice_type})
 
-
+        # Process the card based on destination
         if destination == "top":
             if current_choice_type == "scry":
-                # Add to list to be ordered later (by AI/rules)
+                # Add to list of cards kept on top
                 context.setdefault("kept_on_top", []).append(card_id)
-                logging.debug(f"Scry: Keeping {card_name} on top (pending order).")
-                reward += card_eval_score * 0.05 # Reward keeping good cards
-            else: # Surveil
-                # Put back onto library directly (no reordering for Surveil top choice)
+                logging.debug(f"Scry: Keeping {card_name} on top (pending order)")
+                reward = 0.05 + card_value * 0.05  # Higher reward for keeping good cards on top
+            else:  # Surveil
+                # Put directly back on top of library
                 player["library"].insert(0, card_id)
-                logging.debug(f"Surveil: Kept {card_name} on top.")
-                reward += card_eval_score * 0.05
-        elif destination == "bottom": # Scry only
+                logging.debug(f"Surveil: Kept {card_name} on top")
+                reward = 0.05 + card_value * 0.05
+                
+        elif destination == "bottom":  # Scry only
             context.setdefault("put_on_bottom", []).append(card_id)
-            logging.debug(f"Scry: Putting {card_name} on bottom.")
-            reward -= card_eval_score * 0.05 # Penalize bottoming good cards
-        elif destination == "graveyard": # Surveil only
+            logging.debug(f"Scry: Putting {card_name} on bottom")
+            reward = 0.05 - card_value * 0.05  # Lower reward for putting good cards on bottom
+            
+        elif destination == "graveyard":  # Surveil only
             success_move = gs.move_card(card_id, player, "library_implicit", player, "graveyard", cause="surveil")
             if not success_move:
-                logging.error(f"Failed to move {card_name} to graveyard during surveil.")
-                gs.choice_context = None; gs.phase = gs.PHASE_PRIORITY; return -0.1, False
-            logging.debug(f"Surveil: Put {card_name} into graveyard.")
-            reward -= card_eval_score * 0.03 # Smaller penalty for GY vs bottom? Depends.
+                logging.error(f"Failed to move {card_name} to graveyard during surveil")
+                gs.choice_context = None
+                gs.phase = gs.PHASE_PRIORITY
+                return -0.1, False
+                
+            logging.debug(f"Surveil: Put {card_name} into graveyard")
+            # Higher reward for putting bad cards in graveyard, but also reward for
+            # putting good recursion targets there
+            has_recursion = False
+            if card and any(x in getattr(card, 'oracle_text', '').lower() for x in 
+                        ['from your graveyard', 'from a graveyard']):
+                has_recursion = True
+                
+            reward = 0.05 + (0.05 if has_recursion else -0.05 * card_value)
 
-
-        # --- Check if Choice Phase Ends ---
+        # Check if all cards have been processed
         if not context.get("cards"):
-            logging.debug(f"{current_choice_type.capitalize()} finished.")
-
-            # Finalize Scry: Put bottom cards, then ordered top cards back
+            logging.debug(f"{current_choice_type.capitalize()} finished")
+            
+            # For Scry, finalize the library order
             if current_choice_type == "scry":
                 bottom_cards = context.get("put_on_bottom", [])
                 top_cards = context.get("kept_on_top", [])
-                # AI needs to choose order for top_cards
-                # Simple: keep original relative order
-                ordered_top_cards = top_cards # Placeholder for ordering logic
-                # Add cards back to library
-                player["library"] = ordered_top_cards + player["library"] # Top first
-                player["library"].extend(bottom_cards) # Then bottom
-                logging.debug(f"Scry final: Top=[{','.join(ordered_top_cards)}], Bottom=[{','.join(bottom_cards)}]")
+                
+                # Apply strategic ordering for top cards (default: keep original order)
+                ordered_top_cards = top_cards
+                
+                # Add cards back to library in the correct order
+                player["library"] = ordered_top_cards + player["library"]  # Top cards first
+                player["library"].extend(bottom_cards)  # Bottom cards last
+                logging.debug(f"Scry final: {len(top_cards)} cards on top, {len(bottom_cards)} on bottom")
 
             # Clear context and return to previous phase
+            previous_phase = getattr(gs, 'previous_priority_phase', gs.PHASE_PRIORITY)
             gs.choice_context = None
-            if hasattr(gs, 'previous_priority_phase') and gs.previous_priority_phase is not None:
-                gs.phase = gs.previous_priority_phase
-                gs.previous_priority_phase = None
-            else:
-                gs.phase = gs.PHASE_PRIORITY # Fallback
-            gs.priority_pass_count = 0 # Reset priority
+            gs.phase = previous_phase
+            gs.priority_pass_count = 0
             gs.priority_player = gs._get_active_player()
-
+            
+            # Additional reward for completing the full scry/surveil
+            reward += 0.05
+        
         return reward, True
 
     def _handle_scry_choice(self, param, **kwargs):
@@ -2457,25 +2486,89 @@ class ActionHandler:
         return 0.01, True # Small reward, successful
 
     def _handle_draw_next(self, param, **kwargs):
+        """Handle transitioning from draw step."""
         gs = self.game_state
-        gs._draw_phase(gs._get_active_player())
-        gs.phase = gs.PHASE_MAIN_PRECOMBAT
+        # Actually draw a card for the active player
+        active_player = gs._get_active_player()
+        if active_player["library"]:
+            gs._draw_card(active_player)
+        # Transition to main phase
+        result, success = self._handle_phase_transition(gs.PHASE_DRAW, gs.PHASE_MAIN_PRECOMBAT, **kwargs)
+        return (0.05, success) if success else result, success
+        
+    def _handle_phase_transition(self, current_phase, target_phase, **kwargs):
+        """
+        Centralized handler for phase transitions with improved validation and logging.
+        
+        Args:
+            current_phase: Current game phase
+            target_phase: Desired phase to transition to
+            
+        Returns:
+            tuple: (reward, success_flag)
+        """
+        gs = self.game_state
+        
+        # Validate current phase
+        if gs.phase != current_phase:
+            logging.warning(f"Phase transition attempted from incorrect phase. Expected: {current_phase}, Actual: {gs.phase}")
+            return -0.1, False
+        
+        # Check if this transition is valid in the flow of gameplay
+        valid_transitions = {
+            gs.PHASE_MAIN_PRECOMBAT: [gs.PHASE_BEGIN_COMBAT],
+            gs.PHASE_BEGIN_COMBAT: [gs.PHASE_DECLARE_ATTACKERS],
+            gs.PHASE_DECLARE_ATTACKERS: [gs.PHASE_DECLARE_BLOCKERS],
+            gs.PHASE_DECLARE_BLOCKERS: [gs.PHASE_COMBAT_DAMAGE, gs.PHASE_FIRST_STRIKE_DAMAGE],
+            gs.PHASE_FIRST_STRIKE_DAMAGE: [gs.PHASE_COMBAT_DAMAGE],
+            gs.PHASE_COMBAT_DAMAGE: [gs.PHASE_END_OF_COMBAT],
+            gs.PHASE_END_OF_COMBAT: [gs.PHASE_MAIN_POSTCOMBAT],
+            gs.PHASE_MAIN_POSTCOMBAT: [gs.PHASE_END_STEP],
+            gs.PHASE_END_STEP: [gs.PHASE_CLEANUP],
+            gs.PHASE_CLEANUP: [gs.PHASE_UNTAP],
+            gs.PHASE_UNTAP: [gs.PHASE_UPKEEP],
+            gs.PHASE_UPKEEP: [gs.PHASE_DRAW],
+            gs.PHASE_DRAW: [gs.PHASE_MAIN_PRECOMBAT]
+        }
+        
+        if target_phase not in valid_transitions.get(current_phase, []):
+            logging.warning(f"Invalid phase transition: {current_phase} -> {target_phase}")
+            return -0.05, False
+        
+        # Perform phase-specific checks
+        if target_phase == gs.PHASE_DECLARE_ATTACKERS and current_phase == gs.PHASE_BEGIN_COMBAT:
+            # Check if there are potential attackers
+            active_player = gs._get_active_player()
+            has_creatures = any('creature' in getattr(gs._safe_get_card(cid), 'card_types', []) 
+                            for cid in active_player.get("battlefield", []))
+            if not has_creatures:
+                logging.debug("Skipping attack phase as there are no creatures to attack with")
+                # Skip directly to end of combat
+                gs.phase = gs.PHASE_END_OF_COMBAT
+                return 0.01, True
+        
+        # Perform the transition
+        gs.phase = target_phase
         gs.priority_player = gs._get_active_player()
         gs.priority_pass_count = 0
-        return 0.05, True # Draw is good, successful
+        
+        # Trigger any phase-specific effects
+        if hasattr(gs, 'trigger_phase_change'):
+            gs.trigger_phase_change(target_phase)
+        
+        logging.debug(f"Successfully transitioned from {current_phase} to {target_phase}")
+        return 0.02, True
 
     def _handle_main_phase_end(self, param, **kwargs):
+        """Handle transitioning from main phase."""
         gs = self.game_state
         if gs.phase == gs.PHASE_MAIN_PRECOMBAT:
-            gs.phase = gs.PHASE_BEGIN_COMBAT
+            return self._handle_phase_transition(gs.PHASE_MAIN_PRECOMBAT, gs.PHASE_BEGIN_COMBAT, **kwargs)
         elif gs.phase == gs.PHASE_MAIN_POSTCOMBAT:
-            gs.phase = gs.PHASE_END_STEP
-        else: # Should not happen if mask is correct
+            return self._handle_phase_transition(gs.PHASE_MAIN_POSTCOMBAT, gs.PHASE_END_STEP, **kwargs)
+        else:
             logging.warning(f"MAIN_PHASE_END called during invalid phase: {gs.phase}")
-            return -0.1, False # Failed state change
-        gs.priority_player = gs._get_active_player()
-        gs.priority_pass_count = 0
-        return 0.01, True # Success
+            return -0.1, False
 
     def _handle_combat_damage(self, param, **kwargs):
         # This is often less of a choice and more a state transition.
@@ -2500,123 +2593,284 @@ class ActionHandler:
         return 0.0, True # Pass priority logic is successful
 
     def _handle_mulligan(self, param, **kwargs):
-        """Handle MULLIGAN action."""
+        """
+        Improved handler for the MULLIGAN action with detailed tracking and error recovery.
+        
+        Returns:
+            tuple: (reward, success_flag)
+        """
         gs = self.game_state
-        player = gs.mulligan_player
+        player = getattr(gs, 'mulligan_player', None)
+        
         if not player:
-            logging.warning("MULLIGAN action called but gs.mulligan_player is None.")
-            return -0.2, False # Failure
-
-        result = gs.perform_mulligan(player, keep_hand=False)
-        if result is True: # Successfully took a mulligan
-            mull_count = gs.mulligan_count.get('p1' if player == gs.p1 else 'p2', 1)
-            return -0.05 * mull_count, True # Successful mulligan taken (negative reward)
-        else: # Result is False (e.g., cannot mulligan further?)
-            logging.warning(f"MULLIGAN action failed (perform_mulligan returned False).")
-            return -0.2, False # Failed state change
+            logging.warning("MULLIGAN action called but gs.mulligan_player is None")
+            # Try to recover by finding the active player
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            gs.mulligan_player = player
+            logging.warning(f"Attempting recovery by setting mulligan_player to {player.get('name', 'Unknown')}")
+        
+        # Track mulligan counts
+        current_mulls = gs.mulligan_count.get('p1' if player == gs.p1 else 'p2', 0)
+        hand_size = len(player.get("hand", []))
+        
+        # Validate the mulligan is allowed (7 max mulligans or hand > 0)
+        if current_mulls >= 7:
+            logging.warning(f"Player has already taken maximum number of mulligans: {current_mulls}")
+            return -0.2, False
+        
+        if hand_size == 0:
+            logging.warning("Cannot mulligan with 0 cards in hand")
+            return -0.2, False
+        
+        # Perform the mulligan
+        result = False
+        if hasattr(gs, 'perform_mulligan'):
+            result = gs.perform_mulligan(player, keep_hand=False)
+        else:
+            # Fallback mulligan implementation
+            logging.warning("Using fallback mulligan implementation")
+            
+            # Return cards to library
+            player["library"].extend(player["hand"])
+            player["hand"] = []
+            
+            # Shuffle
+            if hasattr(gs, 'shuffle_library'):
+                gs.shuffle_library(player)
+            else:
+                import random
+                random.shuffle(player["library"])
+            
+            # Draw new hand (1 fewer card)
+            new_size = max(0, 7 - current_mulls - 1)
+            for _ in range(new_size):
+                if player["library"]:
+                    card_id = player["library"].pop(0)
+                    player["hand"].append(card_id)
+            
+            # Update mulligan count
+            gs.mulligan_count['p1' if player == gs.p1 else 'p2'] = current_mulls + 1
+            
+            # Setup bottoming phase data
+            cards_to_bottom = min(1, new_size)
+            if cards_to_bottom > 0:
+                gs.cards_to_bottom = cards_to_bottom
+                gs.bottoming_player = player
+                gs.bottoming_in_progress = True
+                player._needs_to_bottom_next = True
+                
+            result = True
+        
+        if result:
+            # Calculate a scaling penalty based on how many mulligans taken
+            penalty = 0.05 * (current_mulls + 1)
+            # Evaluate the quality of the hand just rejected
+            hand_quality = 0
+            if self.card_evaluator:
+                for card_id in player.get("hand", []):
+                    hand_quality += self.card_evaluator.evaluate_card(card_id, "hand_strength") / max(1, hand_size)
+            
+            # Bigger penalty for mulliganing good hands
+            adjusted_penalty = penalty * (1 + hand_quality)
+            logging.debug(f"Mulligan {current_mulls+1}: Penalty {adjusted_penalty:.2f} (base: {penalty:.2f}, hand quality: {hand_quality:.2f})")
+            
+            return -adjusted_penalty, True
+        else:
+            logging.warning(f"Mulligan action failed (perform_mulligan returned {result})")
+            return -0.2, False
 
     def _handle_keep_hand(self, param, **kwargs):
+        """
+        Improved handler for the KEEP_HAND action with better validation and state transitions.
+        
+        Returns:
+            tuple: (reward, success_flag)
+        """
         gs = self.game_state
-        player = gs.mulligan_player
+        player = getattr(gs, 'mulligan_player', None)
+        
         if not player:
-            logging.warning("KEEP_HAND action called but gs.mulligan_player is None.")
-            return -0.2, False # Failure
-
-        # perform_mulligan handles state transition (to opponent or bottoming or game start)
-        # It returns True if the 'keep' decision itself was processed, False/None if invalid state/action
-        result = gs.perform_mulligan(player, keep_hand=True)
-        if result in [True, None]: # True/None indicates decision processed, state advanced
-            return 0.05, True # Small reward for progressing mulligan
-        else: # Result was False
-            logging.warning(f"KEEP_HAND failed (likely invalid state or error in perform_mulligan).")
-            return -0.2, False # Failed state change
+            logging.warning("KEEP_HAND action called but gs.mulligan_player is None")
+            return -0.2, False
+        
+        # Perform the "keep" decision using game state method
+        result = False
+        if hasattr(gs, 'perform_mulligan'):
+            result = gs.perform_mulligan(player, keep_hand=True)
+        else:
+            # Fallback implementation
+            logging.warning("Using fallback keep hand implementation")
+            
+            # Get mulligan count
+            current_mulls = gs.mulligan_count.get('p1' if player == gs.p1 else 'p2', 0)
+            
+            # Setup bottoming phase if needed
+            if current_mulls > 0:
+                cards_to_bottom = min(current_mulls, len(player.get("hand", [])))
+                if cards_to_bottom > 0:
+                    gs.cards_to_bottom = cards_to_bottom 
+                    gs.bottoming_player = player
+                    gs.bottoming_in_progress = True
+                    player._needs_to_bottom_next = True
+            
+            # Check if opponent still needs to mulligan
+            opponent = gs.p2 if player == gs.p1 else gs.p1
+            if not getattr(opponent, '_mulligan_complete', True):
+                gs.mulligan_player = opponent
+            else:
+                # Both players done, end mulligan phase
+                gs.mulligan_in_progress = False
+                gs.mulligan_player = None
+                if not gs.bottoming_in_progress:
+                    gs.phase = gs.PHASE_PRIORITY
+            
+            result = True
+        
+        if result:
+            # Calculate reward based on hand quality
+            hand_quality = 0
+            hand_size = len(player.get("hand", []))
+            
+            if self.card_evaluator and hand_size > 0:
+                for card_id in player.get("hand", []):
+                    hand_quality += self.card_evaluator.evaluate_card(card_id, "hand_strength") / max(1, hand_size)
+            
+            # Reward for keeping a good hand
+            reward = 0.05 + hand_quality * 0.1
+            logging.debug(f"Keep hand: Reward {reward:.2f} (hand quality: {hand_quality:.2f})")
+            
+            return reward, True
+        else:
+            logging.warning(f"Keep hand action failed (perform_mulligan returned {result})")
+            return -0.1, False
 
     def _handle_bottom_card(self, param, context, **kwargs):
-        """Handles BOTTOM_CARD action during mulligan. Param is the hand index."""
+        """
+        Improved handler for the BOTTOM_CARD action with better validation, evaluation, and tracking.
+        
+        Args:
+            param: Hand index to bottom
+            context: Additional context
+            
+        Returns:
+            tuple: (reward, success_flag)
+        """
         gs = self.game_state
-        player = gs.bottoming_player # Act on the player who needs to bottom
-        hand_idx_to_bottom = param # Agent's choice index from action
-
+        player = getattr(gs, 'bottoming_player', None)
+        hand_idx_to_bottom = param
+        
         if not player:
-            logging.warning("BOTTOM_CARD action called but gs.bottoming_player is None.")
+            logging.warning("BOTTOM_CARD action called but gs.bottoming_player is None")
             return -0.2, False
-
-        # Validate context and state
-        if not gs.bottoming_in_progress or gs.bottoming_player != player:
-            logging.warning("BOTTOM_CARD called but not in bottoming phase for this player.")
+        
+        # Validate bottoming state
+        if not getattr(gs, 'bottoming_in_progress', False) or gs.bottoming_player != player:
+            logging.warning(f"BOTTOM_CARD called but not in bottoming phase for {player.get('name', 'Unknown')}")
             return -0.2, False
-
-        # Check index exists before accessing hand
-        if not (0 <= hand_idx_to_bottom < len(player.get("hand", []))):
-             logging.warning(f"Invalid hand index {hand_idx_to_bottom} for bottoming.")
-             return -0.15, False
-
-        card_id = player["hand"][hand_idx_to_bottom]
+        
+        # Validate index
+        if not isinstance(hand_idx_to_bottom, int) or hand_idx_to_bottom < 0:
+            logging.warning(f"Invalid hand index for bottoming: {hand_idx_to_bottom}")
+            return -0.15, False
+        
+        hand = player.get("hand", [])
+        if hand_idx_to_bottom >= len(hand):
+            logging.warning(f"Hand index {hand_idx_to_bottom} out of bounds (hand size: {len(hand)})")
+            return -0.15, False
+        
+        # Get card and evaluate before bottoming
+        card_id = hand[hand_idx_to_bottom]
         card = gs._safe_get_card(card_id)
         card_name = getattr(card, 'name', card_id)
-
-        # Use GameState method to handle bottoming & state transitions
-        success = gs.bottom_card(player, hand_idx_to_bottom)
-
+        
+        # Evaluate strategic value of this card in current deck/matchup
+        card_value = 0
+        if self.card_evaluator and card:
+            # Use a "bottoming" evaluation context
+            card_value = self.card_evaluator.evaluate_card(card_id, "bottoming", 
+                                                        context_details={"hand_size": len(hand),
+                                                                        "mulligan_count": gs.mulligan_count.get('p1' if player == gs.p1 else 'p2', 0)})
+        
+        # Attempt to bottom the card using game state
+        success = False
+        if hasattr(gs, 'bottom_card'):
+            success = gs.bottom_card(player, hand_idx_to_bottom)
+        else:
+            # Fallback bottoming implementation
+            if hand_idx_to_bottom < len(hand):
+                bottomed_card = hand.pop(hand_idx_to_bottom)
+                player["library"].append(bottomed_card)  # Add to bottom
+                
+                # Update bottoming tracking
+                current_bottomed = getattr(gs, 'bottoming_count', 0)
+                gs.bottoming_count = current_bottomed + 1
+                
+                # Check if bottoming is complete
+                if gs.bottoming_count >= gs.cards_to_bottom:
+                    gs.bottoming_in_progress = False
+                    gs.bottoming_player = None
+                    player._bottoming_complete = True
+                    
+                    # Check if opponent needs to bottom
+                    opponent = gs.p2 if player == gs.p1 else gs.p1
+                    if getattr(opponent, '_needs_to_bottom_next', False):
+                        gs.bottoming_player = opponent
+                        gs.bottoming_in_progress = True
+                        gs.bottoming_count = 0
+                    else:
+                        # All bottoming complete, end mulligan phase
+                        gs.mulligan_in_progress = False
+                        # Move to first turn
+                        gs.phase = gs.PHASE_PRIORITY
+                
+                success = True
+        
         if success:
-            reward_mod = -0.01 # Small default penalty for bottoming
-            if self.card_evaluator:
-                try:
-                     value = self.card_evaluator.evaluate_card(card_id, "bottoming")
-                     reward_mod -= value * 0.05 # More penalty for high value card
-                except Exception as e:
-                    logging.warning(f"Error evaluating card {card_id} during bottoming: {e}")
-
-            # Check if bottoming is now complete GLOBALLY (gs.bottom_card updates state)
+            # Calculate reward/penalty based on card value
+            # More penalty for bottoming high-value cards
+            reward_mod = -0.01 - (card_value * 0.05)
+            
+            # Add context to logging
+            logging.debug(f"Bottomed {card_name} (value: {card_value:.2f}, reward mod: {reward_mod:.2f})")
+            
+            # Check if bottoming is now complete
             if not gs.bottoming_in_progress and not gs.mulligan_in_progress:
-                 logging.debug("Bottoming action completed the entire mulligan phase.")
-                 return 0.05 + reward_mod, True # Finished bottoming process
+                logging.debug("Bottoming action completed the entire mulligan phase")
+                return 0.05 + reward_mod, True  # Bonus for completing phase
             elif not gs.bottoming_in_progress and gs.mulligan_in_progress:
-                 logging.debug("Bottoming finished for this player, mulligan continues for opponent/next state.")
-                 return 0.03 + reward_mod, True # Finished player's part
+                logging.debug("Bottoming finished for this player, mulligan continues")
+                return 0.03 + reward_mod, True  # Small bonus for completing player's bottoming
             else:
-                 # More cards needed, stay in bottoming phase for this player
-                 logging.debug("Bottoming action chosen, more cards needed.")
-                 return 0.02 + reward_mod, True # Incremental success
-        else: # Bottoming failed internally
-            logging.warning(f"Failed to bottom card index {hand_idx_to_bottom} (gs.bottom_card returned False).")
+                logging.debug("Bottoming action chosen, more cards needed")
+                return 0.02 + reward_mod, True  # Small incremental reward
+        else:
+            logging.warning(f"Failed to bottom card at index {hand_idx_to_bottom}")
             return -0.05, False
 
-
     def _handle_upkeep_pass(self, param, **kwargs):
+        """Handle transitioning from upkeep step."""
         gs = self.game_state
-        if gs.phase == gs.PHASE_UPKEEP:
-             gs.phase = gs.PHASE_DRAW
-             gs.priority_player = gs._get_active_player()
-             gs.priority_pass_count = 0
-             return 0.01, True # Success
-        return -0.1, False # Invalid timing
+        return self._handle_phase_transition(gs.PHASE_UPKEEP, gs.PHASE_DRAW, **kwargs)
 
     def _handle_begin_combat_end(self, param, **kwargs):
+        """Handle transitioning from begin combat step."""
         gs = self.game_state
-        if gs.phase == gs.PHASE_BEGIN_COMBAT:
-            gs.phase = gs.PHASE_DECLARE_ATTACKERS
-            gs.priority_player = gs._get_active_player()
-            gs.priority_pass_count = 0
-            return 0.01, True # Success
-        return -0.1, False # Invalid timing
+        return self._handle_phase_transition(gs.PHASE_BEGIN_COMBAT, gs.PHASE_DECLARE_ATTACKERS, **kwargs)
 
     def _handle_end_combat(self, param, **kwargs):
+        """Handle transitioning from end of combat step."""
         gs = self.game_state
-        if gs.phase == gs.PHASE_END_OF_COMBAT:
-            gs.phase = gs.PHASE_MAIN_POSTCOMBAT
-            gs.priority_player = gs._get_active_player()
-            gs.priority_pass_count = 0
-            return 0.01, True # Success
-        return -0.1, False # Invalid timing
+        return self._handle_phase_transition(gs.PHASE_END_OF_COMBAT, gs.PHASE_MAIN_POSTCOMBAT, **kwargs)
 
     def _handle_end_step(self, param, **kwargs):
-        # Usually handled by passing priority during end step.
-        # If it's an explicit action, it should likely pass priority.
-        logging.debug("Handling END_STEP action - passing priority.")
+        """Handle transitioning from end step."""
         gs = self.game_state
-        gs._pass_priority()
-        return 0.01, True # Action performed successfully
+        # Use phase transition for consistency
+        result, success = self._handle_phase_transition(gs.PHASE_END_STEP, gs.PHASE_CLEANUP, **kwargs)
+        # Apply end step effects if successful
+        if success and hasattr(gs, '_end_step_effects'):
+            gs._end_step_effects()
+        return result, success
 
     def _handle_pass_priority(self, param, **kwargs):
         gs = self.game_state
@@ -2880,181 +3134,184 @@ class ActionHandler:
              logging.debug(f"TAP_LAND_FOR_EFFECT failed for {card.name}, ability {ability_idx} (handled by activate_ability).")
              return -0.1, False # Failure
          
-    def _handle_activate_ability(self, param, context, **kwargs): # Param (derived from ACTION_MEANINGS) is None here
+    def _handle_activate_ability(self, param, context, **kwargs):
         """
-        Handles the ACTIVATE_ABILITY action.
-        Expects 'battlefield_idx' and 'ability_idx' in context.
-        Includes checks and handling for the Exhaust mechanic.
+        Enhanced and more robust handler for ability activation with improved error handling,
+        cost validation, and support for different ability types.
+        
+        Args:
+            param: Not used directly (None from ACTION_MEANINGS)
+            context: Must contain 'battlefield_idx' and 'ability_idx'
+            
+        Returns:
+            tuple: (reward, success_flag)
         """
         gs = self.game_state
-        player = gs._get_active_player() # Ability activation usually on your turn/priority
-        # --- Get Indices from CONTEXT ---
+        player = gs._get_active_player()
+        
+        # Get indices from context
         bf_idx = context.get('battlefield_idx')
-        # The ability_idx provided in the context is the *index within the list of activated abilities*
-        # generated for the action mask (0-2 typically).
-        activated_ability_list_idx = context.get('ability_idx')
-
-        if bf_idx is None or activated_ability_list_idx is None:
-            logging.error(f"ACTIVATE_ABILITY missing 'battlefield_idx' or 'ability_idx' in context: {context}")
+        ability_idx = context.get('ability_idx')
+        
+        # Validate context contains needed indices
+        if bf_idx is None or ability_idx is None:
+            logging.error(f"ACTIVATE_ABILITY missing required indices in context: {context}")
             return -0.15, False
-
-        if not isinstance(bf_idx, int) or not isinstance(activated_ability_list_idx, int):
-            logging.error(f"ACTIVATE_ABILITY context indices are not integers: {context}")
+        
+        # Validate indices are integers
+        if not isinstance(bf_idx, int) or not isinstance(ability_idx, int):
+            logging.error(f"ACTIVATE_ABILITY indices must be integers: {context}")
             return -0.15, False
-        # --- End Context Check ---
-
+        
+        # Validate battlefield index
         if bf_idx >= len(player.get("battlefield", [])):
             logging.warning(f"ACTIVATE_ABILITY: Invalid battlefield index {bf_idx}")
             return -0.2, False
-
+        
+        # Get card and validate
         card_id = player["battlefield"][bf_idx]
         card = gs._safe_get_card(card_id)
-        if not card: return -0.2, False # Card not found
-
-        # Use AbilityHandler to get the ability instance
-        if not gs.ability_handler:
-            logging.error("Cannot activate ability: AbilityHandler not found.")
+        
+        if not card:
+            logging.warning(f"ACTIVATE_ABILITY: Card not found for ID {card_id}")
+            return -0.2, False
+        
+        # Verify AbilityHandler exists
+        if not hasattr(gs, 'ability_handler') or not gs.ability_handler:
+            logging.error("Cannot activate ability: AbilityHandler not found")
             return -0.15, False
+        
+        # Get ability and validate index
         activated_abilities = gs.ability_handler.get_activated_abilities(card_id)
-
-        # Validate the list index provided by the context/action
-        if not (0 <= activated_ability_list_idx < len(activated_abilities)):
-            logging.warning(f"Invalid ability list index {activated_ability_list_idx} provided for {card.name}. Available: {len(activated_abilities)}")
+        
+        if not activated_abilities:
+            logging.warning(f"No activated abilities found for {getattr(card, 'name', card_id)}")
             return -0.15, False
-
-        ability_to_activate = activated_abilities[activated_ability_list_idx]
-        # Get the *internal* activation index stored on the ability object (used for tracking)
-        activation_idx_on_card = getattr(ability_to_activate, 'activation_index', -1)
-
-        if activation_idx_on_card == -1:
-            logging.error(f"Internal activation_index missing for ability {activated_ability_list_idx} on {card.name}! Cannot track exhaust.")
-            # Fail activation if it's supposed to be exhaust
-            if getattr(ability_to_activate, 'is_exhaust', False): return -0.15, False
-
-        # --- EXHAUST CHECK ---
-        is_exhaust = getattr(ability_to_activate, 'is_exhaust', False)
-
-        if is_exhaust:
-            if gs.check_exhaust_used(card_id, activation_idx_on_card): # Use the internal index
-                logging.debug(f"Cannot activate Exhaust ability index {activation_idx_on_card} for {card.name}: Already used.")
-                return -0.05, False # Penalty for trying used exhaust
-        # --- END EXHAUST CHECK ---
-
-        # --- PERMISSION CHECK (Timing, Priority - already done by action mask gen) ---
-        # We can assume the action is valid timing/priority-wise if it passed the mask.
-
-        # --- PAY COSTS ---
-        # Merge game state context with action context
+        
+        if ability_idx >= len(activated_abilities):
+            logging.warning(f"Invalid ability index {ability_idx} for {getattr(card, 'name', card_id)}")
+            return -0.15, False
+        
+        ability = activated_abilities[ability_idx]
+        internal_idx = getattr(ability, 'activation_index', ability_idx)
+        
+        # Check if ability is exhausted
+        is_exhaust = getattr(ability, 'is_exhaust', False)
+        if is_exhaust and gs.check_exhaust_used(card_id, internal_idx):
+            logging.debug(f"Cannot activate Exhaust ability for {card.name}: Already used")
+            return -0.05, False
+        
+        # Check if card is tapped (for abilities requiring untapped state)
+        is_tap_ability = False
+        if hasattr(ability, 'cost') and '{T}' in ability.cost:
+            is_tap_ability = True
+            if card_id in player.get("tapped_permanents", set()):
+                logging.debug(f"Cannot activate tap ability for {card.name}: Already tapped")
+                return -0.05, False
+        
+        # Check for timing issues with sorcery-speed restrictions
+        requires_sorcery = "activate only as a sorcery" in getattr(ability, 'effect_text', '').lower()
+        if requires_sorcery and not gs._can_act_at_sorcery_speed(player):
+            logging.debug(f"Cannot activate sorcery-speed ability now for {card.name}")
+            return -0.05, False
+        
+        # Prepare cost context
         cost_context = {
-            "card_id": card_id, "card": card,
-            "ability": ability_to_activate, # Pass the ability object
+            "card_id": card_id,
+            "card": card,
+            "ability": ability,
             "is_ability": True,
-            "cause": "ability_activation",
-            **context # Include context from the action (e.g., choices for costs)
+            "cause": "ability_activation"
         }
-
-        costs_paid = False
-        if gs.mana_system:
-            # Ensure cost string exists
-            cost_str = getattr(ability_to_activate, 'cost', None)
-            if cost_str is not None:
-                costs_paid = gs.mana_system.pay_mana_cost(player, cost_str, cost_context)
-            else:
-                logging.error(f"Ability object for {card.name} missing 'cost' attribute.")
-        else: # Fallback if no mana system
-            logging.warning("Mana system missing, cannot properly handle cost payment.")
-            costs_paid = True # Assume costs paid if no system to check (risky)
-
-        if costs_paid:
-            # --- MARK EXHAUST USED (AFTER paying cost, before adding to stack) ---
-            if is_exhaust:
-                if not gs.mark_exhaust_used(card_id, activation_idx_on_card): # Use internal index
-                    logging.error(f"Failed to mark exhaust used for {card.name} index {activation_idx_on_card} despite successful payment!")
-                    # Rollback costs? Complex. Fail activation for safety.
-                    # gs.mana_system._refund_payment(player, cost_context.get('payment_details')) # Requires payment details stored
-                    return -0.2, False
-            # --- END MARK EXHAUST USED ---
-
-            # --- TRIGGER EXHAUST ACTIVATED EVENT ---
-            if is_exhaust:
-                exhaust_context = {"activator": player, "source_card_id": card_id, "ability_index": activation_idx_on_card}
-                # Make sure ability_handler exists before triggering
-                if gs.ability_handler:
-                    gs.ability_handler.check_abilities(card_id, "EXHAUST_ABILITY_ACTIVATED", exhaust_context)
-                    # Immediately process triggers resulting from activation
-                    gs.ability_handler.process_triggered_abilities()
-                else:
-                    logging.warning("Cannot trigger EXHAUST_ABILITY_ACTIVATED: AbilityHandler missing.")
-            # --- END TRIGGER EXHAUST ACTIVATED EVENT ---
-
-            # --- ADD TO STACK (Handle Targeting) ---
-            effect_text_for_stack = getattr(ability_to_activate, 'effect', getattr(ability_to_activate, 'effect_text', 'Unknown Effect'))
-            requires_target = "target" in effect_text_for_stack.lower()
-
-            if requires_target:
-                # Ability needs targets, set up targeting phase
-                logging.debug(f"Activated ability requires target. Entering TARGETING phase.")
-                # Store previous phase unless already in a special phase
-                if gs.phase not in [gs.PHASE_TARGETING, gs.PHASE_SACRIFICE, gs.PHASE_CHOOSE]:
-                    gs.previous_priority_phase = gs.phase
-                else:
-                    gs.previous_priority_phase = gs.PHASE_MAIN_PRECOMBAT # Fallback if already special
-
-                gs.phase = gs.PHASE_TARGETING
-                gs.targeting_context = {
+        cost_context.update(context)
+        
+        # Verify costs can be paid
+        cost_str = getattr(ability, 'cost', None)
+        if not cost_str:
+            logging.error(f"Ability for {card.name} missing 'cost' attribute")
+            return -0.15, False
+        
+        can_pay = gs.mana_system.can_pay_mana_cost(player, cost_str, cost_context) if gs.mana_system else True
+        
+        if not can_pay:
+            logging.debug(f"Cannot afford cost {cost_str} for {card.name} ability {ability_idx}")
+            return -0.05, False
+        
+        # Pay costs
+        costs_paid = gs.mana_system.pay_mana_cost(player, cost_str, cost_context) if gs.mana_system else True
+        
+        if not costs_paid:
+            logging.warning(f"Failed to pay cost for {card.name} ability {ability_idx}")
+            return -0.05, False
+        
+        # Mark exhaust used (if applicable)
+        if is_exhaust:
+            gs.mark_exhaust_used(card_id, internal_idx)
+            # Trigger exhaust event
+            if gs.ability_handler:
+                exhaust_context = {"activator": player, "source_card_id": card_id, "ability_index": internal_idx}
+                gs.ability_handler.check_abilities(card_id, "EXHAUST_ABILITY_ACTIVATED", exhaust_context)
+                gs.ability_handler.process_triggered_abilities()
+        
+        # Handle targeting if needed
+        effect_text = getattr(ability, 'effect', getattr(ability, 'effect_text', 'Unknown Effect'))
+        requires_target = "target" in effect_text.lower()
+        
+        if requires_target:
+            # Set up targeting phase
+            if gs.phase not in [gs.PHASE_TARGETING, gs.PHASE_SACRIFICE, gs.PHASE_CHOOSE]:
+                gs.previous_priority_phase = gs.phase
+            
+            gs.phase = gs.PHASE_TARGETING
+            gs.targeting_context = {
+                "source_id": card_id,
+                "controller": player,
+                "effect_text": effect_text,
+                "required_type": gs._get_target_type_from_text(effect_text),
+                "required_count": 1,
+                "min_targets": 1,
+                "max_targets": 1,
+                "selected_targets": [],
+                "stack_info": {
+                    "item_type": "ABILITY",
                     "source_id": card_id,
                     "controller": player,
-                    "effect_text": effect_text_for_stack,
-                    "required_type": gs._get_target_type_from_text(effect_text_for_stack), # Use helper
-                    "required_count": 1, # Default, need better parsing for >1 target
-                    "min_targets": 1, # Assume required if "target" present
-                    "max_targets": 1,
-                    "selected_targets": [],
-                    # Store info to put the *actual ability instance* on stack AFTER targeting
-                    "stack_info": {
-                        "item_type": "ABILITY",
-                        "source_id": card_id,
-                        "controller": player,
-                        "context": {
-                                "ability_index": activation_idx_on_card, # Use internal index
-                                "effect_text": effect_text_for_stack,
-                                "ability": ability_to_activate, # <<< Pass the ability object itself
-                                "is_exhaust": is_exhaust, # Pass exhaust status if needed for resolution
-                                "targets": {} # To be filled
-                        }
+                    "context": {
+                        "ability_index": internal_idx,
+                        "effect_text": effect_text,
+                        "ability": ability,
+                        "is_exhaust": is_exhaust,
+                        "targets": {}
                     }
                 }
-                # Set priority to the choosing player
-                gs.priority_player = player
-                gs.priority_pass_count = 0
-                logging.debug(f"Set up targeting for ability: {effect_text_for_stack}")
-
-            else: # No targets needed, add directly to stack
-                stack_context = {
-                    "ability_index": activation_idx_on_card, # Use internal index
-                    "effect_text": effect_text_for_stack,
-                    "ability": ability_to_activate, # <<< Pass the ability object itself
-                    "is_exhaust": is_exhaust, # Pass exhaust status
-                    "targets": {}
-                }
-                gs.add_to_stack("ABILITY", card_id, player, stack_context)
-                logging.debug(f"Added non-targeting ability index {activated_ability_list_idx} ({activation_idx_on_card}) for {card.name} to stack{' (Exhaust)' if is_exhaust else ''}.")
-
-            # --- Calculate Reward ---
-            ability_value = 0
-            if self.card_evaluator:
-                try:
-                    # Pass correct ability index (internal activation_idx_on_card)
-                    ability_value, _ = self.evaluate_ability_activation(card_id, activation_idx_on_card)
-                except Exception as eval_e:
-                    logging.error(f"Error evaluating ability activation {card_id}, {activation_idx_on_card}: {eval_e}")
-
-            # Activation success reward + strategic value
-            return 0.1 + ability_value * 0.4, True
+            }
+            
+            # Set priority to choosing player
+            gs.priority_player = player
+            gs.priority_pass_count = 0
+            logging.debug(f"Set up targeting for ability: {effect_text}")
         else:
-            logging.debug(f"Failed to pay cost for ability index {activated_ability_list_idx} ({activation_idx_on_card}) on {card.name}")
-            # Cost payment failure might need rollback logic in pay_cost (should be handled by ManaSystem)
-            return -0.1, False
+            # Add directly to stack
+            stack_context = {
+                "ability_index": internal_idx,
+                "effect_text": effect_text,
+                "ability": ability,
+                "is_exhaust": is_exhaust,
+                "targets": {}
+            }
+            gs.add_to_stack("ABILITY", card_id, player, stack_context)
+            logging.debug(f"Added non-targeting ability {internal_idx} for {card.name} to stack")
+        
+        # Evaluate strategic value of activation
+        ability_value = 0
+        if self.card_evaluator:
+            try:
+                ability_value, _ = self.evaluate_ability_activation(card_id, internal_idx)
+            except Exception as e:
+                logging.error(f"Error evaluating ability activation: {e}")
+        
+        # Return reward based on strategic value
+        return 0.1 + ability_value * 0.4, True
 
     def _handle_loyalty_ability(self, param, action_type, **kwargs):
         gs = self.game_state
@@ -5222,141 +5479,210 @@ class ActionHandler:
         # --- Specific Handler Implementations ---
 
     def _handle_alternative_casting(self, param, action_type, context=None, **kwargs):
-        """Generic handler for alternative casting methods. (Updated Context Handling & Madness)"""
+        """
+        Improved handler for alternative casting methods with better organization.
+        
+        Args:
+            param: Action parameter value
+            action_type: The specific alternative casting action type
+            context: Additional context for the casting
+            
+        Returns:
+            tuple: (reward, success_flag)
+        """
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
-        if context is None: context = {} # Ensure context is a dict
-
-        # Merge environment/agent context with existing
+        if context is None: context = {}
         if kwargs.get('context'): context.update(kwargs['context'])
-
-        card_id = None
-        source_zone = "graveyard" # Default for flashback/escape/aftermath/jumpstart
-        validation_ok = True
-
-        alt_cost_name = action_type.replace('CAST_WITH_', '').replace('CAST_FOR_', '').replace('CAST_', '').replace('_',' ').lower()
-        context["use_alt_cost"] = alt_cost_name # Flag for mana/cost system
-
-        # --- Identify Source Card and Zone based on Action Type & CONTEXT ---
-        if action_type == "CAST_FOR_MADNESS":
-            source_zone = "exile"
-            # Card ID *MUST* come from context now (provided during action generation)
-            card_id = context.get('card_id')
-            if not card_id:
-                logging.error(f"Madness cast action, but context missing 'card_id': {context}")
-                validation_ok = False
-            # Verify card is actually in exile (context provided exile_idx)
-            elif 'exile_idx' not in context or context['exile_idx'] >= len(player.get(source_zone, [])) or player[source_zone][context['exile_idx']] != card_id:
-                logging.error(f"Madness cast context mismatch: Card {card_id} not found at exile_idx {context.get('exile_idx')}")
-                validation_ok = False
-            # Check against the gs.madness_cast_available state as well for consistency
-            elif not hasattr(gs, 'madness_cast_available') or not gs.madness_cast_available or \
-                 gs.madness_cast_available.get('card_id') != card_id or \
-                 gs.madness_cast_available.get('player') != player:
-                 logging.warning(f"Madness cast attempted but does not match current gs.madness_cast_available state. Context: {context}, State: {gs.madness_cast_available}")
-                 # Allow attempt anyway? Or fail strictly? Fail strictly for now.
-                 validation_ok = False
-
-            # Store exile_idx if needed downstream
-            if validation_ok: context['source_idx'] = context['exile_idx']
-
-        # --- Other alt cast types (remain largely the same logic using context indices) ---
-        elif action_type in ["CAST_FOR_EMERGE", "CAST_FOR_DELVE", "CAST_WITH_OVERLOAD"]: # Originates from hand
-             source_zone = "hand"
-             if "hand_idx" not in context:
-                 logging.error(f"{action_type} requires 'hand_idx' in context.")
-                 validation_ok = False
-             else:
-                 hand_idx = context["hand_idx"]
-                 if hand_idx >= len(player.get(source_zone, [])):
-                     logging.error(f"Invalid hand_idx {hand_idx} in context for {action_type}.")
-                     validation_ok = False
-                 else:
-                     card_id = player[source_zone][hand_idx]
-                     context['source_idx'] = hand_idx # Store index
-        elif action_type in ["CAST_WITH_FLASHBACK", "CAST_WITH_JUMP_START", "CAST_WITH_ESCAPE", "AFTERMATH_CAST"]:
-             source_zone = "graveyard"
-             if "gy_idx" not in context:
-                 logging.error(f"{action_type} requires 'gy_idx' in context. Param={param} is unused if context is missing.")
-                 validation_ok = False
-             else:
-                 gy_idx = context['gy_idx']
-                 if gy_idx >= len(player.get(source_zone, [])):
-                     logging.error(f"Invalid gy_idx {gy_idx} in context for {action_type}.")
-                     validation_ok = False
-                 else:
-                     card_id = player[source_zone][gy_idx]
-                     context['source_idx'] = gy_idx # Store index
-
-        if not card_id or not validation_ok:
-            logging.error(f"Cannot determine valid card ID for {action_type} with context: {context}")
+        
+        # Common casting info for all alternative methods
+        casting_info = {
+            "CAST_WITH_FLASHBACK": {
+                "source_zone": "graveyard",
+                "index_key": "gy_idx",
+                "cost_pattern": r"flashback (\{[^\}]+\})",
+                "timing_check": lambda card: True  # Flashback follows the timing of the card
+            },
+            "CAST_WITH_JUMP_START": {
+                "source_zone": "graveyard",
+                "index_key": "gy_idx",
+                "cost_pattern": None,  # Uses original cost
+                "requires_discard": True,
+                "timing_check": lambda card: True  # Jump-start follows the timing of the card
+            },
+            "CAST_WITH_ESCAPE": {
+                "source_zone": "graveyard",
+                "index_key": "gy_idx",
+                "cost_pattern": r"escape—([^\,]+)",
+                "additional_pattern": r"exile ([^\.]+)",
+                "timing_check": lambda card: True  # Escape follows the timing of the card
+            },
+            "CAST_FOR_MADNESS": {
+                "source_zone": "exile",
+                "index_key": "exile_idx",
+                "cost_pattern": r"madness (\{[^\}]+\}|[0-9]+)",
+                "timing_check": lambda card: True  # Madness follows the timing of the card
+            },
+            "CAST_WITH_OVERLOAD": {
+                "source_zone": "hand",
+                "index_key": "hand_idx",
+                "cost_pattern": r"overload (\{[^\}]+\})",
+                "timing_check": lambda card: True  # Overload follows the timing of the card
+            },
+            "CAST_FOR_EMERGE": {
+                "source_zone": "hand",
+                "index_key": "hand_idx",
+                "cost_pattern": r"emerge (\{[^\}]+\})",
+                "requires_sacrifice": True,
+                "timing_check": lambda card: 'sorcery' in getattr(card, 'card_types', []) or 
+                                        not ('instant' in getattr(card, 'card_types', []))
+            },
+            "CAST_FOR_DELVE": {
+                "source_zone": "hand",
+                "index_key": "hand_idx",
+                "cost_pattern": None,  # Uses original cost with delve reduction
+                "timing_check": lambda card: True  # Delve follows the timing of the card
+            },
+            "AFTERMATH_CAST": {
+                "source_zone": "graveyard",
+                "index_key": "gy_idx",
+                "cast_right_half": True,
+                "timing_check": lambda card: True  # Aftermath follows the timing of the card's right half
+            }
+        }
+        
+        # Retrieve casting configuration
+        if action_type not in casting_info:
+            logging.error(f"Unsupported alternative casting type: {action_type}")
             return -0.2, False
-
+        
+        cast_config = casting_info[action_type]
+        source_zone = cast_config["source_zone"]
+        index_key = cast_config["index_key"]
+        
+        # Get card ID based on context or param
+        card_id = None
+        
+        # Special case for madness which uses card_id directly from context
+        if action_type == "CAST_FOR_MADNESS" and "card_id" in context:
+            card_id = context["card_id"]
+        else:
+            # Otherwise get index from context or param
+            idx = context.get(index_key)
+            if idx is None:
+                # If no index in context, try to use param as index
+                if isinstance(param, int):
+                    idx = param
+                else:
+                    logging.error(f"{action_type} missing required {index_key} in context: {context}")
+                    return -0.15, False
+            
+            # Validate index
+            if idx >= len(player.get(source_zone, [])):
+                logging.error(f"{action_type}: Invalid {index_key} {idx} (max: {len(player.get(source_zone, []))-1})")
+                return -0.1, False
+            
+            card_id = player[source_zone][idx]
+            # Store index in context for downstream handlers
+            context['source_idx'] = idx
+        
+        # Get card and validate
+        card = gs._safe_get_card(card_id)
+        if not card:
+            logging.error(f"{action_type}: Card {card_id} not found")
+            return -0.15, False
+        
+        # Set up context for alternative casting
         context["source_zone"] = source_zone
-
-        # --- Prepare Additional Cost Info (remains the same logic using context indices) ---
-        if action_type == "CAST_WITH_JUMP_START":
-            if "discard_idx" not in context or context["discard_idx"] >= len(player.get("hand", [])):
-                logging.error(f"Jump-Start requires valid 'discard_idx' in context: {context}")
+        context["use_alt_cost"] = action_type.replace('CAST_WITH_', '').replace('CAST_FOR_', '').replace('CAST_', '').replace('_', ' ').lower()
+        
+        # Handle special card-half logic
+        if cast_config.get("cast_right_half"):
+            context["cast_right_half"] = True
+        
+        # Handle additional costs and requirements
+        if cast_config.get("requires_discard"):
+            if "discard_idx" not in context:
+                logging.error(f"{action_type} requires 'discard_idx' in context")
                 return -0.1, False
-            context["additional_cost_to_pay"] = {"type": "discard", "hand_idx": context["discard_idx"]}
-        elif action_type == "CAST_FOR_EMERGE":
-            if "sacrifice_idx" not in context or context["sacrifice_idx"] >= len(player.get("battlefield", [])):
-                logging.error(f"Emerge requires valid 'sacrifice_idx' in context: {context}")
+            
+            discard_idx = context["discard_idx"]
+            if discard_idx >= len(player.get("hand", [])):
+                logging.error(f"{action_type}: Invalid discard_idx {discard_idx}")
                 return -0.1, False
+            
+            context["additional_cost_to_pay"] = {"type": "discard", "hand_idx": discard_idx}
+        
+        if cast_config.get("requires_sacrifice"):
+            if "sacrifice_idx" not in context:
+                logging.error(f"{action_type} requires 'sacrifice_idx' in context")
+                return -0.1, False
+            
             sac_idx = context["sacrifice_idx"]
+            if sac_idx >= len(player.get("battlefield", [])):
+                logging.error(f"{action_type}: Invalid sacrifice_idx {sac_idx}")
+                return -0.1, False
+            
             sac_id = player["battlefield"][sac_idx]
             sac_card = gs._safe_get_card(sac_id)
             if not sac_card or 'creature' not in getattr(sac_card, 'card_types', []):
-                logging.error(f"Emerge sacrifice target index {sac_idx} is not a creature.")
+                logging.error(f"{action_type} sacrifice target must be a creature")
                 return -0.1, False
+            
             context["additional_cost_to_pay"] = {"type": "sacrifice", "target_id": sac_id}
             context["sacrificed_cmc"] = getattr(sac_card, 'cmc', 0)
-        elif action_type == "CAST_WITH_ESCAPE":
+        
+        # Handle escape exile requirements
+        if action_type == "CAST_WITH_ESCAPE":
             if "gy_indices_escape" not in context or not isinstance(context["gy_indices_escape"], list):
-                logging.error("Escape requires 'gy_indices_escape' list in context.")
+                logging.error(f"{action_type} requires 'gy_indices_escape' list in context")
                 return -0.1, False
-            card = gs._safe_get_card(card_id)
-            required_exile_count = 0
-            match = re.search(r"exile (\w+|\d+) other cards?", getattr(card, 'oracle_text','').lower())
-            if match: required_exile_count = self._word_to_number(match.group(1))
-            if required_exile_count <= 0: required_exile_count = 1
-            actual_gy_indices = [idx for idx in context["gy_indices_escape"] if idx < len(player.get("graveyard",[]))]
+            
+            exile_req_str = None
+            pattern = cast_config.get("additional_pattern")
+            if pattern:
+                match = re.search(pattern, getattr(card, 'oracle_text', '').lower())
+                if match: exile_req_str = match.group(1).strip()
+            
+            required_exile_count = self._word_to_number(re.search(r"(\w+|\d+)", exile_req_str).group(1)) if exile_req_str else 0
+            if required_exile_count <= 0: required_exile_count = 5  # Default if not specified
+            
+            actual_gy_indices = [idx for idx in context["gy_indices_escape"] if idx < len(player.get("graveyard", []))]
             if len(actual_gy_indices) < required_exile_count:
-                logging.warning(f"Not enough valid GY indices provided for Escape ({len(actual_gy_indices)}/{required_exile_count})")
+                logging.warning(f"{action_type}: Not enough valid graveyard cards to exile ({len(actual_gy_indices)}/{required_exile_count})")
                 return -0.1, False
+            
             context["additional_cost_to_pay"] = {"type": "escape_exile", "gy_indices": actual_gy_indices[:required_exile_count]}
-        elif action_type == "CAST_FOR_DELVE":
-             if "gy_indices" not in context or not isinstance(context["gy_indices"], list):
-                 logging.error("Delve requires 'gy_indices' list in context.")
-                 return -0.1, False
-             actual_gy_indices = [idx for idx in context["gy_indices"] if idx < len(player.get("graveyard",[]))]
-             context["additional_cost_to_pay"] = {"type": "delve", "gy_indices": actual_gy_indices}
-             context["delve_count"] = len(actual_gy_indices)
-        if action_type == "AFTERMATH_CAST": context["cast_right_half"] = True
-
-        # --- Cast the spell using GameState ---
+        
+        # Handle delve cost reduction
+        if action_type == "CAST_FOR_DELVE":
+            if "gy_indices" not in context or not isinstance(context["gy_indices"], list):
+                logging.error(f"{action_type} requires 'gy_indices' list in context")
+                return -0.1, False
+            
+            actual_gy_indices = [idx for idx in context["gy_indices"] if idx < len(player.get("graveyard", []))]
+            context["additional_cost_to_pay"] = {"type": "delve", "gy_indices": actual_gy_indices}
+            context["delve_count"] = len(actual_gy_indices)
+        
+        # Cast the spell using game state
         success = gs.cast_spell(card_id, player, context=context)
-
+        
         if success:
-            # --- CLEAR MADNESS STATE ---
-            if action_type == "CAST_FOR_MADNESS":
-                # Verify it was the correct card before clearing
-                if hasattr(gs, 'madness_cast_available') and gs.madness_cast_available and \
-                   gs.madness_cast_available.get('card_id') == card_id:
-                    gs.madness_cast_available = None # Clear state *after* successful cast
-                    logging.debug("Madness state cleared after successful cast.")
-            # --- END CLEAR MADNESS STATE ---
-
-            # Calculate reward... (remains the same)
-            card_value = 0.25
+            # Clear madness state after successful cast
+            if action_type == "CAST_FOR_MADNESS" and hasattr(gs, 'madness_cast_available') and gs.madness_cast_available and gs.madness_cast_available.get('card_id') == card_id:
+                gs.madness_cast_available = None
+                logging.debug(f"Madness state cleared after successful cast of {card.name}")
+            
+            # Calculate reward based on card value
+            card_value = 0.3  # Base value for successful alternative cast
             if self.card_evaluator:
-                 eval_context = {"situation": f"cast_{alt_cost_name}"}; eval_context.update(context)
-                 card_value += self.card_evaluator.evaluate_card(card_id, "play", context_details=eval_context) * 0.2
+                eval_context = {"situation": f"cast_{context['use_alt_cost']}"}
+                eval_context.update(context)
+                card_value += self.card_evaluator.evaluate_card(card_id, "play", context_details=eval_context) * 0.2
+            
             return card_value, True
         else:
-            logging.warning(f"Alternative cast failed for {action_type} {card_id}. Handled by gs.cast_spell.")
-            # Rollback handled by cast_spell if payment failed partially
+            logging.warning(f"{action_type} failed for {getattr(card, 'name', card_id)}. Handled by gs.cast_spell.")
             return -0.1, False
 
     def _handle_cast_split(self, param, action_type, **kwargs):
@@ -5477,50 +5803,57 @@ class ActionHandler:
     # --- Helper method to check blocking capability ---
     def _can_block(self, blocker_id, attacker_id):
          """Check if blocker_id can legally block attacker_id."""
-         gs = self.game_state
-         if hasattr(gs, 'combat_resolver') and hasattr(gs.combat_resolver, '_check_block_restrictions'):
-              return gs.combat_resolver._check_block_restrictions(attacker_id, blocker_id)
-         # Basic fallback
-         blocker = gs._safe_get_card(blocker_id)
-         attacker = gs._safe_get_card(attacker_id)
-         if not blocker or not attacker: return False
-         if 'creature' not in getattr(blocker, 'card_types', []): return False
-         # Check flying/reach vs flying
-         has_flying_attacker = 'flying' in getattr(attacker, 'oracle_text', '').lower()
-         if has_flying_attacker:
-              has_flying_blocker = 'flying' in getattr(blocker, 'oracle_text', '').lower()
-              has_reach_blocker = 'reach' in getattr(blocker, 'oracle_text', '').lower()
-              if not has_flying_blocker and not has_reach_blocker:
-                   return False
-         # Check other evasion later (menace handled in multi-block)
-         return True
+         return ExtendedCombatResolver._check_block_restrictions(self, blocker_id, attacker_id)
 
     def _add_state_change_rewards(self, base_reward, previous_state, current_state):
-        """Calculate rewards based on positive changes in game state."""
+        """Calculate rewards based on positive changes in game state with improved strategic weighting."""
         reward = base_reward
-        # Life total swing
+        
+        # Life total rewards with scaling factors - more important at lower life totals
         my_life_change = current_state["my_life"] - previous_state["my_life"]
-        opp_life_change = previous_state["opp_life"] - current_state["opp_life"] # Positive if opponent lost life
-        reward += my_life_change * 0.03 + opp_life_change * 0.05 # Weight opponent life loss slightly higher
-
-        # Card advantage
-        card_adv_change = (current_state["my_hand"] - previous_state["my_hand"]) - (current_state["opp_hand"] - previous_state["opp_hand"])
-        reward += card_adv_change * 0.1
-
-        # Board presence
-        board_adv_change = (current_state["my_board"] - previous_state["my_board"]) - (current_state["opp_board"] - previous_state["opp_board"])
-        reward += board_adv_change * 0.05
-
-        # Power advantage
-        power_adv_change = (current_state["my_power"] - previous_state["my_power"]) - (current_state["opp_power"] - previous_state["opp_power"])
-        reward += power_adv_change * 0.02
-
+        opp_life_change = previous_state["opp_life"] - current_state["opp_life"]
+        
+        # Life change is more important when life is low
+        my_life_factor = 0.03 * (1 + max(0, (20 - current_state["my_life"])) / 10)
+        opp_life_factor = 0.05 * (1 + max(0, (current_state["opp_life"] - 1)) / 10)
+        
+        reward += my_life_change * my_life_factor
+        reward += opp_life_change * opp_life_factor
+        
+        # Card advantage with higher weighting
+        my_hand_change = current_state["my_hand"] - previous_state["my_hand"]
+        opp_hand_change = current_state["opp_hand"] - previous_state["opp_hand"]
+        card_adv_change = my_hand_change - opp_hand_change
+        reward += card_adv_change * 0.15  # Card advantage is very important
+        
+        # Board presence - separate into creatures and non-creatures if possible
+        my_board_change = current_state["my_board"] - previous_state["my_board"]
+        opp_board_change = current_state["opp_board"] - previous_state["opp_board"]
+        board_adv_change = my_board_change - opp_board_change
+        reward += board_adv_change * 0.08
+        
+        # Power advantage with improved scaling
+        my_power_change = current_state["my_power"] - previous_state["my_power"]
+        opp_power_change = current_state["opp_power"] - previous_state["opp_power"]
+        power_adv_change = my_power_change - opp_power_change
+        
+        # Power value scales with how far ahead/behind you are
+        power_factor = 0.03
+        if current_state["my_power"] > current_state["opp_power"]:
+            # Increasing a winning board is good
+            power_factor = 0.04
+        elif current_state["my_power"] < current_state["opp_power"]:
+            # Catching up from behind is very good
+            power_factor = 0.05
+        
+        reward += power_adv_change * power_factor
+        
         # Log detailed reward breakdown if significant change
         if abs(reward - base_reward) > 0.01:
-             logging.debug(f"State Change Reward: Life: {(my_life_change * 0.03 + opp_life_change * 0.05):.2f}, "
-                           f"Cards: {(card_adv_change * 0.1):.2f}, Board: {(board_adv_change * 0.05):.2f}, "
-                           f"Power: {(power_adv_change * 0.02):.2f}")
-
+            logging.debug(f"State Change Reward: Life: {(my_life_change * my_life_factor + opp_life_change * opp_life_factor):.2f}, "
+                        f"Cards: {(card_adv_change * 0.15):.2f}, Board: {(board_adv_change * 0.08):.2f}, "
+                        f"Power: {(power_adv_change * power_factor):.2f}")
+        
         return reward
     
     def _get_escalate_cost_str(self, card):
