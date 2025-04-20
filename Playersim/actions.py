@@ -892,7 +892,185 @@ class ActionHandler:
             self.action_reasons = {11: "Crit Err - PASS", 12: "Crit Err - CONCEDE"}
             self.action_reasons_with_context = {11: {"reason":"Crit Err - PASS","context":{}}, 12: {"reason":"Crit Err - CONCEDE","context":{}}}
             return fallback_actions
+        
+    def _end_mulligan_phase(self):
+        """Helper to clean up mulligan state and transition to Turn 1. (Revised Priority Assignment v5 - Improved State Cleanup)"""
+        # Check if already ended to prevent potential recursion/double execution
+        if not self.mulligan_in_progress and not self.bottoming_in_progress:
+            logging.debug("_end_mulligan_phase called, but mulligan/bottoming already inactive.")
+            return # Avoid running logic again if already ended
+
+        # IMPORTANT: Force end mulligan regardless of unfinished business
+        logging.info("Ending mulligan phase - transitioning to main game.")
+        # Reset all mulligan tracking flags first - do this before any other logic
+        self.mulligan_in_progress = False
+        self.mulligan_player = None
+        self.bottoming_in_progress = False
+        self.bottoming_player = None
+
+        # Force clean up temporary flags using dict.pop
+        for p in [self.p1, self.p2]:
+            if p: # Check if player exists
+                p.pop('_mulligan_decision_made', None)
+                p.pop('_needs_to_bottom_next', None)
+                p.pop('_bottoming_complete', None)
+
+        # --- Set State for Start of Game ---
+        self.turn = 1 # Officially Turn 1
+        self.phase = self.PHASE_UNTAP # Start with Untap
+        
+        try:
+            self._reset_turn_tracking_variables() # Reset turn vars for Turn 1
+        except Exception as e:
+            logging.error(f"Error resetting turn tracking variables: {e}")
+            # Continue even if this fails
+        
+        # Get active player with fallback
+        active_player = self._get_active_player() # P1 is active player on Turn 1
+        if not active_player:
+            logging.critical("CRITICAL ERROR in _end_mulligan_phase: _get_active_player() returned None!")
+            active_player = self.p1 if self.p1 else self.p2
+            if not active_player:
+                logging.critical("FATAL ERROR: No valid players available for active player!")
+                # Create minimal player as last resort
+                active_player = self.p1 = {"name": "Player 1", "library": [], "hand": [], 
+                                        "battlefield": [], "graveyard": [], "exile": [],
+                                        "life": 20, "tapped_permanents": set()}
+
+        logging.debug(f"Performing Turn {self.turn} Untap Step for {active_player['name']}...")
+        try:
+            self._untap_phase(active_player)
+        except Exception as e:
+            logging.error(f"Error in untap phase: {e}")
+            # Continue even if untap fails
+        
+        try:
+            self.check_state_based_actions() # Check SBAs after untap
+        except Exception as e:
+            logging.error(f"Error checking state-based actions: {e}")
+            # Continue even if SBA check fails
+
+        # ** Automatically advance to Upkeep and assign priority **
+        self.phase = self.PHASE_UPKEEP
+        logging.debug(f"Automatically advanced to Upkeep Step.")
+        
+        # IMPORTANT: Trigger abilities *before* assigning priority, as they might affect state or add to stack
+        try:
+            self._handle_beginning_of_phase_triggers() # Trigger upkeep abilities (includes SBA check)
+        except Exception as e:
+            logging.error(f"Error handling beginning of phase triggers: {e}")
+            # Continue even if trigger handling fails
+
+        # ** Ensure Priority is Assigned to Active Player **
+        self.priority_player = active_player
+        self.priority_pass_count = 0
+        self.last_stack_size = len(self.stack) # Initialize stack size tracking
+        logging.debug(f"Entering Upkeep. Priority to AP ({active_player['name']})")
+
+        # Game Turn Limit Check
+        if self.turn > self.max_turns and not getattr(self, '_turn_limit_checked', False):
+            logging.info(f"Turn limit ({self.max_turns}) reached! Ending game.")
+            self._turn_limit_checked = True
+            if self.p1 and self.p2:
+                if self.p1.get("life",0) > self.p2.get("life",0): self.p1["won_game"] = True; self.p2["lost_game"] = True
+                elif self.p2.get("life",0) > self.p1.get("life",0): self.p2["won_game"] = True; self.p1["lost_game"] = True
+                else: self.p1["game_draw"] = True; self.p2["game_draw"] = True
+            # SBAs checked later will finalize the game end
+        
+    def check_mulligan_state(self):
+        """
+        Helper function to diagnose mulligan state inconsistencies and force recovery.
+        Returns True if state is valid, False otherwise and attempts recovery.
+        (Enhanced with stronger recovery v2)
+        """
+        # Case 1: Both mulligan_player and bottoming_player are None but still in mulligan phase
+        if self.mulligan_in_progress and self.mulligan_player is None and not self.bottoming_in_progress:
+            logging.error("Inconsistent state: In mulligan phase with no active mulligan player")
+            # Count remaining players who haven't decided
+            unmade_decisions = 0
+            for p, p_id in [(self.p1, 'p1'), (self.p2, 'p2')]:
+                if p and not p.get('_mulligan_decision_made', False):
+                    unmade_decisions += 1
+                    self.mulligan_player = p
+                    logging.info(f"Recovering mulligan state by assigning {p_id} as mulligan player")
             
+            # If no undecided players were found OR we found multiple (inconsistent), force end mulligan
+            if unmade_decisions != 1:
+                logging.warning(f"Found {unmade_decisions} players with undecided mulligans. Forcing end of mulligan phase.")
+                self._end_mulligan_phase()
+                return False
+            return True
+        
+        # Case 2: In bottoming phase but no bottoming player
+        if self.bottoming_in_progress and self.bottoming_player is None:
+            logging.error("Inconsistent state: In bottoming phase with no active bottoming player")
+            # Find a player who needs to bottom
+            needs_bottom_found = 0
+            for p, p_id in [(self.p1, 'p1'), (self.p2, 'p2')]:
+                if p and p.get('_needs_to_bottom_next', False) and not p.get('_bottoming_complete', False):
+                    needs_bottom_found += 1
+                    self.bottoming_player = p
+                    self.bottoming_count = 0
+                    self.cards_to_bottom = min(self.mulligan_count.get(p_id, 0), len(p.get("hand", [])))
+                    logging.info(f"Recovering bottoming state by assigning {p_id} as bottoming player")
+            
+            # If no players need to bottom OR multiple (inconsistent), force end bottoming
+            if needs_bottom_found != 1:
+                logging.warning(f"Found {needs_bottom_found} players needing to bottom. Forcing end of mulligan phase.")
+                self._end_mulligan_phase()
+                return False
+            return True
+        
+        # Case 3: Neither mulligan nor bottoming in progress, but mulligan_in_progress flag is still set
+        if self.mulligan_in_progress and not self.bottoming_in_progress and self.mulligan_player is None:
+            # Check if all players have completed their mulligan decisions
+            all_decided = True
+            for p in [self.p1, self.p2]:
+                if p and not p.get('_mulligan_decision_made', False):
+                    all_decided = False
+                    break
+                    
+            if all_decided:
+                logging.info("All players have made mulligan decisions but phase not ended. Ending mulligan.")
+                self._end_mulligan_phase()
+                return False
+            else:
+                # Inconsistent state - someone still needs to decide but mulligan_player is None
+                logging.error("Inconsistent mulligan state: No bottoming, not all decided, but no mulligan_player")
+                self._end_mulligan_phase()  # Safety: force end the phase
+                return False
+        
+        # Case 4: Bottoming needed but stalled - check counters
+        if self.bottoming_in_progress and self.bottoming_player:
+            # Check if bottoming is stalled (no cards to bottom or count inconsistency)
+            if self.cards_to_bottom <= 0 or self.bottoming_count >= self.cards_to_bottom:
+                logging.error(f"Bottoming stalled: to_bottom={self.cards_to_bottom}, count={self.bottoming_count}")
+                # Mark this player as complete and check if we need to move to the next player
+                self.bottoming_player['_bottoming_complete'] = True
+                
+                # Check if other player needs to bottom
+                other_player = self.p2 if self.bottoming_player == self.p1 else self.p1
+                if other_player and other_player.get('_needs_to_bottom_next', False) and not other_player.get('_bottoming_complete', False):
+                    self.bottoming_player = other_player
+                    self.bottoming_count = 0
+                    other_id = 'p2' if other_player == self.p2 else 'p1'
+                    self.cards_to_bottom = min(self.mulligan_count.get(other_id, 0), len(other_player.get("hand", [])))
+                    logging.info(f"Transitioning bottoming to next player: {other_player['name']}")
+                else:
+                    # No other player needs to bottom, end mulligan
+                    logging.info("No more players need to bottom. Ending mulligan phase.")
+                    self._end_mulligan_phase()
+                    return False
+        
+        # Case 5: Final safety check - if in limbo, force end
+        if (self.mulligan_in_progress or self.bottoming_in_progress) and self.turn >= 1:
+            logging.error("Critical inconsistency: In mulligan/bottoming but turn >= 1. Forcing end.")
+            self._end_mulligan_phase()
+            return False
+        
+        # In non-error cases, continue
+        return True
+         
     def _add_basic_phase_actions(self, is_my_turn, valid_actions, set_valid_action):
         """Adds basic actions available based on the current phase, assuming priority and no stack."""
         gs = self.game_state
@@ -2600,82 +2778,45 @@ class ActionHandler:
             tuple: (reward, success_flag)
         """
         gs = self.game_state
-        player = getattr(gs, 'mulligan_player', None)
-        
-        if not player:
-            logging.warning("MULLIGAN action called but gs.mulligan_player is None")
-            # Try to recover by finding the active player
-            player = gs.p1 if gs.agent_is_p1 else gs.p2
-            gs.mulligan_player = player
-            logging.warning(f"Attempting recovery by setting mulligan_player to {player.get('name', 'Unknown')}")
-        
-        # Track mulligan counts
+        # Use perspective player for the action, ensure they are the current mulligan player
+        perspective_player = gs.p1 if gs.agent_is_p1 else gs.p2
+        current_mulligan_player = getattr(gs, 'mulligan_player', None)
+
+        if current_mulligan_player != perspective_player:
+             logging.warning(f"MULLIGAN action called by {perspective_player.get('name','?')}, but mulligan player is {getattr(current_mulligan_player,'name','None')}.")
+             # Do not execute if it's not the correct player's turn to mulligan
+             return -0.2, False # Invalid state/action timing
+
+        player = current_mulligan_player # Use the validated player
+        # ... (rest of validation logic from the original _handle_mulligan - checks count, hand size etc.) ...
         current_mulls = gs.mulligan_count.get('p1' if player == gs.p1 else 'p2', 0)
         hand_size = len(player.get("hand", []))
-        
-        # Validate the mulligan is allowed (7 max mulligans or hand > 0)
-        if current_mulls >= 7:
-            logging.warning(f"Player has already taken maximum number of mulligans: {current_mulls}")
-            return -0.2, False
-        
-        if hand_size == 0:
-            logging.warning("Cannot mulligan with 0 cards in hand")
-            return -0.2, False
-        
-        # Perform the mulligan
-        result = False
+        if current_mulls >= 7: return -0.2, False
+        if hand_size == 0: return -0.2, False
+
+        result = None
         if hasattr(gs, 'perform_mulligan'):
             result = gs.perform_mulligan(player, keep_hand=False)
         else:
-            # Fallback mulligan implementation
-            logging.warning("Using fallback mulligan implementation")
-            
-            # Return cards to library
-            player["library"].extend(player["hand"])
-            player["hand"] = []
-            
-            # Shuffle
-            if hasattr(gs, 'shuffle_library'):
-                gs.shuffle_library(player)
-            else:
-                import random
-                random.shuffle(player["library"])
-            
-            # Draw new hand (1 fewer card)
-            new_size = max(0, 7 - current_mulls - 1)
-            for _ in range(new_size):
-                if player["library"]:
-                    card_id = player["library"].pop(0)
-                    player["hand"].append(card_id)
-            
-            # Update mulligan count
-            gs.mulligan_count['p1' if player == gs.p1 else 'p2'] = current_mulls + 1
-            
-            # Setup bottoming phase data
-            cards_to_bottom = min(1, new_size)
-            if cards_to_bottom > 0:
-                gs.cards_to_bottom = cards_to_bottom
-                gs.bottoming_player = player
-                gs.bottoming_in_progress = True
-                player._needs_to_bottom_next = True
-                
-            result = True
-        
-        if result:
-            # Calculate a scaling penalty based on how many mulligans taken
+             logging.error("perform_mulligan missing from GameState.")
+             return -0.2, False
+
+        # Check result from perform_mulligan
+        # perform_mulligan returns True if mulligan taken successfully
+        if result is True:
+            # Calculate penalty (remains the same)
             penalty = 0.05 * (current_mulls + 1)
             # Evaluate the quality of the hand just rejected
+            # --- Hand evaluation needs to happen *before* the mulligan replaces the hand ---
+            # This needs careful consideration: evaluate before calling perform_mulligan?
+            # Let's skip hand evaluation for now to focus on fixing the flow.
             hand_quality = 0
-            if self.card_evaluator:
-                for card_id in player.get("hand", []):
-                    hand_quality += self.card_evaluator.evaluate_card(card_id, "hand_strength") / max(1, hand_size)
-            
             # Bigger penalty for mulliganing good hands
-            adjusted_penalty = penalty * (1 + hand_quality)
-            logging.debug(f"Mulligan {current_mulls+1}: Penalty {adjusted_penalty:.2f} (base: {penalty:.2f}, hand quality: {hand_quality:.2f})")
-            
-            return -adjusted_penalty, True
+            adjusted_penalty = penalty # * (1 + hand_quality)
+            logging.debug(f"Mulligan {current_mulls+1}: Penalty {-adjusted_penalty:.2f}")
+            return -adjusted_penalty, True # Successful mulligan
         else:
+            # If perform_mulligan returns False or None, it failed or was not allowed
             logging.warning(f"Mulligan action failed (perform_mulligan returned {result})")
             return -0.2, False
 
@@ -2687,61 +2828,40 @@ class ActionHandler:
             tuple: (reward, success_flag)
         """
         gs = self.game_state
-        player = getattr(gs, 'mulligan_player', None)
-        
-        if not player:
-            logging.warning("KEEP_HAND action called but gs.mulligan_player is None")
-            return -0.2, False
-        
-        # Perform the "keep" decision using game state method
-        result = False
+        perspective_player = gs.p1 if gs.agent_is_p1 else gs.p2
+        current_mulligan_player = getattr(gs, 'mulligan_player', None)
+
+        if current_mulligan_player != perspective_player:
+             logging.warning(f"KEEP_HAND action called by {perspective_player.get('name','?')}, but mulligan player is {getattr(current_mulligan_player,'name','None')}.")
+             return -0.2, False # Invalid state/action timing
+
+        player = current_mulligan_player # Use validated player
+
+        result = None # perform_mulligan returns None for state transition, False for completion+no_draw
         if hasattr(gs, 'perform_mulligan'):
             result = gs.perform_mulligan(player, keep_hand=True)
         else:
-            # Fallback implementation
-            logging.warning("Using fallback keep hand implementation")
-            
-            # Get mulligan count
-            current_mulls = gs.mulligan_count.get('p1' if player == gs.p1 else 'p2', 0)
-            
-            # Setup bottoming phase if needed
-            if current_mulls > 0:
-                cards_to_bottom = min(current_mulls, len(player.get("hand", [])))
-                if cards_to_bottom > 0:
-                    gs.cards_to_bottom = cards_to_bottom 
-                    gs.bottoming_player = player
-                    gs.bottoming_in_progress = True
-                    player._needs_to_bottom_next = True
-            
-            # Check if opponent still needs to mulligan
-            opponent = gs.p2 if player == gs.p1 else gs.p1
-            if not getattr(opponent, '_mulligan_complete', True):
-                gs.mulligan_player = opponent
-            else:
-                # Both players done, end mulligan phase
-                gs.mulligan_in_progress = False
-                gs.mulligan_player = None
-                if not gs.bottoming_in_progress:
-                    gs.phase = gs.PHASE_PRIORITY
-            
-            result = True
-        
-        if result:
-            # Calculate reward based on hand quality
+            logging.error("perform_mulligan missing from GameState.")
+            return -0.2, False
+
+        # Process the result
+        # Result = None: State transitioned (switched mulligan player or went to bottoming), requires new action mask. Success = True.
+        # Result = False: Mulligan phase finished. Success = True.
+        if result is None or result is False:
+            # Evaluate hand quality (after keep decision)
             hand_quality = 0
             hand_size = len(player.get("hand", []))
-            
             if self.card_evaluator and hand_size > 0:
-                for card_id in player.get("hand", []):
-                    hand_quality += self.card_evaluator.evaluate_card(card_id, "hand_strength") / max(1, hand_size)
-            
-            # Reward for keeping a good hand
+                try: # Add try-except around evaluation
+                     for card_id in player.get("hand", []):
+                         hand_quality += self.card_evaluator.evaluate_card(card_id, "hand_strength") / max(1, hand_size)
+                except Exception as e: logging.error(f"Error evaluating hand quality: {e}")
+
             reward = 0.05 + hand_quality * 0.1
             logging.debug(f"Keep hand: Reward {reward:.2f} (hand quality: {hand_quality:.2f})")
-            
-            return reward, True
-        else:
-            logging.warning(f"Keep hand action failed (perform_mulligan returned {result})")
+            return reward, True # Action processed successfully
+        else: # Should not happen if perform_mulligan returns None/False correctly for keep
+            logging.warning(f"Keep hand action failed (perform_mulligan returned unexpected {result})")
             return -0.1, False
 
     def _handle_bottom_card(self, param, context, **kwargs):
@@ -2756,96 +2876,63 @@ class ActionHandler:
             tuple: (reward, success_flag)
         """
         gs = self.game_state
-        player = getattr(gs, 'bottoming_player', None)
-        hand_idx_to_bottom = param
-        
-        if not player:
-            logging.warning("BOTTOM_CARD action called but gs.bottoming_player is None")
+        perspective_player = gs.p1 if gs.agent_is_p1 else gs.p2
+        current_bottoming_player = getattr(gs, 'bottoming_player', None)
+        hand_idx_to_bottom = param # Param is already the index
+
+        if current_bottoming_player != perspective_player:
+            logging.warning(f"BOTTOM_CARD action called by {perspective_player.get('name','?')}, but bottoming player is {getattr(current_bottoming_player,'name','None')}.")
+            return -0.2, False # Invalid state/action timing
+
+        player = current_bottoming_player # Use validated player
+
+        # --- Validation (moved from GameState method to Handler) ---
+        if not getattr(gs, 'bottoming_in_progress', False):
+            logging.warning("BOTTOM_CARD called but not in bottoming phase.")
             return -0.2, False
-        
-        # Validate bottoming state
-        if not getattr(gs, 'bottoming_in_progress', False) or gs.bottoming_player != player:
-            logging.warning(f"BOTTOM_CARD called but not in bottoming phase for {player.get('name', 'Unknown')}")
-            return -0.2, False
-        
-        # Validate index
         if not isinstance(hand_idx_to_bottom, int) or hand_idx_to_bottom < 0:
-            logging.warning(f"Invalid hand index for bottoming: {hand_idx_to_bottom}")
-            return -0.15, False
-        
+             logging.warning(f"Invalid hand index for bottoming: {hand_idx_to_bottom}")
+             return -0.15, False
         hand = player.get("hand", [])
         if hand_idx_to_bottom >= len(hand):
-            logging.warning(f"Hand index {hand_idx_to_bottom} out of bounds (hand size: {len(hand)})")
-            return -0.15, False
-        
+             logging.warning(f"Hand index {hand_idx_to_bottom} out of bounds (hand size: {len(hand)})")
+             return -0.15, False
+        # --- End Validation ---
+
         # Get card and evaluate before bottoming
         card_id = hand[hand_idx_to_bottom]
         card = gs._safe_get_card(card_id)
-        card_name = getattr(card, 'name', card_id)
-        
-        # Evaluate strategic value of this card in current deck/matchup
         card_value = 0
         if self.card_evaluator and card:
-            # Use a "bottoming" evaluation context
-            card_value = self.card_evaluator.evaluate_card(card_id, "bottoming", 
-                                                        context_details={"hand_size": len(hand),
-                                                                        "mulligan_count": gs.mulligan_count.get('p1' if player == gs.p1 else 'p2', 0)})
-        
+            try: # Add try-except around evaluation
+                 eval_context = {"hand_size": len(hand), "mulligan_count": gs.mulligan_count.get('p1' if player == gs.p1 else 'p2', 0)}
+                 card_value = self.card_evaluator.evaluate_card(card_id, "bottoming", context_details=eval_context)
+            except Exception as e: logging.error(f"Error evaluating card for bottoming: {e}")
+
         # Attempt to bottom the card using game state
         success = False
         if hasattr(gs, 'bottom_card'):
-            success = gs.bottom_card(player, hand_idx_to_bottom)
+            success = gs.bottom_card(player, hand_idx_to_bottom) # GS method handles the logic and state transitions
         else:
-            # Fallback bottoming implementation
-            if hand_idx_to_bottom < len(hand):
-                bottomed_card = hand.pop(hand_idx_to_bottom)
-                player["library"].append(bottomed_card)  # Add to bottom
-                
-                # Update bottoming tracking
-                current_bottomed = getattr(gs, 'bottoming_count', 0)
-                gs.bottoming_count = current_bottomed + 1
-                
-                # Check if bottoming is complete
-                if gs.bottoming_count >= gs.cards_to_bottom:
-                    gs.bottoming_in_progress = False
-                    gs.bottoming_player = None
-                    player._bottoming_complete = True
-                    
-                    # Check if opponent needs to bottom
-                    opponent = gs.p2 if player == gs.p1 else gs.p1
-                    if getattr(opponent, '_needs_to_bottom_next', False):
-                        gs.bottoming_player = opponent
-                        gs.bottoming_in_progress = True
-                        gs.bottoming_count = 0
-                    else:
-                        # All bottoming complete, end mulligan phase
-                        gs.mulligan_in_progress = False
-                        # Move to first turn
-                        gs.phase = gs.PHASE_PRIORITY
-                
-                success = True
-        
+             logging.error("bottom_card method missing from GameState.")
+             return -0.2, False
+
+        # Calculate reward/penalty based on card value
+        # More penalty for bottoming high-value cards
+        reward_mod = -0.01 - (card_value * 0.05)
+        # Apply reward based on success
         if success:
-            # Calculate reward/penalty based on card value
-            # More penalty for bottoming high-value cards
-            reward_mod = -0.01 - (card_value * 0.05)
-            
-            # Add context to logging
-            logging.debug(f"Bottomed {card_name} (value: {card_value:.2f}, reward mod: {reward_mod:.2f})")
-            
-            # Check if bottoming is now complete
+            # Check if bottoming is now complete (from GameState's perspective)
             if not gs.bottoming_in_progress and not gs.mulligan_in_progress:
-                logging.debug("Bottoming action completed the entire mulligan phase")
-                return 0.05 + reward_mod, True  # Bonus for completing phase
-            elif not gs.bottoming_in_progress and gs.mulligan_in_progress:
-                logging.debug("Bottoming finished for this player, mulligan continues")
-                return 0.03 + reward_mod, True  # Small bonus for completing player's bottoming
-            else:
-                logging.debug("Bottoming action chosen, more cards needed")
-                return 0.02 + reward_mod, True  # Small incremental reward
+                 final_reward = 0.05 + reward_mod
+            elif not gs.bottoming_in_progress and gs.mulligan_in_progress: # Waiting for opponent bottoming
+                 final_reward = 0.03 + reward_mod
+            else: # More bottoming needed from this player
+                 final_reward = 0.02 + reward_mod
+            return final_reward, True
         else:
-            logging.warning(f"Failed to bottom card at index {hand_idx_to_bottom}")
-            return -0.05, False
+             logging.warning(f"Failed to bottom card at index {hand_idx_to_bottom} (GameState returned False).")
+             return -0.05, False
 
     def _handle_upkeep_pass(self, param, **kwargs):
         """Handle transitioning from upkeep step."""
@@ -5995,8 +6082,6 @@ class ActionHandler:
                             if can_afford_adventure:
                                 set_valid_action(196 + hand_idx, f"PLAY_ADVENTURE for {adventure_data.get('name', 'Unknown')}")
                                 
-    
-                                
     def _can_afford_card(self, player, card_or_data, is_back_face=False, context=None):
         """Check affordability using ManaSystem, handling dict or Card object."""
         gs = self.game_state
@@ -6814,3 +6899,4 @@ class ActionHandler:
             return True
             
         return False 
+    
