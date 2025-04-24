@@ -314,6 +314,7 @@ class AlphaZeroMTGEnv(gym.Env):
         return self.current_valid_actions.astype(bool)
     
 
+
     def reset(self, seed=None, **kwargs):
         """
         Reset the environment and return initial observation and info.
@@ -330,6 +331,11 @@ class AlphaZeroMTGEnv(gym.Env):
         try:
             # --- Pre-Reset Logging & Safety Checks ---
             logging.info(f"RESETTING environment {env_id}...")
+            # ---> ADDED LOGGING <---
+            initial_agent_is_p1_val = getattr(self.game_state, 'agent_is_p1', 'Not Set Yet')
+            logging.debug(f"Env Reset Start: gs.agent_is_p1 is {initial_agent_is_p1_val}")
+            # ---> END ADDED LOGGING <---
+
             if DEBUG_MODE:
                 import traceback
                 logging.debug(f"Reset call stack (last 5 frames):\n{''.join(traceback.format_stack()[-6:-1])}")
@@ -367,6 +373,10 @@ class AlphaZeroMTGEnv(gym.Env):
             # GameState.reset calls _init_player and _init_subsystems internally
             self.game_state.reset(self.original_p1_deck, self.original_p2_deck, seed)
             gs = self.game_state # Alias for convenience
+            # ---> ADDED LOGGING <---
+            agent_is_p1_after_gs_reset = getattr(gs, 'agent_is_p1', 'ERROR - Not Set')
+            logging.debug(f"Env Reset Mid: After gs.reset(), gs.agent_is_p1 is {agent_is_p1_after_gs_reset}")
+            # ---> END ADDED LOGGING <---
 
             # --- Link Subsystems to GameState and Environment ---
             # External systems (passed or previously set)
@@ -432,18 +442,30 @@ class AlphaZeroMTGEnv(gym.Env):
                  if self.strategy_memory:
                      self.strategic_planner.strategy_memory = self.strategy_memory
                  # Call init_after_reset here, AFTER linking and other setup
-                 self.strategic_planner.init_after_reset()
+                 # ---> Check if method exists before calling ---
+                 if hasattr(self.strategic_planner, 'init_after_reset'):
+                     self.strategic_planner.init_after_reset()
+                 else:
+                      logging.warning("Strategic Planner does not have 'init_after_reset' method.")
 
 
             # --- Final Reset Steps ---
             # Perform initial analysis AFTER planner is initialized
             if self.strategic_planner:
                 try:
-                    self.strategic_planner.analyze_game_state()
+                     # ---> Check if method exists before calling ---
+                     if hasattr(self.strategic_planner, 'analyze_game_state'):
+                        self.strategic_planner.analyze_game_state()
+                     else:
+                        logging.warning("Strategic Planner does not have 'analyze_game_state' method.")
                 except Exception as analysis_e:
                     logging.warning(f"Error during initial game state analysis: {analysis_e}")
 
             # Generate the FIRST action mask based on the MULLIGAN state
+            # ---> ADDED LOGGING <---
+            mull_player_before_mask = getattr(getattr(gs, 'mulligan_player', None), 'name', 'None')
+            logging.debug(f"Env Reset: BEFORE initial action mask gen. Mulligan Player = {mull_player_before_mask}")
+            # ---> END ADDED LOGGING <---
             self.current_valid_actions = self.action_mask() # Calls handler.generate_valid_actions()
 
             # Get the initial observation
@@ -468,12 +490,17 @@ class AlphaZeroMTGEnv(gym.Env):
                          info["action_mask"][6] = True # Mulligan
                          info["action_mask"][12] = True # Concede
 
-            logging.info(f"Environment {env_id} reset complete. Mulligan phase active for {getattr(gs.mulligan_player,'name','N/A')}.")
+            # ---> ADDED LOGGING <---
+            prio_player_at_reset_end = getattr(getattr(gs, 'priority_player', None), 'name', 'None')
+            mull_player_at_reset_end = getattr(getattr(gs, 'mulligan_player', None), 'name', 'None')
+            bottom_player_at_reset_end = getattr(getattr(gs, 'bottoming_player', None), 'name', 'None')
+            logging.debug(f"Env Reset End: Returning obs/info. Prio='{prio_player_at_reset_end}', Mull='{mull_player_at_reset_end}', Bottom='{bottom_player_at_reset_end}'")
+            # ---> END ADDED LOGGING <---
+            logging.info(f"Environment {env_id} reset complete. Mulligan phase active for {mull_player_at_reset_end}.") # Corrected logging var
             logging.info(f"P1 Deck: {self.current_deck_name_p1}, P2 Deck: {self.current_deck_name_p2}")
 
             return obs, info
 
-        # ... (rest of reset error handling remains the same) ...
         except Exception as e:
             # --- Critical Error Handling during Reset ---
             logging.critical(f"CRITICAL error during environment reset: {str(e)}", exc_info=True)
@@ -489,8 +516,7 @@ class AlphaZeroMTGEnv(gym.Env):
                      dummy_data = {"name": "Dummy", "type_line": "Creature"}
                      self.card_db["dummy_card"] = Card(dummy_data)
 
-                self.game_state.p1 = self.game_state._init_player(deck.copy(), 1) # Minimal player init
-                self.game_state.p2 = self.game_state._init_player(deck.copy(), 2)
+                self.game_state.reset(deck.copy(), deck.copy(), seed=None) # Reset with minimal decks
                 self.game_state.agent_is_p1 = True
 
                 # Set game state to start of first turn directly, skipping mulligan
@@ -498,14 +524,15 @@ class AlphaZeroMTGEnv(gym.Env):
                 self.game_state.phase = self.game_state.PHASE_MAIN_PRECOMBAT # Start in a standard phase
                 self.game_state.mulligan_in_progress = False
                 self.game_state.bottoming_in_progress = False
-                # Initialize minimal subsystems AFTER setting basic state
-                self.game_state._init_subsystems()
-                # Link handler
-                from .actions import ActionHandler # Ensure import
-                self.action_handler = getattr(self.game_state, 'action_handler', ActionHandler(self.game_state))
-                self.game_state.action_handler = self.action_handler # Ensure GS has link
-                # Set priority AFTER subsystems are in place
-                self.game_state.priority_player = self.game_state.p1
+                # Ensure priority player is set correctly for Turn 1 after emergency reset
+                self.game_state.priority_player = self.game_state._get_active_player()
+
+                # Link handler (must exist in GS after reset)
+                self.action_handler = getattr(self.game_state, 'action_handler')
+                if not self.action_handler:
+                     logging.error("Emergency Reset: ActionHandler still missing!")
+                     # Cannot recover if basic systems fail
+                     raise RuntimeError("Emergency reset failed to create ActionHandler.")
 
                 # Provide minimal valid actions
                 self.current_valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
@@ -955,6 +982,7 @@ class AlphaZeroMTGEnv(gym.Env):
 
             if not (0 <= action_idx < self.ACTION_SPACE_SIZE):
                 logging.error(f"Step {self.current_step}: Action index {action_idx} out of bounds.")
+                gs.agent_is_p1 = initial_agent_is_p1 # Ensure perspective before safe obs
                 obs = self._get_obs_safe() # Ensure perspective is agent's
                 env_info["critical_error"] = True; env_info["error_message"] = "Action index OOB"
                 env_info["action_mask"] = current_mask # Provide the mask that was current when error occurred
@@ -983,6 +1011,15 @@ class AlphaZeroMTGEnv(gym.Env):
             # --- 3. Execute VALID AGENT's Action using ActionHandler ---
             # Set perspective correctly before applying agent action
             gs.agent_is_p1 = initial_agent_is_p1
+            # --- Ensure action handler exists before calling apply_action ---
+            if not self.action_handler:
+                 logging.critical("ActionHandler is None in env.step before applying action! Cannot proceed.")
+                 env_info["critical_error"] = True; env_info["error_message"] = "ActionHandler is None"
+                 env_info["action_mask"] = current_mask
+                 gs.agent_is_p1 = initial_agent_is_p1 # Ensure perspective before safe obs
+                 obs = self._get_obs_safe()
+                 return obs, -5.0, True, False, env_info # done=True
+
             reward, done, truncated, handler_info = self.action_handler.apply_action(action_idx, context=action_context)
             env_info.update(handler_info) # Merge info
 
@@ -1017,6 +1054,14 @@ class AlphaZeroMTGEnv(gym.Env):
 
                 # --- d. Apply Opponent's Action using ActionHandler ---
                 # Apply action from the OPPONENT'S perspective (mask was generated above)
+                # ---> Ensure action handler exists before opponent action <---
+                if not self.action_handler:
+                     logging.critical("ActionHandler became None before opponent action! Cannot proceed.")
+                     env_info["critical_error"] = True; env_info["error_message"] = "ActionHandler became None mid-step"
+                     done=True; truncated=True
+                     gs.agent_is_p1 = initial_agent_is_p1 # Restore perspective
+                     break # Exit opponent loop
+
                 _, opp_done, opp_truncated, opp_handler_info = self.action_handler.apply_action(opponent_action_idx, context=opponent_action_context)
 
                 # Check if the opponent's action ended the game
@@ -1026,6 +1071,7 @@ class AlphaZeroMTGEnv(gym.Env):
                     env_info["critical_error"] = True
                     env_info["error_message"] = opp_handler_info.get("error_message", "Opponent action critical error")
                     logging.error(f"Critical error during opponent action {opponent_action_idx}. Ending step.")
+                    done=True; truncated=True # Force end on opponent error
                     gs.agent_is_p1 = initial_agent_is_p1 # Restore perspective before breaking
                     break # Exit opponent loop on critical error
 
@@ -1074,12 +1120,22 @@ class AlphaZeroMTGEnv(gym.Env):
             gs.agent_is_p1 = initial_agent_is_p1
             obs = self._get_obs_safe()
             # *** Regenerate mask AFTER perspective is confirmed ***
+            # ---> ADDED LOGGING <---
+            prio_player_before_final_mask = getattr(getattr(gs, 'priority_player', None), 'name', 'None')
+            current_phase_name = gs._PHASE_NAMES.get(gs.phase, gs.phase) if gs and hasattr(gs, '_PHASE_NAMES') else "N/A" # Safe phase name access
+            logging.debug(f"Env Step End: BEFORE final agent mask gen. Prio='{prio_player_before_final_mask}', Phase={current_phase_name}")
+            # ---> END ADDED LOGGING <---
             try:
                 final_agent_mask = self.action_mask().astype(bool)
             except Exception as final_mask_e:
                  logging.error(f"Error generating final agent mask: {final_mask_e}. Using fallback.", exc_info=True)
                  final_agent_mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool); final_agent_mask[11]=True; final_agent_mask[12]=True
             env_info["action_mask"] = final_agent_mask # This mask is for the NEXT agent action
+
+            # ---> ADDED LOGGING <---
+            prio_player_after_final_mask = getattr(getattr(gs, 'priority_player', None), 'name', 'None')
+            logging.debug(f"Env Step End: AFTER final agent mask gen. Prio='{prio_player_after_final_mask}'")
+            # ---> END ADDED LOGGING <---
 
             # --- 8. Record History and Finalize ---
             if hasattr(self, 'last_n_actions'): self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
@@ -1095,11 +1151,13 @@ class AlphaZeroMTGEnv(gym.Env):
 
             # Log step summary
             if self.detailed_logging or DEBUG_ACTION_STEPS:
-                action_type_log, param_log = self.action_handler.get_action_info(action_idx)
+                action_type_log, param_log = self.action_handler.get_action_info(action_idx) if self.action_handler else ("N/A", "N/A")
                 logging.info(f"--- Env Step {self.current_step} COMPLETE ---")
                 logging.info(f"Agent Action: {action_idx} ({action_type_log}({param_log}))")
                 logging.info(f"Opponent Loops: {opponent_loop_count}")
-                logging.info(f"Final State: Turn {gs.turn}, Phase {gs._PHASE_NAMES.get(gs.phase, gs.phase)}, Prio {getattr(gs.priority_player,'name','None')}")
+                final_prio_name = getattr(getattr(gs,'priority_player',None), 'name', 'None') if gs else 'None'
+                final_phase_name = gs._PHASE_NAMES.get(gs.phase, gs.phase) if gs and hasattr(gs, '_PHASE_NAMES') else 'N/A' # Safe access
+                logging.info(f"Final State: Turn {gs.turn if gs else 'N/A'}, Phase {final_phase_name}, Prio {final_prio_name}")
                 logging.info(f"Returned Reward: {step_reward:.4f}, Done: {done}, Truncated: {truncated}")
 
             return obs, step_reward, done, truncated, env_info

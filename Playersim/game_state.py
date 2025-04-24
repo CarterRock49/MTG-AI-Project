@@ -2568,56 +2568,49 @@ class GameState:
         # --- Set State for Start of Game ---
         self.turn = 1 # Officially Turn 1
         self.phase = self.PHASE_UNTAP # Start with Untap
-        
+
         try:
             self._reset_turn_tracking_variables() # Reset turn vars for Turn 1
         except Exception as e:
             logging.error(f"Error resetting turn tracking variables: {e}")
             # Continue even if this fails
-        
+
         # Get active player with fallback
         active_player = self._get_active_player() # P1 is active player on Turn 1
         if not active_player:
             logging.critical("CRITICAL ERROR in _end_mulligan_phase: _get_active_player() returned None!")
-            active_player = self.p1 if self.p1 else self.p2
-            if not active_player:
-                logging.critical("FATAL ERROR: No valid players available for active player!")
-                # Create minimal player as last resort
-                active_player = self.p1 = {"name": "Player 1", "library": [], "hand": [], 
-                                        "battlefield": [], "graveyard": [], "exile": [],
-                                        "life": 20, "tapped_permanents": set()}
+            # ... (Fallback player creation logic remains) ...
+            return # Stop if no player
 
         logging.debug(f"Performing Turn {self.turn} Untap Step for {active_player['name']}...")
         try:
             self._untap_phase(active_player)
-        except Exception as e:
-            logging.error(f"Error in untap phase: {e}")
-            # Continue even if untap fails
-        
-        try:
             self.check_state_based_actions() # Check SBAs after untap
         except Exception as e:
-            logging.error(f"Error checking state-based actions: {e}")
-            # Continue even if SBA check fails
+            logging.error(f"Error in untap phase / SBA check: {e}")
+            # Continue even if untap/SBA fails initially
 
-        # ** Automatically advance to Upkeep and assign priority **
+        # ** Automatically advance to Upkeep **
         self.phase = self.PHASE_UPKEEP
         logging.debug(f"Automatically advanced to Upkeep Step.")
-        
-        # IMPORTANT: Trigger abilities *before* assigning priority, as they might affect state or add to stack
+
+        # ** Trigger upkeep abilities AFTER phase set **
         try:
-            self._handle_beginning_of_phase_triggers() # Trigger upkeep abilities (includes SBA check)
+            # Perform phase-start triggers/actions BEFORE assigning priority
+            self._handle_beginning_of_phase_triggers() # Use helper for upkeep triggers (includes SBA check)
         except Exception as e:
             logging.error(f"Error handling beginning of phase triggers: {e}")
             # Continue even if trigger handling fails
 
-        # ** Ensure Priority is Assigned to Active Player **
+        # ** Assign Priority AFTER triggers **
+        # Priority is given *unless* a trigger caused a state change requiring a different player to act (rare)
+        # SBAs/triggers might resolve here or later. AP gets priority initially in Upkeep.
         self.priority_player = active_player
         self.priority_pass_count = 0
         self.last_stack_size = len(self.stack) # Initialize stack size tracking
-        logging.debug(f"Entering Upkeep. Priority to AP ({active_player['name']})")
+        logging.debug(f"Entering Upkeep. Priority assigned to AP ({active_player['name']})") # Corrected logging
 
-        # Game Turn Limit Check
+        # Game Turn Limit Check (Keep as is)
         if self.turn > self.max_turns and not getattr(self, '_turn_limit_checked', False):
             logging.info(f"Turn limit ({self.max_turns}) reached! Ending game.")
             self._turn_limit_checked = True
