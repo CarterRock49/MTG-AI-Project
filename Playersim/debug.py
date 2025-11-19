@@ -1,7 +1,9 @@
-# Create a modified debug.py file with comprehensive logging and file rotation
+# debug.py
+
 import logging
 import traceback
 import os
+import numpy as np
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
@@ -61,6 +63,7 @@ console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(
 
 # Configure root logger
 root_logger = logging.getLogger()
+# Force level to DEBUG if mode is on, regardless of other libraries
 root_logger.setLevel(logging.DEBUG if DEBUG_MODE else logging.INFO)
 root_logger.addHandler(error_handler)
 root_logger.addHandler(warning_handler)
@@ -87,3 +90,76 @@ def log_exception(exception, additional_info=""):
     error_msg = f"{additional_info}\nException: {str(exception)}\n"
     error_msg += traceback.format_exc()
     logging.error(error_msg)
+
+def debug_log_valid_actions(game_state, valid_actions, action_reasons, action_lookup_func):
+    """
+    Helper to log all available actions in a readable format for debugging.
+    Robust version using standard logging module.
+    """
+    # Only spend compute time if debug logging is enabled
+    if logging.getLogger().isEnabledFor(logging.DEBUG):
+        try:
+            # Ensure valid_actions is a numpy array
+            if not isinstance(valid_actions, np.ndarray):
+                valid_actions = np.array(valid_actions)
+                
+            valid_indices = np.where(valid_actions)[0]
+            count = len(valid_indices)
+            
+            # Identify player
+            player_name = "Unknown"
+            if hasattr(game_state, 'agent_is_p1'):
+                p = game_state.p1 if game_state.agent_is_p1 else game_state.p2
+                if p: player_name = p.get('name', 'Player')
+            
+            # Identify phase
+            phase_name = "Unknown Phase"
+            if hasattr(game_state, 'phase'):
+                # Try to lookup phase name, fallback to int
+                phase_name = getattr(game_state, '_PHASE_NAMES', {}).get(game_state.phase, f"PHASE_{game_state.phase}")
+            
+            # Header
+            log_lines = [f"\n=== 🤖 AI ACTIONS ({count}): {player_name} [{phase_name}] ==="]
+            
+            if count == 0:
+                log_lines.append("  (No valid actions found)")
+            else:
+                for idx in valid_indices:
+                    # 1. Get Action Name
+                    act_name = "Unknown"
+                    if action_lookup_func:
+                        try:
+                            info = action_lookup_func(idx)
+                            if isinstance(info, tuple):
+                                act_name = f"{info[0]}({info[1]})"
+                            else:
+                                act_name = str(info)
+                        except Exception:
+                            act_name = f"Action_{idx}"
+                    
+                    # 2. Get Reason/Context
+                    details = ""
+                    entry = action_reasons.get(idx)
+                    if isinstance(entry, dict):
+                        reason = entry.get("reason", "")
+                        ctx = entry.get("context", {})
+                        # Format context concisely
+                        ctx_str = str(ctx) if ctx else ""
+                        if ctx_str == "{}": ctx_str = ""
+                        
+                        details = f" | {reason}"
+                        if ctx_str: details += f" | {ctx_str}"
+                    elif entry:
+                        details = f" | {str(entry)}"
+                        
+                    log_lines.append(f"  [{idx:03d}] {act_name:<30}{details}")
+
+            log_lines.append("==========================================================")
+            
+            # Log as a single block to prevent interleaving
+            logging.debug("\n".join(log_lines))
+            
+        except Exception as e:
+            # Fallback if formatting fails
+            logging.error(f"Failed to log valid actions: {e}")
+            # print(f"DEBUG FAIL: {e}") # Uncomment for extreme debugging

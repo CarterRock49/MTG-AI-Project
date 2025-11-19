@@ -312,240 +312,178 @@ class AlphaZeroMTGEnv(gym.Env):
 
         # Return bool version
         return self.current_valid_actions.astype(bool)
-    
 
+    def reset(self, seed=None, options=None):
+            """
+            Reset the environment and return initial observation and info.
+            Aligns with GameState starting in the Mulligan phase.
 
-    def reset(self, seed=None, **kwargs):
-        """
-        Reset the environment and return initial observation and info.
-        Aligns with GameState starting in the Mulligan phase.
+            Args:
+                seed: Random seed
+                options: Dictionary of options (Gymnasium API)
 
-        Args:
-            seed: Random seed
-            **kwargs: Additional keyword arguments (required by Gymnasium API)
-
-        Returns:
-            tuple: Initial observation and info dictionary
-        """
-        env_id = getattr(self, "env_id", id(self)) # For tracking
-        try:
-            # --- Pre-Reset Logging & Safety Checks ---
-            logging.info(f"RESETTING environment {env_id}...")
-            # ---> ADDED LOGGING <---
-            initial_agent_is_p1_val = getattr(self.game_state, 'agent_is_p1', 'Not Set Yet')
-            logging.debug(f"Env Reset Start: gs.agent_is_p1 is {initial_agent_is_p1_val}")
-            # ---> END ADDED LOGGING <---
-
-            if DEBUG_MODE:
-                import traceback
-                logging.debug(f"Reset call stack (last 5 frames):\n{''.join(traceback.format_stack()[-6:-1])}")
-
-            # Call parent reset method (for seeding primarily)
-            super().reset(seed=seed)
-
-            # --- Reset Internal Environment State ---
-            self.current_step = 0
-            self.invalid_action_count = 0
-            self.episode_rewards = []
-            self.episode_invalid_actions = 0
-            self.current_episode_actions = []
-            self._game_result_recorded = False # Reset recording flag
-            self._logged_card_ids = set() # Reset logging trackers
-            self._logged_errors = set()   # Reset logging trackers
-            self.last_n_actions = np.full(self.action_memory_size, -1, dtype=np.int32) # Reset action history
-            self.last_n_rewards = np.zeros(self.action_memory_size, dtype=np.float32) # Reset reward history
-            # Ensure these are reset if they exist
-            if hasattr(self, '_phase_history_counts'): self._phase_history_counts = defaultdict(int)
-            if hasattr(self, '_last_phase_progressed'): self._last_phase_progressed = -1
-            if hasattr(self, '_phase_stuck_count'): self._phase_stuck_count = 0
-
-            # --- Reset GameState and Player Setup ---
-            # Choose decks
-            p1_deck_data = random.choice(self.decks)
-            p2_deck_data = random.choice(self.decks)
-            self.current_deck_name_p1 = p1_deck_data["name"]
-            self.current_deck_name_p2 = p2_deck_data["name"]
-            self.original_p1_deck = p1_deck_data["cards"].copy() # Store original for memory
-            self.original_p2_deck = p2_deck_data["cards"].copy()
-
-            # Initialize GameState - it will handle player init, deck shuffle, hand draw, and setting mulligan state
-            self.game_state = GameState(self.card_db, self.max_turns, self.max_hand_size, self.max_battlefield)
-            # GameState.reset calls _init_player and _init_subsystems internally
-            self.game_state.reset(self.original_p1_deck, self.original_p2_deck, seed)
-            gs = self.game_state # Alias for convenience
-            # ---> ADDED LOGGING <---
-            agent_is_p1_after_gs_reset = getattr(gs, 'agent_is_p1', 'ERROR - Not Set')
-            logging.debug(f"Env Reset Mid: After gs.reset(), gs.agent_is_p1 is {agent_is_p1_after_gs_reset}")
-            # ---> END ADDED LOGGING <---
-
-            # --- Link Subsystems to GameState and Environment ---
-            # External systems (passed or previously set)
-            self.initialize_strategic_memory() # Ensures self.strategy_memory exists if available
-            if self.strategy_memory: gs.strategy_memory = self.strategy_memory # Link GS to env's memory
-            if self.has_stats_tracker and self.stats_tracker:
-                gs.stats_tracker = self.stats_tracker # Link GS to env's tracker
-                self.stats_tracker.current_deck_name_p1 = self.current_deck_name_p1
-                self.stats_tracker.current_deck_name_p2 = self.current_deck_name_p2
-            if self.has_card_memory and self.card_memory:
-                gs.card_memory = self.card_memory # Link GS to env's card memory
-                # *** REMOVED problematic clear_temporary_data call ***
-                # self.card_memory.clear_temporary_data() # Replaced with cache clear if needed
-
-            # Internal subsystems (created by gs.reset -> _init_subsystems)
-            # Get references from the NEWLY created GameState instance
-            subsystems_to_check = ['action_handler', 'combat_resolver', 'card_evaluator', 'strategic_planner',
-                                   'mana_system', 'ability_handler', 'layer_system',
-                                   'replacement_effects', 'targeting_system']
-            for system_name in subsystems_to_check:
-                # Get the subsystem instance from GameState
-                subsystem_instance = getattr(gs, system_name, None)
-                setattr(self, system_name, subsystem_instance) # Set the reference on the Environment object
-                if subsystem_instance is None:
-                    logging.warning(f"GameState is missing expected subsystem: '{system_name}'. Env ref set to None.")
-                elif not hasattr(subsystem_instance, 'game_state') or subsystem_instance.game_state != gs:
-                    # Ensure subsystem is linked back to the *current* GameState instance
-                    setattr(subsystem_instance, 'game_state', gs)
-                    logging.debug(f"Relinked {system_name} to current GameState.")
-                # Ensure Env's strategic planner points to the one just created/linked from GS
-                if system_name == 'strategic_planner':
-                     self.strategic_planner = subsystem_instance
-
-
-            # Ensure critical ActionHandler is set AND linked to THIS environment instance
-            if not self.action_handler:
-                logging.error("ActionHandler is None after GameState reset and subsystem linking!")
-                # Attempt recreation (should not be necessary if GS init works)
-                from .actions import ActionHandler # Import locally if needed
-                self.action_handler = ActionHandler(gs) # Use the gs instance created above
-                gs.action_handler = self.action_handler
-            else:
-                # Ensure the existing handler is linked to the *new* game_state
-                self.action_handler.game_state = gs
-                self.action_handler.card_evaluator = gs.card_evaluator # Relink evaluator
-                self.action_handler.combat_handler = gs.combat_action_handler # Relink combat handler
-
-            # Integrate combat actions after subsystems are linked
-            integrate_combat_actions(self.game_state)
-            if hasattr(self.action_handler, 'combat_handler') and self.action_handler.combat_handler:
-                self.action_handler.combat_handler.game_state = self.game_state
-                self.action_handler.combat_handler.card_evaluator = self.card_evaluator # Link evaluator
-                self.action_handler.combat_handler.setup_combat_systems()
-
-            # Update links for subsystems needing external trackers (e.g., CardEvaluator needs stats/card memory)
-            if self.card_evaluator:
-                 self.card_evaluator.stats_tracker = self.stats_tracker
-                 self.card_evaluator.card_memory = self.card_memory
-                 self.card_evaluator.game_state = gs # Ensure linked to new GS
-            if self.strategic_planner: # Check if planner exists before accessing
-                 self.strategic_planner.game_state = gs # Ensure linked to new GS
-                 self.strategic_planner.card_evaluator = self.card_evaluator # Ensure linked
-                 if self.strategy_memory:
-                     self.strategic_planner.strategy_memory = self.strategy_memory
-                 # Call init_after_reset here, AFTER linking and other setup
-                 # ---> Check if method exists before calling ---
-                 if hasattr(self.strategic_planner, 'init_after_reset'):
-                     self.strategic_planner.init_after_reset()
-                 else:
-                      logging.warning("Strategic Planner does not have 'init_after_reset' method.")
-
-
-            # --- Final Reset Steps ---
-            # Perform initial analysis AFTER planner is initialized
-            if self.strategic_planner:
-                try:
-                     # ---> Check if method exists before calling ---
-                     if hasattr(self.strategic_planner, 'analyze_game_state'):
-                        self.strategic_planner.analyze_game_state()
-                     else:
-                        logging.warning("Strategic Planner does not have 'analyze_game_state' method.")
-                except Exception as analysis_e:
-                    logging.warning(f"Error during initial game state analysis: {analysis_e}")
-
-            # Generate the FIRST action mask based on the MULLIGAN state
-            # ---> ADDED LOGGING <---
-            mull_player_before_mask = getattr(getattr(gs, 'mulligan_player', None), 'name', 'None')
-            logging.debug(f"Env Reset: BEFORE initial action mask gen. Mulligan Player = {mull_player_before_mask}")
-            # ---> END ADDED LOGGING <---
-            self.current_valid_actions = self.action_mask() # Calls handler.generate_valid_actions()
-
-            # Get the initial observation
-            obs = self._get_obs_safe() # Ensure safety during initial obs generation
-
-            # Prepare the info dictionary
-            info = {
-                "action_mask": self.current_valid_actions.astype(bool) if self.current_valid_actions is not None else np.zeros(self.ACTION_SPACE_SIZE, dtype=bool),
-                "initial_state": True,
-                "mulligan_active": gs.mulligan_in_progress # Indicate mulligan phase
-            }
-            # Ensure mulligan actions are valid in the initial mask
-            if gs.mulligan_in_progress and info["action_mask"] is not None:
-                 expected_mull_actions = [6, 225] # MULLIGAN, KEEP_HAND (Also potentially BOTTOM_CARD or NO_OP)
-                 if not np.any(info["action_mask"]): # Check if mask is entirely false
-                     logging.error("Initial mask generated during mulligan is EMPTY! Attempting regeneration/fallback.")
-                     self.current_valid_actions = self.action_mask() # Retry generation
-                     info["action_mask"] = self.current_valid_actions.astype(bool)
-                     if not np.any(info["action_mask"]): # Still empty?
-                         logging.critical("Initial mulligan mask STILL empty! Forcing basic options.")
-                         info["action_mask"][225] = True # Keep
-                         info["action_mask"][6] = True # Mulligan
-                         info["action_mask"][12] = True # Concede
-
-            # ---> ADDED LOGGING <---
-            prio_player_at_reset_end = getattr(getattr(gs, 'priority_player', None), 'name', 'None')
-            mull_player_at_reset_end = getattr(getattr(gs, 'mulligan_player', None), 'name', 'None')
-            bottom_player_at_reset_end = getattr(getattr(gs, 'bottoming_player', None), 'name', 'None')
-            logging.debug(f"Env Reset End: Returning obs/info. Prio='{prio_player_at_reset_end}', Mull='{mull_player_at_reset_end}', Bottom='{bottom_player_at_reset_end}'")
-            # ---> END ADDED LOGGING <---
-            logging.info(f"Environment {env_id} reset complete. Mulligan phase active for {mull_player_at_reset_end}.") # Corrected logging var
-            logging.info(f"P1 Deck: {self.current_deck_name_p1}, P2 Deck: {self.current_deck_name_p2}")
-
-            return obs, info
-
-        except Exception as e:
-            # --- Critical Error Handling during Reset ---
-            logging.critical(f"CRITICAL error during environment reset: {str(e)}", exc_info=True)
+            Returns:
+                tuple: Initial observation and info dictionary
+            """
+            env_id = getattr(self, "env_id", id(self)) # For tracking
             try:
-                logging.warning("Attempting emergency fallback reset...")
-                # --- Fallback State Setup ---
+                # --- Pre-Reset Logging & Safety Checks ---
+                logging.info(f"RESETTING environment {env_id}...")
+                
+                # Call parent reset method (Gymnasium handles seeding)
+                super().reset(seed=seed, options=options)
+
+                # --- Reset Internal Environment State ---
+                self.current_step = 0
+                self.invalid_action_count = 0
+                self.episode_rewards = []
+                self.episode_invalid_actions = 0
+                self.current_episode_actions = []
+                self._game_result_recorded = False
+                self._logged_card_ids = set()
+                self._logged_errors = set()
+                self.last_n_actions = np.full(self.action_memory_size, -1, dtype=np.int32)
+                self.last_n_rewards = np.zeros(self.action_memory_size, dtype=np.float32)
+                if hasattr(self, '_phase_history_counts'): self._phase_history_counts = defaultdict(int)
+                if hasattr(self, '_last_phase_progressed'): self._last_phase_progressed = -1
+                if hasattr(self, '_phase_stuck_count'): self._phase_stuck_count = 0
+
+                # --- Deck Selection ---
+                if not self.decks:
+                    logging.error("No decks available in environment! Using dummy deck.")
+                    dummy_deck = [{"name": "Dummy Card", "type_line": "Creature", "mana_cost": "{1}", "card_id": "dummy_1"}] * 60
+                    p1_deck_data = {"name": "Dummy Deck P1", "cards": dummy_deck}
+                    p2_deck_data = {"name": "Dummy Deck P2", "cards": dummy_deck}
+                else:
+                    p1_deck_data = random.choice(self.decks)
+                    p2_deck_data = random.choice(self.decks)
+                
+                self.current_deck_name_p1 = p1_deck_data.get("name", "P1_Deck")
+                self.current_deck_name_p2 = p2_deck_data.get("name", "P2_Deck")
+                # Safely copy card lists (ensure they are lists of IDs)
+                self.original_p1_deck = p1_deck_data.get("cards", []).copy()
+                self.original_p2_deck = p2_deck_data.get("cards", []).copy()
+
+                # --- Initialize GameState ---
+                # Create fresh GameState instance
                 self.game_state = GameState(self.card_db, self.max_turns, self.max_hand_size, self.max_battlefield)
-                deck = self.decks[0]["cards"].copy() if self.decks else ["dummy_card"]*60 # Minimal deck
-                if "dummy_card" not in self.card_db and self.decks: # Add card if missing
-                    dummy_data = {"name": "Dummy", "type_line": "Creature"}
-                    self.card_db["dummy_card"] = Card(dummy_data)
-                elif not self.decks:
-                     dummy_data = {"name": "Dummy", "type_line": "Creature"}
-                     self.card_db["dummy_card"] = Card(dummy_data)
+                
+                # Reset GameState (Initializes players, hands, subsystems)
+                self.game_state.reset(self.original_p1_deck, self.original_p2_deck, seed)
+                gs = self.game_state # Alias
 
-                self.game_state.reset(deck.copy(), deck.copy(), seed=None) # Reset with minimal decks
-                self.game_state.agent_is_p1 = True
+                # --- Link Subsystems to Environment ---
+                # 1. External Systems
+                self.initialize_strategic_memory()
+                if self.strategy_memory: 
+                    gs.strategy_memory = self.strategy_memory
+                    
+                if self.has_stats_tracker and self.stats_tracker:
+                    gs.stats_tracker = self.stats_tracker
+                    self.stats_tracker.current_deck_name_p1 = self.current_deck_name_p1
+                    self.stats_tracker.current_deck_name_p2 = self.current_deck_name_p2
+                    
+                if self.has_card_memory and self.card_memory:
+                    gs.card_memory = self.card_memory
 
-                # Set game state to start of first turn directly, skipping mulligan
-                self.game_state.turn = 1
-                self.game_state.phase = self.game_state.PHASE_MAIN_PRECOMBAT # Start in a standard phase
-                self.game_state.mulligan_in_progress = False
-                self.game_state.bottoming_in_progress = False
-                # Ensure priority player is set correctly for Turn 1 after emergency reset
-                self.game_state.priority_player = self.game_state._get_active_player()
+                # 2. Internal Subsystems (Reflect from GameState to Env)
+                # This ensures Env.action_handler matches GameState.action_handler
+                subsystems = ['action_handler', 'combat_resolver', 'card_evaluator', 'strategic_planner',
+                            'mana_system', 'ability_handler', 'layer_system',
+                            'replacement_effects', 'targeting_system']
+                            
+                for sys_name in subsystems:
+                    instance = getattr(gs, sys_name, None)
+                    setattr(self, sys_name, instance)
+                    
+                    # Verify back-link to CURRENT GameState
+                    if instance and hasattr(instance, 'game_state') and instance.game_state != gs:
+                        instance.game_state = gs
+                        logging.debug(f"Relinked {sys_name} to new GameState instance.")
 
-                # Link handler (must exist in GS after reset)
-                self.action_handler = getattr(self.game_state, 'action_handler')
+                # --- Validate Critical Systems ---
                 if not self.action_handler:
-                     logging.error("Emergency Reset: ActionHandler still missing!")
-                     # Cannot recover if basic systems fail
-                     raise RuntimeError("Emergency reset failed to create ActionHandler.")
+                    logging.error("ActionHandler missing after reset! Attempting emergency recreation.")
+                    from .actions import ActionHandler
+                    self.action_handler = ActionHandler(gs)
+                    gs.action_handler = self.action_handler
 
-                # Provide minimal valid actions
-                self.current_valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
-                self.current_valid_actions[11] = True # Pass Priority
-                self.current_valid_actions[12] = True # Concede
-                obs = self._get_obs_safe() # Get safest possible observation
-                info = {"action_mask": self.current_valid_actions.astype(bool), "error_reset": True}
-                logging.info("Emergency fallback reset completed. Game starts Turn 1, Main Phase.")
+                # Combat Integration
+                if self.action_handler and hasattr(self.action_handler, 'combat_handler'):
+                    # Ensure combat handler has correct references
+                    if self.action_handler.combat_handler:
+                        self.action_handler.combat_handler.game_state = gs
+                        self.action_handler.combat_handler.card_evaluator = self.card_evaluator
+                        self.action_handler.combat_handler.setup_combat_systems()
+
+                # Strategic Planner Init
+                if self.strategic_planner:
+                    self.strategic_planner.game_state = gs
+                    if self.card_evaluator:
+                        self.strategic_planner.card_evaluator = self.card_evaluator
+                    if hasattr(self.strategic_planner, 'init_after_reset'):
+                        self.strategic_planner.init_after_reset()
+
+                # --- Final Setup ---
+                # Generate initial action mask for the Mulligan phase
+                try:
+                    self.current_valid_actions = self.action_mask()
+                except Exception as mask_e:
+                    logging.error(f"Error generating initial action mask: {mask_e}")
+                    self.current_valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+                    self.current_valid_actions[12] = True # Concede as failsafe
+
+                # Get initial observation
+                obs = self._get_obs_safe()
+
+                # Prepare Info
+                info = {
+                    "action_mask": self.current_valid_actions.astype(bool),
+                    "initial_state": True,
+                    "mulligan_active": gs.mulligan_in_progress
+                }
+
+                logging.info(f"Environment {env_id} reset complete. P1: {self.current_deck_name_p1} vs P2: {self.current_deck_name_p2}")
                 return obs, info
-            except Exception as fallback_e:
-                 logging.critical(f"FALLBACK RESET FAILED: {fallback_e}", exc_info=True)
-                 # If even fallback fails, re-raise the original exception.
-                 raise e from fallback_e
+
+            except Exception as e:
+                # --- Critical Error Fallback ---
+                logging.critical(f"CRITICAL error during environment reset: {str(e)}", exc_info=True)
+                return self._emergency_fallback_reset()
+
+    def _emergency_fallback_reset(self):
+        """Provides a minimal valid state if the main reset fails."""
+        try:
+            logging.warning("Attempting emergency fallback reset...")
+            # Create minimal GameState
+            self.game_state = GameState(self.card_db, self.max_turns, self.max_hand_size, self.max_battlefield)
+            
+            # Init minimal players
+            dummy_card_id = next(iter(self.card_db.keys())) if self.card_db else "dummy"
+            self.game_state.reset([dummy_card_id]*60, [dummy_card_id]*60)
+            
+            # Ensure ActionHandler exists
+            from .actions import ActionHandler
+            self.action_handler = ActionHandler(self.game_state)
+            self.game_state.action_handler = self.action_handler
+            
+            # Set pointers
+            self.game_state.turn = 1
+            self.game_state.phase = self.game_state.PHASE_MAIN_PRECOMBAT
+            self.game_state.mulligan_in_progress = False
+            
+            # Basic Mask (Pass/Concede)
+            self.current_valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+            self.current_valid_actions[11] = True # Pass
+            self.current_valid_actions[12] = True # Concede
+            
+            obs = self._get_obs_safe()
+            info = {"action_mask": self.current_valid_actions.astype(bool), "error_reset": True}
+            return obs, info
+            
+        except Exception as fallback_e:
+            logging.critical(f"FALLBACK RESET FAILED: {fallback_e}", exc_info=True)
+            raise fallback_e
         
     def ensure_game_result_recorded(self, forced_result=None):
         """Make sure game result is recorded if it hasn't been already (Added None checks)."""
@@ -1182,52 +1120,44 @@ class AlphaZeroMTGEnv(gym.Env):
     # --- ADDED Helper Methods for Opponent Simulation ---
 
     def _opponent_needs_to_act(self):
-        """Checks if the game state requires the opponent to act."""
-        gs = self.game_state
-        agent_player_obj = gs.p1 if gs.agent_is_p1 else gs.p2
-        opponent_player_obj = gs.p2 if gs.agent_is_p1 else gs.p1
+            """Checks if the game state requires the opponent to act."""
+            gs = self.game_state
+            agent_player_obj = gs.p1 if gs.agent_is_p1 else gs.p2
+            opponent_player_obj = gs.p2 if gs.agent_is_p1 else gs.p1
 
-        # Check if players exist
-        if not agent_player_obj or not opponent_player_obj:
-            return None, None # Error condition
+            # Check if players exist
+            if not agent_player_obj or not opponent_player_obj:
+                return None, None # Error condition
 
-        # Mulligan/Bottoming Phase
-        mulligan_target = getattr(gs, 'mulligan_player', None)
-        if mulligan_target == opponent_player_obj:
-            return opponent_player_obj, {"phase_context": "mulligan_decision"}
+            # Mulligan/Bottoming Phase
+            mulligan_target = getattr(gs, 'mulligan_player', None)
+            if mulligan_target == opponent_player_obj:
+                return opponent_player_obj, {"phase_context": "mulligan_decision"}
 
-        bottoming_target = getattr(gs, 'bottoming_player', None)
-        if bottoming_target == opponent_player_obj:
-            return opponent_player_obj, {"phase_context": "bottoming"}
+            bottoming_target = getattr(gs, 'bottoming_player', None)
+            if bottoming_target == opponent_player_obj:
+                return opponent_player_obj, {"phase_context": "bottoming"}
 
-        # Special Choice Phase (Targeting, Sacrifice, etc.)
-        if gs.phase in [gs.PHASE_TARGETING, gs.PHASE_SACRIFICE, gs.PHASE_CHOOSE]:
-            context = None
-            if gs.phase == gs.PHASE_TARGETING: context = getattr(gs, 'targeting_context', None)
-            elif gs.phase == gs.PHASE_SACRIFICE: context = getattr(gs, 'sacrifice_context', None)
-            elif gs.phase == gs.PHASE_CHOOSE: context = getattr(gs, 'choice_context', None)
+            # Special Choice Phase (Targeting, Sacrifice, etc.)
+            if gs.phase in [gs.PHASE_TARGETING, gs.PHASE_SACRIFICE, gs.PHASE_CHOOSE]:
+                context = None
+                if gs.phase == gs.PHASE_TARGETING: context = getattr(gs, 'targeting_context', None)
+                elif gs.phase == gs.PHASE_SACRIFICE: context = getattr(gs, 'sacrifice_context', None)
+                elif gs.phase == gs.PHASE_CHOOSE: context = getattr(gs, 'choice_context', None)
 
-            if context:
-                 acting_player = context.get('controller') or context.get('player')
-                 if acting_player == opponent_player_obj:
-                     return opponent_player_obj, {"phase_context": gs._PHASE_NAMES.get(gs.phase)}
+                if context:
+                    acting_player = context.get('controller') or context.get('player')
+                    if acting_player == opponent_player_obj:
+                        return opponent_player_obj, {"phase_context": gs._PHASE_NAMES.get(gs.phase)}
 
-        # Priority Check (Outside Mulligan/Choice)
-        priority_target = getattr(gs, 'priority_player', None)
-        if priority_target == opponent_player_obj and gs.phase not in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP]:
-             # Ensure opponent actually *has* valid actions other than NO_OP/Pass
-             # Generate their mask temporarily
-             original_agent_is_p1 = gs.agent_is_p1
-             gs.agent_is_p1 = (opponent_player_obj == gs.p1)
-             try: opp_mask = self.action_mask()
-             finally: gs.agent_is_p1 = original_agent_is_p1
+            # Priority Check (Outside Mulligan/Choice)
+            priority_target = getattr(gs, 'priority_player', None)
+            if priority_target == opponent_player_obj and gs.phase not in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP]:
+                # FIX: If opponent has priority, they MUST act, even if only Pass/Concede is available.
+                # Previously, this block skipped if mask sum was low, causing Agent NO_OP loops.
+                return opponent_player_obj, {"phase_context": "priority"}
 
-             if np.sum(opp_mask) > 2: # More than just Pass (11) and Concede (12) likely available
-                 return opponent_player_obj, {"phase_context": "priority"}
-             else: # Opponent only has Pass/Concede, no real action needed yet
-                 pass
-
-        return None, None # Agent needs to act or game state error
+            return None, None # Agent needs to act or game state error
 
     def _get_scripted_opponent_action(self, opponent_player, opponent_mask, opponent_context):
         """Simple scripted policy for opponent actions."""

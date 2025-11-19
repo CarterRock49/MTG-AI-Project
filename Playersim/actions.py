@@ -1,4 +1,4 @@
-# actions.py
+#actions.py
 
 import logging
 import re
@@ -8,7 +8,7 @@ from collections import defaultdict
 from .card import Card
 from .enhanced_combat import ExtendedCombatResolver
 from .combat_integration import integrate_combat_actions, apply_combat_action
-from .debug import DEBUG_MODE
+from .debug import DEBUG_MODE, debug_log_valid_actions 
 from .enhanced_card_evaluator import EnhancedCardEvaluator
 from .combat_actions import CombatActionHandler
 
@@ -555,521 +555,356 @@ class ActionHandler:
         # Fallback heuristic
         return True, 0.6 # Default to recommend with medium confidence
     
-
     def generate_valid_actions(self):
-        """Return the current action mask as boolean array with reasoning. CONCEDE is now a last resort. (Revised Mulligan/Priority/Logging/Waiting v5 - Bottoming Mask Fix)"""
-        gs = self.game_state
-        try:
-            valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
-            action_reasons = {} # Reset reasons for this generation
+            """
+            Return the current action mask as boolean array with reasoning. 
+            Includes CRITICAL STATE AUTO-CORRECTION to prevent infinite NO_OP loops.
+            Handles all phases, sub-steps, and complex casting sequences.
+            """
+            gs = self.game_state
+            try:
+                valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+                action_reasons = {} # Reset reasons for this generation
 
-            def set_valid_action(index, reason="", context=None):
-                # Ensures CONCEDE (12) isn't added here, handled at the end.
-                if 0 <= index < self.ACTION_SPACE_SIZE and index != 12:
-                    valid_actions[index] = True
-                    action_reasons[index] = {"reason": reason, "context": context or {}}
-                    # logging.debug(f"  Set action {index} VALID: {reason}") # Optional detailed logging
-                elif index != 12: # Log invalid indices *except* CONCEDE
-                    logging.error(f"INVALID ACTION INDEX during generation: {index} bounds (0-{self.ACTION_SPACE_SIZE-1}) Reason: {reason}")
+                def set_valid_action(index, reason="", context=None):
+                    # Ensures CONCEDE (12) isn't added here, handled at the end.
+                    if 0 <= index < self.ACTION_SPACE_SIZE and index != 12:
+                        valid_actions[index] = True
+                        action_reasons[index] = {"reason": reason, "context": context or {}}
+                    elif index != 12:
+                        logging.error(f"INVALID ACTION INDEX during generation: {index} bounds (0-{self.ACTION_SPACE_SIZE-1}) Reason: {reason}")
 
-            # --- Player Validation & Perspective ---
-            perspective_player = gs.p1 if gs.agent_is_p1 else gs.p2 # Player from whose view we generate
-            if not gs.p1 or not gs.p2 or not perspective_player:
-                logging.error("Player object(s) missing or invalid. Defaulting to CONCEDE.")
-                valid_actions[12] = True; action_reasons[12] = {"reason": "Error: Players not initialized", "context": {}}
-                self.action_reasons_with_context = action_reasons; self.action_reasons = {k: v.get("reason","Err") for k, v in action_reasons.items()}; return valid_actions
+                # --- 1. Player Validation & Perspective ---
+                perspective_player = gs.p1 if gs.agent_is_p1 else gs.p2 # Player from whose view we generate
+                if not gs.p1 or not gs.p2 or not perspective_player:
+                    logging.error("Player object(s) missing or invalid. Defaulting to CONCEDE.")
+                    valid_actions[12] = True; action_reasons[12] = {"reason": "Error: Players not initialized", "context": {}}
+                    self.action_reasons_with_context = action_reasons; self.action_reasons = {k: v.get("reason","Err") for k, v in action_reasons.items()}
+                    
+                    debug_log_valid_actions(self.game_state, valid_actions, self.action_reasons_with_context, self.get_action_info)
+                    return valid_actions
 
-            current_turn_player = gs._get_active_player() # Player whose turn it is
-            priority_player_obj = getattr(gs, 'priority_player', None) # Player who currently holds priority
+                current_turn_player = gs._get_active_player() 
+                
+                # --- 2. Mulligan Phase Logic ---
+                if getattr(gs, 'mulligan_in_progress', False):
+                    mulligan_player = getattr(gs, 'mulligan_player', None)
+                    bottoming_player = getattr(gs, 'bottoming_player', None)
 
-            # --- Mulligan Phase Logic ---
-            if getattr(gs, 'mulligan_in_progress', False):
-                mulligan_decision_player = getattr(gs, 'mulligan_player', None)
-                bottoming_active_player = getattr(gs, 'bottoming_player', None)
-                perspective_player_name = perspective_player.get('name', 'Unknown')
-                mulligan_target_name = getattr(mulligan_decision_player, 'name', 'None') if mulligan_decision_player else 'None' # Added safe check
-                bottoming_target_name = getattr(bottoming_active_player, 'name', 'None') if bottoming_active_player else 'None' # Added safe check
-                # Use debug level for this potentially frequent log
-                logging.debug(f"Mulligan Gen: Perspective={perspective_player_name}, Mulligan Player={mulligan_target_name}, Bottoming Player={bottoming_target_name}")
+                    # Check if the perspective player needs to bottom cards
+                    if bottoming_player == perspective_player:
+                        hand_size = len(perspective_player.get("hand", []))
+                        current_bottomed = getattr(gs, 'bottoming_count', 0)
+                        total_needed = getattr(gs, 'cards_to_bottom', 0)
+                        needed_now = max(0, total_needed - current_bottomed)
 
-                action_found_in_mulligan = False
-
-                # Check if the perspective player needs to bottom cards
-                if bottoming_active_player == perspective_player:
-                    hand_size = len(perspective_player.get("hand", []))
-                    current_bottomed = getattr(gs, 'bottoming_count', 0)
-                    total_needed = getattr(gs, 'cards_to_bottom', 0)
-                    needed_now = max(0, total_needed - current_bottomed)
-
-                    logging.debug(f"Bottoming Phase (Perspective {perspective_player.get('name')}): Hand Size: {hand_size}, Total Needed: {total_needed}, Already Bottomed: {current_bottomed}, Needed Now: {needed_now}")
-
-                    if needed_now > 0:
-                        # Generate BOTTOM_CARD actions for valid hand indices
-                        max_hand_idx_for_action = 3 # Actions 226-229 correspond to hand indices 0-3
-                        any_bottom_action_set = False # Track if any bottom action was actually added
-                        for i in range(min(hand_size, max_hand_idx_for_action + 1)):
-                            # Check if the hand index is valid
-                            if i < hand_size:
+                        if needed_now > 0:
+                            # Generate BOTTOM_CARD actions for valid hand indices
+                            # Map indices 0-3 to actions 226-229
+                            for i in range(min(hand_size, 4)): 
                                 set_valid_action(226 + i, f"BOTTOM_CARD index {i}", context={'hand_idx': i})
-                                any_bottom_action_set = True
-                        action_found_in_mulligan = any_bottom_action_set
-                        # Fallback if no actions generated despite needing to bottom
-                        if not any_bottom_action_set:
-                             logging.warning("Bottoming needed, but no BOTTOM_CARD actions set (check hand size/action space mapping). Allowing NO_OP fallback.")
-                             set_valid_action(224, "NO_OP (Bottoming Fallback - Hand Index?)")
-                             action_found_in_mulligan = True
+                        else: 
+                            set_valid_action(224, "NO_OP (Finished bottoming)")
+                        return valid_actions
 
+                    # Check if the perspective player needs to make a mulligan decision
+                    elif mulligan_player == perspective_player:
+                        set_valid_action(225, "KEEP_HAND")
+                        # Can always mulligan if under limit
+                        if gs.mulligan_count.get('p1' if perspective_player == gs.p1 else 'p2', 0) < 7:
+                            set_valid_action(6, "MULLIGAN")
+                        return valid_actions
 
-                    else: # Needed is 0 for this player
-                        logging.debug(f"Bottoming requirement met for {perspective_player_name} ({current_bottomed}/{total_needed}). Checking opponent.")
-                        # This player doesn't need to bottom more. Determine if waiting for opponent or if phase should end.
-                        opponent = gs.p2 if perspective_player == gs.p1 else gs.p1
-                        opp_needs_to_bottom = opponent and opponent.get('_needs_to_bottom_next', False) and not opponent.get('_bottoming_complete', False)
+                    # Check if perspective player is waiting for opponent
+                    elif bottoming_player or mulligan_player:
+                        set_valid_action(224, "NO_OP (Waiting for opponent)")
+                        return valid_actions
 
-                        if opp_needs_to_bottom:
-                            # Player is done, waiting for opponent
-                            set_valid_action(224, f"NO_OP (Finished bottoming, waiting for {getattr(opponent,'name','Opponent')})")
-                            action_found_in_mulligan = True
-                        else:
-                            # Player is done, opponent is done/doesn't need to. Mulligan phase should end via handler.
-                            # If we are generating actions here, it means the phase *didn't* end correctly after the last action.
-                            logging.error("Mulligan Stuck? In bottoming mask generation, but current player needs 0 and opponent is done. Allowing NO_OP. Check state transition logic in GameState.bottom_card.")
-                            set_valid_action(224, "NO_OP (Bottoming Phase Stuck? Should have ended)")
-                            action_found_in_mulligan = True
+                    # State Error: Mulligan in progress but no player assigned
+                    # Allow NO_OP to cycle step and hopefully trigger external recovery
+                    set_valid_action(224, "NO_OP (Mulligan Error Cycle)")
+                    return valid_actions
 
-                # Check if the perspective player needs to make a mulligan decision
-                elif mulligan_decision_player == perspective_player:
-                    logging.debug(f"Mulligan Phase (Perspective): Deciding Keep/Mull.")
-                    set_valid_action(225, "KEEP_HAND")
-                    mulls_taken = gs.mulligan_count.get('p1' if perspective_player == gs.p1 else 'p2', 0)
-                    # Can always mulligan first time (0 mulls taken), down to 0 cards eventually. Max 7 normal mulligans.
-                    if mulls_taken < 7:
-                        set_valid_action(6, "MULLIGAN")
-                    action_found_in_mulligan = True
+                # --- 3. Special Choice Phase Logic (Targeting, Sacrifice, Choose) ---
+                if gs.phase in [gs.PHASE_TARGETING, gs.PHASE_SACRIFICE, gs.PHASE_CHOOSE]:
+                    special_phase_name = gs._PHASE_NAMES.get(gs.phase, "SPECIAL")
+                    context = getattr(gs, 'targeting_context', None) or \
+                            getattr(gs, 'sacrifice_context', None) or \
+                            getattr(gs, 'choice_context', None)
+                    
+                    acting_player = context.get('controller') or context.get('player') if context else None
 
-                # *** ENHANCED CHECK FOR STALLED MULLIGAN & ATTEMPT RECOVERY ***
-                elif bottoming_active_player is None and mulligan_decision_player is None:
-                    # We are in mulligan_in_progress=True, but no player assigned. This IS the error state seen in logs.
-                    logging.error("MULLIGAN STATE ERROR: In Progress, but mulligan_player AND bottoming_player are None! Attempting ENHANCED recovery.")
+                    if acting_player == perspective_player:
+                        if gs.phase == gs.PHASE_TARGETING: 
+                            self._add_targeting_actions(perspective_player, valid_actions, set_valid_action)
+                            # Allow passing if minimum requirements met
+                            min_req = gs.targeting_context.get("min_targets", 1)
+                            sel = len(gs.targeting_context.get("selected_targets", []))
+                            max_targets = gs.targeting_context.get("max_targets", 1)
+                            if sel >= min_req and (min_req < max_targets or sel == max_targets):
+                                set_valid_action(11, "PASS_PRIORITY (Finish Targeting)")
+                                
+                        elif gs.phase == gs.PHASE_SACRIFICE: 
+                            self._add_sacrifice_actions(perspective_player, valid_actions, set_valid_action)
+                            
+                        elif gs.phase == gs.PHASE_CHOOSE: 
+                            self._add_special_choice_actions(perspective_player, valid_actions, set_valid_action)
+                    else:
+                        set_valid_action(224, f"NO_OP (Waiting for opponent in {special_phase_name})")
 
-                    try:
-                        fixed = False
-                        if hasattr(gs, 'check_mulligan_state'):
-                            # Check returns True if valid, False if forced recovery
-                            valid_state = gs.check_mulligan_state()
-                            if not valid_state:
-                                # Recovery was forced - return temp actions for this call, next call will have updated state
-                                logging.info("Mulligan state fixed via check_mulligan_state(). Re-generating actions.")
-                                fixed = True
-                            elif gs.mulligan_player == perspective_player:
-                                # If check assigned current player, let this function continue
-                                logging.info("Recovery: mulligan_player is now assigned to perspective player.")
-                                # Re-run decision logic with new assignment
-                                set_valid_action(225, "KEEP_HAND")
-                                mulls_taken = gs.mulligan_count.get('p1' if perspective_player == gs.p1 else 'p2', 0)
-                                if mulls_taken < 7:
-                                    set_valid_action(6, "MULLIGAN")
-                                action_found_in_mulligan = True
-                                fixed = True
-                            elif gs.bottoming_player == perspective_player:
-                                 # If check assigned current player to bottoming, let this function continue
-                                 logging.info("Recovery: bottoming_player is now assigned to perspective player.")
-                                 # Re-run bottoming logic
-                                 hand_size = len(perspective_player.get("hand", [])); needed_now = max(0, getattr(gs,'cards_to_bottom',0) - getattr(gs,'bottoming_count',0))
-                                 if needed_now > 0:
-                                     max_hand_idx_for_action = 3
-                                     for i in range(min(hand_size, max_hand_idx_for_action + 1)):
-                                         if i < hand_size: set_valid_action(226 + i, f"BOTTOM_CARD index {i} (Recovery)", context={'hand_idx': i})
-                                     action_found_in_mulligan = True
-                                 fixed = True
+                    # If valid actions found (or NO_OP added), return
+                    if np.sum(valid_actions) > 0:
+                        self.action_reasons_with_context = action_reasons
+                        return valid_actions
+                    
+                    # Fallback if no actions generated (prevent crash)
+                    set_valid_action(224, f"NO_OP (Fallback {special_phase_name})")
+                    return valid_actions
 
-                        # If check failed to fix, try direct end
-                        if not fixed:
-                            logging.warning("check_mulligan_state() didn't resolve issue, trying direct _end_mulligan_phase()")
-                            if hasattr(gs, '_end_mulligan_phase'):
-                                gs._end_mulligan_phase()
-                                logging.info("Mulligan phase force-ended via direct call. Re-generating actions.")
-                                fixed = True
+                # --- 4. Regular Game Play & State Integrity Check ---
+                
+                priority_player_obj = getattr(gs, 'priority_player', None)
 
-                        # If any recovery happened, return temporary actions
-                        if fixed:
-                            # Recalculate mask *after* fix attempts, or just return basic NO_OP
-                            # If a player was assigned, the standard logic above would have set actions.
-                            # If phase was ended, subsequent call to generate_valid_actions will reflect non-mulligan state.
-                            # So, just return the actions SET by the standard logic within this check.
-                            if not action_found_in_mulligan: # If fix didn't assign player/actions
-                                 temp_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
-                                 temp_actions[224] = True # Allow NO_OP after failed recovery
-                                 logging.warning("Mulligan recovery attempted, but still no specific actions. Returning NO_OP.")
-                                 return temp_actions
+                # Phases where SOMEONE must have priority (all except Untap/Cleanup)
+                interactive_phases = [
+                    gs.PHASE_UPKEEP, gs.PHASE_DRAW, gs.PHASE_MAIN_PRECOMBAT, 
+                    gs.PHASE_BEGIN_COMBAT, gs.PHASE_DECLARE_ATTACKERS, gs.PHASE_DECLARE_BLOCKERS, 
+                    gs.PHASE_FIRST_STRIKE_DAMAGE, gs.PHASE_COMBAT_DAMAGE, gs.PHASE_END_OF_COMBAT, 
+                    gs.PHASE_MAIN_POSTCOMBAT, gs.PHASE_END_STEP, gs.PHASE_PRIORITY
+                ]
 
-                    except Exception as recovery_e:
-                        logging.critical(f"CRITICAL: Enhanced recovery failed: {recovery_e}", exc_info=True)
+                if priority_player_obj is None and gs.phase in interactive_phases:
+                    active_p = gs._get_active_player()
+                    logging.warning(f"STATE RECOVERY: Priority was None in {gs._PHASE_NAMES.get(gs.phase)}. Auto-assigning to {active_p.get('name', 'AP')} inside mask generation.")
+                    
+                    # Direct GameState Mutation to fix the error immediately
+                    gs.priority_player = active_p
+                    gs.priority_pass_count = 0
+                    
+                    # Update local variable so the rest of this function runs correctly
+                    priority_player_obj = active_p
+                    
+                    # If stack is empty and we're in a phase that should auto-progress, do it
+                    if not gs.stack and gs.phase == gs.PHASE_UPKEEP:
+                        logging.info("Auto-progressing from UPKEEP to DRAW phase after priority fix")
+                        gs.phase = gs.PHASE_DRAW
 
-                    # If all recovery attempts fail or don't assign player/actions, allow NO_OP as a last resort
-                    if not action_found_in_mulligan:
-                        set_valid_action(224, "NO_OP (Mulligan State Error - After recovery attempts)")
-                        action_found_in_mulligan = True
-                # *** END OF ENHANCED CHECK ***
+                # --- Check Priority Match ---
+                has_priority = (priority_player_obj == perspective_player)
 
-                # Check if perspective player is waiting for opponent
-                elif bottoming_active_player: # Opponent is bottoming
-                    set_valid_action(224, f"NO_OP (Waiting for {bottoming_target_name} bottoming)")
-                    action_found_in_mulligan = True
-                elif mulligan_decision_player: # Opponent is deciding mulligan
-                    set_valid_action(224, f"NO_OP (Waiting for {mulligan_target_name} mulligan)")
-                    action_found_in_mulligan = True
-
-
-                # --- Final check/return for mulligan phase (if recovery wasn't attempted/failed) ---
-                self.action_reasons_with_context = action_reasons.copy()
-                self.action_reasons = {k: v.get("reason","Mull") for k, v in action_reasons.items()}
-                if not action_found_in_mulligan: # If NO actions were set inside mulligan logic (including waiting)
-                    # This path should be less likely now due to the error recovery attempt
-                    logging.warning("No specific mulligan/bottom/wait/error actions generated despite being in mulligan phase.")
-                    valid_actions[224] = True # Failsafe NO_OP
-                    action_reasons[224] = {"reason": "NO_OP (Fallback Mulligan)", "context": {}}
-                    self.action_reasons_with_context[224] = action_reasons[224]; self.action_reasons[224] = "NO_OP (Fallback Mulligan)"
-
-                # --- Add CONCEDE as last resort for mulligan phase ---
-                # Count actions again before deciding on CONCEDE
-                if np.sum(valid_actions) == 0: # Check if ONLY CONCEDE would be valid
-                    valid_actions[12] = True
-                    action_reasons[12] = {"reason": "CONCEDE (Mulligan - Final)", "context": {}}
-                    self.action_reasons_with_context[12] = action_reasons[12]; self.action_reasons[12] = action_reasons[12]["reason"]
-                # CONCEDE(12) is implicitly false otherwise due to set_valid_action logic
-
-                return valid_actions # Return immediately for mulligan phase
-
-            # --- Special Choice Phase Logic (Targeting, Sacrifice, Choose) ---
-            special_phase = None
-            acting_player = None # Player required to make the choice
-            if gs.phase == gs.PHASE_TARGETING and hasattr(gs, 'targeting_context') and gs.targeting_context:
-                special_phase = "TARGETING"; acting_player = gs.targeting_context.get("controller")
-            elif gs.phase == gs.PHASE_SACRIFICE and hasattr(gs, 'sacrifice_context') and gs.sacrifice_context:
-                special_phase = "SACRIFICE"; acting_player = gs.sacrifice_context.get("controller")
-            elif gs.phase == gs.PHASE_CHOOSE and hasattr(gs, 'choice_context') and gs.choice_context:
-                special_phase = "CHOOSE"; acting_player = gs.choice_context.get("player")
-
-            if special_phase:
-                action_found_in_special = False
-                if acting_player == perspective_player:
-                    logging.debug(f"Generating actions limited to {special_phase} phase for player {perspective_player.get('name')}.")
-                    if special_phase == "TARGETING":
-                        self._add_targeting_actions(perspective_player, valid_actions, set_valid_action)
-                        min_req = gs.targeting_context.get("min_targets", 1); sel = len(gs.targeting_context.get("selected_targets", []))
-                        max_targets = gs.targeting_context.get("max_targets", 1)
-                        # Allow passing if minimum met AND (minimum is less than max OR maximum reached)
-                        if sel >= min_req and (min_req < max_targets or sel == max_targets):
-                            set_valid_action(11, f"PASS_PRIORITY (Finish {special_phase})") # Pass signifies completion here
-                    elif special_phase == "SACRIFICE":
-                        self._add_sacrifice_actions(perspective_player, valid_actions, set_valid_action)
-                        min_req = gs.sacrifice_context.get("required_count", 1); sel = len(gs.sacrifice_context.get("selected_permanents", []))
-                        if sel >= min_req: set_valid_action(11, f"PASS_PRIORITY (Finish {special_phase})") # Pass signifies completion
-                    elif special_phase == "CHOOSE":
-                        self._add_special_choice_actions(perspective_player, valid_actions, set_valid_action)
-                        # PASS logic might be embedded within special choice actions where needed (e.g., mode choice)
-                    action_found_in_special = np.sum(valid_actions) > 0 # Check if any actions were set
-                else:
-                    # Not this player's turn to act in special phase, allow NO_OP
-                    opp_name = getattr(acting_player, 'name', 'opponent')
-                    set_valid_action(224, f"NO_OP (Waiting for {opp_name} during {special_phase})")
-                    action_found_in_special = True
-
-                # Final check for special phase actions
-                self.action_reasons_with_context = action_reasons.copy(); self.action_reasons = {k: v.get("reason","Choice") for k, v in action_reasons.items()}
-                if not action_found_in_special: # If no actions (even PASS/NO_OP) were set
-                    logging.warning(f"No actions generated during special phase {special_phase} for acting player {getattr(acting_player, 'name', 'None')}.")
-                    valid_actions[224] = True # Failsafe NO_OP
-                    action_reasons[224] = {"reason": f"NO_OP (Fallback {special_phase})", "context": {}}
-                    self.action_reasons_with_context[224] = action_reasons[224]; self.action_reasons[224] = action_reasons[224]["reason"]
-
-                # Add CONCEDE as last resort for special phases
-                if np.sum(valid_actions) == 0:
-                    valid_actions[12] = True
-                    action_reasons[12] = {"reason": f"CONCEDE ({special_phase} - Final)", "context": {}}
-                    self.action_reasons_with_context[12] = action_reasons[12]; self.action_reasons[12] = action_reasons[12]["reason"]
-                # CONCEDE(12) is implicitly false otherwise
-
-                return valid_actions # Return immediately for special phases
-
-            # --- Regular Game Play ---
-            has_priority = (priority_player_obj == perspective_player)
-
-            if not has_priority:
-                # --- Perspective Player Does NOT Have Priority ---
-                logging.debug(f"generate_valid_actions called for {perspective_player.get('name')}, but priority is with {getattr(priority_player_obj, 'name', 'None')}. Allowing NO_OP/Mana.")
-                # Allow NO_OP when waiting.
-                set_valid_action(224, "NO_OP (Waiting for priority)")
-                # Add instant-speed MANA abilities (allowed without priority - Rule 605.3a)
-                self._add_mana_ability_actions(perspective_player, valid_actions, set_valid_action)
-                # Other instant-speed actions (like casting instants) require priority.
-
-            else:
-                # --- Perspective Player HAS Priority ---
-                split_second_is_active = getattr(gs, 'split_second_active', False)
-                # Passing is almost always possible if you have priority (unless winning/losing effect forces action)
-                set_valid_action(11, "PASS_PRIORITY")
-
-                if split_second_is_active:
-                    # Only add mana abilities (and PASS already added)
-                    logging.debug("Split Second active, only allowing Mana abilities and PASS.")
+                if not has_priority:
+                    # --- Perspective Player Does NOT Have Priority ---
+                    # Allow NO_OP when waiting.
+                    set_valid_action(224, "NO_OP (Waiting for priority)")
+                    
+                    # Allow instant-speed MANA abilities (allowed without priority - Rule 605.3a)
                     self._add_mana_ability_actions(perspective_player, valid_actions, set_valid_action)
+
                 else:
-                    # Add regular actions based on timing
-                    is_my_turn = (current_turn_player == perspective_player)
-                    # Use GameState helper to check sorcery speed timing
-                    can_act_sorcery_speed = False
-                    if hasattr(gs, '_can_act_at_sorcery_speed'):
+                    # --- Perspective Player HAS Priority (or was just auto-assigned it) ---
+                    set_valid_action(11, "PASS_PRIORITY") # Always allowed
+
+                    split_second_is_active = getattr(gs, 'split_second_active', False)
+                    
+                    if split_second_is_active:
+                        # Only add mana abilities (and PASS already added)
+                        logging.debug("Split Second active, only allowing Mana abilities and PASS.")
+                        self._add_mana_ability_actions(perspective_player, valid_actions, set_valid_action)
+                    else:
+                        is_my_turn = (current_turn_player == perspective_player)
+                        opponent_player = gs.p2 if perspective_player == gs.p1 else gs.p1
+                        
+                        # Check Timing
                         can_act_sorcery_speed = gs._can_act_at_sorcery_speed(perspective_player)
+                        can_act_instant_speed = gs.phase not in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP]
 
-                    # Can generally act at instant speed unless in Untap/Cleanup
-                    # Targeting/Sacrifice/Choose handled above, so don't need to check here
-                    can_act_instant_speed = gs.phase not in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP, gs.PHASE_TARGETING, gs.PHASE_SACRIFICE, gs.PHASE_CHOOSE]
+                        # Sorcery Speed Actions
+                        if can_act_sorcery_speed:
+                            self._add_sorcery_speed_actions(perspective_player, opponent_player, valid_actions, set_valid_action)
+                            self._add_basic_phase_actions(is_my_turn, valid_actions, set_valid_action)
+                            # Include Split Cards logic which handles Fuse/Split casting
+                            self._add_split_card_actions(perspective_player, valid_actions, set_valid_action)
 
-                    opponent_player = gs.p2 if perspective_player == gs.p1 else gs.p1
+                        # Instant Speed Actions
+                        if can_act_instant_speed:
+                            self._add_instant_speed_actions(perspective_player, opponent_player, valid_actions, set_valid_action)
+                            self._add_damage_prevention_actions(perspective_player, valid_actions, set_valid_action)
 
-                    # Sorcery Speed Actions (Main phase, own turn, empty stack)
-                    if can_act_sorcery_speed:
-                        self._add_sorcery_speed_actions(perspective_player, opponent_player, valid_actions, set_valid_action)
-                        self._add_basic_phase_actions(is_my_turn, valid_actions, set_valid_action) # Phase transitions only at sorcery speed
+                        # Combat Actions
+                        if hasattr(self, 'combat_handler') and self.combat_handler:
+                            active_p_gs = gs._get_active_player()
+                            non_active_p_gs = gs._get_non_active_player()
 
-                    # Instant Speed Actions (Any phase except Untap/Cleanup, needs priority)
-                    if can_act_instant_speed:
-                        self._add_instant_speed_actions(perspective_player, opponent_player, valid_actions, set_valid_action)
+                            if gs.phase == gs.PHASE_DECLARE_ATTACKERS and perspective_player == active_p_gs:
+                                self.combat_handler._add_attack_declaration_actions(perspective_player, non_active_p_gs, valid_actions, set_valid_action)
+                            elif gs.phase == gs.PHASE_DECLARE_BLOCKERS and perspective_player == non_active_p_gs and getattr(gs, 'current_attackers', []):
+                                self.combat_handler._add_block_declaration_actions(perspective_player, valid_actions, set_valid_action)
 
-                    # Add Combat Actions (Declaration phase specific logic)
-                    if hasattr(self, 'combat_handler') and self.combat_handler:
-                        active_player_gs = gs._get_active_player() # Use GS helper
-                        non_active_player_gs = gs._get_non_active_player() # Use GS helper
+                        # Stack Interactions
+                        self._add_x_cost_actions(perspective_player, valid_actions, set_valid_action)
+                        
+                        # Pending Spell Contexts (Complex Casting)
+                        pending_context = getattr(gs, 'pending_spell_context', None)
+                        if pending_context and pending_context.get('card_id') and \
+                        pending_context.get('controller') == perspective_player:
+                            
+                            card_id = pending_context['card_id']
+                            card = gs._safe_get_card(card_id)
+                            
+                            # Kicker / Escalate / Additional Costs
+                            self._add_kicker_options(perspective_player, valid_actions, set_valid_action)
+                            
+                            # Spree Modes
+                            if getattr(card, 'is_spree', False):
+                                self._add_spree_mode_actions(perspective_player, valid_actions, set_valid_action)
 
-                        if gs.phase == gs.PHASE_DECLARE_ATTACKERS and perspective_player == active_player_gs:
-                            self.combat_handler._add_attack_declaration_actions(perspective_player, non_active_player_gs, valid_actions, set_valid_action)
-                        elif gs.phase == gs.PHASE_DECLARE_BLOCKERS and perspective_player == non_active_player_gs and getattr(gs, 'current_attackers', []): # Must be non-active player and attackers declared
-                            self.combat_handler._add_block_declaration_actions(perspective_player, valid_actions, set_valid_action)
-                        # Add other combat step actions if needed (e.g., damage order assignment, First Strike Order choice)
-                        # These would likely be triggered by the combat handler's state machine logic.
+                            # Offspring Cost Payment
+                            if card and getattr(card, 'is_offspring', False) and \
+                            pending_context.get('pay_offspring') is None and \
+                            pending_context.get('waiting_for_choice') == 'offspring_cost':
+                                    cost_str = getattr(card, 'offspring_cost', None)
+                                    if cost_str and self._can_afford_cost_string(perspective_player, cost_str, context=pending_context):
+                                        offspring_context = {'action_source': 'offspring_payment_opportunity'}
+                                        set_valid_action(295, f"Optional: PAY_OFFSPRING_COST for {getattr(card, 'name', card_id)}", context=offspring_context)
 
-                    # Check optional Offspring cost payment for a PENDING spell
-                    pending_spell_context = getattr(gs, 'pending_spell_context', None)
-                    if pending_spell_context and pending_spell_context.get('card_id') and \
-                    pending_spell_context.get('controller') == perspective_player:
-                        card_id = pending_spell_context['card_id']
-                        card = gs._safe_get_card(card_id)
-                        # Check if the spell is waiting for this specific decision (offspring cost)
-                        if card and getattr(card, 'is_offspring', False) and \
-                        pending_spell_context.get('pay_offspring') is None and \
-                        pending_spell_context.get('waiting_for_choice') == 'offspring_cost': # Add specific wait flag
-                            cost_str = getattr(card, 'offspring_cost', None)
-                            # Use pending_context for affordability check
-                            if cost_str and self._can_afford_cost_string(player=perspective_player, cost_string=cost_str, context=pending_spell_context):
-                                offspring_context = {'action_source': 'offspring_payment_opportunity'}
-                                set_valid_action(295, f"Optional: PAY_OFFSPRING_COST for {getattr(card, 'name', card_id)}", context=offspring_context)
+                # --- 5. Final Concede Check ---
+                self.action_reasons_with_context = action_reasons.copy()
+                self.action_reasons = {k: v.get("reason","Unknown") for k, v in action_reasons.items()}
+                
+                num_valid_non_concede = np.sum(valid_actions)
 
-            # --- Final CONCEDE Logic ---
-            self.action_reasons_with_context = action_reasons.copy()
-            self.action_reasons = {k: v.get("reason","Unknown") for k, v in action_reasons.items()}
-            num_valid_non_concede_actions = np.sum(valid_actions) # Count valid actions excluding CONCEDE
+                if num_valid_non_concede == 0:
+                    # Only add CONCEDE if *truly* no other action (not even NO_OP or PASS) is available.
+                    valid_actions[12] = True
+                    concede_reason = "CONCEDE (No other valid actions)"
+                    if 12 not in action_reasons:
+                        action_reasons[12] = {"reason": concede_reason, "context": {}}
+                        self.action_reasons_with_context[12] = action_reasons[12]; self.action_reasons[12] = concede_reason
+                    logging.warning("generate_valid_actions: No valid actions found, only CONCEDE is available.")
 
-            if num_valid_non_concede_actions == 0:
-                # Only add CONCEDE if *truly* no other action (not even NO_OP or PASS) is available.
-                valid_actions[12] = True
-                concede_reason = "CONCEDE (No other valid actions)"
-                if 12 not in action_reasons: # Avoid overwriting critical errors
-                    action_reasons[12] = {"reason": concede_reason, "context": {}}
-                    self.action_reasons_with_context[12] = action_reasons[12]; self.action_reasons[12] = concede_reason
-                logging.warning("generate_valid_actions: No valid actions found, only CONCEDE is available.")
-            # CONCEDE(12) remains implicitly False otherwise
+                debug_log_valid_actions(self.game_state, valid_actions, self.action_reasons_with_context, self.get_action_info)
+                return valid_actions
 
-            return valid_actions
-
-        except Exception as e:
-            # --- Critical Error Fallback ---
-            logging.critical(f"CRITICAL error generating valid actions: {str(e)}", exc_info=True)
-            fallback_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
-            fallback_actions[11] = True # Pass Priority
-            fallback_actions[12] = True # Concede
-            self.action_reasons = {11: "Crit Err - PASS", 12: "Crit Err - CONCEDE"}
-            self.action_reasons_with_context = {11: {"reason":"Crit Err - PASS","context":{}}, 12: {"reason":"Crit Err - CONCEDE","context":{}}}
-            return fallback_actions
+            except Exception as e:
+                # Critical Fallback
+                logging.critical(f"CRITICAL error generating valid actions: {str(e)}", exc_info=True)
+                fallback_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+                fallback_actions[11] = True # Pass Priority
+                fallback_actions[12] = True # Concede
+                self.action_reasons = {11: "Crit Err - PASS", 12: "Crit Err - CONCEDE"}
+                self.action_reasons_with_context = {11: {"reason":"Crit Err - PASS","context":{}}, 12: {"reason":"Crit Err - CONCEDE","context":{}}}
+                debug_log_valid_actions(self.game_state, fallback_actions, self.action_reasons_with_context, self.get_action_info)
+                return fallback_actions
+    
+    def _handle_no_op(self, param, context=None, **kwargs):
+        """Handles NO_OP. Checks for stuck state and forces recovery."""
+        gs = self.game_state
+        logging.debug("Executed NO_OP action.")
         
-    def _end_mulligan_phase(self):
-        """Helper to clean up mulligan state and transition to Turn 1. (Revised Priority Assignment v5 - Improved State Cleanup)"""
-        # Check if already ended to prevent potential recursion/double execution
-        if not self.mulligan_in_progress and not self.bottoming_in_progress:
-            logging.debug("_end_mulligan_phase called, but mulligan/bottoming already inactive.")
-            return # Avoid running logic again if already ended
-
-        # IMPORTANT: Force end mulligan regardless of unfinished business
-        logging.info("Ending mulligan phase - transitioning to main game.")
-        # Reset all mulligan tracking flags first - do this before any other logic
-        self.mulligan_in_progress = False
-        self.mulligan_player = None
-        self.bottoming_in_progress = False
-        self.bottoming_player = None
-
-        # Force clean up temporary flags using dict.pop
-        for p in [self.p1, self.p2]:
-            if p: # Check if player exists
-                p.pop('_mulligan_decision_made', None)
-                p.pop('_needs_to_bottom_next', None)
-                p.pop('_bottoming_complete', None)
-
-        # --- Set State for Start of Game ---
-        self.turn = 1 # Officially Turn 1
-        self.phase = self.PHASE_UNTAP # Start with Untap
-        
-        try:
-            self._reset_turn_tracking_variables() # Reset turn vars for Turn 1
-        except Exception as e:
-            logging.error(f"Error resetting turn tracking variables: {e}")
-            # Continue even if this fails
-        
-        # Get active player with fallback
-        active_player = self._get_active_player() # P1 is active player on Turn 1
-        if not active_player:
-            logging.critical("CRITICAL ERROR in _end_mulligan_phase: _get_active_player() returned None!")
-            active_player = self.p1 if self.p1 else self.p2
-            if not active_player:
-                logging.critical("FATAL ERROR: No valid players available for active player!")
-                # Create minimal player as last resort
-                active_player = self.p1 = {"name": "Player 1", "library": [], "hand": [], 
-                                        "battlefield": [], "graveyard": [], "exile": [],
-                                        "life": 20, "tapped_permanents": set()}
-
-        logging.debug(f"Performing Turn {self.turn} Untap Step for {active_player['name']}...")
-        try:
-            self._untap_phase(active_player)
-        except Exception as e:
-            logging.error(f"Error in untap phase: {e}")
-            # Continue even if untap fails
-        
-        try:
-            self.check_state_based_actions() # Check SBAs after untap
-        except Exception as e:
-            logging.error(f"Error checking state-based actions: {e}")
-            # Continue even if SBA check fails
-
-        # ** Automatically advance to Upkeep and assign priority **
-        self.phase = self.PHASE_UPKEEP
-        logging.debug(f"Automatically advanced to Upkeep Step.")
-        
-        # IMPORTANT: Trigger abilities *before* assigning priority, as they might affect state or add to stack
-        try:
-            self._handle_beginning_of_phase_triggers() # Trigger upkeep abilities (includes SBA check)
-        except Exception as e:
-            logging.error(f"Error handling beginning of phase triggers: {e}")
-            # Continue even if trigger handling fails
-
-        # ** Ensure Priority is Assigned to Active Player **
-        self.priority_player = active_player
-        self.priority_pass_count = 0
-        self.last_stack_size = len(self.stack) # Initialize stack size tracking
-        logging.debug(f"Entering Upkeep. Priority to AP ({active_player['name']})")
-
-        # Game Turn Limit Check
-        if self.turn > self.max_turns and not getattr(self, '_turn_limit_checked', False):
-            logging.info(f"Turn limit ({self.max_turns}) reached! Ending game.")
-            self._turn_limit_checked = True
-            if self.p1 and self.p2:
-                if self.p1.get("life",0) > self.p2.get("life",0): self.p1["won_game"] = True; self.p2["lost_game"] = True
-                elif self.p2.get("life",0) > self.p1.get("life",0): self.p2["won_game"] = True; self.p1["lost_game"] = True
-                else: self.p1["game_draw"] = True; self.p2["game_draw"] = True
-            # SBAs checked later will finalize the game end
+        # Fix for stuck state: If NO_OP executed when priority is None in a playable phase, force recovery.
+        if gs.priority_player is None and gs.phase not in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP, gs.PHASE_TARGETING, gs.PHASE_SACRIFICE, gs.PHASE_CHOOSE]:
+            logging.warning("NO_OP executed while priority is None (Stuck State). Attempting recovery.")
+            
+            # Get the active player first
+            active_player = gs._get_active_player()
+            
+            # 1. Try standard logic to assign priority (might fail if stack logic is strict)
+            try:
+                gs._pass_priority()
+            except Exception as e:
+                logging.error(f"Error during _pass_priority in NO_OP recovery: {e}")
+            
+            # 2. Force assignment if standard logic didn't resolve it
+            if gs.priority_player is None:
+                logging.warning(f"Recovery: Force assigning priority to Active Player ({active_player.get('name', 'Unknown')}).")
+                gs.priority_player = active_player
+                gs.priority_pass_count = 0
+            
+        return 0.0, True
         
     def check_mulligan_state(self):
-        """
-        Helper function to diagnose mulligan state inconsistencies and force recovery.
-        Returns True if state is valid, False otherwise and attempts recovery.
-        (Enhanced with stronger recovery v2)
-        """
-        # Case 1: Both mulligan_player and bottoming_player are None but still in mulligan phase
-        if self.mulligan_in_progress and self.mulligan_player is None and not self.bottoming_in_progress:
-            logging.error("Inconsistent state: In mulligan phase with no active mulligan player")
-            # Count remaining players who haven't decided
-            unmade_decisions = 0
-            for p, p_id in [(self.p1, 'p1'), (self.p2, 'p2')]:
-                if p and not p.get('_mulligan_decision_made', False):
-                    unmade_decisions += 1
-                    self.mulligan_player = p
-                    logging.info(f"Recovering mulligan state by assigning {p_id} as mulligan player")
+            """
+            Helper function to diagnose mulligan state inconsistencies.
+            Fixed to target self.game_state attributes.
+            """
+            gs = self.game_state
             
-            # If no undecided players were found OR we found multiple (inconsistent), force end mulligan
-            if unmade_decisions != 1:
-                logging.warning(f"Found {unmade_decisions} players with undecided mulligans. Forcing end of mulligan phase.")
-                self._end_mulligan_phase()
-                return False
-            return True
-        
-        # Case 2: In bottoming phase but no bottoming player
-        if self.bottoming_in_progress and self.bottoming_player is None:
-            logging.error("Inconsistent state: In bottoming phase with no active bottoming player")
-            # Find a player who needs to bottom
-            needs_bottom_found = 0
-            for p, p_id in [(self.p1, 'p1'), (self.p2, 'p2')]:
-                if p and p.get('_needs_to_bottom_next', False) and not p.get('_bottoming_complete', False):
-                    needs_bottom_found += 1
-                    self.bottoming_player = p
-                    self.bottoming_count = 0
-                    self.cards_to_bottom = min(self.mulligan_count.get(p_id, 0), len(p.get("hand", [])))
-                    logging.info(f"Recovering bottoming state by assigning {p_id} as bottoming player")
-            
-            # If no players need to bottom OR multiple (inconsistent), force end bottoming
-            if needs_bottom_found != 1:
-                logging.warning(f"Found {needs_bottom_found} players needing to bottom. Forcing end of mulligan phase.")
-                self._end_mulligan_phase()
-                return False
-            return True
-        
-        # Case 3: Neither mulligan nor bottoming in progress, but mulligan_in_progress flag is still set
-        if self.mulligan_in_progress and not self.bottoming_in_progress and self.mulligan_player is None:
-            # Check if all players have completed their mulligan decisions
-            all_decided = True
-            for p in [self.p1, self.p2]:
-                if p and not p.get('_mulligan_decision_made', False):
-                    all_decided = False
-                    break
-                    
-            if all_decided:
-                logging.info("All players have made mulligan decisions but phase not ended. Ending mulligan.")
-                self._end_mulligan_phase()
-                return False
-            else:
-                # Inconsistent state - someone still needs to decide but mulligan_player is None
-                logging.error("Inconsistent mulligan state: No bottoming, not all decided, but no mulligan_player")
-                self._end_mulligan_phase()  # Safety: force end the phase
-                return False
-        
-        # Case 4: Bottoming needed but stalled - check counters
-        if self.bottoming_in_progress and self.bottoming_player:
-            # Check if bottoming is stalled (no cards to bottom or count inconsistency)
-            if self.cards_to_bottom <= 0 or self.bottoming_count >= self.cards_to_bottom:
-                logging.error(f"Bottoming stalled: to_bottom={self.cards_to_bottom}, count={self.bottoming_count}")
-                # Mark this player as complete and check if we need to move to the next player
-                self.bottoming_player['_bottoming_complete'] = True
+            # Case 1: Both mulligan_player and bottoming_player are None but still in mulligan phase
+            if gs.mulligan_in_progress and gs.mulligan_player is None and not gs.bottoming_in_progress:
+                logging.error("Inconsistent state: In mulligan phase with no active mulligan player")
+                unmade_decisions = 0
+                for p, p_id in [(gs.p1, 'p1'), (gs.p2, 'p2')]:
+                    if p and not p.get('_mulligan_decision_made', False):
+                        unmade_decisions += 1
+                        gs.mulligan_player = p
+                        logging.info(f"Recovering mulligan state by assigning {p_id} as mulligan player")
                 
-                # Check if other player needs to bottom
-                other_player = self.p2 if self.bottoming_player == self.p1 else self.p1
-                if other_player and other_player.get('_needs_to_bottom_next', False) and not other_player.get('_bottoming_complete', False):
-                    self.bottoming_player = other_player
-                    self.bottoming_count = 0
-                    other_id = 'p2' if other_player == self.p2 else 'p1'
-                    self.cards_to_bottom = min(self.mulligan_count.get(other_id, 0), len(other_player.get("hand", [])))
-                    logging.info(f"Transitioning bottoming to next player: {other_player['name']}")
-                else:
-                    # No other player needs to bottom, end mulligan
-                    logging.info("No more players need to bottom. Ending mulligan phase.")
+                if unmade_decisions != 1:
+                    logging.warning(f"Found {unmade_decisions} players with undecided mulligans. Forcing end of mulligan phase.")
                     self._end_mulligan_phase()
                     return False
-        
-        # Case 5: Final safety check - if in limbo, force end
-        if (self.mulligan_in_progress or self.bottoming_in_progress) and self.turn >= 1:
-            logging.error("Critical inconsistency: In mulligan/bottoming but turn >= 1. Forcing end.")
-            self._end_mulligan_phase()
-            return False
-        
-        # In non-error cases, continue
-        return True
+                return True
+            
+            # Case 2: In bottoming phase but no bottoming player
+            if gs.bottoming_in_progress and gs.bottoming_player is None:
+                logging.error("Inconsistent state: In bottoming phase with no active bottoming player")
+                needs_bottom_found = 0
+                for p, p_id in [(gs.p1, 'p1'), (gs.p2, 'p2')]:
+                    if p and p.get('_needs_to_bottom_next', False) and not p.get('_bottoming_complete', False):
+                        needs_bottom_found += 1
+                        gs.bottoming_player = p
+                        gs.bottoming_count = 0
+                        gs.cards_to_bottom = min(gs.mulligan_count.get(p_id, 0), len(p.get("hand", [])))
+                        logging.info(f"Recovering bottoming state by assigning {p_id} as bottoming player")
+                
+                if needs_bottom_found != 1:
+                    logging.warning(f"Found {needs_bottom_found} players needing to bottom. Forcing end of mulligan phase.")
+                    self._end_mulligan_phase()
+                    return False
+                return True
+            
+            # Case 3: Neither mulligan nor bottoming in progress, but mulligan_in_progress flag is still set
+            if gs.mulligan_in_progress and not gs.bottoming_in_progress and gs.mulligan_player is None:
+                all_decided = True
+                for p in [gs.p1, gs.p2]:
+                    if p and not p.get('_mulligan_decision_made', False):
+                        all_decided = False
+                        break
+                        
+                if all_decided:
+                    logging.info("All players have made mulligan decisions but phase not ended. Ending mulligan.")
+                    self._end_mulligan_phase()
+                    return False
+                else:
+                    logging.error("Inconsistent mulligan state: No bottoming, not all decided, but no mulligan_player")
+                    self._end_mulligan_phase() 
+                    return False
+            
+            # Case 4: Bottoming needed but stalled - check counters
+            if gs.bottoming_in_progress and gs.bottoming_player:
+                if gs.cards_to_bottom <= 0 or gs.bottoming_count >= gs.cards_to_bottom:
+                    logging.error(f"Bottoming stalled: to_bottom={gs.cards_to_bottom}, count={gs.bottoming_count}")
+                    gs.bottoming_player['_bottoming_complete'] = True
+                    
+                    other_player = gs.p2 if gs.bottoming_player == gs.p1 else gs.p1
+                    if other_player and other_player.get('_needs_to_bottom_next', False) and not other_player.get('_bottoming_complete', False):
+                        gs.bottoming_player = other_player
+                        gs.bottoming_count = 0
+                        other_id = 'p2' if other_player == gs.p2 else 'p1'
+                        gs.cards_to_bottom = min(gs.mulligan_count.get(other_id, 0), len(other_player.get("hand", [])))
+                        logging.info(f"Transitioning bottoming to next player: {other_player['name']}")
+                    else:
+                        logging.info("No more players need to bottom. Ending mulligan phase.")
+                        self._end_mulligan_phase()
+                        return False
+            
+            # Case 5: Final safety check - if in limbo, force end
+            if (gs.mulligan_in_progress or gs.bottoming_in_progress) and gs.turn >= 1:
+                logging.error("Critical inconsistency: In mulligan/bottoming but turn >= 1. Forcing end.")
+                self._end_mulligan_phase()
+                return False
+            
+            return True
          
     def _add_basic_phase_actions(self, is_my_turn, valid_actions, set_valid_action):
         """Adds basic actions available based on the current phase, assuming priority and no stack."""
@@ -2016,6 +1851,46 @@ class ActionHandler:
         NOW returns (reward, done, truncated, info) as expected by Environment.
         """
         gs = self.game_state
+        
+        # *** EARLY SAFETY CHECK FOR STUCK STATE ***
+        if action_idx == 224:  # NO_OP action
+            # Count consecutive NO_OPs
+            if not hasattr(gs, '_consecutive_no_ops'):
+                gs._consecutive_no_ops = 0
+            gs._consecutive_no_ops += 1
+            
+            # Progressive Recovery Strategy
+            if gs._consecutive_no_ops > 3:
+                logging.warning(f"STUCK STATE DETECTED: {gs._consecutive_no_ops} consecutive NO_OPs!")
+                
+                # Level 1: Fix missing priority
+                if gs.priority_player is None and gs.phase not in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP]:
+                    active_player = gs._get_active_player()
+                    logging.warning(f"Emergency fix L1: Assigning priority to {active_player.get('name', 'Active Player')}")
+                    gs.priority_player = active_player
+                    gs.priority_pass_count = 0
+                
+                # Level 2: Force Pass Priority (if stuck with priority or opponent stalled)
+                # This usually happens if the env thinks agent acts, but agent thinks no priority
+                elif gs._consecutive_no_ops > 6:
+                    logging.warning("Emergency fix L2: Forcing priority pass/stack resolution.")
+                    gs._pass_priority()
+                
+                # Level 3: Force Phase Advance (Hard Stuck)
+                if gs._consecutive_no_ops > 12:
+                    logging.error("Emergency fix L3: Hard stuck. Forcing phase advance.")
+                    if hasattr(gs, '_advance_phase'):
+                         gs._advance_phase()
+                    else:
+                         # Fallback manual advance
+                         gs.phase = gs.phase + 1 if gs.phase < gs.PHASE_CLEANUP else gs.PHASE_UNTAP
+                         gs.priority_player = gs._get_active_player()
+                         gs.priority_pass_count = 0
+
+        else:
+            # Reset counter on non-NO_OP action
+            gs._consecutive_no_ops = 0
+        
         me = None
         opp = None
         if hasattr(gs, 'p1') and gs.p1 and hasattr(gs, 'p2') and gs.p2:
@@ -2066,7 +1941,7 @@ class ActionHandler:
                     elif gs.choice_context.get("type") == "surveil" and "cards_being_surveiled" not in action_context:
                         action_context['cards'] = gs.choice_context.get('cards', [])
 
-
+        
         # --- Main Action Application Logic ---
         try:
             # 1. Validate Action Index (Check moved here)
@@ -2566,14 +2441,28 @@ class ActionHandler:
             return 0.05, True
         logging.warning("PUT_ON_BOTTOM called outside of Scry context.")
         return -0.1, False
-
+    
     def _handle_no_op(self, param, context=None, **kwargs):
-        """Handles NO_OP. Does nothing to the game state."""
-        gs = self.game_state
-        logging.debug("Executed NO_OP action.")
-        # The simulation of opponent turns is now handled by the Environment's step loop
-        # if this NO_OP was chosen while waiting for the opponent.
-        return 0.0, True # Return (reward, success_flag)
+            """Handles NO_OP. Checks for stuck state and forces recovery."""
+            gs = self.game_state
+            logging.debug("Executed NO_OP action.")
+            
+            # Stuck State Recovery: 
+            # If NO_OP executed when priority is None in a playable phase (not Untap/Cleanup),
+            # it means the game state has lost track of the active actor.
+            if gs.priority_player is None and gs.phase not in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP, gs.PHASE_TARGETING, gs.PHASE_SACRIFICE, gs.PHASE_CHOOSE]:
+                logging.warning("NO_OP executed while priority is None. Attempting recovery.")
+                
+                # 1. Try standard logic to assign priority
+                gs._pass_priority() 
+                
+                # 2. Force assignment if standard logic skipped it (e.g. due to non-empty stack check failure)
+                if gs.priority_player is None:
+                    logging.warning("Recovery: Force assigning priority to Active Player.")
+                    gs.priority_player = gs._get_active_player()
+                    gs.priority_pass_count = 0
+                
+            return 0.0, True
 
     def _handle_pay_offspring_cost(self, param, context=None, **kwargs):
         gs = self.game_state
@@ -2937,7 +2826,21 @@ class ActionHandler:
     def _handle_upkeep_pass(self, param, **kwargs):
         """Handle transitioning from upkeep step."""
         gs = self.game_state
-        return self._handle_phase_transition(gs.PHASE_UPKEEP, gs.PHASE_DRAW, **kwargs)
+        
+        # Ensure priority is assigned before transition
+        if gs.priority_player is None:
+            gs.priority_player = gs._get_active_player()
+            gs.priority_pass_count = 0
+            logging.warning("UPKEEP_PASS: Priority was None, assigned to active player")
+        
+        result, success = self._handle_phase_transition(gs.PHASE_UPKEEP, gs.PHASE_DRAW, **kwargs)
+        
+        # If transition succeeded, ensure priority is set for draw phase
+        if success:
+            gs.priority_player = gs._get_active_player()
+            gs.priority_pass_count = 0
+        
+        return result, success
 
     def _handle_begin_combat_end(self, param, **kwargs):
         """Handle transitioning from begin combat step."""

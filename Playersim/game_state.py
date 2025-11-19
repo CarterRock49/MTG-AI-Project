@@ -30,7 +30,7 @@ class GameState:
                  "strategic_planner", "attackers_this_turn", 'strategy_memory',
                  "_logged_card_ids", "_logged_errors", "targeting_system",
                  "_phase_action_count", "priority_player", "stats_tracker",
-                 "card_memory", 'original_p2_deck', 
+                 "card_memory", 'original_p2_deck', "_consecutive_no_ops",
                  # *** ADDED action_handler ***
                  "action_handler", "impending_cards", "_offspring_cost_paid_context",
                  # Special card types
@@ -114,7 +114,7 @@ class GameState:
         self._phase_history = [] # Use internal list for history
         self._phase_action_count = 0
         self.priority_player = None # Will be set during reset or first phase
-
+        self._consecutive_no_ops = 0
         # Combat state initialization
         self.current_attackers = []
         self.current_block_assignments = {}
@@ -468,106 +468,109 @@ class GameState:
         logging.debug("Day/night cycle initialized (neither day nor night)")
 
     def reset(self, p1_deck, p2_deck, seed=None):
-        """Reset the game state with new decks and initialize all subsystems (Revised Mulligan/Priority)"""
-        if seed is not None:
-            random.seed(seed)
-            np.random.seed(seed)
+            """Reset the game state with new decks and initialize all subsystems (Revised Mulligan/Priority)"""
+            if seed is not None:
+                random.seed(seed)
+                np.random.seed(seed)
 
-        logging.debug("Starting GameState reset...")
-        # Reset basic game state
-        self.turn = 0 # Start at turn 0 to allow mulligan before turn 1 begins
-        self.phase = self.PHASE_UNTAP # Start conceptually before turn 1 begins, will transition via mulligan actions
-        self.combat_damage_dealt = False
-        self.stack = []
-        self.priority_pass_count = 0
-        self.last_stack_size = 0
-        self._phase_action_count = 0
-        self._phase_history = [] # Explicit reset
-        self.optimal_attackers = None
-        self.attack_suggestion_used = False
-        self.cards_played = {0: [], 1: []} # Explicit reset
-        self.exhaust_ability_used = {} # Reset exhaust tracking
-        self.priority_player = None # No priority during mulligan decisions
+            logging.debug("Starting GameState reset...")
+            # Reset basic game state
+            self.turn = 1 # Start at Turn 1 conceptually
+            self.phase = self.PHASE_UPKEEP # Initial conceptual phase
+            self.combat_damage_dealt = False
+            self.stack = []
+            self.priority_pass_count = 0
+            self.last_stack_size = 0
+            self._phase_action_count = 0
+            self._phase_history = [] # Explicit reset
+            self.optimal_attackers = None
+            self.attack_suggestion_used = False
+            self.cards_played = {0: [], 1: []} # Explicit reset
+            self.exhaust_ability_used = {} # Reset exhaust tracking
+            self._consecutive_no_ops = 0
+            # Ensure decks exist and are at least copy-able, with fallbacks if necessary
+            p1_deck_safe = p1_deck.copy() if isinstance(p1_deck, list) else []
+            p2_deck_safe = p2_deck.copy() if isinstance(p2_deck, list) else []
+            
+            # Ensure original deck references exist even if empty
+            self.original_p1_deck = p1_deck_safe
+            self.original_p2_deck = p2_deck_safe
 
-        # Ensure decks exist and are at least copy-able, with fallbacks if necessary
-        p1_deck_safe = p1_deck.copy() if isinstance(p1_deck, list) else []
-        p2_deck_safe = p2_deck.copy() if isinstance(p2_deck, list) else []
-        
-        # Ensure original deck references exist even if empty
-        self.original_p1_deck = p1_deck_safe
-        self.original_p2_deck = p2_deck_safe
+            # Initialize player states AFTER resetting other state
+            self.p1 = self._init_player(p1_deck_safe, player_num=1)
+            self.p2 = self._init_player(p2_deck_safe, player_num=2)
+            
+            # Set agent identity *after* players are created
+            self.agent_is_p1 = True 
 
-        # Initialize player states AFTER resetting other state
-        self.p1 = self._init_player(p1_deck_safe, player_num=1)
-        self.p2 = self._init_player(p2_deck_safe, player_num=2)
-        
-        # Set agent identity *after* players are created
-        self.agent_is_p1 = True # Assume agent is P1 by default unless configured otherwise
+            # *** CRITICAL FIX: Initialize Priority Player ***
+            # Rule 103.1: At the start of the game, the starting player (P1) has priority.
+            # Even if Mulligan overrides control logic, this prevents 'None' state.
+            self.priority_player = self.p1 
 
-        # --- Mulligan State Setup (CRITICAL) ---
-        # After players exist, before subsystems that might query mulligan state
-        self.mulligan_in_progress = True # Start with mulligan phase active
-        self.mulligan_player = self.p1 # P1 mulligans first
-        self.mulligan_count = {'p1': 0, 'p2': 0} # Reset counts
-        self.mulligan_data = {'p1': 0, 'p2': 0} # Reset separate tracker
-        self.bottoming_in_progress = False
-        self.bottoming_player = None
-        self.cards_to_bottom = 0
-        self.bottoming_count = 0
-        # Ensure temporary mulligan flags are cleared on players
-        if self.p1: self.p1.pop('_mulligan_decision_made', None); self.p1.pop('_needs_to_bottom_next', None); self.p1.pop('_bottoming_complete', None)
-        if self.p2: self.p2.pop('_mulligan_decision_made', None); self.p2.pop('_needs_to_bottom_next', None); self.p2.pop('_bottoming_complete', None)
+            # --- Mulligan State Setup (CRITICAL) ---
+            # After players exist, before subsystems that might query mulligan state
+            self.mulligan_in_progress = True # Start with mulligan phase active
+            self.mulligan_player = self.p1 # P1 mulligans first
+            self.mulligan_count = {'p1': 0, 'p2': 0} # Reset counts
+            self.mulligan_data = {'p1': 0, 'p2': 0} # Reset separate tracker
+            self.bottoming_in_progress = False
+            self.bottoming_player = None
+            self.cards_to_bottom = 0
+            self.bottoming_count = 0
+            # Ensure temporary mulligan flags are cleared on players
+            if self.p1: self.p1.pop('_mulligan_decision_made', None); self.p1.pop('_needs_to_bottom_next', None); self.p1.pop('_bottoming_complete', None)
+            if self.p2: self.p2.pop('_mulligan_decision_made', None); self.p2.pop('_needs_to_bottom_next', None); self.p2.pop('_bottoming_complete', None)
 
-        # --- Subsystem Initialization ---
-        try:
-            self._init_subsystems() # ActionHandler created here
-        except Exception as e:
-            logging.error(f"Error initializing subsystems: {e}")
-            # Continue with reset even if subsystem init fails
+            # --- Subsystem Initialization ---
+            try:
+                self._init_subsystems() # ActionHandler created here
+            except Exception as e:
+                logging.error(f"Error initializing subsystems: {e}")
+                # Continue with reset even if subsystem init fails
 
-        # Initialize all tracking variables using the helper AFTER subsystems exist
-        try:
-            self._init_tracking_variables()
-            self.initialize_day_night_cycle() # Call after tracking vars init
-        except Exception as e:
-            logging.error(f"Error initializing tracking variables: {e}")
-            # Continue with reset even if tracking var init fails
+            # Initialize all tracking variables using the helper AFTER subsystems exist
+            try:
+                self._init_tracking_variables()
+                self.initialize_day_night_cycle() # Call after tracking vars init
+            except Exception as e:
+                logging.error(f"Error initializing tracking variables: {e}")
+                # Continue with reset even if tracking var init fails
 
-        # Link external systems AFTER local subsystems are initialized
-        self.strategy_memory = getattr(self, 'strategy_memory', None)
-        self.stats_tracker = getattr(self, 'stats_tracker', None)
-        self.card_memory = getattr(self, 'card_memory', None)
-        if self.strategy_memory: self.strategy_memory.game_state = self
-        if self.stats_tracker: self.stats_tracker.game_state = self # Link if needed
-        if self.card_memory: self.card_memory.game_state = self # Link if needed
-        # Link subsystems that depend on external trackers
-        if self.card_evaluator:
-            self.card_evaluator.stats_tracker = self.stats_tracker
-            self.card_evaluator.card_memory = self.card_memory
-        if self.strategic_planner and self.strategy_memory:
-            self.strategic_planner.strategy_memory = self.strategy_memory
+            # Link external systems AFTER local subsystems are initialized
+            self.strategy_memory = getattr(self, 'strategy_memory', None)
+            self.stats_tracker = getattr(self, 'stats_tracker', None)
+            self.card_memory = getattr(self, 'card_memory', None)
+            if self.strategy_memory: self.strategy_memory.game_state = self
+            if self.stats_tracker: self.stats_tracker.game_state = self # Link if needed
+            if self.card_memory: self.card_memory.game_state = self # Link if needed
+            # Link subsystems that depend on external trackers
+            if self.card_evaluator:
+                self.card_evaluator.stats_tracker = self.stats_tracker
+                self.card_evaluator.card_memory = self.card_memory
+            if self.strategic_planner and self.strategy_memory:
+                self.strategic_planner.strategy_memory = self.strategy_memory
 
-        # Final setup calls
-        if self.strategic_planner and hasattr(self.strategic_planner, 'init_after_reset'):
-            self.strategic_planner.init_after_reset()
+            # Final setup calls
+            if self.strategic_planner and hasattr(self.strategic_planner, 'init_after_reset'):
+                self.strategic_planner.init_after_reset()
 
-        # Initialize card abilities via AbilityHandler AFTER it's linked
-        if self.ability_handler and hasattr(self.ability_handler, '_initialize_abilities'):
-            logging.debug("Initializing card abilities via AbilityHandler.")
-            if isinstance(self.card_db, dict) and self.card_db:
-                self.ability_handler._initialize_abilities()
-            else: logging.error("Cannot initialize abilities: card_db is not valid.")
+            # Initialize card abilities via AbilityHandler AFTER it's linked
+            if self.ability_handler and hasattr(self.ability_handler, '_initialize_abilities'):
+                logging.debug("Initializing card abilities via AbilityHandler.")
+                if isinstance(self.card_db, dict) and self.card_db:
+                    self.ability_handler._initialize_abilities()
+                else: logging.error("Cannot initialize abilities: card_db is not valid.")
 
-        # Initial Layer application
-        if self.layer_system:
-            logging.debug("Applying initial layer effects after reset.")
-            self.layer_system.apply_all_effects()
+            # Initial Layer application
+            if self.layer_system:
+                logging.debug("Applying initial layer effects after reset.")
+                self.layer_system.apply_all_effects()
 
-        # Verify mulligan state is consistent before proceeding
-        self.check_mulligan_state()
+            # Verify mulligan state is consistent before proceeding
+            self.check_mulligan_state()
 
-        logging.debug("GameState reset complete. Mulligan phase active.")
-        # Do NOT advance phase/turn here. Let mulligan actions handle transition.
+            logging.debug("GameState reset complete. Mulligan phase active. Priority initialized to P1.")
     
     def _init_player(self, deck, player_num):
         """Initialize a player's state with a given deck and draw 7 cards for the starting hand."""
@@ -1338,91 +1341,168 @@ class GameState:
         # Otherwise, check normal priority rules
         return self.check_priority(player)
 
+    def _can_act_at_sorcery_speed(self, player):
+        """
+        Check if the specified player can act at sorcery speed.
+        Rules:
+        1. It must be the player's turn (Active Player).
+        2. It must be a Main Phase.
+        3. The stack must be empty.
+        """
+        # Must be the active player
+        if player != self._get_active_player():
+            return False
+            
+        # Must be in a main phase
+        if self.phase not in [self.PHASE_MAIN_PRECOMBAT, self.PHASE_MAIN_POSTCOMBAT]:
+            return False
+            
+        # Stack must be empty
+        if self.stack:
+            return False
+            
+        return True
+
+    def _can_cast_now(self, card_id, player):
+        """
+        Check if a spell can be cast at the current time based on phase, stack state, etc.
+        
+        Args:
+            card_id: ID of the card to check
+            player: Player attempting to cast
+            
+        Returns:
+            bool: Whether the spell can be cast
+        """
+        card = self._safe_get_card(card_id)
+        if not card or not hasattr(card, 'card_types'):
+            return False
+        
+        # Check if player has priority (Prerequisite for casting anything)
+        # Logic: Either they are active player with count 0 (implicit) or explicitly assigned priority
+        active_player = self._get_active_player()
+        has_priority = (player == active_player and self.priority_pass_count == 0) or self.priority_player == player
+        
+        if not has_priority:
+            return False
+
+        # Check timing permissions
+        is_instant = 'instant' in card.card_types
+        has_flash = hasattr(card, 'oracle_text') and 'flash' in card.oracle_text.lower()
+        
+        # Instants and cards with flash can be cast anytime player has priority
+        if is_instant or has_flash:
+            return True
+            
+        # Non-instant speed spells require sorcery speed timing
+        return self._can_act_at_sorcery_speed(player)
+
     def _pass_priority(self):
-        """Handle passing priority between players or advancing state. (Revised Phase Advance & Priority Logic)"""
-        gs = self # Alias for convenience
-
-        # If no one has priority, this action is likely meaningless, but check if state should progress.
-        if gs.priority_player is None:
-            # Check if we are in a state where priority SHOULD be assigned (e.g., empty stack, standard phase)
-            if not gs.stack and gs.phase not in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP, gs.PHASE_TARGETING, gs.PHASE_SACRIFICE, gs.PHASE_CHOOSE]:
-                gs.priority_player = gs._get_active_player()
-                gs.priority_pass_count = 0 # Reset count when assigning priority
-                logging.debug(f"Pass called with no priority: Assigned priority to AP ({gs.priority_player['name']})")
-                # We assigned priority, let the game proceed without incrementing pass count yet.
-                return
-            else:
-                logging.debug("Pass priority called when no player had priority (expected during resolution/untap/cleanup/special phase).")
-                return # State progresses elsewhere or is waiting for choice
-
-        # --- Player with Priority is Passing ---
-        gs.priority_pass_count += 1
-        current_prio_player = gs.priority_player
-        next_prio_player = gs._get_non_active_player() if current_prio_player == gs._get_active_player() else gs._get_active_player()
-        gs.priority_player = next_prio_player # Tentatively pass priority
-        logging.debug(f"Priority passed from {getattr(current_prio_player, 'name', 'Unknown')} to {getattr(next_prio_player, 'name', 'Unknown')} (Pass #{gs.priority_pass_count})")
-
-        # --- Check if State Should Change (Both Passed) ---
-        if gs.priority_pass_count >= 2:
-            logging.debug("Both players passed priority sequentially.")
-            gs.priority_pass_count = 0 # Reset pass count FIRST
-
-            # --- Check Split Second ---
-            if getattr(gs, 'split_second_active', False):
-                # Find the Split Second spell/ability on top (it must be the top item if active)
-                split_second_item = None
-                if gs.stack and isinstance(gs.stack[-1], tuple) and len(gs.stack[-1]) > 3 and gs.stack[-1][3].get("is_split_second", False):
-                    split_second_item = gs.stack[-1]
-
-                if split_second_item:
-                    logging.debug("Split Second active: Resolving split second spell/ability.")
-                    resolved = gs.resolve_top_of_stack() # Resolves and RESETS PRIORITY to AP
-                    # Check if other SS items remain after resolution (unlikely but possible)
-                    if resolved:
-                         any_other_ss = any(isinstance(i,tuple) and len(i)>3 and i[3].get('is_split_second') for i in gs.stack)
-                         if not any_other_ss:
-                             gs.split_second_active = False; logging.info("Split Second is now INACTIVE.")
-                    else: logging.warning("Split second resolution failed.")
-                    # Do NOT advance phase here, priority was reset by resolve_top_of_stack
-                    return # Loop might continue if state changed
-                else:
-                    logging.warning("Split Second was active, but no corresponding spell/ability found on stack top.")
-                    gs.split_second_active = False
-                    gs.priority_player = gs._get_active_player() # Reset priority safely
+            """
+            Handle passing priority between players or advancing state.
+            Strictly enforces Rule 117:
+            - If a player passes, priority goes to the next player.
+            - If both pass in succession:
+                - If stack is not empty: Resolve top item. AP gets priority.
+                - If stack is empty: Advance phase. AP gets priority in new phase.
+            """
+            # --- 1. Critical Recovery: If priority is lost (None), reset to Active Player ---
+            # This fixes the infinite NO_OP loop bug.
+            if self.priority_player is None:
+                # In Untap (0) and Cleanup (15), no player has priority by default.
+                # However, if we are 'stuck' here with no actions happening, we force advance.
+                if self.phase == self.PHASE_UNTAP:
+                    logging.warning("Stuck in UNTAP with no priority. Forcing advance to UPKEEP.")
+                    self.phase = self.PHASE_UPKEEP
+                    self.priority_player = self._get_active_player()
+                    self.priority_pass_count = 0
+                    return
+                
+                # In all other phases (Upkeep, Main, Combat, etc.), SOMEONE must have priority.
+                # Default to Active Player (Rule 117.1).
+                if self.phase != self.PHASE_CLEANUP:
+                    active_p = self._get_active_player()
+                    logging.warning(f"Priority was None in interactive phase {self._PHASE_NAMES.get(self.phase)}. Resetting to Active Player: {active_p['name']}")
+                    self.priority_player = active_p
+                    self.priority_pass_count = 0
                     return
 
-            # --- Check Stack Resolution ---
-            elif gs.stack:
-                # Process triggers FIRST that might have resulted from the passes
-                triggers_processed = False
-                initial_stack_size_before_triggers = len(gs.stack) # Store size before processing
-                if gs.ability_handler: triggers_processed = gs.ability_handler.process_triggered_abilities()
+            # --- 2. Standard Pass Logic ---
+            self.priority_pass_count += 1
+            
+            # Calculate next player (toggle)
+            current_prio = self.priority_player
+            active_p = self._get_active_player()
+            non_active_p = self._get_non_active_player()
+            
+            # If current is Active, next is Non-Active. Otherwise, back to Active.
+            next_player = non_active_p if current_prio == active_p else active_p
+            
+            # Tentatively assign priority to the next player
+            self.priority_player = next_player 
+            # logging.debug(f"Priority passed from {current_prio['name'] if current_prio else 'None'} to {next_player['name']}")
 
-                # Check if new triggers were added
-                if len(gs.stack) > initial_stack_size_before_triggers:
-                    gs.priority_player = gs._get_active_player() # Reset priority to AP
-                    gs.last_stack_size = len(gs.stack) # Update tracked size
-                    logging.debug("Triggers added after pass, priority back to AP.")
-                else: # No new triggers, resolve the stack
-                    logging.debug("Both passed, resolving stack...")
-                    gs.resolve_top_of_stack() # This resets priority to AP internally
-                    # State Based Actions are checked in the main loop after this returns
+            # --- 3. Check if State Should Change (Both Players Passed) ---
+            if self.priority_pass_count >= 2:
+                # Both players passed in succession. Action required.
+                self.priority_pass_count = 0 # Reset pass count immediately
 
-            # --- Check Phase Advance ---
-            # Advance phase only if stack is empty AND no choice context is pending
-            elif not (gs.targeting_context or gs.sacrifice_context or gs.choice_context):
-                 logging.debug("Both passed with empty stack & no choices pending, advancing phase.")
-                 gs._advance_phase() # This resets priority and handles next phase start
-            else: # Choice pending, cannot advance phase
-                logging.debug("Both passed, but choice context pending. Waiting for action.")
-                # Assign priority back to the player who needs to make the choice
-                if gs.targeting_context: gs.priority_player = gs.targeting_context.get("controller")
-                elif gs.sacrifice_context: gs.priority_player = gs.sacrifice_context.get("controller")
-                elif gs.choice_context: gs.priority_player = gs.choice_context.get("player")
-                else: gs.priority_player = None # Should not happen if context exists
-                # gs.priority_pass_count remains 0 because we just reset it
+                # A. Check Split Second (Rare, but overrides stack logic)
+                if getattr(self, 'split_second_active', False):
+                    # Find the Split Second spell/ability on top
+                    split_second_item = None
+                    if self.stack and isinstance(self.stack[-1], tuple) and len(self.stack[-1]) > 3 and self.stack[-1][3].get("is_split_second", False):
+                        split_second_item = self.stack[-1]
 
-        # If only one player passed, priority is now with the next_prio_player. Pass count is 1.
+                    if split_second_item:
+                        logging.debug("Split Second active: Resolving split second spell/ability.")
+                        self.resolve_top_of_stack() 
+                        # Split second active check happens in resolve_top_of_stack logic usually
+                        self.priority_player = active_p # AP gets priority after resolution
+                        return 
+                    else:
+                        # Split second flag was true but no item found; clean up state
+                        self.split_second_active = False
+                        self.priority_player = active_p
+                        return
+
+                # B. Check Stack Resolution
+                elif self.stack:
+                    # Process triggers FIRST that might have resulted from the passes
+                    initial_stack_size = len(self.stack)
+                    if self.ability_handler: 
+                        self.ability_handler.process_triggered_abilities()
+
+                    # Check if new triggers were added to the stack
+                    if len(self.stack) > initial_stack_size:
+                        # New items added: Active Player gets priority to respond (Rule 117.3c)
+                        self.priority_player = active_p
+                        self.last_stack_size = len(self.stack)
+                        logging.debug("Triggers added after pass, priority returned to AP.")
+                        return
+
+                    # No new triggers, resolve the top item
+                    # logging.debug("Both passed, resolving stack...")
+                    self.resolve_top_of_stack() 
+                    
+                    # Rule 117.3b: Active player receives priority after a spell/ability resolves.
+                    self.priority_player = active_p
+                    self.last_stack_size = len(self.stack)
+                    return
+
+                # C. Check Phase Advance (Stack is Empty)
+                else:
+                    # Advance phase only if stack is empty AND no special choice context is pending
+                    if not (self.targeting_context or self.sacrifice_context or self.choice_context):
+                        self._advance_phase() # This resets priority and handles next phase start
+                    else: 
+                        # If choice context pending, force priority to the chooser to prevent stuck state
+                        chooser = None
+                        if self.targeting_context: chooser = self.targeting_context.get("controller")
+                        elif self.sacrifice_context: chooser = self.sacrifice_context.get("controller")
+                        elif self.choice_context: chooser = self.choice_context.get("player")
+                        
+                        self.priority_player = chooser if chooser else active_p
 
 
     def move_card(self, card_id, from_player, from_zone, to_player, to_zone, cause=None, context=None):
@@ -2053,31 +2133,38 @@ class GameState:
         
 
     def add_to_stack(self, item_type, source_id, controller, context=None):
-        """Add an item to the stack with context. (Revised Priority Reset)"""
-        if context is None: context = {}
-        # Ensure source_id is valid
-        card = self._safe_get_card(source_id)
-        card_name = getattr(card, 'name', source_id) if card else source_id
+            """
+            Add an item to the stack with context.
+            Sets priority to the controller (Rule 117.3c).
+            """
+            if context is None: context = {}
+            # Ensure source_id is valid
+            card = self._safe_get_card(source_id)
+            card_name = getattr(card, 'name', source_id) if card else source_id
 
-        stack_item = (item_type, source_id, controller, context)
-        self.stack.append(stack_item)
-        logging.debug(f"Added to stack: {item_type} {card_name} ({source_id}) with context keys: {context.keys()}")
+            stack_item = (item_type, source_id, controller, context)
+            self.stack.append(stack_item)
+            logging.debug(f"Added to stack: {item_type} {card_name} ({source_id}) with context keys: {context.keys()}")
 
-        # Reset priority ONLY IF NOT in a special choice phase.
-        # Priority automatically goes to the active player after something is added.
-        if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+            # *** RULE 117.3c: The player who cast the spell/ability gets priority. ***
+            # By default, after adding to stack, the game state should NOT set priority to None.
+            # It should be the player who took the action.
+            self.priority_player = controller
+
+            # Reset pass count because the state has changed (stack is not empty/same)
             self.priority_pass_count = 0
             self.last_stack_size = len(self.stack)
-            self.priority_player = self._get_active_player()
-            # If not already in priority phase, enter it
-            if self.phase != self.PHASE_PRIORITY:
-                 self.previous_priority_phase = self.phase # Store where we came from
-                 self.phase = self.PHASE_PRIORITY
-            logging.debug(f"Stack changed, priority to AP ({self.priority_player['name']})")
-        else:
-             # Still update stack size even if not resetting priority
-             self.last_stack_size = len(self.stack)
-             logging.debug("Added to stack during special choice phase, priority maintained.")
+
+            # Handling Phase transitions related to Special Choices
+            if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+                # If not already in priority phase (e.g. we were in Main Phase), enter it
+                if self.phase != self.PHASE_PRIORITY:
+                    self.previous_priority_phase = self.phase # Store where we came from
+                    self.phase = self.PHASE_PRIORITY
+                logging.debug(f"Stack changed, priority returned to {self.priority_player['name']}")
+            else:
+                # Still update stack size even if not resetting priority context
+                logging.debug("Added to stack during special choice phase, priority maintained.")
     
     @staticmethod
     def _combine_cost_dicts(cost_dict1, cost_dict2):
@@ -2544,81 +2631,81 @@ class GameState:
             return True # Incremental bottoming action was successful
 
     def _end_mulligan_phase(self):
-        """Helper to clean up mulligan state and transition to Turn 1. (Revised Priority Assignment v5 - Improved State Cleanup)"""
-        # Check if already ended to prevent potential recursion/double execution
-        if not self.mulligan_in_progress and not self.bottoming_in_progress:
-            logging.debug("_end_mulligan_phase called, but mulligan/bottoming already inactive.")
-            return # Avoid running logic again if already ended
+            """Helper to clean up mulligan state and transition to Turn 1. (Revised Priority Assignment v5 - Improved State Cleanup)"""
+            # Check if already ended to prevent potential recursion/double execution
+            if not self.mulligan_in_progress and not self.bottoming_in_progress:
+                logging.debug("_end_mulligan_phase called, but mulligan/bottoming already inactive.")
+                return # Avoid running logic again if already ended
 
-        # IMPORTANT: Force end mulligan regardless of unfinished business
-        logging.info("Ending mulligan phase - transitioning to main game.")
-        # Reset all mulligan tracking flags first - do this before any other logic
-        self.mulligan_in_progress = False
-        self.mulligan_player = None
-        self.bottoming_in_progress = False
-        self.bottoming_player = None
+            # IMPORTANT: Force end mulligan regardless of unfinished business
+            logging.info("Ending mulligan phase - transitioning to main game.")
+            
+            # --- CRITICAL FIX: Reset flags BEFORE changing turn number ---
+            # This prevents "In mulligan but turn >= 1" errors during SBA/Trigger checks that might occur immediately.
+            self.mulligan_in_progress = False
+            self.mulligan_player = None
+            self.bottoming_in_progress = False
+            self.bottoming_player = None
 
-        # Force clean up temporary flags using dict.pop
-        for p in [self.p1, self.p2]:
-            if p: # Check if player exists
-                p.pop('_mulligan_decision_made', None)
-                p.pop('_needs_to_bottom_next', None)
-                p.pop('_bottoming_complete', None)
+            # Force clean up temporary flags using dict.pop
+            for p in [self.p1, self.p2]:
+                if p: # Check if player exists
+                    p.pop('_mulligan_decision_made', None)
+                    p.pop('_needs_to_bottom_next', None)
+                    p.pop('_bottoming_complete', None)
 
-        # --- Set State for Start of Game ---
-        self.turn = 1 # Officially Turn 1
-        self.phase = self.PHASE_UNTAP # Start with Untap
+            # --- Set State for Start of Game ---
+            self.turn = 1 # Officially Turn 1
+            self.phase = self.PHASE_UNTAP # Start with Untap
 
-        try:
-            self._reset_turn_tracking_variables() # Reset turn vars for Turn 1
-        except Exception as e:
-            logging.error(f"Error resetting turn tracking variables: {e}")
-            # Continue even if this fails
+            try:
+                self._reset_turn_tracking_variables() # Reset turn vars for Turn 1
+            except Exception as e:
+                logging.error(f"Error resetting turn tracking variables: {e}")
+                # Continue even if this fails
 
-        # Get active player with fallback
-        active_player = self._get_active_player() # P1 is active player on Turn 1
-        if not active_player:
-            logging.critical("CRITICAL ERROR in _end_mulligan_phase: _get_active_player() returned None!")
-            # ... (Fallback player creation logic remains) ...
-            return # Stop if no player
+            # Get active player with fallback
+            active_player = self._get_active_player() # P1 is active player on Turn 1
+            if not active_player:
+                logging.critical("CRITICAL ERROR in _end_mulligan_phase: _get_active_player() returned None!")
+                return # Stop if no player
 
-        logging.debug(f"Performing Turn {self.turn} Untap Step for {active_player['name']}...")
-        try:
-            self._untap_phase(active_player)
-            self.check_state_based_actions() # Check SBAs after untap
-        except Exception as e:
-            logging.error(f"Error in untap phase / SBA check: {e}")
-            # Continue even if untap/SBA fails initially
+            logging.debug(f"Performing Turn {self.turn} Untap Step for {active_player['name']}...")
+            try:
+                self._untap_phase(active_player)
+                self.check_state_based_actions() # Check SBAs after untap
+            except Exception as e:
+                logging.error(f"Error in untap phase / SBA check: {e}")
+                # Continue even if untap/SBA fails initially
 
-        # ** Automatically advance to Upkeep **
-        self.phase = self.PHASE_UPKEEP
-        logging.debug(f"Automatically advanced to Upkeep Step.")
+            # ** Automatically advance to Upkeep **
+            self.phase = self.PHASE_UPKEEP
+            logging.debug(f"Automatically advanced to Upkeep Step.")
 
-        # ** Trigger upkeep abilities AFTER phase set **
-        try:
-            # Perform phase-start triggers/actions BEFORE assigning priority
-            self._handle_beginning_of_phase_triggers() # Use helper for upkeep triggers (includes SBA check)
-        except Exception as e:
-            logging.error(f"Error handling beginning of phase triggers: {e}")
-            # Continue even if trigger handling fails
+            # ** Trigger upkeep abilities AFTER phase set **
+            try:
+                # Perform phase-start triggers/actions BEFORE assigning priority
+                self._handle_beginning_of_phase_triggers() # Use helper for upkeep triggers (includes SBA check)
+            except Exception as e:
+                logging.error(f"Error handling beginning of phase triggers: {e}")
+                # Continue even if trigger handling fails
 
-        # ** Assign Priority AFTER triggers **
-        # Priority is given *unless* a trigger caused a state change requiring a different player to act (rare)
-        # SBAs/triggers might resolve here or later. AP gets priority initially in Upkeep.
-        self.priority_player = active_player
-        self.priority_pass_count = 0
-        self.last_stack_size = len(self.stack) # Initialize stack size tracking
-        logging.debug(f"Entering Upkeep. Priority assigned to AP ({active_player['name']})") # Corrected logging
+            # ** Assign Priority AFTER triggers **
+            # Priority is given *unless* a trigger caused a state change requiring a different player to act (rare)
+            # SBAs/triggers might resolve here or later. AP gets priority initially in Upkeep.
+            self.priority_player = active_player
+            self.priority_pass_count = 0
+            self.last_stack_size = len(self.stack) # Initialize stack size tracking
+            logging.debug(f"Entering Upkeep. Priority assigned to AP ({active_player['name']})")
 
-        # Game Turn Limit Check (Keep as is)
-        if self.turn > self.max_turns and not getattr(self, '_turn_limit_checked', False):
-            logging.info(f"Turn limit ({self.max_turns}) reached! Ending game.")
-            self._turn_limit_checked = True
-            if self.p1 and self.p2:
-                if self.p1.get("life",0) > self.p2.get("life",0): self.p1["won_game"] = True; self.p2["lost_game"] = True
-                elif self.p2.get("life",0) > self.p1.get("life",0): self.p2["won_game"] = True; self.p1["lost_game"] = True
-                else: self.p1["game_draw"] = True; self.p2["game_draw"] = True
-            # SBAs checked later will finalize the game end
+            # Game Turn Limit Check (Keep as is)
+            if self.turn > self.max_turns and not getattr(self, '_turn_limit_checked', False):
+                logging.info(f"Turn limit ({self.max_turns}) reached! Ending game.")
+                self._turn_limit_checked = True
+                if self.p1 and self.p2:
+                    if self.p1.get("life",0) > self.p2.get("life",0): self.p1["won_game"] = True; self.p2["lost_game"] = True
+                    elif self.p2.get("life",0) > self.p1.get("life",0): self.p2["won_game"] = True; self.p1["lost_game"] = True
+                    else: self.p1["game_draw"] = True; self.p2["game_draw"] = True
 
     def _determine_target_category(self, target_id):
         """Helper to determine the primary category ('creatures', 'players', etc.) for logging/categorization."""
@@ -3301,199 +3388,158 @@ class GameState:
                 if cost_str.isdigit(): return f"{{{cost_str}}}"
                 return cost_str
         return None
-    
+
     def _advance_phase(self):
-        """Advance to the next phase in the turn sequence with improved progress detection and handling."""
+            """
+            Advance to the next phase in the turn sequence.
+            Ensures Active Player receives priority immediately (Rule 117.1).
+            Handles Cleanup Step loops (Rule 514.3).
+            """
+            # Phase sequence definition
+            phase_sequence = [
+                self.PHASE_UNTAP,
+                self.PHASE_UPKEEP,
+                self.PHASE_DRAW,
+                self.PHASE_MAIN_PRECOMBAT,
+                self.PHASE_BEGIN_COMBAT,
+                self.PHASE_DECLARE_ATTACKERS,
+                self.PHASE_DECLARE_BLOCKERS,
+                self.PHASE_FIRST_STRIKE_DAMAGE,
+                self.PHASE_COMBAT_DAMAGE,
+                self.PHASE_END_OF_COMBAT,
+                self.PHASE_MAIN_POSTCOMBAT,
+                self.PHASE_END_STEP,
+                self.PHASE_CLEANUP
+            ]
 
-        # Phase sequence definition
-        phase_sequence = [
-            self.PHASE_UNTAP,
-            self.PHASE_UPKEEP,
-            self.PHASE_DRAW,
-            self.PHASE_MAIN_PRECOMBAT,
-            self.PHASE_BEGIN_COMBAT,         # Renamed from BEGINNING_OF_COMBAT
-            self.PHASE_DECLARE_ATTACKERS,
-            self.PHASE_DECLARE_BLOCKERS,
-            self.PHASE_FIRST_STRIKE_DAMAGE, # Explicitly map to 16
-            self.PHASE_COMBAT_DAMAGE,
-            self.PHASE_END_OF_COMBAT,
-            self.PHASE_MAIN_POSTCOMBAT,
-            self.PHASE_END_STEP,
-            self.PHASE_CLEANUP
-        ]
+            old_phase = self.phase
+            
+            # --- Handle Special Phase Exits ---
+            # If we were in a sub-phase (Targeting, etc.) and are done, return to the game phase
+            if old_phase in [self.PHASE_PRIORITY, self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+                if not self.stack and not self.targeting_context and not self.sacrifice_context and not self.choice_context:
+                    if hasattr(self, 'previous_priority_phase') and self.previous_priority_phase is not None:
+                        # Don't return to Untap/Cleanup from a priority check
+                        if self.previous_priority_phase in [self.PHASE_UNTAP, self.PHASE_CLEANUP]:
+                            # Logic below will handle finding the *next* logical phase from here
+                            old_phase = self.previous_priority_phase 
+                        else:
+                            self.phase = self.previous_priority_phase
+                            self.previous_priority_phase = None
+                            self._phase_action_count = 0
+                            # We returned to the main phase, now we need to advance FROM it.
+                            # Fall through to the while loop below.
+                else:
+                    return # State busy, do not advance
 
-        old_phase = self.phase
-        old_phase_name = self._PHASE_NAMES.get(old_phase, f"UNKNOWN({old_phase})")
+            # --- Phase Advancement Loop (handles skipping) ---
+            current_phase_for_check = self.phase
+            loop_limit = 0
+            
+            while loop_limit < 20: # Safety break for infinite skips
+                loop_limit += 1
 
-        # --- Handle Special Phase Exits ---
-        # Only exit special phases if the stack is empty AND no choice context is pending
-        if old_phase in [self.PHASE_PRIORITY, self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
-            if not self.stack and not self.targeting_context and not self.sacrifice_context and not self.choice_context:
-                # Return to the phase we were in before entering the special phase
-                if hasattr(self, 'previous_priority_phase') and self.previous_priority_phase is not None:
-                    # Prevent returning directly to Untap/Cleanup from Priority unless that was the explicit state
-                    if self.previous_priority_phase in [self.PHASE_UNTAP, self.PHASE_CLEANUP] and old_phase == self.PHASE_PRIORITY:
-                         # If we were in cleanup's priority check and nothing happened, proceed to next turn's untap
-                         if self.previous_priority_phase == self.PHASE_CLEANUP:
-                              self.phase = self.PHASE_UNTAP # Set next phase explicitly, loop below will handle auto-advance
-                         # If we were somehow in untap's priority check (shouldn't happen), move to upkeep
-                         else: # self.previous_priority_phase == self.PHASE_UNTAP
-                              self.phase = self.PHASE_UPKEEP
-                    else:
-                         # Normal return to previous game phase
-                         self.phase = self.previous_priority_phase
+                # Find current phase index
+                try:
+                    current_idx = phase_sequence.index(current_phase_for_check)
+                except ValueError:
+                    logging.error(f"Current phase {current_phase_for_check} unknown. Resetting to Main.")
+                    self.phase = self.PHASE_MAIN_PRECOMBAT
+                    self.priority_player = self._get_active_player()
+                    return
 
-                    self.previous_priority_phase = None # Clear after using
-                else: # Fallback if previous phase wasn't tracked (shouldn't normally happen)
-                    logging.warning(f"No previous_priority_phase tracked when exiting {old_phase_name}. Defaulting.")
-                    self.phase = self.PHASE_MAIN_POSTCOMBAT if getattr(self, 'combat_damage_dealt', False) else self.PHASE_MAIN_PRECOMBAT
+                # Determine next phase
+                next_idx = (current_idx + 1) % len(phase_sequence)
+                next_phase_in_sequence = phase_sequence[next_idx]
 
-                new_phase_name = self._PHASE_NAMES.get(self.phase, '?')
-                logging.debug(f"Returning from special phase {old_phase_name} to {new_phase_name}")
-                self._phase_action_count = 0 # Reset phase action count when returning
-                # Fall through to the phase advancement loop below to handle the *returned* phase
-            else:
-                 # Stay in the current special phase if stack/context still active
-                 logging.debug(f"Staying in special phase {old_phase_name} (Stack/Choice Context still active).")
-                 return # No phase advancement yet
+                # --- 1. Handle Turn Transition (Cleanup -> Untap) ---
+                if current_phase_for_check == self.PHASE_CLEANUP and next_phase_in_sequence == self.PHASE_UNTAP:
+                    # Perform Cleanup Actions (Rule 514)
+                    active_p = self._get_active_player()
+                    non_active_p = self._get_non_active_player()
+                    
+                    # Discard down to hand size, remove damage, etc.
+                    self._cleanup_step_actions(active_p)
+                    self._cleanup_step_actions(non_active_p)
+                    
+                    # Rule 514.3: Check for State-Based Actions or Triggers
+                    sba_happened = self.check_state_based_actions()
+                    
+                    # If SBAs happened or triggers triggered, players get priority, then another cleanup happens.
+                    if sba_happened or self.stack:
+                        logging.info("Events occurred during Cleanup. Active Player gets priority.")
+                        self.priority_player = active_p
+                        self.priority_pass_count = 0
+                        return # Stop advancement, handle priority in Cleanup
 
-
-        # --- Phase Advancement Loop (handles skipping) ---
-        # Start the loop checking FROM the current phase (which might have just been restored or set)
-        current_phase_for_check = self.phase
-        while True: # Loop to handle potential phase skips
-            # Find current phase index in the standard sequence
-            try:
-                current_idx = phase_sequence.index(current_phase_for_check)
-            except ValueError:
-                logging.error(f"Current phase {self._PHASE_NAMES.get(current_phase_for_check)} not found in standard sequence. Resetting.")
-                # Force to a known state to avoid infinite loops
-                self.phase = self.PHASE_MAIN_PRECOMBAT
-                self.priority_player = self._get_active_player()
-                self.priority_pass_count = 0
-                self._phase_action_count = 0
-                return # Stop advancement
-
-            # Determine the next phase in the sequence
-            next_idx = (current_idx + 1) % len(phase_sequence)
-            next_phase_in_sequence = phase_sequence[next_idx]
-            next_phase_name = self._PHASE_NAMES.get(next_phase_in_sequence, '?')
-
-            # Identify the player whose phase it would be (critical for skip checks)
-            is_new_turn_starting = (current_phase_for_check == self.PHASE_CLEANUP and next_phase_in_sequence == self.PHASE_UNTAP)
-            active_player_for_next_phase = self._get_next_turn_player() if is_new_turn_starting else self._get_active_player()
-
-            # --- Check for Phase Skipping ---
-            should_skip_phase = False
-            # 1. Check Replacement Effects for Skipping
-            if hasattr(self, 'replacement_effects') and self.replacement_effects:
-                skip_context = {
-                    'event_type': 'BEGIN_PHASE',
-                    'player': active_player_for_next_phase,
-                    'phase': next_phase_name, # Name of the phase/step
-                    'phase_value': next_phase_in_sequence # Value of the phase/step
-                }
-                modified_skip_context, was_replaced = self.replacement_effects.apply_replacements("BEGIN_PHASE", skip_context)
-                if was_replaced and modified_skip_context.get('prevented', False):
-                    should_skip_phase = True
-                    logging.info(f"Skipping phase {next_phase_name} for {active_player_for_next_phase['name']} due to replacement effect.")
-
-            # 2. Check First Strike skip condition specifically
-            if not should_skip_phase and next_phase_in_sequence == self.PHASE_FIRST_STRIKE_DAMAGE and not self._combat_has_first_strike():
-                should_skip_phase = True
-                logging.debug("Skipping First Strike Damage phase (no first/double strike).")
-
-            # 3. Skip Untap Step explicitly (it's handled by turn transition below)
-            # This prevents advancing *into* Untap during the regular phase sequence,
-            # ensuring it only happens when transitioning from Cleanup.
-            if not should_skip_phase and next_phase_in_sequence == self.PHASE_UNTAP and not is_new_turn_starting:
-                 # This case means we somehow tried to advance into Untap without it being a new turn
-                 logging.error(f"Invalid state: Tried to enter UNTAP phase from {old_phase_name}. Resetting to Upkeep.")
-                 self.phase = self.PHASE_UPKEEP
-                 current_phase_before_loop = self.phase # Adjust loop tracker
-                 continue # Restart loop from Upkeep
-
-            if should_skip_phase:
-                # If skipped, advance the internal tracker and loop again to check the *next* phase
-                logging.debug(f"Auto-skipping phase: {next_phase_name}")
-                current_phase_for_check = next_phase_in_sequence # Continue loop FROM the skipped phase index
-                continue # Check the phase AFTER the skipped one
-            else:
-                # --- This is the phase we are ACTUALLY entering ---
-
-                # --- Handle Turn Transition FIRST ---
-                if is_new_turn_starting:
-                    prev_turn = self.turn
+                    # If clean, proceed to NEXT TURN
                     self.turn += 1
-                    logging.info(f"=== ADVANCING FROM TURN {prev_turn} TO TURN {self.turn} ===")
-                    # Reset turn-based tracking variables
+                    logging.info(f"=== ADVANCING TO TURN {self.turn} ===")
+                    
                     self._reset_turn_tracking_variables()
-                    active_player = self._get_active_player() # Get the *new* active player
+                    new_active_p = self._get_active_player() # Update active player var
 
-                    # --- Start of Turn Logic: UNTAP + Auto-Advance to UPKEEP ---
-                    logging.debug(f"Performing Turn {self.turn} Untap Step for {active_player['name']}...")
-                    self._untap_phase(active_player) # Perform untap actions
-                    self.check_state_based_actions() # Rule 502.4
+                    # UNTAP STEP (Rule 502) - No priority
+                    self._untap_phase(new_active_p)
+                    self.check_state_based_actions() 
 
-                    # Now, automatically transition to Upkeep and grant priority
+                    # Auto-advance to UPKEEP (Rule 503) - Priority starts here
                     self.phase = self.PHASE_UPKEEP
-                    logging.debug(f"Automatically advanced to Upkeep Step.")
-                    self._phase_action_count = 0 # Reset count for new phase
+                    self._phase_action_count = 0
+                    
+                    # Trigger "Beginning of Upkeep"
+                    self._handle_beginning_of_phase_triggers() 
 
-                    # Trigger "beginning of upkeep"
-                    self._handle_beginning_of_phase_triggers() # Use helper
-
-                    # AP gets priority in Upkeep
-                    self.priority_player = active_player
+                    # Rule 117.1: Active Player gets priority
+                    self.priority_player = new_active_p
                     self.priority_pass_count = 0
                     self.last_stack_size = len(self.stack)
-                    logging.debug(f"Entering Upkeep. Priority to AP ({self.priority_player['name']})")
+                    # logging.debug(f"Turn {self.turn} Upkeep. Priority to {new_active_p['name']}")
+                    
+                    # Check Game End (Turn Limit)
+                    if self.turn > self.max_turns:
+                        # Logic handled in check_state_based_actions / env step
+                        pass
+                    return
 
-                    # --- Game Turn Limit Check ---
-                    if self.turn > self.max_turns and not getattr(self, '_turn_limit_checked', False):
-                        logging.info(f"Turn limit ({self.max_turns}) reached! Ending game.")
-                        self._turn_limit_checked = True
-                        # Set game end flags based on life totals
-                        if self.p1 and self.p2:
-                            if self.p1.get("life",0) > self.p2.get("life",0): self.p1["won_game"] = True; self.p2["lost_game"] = True
-                            elif self.p2.get("life",0) > self.p1.get("life",0): self.p2["won_game"] = True; self.p1["lost_game"] = True
-                            else: self.p1["game_draw"] = True; self.p2["game_draw"] = True
-                        # SBAs checked later will finalize the game end
-                    break # Exit loop after handling turn transition
+                # --- 2. Check for Phase Skipping (e.g. First Strike) ---
+                should_skip = False
+                if next_phase_in_sequence == self.PHASE_FIRST_STRIKE_DAMAGE and not self._combat_has_first_strike():
+                    should_skip = True
+                
+                # If explicitly skipping Untap (should be handled by logic above, but failsafe)
+                if next_phase_in_sequence == self.PHASE_UNTAP:
+                    should_skip = True # Loop back around to handle turn transition logic
+                
+                if should_skip:
+                    current_phase_for_check = next_phase_in_sequence
+                    continue # Loop to next
 
-                # --- Not a new turn, entering next_phase_in_sequence ---
+                # --- 3. Enter Next Phase ---
                 self.phase = next_phase_in_sequence
-                logging.debug(f"Advanced from {old_phase_name} to {next_phase_name}")
-                self._phase_action_count = 0 # Reset counter for new phase
-                active_player = self._get_active_player() # Get current AP
+                self._phase_action_count = 0
+                active_p = self._get_active_player()
 
-                # --- Phase Start Actions & Trigger Checks (Excluding Untap) ---
-                if self.phase == self.PHASE_CLEANUP:
-                     logging.debug(f"Entering Cleanup Step for player {active_player['name']}.")
-                     self._cleanup_step_actions(active_player)
-                     self._cleanup_step_actions(self._get_non_active_player())
-                     # After cleanup actions, check for triggers/SBAs. If none, loop proceeds to turn end.
-                     self.check_state_based_actions()
-                     self.priority_player = None # No priority received initially
-                     # Re-run loop check to potentially pass priority or advance turn if state is stable
-                     current_phase_for_check = self.phase
-                     continue
-                else: # Phases other than Cleanup/Untap
-                     # Perform phase-start triggers/actions
-                     self._handle_beginning_of_phase_triggers() # Use helper for upkeep, draw, combat, end step
-                     # Set Priority
-                     if self.phase not in [self.PHASE_CLEANUP]: # Shouldn't be needed after cleanup handling above
-                         self.priority_player = active_player # AP gets priority first
-                         self.priority_pass_count = 0
-                         self.last_stack_size = len(self.stack)
-                         logging.debug(f"Entering {next_phase_name}. Priority to AP ({active_player['name']})")
-                     else:
-                          logging.debug(f"Entering {next_phase_name}. No priority automatically given.")
+                # Handle "At Beginning of Step" triggers
+                if self.phase == self.PHASE_DRAW:
+                    self._draw_phase(active_p) # Turn-based action: Draw
+                
+                self._handle_beginning_of_phase_triggers()
 
-                     # Update stack size tracking if needed
-                     if len(self.stack) != self.last_stack_size: self.last_stack_size = len(self.stack)
+                # Rule 117.1: Active Player gets priority
+                self.priority_player = active_p
+                self.priority_pass_count = 0
+                self.last_stack_size = len(self.stack)
+                
+                # logging.debug(f"Entering {self._PHASE_NAMES.get(self.phase)}. Priority to {active_p['name']}")
+                return # Phase advanced successfully
 
-                break # Exit the while loop, phase transition complete successfully
+            # Fallback if loop limit hit
+            logging.error("Phase advancement loop limit reached. Defaulting to Main Phase.")
+            self.phase = self.PHASE_MAIN_PRECOMBAT
+            self.priority_player = self._get_active_player()
+            self.priority_pass_count = 0
+
 
     def _reset_turn_tracking_variables(self):
         """Helper to reset variables at the start of a new turn."""
@@ -3627,27 +3673,29 @@ class GameState:
         return False
 
     def _get_active_player(self):
-        """Returns the active player (whose turn it is) with strict error checking."""
-        # Determine active player based on turn number and agent assignment
-        active_is_p1 = (self.turn % 2 == 1) == self.agent_is_p1
-        
-        # Check if player exists and return with robust logging
-        if active_is_p1:
-            if self.p1 is None:
-                logging.critical("CRITICAL ERROR: p1 is None in _get_active_player!")
-                # Try to return any valid player
-                return self.p2 if self.p2 is not None else None
-            return self.p1
-        else:
-            if self.p2 is None:
-                logging.critical("CRITICAL ERROR: p2 is None in _get_active_player!")
-                # Try to return any valid player
-                return self.p1 if self.p1 is not None else None
-            return self.p2
+            """Returns the active player (whose turn it is) with strict error checking."""
+            # Determine active player based on turn number and agent assignment
+            # Turn 1, 3, 5... = P1's turn. Turn 2, 4, 6... = P2's turn.
+            active_is_p1 = (self.turn % 2 != 0) 
+            
+            if active_is_p1:
+                if self.p1 is None:
+                    logging.critical("CRITICAL: p1 is None in _get_active_player. Defaulting to p2 if available.")
+                    return self.p2
+                return self.p1
+            else:
+                if self.p2 is None:
+                    logging.critical("CRITICAL: p2 is None in _get_active_player. Defaulting to p1 if available.")
+                    return self.p1
+                return self.p2
 
     def _get_non_active_player(self):
-        """Returns the non-active player."""
-        return self.p2 if (self.turn % 2 == 1) == self.agent_is_p1 else self.p1
+        """Returns the non-active player (NAP)."""
+        active_is_p1 = (self.turn % 2 != 0)
+        if active_is_p1:
+            return self.p2 if self.p2 else self.p1
+        else:
+            return self.p1 if self.p1 else self.p2
         
     def _check_phase_progress(self):
         """Ensure phase progression is happening correctly, forcing termination if needed."""
