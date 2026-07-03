@@ -1,17 +1,17 @@
 import logging
 from collections import defaultdict
-from .combat import EnhancedCombatResolver
+from .combat import CombatResolver
 
-class ExtendedCombatResolver(EnhancedCombatResolver):
+class ExtendedCombatResolver(CombatResolver):
     """
-    Extended version of the EnhancedCombatResolver that adds support for:
+    Extended version of the CombatResolver that adds support for:
     - Planeswalker damage
     - Battle damage
     - First strike ordering
     - Ninjutsu
     - Multiple blocker assignment
     
-    This class inherits from EnhancedCombatResolver and extends it with new capabilities.
+    This class inherits from CombatResolver and extends it with new capabilities.
     """
     
     def __init__(self, game_state):

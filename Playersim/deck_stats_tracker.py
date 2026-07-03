@@ -2,22 +2,16 @@ import os
 import json
 import logging
 import hashlib
-import numpy as np
 import gzip
 import asyncio
-import statistics
 import time
-import csv
-import datetime
 import threading
 import re
 import glob
 from collections import defaultdict, Counter
-from typing import Dict, List, Any, Optional, Tuple, Set, Union, Callable
+from typing import Dict, List, Any, Optional, Tuple, Union
 from enum import Enum
 import math
-import concurrent.futures
-from .debug import DEBUG_MODE
 # Version information for tracking schema changes
 STATS_VERSION = "3.1.0"  # Updated version for new format
 
@@ -27,8 +21,8 @@ class GameStage(Enum):
     MID = "mid"      # Turns 4-7
     LATE = "late"    # Turns 8+
 
-# Game state definitions
-class GameState(Enum):
+# Board position definitions (renamed from GameState to avoid collision with game_state.GameState)
+class GamePosition(Enum):
     AHEAD = "ahead"      # Winning position
     PARITY = "parity"    # Even position
     BEHIND = "behind"    # Losing position
@@ -2117,7 +2111,7 @@ class DeckStatsTracker:
                     card_db: Dict, turn_count: int, cards_played: Dict = None, 
                     winner_life: int = 20, winner_deck_name: str = None, 
                     loser_deck_name: str = None, is_draw: bool = False,
-                    game_stage: str = None, game_state: Union[str, GameState] = "parity", 
+                    game_stage: str = None, game_state: Union[str, GamePosition] = "parity", 
                     mulligan_data: Dict = None, opening_hands: Dict = None,
                     draw_history: Dict = None, play_order: Dict = None) -> bool:
         """Record a game result with comprehensive error handling and additional tracking"""
@@ -2170,9 +2164,9 @@ class DeckStatsTracker:
             # Handle game state conversion
             if isinstance(game_state, str):
                 try:
-                    game_state = GameState(game_state)
+                    game_state = GamePosition(game_state)
                 except ValueError:
-                    game_state = GameState.PARITY  # Default to parity if invalid
+                    game_state = GamePosition.PARITY  # Default to parity if invalid
             
             # Default mulligan data if not provided
             if mulligan_data is None:
@@ -2335,7 +2329,7 @@ class DeckStatsTracker:
     
     def _update_deck_stats(self, deck_id: str, deck: List[int], archetype: str,
                             is_winner: bool, turn_count: int,
-                            game_stage: GameStage, game_state: GameState,
+                            game_stage: GameStage, game_state: GamePosition,
                             deck_name: str = None, is_draw: bool = False,
                             mulligan_count: int = 0, opening_hand: List[int] = None,
                             draw_history: Dict = None, play_order: bool = True) -> bool:
@@ -2540,7 +2534,7 @@ class DeckStatsTracker:
 
     def _update_card_stats(self, winner_deck_id: str, loser_deck_id: str, 
                         cards_played: Dict[int, List[int]],
-                        game_stage: GameStage, game_state: GameState,
+                        game_stage: GameStage, game_state: GamePosition,
                         is_draw: bool = False, opening_hands: Dict = None,
                         draw_history: Dict = None, play_order: Dict = None) -> bool:
         """
@@ -3135,11 +3129,11 @@ class DeckStatsTracker:
                 
                 # Track performance by game state/position
                 # Invert game state for loser's perspective
-                position_key = GameState.BEHIND.value
-                if game_state == GameState.BEHIND:
-                    position_key = GameState.AHEAD.value
-                elif game_state == GameState.PARITY:
-                    position_key = GameState.PARITY.value
+                position_key = GamePosition.BEHIND.value
+                if game_state == GamePosition.BEHIND:
+                    position_key = GamePosition.AHEAD.value
+                elif game_state == GamePosition.PARITY:
+                    position_key = GamePosition.PARITY.value
                     
                 if position_key not in card_perf["performance_by_position"]:
                     card_perf["performance_by_position"][position_key] = {"wins": 0, "losses": 0, "draws": 0, "played": 0}

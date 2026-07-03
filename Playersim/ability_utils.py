@@ -282,7 +282,7 @@ class EffectFactory:
             CounterSpellEffect, CreateTokenEffect, DestroyEffect, ExileEffect,
             DiscardEffect, MillEffect, TapEffect, UntapEffect, BuffEffect,
             SearchLibraryEffect, AddCountersEffect, ReturnToHandEffect,
-            ScryEffect, SurveilEffect, LifeDrainEffect, CopySpellEffect, TransformEffect, FightEffect)
+            ScryEffect, SurveilEffect, CopySpellEffect, TransformEffect, FightEffect)
 
         # --- Offspring ETB Trigger Detection (before standard token creation) ---
         offspring_trigger_pattern = re.compile(

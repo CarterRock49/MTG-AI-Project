@@ -1,15 +1,15 @@
 import logging
+from .targeting import TargetingSystem  # noqa: F401  (re-export: kept for backward compatibility)
 
 import numpy as np
 # Remove KeywordEffects if not used directly after refactoring
 # from .keyword_effects import KeywordEffects
-from .ability_types import Ability, ActivatedAbility, TriggeredAbility, StaticAbility, ManaAbility, AbilityEffect, CreateTokenEffect
+from .ability_types import Ability, ActivatedAbility, TriggeredAbility, StaticAbility, ManaAbility, CreateTokenEffect
 import re
 from collections import defaultdict
 from .card import Card
 from .ability_utils import EffectFactory
 # *** CHANGED: Import TargetingSystem from its new file ***
-from .targeting import TargetingSystem # Import TargetingSystem from targeting.py
 
 class AbilityHandler:
     """Handles card abilities and special effects"""
@@ -508,8 +508,8 @@ class AbilityHandler:
                 ("choose up to one —", 0, 1),
                 ("choose one —", 1, 1),
                 # *** CHANGED: Added em dash variations and common bullet style ***
-                ("choose one\s*[-—\u2014]\s*", 1, 1),
-                ("choose one\s*[•●]\s*", 1, 1) # Alternative marker using bullet itself
+                (r"choose one\s*[-—\u2014]\s*", 1, 1),
+                (r"choose one\s*[•●]\s*", 1, 1) # Alternative marker using bullet itself
             ]
 
             start_index = -1

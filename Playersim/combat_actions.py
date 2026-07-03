@@ -1,10 +1,6 @@
 import logging
 import re
-from collections import defaultdict
-import numpy as np
 
-from Playersim.card import Card  # Add if needed for array operations
-from .enhanced_card_evaluator import EnhancedCardEvaluator  # If used directly
 from .enhanced_combat import ExtendedCombatResolver  # If referenced directly
 
 class CombatActionHandler:
@@ -396,28 +392,28 @@ class CombatActionHandler:
                  setattr(gs, attr, default)
         logging.debug("Combat state tracking reset/initialized")
     
-    def handle_first_strike_order(self):
-        """Set the damage assignment order for first strike combat."""
-        gs = self.game_state
-        player = gs.p1 if gs.agent_is_p1 else gs.p2 # The ATTACKING player assigns damage order
+    def handle_first_strike_order(self, param=None, context=None, **kwargs):
+            """Set the damage assignment order for first strike combat."""
+            gs = self.game_state
+            player = gs.p1 if gs.agent_is_p1 else gs.p2 # The ATTACKING player assigns damage order
 
-        for attacker_id, blockers in gs.current_block_assignments.items():
-            if len(blockers) <= 1: continue # No order needed
-            attacker_card = gs._safe_get_card(attacker_id)
-            if not attacker_card: continue
+            for attacker_id, blockers in gs.current_block_assignments.items():
+                if len(blockers) <= 1: continue # No order needed
+                attacker_card = gs._safe_get_card(attacker_id)
+                if not attacker_card: continue
 
-            # Get player choice for order (AI needs to provide this)
-            # Placeholder: Default order (e.g., by toughness asc)
-            defender = gs.p2 if player == gs.p1 else gs.p1
-            ordered_blockers = sorted(blockers, key=lambda bid: getattr(gs._safe_get_card(bid), 'toughness', 0))
+                # Get player choice for order (AI needs to provide this)
+                # Placeholder: Default order (e.g., by toughness asc)
+                ordered_blockers = sorted(blockers, key=lambda bid: getattr(gs._safe_get_card(bid), 'toughness', 0))
 
-            gs.first_strike_ordering[attacker_id] = ordered_blockers # Store chosen order
-            logging.debug(f"Set damage assignment order for {attacker_card.name}: {[gs._safe_get_card(bid).name for bid in ordered_blockers]}")
+                gs.first_strike_ordering[attacker_id] = ordered_blockers # Store chosen order
+                logging.debug(f"Set damage assignment order for {attacker_card.name}: {[gs._safe_get_card(bid).name for bid in ordered_blockers]}")
 
-        return True # Succeeded in setting (or determining no need for) orders
-    
-    def handle_assign_combat_damage(self, damage_assignments=None):
+            return True # Succeeded in setting (or determining no need for) orders
+
+    def handle_assign_combat_damage(self, param=None, context=None, **kwargs):
         """Handle assignment of combat damage."""
+        damage_assignments = param # Map param to expected argument
         gs = self.game_state
         if not gs.combat_resolver: return False
 
@@ -439,14 +435,19 @@ class CombatActionHandler:
              gs.priority_player = gs._get_active_player()
              gs.priority_pass_count = 0
         return success
-    
-    def handle_attack_battle(self, battle_target_idx):
+
+    def handle_attack_battle(self, param=None, context=None, **kwargs):
         """Assign last declared attacker to target a specific battle. Param is battle index (0-4)."""
+        battle_target_idx = param # Map param to expected argument
         gs = self.game_state
         # Check if it's the right phase and if attackers have been declared
         if gs.phase != gs.PHASE_DECLARE_ATTACKERS or not gs.current_attackers:
             logging.warning("Cannot assign battle target outside Declare Attackers phase or with no attackers.")
-            return False # Changed return value to indicate failure
+            return False 
+
+        if battle_target_idx is None:
+            logging.error("handle_attack_battle called with None param.")
+            return False
 
         opponent = gs.p2 if gs.agent_is_p1 else gs.p1
         # Get battles relative to opponent's battlefield
@@ -456,33 +457,32 @@ class CombatActionHandler:
         # Parameter battle_target_idx is 0-4, maps to index within opponent_battles list
         if 0 <= battle_target_idx < len(opponent_battles):
             # Find the absolute battlefield index and card ID of the target battle
-            abs_bf_idx, battle_id = opponent_battles[battle_target_idx] # abs_bf_idx is the index on opponent's full battlefield
+            abs_bf_idx, battle_id = opponent_battles[battle_target_idx] 
 
             # --- Assign Attacker Rule ---
             # Rule: Assume the *last* creature added to gs.current_attackers is the one choosing this target.
-            # This requires the agent to declare attacker THEN declare target (if not player).
             if not gs.current_attackers:
                 logging.warning("No attacker declared before assigning battle target.")
-                return False # Should have declared an attacker first
+                return False 
             attacker_id = gs.current_attackers[-1]
             attacker_card = gs._safe_get_card(attacker_id)
-            if not attacker_card: return False # Attacker card not found?
+            if not attacker_card: return False 
 
             # Ensure the battle_attack_targets dict exists
             if not hasattr(gs, 'battle_attack_targets'): gs.battle_attack_targets = {}
 
-            # Remove any previous target assignment for this attacker (if re-assigning target mid-declaration)
+            # Remove any previous target assignment for this attacker
             if attacker_id in gs.battle_attack_targets: del gs.battle_attack_targets[attacker_id]
             if hasattr(gs, 'planeswalker_attack_targets') and attacker_id in gs.planeswalker_attack_targets: del gs.planeswalker_attack_targets[attacker_id]
 
             # Assign attacker to battle
             gs.battle_attack_targets[attacker_id] = battle_id
             battle_card = gs._safe_get_card(battle_id)
-            logging.debug(f"Attacker {attacker_card.name} now targeting Battle {battle_card.name} (Opp BF Idx {abs_bf_idx})")
-            return True # Action successful
+            logging.debug(f"Attacker {attacker_card.name} now targeting Battle {battle_card.name}")
+            return True 
         else:
             logging.warning(f"Invalid battle target index {battle_target_idx}. Available battles: {len(opponent_battles)}")
-            return False # Invalid index selected
+            return False 
 
     # --- Helpers for finding targets based on identifiers ---
     def _find_planeswalker_target(self, pw_identifier):
@@ -643,7 +643,7 @@ class CombatActionHandler:
         gs.trigger_ability(ninja_id, "ENTERS_BATTLEFIELD", {"controller": player, "used_ninjutsu": True})
         return True
     
-    def handle_declare_attackers_done(self):
+    def handle_declare_attackers_done(self, param=None, context=None, **kwargs):
         """Handle the end of the declare attackers phase."""
         gs = self.game_state
         if gs.phase != gs.PHASE_DECLARE_ATTACKERS:
@@ -655,7 +655,7 @@ class CombatActionHandler:
         logging.debug(f"Ended Declare Attackers. Priority to {gs.priority_player['name']} in Declare Blockers.")
         return True
     
-    def handle_declare_blockers_done(self):
+    def handle_declare_blockers_done(self, param=None, context=None, **kwargs):
         """Handle the end of the declare blockers phase."""
         gs = self.game_state
         if gs.phase != gs.PHASE_DECLARE_BLOCKERS:
@@ -683,10 +683,16 @@ class CombatActionHandler:
         gs.priority_pass_count = 0
         return True
     
-    def handle_attack_planeswalker(self, pw_target_idx):
+
+    def handle_attack_planeswalker(self, param=None, context=None, **kwargs):
         """Handle attack targeting a planeswalker."""
+        pw_target_idx = param # Map param to expected argument
         gs = self.game_state
         if gs.phase != gs.PHASE_DECLARE_ATTACKERS or not gs.current_attackers: return False
+        
+        if pw_target_idx is None:
+             logging.error("handle_attack_planeswalker called with None param.")
+             return False
 
         opponent = gs.p2 if gs.agent_is_p1 else gs.p1
         opponent_planeswalkers = [(idx, cid) for idx, cid in enumerate(opponent["battlefield"])
@@ -700,7 +706,6 @@ class CombatActionHandler:
             logging.debug(f"{gs._safe_get_card(attacker_id).name} now targeting PW {gs._safe_get_card(pw_id).name}")
             return True
         return False
-
 
     def handle_assign_multiple_blockers(self, param, context, **kwargs):
         """Handle assigning multiple blockers. Attacker index from PARAM, blocker identifiers from CONTEXT."""

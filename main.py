@@ -48,11 +48,24 @@ class CompletelyFixedMTGExtractor(BaseFeaturesExtractor):
         self.output_dim = features_dim
         self.has_initialized = False
         
-        # Initialize MLP extractors for each observation key
-        self.extractors = {}
+        # BUGFIX: was a plain dict, so PyTorch never registered these sub-networks.
+        # Their weights were invisible to the optimizer (never trained), missing from
+        # state_dict (never saved in checkpoints), and never moved to GPU.
+        self.extractors = torch.nn.ModuleDict()
         
-        # Phase embedding
-        self.phase_embedding = torch.nn.Embedding(10, 16)  # Assuming max 10 phases
+        # BUGFIX: was Embedding(10, 16), but engine phase indices go up to 19
+        # (PHASE_CHOOSE) -> IndexError the first time an episode reached phase >= 10.
+        # Size from the declared observation space instead.
+        phase_dim = 16
+        num_phases = 32  # fallback if the space is missing or unbounded
+        merged_dim = 0
+        if "phase" in observation_space.spaces:
+            phase_space = observation_space.spaces["phase"]
+            high = np.asarray(phase_space.high)
+            if np.all(np.isfinite(high)):
+                num_phases = int(high.max()) + 1
+            merged_dim += int(np.prod(phase_space.shape)) * phase_dim
+        self.phase_embedding = torch.nn.Embedding(num_phases, phase_dim)
         
         # Final projections
         self.preprocessing_dim = 256  # Intermediate dimension
@@ -74,6 +87,7 @@ class CompletelyFixedMTGExtractor(BaseFeaturesExtractor):
                     torch.nn.ReLU(),
                     torch.nn.Linear(32, 64)
                 )
+                merged_dim += 64
             
             elif len(subspace.shape) == 2:
                 # 2D observations like battlefield and hand
@@ -84,6 +98,13 @@ class CompletelyFixedMTGExtractor(BaseFeaturesExtractor):
                     torch.nn.Linear(128, 64),
                     torch.nn.ReLU()
                 )
+                merged_dim += n_cards * 64
+        
+        # BUGFIX: feature_merger used to be created lazily inside forward(), AFTER the
+        # optimizer had already collected parameters -> it was never trained, and a
+        # freshly constructed policy had no such key -> MaskablePPO.load() mismatched.
+        # The input width is now computed above, so it can be built here.
+        self.feature_merger = torch.nn.Linear(merged_dim, self.preprocessing_dim)
         
         # LSTM for sequential processing
         self.lstm = torch.nn.LSTM(
@@ -98,7 +119,9 @@ class CompletelyFixedMTGExtractor(BaseFeaturesExtractor):
             
         # Process discrete observations
         if "phase" in observations:
-            phase_tensor = observations["phase"].long()
+            # Defensive clamp: never index outside the embedding table.
+            phase_tensor = observations["phase"].long().clamp(
+                0, self.phase_embedding.num_embeddings - 1)
             phase_emb = self.phase_embedding(phase_tensor)
             encoded_tensor_list.append(phase_emb)
         
@@ -112,14 +135,11 @@ class CompletelyFixedMTGExtractor(BaseFeaturesExtractor):
         # Merge features
         preprocessed_features = torch.cat([tensor.view(batch_size, -1) for tensor in encoded_tensor_list], dim=1)
         
-        # Initialize feature_merger if it doesn't exist yet
-        if not hasattr(self, "feature_merger"):
-            merged_dim = preprocessed_features.shape[1]
-            self.feature_merger = torch.nn.Linear(merged_dim, self.preprocessing_dim).to(preprocessed_features.device)
-            # In case we're in inference/evaluation mode and this is still being initialized:
-            if not self.training:
-                self.feature_merger.eval()
-        
+        # feature_merger is now built in __init__ with a precomputed input width.
+        assert preprocessed_features.shape[1] == self.feature_merger.in_features, (
+            f"Feature width mismatch: got {preprocessed_features.shape[1]}, "
+            f"extractor was built for {self.feature_merger.in_features}. "
+            f"The observation space likely changed after construction.")
         merged_features = self.feature_merger(preprocessed_features)
         projected_features = self.final_projection(merged_features)
         
@@ -1238,7 +1258,12 @@ def main():
     # Configure logging level based on debug flag
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
-        DEBUG_MODE = True
+        # BUGFIX: `DEBUG_MODE = True` only created a local variable here. Set the
+        # flag on the shared debug module instead. Note: modules that did
+        # `from .debug import DEBUG_MODE` at import time keep their own copy, so
+        # this only affects code that reads `debug.DEBUG_MODE` at runtime.
+        from Playersim import debug as debug_module
+        debug_module.DEBUG_MODE = True
     
     # Configure CPU usage - optimized for Ryzen 5 5600
     if args.cpu_only:
@@ -1287,8 +1312,19 @@ def main():
         # Run the optimization with appropriate trial count
         best_params = optimize_hyperparameters(n_trials=n_trials)
         logging.info("Hyperparameter optimization completed. Updating training configuration.")
+        # BUGFIX: was setattr(args, key.replace('_', '-'), value), which wrote to
+        # attributes like "learning-rate" that argparse never reads -> the optimized
+        # values were silently discarded. Optuna keys already use underscores.
+        applied, skipped = [], []
         for key, value in best_params.items():
-            setattr(args, key.replace('_', '-'), value)
+            if hasattr(args, key):
+                setattr(args, key, value)
+                applied.append(f"{key}={value}")
+            else:
+                skipped.append(key)
+        logging.info(f"Applied optimized hyperparameters: {applied}")
+        if skipped:
+            logging.warning(f"Optimized params with no matching CLI arg (not applied): {skipped}")
 
     # Determine number of environments - optimized for Ryzen 5 5600
     num_envs = args.n_envs if args.n_envs > 0 else min(6, os.cpu_count() // 2)  # Default to 6 envs for 12 threads
@@ -1346,6 +1382,7 @@ def main():
     # Start time for tracking
     start_time = time.time()
 
+    model = None  # BUGFIX: defined before try so the finally block can't NameError
     try:
         # Create or resume model
         if args.resume:
@@ -1394,13 +1431,16 @@ def main():
         logging.error(f"Training error: {str(e)}")
         logging.error(traceback.format_exc())
     finally:
-        # Save final model
-        final_model_path = os.path.join(MODEL_DIR, f"{run_id}_final")
-        logging.info(f"Saving final model to {final_model_path}")
-        model.save(final_model_path)
+        # BUGFIX: if model construction itself failed, this block used to raise
+        # NameError and bury the original exception.
+        if model is not None:
+            # Save final model
+            final_model_path = os.path.join(MODEL_DIR, f"{run_id}_final")
+            logging.info(f"Saving final model to {final_model_path}")
+            model.save(final_model_path)
         
         # Save network parameters separately
-        if hasattr(model, "policy") and hasattr(model.policy, "features_extractor"):
+        if model is not None and hasattr(model, "policy") and hasattr(model.policy, "features_extractor"):
             # Save feature extractor separately for easier analysis
             feature_extractor_path = os.path.join(MODEL_DIR, f"{run_id}_feature_extractor.pth")
             torch.save(model.policy.features_extractor.state_dict(), feature_extractor_path)

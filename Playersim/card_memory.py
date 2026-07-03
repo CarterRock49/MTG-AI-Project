@@ -3,13 +3,9 @@ import os
 import json
 import logging
 import time
-import pickle
-import numpy as np
-from collections import defaultdict
 import gzip
 import threading
-import re
-from typing import Dict, List, Tuple, Any, Optional, Union
+from typing import Dict, List, Union
 
 
 class CardMemory:

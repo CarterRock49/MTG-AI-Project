@@ -1,7 +1,6 @@
 import logging
 import numpy as np
-import re
-from typing import Dict, List, Any, Tuple, Optional, Set
+from typing import Dict, List, Any, Tuple
 
 class EnhancedCardEvaluator:
     """Advanced card evaluation system for Magic: The Gathering."""

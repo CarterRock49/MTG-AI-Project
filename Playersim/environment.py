@@ -5,13 +5,10 @@ import re
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
-from .card import load_decks_and_card_db, Card
+from .card import Card
 from .game_state import GameState
-from .actions import ActionHandler # Assuming ActionHandler is now lean
-from .enhanced_combat import ExtendedCombatResolver
-from .combat_integration import integrate_combat_actions, apply_combat_action
-from .enhanced_mana_system import EnhancedManaSystem
-from .enhanced_card_evaluator import EnhancedCardEvaluator
+from .actions import ActionHandler
+from .combat_integration import integrate_combat_actions
 from .strategic_planner import MTGStrategicPlanner
 # Ensure DEBUG_MODE exists or default it
 try:
@@ -19,11 +16,8 @@ try:
 except ImportError:
     DEBUG_MODE = False
     DEBUG_ACTION_STEPS = False
-import time
 from .strategy_memory import StrategyMemory
 from collections import defaultdict
-from .layer_system import LayerSystem
-from .replacement_effects import ReplacementEffectSystem
 from .deck_stats_tracker import DeckStatsTracker
 from .card_memory import CardMemory
 
@@ -101,7 +95,6 @@ class AlphaZeroMTGEnv(gym.Env):
         # Initialize action handler AFTER GameState
         # --- Ensure ActionHandler exists and link it ---
         try:
-             from .actions import ActionHandler # Ensure import
              self.action_handler = ActionHandler(self.game_state)
              self.game_state.action_handler = self.action_handler
              logging.debug("Linked ActionHandler instance to GameState.")
@@ -129,7 +122,11 @@ class AlphaZeroMTGEnv(gym.Env):
         integrate_combat_actions(self.game_state) # Integrate after GS subsystems are ready
 
         # Feature dimension determined dynamically above
-        MAX_PHASE = self.game_state.PHASE_CLEANUP # Use PHASE_CLEANUP as highest constant now
+        # BUGFIX: PHASE_CLEANUP (15) is NOT the highest phase constant; special phases
+        # (FIRST_STRIKE_DAMAGE=16, TARGETING=17, SACRIFICE=18, CHOOSE=19) exceed it,
+        # which made the declared space too small and zeroed their one-hot encoding.
+        MAX_PHASE = max(v for k, v in vars(type(self.game_state)).items()
+                        if k.startswith("PHASE_") and isinstance(v, int))
 
         self.action_memory_size = 80
 
@@ -264,7 +261,6 @@ class AlphaZeroMTGEnv(gym.Env):
     def initialize_strategic_memory(self):
         """Initialize and connect the strategy memory system."""
         try:
-            from .strategy_memory import StrategyMemory
             self.strategy_memory = StrategyMemory()
             # Enable the strategy memory to access critical game state components
             self.game_state.strategy_memory = self.strategy_memory
@@ -292,7 +288,6 @@ class AlphaZeroMTGEnv(gym.Env):
                 else:
                     logging.warning("Recreating ActionHandler in action_mask.")
                     # Need ActionHandler class defined or imported
-                    from .actions import ActionHandler # Import locally if needed
                     self.action_handler = ActionHandler(self.game_state)
 
             self.current_valid_actions = self.action_handler.generate_valid_actions()
@@ -404,7 +399,6 @@ class AlphaZeroMTGEnv(gym.Env):
                 # --- Validate Critical Systems ---
                 if not self.action_handler:
                     logging.error("ActionHandler missing after reset! Attempting emergency recreation.")
-                    from .actions import ActionHandler
                     self.action_handler = ActionHandler(gs)
                     gs.action_handler = self.action_handler
 
@@ -463,7 +457,6 @@ class AlphaZeroMTGEnv(gym.Env):
             self.game_state.reset([dummy_card_id]*60, [dummy_card_id]*60)
             
             # Ensure ActionHandler exists
-            from .actions import ActionHandler
             self.action_handler = ActionHandler(self.game_state)
             self.game_state.action_handler = self.action_handler
             
@@ -653,56 +646,6 @@ class AlphaZeroMTGEnv(gym.Env):
             import traceback
             logging.error(traceback.format_exc())
             return None
-        
-    def _get_strategic_advice(self):
-        """
-        Get comprehensive strategic advice for the current game state.
-        This integrates all the strategic planner capabilities.
-        
-        Returns:
-            dict: Strategic advice and recommendations
-        """
-        if not hasattr(self, 'strategic_planner'):
-            return None
-        
-        try:
-            gs = self.game_state
-            advice = {}
-            
-            # Get game state analysis
-            advice["current_analysis"] = self.strategic_planner.analyze_game_state()
-            
-            # Adapt strategy parameters
-            advice["strategy_params"] = self.strategic_planner.adapt_strategy()
-            
-            # Identify win conditions
-            advice["win_conditions"] = self.strategic_planner.identify_win_conditions()
-            
-            # Get threat assessment
-            advice["threats"] = self.strategic_planner.assess_threats()
-            
-            # Create multi-turn plan
-            advice["turn_plans"] = self.strategic_planner.plan_multi_turn_sequence(depth=2)
-            
-            # Get suggested action
-            valid_actions = np.where(self.current_valid_actions)[0]
-            advice["recommended_action"] = self.strategic_planner.recommend_action(valid_actions)
-            
-            # Recommended action details
-            if advice["recommended_action"] is not None:
-                action_type, param = gs.action_handler.get_action_info(advice["recommended_action"])
-                advice["action_details"] = {
-                    "type": action_type,
-                    "param": param
-                }
-            
-            return advice
-        
-        except Exception as e:
-            logging.error(f"Error getting strategic advice: {e}")
-            import traceback
-            logging.error(traceback.format_exc())
-            return None   
         
     def _check_phase_progress(self):
         """
@@ -3291,8 +3234,10 @@ class AlphaZeroMTGEnv(gym.Env):
 
     def _phase_to_onehot(self, phase):
         """Convert phase to one-hot encoding for better RL learning"""
-        # Use the highest phase constant (PHASE_CLEANUP) to determine the size
-        max_phase = self.game_state.PHASE_CLEANUP
+        # BUGFIX: size from the true highest PHASE_ constant, not PHASE_CLEANUP,
+        # so special phases (16-19) get a real one-hot instead of all zeros.
+        max_phase = max(v for k, v in vars(type(self.game_state)).items()
+                        if k.startswith("PHASE_") and isinstance(v, int))
         onehot = np.zeros(max_phase + 1, dtype=np.float32)
         
         # Only set the element if it's within bounds

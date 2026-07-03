@@ -1,7 +1,6 @@
 import logging
 import numpy as np
 import random
-from collections import defaultdict
 import re
 
 class MTGStrategicPlanner:
@@ -4831,7 +4830,6 @@ class MTGStrategicPlanner:
             tuple: (value: float, reasoning: str) - Value score and explanation
         """
         gs = self.game_state
-        card_name = card.name if hasattr(card, 'name') else f"Card {card_id}"
         # Check if ability handler exists
         if not hasattr(gs, 'ability_handler') or not gs.ability_handler:
             return 0.0, "No ability handler available"
@@ -4840,6 +4838,8 @@ class MTGStrategicPlanner:
         card = gs._safe_get_card(card_id)
         if not card:
             return -1.0, "Card not found"
+        # BUGFIX: was computed before `card` was fetched -> NameError on every call.
+        card_name = card.name if hasattr(card, 'name') else f"Card {card_id}"
         
         # Check if ability exists
         activated_abilities = gs.ability_handler.get_activated_abilities(card_id)

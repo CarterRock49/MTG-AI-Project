@@ -376,11 +376,6 @@ class ReplacementEffectSystem:
 
         return effect_id
         
-    def remove_effect(self, effect_id):
-        """Remove a replacement effect."""
-        self.active_effects = [effect for effect in self.active_effects 
-                             if effect.get('effect_id') != effect_id]
-    
     def apply_replacements(self, event_type, event_context):
             """Apply replacement effects with improved conflict resolution and Madness handling."""
             modified_context = dict(event_context)

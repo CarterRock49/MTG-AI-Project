@@ -3,14 +3,12 @@
 import logging
 import re
 import numpy as np
-import random
 from collections import defaultdict
 from .card import Card
 from .enhanced_combat import ExtendedCombatResolver
 from .combat_integration import integrate_combat_actions, apply_combat_action
-from .debug import DEBUG_MODE, debug_log_valid_actions 
+from .debug import debug_log_valid_actions 
 from .enhanced_card_evaluator import EnhancedCardEvaluator
-from .combat_actions import CombatActionHandler
 
 # ACTION_MEANINGS dictionary - Corrected and verified for size 480 (Indices 0-479)
 # Added Context Required comments

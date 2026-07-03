@@ -3,11 +3,10 @@ import logging
 import numpy as np
 import copy
 
-from Playersim.ability_utils import EffectFactory # Import copy for deepcopy
+from .ability_utils import EffectFactory
 
 # (Keep existing imports)
 from .card import Card
-from .debug import DEBUG_MODE
 import re
 from .ability_types import StaticAbility, TriggeredAbility
 from collections import defaultdict
@@ -328,136 +327,136 @@ class GameState:
         self.initialize_day_night_cycle()
 
     def _init_tracking_variables(self):
-        """Initialize all game state tracking variables with proper defaults."""
-        # Player Independent Tracking
-        self.day_night_state = None
-        self.day_night_checked_this_turn = False
-        self.split_second_active = False
-        self.phased_out = set() # Stores IDs of phased-out permanents
-        self.suspended_cards = {} # {card_id: {'player': P, 'counters': N, 'cost': STR}}
-        self.rebounded_cards = {} # {card_id: {'owner': P, 'turn_exiled': T}}
-        self.madness_cast_available = None # {card_id: {'player': P, 'cost': STR}} - holds ONE opportunity
-        self.madness_trigger = None # Used internally during discard resolution
-        self.miracle_card_id = None
-        self.miracle_cost = None
-        self.miracle_player = None
-        self.miracle_active = False
-        self.miracle_cost_parsed = None
-        self.kicked_cards = set()
-        self.evoked_cards = set()
-        self.foretold_cards = {} # {card_id: {'turn': T}}
-        self.blitz_cards = set()
-        self.dash_cards = set()
-        self.unearthed_cards = set()
-        self.jump_start_cards = set()
-        self.buyback_cards = set()
-        self.flashback_cards = set()
-        self.adventure_cards = set()
-        self.exile_at_end_of_combat = []
-        self.haste_until_eot = set() # Use only this one for consistency
-        self.crewed_vehicles = set()
-        self.morphed_cards = {}
-        self.manifested_cards = {}
-        self.epic_spells = {}
-        self.myriad_tokens = []
-        self.persist_returned = set()
-        self.undying_returned = set()
-        self.banding_creatures = set() # Track creatures currently in bands
+            """Initialize all game state tracking variables with proper defaults."""
+            # Player Independent Tracking
+            self.day_night_state = None
+            self.day_night_checked_this_turn = False
+            self.split_second_active = False
+            self.phased_out = set() # Stores IDs of phased-out permanents
+            self.suspended_cards = {} # {card_id: {'player': P, 'counters': N, 'cost': STR}}
+            self.rebounded_cards = {} # {card_id: {'owner': P, 'turn_exiled': T}}
+            self.madness_cast_available = None # {card_id: {'player': P, 'cost': STR}} - holds ONE opportunity
+            self.madness_trigger = None # Used internally during discard resolution
+            self.miracle_card_id = None
+            self.miracle_cost = None
+            self.miracle_player = None
+            self.miracle_active = False
+            self.miracle_cost_parsed = None
+            self.kicked_cards = set()
+            self.evoked_cards = set()
+            self.foretold_cards = {} # {card_id: {'turn': T}}
+            self.blitz_cards = set()
+            self.dash_cards = set()
+            self.unearthed_cards = set()
+            self.jump_start_cards = set()
+            self.buyback_cards = set()
+            self.flashback_cards = set()
+            self.adventure_cards = set()
+            self.exile_at_end_of_combat = []
+            self.haste_until_eot = set() # Use only this one for consistency
+            self.crewed_vehicles = set()
+            self.morphed_cards = {}
+            self.manifested_cards = {}
+            self.epic_spells = {}
+            self.myriad_tokens = []
+            self.persist_returned = set()
+            self.undying_returned = set()
+            self.banding_creatures = set() # Track creatures currently in bands
 
-        # Turn-based tracking (resets each turn usually)
-        self.spells_cast_this_turn = []
-        self.attackers_this_turn = set()
-        self.damage_dealt_this_turn = {}
-        self.cards_drawn_this_turn = {} # Initialize as empty, will be populated like {'p1': 0, 'p2': 0}
-        self.life_gained_this_turn = {}
-        self.damage_this_turn = {}
-        self.cards_to_graveyard_this_turn = {} # {turn_num: [card_ids]}
-        self.gravestorm_count = 0
-        self.boast_activated = set()
-        self.forecast_used = set()
+            # Turn-based tracking (resets each turn usually)
+            self.spells_cast_this_turn = []
+            self.attackers_this_turn = set()
+            self.damage_dealt_this_turn = {}
+            self.cards_drawn_this_turn = {} # Initialize as empty, will be populated like {'p1': 0, 'p2': 0}
+            self.life_gained_this_turn = {}
+            self.damage_this_turn = {}
+            self.cards_to_graveyard_this_turn = {} # {turn_num: [card_ids]}
+            self.gravestorm_count = 0
+            self.boast_activated = set()
+            self.forecast_used = set()
 
-        # Context slots (reset before action handling)
-        self.targeting_context = None
-        self.sacrifice_context = None
-        self.choice_context = None
-        self.pending_spell_context = None
-        self.clash_context = None
-        self.dredge_pending = None
-        self.spree_context = None
-        self.impending_cards = {}
-        self._offspring_cost_paid_context = {}
-        # Surveil/Scry state
-        self.surveil_in_progress = False
-        self.cards_being_surveiled = []
-        self.surveiling_player = None
-        self.scry_in_progress = False
-        self.scrying_cards = []
-        self.scrying_player = None
-        self.scrying_tops = []
-        self.scrying_bottoms = []
+            # Context slots (reset before action handling)
+            self.targeting_context = None
+            self.sacrifice_context = None
+            self.choice_context = None
+            self.pending_spell_context = None
+            self.clash_context = None
+            self.dredge_pending = None
+            self.spree_context = None
+            self.impending_cards = {}
+            self._offspring_cost_paid_context = {}
+            # Surveil/Scry state
+            self.surveil_in_progress = False
+            self.cards_being_surveiled = []
+            self.surveiling_player = None
+            self.scry_in_progress = False
+            self.scrying_cards = []
+            self.scrying_player = None
+            self.scrying_tops = []
+            self.scrying_bottoms = []
 
-        # Game state flags (can be reset or carried over)
-        self.combat_damage_dealt = False
-        self.progress_was_forced = False
-        self._turn_limit_checked = False
+            # Game state flags (can be reset or carried over)
+            self.combat_damage_dealt = False
+            self.progress_was_forced = False
+            self._turn_limit_checked = False
 
-        # Internal tracking/logging flags (reset for new game)
-        self._logged_card_ids = set()
-        self._logged_errors = set()
-        self.previous_priority_phase = None
+            # Internal tracking/logging flags (reset for new game)
+            self._logged_card_ids = set()
+            self._logged_errors = set()
+            self.previous_priority_phase = None
 
-        # Effect Tracking (can be reset)
-        self.until_end_of_turn_effects = {} # Tracking specific effects
-        self.temp_control_effects = {} # {card_id: original_controller}
+            # Effect Tracking (can be reset)
+            self.until_end_of_turn_effects = {} # Tracking specific effects
+            self.temp_control_effects = {} # {card_id: original_controller}
 
-        # Saga and Battle counters
-        self.saga_counters = {} # {card_id: chapter_num}
-        self.battle_cards = {} # {card_id: defense_counters}
+            # Saga and Battle counters
+            self.saga_counters = {} # {card_id: chapter_num}
+            self.battle_cards = {} # {card_id: defense_counters}
 
-        # Cast Tracking
-        self.cards_castable_from_exile = set()
-        self.cast_as_back_face = set()
+            # Cast Tracking
+            self.cards_castable_from_exile = set()
+            self.cast_as_back_face = set()
 
-        # Other state tracking
-        self.mdfc_cards = set() # Tracks MDFCs on battlefield/stack?
-        self.abilities_activated_this_turn = [] # List of (card_id, ability_idx) tuples
+            # Other state tracking
+            self.mdfc_cards = set() # Tracks MDFCs on battlefield/stack?
+            self.abilities_activated_this_turn = [] # List of (card_id, ability_idx) tuples
 
-        # Player state based tracking (reset inside player dicts)
-        for player in [self.p1, self.p2]:
-            if player:
-                 player["land_played"] = False
-                 player["entered_battlefield_this_turn"] = set()
-                 player["activated_this_turn"] = set()
-                 player["pw_activations"] = {}
-                 player["lost_life_this_turn"] = False
-                 player["attempted_draw_from_empty"] = False
-                 player["poison_counters"] = 0
-                 player["experience_counters"] = 0
-                 player["energy_counters"] = 0
-                 player["city_blessing"] = False
-                 player["monarch"] = False
-                 player["damage_counters"] = {}
-                 player["deathtouch_damage"] = set()
-                 player["loyalty_counters"] = {}
-                 # player["saga_counters"] = {} # Moved to game level
-                 player["attachments"] = {}
-                 player["championed_cards"] = {}
-                 player["ciphered_spells"] = {}
-                 player["haunted_by"] = {}
-                 player["hideaway_cards"] = {}
-                 player["mutation_stacks"] = {}
-                 player["regeneration_shields"] = set()
-                 player["lost_game"] = False
-                 player["won_game"] = False
-                 player["game_draw"] = False
-                 player["skip_end_step_trigger"] = set()
-                 player["phased_out_permanents"] = set()
-                 # Reset mana pools
-                 player["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
-                 player["conditional_mana"] = {}
-                 player["phase_restricted_mana"] = {}
+            # Player state based tracking (reset inside player dicts)
+            for player in [self.p1, self.p2]:
+                if player:
+                    player["land_played"] = False
+                    player["entered_battlefield_this_turn"] = set()
+                    player["activated_this_turn"] = set()
+                    player["pw_activations"] = {}
+                    player["lost_life_this_turn"] = False
+                    player["attempted_draw_from_empty"] = False
+                    player["poison_counters"] = 0
+                    player["experience_counters"] = 0
+                    player["energy_counters"] = 0
+                    player["city_blessing"] = False
+                    player["monarch"] = False
+                    player["damage_counters"] = {}
+                    player["deathtouch_damage"] = {} # FIXED: Must be a dict, not a set
+                    player["loyalty_counters"] = {}
+                    # player["saga_counters"] = {} # Moved to game level
+                    player["attachments"] = {}
+                    player["championed_cards"] = {}
+                    player["ciphered_spells"] = {}
+                    player["haunted_by"] = {}
+                    player["hideaway_cards"] = {}
+                    player["mutation_stacks"] = {}
+                    player["regeneration_shields"] = set()
+                    player["lost_game"] = False
+                    player["won_game"] = False
+                    player["game_draw"] = False
+                    player["skip_end_step_trigger"] = set()
+                    player["phased_out_permanents"] = set()
+                    # Reset mana pools
+                    player["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
+                    player["conditional_mana"] = {}
+                    player["phase_restricted_mana"] = {}
 
-        logging.debug("Initialized/Reset all tracking variables")
+            logging.debug("Initialized/Reset all tracking variables")
 
     def initialize_day_night_cycle(self):
         """Initialize the day/night cycle state and tracking."""
@@ -574,7 +573,6 @@ class GameState:
     
     def _init_player(self, deck, player_num):
         """Initialize a player's state with a given deck and draw 7 cards for the starting hand."""
-        import copy # Moved import inside
 
         if not deck:
             logging.warning(f"Initializing player {player_num} with empty deck! Creating minimal fallback deck.")
@@ -910,57 +908,6 @@ class GameState:
                     
         return creature_ids
     
-    def find_card_location(self, card_id):
-        """
-        Find which player controls a card and in which zone it is.
-        This is a unified method to be used by both GameState and LayerSystem.
-        
-        Args:
-            card_id: ID of the card to locate
-            
-        Returns:
-            tuple: (player, zone) or None if not found
-        """
-        zones = ["battlefield", "hand", "graveyard", "exile", "library"]
-        
-        for player in [self.p1, self.p2]:
-            for zone in zones:
-                if zone in player and card_id in player[zone]:
-                    return player, zone
-                    
-        # Check special zones like the stack
-        for item in self.stack:
-            if isinstance(item, tuple) and len(item) >= 3 and item[1] == card_id:
-                return item[2], "stack"  # Return the controller and "stack" zone
-        
-        # Check other special tracking sets/dicts
-        special_zones = [
-            ("adventure_cards", "adventure_zone"),
-            ("phased_out", "phased_out"),
-            ("foretold_cards", "foretold_zone"),
-            ("suspended_cards", "suspended")
-        ]
-        
-        for attr_name, zone_name in special_zones:
-            if hasattr(self, attr_name):
-                attr = getattr(self, attr_name)
-                if isinstance(attr, set) and card_id in attr:
-                    # Try to determine the controller
-                    for player in [self.p1, self.p2]:
-                        # Check if player has this in any of their tracked special zones
-                        if hasattr(player, attr_name) and card_id in getattr(player, attr_name):
-                            return player, zone_name
-                    # If we can't determine controller, return p1 as default
-                    return self.p1, zone_name
-                elif isinstance(attr, dict) and card_id in attr:
-                    # For dict-based tracking, the value might contain controller info
-                    if "controller" in attr[card_id]:
-                        return attr[card_id]["controller"], zone_name
-                    # If no controller info, default to p1
-                    return self.p1, zone_name
-                    
-        return None
-        
     def _revert_temporary_control(self):
         """
         Revert any temporary control effects, returning cards to their original controllers.
@@ -2451,67 +2398,104 @@ class GameState:
         
         return has_priority
         
-    def play_land(self, card_id, controller):
-        """
-        Play a land card from hand to battlefield, respecting the one-land-per-turn rule.
-        
-        Args:
-            card_id: ID of the land card to play
-            controller: Player dictionary of the player playing the land
+    def play_land(self, card_id, controller, play_back_face=False):
+            """
+            Play a land card from hand to battlefield, respecting the one-land-per-turn rule.
+            Handles MDFC (Modal Double-Faced Card) lands.
             
-        Returns:
-            bool: Whether the land was successfully played
-        """
-        # Check if card exists in hand
-        if card_id not in controller["hand"]:
-            logging.warning(f"Land {card_id} not found in hand")
-            return False
-        
-        # Check if the card is actually a land
-        card = self._safe_get_card(card_id)
-        if not card or not hasattr(card, 'type_line') or 'land' not in card.type_line.lower():
-            logging.warning(f"Card {card_id} is not a land")
-            return False
-        
-        # Check if player has already played a land this turn
-        if controller.get("land_played", False):
-            logging.warning(f"Player has already played a land this turn")
-            return False
-        
-        # Check if it's a valid phase to play a land
-        if self.phase not in [self.PHASE_MAIN_PRECOMBAT, self.PHASE_MAIN_POSTCOMBAT]:
-            logging.warning(f"Cannot play a land during phase {self.phase}")
-            return False
-        
-        # Check if the player has priority
-        active_player = self._get_active_player()
-        if controller != active_player:
-            logging.warning(f"Player does not have priority to play a land")
-            return False
-        
-        # Move the land from hand to battlefield
-        result = self.move_card(card_id, controller, "hand", controller, "battlefield", cause="land_play")
-        
-        if result:
-            # Mark that player has played a land this turn
-            controller["land_played"] = True
+            Args:
+                card_id: ID of the land card to play
+                controller: Player dictionary of the player playing the land
+                play_back_face: Boolean, if True, play the back face of an MDFC
+                
+            Returns:
+                bool: Whether the land was successfully played
+            """
+            # Check if card exists in hand
+            if card_id not in controller["hand"]:
+                logging.warning(f"Land {card_id} not found in hand")
+                return False
             
-            # Track the land play for statistics
-            player_idx = 0 if controller == self.p1 else 1
-            self.track_card_played(card_id, player_idx)
+            # Check if the card is actually a land (checking the correct face)
+            card = self._safe_get_card(card_id)
+            if not card:
+                logging.warning(f"Card {card_id} invalid")
+                return False
+
+            is_land = False
+            # If playing back face, check back face type line
+            if play_back_face:
+                if hasattr(card, 'back_face') and card.back_face and 'land' in card.back_face.get('type_line', '').lower():
+                    is_land = True
+                else:
+                    logging.debug(f"Play land failed: Back face of {card.name} is not a land.")
+            # If playing front face, check normal type line
+            else:
+                if hasattr(card, 'type_line') and 'land' in card.type_line.lower():
+                    is_land = True
+
+            if not is_land:
+                logging.warning(f"Card {card.name} (Back: {play_back_face}) is not a land")
+                return False
             
-            # Handle entering-the-battlefield effects specific to lands
-            card_name = card.name if hasattr(card, 'name') else f"Land {card_id}"
-            logging.debug(f"Played land {card_name}")
+            # Check if player has already played a land this turn
+            if controller.get("land_played", False):
+                logging.warning(f"Player has already played a land this turn")
+                return False
             
-            # Check if land enters tapped
-            if hasattr(card, 'oracle_text') and "enters the battlefield tapped" in card.oracle_text.lower():
-                if not hasattr(controller, "tapped_permanents"):
-                    controller["tapped_permanents"] = set()
-                controller["tapped_permanents"].add(card_id)
-                logging.debug(f"Land {card_name} enters tapped")
-        
-        return result
+            # Check if it's a valid phase to play a land
+            if self.phase not in [self.PHASE_MAIN_PRECOMBAT, self.PHASE_MAIN_POSTCOMBAT]:
+                logging.warning(f"Cannot play a land during phase {self.phase}")
+                return False
+            
+            # Check if the player has priority
+            active_player = self._get_active_player()
+            if controller != active_player:
+                logging.warning(f"Player does not have priority to play a land")
+                return False
+            
+            # Register back face status if applicable so the engine knows how to treat it on BF
+            if play_back_face:
+                if not hasattr(self, 'cast_as_back_face'):
+                    self.cast_as_back_face = set()
+                self.cast_as_back_face.add(card_id)
+
+            # Prepare context for move_card
+            move_context = {'play_back_face': play_back_face}
+
+            # Move the land from hand to battlefield
+            result = self.move_card(card_id, controller, "hand", controller, "battlefield", cause="land_play", context=move_context)
+            
+            if result:
+                # Mark that player has played a land this turn
+                controller["land_played"] = True
+                
+                # Track the land play for statistics
+                player_idx = 0 if controller == self.p1 else 1
+                self.track_card_played(card_id, player_idx)
+                
+                # Determine properties for logging and tapped check based on the played face
+                card_name = card.name
+                oracle_text = getattr(card, 'oracle_text', '').lower()
+                
+                if play_back_face and hasattr(card, 'back_face'):
+                    card_name = card.back_face.get('name', card_name)
+                    oracle_text = card.back_face.get('oracle_text', '').lower()
+
+                logging.debug(f"Played land {card_name}")
+                
+                # Check if land enters tapped based on the specific face's text
+                if "enters the battlefield tapped" in oracle_text:
+                    if not hasattr(controller, "tapped_permanents"):
+                        controller["tapped_permanents"] = set()
+                    controller["tapped_permanents"].add(card_id)
+                    logging.debug(f"Land {card_name} enters tapped")
+            else:
+                # If move failed, cleanup the back face registration
+                if play_back_face and hasattr(self, 'cast_as_back_face') and card_id in self.cast_as_back_face:
+                    self.cast_as_back_face.remove(card_id)
+            
+            return result
     
     def tap_permanent(self, card_id, player):
         """Tap a permanent, triggering any appropriate abilities."""
@@ -3100,7 +3084,6 @@ class GameState:
         token_id = f"TOKEN_COPY_{len(controller['tokens'])}_{original_card.name[:10].replace(' ','')}"
 
         # Use dict/copy.deepcopy to get copyable values
-        import copy
         try:
             # Get copyable characteristics based on Rule 707.2
             copyable_values = {
@@ -3724,7 +3707,6 @@ class GameState:
         Handles deep copying mutable state, re-linking subsystems, and
         correcting object references within the cloned state.
         """
-        import copy # Ensure copy module is available
 
         logging.debug("Cloning GameState starting...")
         # 1. Create a new instance with basic parameters (card_db is shared reference)
@@ -4117,14 +4099,6 @@ class GameState:
         # Check state-based actions after resolution
         self.check_state_based_actions()
         
-    def initialize_day_night_cycle(self):
-        """Initialize the day/night cycle state and tracking."""
-        # Start with neither day nor night
-        self.day_night_state = None
-        # Track if we've already checked day/night transition this turn
-        self.day_night_checked_this_turn = False
-        logging.debug("Day/night cycle initialized (neither day nor night)")
-
     def check_day_night_transition(self):
         """
         Check and update the day/night state based on spells cast this turn.
@@ -5070,7 +5044,7 @@ class GameState:
     def initialize_targeting_system(self):
         """Initialize the targeting system."""
         try:
-            from .ability_handler import TargetingSystem
+            from .targeting import TargetingSystem
             self.targeting_system = TargetingSystem(self)
             logging.debug("TargetingSystem initialized successfully")
         except ImportError as e:
@@ -6743,7 +6717,6 @@ class GameState:
         
         # Import modules we'll need
         import re
-        from .ability_types import DamageEffect, DrawCardEffect, GainLifeEffect
         
         # Try to create a proper effect using ability_handler
         effect = None

@@ -4,8 +4,7 @@ import logging
 import re
 import numpy as np
 
-from Playersim.ability_utils import EffectFactory
-from .debug import DEBUG_MODE
+from .ability_utils import EffectFactory
 
 class Card:
     """Encapsulates card attributes and behaviors."""

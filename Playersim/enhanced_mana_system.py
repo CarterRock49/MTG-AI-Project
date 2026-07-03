@@ -521,68 +521,6 @@ class EnhancedManaSystem:
         kicker_cost = match.group(1).strip()
         return self.parse_mana_cost(kicker_cost)
 
-    def calculate_cost_increase(self, player, cost, card_id, context=None):
-        """
-        Calculate cost increasing effects that apply to a card.
-        
-        Args:
-            player: The player dictionary
-            cost: The parsed mana cost dictionary
-            card_id: ID of the card being cast
-            context: Optional context for special cases
-            
-        Returns:
-            dict: The increased cost dictionary
-        """
-        gs = self.game_state
-        card = gs._safe_get_card(card_id)
-        if not card:
-            return cost
-        
-        increased_cost = cost.copy()
-        
-        # Check for cost increasing effects on the battlefield for all players
-        for player_idx, p in enumerate([gs.p1, gs.p2]):
-            is_opponent = (player != p)
-            
-            for battlefield_id in p["battlefield"]:
-                battlefield_card = gs._safe_get_card(battlefield_id)
-                if not battlefield_card or not hasattr(battlefield_card, 'oracle_text'):
-                    continue
-                    
-                oracle_text = battlefield_card.oracle_text.lower()
-                
-                # Tax effects like "Spells cost {1} more to cast"
-                if "spells cost" in oracle_text and "more to cast" in oracle_text:
-                    # Extract amount of increase
-                    import re
-                    match = re.search(r"cost \{(\d+)\} more", oracle_text)
-                    if match:
-                        increase = int(match.group(1))
-                        increased_cost["generic"] += increase
-                        logging.debug(f"Applying generic cost increase of {increase} from {battlefield_card.name}")
-                
-                # Color-specific tax effects
-                for color, symbol in zip(['white', 'blue', 'black', 'red', 'green'], ['W', 'U', 'B', 'R', 'G']):
-                    if f"{color} spells" in oracle_text and "cost" in oracle_text and "more" in oracle_text:
-                        # Check if spell is the right color
-                        if hasattr(card, 'colors') and card.colors[list('WUBRG').index(symbol)]:
-                            match = re.search(r"cost \{(\d+)\} more", oracle_text)
-                            if match:
-                                increase = int(match.group(1))
-                                increased_cost["generic"] += increase
-                                logging.debug(f"Applying {color} spell cost increase of {increase} from {battlefield_card.name}")
-                
-                # Opponent-specific tax effects
-                if is_opponent and ("spells your opponents cast" in oracle_text and "cost" in oracle_text and "more" in oracle_text):
-                    match = re.search(r"cost \{(\d+)\} more", oracle_text)
-                    if match:
-                        increase = int(match.group(1))
-                        increased_cost["generic"] += increase
-                        logging.debug(f"Applying opponent cost increase of {increase} from {battlefield_card.name}")
-        
-        return increased_cost
-
     def apply_minimum_cost_effects(self, player, cost, card_id, context=None):
         """
         Apply minimum cost effects like Trinisphere.

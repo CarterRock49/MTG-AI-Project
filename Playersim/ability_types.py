@@ -1,7 +1,6 @@
 import logging
 import re
 import random
-from .enhanced_mana_system import EnhancedManaSystem
 from .card import Card
 from .ability_utils import text_to_number, safe_int, resolve_simple_targeting, EffectFactory
 

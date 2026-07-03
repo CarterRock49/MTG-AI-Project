@@ -3,7 +3,7 @@ from collections import defaultdict
 
 from numpy import copy
 
-from Playersim.ability_utils import safe_int
+from .ability_utils import safe_int
 from .card import Card
 import re
 class LayerSystem:

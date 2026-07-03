@@ -1,15 +1,12 @@
-
 import logging
-import numpy as np
 from collections import defaultdict
-from .card import Card
 # Assuming DEBUG_MODE is defined in debug.py or elsewhere
 try:
     from .debug import DEBUG_MODE
 except ImportError:
     DEBUG_MODE = False # Default if not found
 
-class EnhancedCombatResolver:
+class CombatResolver:
     """Advanced combat resolution system implementing detailed MTG combat rules"""
     
     def __init__(self, game_state):
@@ -26,7 +23,7 @@ class EnhancedCombatResolver:
             try:
                 from .ability_handler import AbilityHandler
                 game_state.ability_handler = AbilityHandler(game_state)
-                logging.debug("Initialized AbilityHandler in EnhancedCombatResolver")
+                logging.debug("Initialized AbilityHandler in CombatResolver")
             except (ImportError, AttributeError) as e:
                 logging.warning(f"Could not initialize AbilityHandler in Base Resolver: {e}")
                 
@@ -2611,3 +2608,9 @@ class EnhancedCombatResolver:
         blocking_options.sort(key=lambda x: x['value'], reverse=True)
         
         return blocking_options
+
+
+# Deprecated alias: this base class was previously (confusingly) named
+# EnhancedCombatResolver while living in combat.py. Kept so older imports
+# keep working; prefer CombatResolver in new code.
+EnhancedCombatResolver = CombatResolver
