@@ -3167,3 +3167,126 @@ class ExileEffect(AbilityEffect):
                   # Logging handled by move_card
 
         return exiled_count > 0
+
+class DelayedTriggerEffect(AbilityEffect):
+    """One-shot delayed triggered ability created from oracle text (CR 603.7).
+
+    Produced by EffectFactory._extract_delayed_triggers when a sentence reads
+    "At the beginning of the next <phase>, <effect>." (leading form) or
+    "<effect> at the beginning of the next <phase>." (trailing form).
+
+    Applying this effect performs NOTHING immediately; it registers the inner
+    effect with game_state.register_delayed_trigger so it fires exactly once
+    at the beginning of the named phase, then expires.
+
+    Binding of "it"-style pronouns (v1): the bound object is the single
+    explicit target if exactly one is present, else the source card. This is
+    correct for the common producers (unearth-style "Exile it...", blink
+    riders on a targeted permanent). A rider whose pronoun refers to an
+    object created earlier in the same resolution (e.g. a token made by a
+    previous sentence) mis-binds to the source; those fire as a safe no-op
+    if the bound object has left the battlefield, and are a documented
+    limitation until pronoun tracking lands.
+    """
+
+    #: normalized phase phrase -> GameState phase-constant attribute name
+    PHASE_ATTR = {
+        "end step": "PHASE_END_STEP",
+        "upkeep": "PHASE_UPKEEP",
+        "end of combat": "PHASE_END_OF_COMBAT",
+        "combat": "PHASE_BEGIN_COMBAT",
+        "cleanup": "PHASE_CLEANUP",
+        "cleanup step": "PHASE_CLEANUP",
+        "main phase": "PHASE_MAIN_POSTCOMBAT",
+    }
+
+    # Simple riders on a bound object, handled directly instead of re-parsing,
+    # because the pronoun ("it") is meaningless to the text parser.
+    _RIDER_RE = re.compile(
+        r"^(exile|sacrifice|destroy|return)\s+"
+        r"(it|this creature|this permanent|that creature|that token)"
+        r"(?:\s+to its owner'?s hand)?\s*\.?$",
+        re.IGNORECASE)
+
+    def __init__(self, inner_text, phase_key, full_text=None):
+        super().__init__(full_text or inner_text)
+        self.inner_text = inner_text.strip().rstrip('.')
+        self.phase_key = phase_key.strip().lower()
+        # Registration itself never needs a pre-resolved target; the inner
+        # effect resolves its own targets when it fires.
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        gs = game_state
+        phase_attr = self.PHASE_ATTR.get(self.phase_key)
+        phase_const = getattr(gs, phase_attr, None) if phase_attr else None
+        if phase_const is None:
+            logging.warning(
+                f"DelayedTriggerEffect: unknown phase '{self.phase_key}' in '{self.effect_text}'")
+            try:
+                gs.fidelity_counters["unparsed_effects"] += 1
+            except Exception:
+                pass
+            return False
+
+        # Bind the object an "it"-style rider refers to (see class docstring).
+        bound_id = None
+        if targets:
+            flat = [tid for tl in targets.values() if isinstance(tl, list) for tid in tl]
+            if len(flat) == 1:
+                bound_id = flat[0]
+        if bound_id is None:
+            bound_id = source_id
+
+        rider_match = self._RIDER_RE.match(self.inner_text.lower())
+        inner_text = self.inner_text
+
+        def fire():
+            if rider_match and bound_id is not None:
+                verb = rider_match.group(1).lower()
+                ctrl = gs.get_card_controller(bound_id)
+                if not ctrl:
+                    # Object left the battlefield before the trigger fired;
+                    # the rider does nothing (safe v1 approximation).
+                    logging.debug(
+                        f"Delayed rider '{verb}' skipped: object {bound_id} no longer on battlefield.")
+                    return
+                owner = gs._find_card_owner_fallback(bound_id) or ctrl
+                if verb == "exile":
+                    gs.move_card(bound_id, ctrl, "battlefield", owner, "exile",
+                                 cause="delayed_trigger")
+                elif verb == "sacrifice":
+                    gs.move_card(bound_id, ctrl, "battlefield", owner, "graveyard",
+                                 cause="sacrifice")
+                elif verb == "destroy":
+                    gs.move_card(bound_id, ctrl, "battlefield", owner, "graveyard",
+                                 cause="destroy")
+                elif verb == "return":
+                    gs.move_card(bound_id, ctrl, "battlefield", owner, "hand",
+                                 cause="delayed_trigger")
+                return
+            # General case: parse the inner clause at fire time and apply it.
+            from .ability_utils import EffectFactory
+            inner_effects = EffectFactory.create_effects(inner_text) or []
+            applied = False
+            for eff in inner_effects:
+                if isinstance(eff, DelayedTriggerEffect):
+                    continue  # never chain-defer
+                try:
+                    applied = bool(eff.apply(gs, source_id, controller, targets)) or applied
+                except Exception as e:
+                    logging.error(f"Delayed trigger inner effect failed: {e}")
+            if not applied:
+                try:
+                    gs.fidelity_counters["unparsed_effects"] += 1
+                except Exception:
+                    pass
+
+        gs.register_delayed_trigger(
+            fire, phase=phase_const,
+            description=f"text: {self.effect_text[:80]}")
+        logging.debug(
+            f"Registered text-parsed delayed trigger ({self.phase_key}): {self.inner_text[:60]}")
+        return True
+
+

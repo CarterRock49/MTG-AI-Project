@@ -1941,12 +1941,44 @@ class EnhancedManaSystem:
             card_name_log = getattr(gs._safe_get_card(card_id), 'name', 'spell/ability') if card_id else 'spell/ability'
             logging.debug(f"Paid cost {cost_str} for {card_name_log} with {payment_str}")
             self._cleanup_empty_conditional_mana(player)
+            self._last_payment = payment  # exposed via pay_mana_cost_get_details
             return True
         else:
              # This path might be reached if non-mana costs failed. Rollback handled there.
              logging.warning("pay_mana_cost reached end with mana_payment_successful=False.")
              return False
          
+    def pay_mana_cost_get_details(self, player, cost, context=None):
+        """Pay a mana cost and return a details dict, or None on failure.
+
+        The details dict contains:
+          - 'spent_specific': {color: amount} totals across all pools, suitable
+            for refunding via add_mana() if the cast must be rolled back.
+          - 'payment': the full internal payment breakdown (colors, conditional,
+            phase_restricted, life, snow, tapped/exiled/sacrificed/discarded).
+          - 'life_paid' / 'snow_paid': convenience scalars.
+        Callers: game_state_stack.cast_spell, ability_types (activated-ability
+        mana costs), actions_choices (X payment).
+        """
+        self._last_payment = None
+        if not self.pay_mana_cost(player, cost, context):
+            return None
+        payment = getattr(self, '_last_payment', None) or {}
+        spent = defaultdict(int)
+        for color, amt in payment.get('colors', {}).items():
+            if amt: spent[color] += amt
+        for color, amt in payment.get('phase_restricted', {}).items():
+            if amt: spent[color] += amt
+        for _restriction, pool_part in payment.get('conditional', {}).items():
+            for color, amt in pool_part.items():
+                if amt: spent[color] += amt
+        return {
+            'spent_specific': dict(spent),
+            'payment': payment,
+            'life_paid': payment.get('life', 0),
+            'snow_paid': payment.get('snow', 0),
+        }
+
     def _pay_generic_mana_with_all_pools(self, player, amount, payment, current_pool, phase_pool, conditional_pool, usable_conditional, context):
          """Pay generic mana optimally using all pools."""
          # 1. Regular Colorless

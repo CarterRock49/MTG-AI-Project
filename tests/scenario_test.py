@@ -319,6 +319,66 @@ def s_delayed_trigger_fires_once():
     assert not gs.delayed_triggers, "expired trigger was not removed from the registry"
 
 
+@scenario("603.7 (text)", "leading 'At the beginning of the next end step, ...' oracle text defers its effect")
+def s_text_delayed_leading():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    cid = card_id_by_name(gs, "Thicket Brute")
+    owner = to_battlefield(gs, cid)
+    before = owner["life"]
+    effects = EffectFactory.create_effects("At the beginning of the next end step, you gain 2 life.")
+    assert effects, "parser produced no effects for delayed-trigger text"
+    for eff in effects:
+        eff.apply(gs, cid, owner)
+    assert owner["life"] == before, \
+        "delayed effect applied immediately instead of being deferred to the end step"
+    assert gs.delayed_triggers, "no delayed trigger was registered from oracle text"
+    guard = 0
+    while gs.phase != gs.PHASE_END_STEP and guard < 25:
+        gs._advance_phase()
+        guard += 1
+    assert owner["life"] == before + 2, \
+        f"delayed effect did not fire at the end step (life {owner['life']}, expected {before + 2})"
+    assert not gs.delayed_triggers, "text-parsed delayed trigger did not expire after firing"
+
+
+@scenario("603.7 (text)", "trailing 'Exile it at the beginning of the next end step' defers the exile")
+def s_text_delayed_trailing():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    cid = card_id_by_name(gs, "Thicket Brute")
+    owner = to_battlefield(gs, cid)
+    # Unearth-style rider: the source card is the bound object ("it").
+    effects = EffectFactory.create_effects("Exile it at the beginning of the next end step.")
+    assert effects, "parser produced no effects for trailing delayed-trigger text"
+    for eff in effects:
+        eff.apply(gs, cid, owner)
+    assert cid in owner["battlefield"], \
+        "exile happened immediately instead of at the next end step"
+    guard = 0
+    while gs.phase != gs.PHASE_END_STEP and guard < 25:
+        gs._advance_phase()
+        guard += 1
+    assert cid in owner["exile"], \
+        "creature was not exiled at the beginning of the next end step"
+    assert not gs.delayed_triggers, "trailing-form delayed trigger did not expire after firing"
+
+
+@scenario("603.7 (guard)", "recurring 'at the beginning of your upkeep' text is NOT a one-shot delayed trigger")
+def s_text_delayed_not_recurring():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    pre = len(gs.delayed_triggers)
+    effects = EffectFactory.create_effects("At the beginning of your upkeep, you gain 1 life.")
+    for eff in effects:
+        try:
+            eff.apply(gs, None, gs.p1)
+        except Exception:
+            pass
+    assert len(gs.delayed_triggers) == pre, \
+        "recurring upkeep trigger text was wrongly registered as a one-shot delayed trigger"
+
+
 @scenario("616 (engine)", "legacy asap delayed triggers fire at the next state-based check")
 def s_delayed_trigger_asap():
     gs = fresh()

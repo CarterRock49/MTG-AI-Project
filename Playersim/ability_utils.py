@@ -259,6 +259,55 @@ class EffectFactory:
         return None # No target description found
 
 
+    # --- Delayed trigger extraction (CR 603.7) ------------------------------
+    # Only the "next <phase>" wording is a one-shot delayed trigger created by
+    # a resolving spell/ability. Recurring wordings ("at the beginning of your
+    # upkeep", "...of each end step") are triggered abilities of permanents,
+    # parsed elsewhere, and must NOT match here.
+    _DELAYED_PHASE = r"(end step|upkeep|end of combat|combat|cleanup(?: step)?|main phase)"
+    _DELAYED_LEADING = re.compile(
+        r"^\s*at the beginning of (?:the |your )?next " + _DELAYED_PHASE
+        + r"\s*,?\s*(.+?)\s*$",
+        re.IGNORECASE)
+    _DELAYED_TRAILING = re.compile(
+        r"^\s*(.+?)\s+at the beginning of (?:the |your )?next " + _DELAYED_PHASE
+        + r"\s*\.?\s*$",
+        re.IGNORECASE)
+
+    @staticmethod
+    def _extract_delayed_triggers(effect_text):
+        """Carve delayed-trigger sentences out of effect text (CR 603.7).
+
+        Must run BEFORE clause splitting: the comma split would sever
+        "At the beginning of the next end step" from its effect.
+
+        Returns (delayed_effects, remaining_text) where delayed_effects is a
+        list of DelayedTriggerEffect and remaining_text contains every
+        sentence that is not a delayed trigger, to flow through the normal
+        clause pipeline unchanged.
+        """
+        from .ability_types import DelayedTriggerEffect
+        delayed = []
+        kept = []
+        for sentence in re.split(r"(?<=[.!;])\s+", effect_text.strip()):
+            if not sentence.strip():
+                continue
+            # Reminder text is removed for matching only; the original
+            # sentence is preserved if it is not a delayed trigger.
+            probe = re.sub(r"\s*\([^()]*?\)\s*", " ", sentence).strip()
+            m = EffectFactory._DELAYED_LEADING.match(probe)
+            if m:
+                phase_key, inner = m.group(1), m.group(2)
+                delayed.append(DelayedTriggerEffect(inner, phase_key, full_text=probe))
+                continue
+            m = EffectFactory._DELAYED_TRAILING.match(probe)
+            if m:
+                inner, phase_key = m.group(1), m.group(2)
+                delayed.append(DelayedTriggerEffect(inner, phase_key, full_text=probe))
+                continue
+            kept.append(sentence)
+        return delayed, " ".join(kept)
+
     @staticmethod
     def create_effects(effect_text, targets=None): # targets arg currently unused here
         """
@@ -268,6 +317,14 @@ class EffectFactory:
         if not effect_text: return []
 
         effects = []
+
+        # CR 603.7: pull out "at the beginning of the next <phase>" sentences
+        # as DelayedTriggerEffect BEFORE clause splitting (see helper docstring).
+        delayed_effects, effect_text = EffectFactory._extract_delayed_triggers(effect_text)
+        effects.extend(delayed_effects)
+        if not effect_text.strip(". "):
+            return effects
+
         processed_clauses = []
         # Basic clause splitting (commas, 'and', 'then', em dash) - needs improvement for complex sentences
         # Added splitting on sentence endings like ". Then" or "; then" and em dash used as separator

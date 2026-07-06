@@ -39,13 +39,29 @@ card categories, which poisons the deck-builder's inputs.
 1. **Delayed triggered abilities (CR 603.7)** — ✅ core delivered (July 2026).
    `gs.register_delayed_trigger(effect, phase=...)` with firing hooks at every
    phase entry and at state-based checks (asap class); triggers fire exactly
-   once and expire; three scenarios guard it. The two pre-existing producers
-   (damage redirection, deferred lifelink gain) were crashing on the missing
-   `delayed_triggers` slot and now work. Clones start with an empty registry
-   (closures reference the original state; documented v1 limitation for MCTS).
-   **Remaining:** wire the oracle-text parser ("at the beginning of the next
-   end step, ...") in ability_handler/ability_types to call the registry, so
-   card text produces delayed triggers without hand-written closures.
+   once and expire. The two pre-existing producers (damage redirection,
+   deferred lifelink gain) were crashing on the missing `delayed_triggers`
+   slot and now work. Clones start with an empty registry (closures reference
+   the original state; documented v1 limitation for MCTS).
+   **Oracle-text wiring ✅ (July 2026):** `EffectFactory.create_effects` now
+   carves out "at the beginning of the next <phase>" sentences BEFORE clause
+   splitting (the comma split used to sever the timing phrase from its
+   effect) and emits `DelayedTriggerEffect` objects. Applying one registers
+   the inner effect with the registry instead of executing it — covering all
+   resolution paths (spells, abilities, modal modes) through the single
+   factory hook. Both templating forms parse: leading ("At the beginning of
+   the next end step, you gain 2 life.") and trailing ("Exile it at the
+   beginning of the next end step.", unearth-style). Simple pronoun riders
+   (exile/sacrifice/destroy/return "it") bind to the single explicit target
+   if present, else the source card, and no-op safely if the object has left
+   the battlefield; other inner clauses re-enter the factory at fire time.
+   Recurring wordings ("at the beginning of your upkeep / each end step")
+   deliberately do NOT match — those are permanents' triggered abilities.
+   Six scenarios now guard 603.7. **v1 limitations (documented):** a pronoun
+   referring to an object created by an earlier sentence in the same
+   resolution (token-maker riders) mis-binds to the source and no-ops;
+   unmapped phases and failed inner effects increment `unparsed_effects`
+   fidelity telemetry.
    Bonus bug found by the new scenarios: Card objects are shared across games
    via card_db, and counters written onto them leaked into later games —
    every game after the first started with the previous game's +1/+1 counters.
