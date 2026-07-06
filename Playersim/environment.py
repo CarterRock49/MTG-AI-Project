@@ -1,4 +1,5 @@
 
+import os
 import random
 import logging
 import re
@@ -55,6 +56,13 @@ class AlphaZeroMTGEnv(gym.Env):
         super().__init__()
         self.decks = decks
         self.card_db = card_db
+        # Version stamp for recorded games: card values measured under a weak agent
+        # are not card values. main.py sets this to the run id; update it at
+        # checkpoints for finer granularity.
+        self.agent_version = "unversioned"
+        self._fidelity_agg = {"games_recorded": 0, "unimplemented_action": 0,
+                              "unparsed_mana": 0, "unparsed_modal": 0,
+                              "unparsed_effects": 0, "unparsed_cards": {}}
         self.max_turns = max_turns
         self.max_hand_size = max_hand_size
         self.max_battlefield = max_battlefield
@@ -66,7 +74,7 @@ class AlphaZeroMTGEnv(gym.Env):
 
         # Initialize deck statistics tracker (Corrected class name usage)
         try:
-            self.stats_tracker = DeckStatsTracker() # Use the imported tracker
+            self.stats_tracker = DeckStatsTracker(card_db=card_db) # BUGFIX: was constructed without the card database
             self.has_stats_tracker = True
         except (ImportError, ModuleNotFoundError, NameError):
             logging.warning("DeckStatsTracker not available, statistics will not be recorded")
@@ -92,34 +100,10 @@ class AlphaZeroMTGEnv(gym.Env):
         # Initialize game state manager
         self.game_state = GameState(self.card_db, max_turns, max_hand_size, max_battlefield)
 
-        # Initialize action handler AFTER GameState
-        # --- Ensure ActionHandler exists and link it ---
-        try:
-             self.action_handler = ActionHandler(self.game_state)
-             self.game_state.action_handler = self.action_handler
-             logging.debug("Linked ActionHandler instance to GameState.")
-        except ImportError:
-             logging.error("ActionHandler class not found. Environment cannot function correctly.")
-             self.action_handler = None
-             # GameState action_handler will remain None or be set later by GS init
-
-
-        # GameState initializes its own subsystems now
-        self.combat_resolver = getattr(self.game_state, 'combat_resolver', None) # Get ref if needed
-        
-        self.strategic_planner = None
-        try:
-            self.strategic_planner = MTGStrategicPlanner(
-                self.game_state, # Pass GS
-                getattr(self.game_state, 'card_evaluator', None), # Pass evaluator from GS
-                self.combat_resolver # Pass combat resolver
-            )
-            self.game_state.strategic_planner = self.strategic_planner # Link planner to GS
-            logging.debug("StrategicPlanner initialized in Env __init__.")
-        except Exception as e:
-            logging.error(f"Failed to initialize StrategicPlanner in Env __init__: {e}")
-        
-        integrate_combat_actions(self.game_state) # Integrate after GS subsystems are ready
+        # The environment is the single owner of the agent layer (action handler,
+        # card evaluator, strategic planner). GameState no longer constructs these
+        # for the primary game — only clone() builds its own for MCTS simulations.
+        self._build_agents()
 
         # Feature dimension determined dynamically above
         # BUGFIX: PHASE_CLEANUP (15) is NOT the highest phase constant; special phases
@@ -309,6 +293,14 @@ class AlphaZeroMTGEnv(gym.Env):
         return self.current_valid_actions.astype(bool)
 
     def reset(self, seed=None, options=None):
+            # BUGFIX: gym seeds only self.np_random; deck selection and other engine
+            # randomness use the global `random` module, so seeded resets were not
+            # reproducible. Seed both global RNGs when a seed is provided.
+            # (Indented to match this function's existing 12-space body style --
+            # a shallower block here would swallow the whole body as its suite.)
+            if seed is not None:
+                random.seed(seed)
+                np.random.seed(seed % (2**32))
             """
             Reset the environment and return initial observation and info.
             Aligns with GameState starting in the Mulligan phase.
@@ -335,6 +327,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 self.episode_invalid_actions = 0
                 self.current_episode_actions = []
                 self._game_result_recorded = False
+                self._game_logged = False
                 self._logged_card_ids = set()
                 self._logged_errors = set()
                 self.last_n_actions = np.full(self.action_memory_size, -1, dtype=np.int32)
@@ -381,11 +374,11 @@ class AlphaZeroMTGEnv(gym.Env):
                 if self.has_card_memory and self.card_memory:
                     gs.card_memory = self.card_memory
 
-                # 2. Internal Subsystems (Reflect from GameState to Env)
-                # This ensures Env.action_handler matches GameState.action_handler
-                subsystems = ['action_handler', 'combat_resolver', 'card_evaluator', 'strategic_planner',
-                            'mana_system', 'ability_handler', 'layer_system',
-                            'replacement_effects', 'targeting_system']
+                # 2. Rules subsystems (Reflect from GameState to Env). The agent
+                # layer is NOT reflected: the environment owns it and rebuilds it
+                # below via _build_agents().
+                subsystems = ['combat_resolver', 'mana_system', 'ability_handler',
+                            'layer_system', 'replacement_effects', 'targeting_system']
                             
                 for sys_name in subsystems:
                     instance = getattr(gs, sys_name, None)
@@ -396,27 +389,8 @@ class AlphaZeroMTGEnv(gym.Env):
                         instance.game_state = gs
                         logging.debug(f"Relinked {sys_name} to new GameState instance.")
 
-                # --- Validate Critical Systems ---
-                if not self.action_handler:
-                    logging.error("ActionHandler missing after reset! Attempting emergency recreation.")
-                    self.action_handler = ActionHandler(gs)
-                    gs.action_handler = self.action_handler
-
-                # Combat Integration
-                if self.action_handler and hasattr(self.action_handler, 'combat_handler'):
-                    # Ensure combat handler has correct references
-                    if self.action_handler.combat_handler:
-                        self.action_handler.combat_handler.game_state = gs
-                        self.action_handler.combat_handler.card_evaluator = self.card_evaluator
-                        self.action_handler.combat_handler.setup_combat_systems()
-
-                # Strategic Planner Init
-                if self.strategic_planner:
-                    self.strategic_planner.game_state = gs
-                    if self.card_evaluator:
-                        self.strategic_planner.card_evaluator = self.card_evaluator
-                    if hasattr(self.strategic_planner, 'init_after_reset'):
-                        self.strategic_planner.init_after_reset()
+                # --- Agent layer: env is the single owner; rebuild for the fresh GameState ---
+                self._build_agents()
 
                 # --- Final Setup ---
                 # Generate initial action mask for the Mulligan phase
@@ -502,6 +476,18 @@ class AlphaZeroMTGEnv(gym.Env):
              logging.info("Game ended due to invalid action limit.")
              is_draw = True
              self._game_result = "invalid_limit"
+        elif forced_result in ("win", "loss", "draw"):
+            # Result already adjudicated by the caller (e.g., turn-limit life
+            # comparison in _check_game_end_conditions). Trust it: the flag-based
+            # inference below cannot see turn-limit adjudication.
+            self._game_result = forced_result
+            if forced_result == "draw":
+                is_draw = True
+            else:
+                agent_won = (forced_result == "win")
+                is_p1_winner = (gs.agent_is_p1 == agent_won)
+                winner = gs.p1 if is_p1_winner else gs.p2
+                winner_life = winner.get("life", 0)
         else:
             # Determine the winner based on game state (use .get with defaults)
             me = gs.p1 if gs.agent_is_p1 else gs.p2
@@ -596,7 +582,128 @@ class AlphaZeroMTGEnv(gym.Env):
                                                winner_archetype_mem, loser_archetype_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), is_draw=False, player_idx=(0 if is_p1_winner else 1))
             except Exception as mem_e:
                  logging.error(f"Error recording cards to memory: {mem_e}", exc_info=True)
+
+        # Persist immediately: a crash mid-training must not lose recorded games.
+        if getattr(self, '_game_result_recorded', False):
+            if not getattr(self, '_game_logged', False):
+                try:
+                    self._write_stats_artifacts()
+                    self._game_logged = True
+                except Exception as log_e:
+                    logging.error(f"Error writing game log/fidelity report: {log_e}")
+            try:
+                if getattr(self, 'stats_tracker', None) and hasattr(self.stats_tracker, 'save_updates_sync'):
+                    self.stats_tracker.save_updates_sync()
+                if getattr(self, 'card_memory', None) and hasattr(self.card_memory, 'save_all_card_data'):
+                    self.card_memory.save_all_card_data()
+            except Exception as save_e:
+                logging.error(f"Error persisting stats after game record: {save_e}")
                  
+    def _build_agents(self):
+        """Construct and attach the agent layer for the current GameState.
+
+        Single ownership: the environment builds these; GameState only holds
+        references. ActionHandler creates/adopts the card evaluator and wires
+        combat integration during its own __init__.
+        """
+        gs = self.game_state
+        try:
+            self.action_handler = ActionHandler(gs)
+            gs.action_handler = self.action_handler
+            logging.debug("ActionHandler built and linked to GameState.")
+        except Exception as e:
+            logging.error(f"Failed to initialize ActionHandler: {e}")
+            self.action_handler = None
+            gs.action_handler = None
+
+        self.card_evaluator = getattr(gs, 'card_evaluator', None)
+        if self.card_evaluator:
+            self.card_evaluator.stats_tracker = getattr(gs, 'stats_tracker', None)
+            self.card_evaluator.card_memory = getattr(gs, 'card_memory', None)
+        self.combat_resolver = getattr(gs, 'combat_resolver', None)
+
+        self.strategic_planner = None
+        try:
+            self.strategic_planner = MTGStrategicPlanner(gs, self.card_evaluator, self.combat_resolver)
+            gs.strategic_planner = self.strategic_planner
+            if getattr(gs, 'strategy_memory', None):
+                self.strategic_planner.strategy_memory = gs.strategy_memory
+            if hasattr(self.strategic_planner, 'init_after_reset'):
+                self.strategic_planner.init_after_reset()
+            logging.debug("StrategicPlanner built and linked to GameState.")
+        except Exception as e:
+            logging.error(f"Failed to initialize StrategicPlanner: {e}")
+            gs.strategic_planner = None
+
+    def set_agent_version(self, version):
+        """Stamp subsequent game records with the agent identity (e.g. run id or
+        checkpoint tag). Call via vec_env.env_method("set_agent_version", tag) --
+        vec_env.set_attr would set the attribute on the ActionMasker wrapper
+        instead of this env, leaving records stamped "unversioned"."""
+        self.agent_version = str(version)
+
+    def _write_stats_artifacts(self):
+        """Append this game to the per-game log and refresh the fidelity report.
+
+        These two files are the metadata contract for the downstream deck-builder:
+        - game_log.jsonl: one JSON object per recorded game (result, decks, turn
+          count, agent_version, per-game fidelity), for weighting and filtering.
+        - fidelity_report.json: cumulative counts plus every card name whose text
+          the engine could not fully parse -- stats for those cards are unreliable.
+        """
+        import json as _json
+        import time as _time
+        gs = self.game_state
+        base = getattr(getattr(self, 'stats_tracker', None), 'base_path', None) or "./deck_stats"
+        os.makedirs(base, exist_ok=True)
+
+        fc = getattr(gs, 'fidelity_counters', None) or {}
+        per_game_fidelity = {k: (sorted(v) if isinstance(v, set) else v) for k, v in fc.items()}
+
+        entry = {
+            "schema_version": 1,
+            "ts": _time.time(),
+            "result": getattr(self, '_game_result', None),
+            "turn_count": getattr(gs, 'turn', None),
+            "p1_deck": getattr(self, 'current_deck_name_p1', "Unknown_P1"),
+            "p2_deck": getattr(self, 'current_deck_name_p2', "Unknown_P2"),
+            "agent_is_p1": getattr(gs, 'agent_is_p1', True),
+            "agent_version": getattr(self, 'agent_version', "unversioned"),
+            "fidelity": per_game_fidelity,
+        }
+        with open(os.path.join(base, "game_log.jsonl"), "a", encoding="utf-8") as f:
+            f.write(_json.dumps(entry) + "\n")
+
+        agg = self._fidelity_agg
+        agg["games_recorded"] += 1
+        for key in ("unimplemented_action", "unparsed_mana", "unparsed_modal", "unparsed_effects"):
+            agg[key] += fc.get(key, 0)
+        for name in fc.get("unparsed_cards", ()):  # per-card unreliability counts
+            agg["unparsed_cards"][name] = agg["unparsed_cards"].get(name, 0) + 1
+        report = dict(agg)
+        report["agent_version"] = getattr(self, 'agent_version', "unversioned")
+        report["generated_at"] = _time.time()
+        with open(os.path.join(base, "fidelity_report.json"), "w", encoding="utf-8") as f:
+            _json.dump(report, f, indent=2, sort_keys=True)
+
+    def close(self):
+        """Persist all statistics before shutdown so no recorded game is lost."""
+        try:
+            self.ensure_game_result_recorded()
+        except Exception:
+            pass  # best effort: closing mid-game may have no result to record
+        try:
+            if getattr(self, 'stats_tracker', None) and hasattr(self.stats_tracker, 'save_updates_sync'):
+                self.stats_tracker.save_updates_sync()
+        except Exception as e:
+            logging.error(f"close(): stats tracker save failed: {e}")
+        try:
+            if getattr(self, 'card_memory', None) and hasattr(self.card_memory, 'save_all_card_data'):
+                self.card_memory.save_all_card_data()
+        except Exception as e:
+            logging.error(f"close(): card memory save failed: {e}")
+        super().close()
+
     def _get_strategic_advice(self):
         """
         Get comprehensive strategic advice for the current game state.
@@ -899,6 +1006,7 @@ class AlphaZeroMTGEnv(gym.Env):
                  env_info["action_mask"] = current_mask
                  gs.agent_is_p1 = initial_agent_is_p1 # Ensure perspective before safe obs
                  obs = self._get_obs_safe()
+                 self.ensure_game_result_recorded(forced_result="error")
                  return obs, -5.0, True, False, env_info # done=True
 
             reward, done, truncated, handler_info = self.action_handler.apply_action(action_idx, context=action_context)
@@ -1040,6 +1148,19 @@ class AlphaZeroMTGEnv(gym.Env):
                 final_phase_name = gs._PHASE_NAMES.get(gs.phase, gs.phase) if gs and hasattr(gs, '_PHASE_NAMES') else 'N/A' # Safe access
                 logging.info(f"Final State: Turn {gs.turn if gs else 'N/A'}, Phase {final_phase_name}, Prio {final_prio_name}")
                 logging.info(f"Returned Reward: {step_reward:.4f}, Done: {done}, Truncated: {truncated}")
+
+            # BUGFIX: game results were never recorded on normal endings --
+            # ensure_game_result_recorded existed but nothing called it, so the
+            # stats pipeline (the whole point of the simulator) stayed empty.
+            if done or truncated:
+                try:
+                    self.ensure_game_result_recorded(forced_result=env_info.get("game_result"))
+                except Exception as rec_e:
+                    logging.error(f"Failed to record game result: {rec_e}")
+                fc = getattr(gs, 'fidelity_counters', None)
+                if fc:
+                    env_info["fidelity"] = {k: (sorted(v) if isinstance(v, set) else v)
+                                            for k, v in fc.items()}
 
             return obs, step_reward, done, truncated, env_info
 

@@ -122,7 +122,13 @@ def stage(name):
 
 @stage("regression: fixed bugs stay fixed")
 def check_regressions():
+    import ast as _ast
+    import importlib
     import inspect
+    import os
+    import pkgutil
+
+    import Playersim
 
     # 1. deck_stats_tracker must expose GamePosition, not a colliding GameState enum.
     from Playersim import deck_stats_tracker as dst
@@ -133,26 +139,71 @@ def check_regressions():
     from Playersim import game_state as gs_mod
     assert "from .ability_handler import TargetingSystem" not in inspect.getsource(gs_mod)
 
-    # 3. No class may define the same method twice (the second silently wins).
-    from Playersim import environment as env_mod
-    from Playersim import enhanced_mana_system, replacement_effects
-    assert inspect.getsource(env_mod).count("def _get_strategic_advice(") == 1
-    assert inspect.getsource(enhanced_mana_system).count("def calculate_cost_increase(") == 1
-    assert inspect.getsource(replacement_effects).count("def remove_effect(") == 1
-    assert inspect.getsource(gs_mod).count("def find_card_location(") == 1
-    assert inspect.getsource(gs_mod).count("def initialize_day_night_cycle(") == 1
+    # 3. UNIVERSAL: no module-level function or class method may be defined twice
+    # anywhere in the package. Python keeps only the last definition, silently
+    # discarding the rest — this bug class was found 24 times during cleanup.
+    pkg_dir = Playersim.__path__[0]
+    dups = []
+    for fname in sorted(os.listdir(pkg_dir)):
+        if not fname.endswith(".py"):
+            continue
+        with open(os.path.join(pkg_dir, fname), encoding="utf-8") as f:
+            tree = _ast.parse(f.read())
+        scopes = [("module", tree)] + [(n.name, n) for n in _ast.walk(tree)
+                                       if isinstance(n, _ast.ClassDef)]
+        for scope_name, scope in scopes:
+            names = [n.name for n in scope.body
+                     if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))]
+            for name in set(n for n in names if names.count(n) > 1):
+                dups.append(f"{fname}::{scope_name}::{name}")
+    assert not dups, f"duplicate definitions (second silently wins): {dups}"
+
+    # Cross-module duplicates within a split family (the same method defined in
+    # two mixins of one class) are invisible to the per-file check above.
+    def family(prefix):
+        return [importlib.import_module(f"Playersim.{i.name}")
+                for i in pkgutil.iter_modules(Playersim.__path__)
+                if i.name.startswith(prefix)]
+    for prefix, probe in (("game_state", "find_card_location"),
+                          ("actions", "_handle_no_op"),
+                          ("strategic_planner", "monte_carlo_search")):
+        n = sum(inspect.getsource(m).count(f"def {probe}(") for m in family(prefix))
+        assert n == 1, f"{probe} defined {n} times across {prefix} modules"
 
     # 4. remove_effect must clean the event-type index, not just the list,
     #    or removed effects keep firing through effect_index.
+    from Playersim import replacement_effects
     assert "effect_index" in inspect.getsource(
         replacement_effects.ReplacementEffectSystem.remove_effect)
 
     # 5. combat.py holds CombatResolver; the old name must survive as an alias.
     from Playersim import combat
-    assert hasattr(combat, "CombatResolver"), "CombatResolver missing from combat.py"
     assert combat.EnhancedCombatResolver is combat.CombatResolver, "compat alias broken"
     from Playersim.enhanced_combat import ExtendedCombatResolver
     assert issubclass(ExtendedCombatResolver, combat.CombatResolver)
+
+    # 6. The god-class splits: every class must compose its mixins, and GameState
+    #    must stay dict-less (__slots__ semantics).
+    from Playersim.game_state import GameState
+    gs_mro = {c.__name__ for c in GameState.__mro__}
+    for expected in ("GameStateSetupMixin", "GameStateTurnMixin", "GameStateZonesMixin",
+                     "GameStateStackMixin", "GameStatePermanentsMixin", "GameStateDamageMixin"):
+        assert expected in gs_mro, f"{expected} missing from GameState MRO"
+    assert "__dict__" not in getattr(GameState, "__slots__", ["__dict__"]), \
+        "GameState instances must stay dict-less (__slots__ semantics)"
+
+    from Playersim.actions import ActionHandler, ACTION_MEANINGS
+    ah_mro = {c.__name__ for c in ActionHandler.__mro__}
+    for expected in ("ActionSpaceMixin", "TurnPhaseHandlersMixin", "CastingHandlersMixin",
+                     "CombatHandlersMixin", "ChoiceHandlersMixin", "MechanicsHandlersMixin"):
+        assert expected in ah_mro, f"{expected} missing from ActionHandler MRO"
+    assert len(ACTION_MEANINGS) == 480, "ACTION_MEANINGS must stay at 480 entries"
+
+    from Playersim.strategic_planner import MTGStrategicPlanner, MCTSNode  # noqa: F401
+    sp_mro = {c.__name__ for c in MTGStrategicPlanner.__mro__}
+    for expected in ("ArchetypeAnalysisMixin", "CardEvaluationMixin",
+                     "ThreatSynergyMixin", "SearchDecisionMixin"):
+        assert expected in sp_mro, f"{expected} missing from MTGStrategicPlanner MRO"
 
 
 @stage("import hygiene: every module imports cleanly")
@@ -230,6 +281,24 @@ def check_reset(env):
     return obs
 
 
+@stage("agent-layer ownership invariants")
+def check_agent_ownership(env):
+    """The environment is the single owner of the agent layer; clones are
+    self-contained so MCTS simulations keep working."""
+    env.reset(seed=SEED)
+    gs = env.game_state
+    assert gs.action_handler is env.action_handler, "env and gs must share ONE ActionHandler"
+    assert gs.strategic_planner is env.strategic_planner, "env and gs must share ONE planner"
+    assert gs.card_evaluator is env.card_evaluator, "env and gs must share ONE evaluator"
+    assert gs.action_handler.card_evaluator is gs.card_evaluator
+    assert gs.strategic_planner.card_evaluator is gs.card_evaluator
+
+    clone = gs.clone()
+    assert clone.action_handler is not None and clone.action_handler is not gs.action_handler
+    assert clone.strategic_planner is not None and clone.strategic_planner is not gs.strategic_planner
+    assert clone.action_handler.game_state is clone, "clone's handler must bind to the clone"
+
+
 @stage("play random-valid-action episodes")
 def play_episodes(env):
     rng = random.Random(SEED)
@@ -247,6 +316,73 @@ def play_episodes(env):
             steps += 1
         print(f"        episode {episode}: {steps} steps, "
               f"terminated={terminated}, truncated={truncated}")
+
+
+@stage("stats pipeline records and persists games")
+def check_stats_pipeline(decks, card_db):
+    """The mission-critical path: finished games must land in deck_stats and
+    card_memory on disk, with fidelity telemetry exposed in the final info."""
+    from Playersim.environment import AlphaZeroMTGEnv
+    repo = os.getcwd()
+    with tempfile.TemporaryDirectory() as d:
+        os.chdir(d)  # tracker/memory write to ./deck_stats and ./card_memory
+        try:
+            env = AlphaZeroMTGEnv(decks, card_db)
+            env.set_agent_version("smoke-test")
+            rng = random.Random(SEED)
+            recorded_any = False
+            last_info = {}
+            for ep in range(3):
+                env.reset(seed=SEED + ep)
+                done = trunc = False
+                steps = 0
+                while not (done or trunc) and steps < MAX_STEPS_PER_EPISODE:
+                    mask = env.action_mask()
+                    valid = np.where(mask)[0]
+                    _, _, done, trunc, last_info = env.step(int(rng.choice(list(valid))))
+                    steps += 1
+                recorded_any = recorded_any or getattr(env, "_game_result_recorded", False)
+            env.close()
+            assert recorded_any, "no game result recorded across 3 episodes"
+            assert "fidelity" in last_info, "fidelity telemetry missing from final info"
+            for sub in ("deck_stats", "card_memory"):
+                p = os.path.join(d, sub)
+                assert os.path.isdir(p) and os.listdir(p), f"{sub} not persisted to disk"
+
+            # The metadata contract for the downstream deck-builder.
+            log_path = os.path.join(d, "deck_stats", "game_log.jsonl")
+            assert os.path.exists(log_path), "game_log.jsonl missing"
+            records = [json.loads(l) for l in open(log_path, encoding="utf-8")]
+            assert records, "game log is empty"
+            for r in records:
+                for field in ("schema_version", "ts", "result", "turn_count",
+                              "p1_deck", "p2_deck", "agent_is_p1",
+                              "agent_version", "fidelity"):
+                    assert field in r, f"game log record missing '{field}'"
+                assert r["schema_version"] == 1, "unexpected game log schema version"
+                assert r["agent_version"] == "smoke-test", "agent version not stamped"
+            rep_path = os.path.join(d, "deck_stats", "fidelity_report.json")
+            assert os.path.exists(rep_path), "fidelity_report.json missing"
+            rep = json.load(open(rep_path, encoding="utf-8"))
+            assert rep.get("games_recorded") == len(records), \
+                "fidelity report count does not match game log (double-append?)"
+
+            # Downstream metadata contract: per-game log + cumulative fidelity report.
+            log_path = os.path.join(d, "deck_stats", "game_log.jsonl")
+            assert os.path.isfile(log_path), "game_log.jsonl missing"
+            with open(log_path, encoding="utf-8") as f:
+                entries = [json.loads(line) for line in f if line.strip()]
+            assert entries, "game_log.jsonl is empty"
+            for key in ("result", "turn_count", "agent_version", "fidelity", "p1_deck", "p2_deck"):
+                assert key in entries[0], f"game_log entry missing '{key}'"
+            rep_path = os.path.join(d, "deck_stats", "fidelity_report.json")
+            assert os.path.isfile(rep_path), "fidelity_report.json missing"
+            with open(rep_path, encoding="utf-8") as f:
+                report = json.load(f)
+            assert report.get("games_recorded", 0) >= 1
+            assert "unparsed_cards" in report
+        finally:
+            os.chdir(repo)
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +404,9 @@ def main():
         if env is None:
             return finish()
         if check_reset(env) is not None:
+            check_agent_ownership(env)
             play_episodes(env)
+        check_stats_pipeline(decks, card_db)
     return finish()
 
 

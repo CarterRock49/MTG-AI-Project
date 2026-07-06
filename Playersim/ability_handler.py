@@ -343,6 +343,8 @@ class AbilityHandler:
                                            # It mentioned adding mana, but parsing failed or yielded none
                                            # Treat as regular activated ability for now
                                            logging.warning(f"Mana parsing failed for: '{attributes['effect']}'")
+                                           _fc = getattr(self.game_state, 'fidelity_counters', None)
+                                           if _fc is not None: _fc["unparsed_mana"] += 1
                                            ability = ActivatedAbility(**attributes)
                                  else: # Normal Activated Ability
                                       ability = ActivatedAbility(**attributes)
@@ -592,6 +594,8 @@ class AbilityHandler:
                 # Log specific marker info if available
                 marker_log = f" after marker '{chosen_marker_info[0]}'" if chosen_marker_info else ""
                 logging.warning(f"Found modal indication{marker_log} but failed to parse mode texts from: '{modal_text[:100]}...'")
+                _fc = getattr(self.game_state, 'fidelity_counters', None)
+                if _fc is not None: _fc["unparsed_modal"] += 1
                 return None, 0, 0
 
             logging.debug(f"Parsed modes: {modes}, MinChoices: {min_choices}, MaxChoices: {max_choices}")
@@ -700,6 +704,12 @@ class AbilityHandler:
 
             # Clear existing registered abilities for this card_id
             self.registered_abilities[card_id] = []
+
+            # Fidelity snapshot: if any unparsed counters advance while parsing this
+            # card, the card gets attributed by name for the downstream stats consumer.
+            _fc = getattr(self.game_state, 'fidelity_counters', None)
+            _fid_before = ((_fc.get("unparsed_mana", 0) + _fc.get("unparsed_modal", 0)
+                            + _fc.get("unparsed_effects", 0)) if _fc is not None else 0)
             abilities_list = self.registered_abilities[card_id]
             activated_ability_counter = 0 # Tracks the index for non-mana activated abilities
 
@@ -897,6 +907,17 @@ class AbilityHandler:
                 import traceback
                 logging.error(traceback.format_exc())
                 if card_id not in self.registered_abilities: self.registered_abilities[card_id] = []
+                _fc = getattr(self.game_state, 'fidelity_counters', None)
+                if _fc is not None:
+                    _fc["unparsed_effects"] += 1
+                    _fc.setdefault("unparsed_cards", set()).add(card_name_log)
+
+            # Fidelity attribution: counters advanced during this card's parse.
+            if _fc is not None:
+                _after = (_fc.get("unparsed_mana", 0) + _fc.get("unparsed_modal", 0)
+                          + _fc.get("unparsed_effects", 0))
+                if _after > _fid_before:
+                    _fc.setdefault("unparsed_cards", set()).add(getattr(card, 'name', f"card_{card_id}"))
             
     def _classify_and_parse_ability_clause(self, card_id, card, clause_text, current_activated_index):
         """

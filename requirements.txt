@@ -1,0 +1,10 @@
+torch
+numpy
+stable-baselines3[extra]
+sb3-contrib
+gymnasium
+optuna
+matplotlib
+psutil
+gputil
+tensorboard

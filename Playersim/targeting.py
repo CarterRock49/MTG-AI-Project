@@ -665,7 +665,11 @@ class TargetingSystem:
 
         return selected_targets if selected_targets else {}
 
-    def validate_targets(self, card_id, targets, controller):
+    def validate_targets(self, card_id, targets, controller, effect_text=None):
+        # effect_text: optional specific effect text (e.g., a chosen modal mode);
+        # accepted for callers that pass it (resolution-time validation). BUGFIX:
+        # previously absent, so every resolution-time validation raised TypeError
+        # and the resolving spell was silently lost.
         """
         Validate if the selected targets are legal for the card.
 

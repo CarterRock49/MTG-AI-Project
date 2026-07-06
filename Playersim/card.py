@@ -641,40 +641,6 @@ class Card:
         
         return None
 
-    def _parse_base_level(self, oracle_text):
-        """
-        Parse the base (level 1) class characteristics.
-        
-        Handles various base level descriptions:
-        - Initial abilities
-        - Base type line
-        - Initial cost (if any)
-        """
-        # Initialize base level dictionary
-        base_level = {
-            'level': 1,
-            'cost': '',
-            'abilities': [],
-            'power': None,
-            'toughness': None,
-            'type_line': self.type_line
-        }
-        
-        # Extract base level abilities
-        # Look for text before first "Level X:" or end of text
-        base_match = re.search(r'^(.*?)(?:level \d+:|$)', oracle_text, re.DOTALL)
-        
-        if base_match:
-            base_abilities_text = base_match.group(1).strip()
-            
-            # Remove explanatory text in parentheses
-            base_abilities_text = re.sub(r'\([^)]*\)', '', base_abilities_text)
-            
-            # Split abilities, handling different separation methods
-            abilities = [a.strip() for a in re.split(r'\n+|[•●\-]', base_abilities_text) if a.strip()]
-            base_level['abilities'] = abilities
-        
-        self.levels.append(base_level)
 
     def _parse_base_level(self, oracle_text):
         """
@@ -1241,84 +1207,6 @@ class Card:
         
         return True
 
-    def _process_door_effect(self, effect, game_state, controller):
-        """
-        Process a door effect when unlocked by creating events or triggering abilities.
-        """
-        effect_type = effect.get('type')
-        details = effect.get('details', '')
-
-        if not hasattr(game_state, 'ability_handler') or not game_state.ability_handler:
-             logging.warning("Cannot process door effect: AbilityHandler not found in GameState.")
-             return
-
-        # Context for the effect application
-        context = {'source_id': self.card_id, 'controller': controller, 'effect_origin': 'door_unlock'}
-
-        try:
-            # Convert text descriptions to AbilityEffect objects or direct GameState actions
-            if effect_type == 'token_creation':
-                 # Assuming details = (count_str, type_desc)
-                 token_details = self._parse_token_details(details[1]) # Use helper to parse description
-                 token_data = { # Convert parsed details to data format for GS
-                      "name": token_details.get('name', "Room Token"),
-                      "type_line": token_details.get('type_line', "Token Creature"),
-                      "power": token_details.get('power', 1),
-                      "toughness": token_details.get('toughness', 1),
-                      "colors": token_details.get('colors', [0, 0, 0, 0, 0]),
-                      "subtypes": token_details.get('subtypes', []),
-                      "abilities": token_details.get('abilities', [])
-                 }
-                 token_count = token_details.get('count', 1)
-                 for _ in range(token_count):
-                      game_state.create_token(controller, token_data) # Call GS method
-
-            elif effect_type == 'card_manipulation':
-                 # Assuming details = (action_str, count_str)
-                 action, count = details
-                 count = int(count) if isinstance(count, str) and count.isdigit() else 1
-                 if action == 'draw': game_state.draw_cards(controller, count) # Call GS method
-                 # Add discard logic if needed, possibly via effect
-
-            elif effect_type == 'damage_effect':
-                 # Assuming details = (amount_str, target_desc)
-                 damage_amount, target_desc = details
-                 damage_amount = int(damage_amount) if isinstance(damage_amount, str) and damage_amount.isdigit() else 1
-                 # Create and apply DamageEffect via AbilityHandler
-                 effect_text = f"deals {damage_amount} damage to {target_desc}" # Reconstruct text for parser
-                 # Need to resolve targets first if text requires it
-                 targets = None
-                 if "target" in target_desc:
-                     targets = game_state.targeting_system.resolve_targeting(self.card_id, controller, effect_text)
-                 effects = EffectFactory.create_effects(effect_text, targets=targets)
-                 for eff in effects: eff.apply(game_state, self.card_id, controller, targets)
-
-            elif effect_type == 'graveyard_return':
-                 # Assuming details = target_desc
-                 target_desc = details
-                 effect_text = f"return {target_desc} from your graveyard" # Reconstruct
-                 targets = None # Search handled by effect itself? Or target selection first?
-                 # For now, assume effect handles search
-                 effects = EffectFactory.create_effects(effect_text)
-                 for eff in effects: eff.apply(game_state, self.card_id, controller, targets)
-
-            elif effect_type == 'surveil':
-                 # Assuming details = count_str
-                 count = int(details) if isinstance(details, str) and details.isdigit() else 1
-                 game_state.surveil(controller, count) # Call GS method
-
-            elif effect_type == 'manifest':
-                 # Assuming details = ? (Manifest logic complex)
-                 game_state.manifest_card(controller) # Call GS method (needs count if specified)
-
-            # Add other effect types here, calling appropriate GameState methods or creating AbilityEffect objects
-
-            logging.debug(f"Processed door effect: {effect_type}")
-
-        except Exception as e:
-            logging.error(f"Error processing door effect '{effect_type}': {e}")
-            import traceback
-            logging.error(traceback.format_exc())
     
     
     def _parse_token_details(self, token_desc):

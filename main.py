@@ -1343,6 +1343,11 @@ def main():
     env_fns = [make_env_factory(i) for i in range(num_envs)]
     vec_env = DummyVecEnv(env_fns)
     vec_env = VecMonitor(vec_env)
+    # Stamp recorded games with this training run so the downstream deck-builder
+    # can weight or filter stats by the agent that generated them.
+    # BUGFIX: set_attr sets the attribute on the ActionMasker wrapper, not the
+    # underlying env, so records stayed "unversioned". env_method reaches the env.
+    vec_env.env_method("set_agent_version", run_id)
     
     # Learning rate scheduler
     lr_scheduler = CustomLearningRateScheduler(
@@ -1375,6 +1380,7 @@ def main():
 
     eval_env_fns = [make_eval_env_factory(i) for i in range(2)]  # Reduced from 4 to 2 for CPU
     eval_env = VecMonitor(DummyVecEnv(eval_env_fns))
+    eval_env.env_method("set_agent_version", f"{run_id}-eval")
 
     # Create callbacks
     callbacks = create_callbacks(eval_env, run_id, args)

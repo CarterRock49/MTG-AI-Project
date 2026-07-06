@@ -1,7 +1,8 @@
 import logging
 import re
 
-from numpy import copy
+import copy  # BUGFIX: was `from numpy import copy`, shadowing the stdlib module
+             # and crashing every copy.deepcopy call in this file
 
 class ReplacementEffectSystem:
     """

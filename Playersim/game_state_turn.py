@@ -1,0 +1,862 @@
+"""Turn structure, phase progression, priority, and turn-cycle mechanics.
+
+Extracted from game_state.py. This module defines behavior only (a mixin);
+all state lives on GameState itself, which composes every mixin.
+"""
+
+import logging
+import re
+
+
+class GameStateTurnMixin:
+    """Turn structure, phase progression, priority, and turn-cycle mechanics."""
+
+    # Empty slots: preserves GameState's __slots__ semantics (no instance __dict__).
+    __slots__ = ()
+
+    def initialize_day_night_cycle(self):
+        """Initialize the day/night cycle state and tracking."""
+        # Start with neither day nor night
+        self.day_night_state = None
+        # Track if we've already checked day/night transition this turn
+        self.day_night_checked_this_turn = False
+        logging.debug("Day/night cycle initialized (neither day nor night)")
+
+    def _untap_phase(self, player):
+        """Reset mana and untap all permanents, handling Phasing."""
+        # --- Phasing ---
+        # 1. Phase In Permanents that should return
+        if hasattr(self, 'phased_out'):
+            permanents_phasing_in = []
+            # Check player's phased-out permanents first
+            player_phased_out = player.get("phased_out_permanents", set())
+            for card_id in list(player_phased_out): # Iterate copy
+                 if card_id in self.phased_out: # Confirm it's in global set
+                      # Phase in logic: Remove from phased out, add to battlefield (untapped)
+                      self.phased_out.remove(card_id)
+                      player_phased_out.remove(card_id)
+                      if card_id not in player.get("battlefield", []): # Avoid duplicates if already there somehow
+                           player["battlefield"].append(card_id)
+                           # Remove from tapped state (enters untapped)
+                           player.get("tapped_permanents", set()).discard(card_id)
+                           card = self._safe_get_card(card_id)
+                           logging.debug(f"Phased in: {getattr(card, 'name', card_id)}")
+                           self.trigger_ability(card_id, "PHASED_IN", {"controller": player})
+                           permanents_phasing_in.append(card_id)
+
+        # 2. Check Permanents with Phasing on Battlefield
+        permanents_phasing_out = []
+        for card_id in list(player.get("battlefield",[])): # Iterate copy
+             card = self._safe_get_card(card_id)
+             # Check keyword via Layer System result preferred
+             if card and self.check_keyword(card_id, "phasing"):
+                 permanents_phasing_out.append(card_id)
+
+        # 3. Phase Out identified permanents
+        if permanents_phasing_out:
+            if not hasattr(self, 'phased_out'): self.phased_out = set() # Ensure set exists
+            player_phased_out = player.setdefault("phased_out_permanents", set())
+            for card_id in permanents_phasing_out:
+                if card_id in player["battlefield"]: # Ensure it's still there
+                    player["battlefield"].remove(card_id)
+                    self.phased_out.add(card_id)
+                    player_phased_out.add(card_id)
+                    # Store state if needed (tapped, counters etc.) - simplified for now
+                    card = self._safe_get_card(card_id)
+                    logging.debug(f"Phased out: {getattr(card, 'name', card_id)}")
+                    # Remove effects, etc.
+                    if self.layer_system: self.layer_system.remove_effects_by_source(card_id)
+                    if self.replacement_effects: self.replacement_effects.remove_effects_by_source(card_id)
+
+        # --- Standard Untap Actions ---
+        # Reset mana pools
+        player["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
+        player["conditional_mana"] = {}
+        player["phase_restricted_mana"] = {}
+
+        # Untap permanents *that did not phase out*
+        untapped_ids = set()
+        tapped_set = player.get("tapped_permanents", set())
+        for card_id in list(player.get("battlefield", [])): # Iterate copy, only those currently on BF
+            if card_id in tapped_set:
+                 tapped_set.remove(card_id)
+                 untapped_ids.add(card_id)
+                 card = self._safe_get_card(card_id)
+                 logging.debug(f"Untapped: {getattr(card, 'name', card_id)}")
+                 self.trigger_ability(card_id, "UNTAPPED", {"controller": player})
+
+        player["tapped_permanents"] = tapped_set # Update the set
+
+        player["entered_battlefield_this_turn"] = set() # Clear sickness status
+        player["land_played"] = False
+        player["damage_counters"] = {} # Damage removed in Cleanup usually, but safe reset here? Rule 514.2. Okay.
+        logging.debug(f"Untap Phase for {player['name']} complete.")
+
+    def _draw_phase(self, player):
+        """Draw a card from the library with replacement effect handling."""
+        if player["library"]:
+            # Create event context
+            draw_context = {
+                "player": player,
+                "draw_count": 1,
+                "card_id": player["library"][0] if player["library"] else None
+            }
+            
+            # Apply replacement effects
+            modified_context, was_replaced = self.apply_replacement_effect("DRAW", draw_context)
+            
+            if was_replaced:
+                # Use the modified context
+                # The replacement effect handler already performed the action
+                pass
+            else:
+                # Normal draw
+                card_id = player["library"].pop(0)
+                player["hand"].append(card_id)
+                
+                # Get the card object properly using _safe_get_card
+                card = self._safe_get_card(card_id)
+                
+                # Attempt to handle miracle if applicable
+                miracle_handled = False
+                if hasattr(self, 'handle_miracle_draw'):
+                    miracle_handled = self.handle_miracle_draw(card_id, player)
+                
+                # Only attempt to log the card name if we got a valid card object
+                if card:
+                    logging.debug(f"Draw Phase: Drew {card.name}{' and cast for miracle cost' if miracle_handled else ''}")
+                else:
+                    logging.debug(f"Draw Phase: Drew card ID {card_id}")
+        else:
+            # Track attempted draw from empty
+            player["attempted_draw_from_empty"] = True
+            logging.warning("Draw Phase: No cards left in library. Player loses the game!")
+            player["life"] = 0  # Losing condition: drawing from an empty library
+            self.check_state_based_actions()
+
+    def _end_phase(self, player):
+        """Cleanup at end phase."""
+        player["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
+        # Enforce hand size limits, etc.
+        if len(player["hand"]) > self.max_hand_size:
+            player["hand"] = player["hand"][:self.max_hand_size]
+        # Revert any temporary control effects at end of turn
+        self._revert_temporary_control()
+
+    def _can_respond_to_stack(self, player=None):
+        """
+        Check if the player can respond to the stack, considering effects like Split Second.
+        
+        Args:
+            player: The player who is trying to respond
+            
+        Returns:
+            bool: Whether the player can respond to the stack
+        """
+        # If Split Second is active, no player can respond
+        if hasattr(self, 'split_second_active') and self.split_second_active:
+            return False
+            
+        # Otherwise, check normal priority rules
+        return self.check_priority(player)
+
+    def _can_act_at_sorcery_speed(self, player):
+        """
+        Check if the specified player can act at sorcery speed.
+        Rules:
+        1. It must be the player's turn (Active Player).
+        2. It must be a Main Phase.
+        3. The stack must be empty.
+        """
+        # Must be the active player
+        if player != self._get_active_player():
+            return False
+            
+        # Must be in a main phase
+        if self.phase not in [self.PHASE_MAIN_PRECOMBAT, self.PHASE_MAIN_POSTCOMBAT]:
+            return False
+            
+        # Stack must be empty
+        if self.stack:
+            return False
+            
+        return True
+
+    def _pass_priority(self):
+            """
+            Handle passing priority between players or advancing state.
+            Strictly enforces Rule 117:
+            - If a player passes, priority goes to the next player.
+            - If both pass in succession:
+                - If stack is not empty: Resolve top item. AP gets priority.
+                - If stack is empty: Advance phase. AP gets priority in new phase.
+            """
+            # --- 1. Critical Recovery: If priority is lost (None), reset to Active Player ---
+            # This fixes the infinite NO_OP loop bug.
+            if self.priority_player is None:
+                # In Untap (0) and Cleanup (15), no player has priority by default.
+                # However, if we are 'stuck' here with no actions happening, we force advance.
+                if self.phase == self.PHASE_UNTAP:
+                    logging.warning("Stuck in UNTAP with no priority. Forcing advance to UPKEEP.")
+                    self.phase = self.PHASE_UPKEEP
+                    self.priority_player = self._get_active_player()
+                    self.priority_pass_count = 0
+                    return
+                
+                # In all other phases (Upkeep, Main, Combat, etc.), SOMEONE must have priority.
+                # Default to Active Player (Rule 117.1).
+                if self.phase != self.PHASE_CLEANUP:
+                    active_p = self._get_active_player()
+                    logging.warning(f"Priority was None in interactive phase {self._PHASE_NAMES.get(self.phase)}. Resetting to Active Player: {active_p['name']}")
+                    self.priority_player = active_p
+                    self.priority_pass_count = 0
+                    return
+
+            # --- 2. Standard Pass Logic ---
+            self.priority_pass_count += 1
+            
+            # Calculate next player (toggle)
+            current_prio = self.priority_player
+            active_p = self._get_active_player()
+            non_active_p = self._get_non_active_player()
+            
+            # If current is Active, next is Non-Active. Otherwise, back to Active.
+            next_player = non_active_p if current_prio == active_p else active_p
+            
+            # Tentatively assign priority to the next player
+            self.priority_player = next_player 
+            # logging.debug(f"Priority passed from {current_prio['name'] if current_prio else 'None'} to {next_player['name']}")
+
+            # --- 3. Check if State Should Change (Both Players Passed) ---
+            if self.priority_pass_count >= 2:
+                # Both players passed in succession. Action required.
+                self.priority_pass_count = 0 # Reset pass count immediately
+
+                # A. Check Split Second (Rare, but overrides stack logic)
+                if getattr(self, 'split_second_active', False):
+                    # Find the Split Second spell/ability on top
+                    split_second_item = None
+                    if self.stack and isinstance(self.stack[-1], tuple) and len(self.stack[-1]) > 3 and self.stack[-1][3].get("is_split_second", False):
+                        split_second_item = self.stack[-1]
+
+                    if split_second_item:
+                        logging.debug("Split Second active: Resolving split second spell/ability.")
+                        self.resolve_top_of_stack() 
+                        # Split second active check happens in resolve_top_of_stack logic usually
+                        self.priority_player = active_p # AP gets priority after resolution
+                        return 
+                    else:
+                        # Split second flag was true but no item found; clean up state
+                        self.split_second_active = False
+                        self.priority_player = active_p
+                        return
+
+                # B. Check Stack Resolution
+                elif self.stack:
+                    # Process triggers FIRST that might have resulted from the passes
+                    initial_stack_size = len(self.stack)
+                    if self.ability_handler: 
+                        self.ability_handler.process_triggered_abilities()
+
+                    # Check if new triggers were added to the stack
+                    if len(self.stack) > initial_stack_size:
+                        # New items added: Active Player gets priority to respond (Rule 117.3c)
+                        self.priority_player = active_p
+                        self.last_stack_size = len(self.stack)
+                        logging.debug("Triggers added after pass, priority returned to AP.")
+                        return
+
+                    # No new triggers, resolve the top item
+                    # logging.debug("Both passed, resolving stack...")
+                    self.resolve_top_of_stack() 
+                    
+                    # Rule 117.3b: Active player receives priority after a spell/ability resolves.
+                    self.priority_player = active_p
+                    self.last_stack_size = len(self.stack)
+                    return
+
+                # C. Check Phase Advance (Stack is Empty)
+                else:
+                    # Advance phase only if stack is empty AND no special choice context is pending
+                    if not (self.targeting_context or self.sacrifice_context or self.choice_context):
+                        self._advance_phase() # This resets priority and handles next phase start
+                    else: 
+                        # If choice context pending, force priority to the chooser to prevent stuck state
+                        chooser = None
+                        if self.targeting_context: chooser = self.targeting_context.get("controller")
+                        elif self.sacrifice_context: chooser = self.sacrifice_context.get("controller")
+                        elif self.choice_context: chooser = self.choice_context.get("player")
+                        
+                        self.priority_player = chooser if chooser else active_p
+
+    def _advance_phase(self):
+            """
+            Advance to the next phase in the turn sequence.
+            Ensures Active Player receives priority immediately (Rule 117.1).
+            Handles Cleanup Step loops (Rule 514.3).
+            """
+            # Phase sequence definition
+            phase_sequence = [
+                self.PHASE_UNTAP,
+                self.PHASE_UPKEEP,
+                self.PHASE_DRAW,
+                self.PHASE_MAIN_PRECOMBAT,
+                self.PHASE_BEGIN_COMBAT,
+                self.PHASE_DECLARE_ATTACKERS,
+                self.PHASE_DECLARE_BLOCKERS,
+                self.PHASE_FIRST_STRIKE_DAMAGE,
+                self.PHASE_COMBAT_DAMAGE,
+                self.PHASE_END_OF_COMBAT,
+                self.PHASE_MAIN_POSTCOMBAT,
+                self.PHASE_END_STEP,
+                self.PHASE_CLEANUP
+            ]
+
+            old_phase = self.phase
+            
+            # --- Handle Special Phase Exits ---
+            # If we were in a sub-phase (Targeting, etc.) and are done, return to the game phase
+            if old_phase in [self.PHASE_PRIORITY, self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+                if not self.stack and not self.targeting_context and not self.sacrifice_context and not self.choice_context:
+                    if hasattr(self, 'previous_priority_phase') and self.previous_priority_phase is not None:
+                        # Don't return to Untap/Cleanup from a priority check
+                        if self.previous_priority_phase in [self.PHASE_UNTAP, self.PHASE_CLEANUP]:
+                            # Logic below will handle finding the *next* logical phase from here
+                            old_phase = self.previous_priority_phase 
+                        else:
+                            self.phase = self.previous_priority_phase
+                            self.previous_priority_phase = None
+                            self._phase_action_count = 0
+                            # We returned to the main phase, now we need to advance FROM it.
+                            # Fall through to the while loop below.
+                else:
+                    return # State busy, do not advance
+
+            # --- Phase Advancement Loop (handles skipping) ---
+            current_phase_for_check = self.phase
+            loop_limit = 0
+            
+            while loop_limit < 20: # Safety break for infinite skips
+                loop_limit += 1
+
+                # Find current phase index
+                try:
+                    current_idx = phase_sequence.index(current_phase_for_check)
+                except ValueError:
+                    logging.error(f"Current phase {current_phase_for_check} unknown. Resetting to Main.")
+                    self.phase = self.PHASE_MAIN_PRECOMBAT
+                    self.priority_player = self._get_active_player()
+                    return
+
+                # Determine next phase
+                next_idx = (current_idx + 1) % len(phase_sequence)
+                next_phase_in_sequence = phase_sequence[next_idx]
+
+                # --- 1. Handle Turn Transition (Cleanup -> Untap) ---
+                if current_phase_for_check == self.PHASE_CLEANUP and next_phase_in_sequence == self.PHASE_UNTAP:
+                    # Perform Cleanup Actions (Rule 514)
+                    active_p = self._get_active_player()
+                    non_active_p = self._get_non_active_player()
+                    
+                    # Discard down to hand size, remove damage, etc.
+                    self._cleanup_step_actions(active_p)
+                    self._cleanup_step_actions(non_active_p)
+                    
+                    # Rule 514.3: Check for State-Based Actions or Triggers
+                    sba_happened = self.check_state_based_actions()
+                    
+                    # If SBAs happened or triggers triggered, players get priority, then another cleanup happens.
+                    if sba_happened or self.stack:
+                        logging.info("Events occurred during Cleanup. Active Player gets priority.")
+                        self.priority_player = active_p
+                        self.priority_pass_count = 0
+                        return # Stop advancement, handle priority in Cleanup
+
+                    # If clean, proceed to NEXT TURN
+                    self.turn += 1
+                    logging.info(f"=== ADVANCING TO TURN {self.turn} ===")
+                    
+                    self._reset_turn_tracking_variables()
+                    new_active_p = self._get_active_player() # Update active player var
+
+                    # UNTAP STEP (Rule 502) - No priority
+                    self._untap_phase(new_active_p)
+                    self.check_state_based_actions() 
+
+                    # Auto-advance to UPKEEP (Rule 503) - Priority starts here
+                    self.phase = self.PHASE_UPKEEP
+                    self._phase_action_count = 0
+                    
+                    # Trigger "Beginning of Upkeep"
+                    self._handle_beginning_of_phase_triggers() 
+
+                    # Rule 117.1: Active Player gets priority
+                    self.priority_player = new_active_p
+                    self.priority_pass_count = 0
+                    self.last_stack_size = len(self.stack)
+                    # logging.debug(f"Turn {self.turn} Upkeep. Priority to {new_active_p['name']}")
+                    
+                    # Check Game End (Turn Limit)
+                    if self.turn > self.max_turns:
+                        # Logic handled in check_state_based_actions / env step
+                        pass
+                    return
+
+                # --- 2. Check for Phase Skipping (e.g. First Strike) ---
+                should_skip = False
+                if next_phase_in_sequence == self.PHASE_FIRST_STRIKE_DAMAGE and not self._combat_has_first_strike():
+                    should_skip = True
+                
+                # If explicitly skipping Untap (should be handled by logic above, but failsafe)
+                if next_phase_in_sequence == self.PHASE_UNTAP:
+                    should_skip = True # Loop back around to handle turn transition logic
+                
+                if should_skip:
+                    current_phase_for_check = next_phase_in_sequence
+                    continue # Loop to next
+
+                # --- 3. Enter Next Phase ---
+                self.phase = next_phase_in_sequence
+                self._phase_action_count = 0
+                active_p = self._get_active_player()
+
+                # Handle "At Beginning of Step" triggers
+                if self.phase == self.PHASE_DRAW:
+                    self._draw_phase(active_p) # Turn-based action: Draw
+                
+                self._handle_beginning_of_phase_triggers()
+
+                # Rule 117.1: Active Player gets priority
+                self.priority_player = active_p
+                self.priority_pass_count = 0
+                self.last_stack_size = len(self.stack)
+                
+                # logging.debug(f"Entering {self._PHASE_NAMES.get(self.phase)}. Priority to {active_p['name']}")
+                return # Phase advanced successfully
+
+            # Fallback if loop limit hit
+            logging.error("Phase advancement loop limit reached. Defaulting to Main Phase.")
+            self.phase = self.PHASE_MAIN_PRECOMBAT
+            self.priority_player = self._get_active_player()
+            self.priority_pass_count = 0
+
+    def _reset_turn_tracking_variables(self):
+        """Helper to reset variables at the start of a new turn."""
+        self.combat_damage_dealt = False
+        self.day_night_checked_this_turn = False
+        self.spells_cast_this_turn = []
+        self.attackers_this_turn = set()
+        self.damage_dealt_this_turn = {}
+        self.cards_drawn_this_turn = {'p1': 0, 'p2': 0} # Reset draw counts
+        # Proper graveyard tracking reset
+        if not hasattr(self, 'cards_to_graveyard_this_turn'): self.cards_to_graveyard_this_turn = {}
+        self.cards_to_graveyard_this_turn[self.turn] = []
+        turns_to_keep = 1
+        keys_to_delete = [t for t in self.cards_to_graveyard_this_turn if t < self.turn - turns_to_keep]
+        for t in keys_to_delete: del self.cards_to_graveyard_this_turn[t]
+        self.gravestorm_count = 0
+        self.boast_activated = set()
+        self.forecast_used = set()
+        self.life_gained_this_turn = {}
+        self.damage_this_turn = {}
+        # Player flags
+        for player in [self.p1, self.p2]:
+            if player:
+                player["land_played"] = False
+                player["entered_battlefield_this_turn"] = set()
+                player["activated_this_turn"] = set()
+                player["lost_life_this_turn"] = False
+                player["pw_activations"] = {} # Reset PW activations per turn
+        logging.debug(f"Turn {self.turn}: Reset turn tracking variables.")
+
+    def register_delayed_trigger(self, effect, phase=None, description=""):
+        """Register a delayed triggered ability (CR 603.7).
+
+        effect: zero-argument callable performing the ability's effect.
+        phase:  the phase constant at whose beginning the trigger fires
+                (e.g. self.PHASE_END_STEP for "at the beginning of the next
+                end step"). None means "as soon as the current event fully
+                resolves" (fired at the next state-based check), matching the
+                legacy bare-callable producers.
+        Triggers fire exactly once, then expire.
+        """
+        if not hasattr(self, 'delayed_triggers') or self.delayed_triggers is None:
+            self.delayed_triggers = []
+        self.delayed_triggers.append({
+            "phase": phase,
+            "effect": effect,
+            "description": description or "delayed trigger",
+        })
+
+    def process_delayed_triggers(self, current_phase=None):
+        """Fire due delayed triggers; returns how many fired.
+
+        current_phase=None fires only the asap class (bare callables and
+        phase=None registrations). With a phase, also fires triggers waiting
+        for that phase's beginning. Iterates a snapshot so effects that
+        register new delayed triggers wait for the next occurrence (a trigger
+        created during an end step fires at the NEXT end step, per 603.7a).
+        """
+        pending = getattr(self, 'delayed_triggers', None)
+        if not pending:
+            return 0
+        fired = 0
+        snapshot = list(pending)
+        for entry in snapshot:
+            is_bare = callable(entry) and not isinstance(entry, dict)
+            phase = None if is_bare else entry.get("phase")
+            due = (phase is None) or (current_phase is not None and phase == current_phase)
+            if not due:
+                continue
+            try:
+                pending.remove(entry)
+            except ValueError:
+                continue  # already consumed by re-entrant processing
+            effect = entry if is_bare else entry.get("effect")
+            desc = "legacy asap trigger" if is_bare else entry.get("description", "delayed trigger")
+            try:
+                if callable(effect):
+                    effect()
+                    fired += 1
+                    logging.debug(f"Delayed trigger fired: {desc}")
+            except Exception as e:
+                logging.error(f"Error firing delayed trigger '{desc}': {e}")
+        return fired
+
+    def _handle_beginning_of_phase_triggers(self):
+        """Handles 'at the beginning of <phase>' triggers and related actions."""
+        gs = self # Alias
+        # CR 603.7: delayed triggers waiting for the beginning of this phase.
+        self.process_delayed_triggers(self.phase)
+        active_player = gs._get_active_player()
+        non_active_player = gs._get_non_active_player()
+        if not active_player or not non_active_player: # Safety check if players are None
+            logging.error("Cannot handle phase triggers: player object is None.")
+            return
+
+        trigger_context_ap = {"controller": active_player}
+        trigger_context_nap = {"controller": non_active_player}
+
+        # --- Get the correct event type string ---
+        phase_event_map = {
+            self.PHASE_UPKEEP: "BEGINNING_OF_UPKEEP",
+            self.PHASE_DRAW: "BEGINNING_OF_DRAW", # Usually no triggers, but possible
+            self.PHASE_MAIN_PRECOMBAT: "BEGINNING_OF_PRECOMBAT_MAIN", # Specific event
+            self.PHASE_BEGIN_COMBAT: "BEGINNING_OF_COMBAT",
+            self.PHASE_END_STEP: "BEGINNING_OF_END_STEP"
+            # Add other phases if they have standard beginning triggers
+        }
+        event_type = phase_event_map.get(self.phase)
+
+        if event_type:
+            # Check Day/Night (handle based on phase)
+            if self.phase == self.PHASE_UPKEEP and hasattr(gs, 'check_day_night_transition') and not self.day_night_checked_this_turn:
+                self.check_day_night_transition()
+            elif self.phase == self.PHASE_END_STEP and hasattr(gs, 'check_day_night_transition') and not self.day_night_checked_this_turn:
+                 # Rule 513.2 allows day/night check here too
+                 self.check_day_night_transition()
+
+            # Saga Counters (Beginning of Precombat Main - Rule 714.2b) - Should happen AFTER upkeep triggers resolve
+            if self.phase == self.PHASE_MAIN_PRECOMBAT and hasattr(gs, 'advance_saga_counters'):
+                 self.advance_saga_counters(active_player)
+
+            # Trigger abilities via AbilityHandler - Pass None as source_id for general phase triggers
+            # *** CORRECTED CALL: Use self.ability_handler.check_abilities ***
+            if self.ability_handler:
+                self.ability_handler.check_abilities(None, event_type, trigger_context_ap)
+                self.ability_handler.check_abilities(None, event_type, trigger_context_nap)
+                # Process any queued triggers immediately AFTER checking
+                self.ability_handler.process_triggered_abilities()
+            else:
+                 logging.warning("Cannot trigger beginning of phase abilities: AbilityHandler missing.")
+
+            # Check SBAs after triggers have been processed
+            self.check_state_based_actions()
+        else:
+             # Handle phases without standard beginning triggers if necessary
+             # e.g., DECLARE_ATTACKERS might have its own triggers checked elsewhere
+             pass
+
+    def _cleanup_step_actions(self, player):
+        """Handles the Cleanup Step actions for a given player."""
+        if not player: return
+
+        # 1. Discard down to maximum hand size
+        max_hand = self.max_hand_size # Can be modified by effects
+        if len(player.get("hand", [])) > max_hand:
+            num_to_discard = len(player["hand"]) - max_hand
+            logging.info(f"{player['name']} discarding {num_to_discard} card(s) due to hand size.")
+            # TODO: Implement AI/Player choice for discard
+            # Simple: Discard last N cards drawn/added
+            for _ in range(num_to_discard):
+                if player["hand"]:
+                    card_id = player["hand"].pop(-1) # Discard last card
+                    self.move_card(card_id, player, "hand_implicit", player, "graveyard", cause="cleanup_discard")
+            self.check_state_based_actions() # Check immediately after discard
+
+        # 2. Remove damage marked on permanents
+        player["damage_counters"] = {}
+        player["deathtouch_damage"] = {}
+        logging.debug(f"Removed damage from {player['name']}'s creatures.")
+
+        # 3. "Until end of turn" and "this turn" effects end
+        # --- LayerSystem handles duration removal ---
+        if hasattr(self, 'layer_system'):
+            # BUGFIX: was remove_temporary_effects(self.turn), which does not exist
+            # on LayerSystem -> AttributeError on every cleanup step.
+            removed_count = self.layer_system.cleanup_expired_effects() or 0
+            if removed_count > 0: logging.debug(f"Cleanup: Removed {removed_count} temporary layer effects.")
+        # Clear other temporary game state trackers (need specific cleanup logic)
+        if hasattr(self, 'haste_until_eot'): self.haste_until_eot.clear()
+
+    def _get_next_turn_player(self):
+        """Determines who the active player will be on the next turn."""
+        # Simple 2-player toggle based on current turn and agent assignment
+        current_turn_player_is_p1 = (self.turn % 2 == 1) == self.agent_is_p1
+        return self.p2 if current_turn_player_is_p1 else self.p1
+
+    def _combat_has_first_strike(self):
+        """Checks if any attacking or blocking creature has first strike or double strike."""
+        for creature_id in self.current_attackers:
+             if self.check_keyword(creature_id, "first strike") or self.check_keyword(creature_id, "double strike"):
+                 return True
+        for blockers in self.current_block_assignments.values():
+             for blocker_id in blockers:
+                  if self.check_keyword(blocker_id, "first strike") or self.check_keyword(blocker_id, "double strike"):
+                      return True
+        return False
+
+    def _get_active_player(self):
+            """Returns the active player (whose turn it is) with strict error checking."""
+            # Determine active player based on turn number and agent assignment
+            # Turn 1, 3, 5... = P1's turn. Turn 2, 4, 6... = P2's turn.
+            active_is_p1 = (self.turn % 2 != 0) 
+            
+            if active_is_p1:
+                if self.p1 is None:
+                    logging.critical("CRITICAL: p1 is None in _get_active_player. Defaulting to p2 if available.")
+                    return self.p2
+                return self.p1
+            else:
+                if self.p2 is None:
+                    logging.critical("CRITICAL: p2 is None in _get_active_player. Defaulting to p1 if available.")
+                    return self.p1
+                return self.p2
+
+    def _get_non_active_player(self):
+        """Returns the non-active player (NAP)."""
+        active_is_p1 = (self.turn % 2 != 0)
+        if active_is_p1:
+            return self.p2 if self.p2 else self.p1
+        else:
+            return self.p1 if self.p1 else self.p2
+
+    def _check_phase_progress(self):
+        """Ensure phase progression is happening correctly, forcing termination if needed."""
+        # Add current phase to history (keeping only recent history)
+        self._phase_history.append(self.phase)
+        if len(self._phase_history) > 30:
+            self._phase_history.pop(0)
+        
+        # Check for being stuck in the same phase
+        if len(self._phase_history) >= 20 and all(p == self._phase_history[0] for p in self._phase_history):
+            logging.warning(f"Detected potential phase stagnation in phase {self._phase_history[0]}")
+            # Force advance to next turn as an escape mechanism
+            if self.phase in [self.PHASE_PRIORITY, self.PHASE_END_STEP, self.PHASE_CLEANUP]:
+                self.phase = self.PHASE_UNTAP
+                self.turn += 1
+                self._phase_history = []  # Reset history after forced progress
+                self.progress_was_forced = True
+                logging.warning(f"Force-advancing to turn {self.turn} to break potential stall")
+                return True
+        
+        return False
+
+    def check_day_night_transition(self):
+        """
+        Check and update the day/night state based on spells cast this turn.
+        This is called during the end step of each turn.
+        """
+        if self.day_night_checked_this_turn:
+            return
+            
+        # Count spells cast by active player this turn
+        active_player = self._get_active_player()
+        spells_cast = sum(1 for spell in self.spells_cast_this_turn if isinstance(spell, tuple) 
+                        and len(spell) >= 2 and spell[1] == active_player)
+        
+        old_state = self.day_night_state
+        
+        # Apply transition rules
+        if self.day_night_state is None:
+            # If neither day nor night, and no spells were cast, it becomes night
+            if spells_cast == 0:
+                self.day_night_state = "night"
+                logging.debug("It becomes night (no spells cast)")
+            elif spells_cast >= 1:
+                self.day_night_state = "day"
+                logging.debug(f"It becomes day (player cast {spells_cast} spells)")
+        elif self.day_night_state == "day":
+            # If day, and at least two spells were cast, it becomes night
+            if spells_cast >= 2:
+                self.day_night_state = "night"
+                logging.debug(f"It becomes night (player cast {spells_cast} spells)")
+        elif self.day_night_state == "night":
+            # If night, and no spells were cast, it becomes day
+            if spells_cast == 0:
+                self.day_night_state = "day"
+                logging.debug("It becomes day (no spells cast)")
+        
+        # If the state changed, transform all daybound/nightbound cards
+        if self.day_night_state != old_state:
+            self.transform_day_night_cards()
+        
+        self.day_night_checked_this_turn = True
+
+    def transform_day_night_cards(self):
+        """
+        Transform all daybound/nightbound cards when day/night state changes.
+        
+        Returns:
+            list: List of cards that were transformed
+        """
+        if not hasattr(self, 'day_night_state'):
+            logging.warning("Day/night state not initialized")
+            return []
+            
+        transformed_cards = []
+        
+        # Process all permanents in battlefield
+        for player in [self.p1, self.p2]:
+            for card_id in player["battlefield"]:
+                card = self._safe_get_card(card_id)
+                if not card or not hasattr(card, 'oracle_text'):
+                    continue
+                
+                oracle_text = card.oracle_text.lower()
+                has_daybound = "daybound" in oracle_text
+                has_nightbound = "nightbound" in oracle_text
+                
+                if not has_daybound and not has_nightbound:
+                    continue
+                    
+                # Determine if card should transform
+                should_transform = False
+                if has_daybound and self.day_night_state == "night" and not getattr(card, "is_night_side", False):
+                    should_transform = True
+                elif has_nightbound and self.day_night_state == "day" and getattr(card, "is_night_side", True):
+                    should_transform = True
+                    
+                # Apply transformation
+                if should_transform and hasattr(card, "transform"):
+                    # Transform the card
+                    card.transform()
+                    transformed_cards.append(card_id)
+                    
+                    # Create context for transformation triggers
+                    context = {
+                        "card": card,
+                        "controller": player,
+                        "from_state": "day" if has_daybound else "night",
+                        "to_state": "night" if has_daybound else "day"
+                    }
+                    
+                    # Trigger transformation ability
+                    self.trigger_ability(card_id, "TRANSFORMED", context)
+                    
+                    # Also trigger day/night change ability
+                    self.trigger_ability(card_id, "DAY_NIGHT_CHANGED", context)
+                    
+                    logging.debug(f"{card.name} transformed due to day/night change")
+        
+        return transformed_cards
+
+    def check_priority(self, player=None):
+        """
+        Check if player has priority and can take actions.
+        In Magic: The Gathering, priority determines which player can take game actions.
+        """
+        # If player is None, check active player
+        if player is None:
+            player = self._get_active_player()
+        
+        # In these phases, no player gets priority
+        if self.phase in [self.PHASE_UNTAP, self.PHASE_CLEANUP]:
+            return False
+            
+        # In general, active player gets priority first in each step
+        active_player = self._get_active_player()
+        
+        # If stack is not empty, the player who last added to the stack passes priority
+        if self.stack and hasattr(self, 'last_stack_actor'):
+            return player != self.last_stack_actor
+            
+        # Otherwise active player has priority by default
+        return player == active_player
+
+    def advance_saga_counters(self, player):
+        """
+        Advance saga counters at the beginning of the main phase.
+        This implements the rules for Saga enchantments from Dominaria.
+        
+        Args:
+            player: The player whose Sagas to advance
+            
+        Returns:
+            list: List of Sagas that were advanced
+        """
+        # Check if saga counters tracking exists
+        if not hasattr(self, "saga_counters"):
+            self.saga_counters = {}
+        
+        # Find all Sagas in the battlefield
+        sagas = []
+        for card_id in player["battlefield"]:
+            card = self._safe_get_card(card_id)
+            if (card and hasattr(card, 'card_types') and 'enchantment' in card.card_types
+                and hasattr(card, 'subtypes') and 'saga' in [s.lower() for s in card.subtypes]):
+                sagas.append(card_id)
+        
+        advanced_sagas = []
+        
+        # Process each Saga
+        for saga_id in sagas:
+            # Get current chapter
+            current_chapter = self.saga_counters.get(saga_id, 0)
+            
+            # Advance to next chapter
+            new_chapter = current_chapter + 1
+            self.saga_counters[saga_id] = new_chapter
+            advanced_sagas.append(saga_id)
+            
+            # Trigger chapter ability
+            saga_card = self._safe_get_card(saga_id)
+            context = {
+                "card": saga_card,
+                "controller": player,
+                "chapter": new_chapter
+            }
+            
+            self.trigger_ability(saga_id, "SAGA_CHAPTER", context)
+            logging.debug(f"Saga {saga_card.name} advanced to chapter {new_chapter}")
+            
+            # Check if saga is completed (usually after chapter 3)
+            chapter_count = 0
+            if hasattr(saga_card, 'oracle_text'):
+                # Count chapter abilities (look for "I", "II", "III", etc.)
+                chapter_pattern = re.compile(r"(^|\n)([IVX]+) —", re.MULTILINE)
+                chapter_matches = chapter_pattern.findall(saga_card.oracle_text)
+                chapter_count = len(chapter_matches)
+            
+            # Default to 3 chapters if we couldn't determine count
+            if chapter_count == 0:
+                chapter_count = 3
+            
+            # If we're past the last chapter, sacrifice the saga
+            if new_chapter > chapter_count:
+                self.move_card(saga_id, player, "battlefield", player, "graveyard")
+                self.trigger_ability(saga_id, "SAGA_SACRIFICED", {"chapter": new_chapter})
+                logging.debug(f"Saga {saga_card.name} completed and sacrificed")
+        
+        return advanced_sagas
+

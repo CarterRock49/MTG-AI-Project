@@ -1,7 +1,8 @@
 import logging
 from collections import defaultdict
 
-from numpy import copy
+import copy  # BUGFIX: was `from numpy import copy`, shadowing the stdlib module
+             # and crashing every copy.deepcopy call in this file
 
 from .ability_utils import safe_int
 from .card import Card
@@ -52,6 +53,16 @@ class LayerSystem:
         affected_card_ids.update(cards_with_effects)
 
 
+        # BUGFIX: cards carrying counters need layer 7c even when no layer effects
+        # are registered at all; without this, +1/+1 and -1/-1 counters never
+        # modified power/toughness in games with no other static effects.
+        for _p in (gs.p1, gs.p2):
+            if _p:
+                for _cid in _p.get("battlefield", []):
+                    _c = gs._safe_get_card(_cid)
+                    if _c is not None and getattr(_c, 'counters', None):
+                        affected_card_ids.add(_cid)
+
         if not affected_card_ids:
             # Optimization: If no effects registered AND state hasn't changed since last FULL calc, skip.
             # Need a more robust hash check if skipping here.
@@ -83,12 +94,20 @@ class LayerSystem:
         state_tuple_items = list(gs.p1.get("battlefield", [])) + list(gs.p2.get("battlefield", []))
         # Include timestamps hash maybe?
         timestamps_tuple = tuple(sorted(self.timestamps.items()))
+        # BUGFIX: counters were absent from this hash, so adding/removing +1/+1
+        # or -1/-1 counters never invalidated the cache -> stale power/toughness.
+        counters_tuple = tuple(sorted(
+            (cid, tuple(sorted(getattr(gs._safe_get_card(cid), 'counters', {}).items())))
+            for cid in set(state_tuple_items)
+            if gs._safe_get_card(cid) is not None
+        ))
         current_state_tuple = (
             tuple(sorted(state_tuple_items)),
             self.effect_counter, # Track effect registrations/removals
             gs.turn, # Include turn number
             gs.phase, # Include phase
-            timestamps_tuple # Include timestamps of registered effects
+            timestamps_tuple, # Include timestamps of registered effects
+            counters_tuple
         )
         current_state_hash = hash(current_state_tuple)
 

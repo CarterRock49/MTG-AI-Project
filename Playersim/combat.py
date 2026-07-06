@@ -131,29 +131,7 @@ class CombatResolver:
         
         return True
     
-    def _get_card_power(self, card, controller):
-        """Get a card's current power with temporary buffs."""
-        if not card or not hasattr(card, 'power'): return 0
-        base_power = card.power
-        # Add counters (Layer system should ideally handle this, simplified here)
-        base_power += getattr(card, 'counters', {}).get('+1/+1', 0)
-        base_power -= getattr(card, 'counters', {}).get('-1/-1', 0)
-        # Add temporary buffs
-        if hasattr(controller, 'temp_buffs') and getattr(card, 'card_id', None) in controller.get('temp_buffs', {}):
-             base_power += controller['temp_buffs'][card.card_id].get('power', 0)
-        return max(0, base_power)
 
-    def _get_card_toughness(self, card, controller):
-        """Get a card's current toughness with temporary buffs."""
-        if not card or not hasattr(card, 'toughness'): return 0
-        base_toughness = card.toughness
-        # Add counters
-        base_toughness += getattr(card, 'counters', {}).get('+1/+1', 0)
-        base_toughness -= getattr(card, 'counters', {}).get('-1/-1', 0)
-        # Add temporary buffs
-        if hasattr(controller, 'temp_buffs') and getattr(card, 'card_id', None) in controller.get('temp_buffs', {}):
-             base_toughness += controller['temp_buffs'][card.card_id].get('toughness', 0)
-        return max(1, base_toughness) # Toughness usually can't be less than 1 unless damage marked
 
     def _process_planeswalker_damage(self, attacker_id, attacker_player, planeswalker_id):
         """Process damage to a planeswalker."""
