@@ -66,10 +66,41 @@ card categories, which poisons the deck-builder's inputs.
    via card_db, and counters written onto them leaked into later games —
    every game after the first started with the previous game's +1/+1 counters.
    Fixed by clearing transient card state at game start.
-2. **Layer dependency ordering (CR 613.8)** — `layer_system.py` admits dependency
-   sorting is inactive; static-effect cards mis-evaluate in interaction-heavy decks.
-3. **Intervening "if" (603.4) / reflexive triggers (603.12)** — absent; affected
-   cards fire wrongly or not at all.
+2. **Layer dependency ordering (CR 613.8)** — ✅ core delivered (July 2026).
+   `_sort_layer_effects` now does a real within-layer dependency pass on top
+   of timestamp order: an effect that strips another effect's source applies
+   first (topological sort; dependency loops fall back to timestamp order per
+   613.8c). The piece that actually changes outcomes is existence tracking:
+   once `remove_all_abilities` applies to a source, that source's
+   not-yet-applied effects in layer 6 and all of layer 7 no longer exist and
+   are skipped — effects already applied in earlier layers correctly continue
+   (CR 613.6). The Humility shape (grantor stripped => its grants vanish) and
+   the two-strip loop now evaluate correctly; three scenarios guard it.
+   **Remaining (v1 limitations):** specific `remove_ability` is not treated
+   as an existence dependency (the engine can't yet tell which ability
+   generates which effect); layer-4 `set_type`/`lose_all_subtypes` edges are
+   ordered but basic-land-typing ability removal (CR 305.7, the Blood
+   Moon/Urborg shape) is not modeled; dependencies that change an effect's
+   *applicability set* rather than its existence are out of scope while
+   `affected_ids` is a static snapshot.
+3. **Intervening "if" (603.4)** — ✅ delivered (July 2026), and the scenario
+   work exposed two silent bugs bigger than the feature: (a) the trigger
+   parser's separator was optional, so every text-parsed trigger condition
+   was mangled ("when t...") and **no text-parsed triggered ability ever
+   fired** — both live trigger paths (ability_handler.check_abilities and
+   the stack) route through can_trigger, whose patterns could never match;
+   (b) can_trigger called `_extract_condition_clause`, a method that did not
+   exist anywhere — a latent AttributeError masked only by bug (a). Both
+   fixed. The intervening "if" is now extracted at parse time
+   (`self.intervening_if`), checked at trigger time in can_trigger and
+   re-checked at resolution in resolve/resolve_with_targets (fizzle
+   convention if false). Condition evaluation fallback also fixed: matched
+   patterns now return their actual boolean instead of falling through to
+   "assume True" on failure — without this, no intervening "if" could ever
+   evaluate false. Three scenarios guard it. Trigger stats before this fix
+   are suspect for any deck relying on text-parsed triggers.
+   **Remaining:** reflexive triggers (603.12); richer condition vocabulary
+   in `_evaluate_condition` (counters, tapped state, card types in play).
 4. **Trigger ordering (603.3b)** as an agent choice — engine-default ordering hides
    real card value in trigger-dense decks.
 5. **Copy fidelity (CR 707)** and **cost-modification ordering (601.2f)** — copy

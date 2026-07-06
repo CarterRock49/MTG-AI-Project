@@ -118,6 +118,11 @@ class LayerSystem:
         # --- Proceed with recalculation ---
         # logging.debug(f"LayerSystem: Recalculating effects for {len(affected_card_ids)} cards.")
         calculated_characteristics = {} # Store calculated state during this run
+        # CR 613.8 existence tracking: sources whose abilities have been fully
+        # removed at this point in the pass. Their not-yet-applied effects in
+        # this and later layers no longer exist and are skipped. Effects already
+        # applied in earlier layers correctly continue to apply (CR 613.6).
+        self._stripped_sources = set()
 
         # 1. Initialize: Get base characteristics for ALL affected cards
         from .card import Card # Ensure Card class is available
@@ -236,6 +241,9 @@ class LayerSystem:
         sorted_layer6 = self._sort_layer_effects(6, self.layers[6])
         for _, effect_data in sorted_layer6:
             if callable(effect_data.get('condition')) and not effect_data['condition'](gs): continue
+            # CR 613.8: an effect whose source has lost all abilities earlier
+            # in this pass no longer exists.
+            if effect_data.get('source_id') in self._stripped_sources: continue
             # Apply effect data to modify _granted_abilities and _removed_abilities sets
             self._calculate_layer6_abilities(effect_data, calculated_characteristics)
         # Finalize keywords array and protection details for each card AFTER all layer 6 effects are calculated
@@ -250,12 +258,14 @@ class LayerSystem:
         sorted_layer7a = self._sort_layer_effects(7, self.layers[7].get('a',[]), sublayer='a') # Use .get for safety
         for _, effect_data in sorted_layer7a:
             if callable(effect_data.get('condition')) and not effect_data['condition'](gs): continue
+            if effect_data.get('source_id') in self._stripped_sources: continue  # CR 613.8: source lost all abilities; effect no longer exists (skip)
             self._calculate_layer7a_cda_and_base(effect_data, calculated_characteristics) # Use correct method
 
         # 7b: Effects setting P/T to specific values (e.g., "becomes 1/1")
         sorted_layer7b = self._sort_layer_effects(7, self.layers[7].get('b', []), sublayer='b') # Use 'b' sublayer
         for _, effect_data in sorted_layer7b:
             if callable(effect_data.get('condition')) and not effect_data['condition'](gs): continue
+            if effect_data.get('source_id') in self._stripped_sources: continue  # CR 613.8: source lost all abilities; effect no longer exists (skip)
             self._calculate_layer7b_set_specific(effect_data, calculated_characteristics) # Use correct method
 
         # 7c: P/T modifications from counters (+1/+1, -1/-1)
@@ -268,12 +278,14 @@ class LayerSystem:
         sorted_layer7d = self._sort_layer_effects(7, self.layers[7].get('c', []), sublayer='c')
         for _, effect_data in sorted_layer7d:
             if callable(effect_data.get('condition')) and not effect_data['condition'](gs): continue
+            if effect_data.get('source_id') in self._stripped_sources: continue  # CR 613.8: source lost all abilities; effect no longer exists (skip)
             self._calculate_layer7d_modify(effect_data, calculated_characteristics) # Use correct method
 
         # 7e: P/T switching
         sorted_layer7e = self._sort_layer_effects(7, self.layers[7].get('d', []), sublayer='d')
         for _, effect_data in sorted_layer7e:
             if callable(effect_data.get('condition')) and not effect_data['condition'](gs): continue
+            if effect_data.get('source_id') in self._stripped_sources: continue  # CR 613.8: source lost all abilities; effect no longer exists (skip)
             self._calculate_layer7e_switch(effect_data, calculated_characteristics) # Use correct method
 
 
@@ -584,67 +596,88 @@ class LayerSystem:
 
         
     def _sort_layer_effects(self, layer_num, effects, sublayer=None):
-        """
-        Sorts effects for a given layer/sublayer based primarily on timestamps.
-        Includes a basic check for critical layer dependencies that might override timestamps.
+        """Sort effects within one layer/sublayer per CR 613.7-613.8.
+
+        Base order is timestamp order (613.7). On top of that, a within-layer
+        dependency pass (613.8): if applying effect A would change whether
+        effect B exists, B is dependent on A and A applies first, regardless
+        of timestamps. Dependency loops fall back to timestamp order for the
+        loop's members (613.8c).
+
+        Detectable dependency (v1): A strips the abilities of B's source —
+        layer 6 'remove_all_abilities' whose affected set contains B's
+        source_id (the Humility shape). Layer 4 'set_type' /
+        'lose_all_subtypes' hitting another layer-4 effect's source is
+        ordered the same way (the Blood Moon / Urborg shape), though ability
+        stripping as a *consequence* of basic-land typing (CR 305.7) is not
+        yet modeled. Specific 'remove_ability' is not treated as an
+        existence dependency because the engine cannot yet tell which
+        ability generates which effect.
+
+        Whether a dependency-ordered strip actually stops the dependent
+        effect from applying is handled by the existence check in
+        apply_all_effects via self._stripped_sources.
         """
         gs = self.game_state
-
-        # Check for potential dependencies before timestamp sorting
-        # Simple dependency: Layer 4 (type) affects Layer 6 (abilities) and 7 (P/T)
-        # If effect A in Layer 6/7 targets X, and effect B in Layer 4 targets X,
-        # B should conceptually apply first. Timestamp usually handles this, but edge cases exist.
-
-        # Perform timestamp sort (Python's sort is stable)
-        # Fallback to 0 if effect_id somehow missing from timestamps dict
         sorted_effects = sorted(effects, key=lambda x: self.timestamps.get(x[0], 0))
+        if len(sorted_effects) < 2:
+            return sorted_effects
 
-        # --- Dependency Check (Post-Sort Warning/Potential Reorder - Simplified) ---
-        # This check detects potential violations if timestamps lead to wrong order
-        # Note: Full dependency resolution is complex (topological sort). This is a simpler check.
-        if layer_num in [6, 7] and self.layers.get(4): # Check only if Layer 4 effects exist
-            layer4_effects_map = defaultdict(list)
-            # Collect all *active* Layer 4 effects
-            for effect_id4, data4 in self.layers[4]:
-                # Check effect condition *now*
-                is_active4 = True # Assume active if no condition
-                if callable(data4.get('condition')):
-                     try: is_active4 = data4['condition'](gs)
-                     except Exception as e: logging.warning(f"Error checking condition for L4 effect {effect_id4}: {e}"); is_active4=False # Treat error as inactive
-                if not is_active4: continue
+        strip_types = {6: ('remove_all_abilities',),
+                       4: ('set_type', 'lose_all_subtypes')}.get(layer_num)
+        if not strip_types:
+            return sorted_effects
 
-                # Store effect keyed by target_id
-                for target_id in data4.get('affected_ids', []):
-                     layer4_effects_map[target_id].append((effect_id4, data4))
+        def _active(data):
+            cond = data.get('condition')
+            if callable(cond):
+                try:
+                    return bool(cond(gs))
+                except Exception as e:
+                    logging.warning(f"Error checking effect condition during dependency sort: {e}")
+                    return False
+            return True
 
-            # Check effects in the current layer (6 or 7) against Layer 4 effects
-            for i in range(len(sorted_effects)):
-                effect_id1, effect_data1 = sorted_effects[i]
-                # Skip if this effect itself isn't active
-                is_active1 = True
-                if callable(effect_data1.get('condition')):
-                     try: is_active1 = effect_data1['condition'](gs)
-                     except Exception as e: logging.warning(f"Error checking condition for L{layer_num} effect {effect_id1}: {e}"); is_active1=False
-                if not is_active1: continue
+        ids = [eid for eid, _ in sorted_effects]
+        data_by_id = dict(sorted_effects)
+        # deps[b] = effect ids that must apply before b (b depends on them)
+        deps = {eid: set() for eid in ids}
+        for a_id, a_data in sorted_effects:
+            if a_data.get('effect_type') not in strip_types or not _active(a_data):
+                continue
+            a_affected = set(a_data.get('affected_ids', []))
+            a_source = a_data.get('source_id')
+            for b_id, b_data in sorted_effects:
+                if b_id == a_id:
+                    continue
+                b_source = b_data.get('source_id')
+                if b_source in a_affected and b_source != a_source:
+                    deps[b_id].add(a_id)
+        if not any(deps.values()):
+            return sorted_effects
 
-                source_id1 = effect_data1['source_id']
-                ts1 = self.timestamps.get(effect_id1, 0)
-
-                for target_id in effect_data1.get('affected_ids', []):
-                    # Check if this target has Layer 4 effects applied later
-                    if target_id in layer4_effects_map:
-                         for effect_id4, effect_data4 in layer4_effects_map[target_id]:
-                             source_id4 = effect_data4['source_id']
-                             ts4 = self.timestamps.get(effect_id4, 0)
-                             # If a relevant Layer 4 effect has a *later* timestamp, it's a potential dependency violation
-                             if ts4 > ts1 and source_id1 != source_id4:
-                                 logging.warning(f"Potential Layer Dependency Violation: Layer {layer_num} effect {effect_id1} (TS:{ts1}) "
-                                                 f"on {target_id} might depend on Layer 4 effect {effect_id4} (TS:{ts4}) which has a later timestamp.")
-                                 # Simple Reorder (Swap adjacent pair if violation found): Risky, can cascade.
-                                 # If full topological sort isn't implemented, logging is the safest action.
-
-        # Return timestamp-sorted list (potentially with logged warnings)
-        return sorted_effects
+        # Kahn topological sort; among ready effects, earliest timestamp first,
+        # so the result deviates from timestamp order only where a dependency
+        # forces it to.
+        order_index = {eid: i for i, eid in enumerate(ids)}
+        result, placed = [], set()
+        remaining = list(ids)
+        while remaining:
+            ready = [eid for eid in remaining if deps[eid] <= placed]
+            if not ready:
+                # Dependency loop (613.8c): the loop's members apply in
+                # timestamp order relative to each other.
+                logging.debug(
+                    f"Layer {layer_num}: dependency loop among {remaining}; using timestamp order.")
+                result.extend(remaining)
+                break
+            nxt = min(ready, key=lambda e: order_index[e])
+            result.append(nxt)
+            placed.add(nxt)
+            remaining.remove(nxt)
+        if result != ids:
+            logging.debug(f"Layer {layer_num}: dependency sort reordered {ids} -> {result}")
+        return [(eid, data_by_id[eid]) for eid in result]
     
     def _calculate_layer1_copy(self, effect_data, calculated_characteristics):
         source_to_copy_id = effect_data.get('effect_value')
@@ -826,6 +859,11 @@ class LayerSystem:
                     logging.debug(f"Layer 6: Removed '{ability_val_lower}' from {target_id}")
 
                 elif effect_type == 'remove_all_abilities':
+                    # CR 613.8: record that this object's abilities are gone, so
+                    # its own not-yet-applied effects stop existing for the rest
+                    # of this pass (checked in apply_all_effects).
+                    if not hasattr(self, '_stripped_sources'): self._stripped_sources = set()
+                    self._stripped_sources.add(target_id)
                     # Mark all inherent abilities for removal
                     chars['_removed_abilities'].update(chars.get('_inherent_abilities', set()))
                     # Also remove any currently granted abilities

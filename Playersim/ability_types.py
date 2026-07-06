@@ -707,6 +707,16 @@ class TriggeredAbility(Ability):
         self.effect = self.effect.lower() # Store lower
         self.additional_condition = additional_condition # Can be string or callable
 
+        # CR 603.4 intervening "if": "When/Whenever/At [event], if [condition],
+        # [effect]." The condition is checked at trigger time (can_trigger) AND
+        # again at resolution (resolve/resolve_with_targets); if false at either
+        # point the ability does not trigger / does nothing.
+        self.intervening_if = None
+        _iv = re.match(r'^\s*if\s+(.+?),\s*(.+)$', self.effect, re.IGNORECASE)
+        if _iv:
+            self.intervening_if = "if " + _iv.group(1).strip()
+            self.effect = _iv.group(2).strip()
+
         # Validation after potential parsing
         if self.trigger_condition == "unknown":
              raise ValueError(f"TriggeredAbility requires trigger_condition. Got text='{effect_text}'")
@@ -720,11 +730,17 @@ class TriggeredAbility(Ability):
     def _parse_condition_effect(self, text):
         """Attempt to parse 'When/Whenever/At..., Effect.' or 'When/Whenever/At... — Effect' format. Handles em dash."""
         # Regex includes comma, colon, en dash, em dash, unicode em dash as separators
-        match = re.match(r'^\s*(when|whenever|at)\s+([^,:—\u2014]+?),?[:—\u2014]?\s*(.+)\s*$', text.strip(), re.IGNORECASE | re.DOTALL)
+        # BUGFIX (July 2026): the separator between trigger and effect was fully
+        # optional, so the non-greedy trigger group matched a single character
+        # ("when t...") and every text-parsed trigger condition was mangled --
+        # can_trigger's patterns never matched and text-parsed triggers never
+        # fired. The separator (comma / colon / dash) is now mandatory.
+        match = re.match(
+            r'^\s*((?:when|whenever|at)\b[^,:\u2013\u2014]*?)\s*[,:\u2013\u2014]\s*(.+?)\s*$',
+            text.strip(), re.IGNORECASE | re.DOTALL)
         if match:
-            # Combine trigger parts
-            trigger_part = f"{match.group(1)} {match.group(2)}".strip()
-            effect_part = match.group(3).strip()
+            trigger_part = match.group(1).strip()
+            effect_part = match.group(2).strip()
             # Remove trailing period if present
             if effect_part.endswith('.'): effect_part = effect_part[:-1]
             # Simple validation: effect shouldn't contain trigger keywords unless nested
@@ -814,7 +830,7 @@ class TriggeredAbility(Ability):
         # Check if our trigger condition matches any of the patterns
         if matches_any_pattern(self.trigger_condition, event_patterns):
             # Parse for any conditional clause in the trigger text
-            condition_clause = self._extract_condition_clause(self.effect_text)
+            condition_clause = getattr(self, 'intervening_if', None) or self._extract_condition_clause(self.effect_text)
             
             # If there's a conditional clause, evaluate it
             if condition_clause:
@@ -832,6 +848,9 @@ class TriggeredAbility(Ability):
 
     def resolve_with_targets(self, game_state, controller, targets=None):
         """Resolve this ability with specific targets."""
+        if not self._intervening_if_met(game_state, controller):
+            logging.debug(f"CR 603.4: intervening 'if' no longer true at resolution; ability does nothing: {self.effect_text}")
+            return False  # Fizzle convention: resolves, does nothing
         return self._resolve_ability_implementation(game_state, controller, targets)
 
 
@@ -862,7 +881,7 @@ class TriggeredAbility(Ability):
         if not gs or not controller: return True
 
         # Use the card evaluator for condition checking if available
-        if hasattr(gs, 'card_evaluator') and gs.card_evaluator:
+        if hasattr(gs, 'card_evaluator') and gs.card_evaluator and hasattr(gs.card_evaluator, 'evaluate_condition'):
             try:
                 # Pass context and condition text
                 return gs.card_evaluator.evaluate_condition(condition_text, context)
@@ -888,22 +907,45 @@ class TriggeredAbility(Ability):
             return any(self._card_matches_criteria(gs._safe_get_card(cid), required_type)
                        for cid in opponent.get("battlefield", []))
 
-        # Check life total
+        # Check life total. BUGFIX (July 2026): a matched pattern must return
+        # its actual result; previously a matched-but-false condition fell
+        # through to the "assume True" default, so intervening "if" checks
+        # could never come back False.
         life_match = re.search(r"if (you have|your life total is) (\d+) or more life", condition_text)
-        if life_match and controller["life"] >= int(life_match.group(2)): return True
+        if life_match: return controller["life"] >= int(life_match.group(2))
         life_match = re.search(r"if (you have|your life total is) (\d+) or less life", condition_text)
-        if life_match and controller["life"] <= int(life_match.group(2)): return True
+        if life_match: return controller["life"] <= int(life_match.group(2))
 
         # Check card count in hand/graveyard
         card_count_match = re.search(r"if you have (\d+) or more cards in (your hand|your graveyard)", condition_text)
         if card_count_match:
              count = int(card_count_match.group(1))
              zone = card_count_match.group(2).replace("your ", "")
-             if len(controller.get(zone, [])) >= count: return True
+             return len(controller.get(zone, [])) >= count
 
         logging.warning(f"Could not parse trigger condition: '{condition_text}'. Assuming True.")
         return True # Default to true if condition unparsed
     
+    def _extract_condition_clause(self, text):
+        """Return the intervening 'if' clause (CR 603.4) from ability text, or None.
+
+        NOTE: this method was previously called from can_trigger but never
+        existed -- a latent AttributeError masked by the trigger-parse bug.
+        The clause is normally extracted once in __init__ (self.intervening_if);
+        this re-derives it from raw text as a fallback.
+        """
+        if getattr(self, 'intervening_if', None):
+            return self.intervening_if
+        m = re.search(r'(?:when|whenever|at)\b[^,]*,\s*if\s+([^,]+?),', text or '', re.IGNORECASE)
+        return ("if " + m.group(1).strip()) if m else None
+
+    def _intervening_if_met(self, game_state, controller):
+        """Evaluate the intervening 'if' right now (used at resolution, CR 603.4)."""
+        cond = getattr(self, 'intervening_if', None)
+        if not cond:
+            return True
+        return self._evaluate_condition(cond, {'game_state': game_state, 'controller': controller})
+
     def _check_additional_condition(self, context):
         """Checks self.additional_condition using the same evaluation logic."""
         if not self.additional_condition: return True
@@ -912,6 +954,9 @@ class TriggeredAbility(Ability):
 
     def resolve(self, game_state, controller, targets=None):
         """Resolve this triggered ability using the default implementation."""
+        if not self._intervening_if_met(game_state, controller):
+            logging.debug(f"CR 603.4: intervening 'if' no longer true at resolution; ability does nothing: {self.effect_text}")
+            return False  # Fizzle convention: resolves, does nothing
         return super()._resolve_ability_implementation(game_state, controller, targets)
 
 

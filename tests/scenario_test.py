@@ -379,6 +379,153 @@ def s_text_delayed_not_recurring():
         "recurring upkeep trigger text was wrongly registered as a one-shot delayed trigger"
 
 
+def _kw(gs, cid, name):
+    """1 if the live card currently has keyword `name`, else 0."""
+    from Playersim.card import Card
+    card = gs._safe_get_card(cid)
+    idx = Card.ALL_KEYWORDS.index(name)
+    kws = getattr(card, 'keywords', None) or []
+    return kws[idx] if idx < len(kws) else 0
+
+
+@scenario("613.8", "an effect whose source loses all abilities stops applying (within-layer dependency)")
+def s_layer_dependency_strip_grantor():
+    gs = fresh()
+    grantor = card_id_by_name(gs, "Moss Titan")       # has Trample
+    grantee = card_id_by_name(gs, "Vine Stalker")     # vanilla
+    stripper = card_id_by_name(gs, "Canopy Sentinel") # stands in for a Humility-style source
+    for cid in (grantor, grantee, stripper):
+        to_battlefield(gs, cid)
+    ls = gs.layer_system
+    # Earlier timestamp: the grantor's static ability gives the grantee flying.
+    ls.register_effect({'source_id': grantor, 'layer': 6, 'affected_ids': [grantee],
+                        'effect_type': 'add_ability', 'effect_value': 'flying',
+                        'duration': 'permanent'})
+    # Later timestamp: strip ALL abilities from the grantor.
+    ls.register_effect({'source_id': stripper, 'layer': 6, 'affected_ids': [grantor],
+                        'effect_type': 'remove_all_abilities', 'effect_value': None,
+                        'duration': 'permanent'})
+    ls.invalidate_cache()
+    ls.apply_all_effects()
+    # CR 613.8: the grant depends on the strip; the strip applies first and the
+    # grant's source has no abilities, so the grant does not exist.
+    assert _kw(gs, grantor, "trample") == 0, "stripped grantor still has trample"
+    assert _kw(gs, grantee, "flying") == 0, \
+        "grant from an ability-stripped source still applied (dependency ordering ignored)"
+
+
+@scenario("613.8c", "a dependency loop between two strip effects falls back to timestamp order")
+def s_layer_dependency_cycle():
+    gs = fresh()
+    p = card_id_by_name(gs, "Moss Titan")        # Trample
+    q = card_id_by_name(gs, "Canopy Sentinel")   # Reach
+    for cid in (p, q):
+        to_battlefield(gs, cid)
+    ls = gs.layer_system
+    # A (earlier): P's ability strips Q. B (later): Q's ability strips P.
+    ls.register_effect({'source_id': p, 'layer': 6, 'affected_ids': [q],
+                        'effect_type': 'remove_all_abilities', 'effect_value': None,
+                        'duration': 'permanent'})
+    ls.register_effect({'source_id': q, 'layer': 6, 'affected_ids': [p],
+                        'effect_type': 'remove_all_abilities', 'effect_value': None,
+                        'duration': 'permanent'})
+    ls.invalidate_cache()
+    ls.apply_all_effects()
+    # Loop -> timestamp order: A applies, stripping Q; B's source now has no
+    # abilities, so B never applies and P keeps trample.
+    assert _kw(gs, q, "reach") == 0, "earlier strip in the loop did not apply"
+    assert _kw(gs, p, "trample") == 1, \
+        "later strip applied even though its source had lost all abilities"
+
+
+@scenario("613.8 (guard)", "a grant with a later timestamp than a strip on its target still applies")
+def s_layer_dependency_grant_after_strip():
+    gs = fresh()
+    target = card_id_by_name(gs, "Vine Stalker")
+    stripper = card_id_by_name(gs, "Canopy Sentinel")
+    grantor = card_id_by_name(gs, "Thicket Brute")   # NOT affected by the strip
+    for cid in (target, stripper, grantor):
+        to_battlefield(gs, cid)
+    ls = gs.layer_system
+    # Earlier: strip the target's abilities. Later: an untouched source grants flying.
+    ls.register_effect({'source_id': stripper, 'layer': 6, 'affected_ids': [target],
+                        'effect_type': 'remove_all_abilities', 'effect_value': None,
+                        'duration': 'permanent'})
+    ls.register_effect({'source_id': grantor, 'layer': 6, 'affected_ids': [target],
+                        'effect_type': 'add_ability', 'effect_value': 'flying',
+                        'duration': 'permanent'})
+    ls.invalidate_cache()
+    ls.apply_all_effects()
+    # No dependency between the two (the grantor is untouched), so timestamp
+    # order stands: strip, then grant -> the target HAS flying.
+    assert _kw(gs, target, "flying") == 1, \
+        "grant applied after a strip on its target was wrongly suppressed"
+
+
+@scenario("603.1", "triggered ability text parses into trigger condition and effect")
+def s_trigger_parse():
+    gs = fresh()
+    from Playersim.ability_types import TriggeredAbility
+    cid = card_id_by_name(gs, "Thicket Brute")
+    owner = to_battlefield(gs, cid)
+    ta = TriggeredAbility(card_id=cid,
+                          effect_text="When this creature enters the battlefield, draw a card.")
+    assert ta.trigger_condition == "when this creature enters the battlefield", \
+        f"mangled trigger condition: '{ta.trigger_condition}'"
+    assert ta.effect == "draw a card", f"mangled effect: '{ta.effect}'"
+    ctx = {'game_state': gs, 'controller': owner}
+    assert ta.can_trigger('ENTERS_BATTLEFIELD', ctx), "ETB trigger did not fire on its event"
+    assert not ta.can_trigger('DIES', ctx), "ETB trigger fired on the wrong event"
+    hand_before = len(owner["hand"])
+    ta.resolve(gs, owner)
+    assert len(owner["hand"]) == hand_before + 1, "trigger effect did not resolve"
+
+
+@scenario("603.4", "intervening 'if' is checked at trigger time")
+def s_intervening_if_trigger_time():
+    gs = fresh()
+    from Playersim.ability_types import TriggeredAbility
+    cid = card_id_by_name(gs, "Thicket Brute")
+    owner = to_battlefield(gs, cid)
+    ta = TriggeredAbility(card_id=cid,
+                          effect_text="When this creature enters the battlefield, "
+                                      "if you have 30 or more life, draw a card.")
+    assert ta.effect == "draw a card", \
+        f"intervening 'if' was not separated from the effect: '{ta.effect}'"
+    ctx = {'game_state': gs, 'controller': owner}
+    owner["life"] = 20
+    assert not ta.can_trigger('ENTERS_BATTLEFIELD', ctx), \
+        "ability triggered although the intervening 'if' was false (CR 603.4)"
+    owner["life"] = 30
+    assert ta.can_trigger('ENTERS_BATTLEFIELD', ctx), \
+        "ability failed to trigger although the intervening 'if' was true"
+
+
+@scenario("603.4", "intervening 'if' is checked again at resolution; if false, the ability does nothing")
+def s_intervening_if_resolution_time():
+    gs = fresh()
+    from Playersim.ability_types import TriggeredAbility
+    cid = card_id_by_name(gs, "Thicket Brute")
+    owner = to_battlefield(gs, cid)
+    ta = TriggeredAbility(card_id=cid,
+                          effect_text="When this creature enters the battlefield, "
+                                      "if you have 30 or more life, draw a card.")
+    ctx = {'game_state': gs, 'controller': owner}
+    owner["life"] = 30
+    assert ta.can_trigger('ENTERS_BATTLEFIELD', ctx)
+    # Condition becomes false while the ability is on the stack.
+    owner["life"] = 20
+    hand_before = len(owner["hand"])
+    ta.resolve(gs, owner)
+    assert len(owner["hand"]) == hand_before, \
+        "ability resolved its effect although the intervening 'if' was false at resolution"
+    # And with the condition still true at resolution, it does resolve.
+    owner["life"] = 30
+    ta.resolve(gs, owner)
+    assert len(owner["hand"]) == hand_before + 1, \
+        "ability with a true intervening 'if' failed to resolve"
+
+
 @scenario("616 (engine)", "legacy asap delayed triggers fire at the next state-based check")
 def s_delayed_trigger_asap():
     gs = fresh()
