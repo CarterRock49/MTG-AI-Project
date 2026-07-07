@@ -526,6 +526,380 @@ def s_intervening_if_resolution_time():
         "ability with a true intervening 'if' failed to resolve"
 
 
+@scenario("603 (e2e)", "an ETB trigger parsed from card text fires through the full pipeline")
+def s_etb_trigger_end_to_end():
+    gs = fresh()
+    cid = card_id_by_name(gs, "Grove Chronicler")
+    owner = owner_of(gs, cid)
+    hand_before = len(owner["hand"])
+    # move_card fires ENTERS_BATTLEFIELD -> check_abilities queues the parsed
+    # TriggeredAbility -> process_triggered_abilities stacks it -> resolution
+    # applies "draw a card". This is the wiring the fixture decks now exercise
+    # in every random episode.
+    to_battlefield(gs, cid)
+    gs.ability_handler.process_triggered_abilities()
+    guard = 0
+    while gs.stack and guard < 10:
+        gs.resolve_top_of_stack()
+        guard += 1
+    assert len(owner["hand"]) == hand_before + 1, \
+        "ETB draw trigger did not fire end-to-end (registration, event, stack, or resolution broke)"
+
+
+@scenario("603.3b", "simultaneous triggers for the agent's player become an ordering choice")
+def s_trigger_order_choice():
+    gs = fresh()
+    from Playersim.ability_types import TriggeredAbility
+    agent = gs.p1 if getattr(gs, 'agent_is_p1', True) else gs.p2
+    gs.priority_player = agent
+    # Two creatures the agent controls, each with a (hand-built) trigger.
+    c1 = card_id_by_name(gs, "Grove Chronicler")
+    c2 = card_id_by_name(gs, "Verdant Reclaimer")
+    # Force both onto the AGENT's battlefield regardless of deck ownership:
+    for cid in (c1, c2):
+        owner = owner_of(gs, cid)
+        assert gs.move_card(cid, owner, "library", agent, "battlefield")
+    gs.ability_handler.active_triggers = []
+    gs.stack.clear()
+    t1 = TriggeredAbility(card_id=c1, effect_text="When this creature enters the battlefield, draw a card.")
+    t2 = TriggeredAbility(card_id=c2, effect_text="When this creature enters the battlefield, you gain 2 life.")
+    # Make sure both triggers belong to the ACTIVE player so they form one
+    # AP batch (603.3b is about ordering within one player's batch).
+    while gs._get_active_player() is not agent:
+        gs._advance_phase()
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.ability_handler.active_triggers = [(t1, agent, {}), (t2, agent, {})]
+    gs.ability_handler.process_triggered_abilities()
+    # 2+ simultaneous triggers -> the engine must ask, not pick silently.
+    assert gs.phase == gs.PHASE_CHOOSE, "no ordering choice was offered for simultaneous triggers"
+    assert gs.choice_context and gs.choice_context.get("type") == "order_triggers"
+    assert len(gs.choice_context.get("pending", [])) == 2
+    assert not gs.stack, "triggers were stacked before the ordering choice was made"
+    # Agent chooses the SECOND trigger to go on the stack first; the remaining
+    # one is auto-stacked (no pointless extra decision).
+    assert gs.ability_handler.order_trigger_chosen(1), "valid ordering choice was rejected"
+    assert gs.choice_context is None, "choice context not cleared after ordering completed"
+    # Stack is non-empty after ordering: the game must sit in PHASE_PRIORITY
+    # (CR 117.3c) with the interrupted phase saved for when the stack empties.
+    assert gs.phase == gs.PHASE_PRIORITY, "priority round not opened after triggers were stacked"
+    assert gs.previous_priority_phase == gs.PHASE_MAIN_PRECOMBAT, \
+        "interrupted phase was not preserved across the ordering choice"
+    stacked = [item[1] for item in gs.stack if item[0] == "TRIGGER"]
+    assert stacked == [c2, c1], f"stack order {stacked} does not reflect the chosen order [{c2}, {c1}]"
+
+
+@scenario("603.3b (guard)", "a single trigger bypasses the ordering choice entirely")
+def s_trigger_order_single_bypass():
+    gs = fresh()
+    from Playersim.ability_types import TriggeredAbility
+    agent = gs.p1 if getattr(gs, 'agent_is_p1', True) else gs.p2
+    c1 = card_id_by_name(gs, "Grove Chronicler")
+    owner = owner_of(gs, c1)
+    assert gs.move_card(c1, owner, "library", agent, "battlefield")
+    gs.ability_handler.active_triggers = []
+    gs.stack.clear()
+    t1 = TriggeredAbility(card_id=c1, effect_text="When this creature enters the battlefield, draw a card.")
+    gs.ability_handler.active_triggers = [(t1, agent, {})]
+    gs.ability_handler.process_triggered_abilities()
+    # No ordering decision for a single trigger: no choice context, no
+    # PHASE_CHOOSE. (add_to_stack legitimately opens a priority round.)
+    assert gs.choice_context is None, "single trigger wrongly created a choice context"
+    assert gs.phase != gs.PHASE_CHOOSE, "single trigger wrongly opened a choice phase"
+    stacked = [item[1] for item in gs.stack if item[0] == "TRIGGER"]
+    assert stacked == [c1], "single trigger did not go straight onto the stack"
+
+
+@scenario("613 (idempotence)", "repeated layer recalculation does not compound static P/T effects")
+def s_layer_recalc_idempotent():
+    gs = fresh()
+    cid = card_id_by_name(gs, "Thicket Brute")   # printed 3/3
+    to_battlefield(gs, cid)
+    card = gs._safe_get_card(cid)
+    ls = gs.layer_system
+    ls.register_effect({'source_id': cid, 'layer': 7, 'sublayer': 'c',
+                        'affected_ids': [cid], 'effect_type': 'modify_pt',
+                        'effect_value': (1, 1), 'duration': 'permanent'})
+    results = []
+    for _ in range(3):
+        ls.invalidate_cache()
+        ls.apply_all_effects()
+        results.append((card.power, card.toughness))
+    # The layer pass must start from PRINTED characteristics every time; the
+    # live card is an output, never an input. +1/+1 on a 3/3 is 4/4 forever.
+    assert results == [(4, 4), (4, 4), (4, 4)], \
+        f"static +1/+1 compounded across recalculations: {results} (base feeds back into itself)"
+
+
+@scenario("601.2f", "cost increases apply before cost reductions")
+def s_cost_modification_order():
+    gs = fresh()
+    ms = gs.mana_system
+    player = gs.p1
+    cid = card_id_by_name(gs, "Thicket Brute")
+    # Synthetic modifiers: a +2 tax and a -3 discount on a {2} generic cost.
+    # CR 601.2f: increases first (2+2=4), then reductions (4-3=1) -> generic 1.
+    # Reductions-first bottoms out at zero and gives 2 - a full mana off.
+    ms._gather_cost_modification_effects = lambda p, c, ctx=None: [
+        {'type': 'reduction', 'applies_to': 'generic', 'amount': 3, 'source': 'Discount'},
+        {'type': 'increase', 'applies_to': 'generic', 'amount': 2, 'source': 'Tax'},
+    ]
+    base = ms.parse_mana_cost("{2}{G}")
+    final = ms.apply_cost_modifiers(player, base, cid)
+    assert final['generic'] == 1, \
+        f"expected generic 1 (increases before reductions, CR 601.2f), got {final['generic']}"
+    assert final['G'] == 1, "colored component should be untouched"
+
+
+@scenario("707.2", "a token copy uses printed characteristics, not current ones")
+def s_token_copy_printed_values():
+    gs = fresh()
+    cid = card_id_by_name(gs, "Thicket Brute")   # printed 3/3, no keywords
+    owner = to_battlefield(gs, cid)
+    ls = gs.layer_system
+    # Pump and grant flying via continuous effects...
+    ls.register_effect({'source_id': cid, 'layer': 7, 'sublayer': 'c',
+                        'affected_ids': [cid], 'effect_type': 'modify_pt',
+                        'effect_value': (2, 2), 'duration': 'permanent'})
+    ls.register_effect({'source_id': cid, 'layer': 6, 'affected_ids': [cid],
+                        'effect_type': 'add_ability', 'effect_value': 'flying',
+                        'duration': 'permanent'})
+    ls.invalidate_cache()
+    ls.apply_all_effects()
+    live = gs._safe_get_card(cid)
+    assert (live.power, live.toughness) == (5, 5), "test setup: pump did not apply"
+    # ...then copy it. CR 707.2: the copy gets PRINTED values only.
+    token_id = gs.create_token_copy(live, owner)
+    assert token_id is not None, "token copy creation failed"
+    token = gs._safe_get_card(token_id)
+    assert token is not None, "token card object not found after creation"
+    assert (int(token.printed('power')), int(token.printed('toughness'))) == (3, 3), \
+        f"token copied modified P/T {token.power}/{token.toughness} instead of printed 3/3"
+    assert _kw(gs, token_id, "flying") == 0, \
+        "token copied a granted keyword; copies use printed characteristics (CR 707.2)"
+
+
+@scenario("707.2 (layer 1)", "a layer-1 copy effect copies the source's printed characteristics")
+def s_layer1_copy_printed_values():
+    gs = fresh()
+    src_id = card_id_by_name(gs, "Moss Titan")      # printed 5/5 (per fixture), Trample
+    dst_id = card_id_by_name(gs, "Vine Stalker")
+    for cid in (src_id, dst_id):
+        to_battlefield(gs, cid)
+    src_card = gs._safe_get_card(src_id)
+    printed_p, printed_t = int(src_card.printed('power')), int(src_card.printed('toughness'))
+    ls = gs.layer_system
+    # Pump the SOURCE with a continuous effect...
+    ls.register_effect({'source_id': src_id, 'layer': 7, 'sublayer': 'c',
+                        'affected_ids': [src_id], 'effect_type': 'modify_pt',
+                        'effect_value': (3, 3), 'duration': 'permanent'})
+    # ...and make dst a copy of src (layer 1).
+    ls.register_effect({'source_id': dst_id, 'layer': 1, 'affected_ids': [dst_id],
+                        'effect_type': 'copy', 'effect_value': src_id,
+                        'duration': 'permanent'})
+    ls.invalidate_cache()
+    ls.apply_all_effects()
+    dst = gs._safe_get_card(dst_id)
+    # The copy sees printed values; the source's +3/+3 does NOT carry over.
+    assert (dst.power, dst.toughness) == (printed_p, printed_t), \
+        (f"layer-1 copy took modified values {dst.power}/{dst.toughness}; "
+         f"expected printed {printed_p}/{printed_t} (CR 707.2)")
+
+
+def _combat_setup(gs, attacker_name, blocker_name, attacker_keywords=()):
+    """Put attacker on the agent's battlefield, blocker on the defender's,
+    grant keywords via layer effects, and wire the combat structures."""
+    agent = gs.p1 if getattr(gs, 'agent_is_p1', True) else gs.p2
+    defender = gs.p2 if agent is gs.p1 else gs.p1
+    atk = card_id_by_name(gs, attacker_name)
+    blk = card_id_by_name(gs, blocker_name)
+    assert gs.move_card(atk, owner_of(gs, atk), "library", agent, "battlefield")
+    assert gs.move_card(blk, owner_of(gs, blk), "library", defender, "battlefield")
+    for kw in attacker_keywords:
+        gs.layer_system.register_effect({'source_id': atk, 'layer': 6,
+                                         'affected_ids': [atk],
+                                         'effect_type': 'add_ability', 'effect_value': kw,
+                                         'duration': 'permanent'})
+    gs.layer_system.invalidate_cache()
+    gs.layer_system.apply_all_effects()
+    gs.ability_handler.active_triggers = []
+    gs.stack.clear()
+    gs.current_attackers = [atk]
+    gs.current_block_assignments = {atk: [blk]}
+    gs.combat_damage_dealt = False
+    return agent, defender, atk, blk
+
+
+def _zone_of(gs, cid):
+    return gs.find_card_location(cid)[1]
+
+
+@scenario("510.4", "a blocker killed by first-strike damage deals no regular damage back")
+def s_first_strike_kills_before_regular():
+    gs = fresh()
+    # 2/2 first striker vs 2/2 vanilla: without first strike this is a mutual
+    # kill; with it, the blocker must be dead before regular damage.
+    agent, defender, atk, blk = _combat_setup(gs, "Cinder Brawler", "Vine Stalker",
+                                              attacker_keywords=("first strike",))
+    gs.combat_resolver.resolve_combat()
+    gs.check_state_based_actions()
+    assert _zone_of(gs, blk) == "graveyard", "blocker survived lethal first-strike damage"
+    atk_damage = agent.get("damage_counters", {}).get(atk, 0)
+    assert atk_damage == 0 and _zone_of(gs, atk) == "battlefield", \
+        (f"attacker took {atk_damage} regular damage from a blocker that died to "
+         f"first strike (no SBA ran between damage steps)")
+
+
+@scenario("702.19", "trample assigns lethal to the blocker and the excess to the player")
+def s_trample_excess_to_player():
+    gs = fresh()
+    agent, defender, atk, blk = _combat_setup(gs, "Magma Bruiser", "Vine Stalker",
+                                              attacker_keywords=("trample",))
+    life_before = defender["life"]
+    gs.combat_resolver.resolve_combat()
+    gs.check_state_based_actions()
+    # 4 power vs 2 toughness: 2 lethal to the blocker, 2 trample through.
+    assert _zone_of(gs, blk) == "graveyard", "blocker did not die to lethal assignment"
+    assert defender["life"] == life_before - 2, \
+        f"expected 2 trample damage, defender life went {life_before} -> {defender['life']}"
+
+
+@scenario("702.2 + 702.19", "deathtouch makes 1 damage lethal for trample assignment and for the SBA")
+def s_deathtouch_trample():
+    gs = fresh()
+    agent, defender, atk, blk = _combat_setup(gs, "Furnace Colossus", "Canopy Sentinel",
+                                              attacker_keywords=("trample", "deathtouch"))
+    life_before = defender["life"]
+    gs.combat_resolver.resolve_combat()
+    gs.check_state_based_actions()
+    # 6 power, deathtouch: 1 to the 2/4 blocker is lethal (CR 702.2c applied to
+    # 510.1c), 5 tramples through; the blocker dies to the deathtouch SBA.
+    assert defender["life"] == life_before - 5, \
+        f"expected 5 trample damage with deathtouch assignment, life went {life_before} -> {defender['life']}"
+    assert _zone_of(gs, blk) == "graveyard", \
+        "blocker survived deathtouch damage (SBA 704.5h not honoring the deathtouch mark)"
+
+
+@scenario("engine (leak)", "layer-written card state does not leak into the next game")
+def s_no_cross_game_layer_leak():
+    gs = fresh()
+    cid = card_id_by_name(gs, "Thicket Brute")   # printed 3/3
+    to_battlefield(gs, cid)
+    gs.layer_system.register_effect({'source_id': cid, 'layer': 7, 'sublayer': 'c',
+                                     'affected_ids': [cid], 'effect_type': 'modify_pt',
+                                     'effect_value': (4, 4), 'duration': 'permanent'})
+    gs.layer_system.invalidate_cache()
+    gs.layer_system.apply_all_effects()
+    card = gs._safe_get_card(cid)
+    assert (card.power, card.toughness) == (7, 7), "test setup: pump did not apply"
+    # A new game over the same shared card_db must see printed values again.
+    gs2 = fresh()
+    card2 = gs2.card_db.get(card_id_by_name(gs2, "Thicket Brute"))
+    assert (int(card2.power), int(card2.toughness)) == (3, 3), \
+        (f"live P/T {card2.power}/{card2.toughness} leaked from the previous game "
+         f"(shared card_db object not restored to printed at game start)")
+    assert card2.name == "Thicket Brute", "card identity leaked from a previous game's copy effect"
+
+
+@scenario("510.1c (choice)", "damage assignment order among multiple blockers is an agent choice")
+def s_blocker_order_choice():
+    gs = fresh()
+    from Playersim.combat_integration import integrate_combat_actions
+    handler = integrate_combat_actions(gs)
+    agent = gs.p1 if getattr(gs, 'agent_is_p1', True) else gs.p2
+    defender = gs.p2 if agent is gs.p1 else gs.p1
+    atk = card_id_by_name(gs, "Magma Bruiser")      # 4/3
+    b_big = card_id_by_name(gs, "Thicket Brute")    # 3/3
+    b_small = card_id_by_name(gs, "Sprout Guardian")  # 1/2
+    assert gs.move_card(atk, owner_of(gs, atk), "library", agent, "battlefield")
+    for bid in (b_big, b_small):
+        assert gs.move_card(bid, owner_of(gs, bid), "library", defender, "battlefield")
+    gs.ability_handler.active_triggers = []
+    gs.stack.clear()
+    gs.current_attackers = [atk]
+    gs.current_block_assignments = {atk: [b_small, b_big]}   # declaration order: small first
+    gs.combat_damage_dealt = False
+    gs.phase = gs.PHASE_COMBAT_DAMAGE
+    # Requesting damage resolution with 2+ blockers must ask for the order,
+    # not resolve with a silent default.
+    assert handler.handle_assign_combat_damage()
+    assert gs.phase == gs.PHASE_CHOOSE, "no assignment-order choice was offered"
+    ctx = gs.choice_context
+    assert ctx and ctx.get("type") == "order_blockers" and ctx.get("attacker_id") == atk
+    assert not gs.combat_damage_dealt, "damage resolved before the order was chosen"
+    # Agent chooses the BIG blocker (index in pending list) to take damage first:
+    pending = ctx["pending"]
+    assert handler.blocker_order_chosen(pending.index(b_big)), "valid order choice rejected"
+    # Ordering complete -> combat resolves with the chosen order and the game
+    # moves on to end of combat.
+    assert gs.choice_context is None, "choice context not cleared"
+    assert gs.combat_damage_dealt, "combat did not resolve after ordering completed"
+    assert gs.phase == gs.PHASE_END_OF_COMBAT, "phase did not advance after resolution"
+    gs.check_state_based_actions()
+    # 4 power: 3 lethal to Thicket Brute (dies), remaining 1 to Sprout Guardian.
+    assert gs.find_card_location(b_big)[1] == "graveyard", \
+        "first-ordered blocker did not receive lethal damage first"
+    assert gs.find_card_location(b_small)[1] == "battlefield", \
+        "second-ordered blocker died despite only 1 remaining damage"
+    assert defender.get("damage_counters", {}).get(b_small, 0) == 1, \
+        "remaining damage was not assigned to the second blocker"
+
+
+@scenario("510.1c (guard)", "a single blocker needs no assignment-order choice")
+def s_blocker_order_single_bypass():
+    gs = fresh()
+    from Playersim.combat_integration import integrate_combat_actions
+    handler = integrate_combat_actions(gs)
+    agent = gs.p1 if getattr(gs, 'agent_is_p1', True) else gs.p2
+    defender = gs.p2 if agent is gs.p1 else gs.p1
+    atk = card_id_by_name(gs, "Magma Bruiser")
+    blk = card_id_by_name(gs, "Vine Stalker")
+    assert gs.move_card(atk, owner_of(gs, atk), "library", agent, "battlefield")
+    assert gs.move_card(blk, owner_of(gs, blk), "library", defender, "battlefield")
+    gs.ability_handler.active_triggers = []
+    gs.stack.clear()
+    gs.current_attackers = [atk]
+    gs.current_block_assignments = {atk: [blk]}
+    gs.combat_damage_dealt = False
+    gs.phase = gs.PHASE_COMBAT_DAMAGE
+    assert handler.handle_assign_combat_damage()
+    assert gs.choice_context is None, "single blocker wrongly opened an ordering choice"
+    assert gs.combat_damage_dealt, "combat did not resolve immediately with one blocker"
+    assert gs.phase == gs.PHASE_END_OF_COMBAT
+
+
+@scenario("stats (play history)", "the engine records the actual turn each card was played")
+def s_play_history_recorded():
+    gs = fresh()
+    c1 = card_id_by_name(gs, "Ember Grunt")
+    c2 = card_id_by_name(gs, "Thicket Brute")
+    gs.turn = 2
+    gs.track_card_played(c1, 0)
+    gs.turn = 5
+    gs.track_card_played(c2, 0)
+    hist = getattr(gs, 'play_history', None)
+    assert hist is not None, "play turns are not tracked; play-turn stats are fabricated from CMC"
+    assert hist[0].get(2) == [c1] and hist[0].get(5) == [c2], \
+        f"play history recorded wrong turns: {hist[0]} (expected {{2: [{c1}], 5: [{c2}]}})"
+
+
+@scenario("stats (winner mapping)", "cards played are attributed to winner/loser, not to p1/p2")
+def s_stats_winner_mapping():
+    gs = fresh()
+    env = get_env()
+    gs.cards_played = {0: [101], 1: [202]}
+    gs.play_history = {0: {2: [101]}, 1: {3: [202]}}
+    mapped_cards, mapped_history = env._stats_result_mapped(gs, is_p1_winner=False)
+    # p2 won: their cards must land in the WINNER slot. The old code passed
+    # p1/p2-indexed data into a consumer that reads index 0 as the winner,
+    # scrambling card attribution in every game p2 won.
+    assert mapped_cards == {0: [202], 1: [101]}, \
+        f"winner/loser card mapping wrong: {mapped_cards}"
+    assert mapped_history == {"winner": {3: [202]}, "loser": {2: [101]}}, \
+        f"winner/loser play-history mapping wrong: {mapped_history}"
+    mapped_cards, mapped_history = env._stats_result_mapped(gs, is_p1_winner=True)
+    assert mapped_cards == {0: [101], 1: [202]} and mapped_history["winner"] == {2: [101]}
+
+
 @scenario("616 (engine)", "legacy asap delayed triggers fire at the next state-based check")
 def s_delayed_trigger_asap():
     gs = fresh()

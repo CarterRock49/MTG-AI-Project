@@ -545,6 +545,8 @@ class AlphaZeroMTGEnv(gym.Env):
                      logging.error("Cannot record game result: Deck list or name is None.")
                      return
 
+                _cards_mapped, _history_mapped = self._stats_result_mapped(
+                    gs, True if is_draw else is_p1_winner)
                 self.stats_tracker.record_game(
                     winner_deck=winner_deck_list,
                     loser_deck=loser_deck_list,
@@ -553,7 +555,8 @@ class AlphaZeroMTGEnv(gym.Env):
                     winner_life=winner_life,
                     winner_deck_name=winner_name,
                     loser_deck_name=loser_name,
-                    cards_played=getattr(gs, 'cards_played', {0: [], 1: []}),
+                    cards_played=_cards_mapped,
+                    play_history=_history_mapped,
                     is_draw=is_draw
                 )
                 self._game_result_recorded = True
@@ -805,6 +808,23 @@ class AlphaZeroMTGEnv(gym.Env):
         # No progression was forced
         return False
     
+    def _stats_result_mapped(self, gs, is_p1_winner):
+        """Map p1/p2-indexed play data into winner/loser order for the stats
+        tracker, which reads cards_played index 0 as the WINNER.
+
+        Triage fix (July 2026): raw gs.cards_played ({0: p1, 1: p2}) was passed
+        straight through, so card-level win attribution was swapped in every
+        game p2 won (~half of all games). Returns (cards_played_mapped,
+        play_history_mapped) with play_history keyed 'winner'/'loser'.
+        For draws, callers pass is_p1_winner=True (slot order is arbitrary).
+        """
+        raw_cards = getattr(gs, 'cards_played', {0: [], 1: []}) or {0: [], 1: []}
+        raw_hist = getattr(gs, 'play_history', {0: {}, 1: {}}) or {0: {}, 1: {}}
+        w, l = (0, 1) if is_p1_winner else (1, 0)
+        cards_mapped = {0: list(raw_cards.get(w, [])), 1: list(raw_cards.get(l, []))}
+        history_mapped = {"winner": dict(raw_hist.get(w, {})), "loser": dict(raw_hist.get(l, {}))}
+        return cards_mapped, history_mapped
+
     def _record_cards_to_memory(self, player_deck, opponent_deck, cards_played_data, turn_count,
                             player_archetype, opponent_archetype, opening_hands_data, draw_history_data, is_draw=False, player_idx=0):
         """Record detailed card performance data to the card memory system, handles draw."""
@@ -1942,8 +1962,8 @@ class AlphaZeroMTGEnv(gym.Env):
                 deck1_name = getattr(self, 'current_deck_name_p1', "Unknown Deck 1")
                 deck2_name = getattr(self, 'current_deck_name_p2', "Unknown Deck 2")
                 
-                # Use player 0 and 1 for consistent keys regardless of who is agent
-                game_cards_played = getattr(gs, 'cards_played', {0: [], 1: []})
+                # Draw: slot order arbitrary; map p1 to the winner slot
+                game_cards_played, game_play_history = self._stats_result_mapped(gs, True)
                 
                 # Determine game stage based on turn count
                 game_stage = "early"
@@ -1962,6 +1982,7 @@ class AlphaZeroMTGEnv(gym.Env):
                     winner_deck_name=deck1_name,
                     loser_deck_name=deck2_name,
                     cards_played=game_cards_played,
+                    play_history=game_play_history,
                     game_stage=game_stage,
                     is_draw=True
                 )
@@ -1978,8 +1999,8 @@ class AlphaZeroMTGEnv(gym.Env):
                 winner_name = getattr(self, 'current_deck_name_p1', "Unknown Deck 1") if winner_is_p1 else getattr(self, 'current_deck_name_p2', "Unknown Deck 2")
                 loser_name = getattr(self, 'current_deck_name_p2', "Unknown Deck 2") if winner_is_p1 else getattr(self, 'current_deck_name_p1', "Unknown Deck 1")
                 
-                # Get cards played from game state if available
-                game_cards_played = getattr(gs, 'cards_played', {0: [], 1: []})
+                # Map play data into winner/loser order (see _stats_result_mapped)
+                game_cards_played, game_play_history = self._stats_result_mapped(gs, winner_is_p1)
                 
                 # Determine game stage based on turn count
                 game_stage = "early"
@@ -1998,6 +2019,7 @@ class AlphaZeroMTGEnv(gym.Env):
                     winner_deck_name=winner_name,
                     loser_deck_name=loser_name,
                     cards_played=game_cards_played,
+                    play_history=game_play_history,
                     game_stage=game_stage,
                     is_draw=False
                 )

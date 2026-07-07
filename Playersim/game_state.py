@@ -36,7 +36,7 @@ class GameState(
                  "turn", "phase", "agent_is_p1", "combat_damage_dealt", "day_night_state",
                  "current_attackers", "current_block_assignments", 'mulligan_data',
                  "current_spell_requires_target", "current_spell_card_id", "exhaust_ability_used",
-                 "optimal_attackers", "attack_suggestion_used", 'cards_played',
+                 "optimal_attackers", "attack_suggestion_used", 'cards_played', 'play_history',
                  "p1", "p2", "ability_handler", "damage_dealt_this_turn",
                  "previous_priority_phase", "layer_system", "until_end_of_turn_effects",
                  "mana_system", "replacement_effects", "cards_drawn_this_turn",
@@ -385,6 +385,13 @@ class GameState(
                     for _card in self.card_db.values():
                         if getattr(_card, 'counters', None):
                             _card.counters = {}
+                        # Same leakage class, wider blast radius: the layer
+                        # write-back mutates shared card objects (name, P/T,
+                        # keywords, ...). Restore printed characteristics so
+                        # game N's continuous-effect output cannot leak into
+                        # game N+1's live card state.
+                        if hasattr(_card, 'reset_to_printed'):
+                            _card.reset_to_printed()
             except Exception as _e:
                 logging.error(f"Error clearing transient card state: {_e}")
             self.fidelity_counters = {
@@ -544,6 +551,7 @@ class GameState(
             self.optimal_attackers = None
             self.attack_suggestion_used = False
             self.cards_played = {0: [], 1: []} # Explicit reset
+            self.play_history = {0: {}, 1: {}} # {player_idx: {turn: [card_ids]}} — real play turns for stats
             self.exhaust_ability_used = {} # Reset exhaust tracking
             self._consecutive_no_ops = 0
             # Ensure decks exist and are at least copy-able, with fallbacks if necessary

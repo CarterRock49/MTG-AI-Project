@@ -149,28 +149,36 @@ class LayerSystem:
             if not live_card: live_card = original_card # Fallback if not found in GS zones? Risky.
 
 
-            # --- Deep copy mutable types ---
+            # --- Start from PRINTED characteristics (July 2026 bugfix) ---
+            # The end-of-pass write-back mutates the live card, and card_db
+            # returns that same shared object. Reading live attributes here fed
+            # the previous pass's OUTPUT back in as the next pass's BASE, so
+            # every static P/T effect compounded on every recalculation (+1/+1
+            # became +N/+N over a game). Card.printed() reads the snapshot
+            # taken at construction; the live card is an output, never an input.
+            _pr = original_card.printed if hasattr(original_card, 'printed') else \
+                (lambda attr, default=None: getattr(original_card, attr, default))
             base_chars = {
-                'name': getattr(original_card, 'name', 'Unknown'),
-                'mana_cost': getattr(original_card, 'mana_cost', ''),
-                'colors': copy.deepcopy(getattr(original_card, 'colors', [0]*5)), # Deep copy list
-                'card_types': copy.deepcopy(getattr(original_card, 'card_types', [])), # Deep copy list
-                'subtypes': copy.deepcopy(getattr(original_card, 'subtypes', [])), # Deep copy list
-                'supertypes': copy.deepcopy(getattr(original_card, 'supertypes', [])), # Deep copy list
-                'oracle_text': getattr(original_card, 'oracle_text', ''),
-                # Start with base keywords array (ensure correct length)
-                'keywords': copy.deepcopy(getattr(original_card, 'keywords', [0]*len(Card.ALL_KEYWORDS))), # Deep copy list
-                'power': getattr(original_card, 'power', None), # Keep None if base is None
-                'toughness': getattr(original_card, 'toughness', None), # Keep None if base is None
-                'loyalty': getattr(original_card, 'loyalty', None), # Keep None if base is None
-                'defense': getattr(original_card, 'defense', None), # For Battles
-                'cmc': getattr(original_card, 'cmc', 0),
-                'type_line': getattr(original_card, 'type_line', ''),
-                # Base P/T tracked separately, default to original values or 0 if None
-                '_base_power': getattr(original_card, 'power', 0) if getattr(original_card, 'power', None) is not None else 0,
-                '_base_toughness': getattr(original_card, 'toughness', 0) if getattr(original_card, 'toughness', None) is not None else 0,
-                # Calculate inherent abilities from BASE text (before Layer 3 changes)
-                '_inherent_abilities': self._approximate_keywords_set(getattr(original_card, 'oracle_text', '')),
+                'name': _pr('name', 'Unknown'),
+                'mana_cost': _pr('mana_cost', ''),
+                'colors': copy.deepcopy(_pr('colors', [0]*5)),
+                'card_types': copy.deepcopy(_pr('card_types', [])),
+                'subtypes': copy.deepcopy(_pr('subtypes', [])),
+                'supertypes': copy.deepcopy(_pr('supertypes', [])),
+                'oracle_text': _pr('oracle_text', ''),
+                # Start with printed keywords array (ensure correct length)
+                'keywords': copy.deepcopy(_pr('keywords', [0]*len(Card.ALL_KEYWORDS))),
+                'power': _pr('power', None),  # Keep None if base is None
+                'toughness': _pr('toughness', None),
+                'loyalty': _pr('loyalty', None),
+                'defense': _pr('defense', None),  # For Battles
+                'cmc': _pr('cmc', 0),
+                'type_line': _pr('type_line', ''),
+                # Base P/T tracked separately, default to printed values or 0 if None
+                '_base_power': _pr('power', 0) if _pr('power', None) is not None else 0,
+                '_base_toughness': _pr('toughness', 0) if _pr('toughness', None) is not None else 0,
+                # Calculate inherent abilities from PRINTED text (before Layer 3 changes)
+                '_inherent_abilities': self._approximate_keywords_set(_pr('oracle_text', '')),
                 '_granted_abilities': set(), # Track granted abilities within this calculation pass
                 '_removed_abilities': set(), # Track removed abilities within this calculation pass
                 '_active_protection_details': set(), # *** Initialize empty set for protection details ***
@@ -688,25 +696,35 @@ class LayerSystem:
         for target_id in effect_data.get('affected_ids', []):
             if target_id in calculated_characteristics:
                  logging.debug(f"Layer 1: Applying copy of {source_to_copy_card.name} to {target_id}")
-                 # Apply copyable values based on Rule 707.2
+                 # Apply copyable values based on Rule 707.2: PRINTED
+                 # characteristics of the source, not its live attributes
+                 # (which carry last pass's continuous-effect output).
                  import copy
                  target_chars = calculated_characteristics[target_id]
-                 source_attrs = source_to_copy_card.__dict__ # Simple way, assumes no slots
+                 _pr = source_to_copy_card.printed if hasattr(source_to_copy_card, 'printed') else \
+                     (lambda attr, default=None: getattr(source_to_copy_card, attr, default))
 
                  copyable_attrs = ['name', 'mana_cost', 'colors', 'card_types', 'subtypes', 'supertypes', 'oracle_text', 'power', 'toughness', 'loyalty']
                  for attr in copyable_attrs:
-                     if hasattr(source_to_copy_card, attr):
-                         value = getattr(source_to_copy_card, attr)
+                     value = _pr(attr, None)
+                     if value is not None or attr in ('power', 'toughness', 'loyalty'):
                          # Deep copy lists/dicts
                          target_chars[attr] = copy.deepcopy(value) if isinstance(value, (list, dict)) else value
 
                  # Reset non-copyable aspects implicit in the copy action
                  # Note: Status (tapped, counters, etc.) aren't part of copy effect itself
-                 # But derived properties might change:
-                 target_chars['_base_power'] = target_chars.get('power', 0)
-                 target_chars['_base_toughness'] = target_chars.get('toughness', 0)
-                 # Recalculate type line potentially
-                 target_chars['type_line'] = self.game_state._build_type_line(target_chars) # Assume GS has helper
+                 # But derived properties must follow the copied identity:
+                 def _as_int(v, default=0):
+                     try: return int(v)
+                     except (TypeError, ValueError): return default
+                 target_chars['_base_power'] = _as_int(target_chars.get('power', 0))
+                 target_chars['_base_toughness'] = _as_int(target_chars.get('toughness', 0))
+                 # Copy the printed type line (gs._build_type_line never existed --
+                 # this call crashed every layer-1 copy until the first 707.2
+                 # scenario exercised the path, July 2026).
+                 target_chars['type_line'] = _pr('type_line', target_chars.get('type_line', ''))
+                 # The copy's inherent abilities come from its NEW (copied) text.
+                 target_chars['_inherent_abilities'] = self._approximate_keywords_set(target_chars.get('oracle_text', ''))
                  target_chars['_granted_abilities'] = set()
                  target_chars['_removed_abilities'] = set()
 

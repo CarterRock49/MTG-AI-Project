@@ -368,27 +368,33 @@ class GameStatePermanentsMixin:
 
         token_id = f"TOKEN_COPY_{len(controller['tokens'])}_{original_card.name[:10].replace(' ','')}"
 
-        # Use dict/copy.deepcopy to get copyable values
+        # CR 707.2 (July 2026): copyable values are the PRINTED characteristics,
+        # never the live ones -- the live object carries continuous-effect output
+        # (layer write-back mutates power/keywords/colors in place), so reading
+        # live attributes copied pumps and granted keywords onto the token.
+        # Card.printed() reads the construction-time snapshot; the snapshot the
+        # token takes of THESE values then becomes the token's own printed
+        # identity, which is exactly what CR 707.2 wants for copies of copies.
         try:
-            # Get copyable characteristics based on Rule 707.2
+            _pr = original_card.printed if hasattr(original_card, 'printed') else \
+                (lambda attr, default=None: getattr(original_card, attr, default))
             copyable_values = {
-                "name": original_card.name,
-                "mana_cost": original_card.mana_cost,
-                #"color": original_card.color, # Use color_identity?
-                "color_identity": original_card.colors, # Store the 5-dim vector
-                "card_types": copy.deepcopy(original_card.card_types),
-                "subtypes": copy.deepcopy(original_card.subtypes),
-                "supertypes": copy.deepcopy(original_card.supertypes),
-                "oracle_text": original_card.oracle_text,
-                # Base power/toughness/loyalty (not including counters/effects)
-                "power": getattr(original_card, '_base_power', getattr(original_card, 'power', 0)), # Need base P/T logic
-                "toughness": getattr(original_card, '_base_toughness', getattr(original_card, 'toughness', 0)),
-                "loyalty": getattr(original_card, '_base_loyalty', getattr(original_card, 'loyalty', 0)),
-                "keywords": copy.deepcopy(getattr(original_card,'keywords',[0]*11)), # Copy base keywords
-                "faces": copy.deepcopy(getattr(original_card,'faces', None)), # Copy faces for DFCs
+                "name": _pr("name"),
+                "mana_cost": _pr("mana_cost"),
+                "color_identity": copy.deepcopy(_pr("colors", [0] * 5)),  # 5-dim vector
+                "card_types": copy.deepcopy(_pr("card_types", [])),
+                "subtypes": copy.deepcopy(_pr("subtypes", [])),
+                "supertypes": copy.deepcopy(_pr("supertypes", [])),
+                "oracle_text": _pr("oracle_text", ""),
+                # Printed power/toughness/loyalty (no counters, no effects)
+                "power": _pr("power", 0),
+                "toughness": _pr("toughness", 0),
+                "loyalty": _pr("loyalty", 0),
+                "keywords": copy.deepcopy(_pr("keywords", [0] * 21)),
+                "faces": copy.deepcopy(getattr(original_card, 'faces', None)),  # DFC faces
             }
             copyable_values["is_token"] = True # Mark as token
-            copyable_values["type_line"] = original_card.type_line # Copy type line
+            copyable_values["type_line"] = _pr("type_line", original_card.type_line) # Copy printed type line
 
         except Exception as e:
              logging.error(f"Error getting copyable values for {original_card.name}: {e}")

@@ -425,7 +425,13 @@ class CombatActionHandler:
                   logging.warning("Manual damage assignment not supported by resolver.")
                   success = False # Fallback: Fail if resolver missing function
         else:
-             # Auto-resolve damage if no specific assignments given
+             # CR 510.1c: with 2+ blockers on any of the agent's attackers,
+             # the damage assignment order is the attacking player's CHOICE.
+             # Open the ordering choice and defer resolution; ordering
+             # completion (blocker_order_chosen) finishes combat itself.
+             if self.begin_blocker_order_choice():
+                 return True
+             # Auto-resolve damage if no ordering choice is needed
              _ = gs.combat_resolver.resolve_combat() # Resolve combat automatically
              success = True
 
@@ -435,6 +441,95 @@ class CombatActionHandler:
              gs.priority_player = gs._get_active_player()
              gs.priority_pass_count = 0
         return success
+
+    def begin_blocker_order_choice(self):
+        """Open an 'order_blockers' choice (CR 510.1c) if the agent's player
+        has any attacker blocked by 2+ blockers without an assignment order.
+        Returns True if a choice was opened. The scripted opponent's attackers
+        keep the toughness-ascending default (same scope cut as 603.3b:
+        an interactive opponent choice would deadlock the single-agent loop).
+        """
+        gs = self.game_state
+        agent = gs.p1 if getattr(gs, 'agent_is_p1', True) else gs.p2
+        if getattr(gs, 'choice_context', None):
+            return False
+        if not hasattr(gs, 'first_strike_ordering'):
+            gs.first_strike_ordering = {}
+        needs_order = []
+        for attacker_id, blockers in gs.current_block_assignments.items():
+            valid = [b for b in blockers if gs.find_card_location(b)[1] == 'battlefield']
+            if len(valid) < 2 or attacker_id in gs.first_strike_ordering:
+                continue
+            if gs.get_card_controller(attacker_id) is not agent:
+                # Opponent's attacker: keep the engine default order.
+                continue
+            needs_order.append((attacker_id, valid))
+        if not needs_order:
+            return False
+        first_attacker, first_blockers = needs_order[0]
+        if gs.phase not in [gs.PHASE_CHOOSE, gs.PHASE_TARGETING, gs.PHASE_SACRIFICE]:
+            gs.previous_priority_phase = gs.phase
+        gs.phase = gs.PHASE_CHOOSE
+        gs.choice_context = {
+            'type': 'order_blockers',
+            'player': agent,
+            'attacker_id': first_attacker,
+            'pending': list(first_blockers),
+            'ordered': [],
+            'remaining_attackers': [a for a, _ in needs_order[1:]],
+            'source_id': first_attacker,
+            'resolved': False,
+        }
+        gs.priority_pass_count = 0
+        gs.priority_player = agent
+        logging.debug(
+            f"CR 510.1c: ordering choice opened for attacker {first_attacker} "
+            f"({len(first_blockers)} blockers).")
+        return True
+
+    def blocker_order_chosen(self, index):
+        """Apply one ordering pick: pending[index] takes damage next. When the
+        current attacker's order completes, move to the next multi-blocked
+        attacker, or close the choice and finish combat resolution. Returns
+        True if the pick was valid."""
+        gs = self.game_state
+        ctx = getattr(gs, 'choice_context', None)
+        if not ctx or ctx.get('type') != 'order_blockers':
+            logging.warning("blocker_order_chosen called without an order_blockers context.")
+            return False
+        pending = ctx.get('pending', [])
+        if not isinstance(index, int) or not (0 <= index < len(pending)):
+            logging.warning(f"blocker_order_chosen: invalid index {index} for {len(pending)} pending.")
+            return False
+        ctx['ordered'].append(pending.pop(index))
+        if len(pending) == 1:
+            ctx['ordered'].append(pending.pop(0))
+        if pending:
+            return True
+        # This attacker's order is complete.
+        gs.first_strike_ordering[ctx['attacker_id']] = list(ctx['ordered'])
+        remaining = ctx.get('remaining_attackers') or []
+        while remaining:
+            next_attacker = remaining.pop(0)
+            valid = [b for b in gs.current_block_assignments.get(next_attacker, [])
+                     if gs.find_card_location(b)[1] == 'battlefield']
+            if len(valid) >= 2 and next_attacker not in gs.first_strike_ordering:
+                ctx.update({'attacker_id': next_attacker, 'source_id': next_attacker,
+                            'pending': list(valid), 'ordered': [],
+                            'remaining_attackers': remaining})
+                return True
+        # All orders chosen: close the choice, restore the phase, and finish
+        # the deferred combat resolution (mirrors handle_assign_combat_damage's
+        # tail).
+        gs.choice_context = None
+        prev = getattr(gs, 'previous_priority_phase', None)
+        if prev is not None:
+            gs.phase = prev
+        _ = gs.combat_resolver.resolve_combat()
+        gs.phase = gs.PHASE_END_OF_COMBAT
+        gs.priority_player = gs._get_active_player()
+        gs.priority_pass_count = 0
+        return True
 
     def handle_attack_battle(self, param=None, context=None, **kwargs):
         """Assign last declared attacker to target a specific battle. Param is battle index (0-4)."""

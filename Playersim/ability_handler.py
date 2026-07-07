@@ -1764,62 +1764,131 @@ class AbilityHandler:
     
     def process_triggered_abilities(self):
         """
-        Process all pending triggered abilities from the queue, adding them to the stack in APNAP order.
-        Ensures GameState context is passed correctly. (Revised context passing)
+        Move all pending triggered abilities from the queue to the stack in
+        APNAP order (CR 603.3b): the active player puts their simultaneous
+        triggers on the stack in an order of their choice, then the non-active
+        player does the same.
+
+        The ordering choice is surfaced to the AGENT as a real decision (an
+        'order_triggers' choice_context in PHASE_CHOOSE, actions 353-362) when
+        the agent's player has 2+ simultaneous triggers. The scripted/random
+        opponent auto-orders in queue order for now -- routing the opponent's
+        ordering through a policy is a self-play (Tier 3) follow-up. Zero or
+        one triggers bypass the choice entirely, so training dynamics are
+        untouched in the common case.
         """
         gs = self.game_state
         if not self.active_triggers:
             return
 
+        active_player = gs._get_active_player()
         ap_triggers = []
         nap_triggers = []
-        active_player = gs._get_active_player()
+        for entry in self.active_triggers:
+            ability, controller = entry[0], entry[1]
+            if controller == active_player:
+                ap_triggers.append(entry)
+            else:
+                nap_triggers.append(entry)
 
-        # Sort triggers by Active Player (AP) and Non-Active Player (NAP) based on the controller at time of trigger
-        # Use controller from the stored tuple: (ability, controller, context_at_trigger)
-        for ability, controller, context_at_trigger in self.active_triggers:
-             if controller == active_player: ap_triggers.append((ability, controller, context_at_trigger))
-             else: nap_triggers.append((ability, controller, context_at_trigger))
+        # Clear the queue *before* adding to stack to prevent potential
+        # re-trigger loops within resolution.
+        self.active_triggers = []
 
-        # Clear the queue *before* adding to stack to prevent potential re-trigger loops within resolution
-        queued_triggers = ap_triggers + nap_triggers
-        self.active_triggers = [] # Clear the processing queue
+        # AP batch first; the NAP batch is stacked once AP's ordering is done.
+        self._stack_trigger_batch_with_choice(ap_triggers, next_batch=nap_triggers)
 
-        # --- TODO: Implement choice for ordering simultaneous triggers ---
-        # Rule 603.3b: If multiple abilities triggered, AP puts theirs on stack in chosen order, then NAP does.
-        # For now, add in the order they were processed.
+    def _push_trigger_to_stack(self, ability, controller, context_at_trigger):
+        """Put a single queued trigger onto the stack with its captured context."""
+        gs = self.game_state
+        if not ability or not hasattr(ability, 'card_id'):
+            return False
+        if context_at_trigger is None:
+            context_at_trigger = {}
+        if 'ability' not in context_at_trigger:
+            context_at_trigger['ability'] = ability
+        if 'source_id' not in context_at_trigger:
+            context_at_trigger['source_id'] = ability.card_id
+        if 'effect_text' not in context_at_trigger:
+            context_at_trigger['effect_text'] = getattr(ability, 'effect_text', 'Unknown Effect')
+        gs.add_to_stack("TRIGGER", ability.card_id, controller, context_at_trigger)
+        return True
 
-        # Add AP triggers to stack first
-        num_ap_added = 0
-        for ability, controller, context_at_trigger in ap_triggers:
-            if not ability or not hasattr(ability, 'card_id'): continue # Safety check
-            # Ensure the context passed to the stack includes the ability object itself
-            if 'ability' not in context_at_trigger: context_at_trigger['ability'] = ability
-            # Add essential context keys if missing from trigger time (less ideal, but safe)
-            if 'source_id' not in context_at_trigger: context_at_trigger['source_id'] = ability.card_id
-            if 'effect_text' not in context_at_trigger: context_at_trigger['effect_text'] = getattr(ability,'effect_text','Unknown Effect')
+    def _stack_trigger_batch_with_choice(self, batch, next_batch=None):
+        """Stack one player's simultaneous triggers (CR 603.3b).
 
-            gs.add_to_stack("TRIGGER", ability.card_id, controller, context_at_trigger) # Pass original captured context
-            num_ap_added += 1
+        2+ triggers controlled by the agent's player open an 'order_triggers'
+        choice; anything else (0/1 triggers, opponent's batch, or a choice
+        context already active) is stacked immediately in queue order.
+        """
+        gs = self.game_state
+        batch = [e for e in (batch or []) if e[0] is not None and hasattr(e[0], 'card_id')]
+        agent_player = gs.p1 if getattr(gs, 'agent_is_p1', True) else gs.p2
+        controller = batch[0][1] if batch else None
+        interactive = (len(batch) >= 2
+                       and controller is agent_player
+                       and not getattr(gs, 'choice_context', None))
 
-        # Add NAP triggers to stack
-        num_nap_added = 0
-        for ability, controller, context_at_trigger in nap_triggers:
-            if not ability or not hasattr(ability, 'card_id'): continue # Safety check
-            if 'ability' not in context_at_trigger: context_at_trigger['ability'] = ability
-            if 'source_id' not in context_at_trigger: context_at_trigger['source_id'] = ability.card_id
-            if 'effect_text' not in context_at_trigger: context_at_trigger['effect_text'] = getattr(ability,'effect_text','Unknown Effect')
+        if not interactive:
+            added = 0
+            for ability, ctrl, trig_ctx in batch:
+                if self._push_trigger_to_stack(ability, ctrl, trig_ctx):
+                    added += 1
+            if added:
+                logging.debug(f"Added {added} triggered abilities to stack (auto order).")
+            if next_batch:
+                self._stack_trigger_batch_with_choice(next_batch)
+            return
 
-            gs.add_to_stack("TRIGGER", ability.card_id, controller, context_at_trigger) # Pass original captured context
-            num_nap_added += 1
+        # Enter the ordering choice (same pattern as scry/surveil).
+        if gs.phase not in [gs.PHASE_CHOOSE, gs.PHASE_TARGETING, gs.PHASE_SACRIFICE]:
+            gs.previous_priority_phase = gs.phase
+        gs.phase = gs.PHASE_CHOOSE
+        gs.choice_context = {
+            'type': 'order_triggers',
+            'player': controller,
+            'pending': list(batch),
+            'next_batch': list(next_batch) if next_batch else [],
+            'source_id': batch[0][0].card_id,
+            'resolved': False,
+        }
+        gs.priority_pass_count = 0
+        gs.priority_player = controller
+        logging.debug(
+            f"CR 603.3b: {controller['name']} must order {len(batch)} simultaneous triggers.")
 
-        total_added = num_ap_added + num_nap_added
-        if total_added > 0:
-             logging.debug(f"Added {num_ap_added} AP / {num_nap_added} NAP ({total_added} total) Triggered Abilities to stack.")
+    def order_trigger_chosen(self, index):
+        """Apply the agent's ordering choice: pending[index] goes on the stack
+        next. When one trigger remains it is auto-stacked (no pointless extra
+        decision); when the batch empties, the choice closes, the phase is
+        restored, and any waiting NAP batch is stacked. Returns True if the
+        choice was valid and applied."""
+        gs = self.game_state
+        ctx = getattr(gs, 'choice_context', None)
+        if not ctx or ctx.get('type') != 'order_triggers':
+            logging.warning("order_trigger_chosen called without an order_triggers context.")
+            return False
+        pending = ctx.get('pending', [])
+        if not isinstance(index, int) or not (0 <= index < len(pending)):
+            logging.warning(f"order_trigger_chosen: invalid index {index} for {len(pending)} pending.")
+            return False
 
-        # After adding triggers, the main game loop handles stack resolution.
-        # add_to_stack resets priority correctly.
+        ability, controller, trig_ctx = pending.pop(index)
+        self._push_trigger_to_stack(ability, controller, trig_ctx)
+        if len(pending) == 1:
+            ability, controller, trig_ctx = pending.pop(0)
+            self._push_trigger_to_stack(ability, controller, trig_ctx)
 
+        if not pending:
+            next_batch = ctx.get('next_batch') or []
+            gs.choice_context = None
+            # The stack is now non-empty: players receive priority (CR 117.3c),
+            # matching add_to_stack's own convention for non-choice phases.
+            # previous_priority_phase keeps the phase saved on choice entry, so
+            # the game returns there once the stack empties.
+            gs.phase = gs.PHASE_PRIORITY
+            self._stack_trigger_batch_with_choice(next_batch)
+        return True
 
     def resolve_ability(self, ability_type, card_id, controller, context=None):
         """

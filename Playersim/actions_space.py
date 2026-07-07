@@ -588,6 +588,25 @@ class ActionSpaceMixin:
                 # Allow skipping the dredge replacement
                 set_valid_action(11, "Skip Dredge") # PASS_PRIORITY effectively skips
 
+            # Order blockers for damage assignment (CR 510.1c) - indices 353-362
+            elif choice_type == "order_blockers":
+                pending = context.get("pending", [])
+                atk_card = gs._safe_get_card(context.get("attacker_id"))
+                atk_name = getattr(atk_card, 'name', '?')
+                for i, bid in enumerate(pending[:10]):
+                    b_card = gs._safe_get_card(bid)
+                    b_name = getattr(b_card, 'name', bid)
+                    set_valid_action(353 + i, f"ASSIGN_DAMAGE {atk_name} -> {b_name} next")
+
+            # Order simultaneous triggers (CR 603.3b) - reuses indices 353-362
+            elif choice_type == "order_triggers":
+                pending = context.get("pending", [])
+                for i, entry in enumerate(pending[:10]):
+                    ability = entry[0]
+                    card = gs._safe_get_card(getattr(ability, 'card_id', None))
+                    name = getattr(card, 'name', getattr(ability, 'card_id', '?'))
+                    set_valid_action(353 + i, f"ORDER_TRIGGER {name} onto stack next")
+
             # Choose Mode
             elif choice_type == "choose_mode":
                 num_choices = context.get("num_choices", 0)

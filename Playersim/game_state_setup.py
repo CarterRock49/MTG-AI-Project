@@ -16,14 +16,33 @@ class GameStateSetupMixin:
     __slots__ = ()
 
     def track_card_played(self, card_id, player_idx):
-        """Track when a card is played for statistics purposes"""
-        # Create tracking dictionary if it doesn't exist
+        """Track WHICH cards are played and WHEN (turn) for statistics.
+
+        Triage fix (July 2026): only the which-list existed; the stats tracker
+        then FABRICATED play turns as estimated_turn = CMC, so every curve
+        statistic fed to the deck builder was fiction. play_history records
+        {player_idx: {turn: [card_ids]}} with the real turn of each play.
+        """
+        # Create tracking dictionaries if they don't exist
         if not hasattr(self, 'cards_played'):
             self.cards_played = {0: [], 1: []}
+        if not hasattr(self, 'play_history'):
+            self.play_history = {0: {}, 1: {}}
         
-        # Add the card to the played list for the appropriate player
-        player_idx = 0 if player_idx == self.p1 else 1
+        # Accept either a player dict or an index. Triage fix (July 2026):
+        # this line unconditionally re-mapped by comparing to the player DICT,
+        # but every caller passes an int index -- 0 == self.p1 is always False,
+        # so ALL plays were credited to index 1 (p1's plays counted as p2's).
+        if player_idx is self.p1:
+            player_idx = 0
+        elif player_idx is self.p2:
+            player_idx = 1
+        elif player_idx not in (0, 1):
+            logging.warning(f"track_card_played: unrecognized player_idx {player_idx!r}; defaulting to 1")
+            player_idx = 1
         self.cards_played[player_idx].append(card_id)
+        turn = getattr(self, 'turn', 0)
+        self.play_history[player_idx].setdefault(turn, []).append(card_id)
         
         # If stats tracker is available, inform it
         if hasattr(self, 'stats_tracker') and self.stats_tracker:

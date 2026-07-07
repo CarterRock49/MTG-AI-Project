@@ -420,21 +420,13 @@ class EnhancedManaSystem:
         # Get effects based on the card being cast (or generic if no card)
         cost_effects = self._gather_cost_modification_effects(player, card, context)
 
-        # Apply reductions first
-        for effect in [e for e in cost_effects if e['type'] == 'reduction']:
-             original_cost_values = modified_cost.copy() # Copy before applying effect
-             modified_cost = self._apply_cost_effect(modified_cost, effect)
-             # Track change
-             change_amount = 0
-             if effect['applies_to'] == 'generic':
-                 change_amount = original_cost_values['generic'] - modified_cost['generic']
-             elif effect['applies_to'] == 'specific_color':
-                 color = effect['color']
-                 change_amount = original_cost_values.get(color,0) - modified_cost.get(color,0)
-             if change_amount > 0:
-                  applied_modifications['reductions'].append({ 'amount': change_amount, 'source': effect.get('source', 'unknown'), 'type': effect['applies_to']})
-
-        # Apply increases next
+        # CR 601.2f BUGFIX (July 2026): cost INCREASES apply before cost
+        # reductions. The old reductions-first order let a reduction bottom
+        # out at zero generic before a tax applied, over-pricing the spell by
+        # up to the clipped amount (e.g. {2} +2 tax -3 discount: correct {1},
+        # old order {2}). Cost-reduction decks were systematically mis-priced
+        # against tax effects.
+        # Apply increases first
         for effect in [e for e in cost_effects if e['type'] == 'increase']:
              original_cost_values = modified_cost.copy()
              modified_cost = self._apply_cost_effect(modified_cost, effect)
@@ -447,6 +439,20 @@ class EnhancedManaSystem:
                  change_amount = modified_cost.get(color,0) - original_cost_values.get(color,0)
              if change_amount > 0:
                   applied_modifications['increases'].append({ 'amount': change_amount, 'source': effect.get('source', 'unknown'), 'type': effect['applies_to']})
+
+        # Apply reductions after all increases (CR 601.2f)
+        for effect in [e for e in cost_effects if e['type'] == 'reduction']:
+             original_cost_values = modified_cost.copy() # Copy before applying effect
+             modified_cost = self._apply_cost_effect(modified_cost, effect)
+             # Track change
+             change_amount = 0
+             if effect['applies_to'] == 'generic':
+                 change_amount = original_cost_values['generic'] - modified_cost['generic']
+             elif effect['applies_to'] == 'specific_color':
+                 color = effect['color']
+                 change_amount = original_cost_values.get(color,0) - modified_cost.get(color,0)
+             if change_amount > 0:
+                  applied_modifications['reductions'].append({ 'amount': change_amount, 'source': effect.get('source', 'unknown'), 'type': effect['applies_to']})
 
         # Apply context-based reductions (Convoke, Delve, Improvise)
         # These modify the *cost itself* before payment check

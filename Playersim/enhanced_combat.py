@@ -112,8 +112,15 @@ class ExtendedCombatResolver(CombatResolver):
                  # Trigger combat damage events AFTER damage application & lifelink gain
                  # self._process_combat_triggers(creatures_dealt_damage_fs, is_first_strike=True) # Trigger processing deferred to main loop
 
-                 # --- SBAs Checked Externally by Game Loop ---
-                 # The main game loop should call check_state_based_actions after this step resolves.
+                 # --- CR 510.4 BUGFIX (July 2026): state-based actions MUST run
+                 # between the first-strike and regular damage steps. Both steps
+                 # happen inside this one call, so 'the game loop will check
+                 # later' never happened in between -- creatures dealt lethal
+                 # first-strike damage stayed on the battlefield (the regular
+                 # step only skips combatants that have LEFT it) and struck
+                 # back. First strike was cosmetic.
+                 if hasattr(gs, 'check_state_based_actions'):
+                     gs.check_state_based_actions()
 
                  # Clear marking structures for the regular damage step
                  damage_marked_on_creatures.clear()

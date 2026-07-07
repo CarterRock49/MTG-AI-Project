@@ -68,6 +68,10 @@ def build_fixture_decks(folder):
         _card("Ash Vanguard", "{2}{R}", "Creature — Human Soldier", 3, ["R"], 3, 2),
         _card("Magma Bruiser", "{3}{R}", "Creature — Ogre", 4, ["R"], 4, 3),
         _card("Furnace Colossus", "{4}{R}{R}", "Creature — Giant", 6, ["R"], 6, 5),
+        _card("Ember Herald", "{1}{R}", "Creature — Goblin Shaman", 2, ["R"], 1, 1,
+              "When this creature enters the battlefield, Ember Herald deals 1 damage to each opponent."),
+        _card("Cinder Martyr", "{1}{R}", "Creature — Goblin", 2, ["R"], 2, 1,
+              "When this creature dies, Cinder Martyr deals 1 damage to each opponent."),
         _card("Spark Jolt", "{R}", "Instant", 1, ["R"], text="Spark Jolt deals 2 damage to any target."),
         _card("Lava Blast", "{2}{R}", "Sorcery", 3, ["R"], text="Lava Blast deals 3 damage to any target."),
         _card("Battle Rush", "{1}{R}", "Instant", 2, ["R"], text="Target creature gets +2/+0 until end of turn."),
@@ -79,6 +83,10 @@ def build_fixture_decks(folder):
         _card("Moss Titan", "{3}{G}", "Creature — Elemental", 4, ["G"], 4, 4, "Trample"),
         _card("Canopy Sentinel", "{2}{G}", "Creature — Spider", 3, ["G"], 2, 4, "Reach"),
         _card("Elder Wurm", "{4}{G}{G}", "Creature — Wurm", 6, ["G"], 6, 6, "Trample"),
+        _card("Grove Chronicler", "{2}{G}", "Creature — Elf Druid", 3, ["G"], 2, 2,
+              "When this creature enters the battlefield, draw a card."),
+        _card("Verdant Reclaimer", "{1}{G}", "Creature — Elf", 2, ["G"], 1, 1,
+              "When this creature dies, you gain 2 life."),
         _card("Wild Growth Ritual", "{G}", "Sorcery", 1, ["G"], text="Search your library for a basic land card and put it onto the battlefield tapped."),
         _card("Predator's Bite", "{1}{G}", "Instant", 2, ["G"], text="Target creature gets +3/+3 until end of turn."),
         _card("Nature's Meal", "{2}{G}", "Sorcery", 3, ["G"], text="You gain 5 life."),
@@ -87,8 +95,8 @@ def build_fixture_decks(folder):
     forest = _card("Forest", "", "Basic Land — Forest", 0, ["G"], text="{T}: Add {G}.")
 
     def deck_json(spells, land):
-        entries = [{"card": c, "count": 4} for c in spells]      # 9 * 4 = 36
-        entries.append({"card": land, "count": 24})               # + 24 = 60
+        entries = [{"card": c, "count": 4} for c in spells]      # 11 * 4 = 44
+        entries.append({"card": land, "count": 16})               # + 16 = 60
         return {"deck": entries}
 
     with open(os.path.join(folder, "smoke_red.json"), "w") as f:
@@ -241,7 +249,7 @@ def load_data(folder):
     assert len(decks) == 2, f"expected 2 decks, got {len(decks)}"
     for d in decks:
         assert len(d["cards"]) == 60, f"deck {d['name']} has {len(d['cards'])} cards"
-    assert len(card_db) == 20, f"expected 20 unique cards, got {len(card_db)}"
+    assert len(card_db) == 24, f"expected 24 unique cards, got {len(card_db)}"  # 11 spells x 2 decks + 2 basic lands
     return decks, card_db
 
 

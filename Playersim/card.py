@@ -149,6 +149,63 @@ class Card:
         if 'planeswalker' in self.card_types:
             self._init_planeswalker(card_data)
 
+        # --- Printed-characteristics snapshot (July 2026) ---
+        # The layer system's write-back mutates this object's attributes every
+        # recalculation pass. The pass must therefore start from PRINTED values
+        # (this snapshot), never from the mutated live attributes -- otherwise
+        # continuous effects compound on every recalculation. Also the source
+        # of copyable values for CR 707.2. Taken once at construction; for
+        # token copies the constructing data IS the copy's printed identity.
+        self.snapshot_printed()
+
+    def snapshot_printed(self):
+        """(Re-)capture this card's printed characteristics from its current
+        attributes. Called once at construction; call again only when the
+        printed identity legitimately changes (e.g. transform)."""
+        import copy as _copy
+        self._printed = {
+            'name': self.name,
+            'mana_cost': self.mana_cost,
+            'cmc': getattr(self, 'cmc', 0),
+            'colors': _copy.deepcopy(getattr(self, 'colors', [0] * 5)),
+            'card_types': _copy.deepcopy(getattr(self, 'card_types', [])),
+            'subtypes': _copy.deepcopy(getattr(self, 'subtypes', [])),
+            'supertypes': _copy.deepcopy(getattr(self, 'supertypes', [])),
+            'type_line': getattr(self, 'type_line', ''),
+            'oracle_text': getattr(self, 'oracle_text', ''),
+            'keywords': _copy.deepcopy(getattr(self, 'keywords', [0] * len(Card.ALL_KEYWORDS))),
+            'power': getattr(self, 'power', None),
+            'toughness': getattr(self, 'toughness', None),
+            'loyalty': getattr(self, 'loyalty', None),
+            'defense': getattr(self, 'defense', None),
+        }
+
+    def reset_to_printed(self):
+        """Restore live characteristics from the printed snapshot.
+
+        The layer system's write-back mutates this shared object (name, P/T,
+        keywords, colors, types, oracle_text); without this reset, game N's
+        layer output leaks into game N+1 as the card's apparent live state --
+        the same cross-game leakage class as the counters bug. Called at game
+        start alongside counter clearing.
+        """
+        import copy as _copy
+        p = getattr(self, '_printed', None)
+        if not p:
+            return
+        for attr, value in p.items():
+            try:
+                setattr(self, attr, _copy.deepcopy(value) if isinstance(value, (list, dict, set)) else value)
+            except Exception:
+                pass
+
+    def printed(self, attr, default=None):
+        """Printed (pre-continuous-effects) value of a characteristic."""
+        p = getattr(self, '_printed', None)
+        if p is not None and attr in p:
+            return p[attr]
+        return getattr(self, attr, default)
+
     def _parse_special_keywords(self, oracle_text):
         """Parses Offspring and Impending keywords from oracle text."""
         if not oracle_text: return

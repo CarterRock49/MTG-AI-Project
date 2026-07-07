@@ -2113,7 +2113,8 @@ class DeckStatsTracker:
                     loser_deck_name: str = None, is_draw: bool = False,
                     game_stage: str = None, game_state: Union[str, GamePosition] = "parity", 
                     mulligan_data: Dict = None, opening_hands: Dict = None,
-                    draw_history: Dict = None, play_order: Dict = None) -> bool:
+                    draw_history: Dict = None, play_order: Dict = None,
+                    play_history: Dict = None) -> bool:
         """Record a game result with comprehensive error handling and additional tracking"""
         try:
             # Initialize card database if needed
@@ -2248,7 +2249,8 @@ class DeckStatsTracker:
                 is_draw=is_draw,
                 opening_hands=opening_hands,
                 draw_history=draw_history,
-                play_order=play_order
+                play_order=play_order,
+                play_history=play_history
             )
             
             # Save updates
@@ -2536,7 +2538,8 @@ class DeckStatsTracker:
                         cards_played: Dict[int, List[int]],
                         game_stage: GameStage, game_state: GamePosition,
                         is_draw: bool = False, opening_hands: Dict = None,
-                        draw_history: Dict = None, play_order: Dict = None) -> bool:
+                        draw_history: Dict = None, play_order: Dict = None,
+                        play_history: Dict = None) -> bool:
         """
         Update statistics for individual cards with enhanced tracking.
         
@@ -2584,16 +2587,19 @@ class DeckStatsTracker:
         
         # Track when cards were played (by turn)
         first_play_history = {}
-        for card_id in first_played:
-            # Find when this card was played (simplified - we don't have play history yet)
-            # In a real implementation, we'd track when each card was played
-            # For now, estimate based on CMC
-            card = self.card_db.get(card_id)
-            if card and hasattr(card, 'cmc'):
-                estimated_turn = max(1, min(int(card.cmc), 20))
-                if estimated_turn not in first_play_history:
-                    first_play_history[estimated_turn] = []
-                first_play_history[estimated_turn].append(card_id)
+        real_winner_history = (play_history or {}).get("winner") or {}
+        if real_winner_history:
+            # Triage fix (July 2026): use the REAL turns recorded by
+            # gs.track_card_played. The CMC estimate below fabricated curve
+            # data (every 6-drop "played on turn 6").
+            first_play_history = {int(t): list(ids) for t, ids in real_winner_history.items()}
+        else:
+            # Fallback for older callers without play tracking: CMC estimate.
+            for card_id in first_played:
+                card = self.card_db.get(card_id)
+                if card and hasattr(card, 'cmc'):
+                    estimated_turn = max(1, min(int(card.cmc), 20))
+                    first_play_history.setdefault(estimated_turn, []).append(card_id)
         
         # Update card performances for winner deck
         for card_entry in winner_composition:
@@ -2989,14 +2995,16 @@ class DeckStatsTracker:
         
         # Track when cards were played (by turn)
         second_play_history = {}
-        for card_id in second_played:
-            # Estimate play turn based on CMC (simplified)
-            card = self.card_db.get(card_id)
-            if card and hasattr(card, 'cmc'):
-                estimated_turn = max(1, min(int(card.cmc), 20))
-                if estimated_turn not in second_play_history:
-                    second_play_history[estimated_turn] = []
-                second_play_history[estimated_turn].append(card_id)
+        real_loser_history = (play_history or {}).get("loser") or {}
+        if real_loser_history:
+            # Real turns (see winner-side comment).
+            second_play_history = {int(t): list(ids) for t, ids in real_loser_history.items()}
+        else:
+            for card_id in second_played:
+                card = self.card_db.get(card_id)
+                if card and hasattr(card, 'cmc'):
+                    estimated_turn = max(1, min(int(card.cmc), 20))
+                    second_play_history.setdefault(estimated_turn, []).append(card_id)
         
         # Update card performances for loser deck
         for card_entry in loser_composition:

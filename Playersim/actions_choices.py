@@ -722,9 +722,42 @@ class ChoiceHandlersMixin:
         logging.warning(f"Unhandled special choice type: {choice_type} or mismatched action")
         return -0.1, False
 
+    def _handle_order_blockers(self, param, context, **kwargs):
+        """CR 510.1c: assign damage to pending blocker [param] next."""
+        gs = self.game_state
+        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        ctx = getattr(gs, 'choice_context', None)
+        if not ctx or ctx.get('type') != 'order_blockers' or ctx.get('player') != player:
+            logging.warning("ASSIGN_DAMAGE order action called out of context.")
+            return -0.2, False
+        handler = getattr(gs, 'combat_action_handler', None)
+        if handler and handler.blocker_order_chosen(param):
+            return 0.05, True
+        logging.warning(f"Invalid blocker order index {param}.")
+        return -0.1, False
+
+    def _handle_order_triggers(self, param, context, **kwargs):
+        """CR 603.3b: put pending trigger [param] onto the stack next.
+        Delegates the mechanics to AbilityHandler.order_trigger_chosen."""
+        gs = self.game_state
+        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        ctx = getattr(gs, 'choice_context', None)
+        if not ctx or ctx.get('type') != 'order_triggers' or ctx.get('player') != player:
+            logging.warning("ORDER_TRIGGER action called out of context.")
+            return -0.2, False
+        if gs.ability_handler and gs.ability_handler.order_trigger_chosen(param):
+            return 0.05, True
+        logging.warning(f"Invalid ORDER_TRIGGER index {param}.")
+        return -0.1, False
+
     def _handle_choose_mode(self, param, context, **kwargs):
         """Handles the CHOOSE_MODE action. Param is the chosen mode index (0-9). Finalizes choice if criteria met."""
         gs = self.game_state
+        # CR 603.3b / 510.1c: ordering choices share the 353-362 index range.
+        if getattr(gs, 'choice_context', None) and gs.choice_context.get('type') == 'order_triggers':
+            return self._handle_order_triggers(param, context)
+        if getattr(gs, 'choice_context', None) and gs.choice_context.get('type') == 'order_blockers':
+            return self._handle_order_blockers(param, context)
         player = gs.p1 if gs.agent_is_p1 else gs.p2
         chosen_mode_idx = param # Agent's choice index from action
 
