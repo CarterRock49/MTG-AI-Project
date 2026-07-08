@@ -1582,6 +1582,525 @@ def s_leveler_creature_recognized():
     reset_manifest_for_tests()
 
 
+@scenario("parser: bounce", "'return target creature to its owner's hand' parses and resolves")
+def s_parser_bounce():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    player = gs.p1
+    src_id = card_id_by_name(gs, "Thicket Brute")
+    to_battlefield(gs, src_id)
+    victim = card_id_by_name(gs, "Vine Stalker")
+    to_battlefield(gs, victim)
+    effs = EffectFactory.create_effects("Return target creature to its owner's hand.",
+                                        source_name="Test Bounce")
+    assert effs and type(effs[0]).__name__ == "ReturnToHandEffect", \
+        (f"'return to its owner's hand' did not parse to a bounce effect: "
+         f"{[type(e).__name__ for e in effs]} - the branch checked a regex string literally")
+    hand_before = len(gs.get_card_controller(victim)["hand"])
+    for e in effs:
+        e.apply(gs, src_id, player, {"creatures": [victim]})
+    owner = gs._find_card_owner_fallback(victim) or player
+    assert gs.find_card_location(victim)[1] == "hand", "bounced creature is not in hand"
+
+
+@scenario("parser: life loss", "'target player loses N life' parses and drains life")
+def s_parser_life_loss():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    player = gs.p1
+    opp = gs.p2
+    src_id = card_id_by_name(gs, "Thicket Brute")
+    to_battlefield(gs, src_id)
+    effs = EffectFactory.create_effects("Target player loses 2 life.", source_name="Test Drain")
+    assert effs and any(type(e).__name__ == "LoseLifeEffect" for e in effs), \
+        f"'loses N life' did not parse to a life-loss effect: {[type(e).__name__ for e in effs]}"
+    life_before = opp["life"]
+    for e in effs:
+        e.apply(gs, src_id, player, {"players": ["p2"]})
+    assert opp["life"] == life_before - 2, \
+        f"target player life went {life_before} -> {opp['life']}, expected -2"
+
+
+@scenario("parser: keyword grant", "'target creature gains flying until end of turn' grants the keyword")
+def s_parser_keyword_grant():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    player = gs.p1
+    src_id = card_id_by_name(gs, "Thicket Brute")
+    to_battlefield(gs, src_id)
+    target = card_id_by_name(gs, "Vine Stalker")
+    to_battlefield(gs, target)
+    assert _kw(gs, target, "flying") == 0, "test setup: target already has flying"
+    effs = EffectFactory.create_effects("Target creature gains flying until end of turn.",
+                                        source_name="Test Grant")
+    assert effs and any(type(e).__name__ == "GainKeywordEffect" for e in effs), \
+        f"keyword grant did not parse to a grant effect: {[type(e).__name__ for e in effs]}"
+    for e in effs:
+        e.apply(gs, src_id, player, {"creatures": [target]})
+    gs.layer_system.invalidate_cache(); gs.layer_system.apply_all_effects()
+    assert _kw(gs, target, "flying") == 1, \
+        "target creature did not gain flying (keyword grant is a no-op)"
+
+
+@scenario("parser: distribute counters", "'distribute N +1/+1 counters' places the counters")
+def s_parser_distribute_counters():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    player = gs.p1
+    src_id = card_id_by_name(gs, "Thicket Brute")
+    to_battlefield(gs, src_id)
+    a = card_id_by_name(gs, "Vine Stalker"); to_battlefield(gs, a)
+    effs = EffectFactory.create_effects(
+        "Distribute three +1/+1 counters among any number of target creatures.",
+        source_name="Test Distribute")
+    assert effs and any(type(e).__name__ == "AddCountersEffect" for e in effs), \
+        f"distribute counters did not parse: {[type(e).__name__ for e in effs]}"
+    # With one target creature, all 3 counters land on it.
+    for e in effs:
+        e.apply(gs, src_id, player, {"creatures": [a]})
+    card = gs._safe_get_card(a)
+    assert card.counters.get("+1/+1", 0) == 3, \
+        f"distribute placed {card.counters.get('+1/+1', 0)} counters, expected 3 on the sole target"
+
+
+@scenario("parser: sacrifice", "'sacrifice a creature' moves one of your creatures to the graveyard")
+def s_parser_sacrifice():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    player = gs.p1
+    src_id = card_id_by_name(gs, "Thicket Brute")
+    player = to_battlefield(gs, src_id)   # controller = the creatures' actual owner
+    victim = card_id_by_name(gs, "Vine Stalker")
+    assert gs.move_card(victim, owner_of(gs, victim), "library", player, "battlefield")
+    effs = EffectFactory.create_effects("Sacrifice a creature.", source_name="Test Sac")
+    assert effs and type(effs[0]).__name__ == "SacrificeEffect", \
+        f"'sacrifice a creature' did not parse to a sacrifice effect: {[type(e).__name__ for e in effs]}"
+    gy_before = len(player["graveyard"])
+    bf_before = len([c for c in player["battlefield"] if "creature" in getattr(gs._safe_get_card(c),"card_types",[])])
+    for e in effs:
+        e.apply(gs, src_id, player, {})
+    bf_after = len([c for c in player["battlefield"] if "creature" in getattr(gs._safe_get_card(c),"card_types",[])])
+    assert bf_after == bf_before - 1 and len(player["graveyard"]) == gy_before + 1, \
+        "no creature was sacrificed to the graveyard"
+
+
+@scenario("parser: edict", "'target player sacrifices a creature' hits the opponent")
+def s_parser_edict():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    player, opp = gs.p1, gs.p2
+    src_id = card_id_by_name(gs, "Thicket Brute"); to_battlefield(gs, src_id)
+    theirs = card_id_by_name(gs, "Vine Stalker")
+    assert gs.move_card(theirs, owner_of(gs, theirs), "library", opp, "battlefield")
+    effs = EffectFactory.create_effects("Target player sacrifices a creature.", source_name="Edict")
+    assert effs and type(effs[0]).__name__ == "SacrificeEffect", \
+        f"edict did not parse to a sacrifice effect: {[type(e).__name__ for e in effs]}"
+    gy_before = len(opp["graveyard"])
+    for e in effs:
+        e.apply(gs, src_id, player, {"players": ["p2"]})
+    assert len(opp["graveyard"]) == gy_before + 1, "edict did not make the target player sacrifice"
+
+
+@scenario("parser: reanimation", "'return target creature card from your graveyard to the battlefield' revives it")
+def s_parser_reanimation():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    player = gs.p1
+    src_id = card_id_by_name(gs, "Thicket Brute"); to_battlefield(gs, src_id)
+    dead = inject_card(gs, {"name": "Dead Bear", "mana_cost": "{1}{G}",
+                            "type_line": "Creature — Bear", "power": 2, "toughness": 2})
+    player["graveyard"].append(dead)
+    effs = EffectFactory.create_effects(
+        "Return target creature card from your graveyard to the battlefield.", source_name="Reanimate")
+    assert effs and type(effs[0]).__name__ == "ReanimateEffect", \
+        f"reanimation did not parse: {[type(e).__name__ for e in effs]}"
+    for e in effs:
+        e.apply(gs, src_id, player, {"cards": [dead]})
+    assert gs.find_card_location(dead)[1] == "battlefield", \
+        "reanimated creature is not on the battlefield"
+    assert dead not in player["graveyard"], "reanimated creature was left in the graveyard"
+
+
+@scenario("parser: can't attack/block", "'target creature can't block this turn' registers the restriction")
+def s_parser_cant_block():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    player = gs.p1
+    src_id = card_id_by_name(gs, "Thicket Brute"); to_battlefield(gs, src_id)
+    target = card_id_by_name(gs, "Vine Stalker"); to_battlefield(gs, target)
+    effs = EffectFactory.create_effects("Target creature can't block this turn.", source_name="Falter")
+    assert effs and type(effs[0]).__name__ == "GainKeywordEffect", \
+        f"'can't block' did not parse to a restriction grant: {[type(e).__name__ for e in effs]}"
+    for e in effs:
+        e.apply(gs, src_id, player, {"creatures": [target]})
+    gs.layer_system.invalidate_cache(); gs.layer_system.apply_all_effects()
+    # The restriction is stored as a granted 'cant_block' ability on the target.
+    card = gs._safe_get_card(target)
+    granted = getattr(card, '_granted_abilities', set()) if hasattr(card, '_granted_abilities') else set()
+    # Fall back to checking the layer registration directly.
+    has_restriction = any(
+        d.get('effect_value') == 'cant_block' and target in d.get('affected_ids', [])
+        for _, d in gs.layer_system.layers[6])
+    assert has_restriction, "'can't block' restriction was not registered on the target"
+
+
+@scenario("711 (leveler)", "a level-up creature reports P/T for its current level band")
+def s_leveler_pt_by_level():
+    gs = fresh()
+    player = gs.p1
+    lev = inject_card(gs, {
+        "name": "Warfare Student", "mana_cost": "{W}",
+        "type_line": "Creature — Human Soldier",
+        "oracle_text": "Level up {W}\nLEVEL 1-6\n4/4\nFirst strike\nLEVEL 7+\n8/8\nDouble strike",
+        "power": 1, "toughness": 1,
+    })
+    player["library"].append(lev)
+    assert gs.move_card(lev, player, "library", player, "battlefield")
+    card = gs._safe_get_card(lev)
+    assert getattr(card, "is_leveler", False), "leveler creature was not recognized as a leveler"
+    # Base (0 level counters): printed 1/1.
+    assert card.get_leveler_pt(0) == (1, 1), f"level 0 P/T wrong: {card.get_leveler_pt(0)}"
+    # 3 counters -> band LEVEL 1-6 -> 4/4.
+    assert card.get_leveler_pt(3) == (4, 4), f"level 3 P/T wrong: {card.get_leveler_pt(3)}"
+    # 7 counters -> band LEVEL 7+ -> 8/8.
+    assert card.get_leveler_pt(7) == (8, 8), f"level 7 P/T wrong: {card.get_leveler_pt(7)}"
+
+
+@scenario("712 (MDFC)", "casting an MDFC's back face uses the back face's cost and text")
+def s_mdfc_back_face_cast():
+    gs = fresh()
+    player = gs.p1
+    mdfc = inject_card(gs, {
+        "name": "Sejiri Shelter // Sejiri Glacier",
+        "mana_cost": "{1}{W}",
+        "type_line": "Instant // Land",
+        "oracle_text": "Sejiri Shelter\nInstant\nTarget creature gains protection from a color.\n"
+                       "Sejiri Glacier\nLand\nSejiri Glacier enters the battlefield tapped.",
+        "faces": [
+            {"name": "Sejiri Shelter", "mana_cost": "{1}{W}", "type_line": "Instant",
+             "oracle_text": "Target creature you control gains protection from the color of your choice until end of turn."},
+            {"name": "Sejiri Glacier", "mana_cost": "", "type_line": "Land",
+             "oracle_text": "Sejiri Glacier enters the battlefield tapped."},
+        ],
+    })
+    card = gs._safe_get_card(mdfc)
+    assert card.is_mdfc(), "card with two non-transform faces was not recognized as MDFC"
+    # The engine must expose the cost/text of a chosen face, not just the front.
+    front_cost = card.get_face_cost(0)
+    back_cost = card.get_face_cost(1)
+    assert front_cost == "{1}{W}", f"front face cost wrong: {front_cost}"
+    assert back_cost == "", f"back face (land) cost wrong: {back_cost!r}"
+    assert "enters the battlefield tapped" in card.get_face_text(1).lower(), \
+        "back face text not retrievable for casting/playing the back face"
+
+
+@scenario("parser: ritual", "'Add {B}{B}{B}' as a spell effect fills the mana pool")
+def s_parser_ritual():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    player = gs.p1
+    src_id = card_id_by_name(gs, "Thicket Brute"); to_battlefield(gs, src_id)
+    player["mana_pool"] = {}
+    effs = EffectFactory.create_effects("Add {B}{B}{B}.", source_name="Dark Ritual")
+    assert effs and type(effs[0]).__name__ == "AddManaEffect", \
+        f"ritual text did not parse to a mana effect: {[type(e).__name__ for e in effs]}"
+    for e in effs:
+        e.apply(gs, src_id, player, {})
+    assert player["mana_pool"].get("B", 0) == 3, \
+        f"ritual produced {player['mana_pool'].get('B', 0)} B, expected 3 (rituals were no-ops)"
+
+
+@scenario("parser: gain control", "'gain control of target creature' moves it to your battlefield")
+def s_parser_gain_control():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    player, opp = gs.p1, gs.p2
+    src_id = card_id_by_name(gs, "Thicket Brute"); to_battlefield(gs, src_id)
+    theirs = card_id_by_name(gs, "Vine Stalker")
+    assert gs.move_card(theirs, owner_of(gs, theirs), "library", opp, "battlefield")
+    effs = EffectFactory.create_effects("Gain control of target creature until end of turn.",
+                                        source_name="Threaten")
+    assert effs and type(effs[0]).__name__ == "ControlEffect", \
+        f"gain control did not parse: {[type(e).__name__ for e in effs]}"
+    for e in effs:
+        e.apply(gs, src_id, player, {"creatures": [theirs]})
+    assert theirs in player["battlefield"] and theirs not in opp["battlefield"], \
+        "creature was not taken under the caster's control"
+
+
+@scenario("parser: regenerate", "'regenerate target creature' grants a regeneration shield")
+def s_parser_regenerate():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    src_id = card_id_by_name(gs, "Thicket Brute")
+    player = to_battlefield(gs, src_id)
+    target = card_id_by_name(gs, "Vine Stalker")
+    assert gs.move_card(target, owner_of(gs, target), "library", player, "battlefield")
+    effs = EffectFactory.create_effects("Regenerate target creature.", source_name="Regen")
+    assert effs and type(effs[0]).__name__ == "RegenerateEffect", \
+        f"regenerate did not parse: {[type(e).__name__ for e in effs]}"
+    for e in effs:
+        e.apply(gs, src_id, player, {"creatures": [target]})
+    assert target in player.get("regeneration_shields", set()), \
+        "regenerate did not add a regeneration shield"
+    # The shield prevents the next destruction.
+    assert gs.apply_regeneration(target, player), "regeneration shield did not fire on destroy"
+    assert gs.find_card_location(target)[1] == "battlefield", "creature left despite regenerating"
+
+
+@scenario("parser: mass tap", "'tap all creatures target player controls' taps their team")
+def s_parser_mass_tap():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    player, opp = gs.p1, gs.p2
+    src_id = card_id_by_name(gs, "Thicket Brute"); to_battlefield(gs, src_id)
+    a = card_id_by_name(gs, "Vine Stalker")
+    assert gs.move_card(a, owner_of(gs, a), "library", opp, "battlefield")
+    b = card_id_by_name(gs, "Sprout Guardian")
+    assert gs.move_card(b, owner_of(gs, b), "library", opp, "battlefield")
+    effs = EffectFactory.create_effects("Tap all creatures target player controls.",
+                                        source_name="Sleep")
+    assert effs and type(effs[0]).__name__ == "TapEffect", \
+        f"mass tap did not parse: {[type(e).__name__ for e in effs]}"
+    for e in effs:
+        e.apply(gs, src_id, player, {"players": ["p2"]})
+    tapped = opp.get("tapped_permanents", set())
+    assert a in tapped and b in tapped, \
+        f"not all of the target player's creatures were tapped: {tapped}"
+
+
+@scenario("parser: mass bounce", "'return all creatures to their owners' hands' clears the board to hand")
+def s_parser_mass_bounce():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    player, opp = gs.p1, gs.p2
+    src_id = card_id_by_name(gs, "Thicket Brute"); pl = to_battlefield(gs, src_id)
+    mine = card_id_by_name(gs, "Vine Stalker")
+    assert gs.move_card(mine, owner_of(gs, mine), "library", pl, "battlefield")
+    theirs = card_id_by_name(gs, "Sprout Guardian")
+    other = gs.p2 if pl is gs.p1 else gs.p1
+    assert gs.move_card(theirs, owner_of(gs, theirs), "library", other, "battlefield")
+    effs = EffectFactory.create_effects("Return all creatures to their owners' hands.",
+                                        source_name="Evacuation")
+    assert effs and type(effs[0]).__name__ == "ReturnToHandEffect", \
+        f"mass bounce did not parse: {[type(e).__name__ for e in effs]}"
+    for e in effs:
+        e.apply(gs, src_id, pl, {})
+    assert gs.find_card_location(mine)[1] == "hand" and gs.find_card_location(theirs)[1] == "hand", \
+        "not all creatures were returned to hand"
+
+
+@scenario("parser: untap all", "'untap all lands you control' untaps the caster's lands")
+def s_parser_untap_all():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    src_id = card_id_by_name(gs, "Thicket Brute"); player = to_battlefield(gs, src_id)
+    forest = card_id_by_name(gs, "Forest")
+    assert gs.move_card(forest, owner_of(gs, forest), "library", player, "battlefield")
+    player.setdefault("tapped_permanents", set()).add(forest)
+    assert forest in player["tapped_permanents"], "setup: land not tapped"
+    effs = EffectFactory.create_effects("Untap all lands you control.", source_name="Early Harvest")
+    assert effs and type(effs[0]).__name__ == "UntapEffect", \
+        f"untap-all did not parse: {[type(e).__name__ for e in effs]}"
+    for e in effs:
+        e.apply(gs, src_id, player, {})
+    assert forest not in player.get("tapped_permanents", set()), \
+        "'untap all lands you control' did not untap the caster's land"
+
+
+@scenario("parser: dig", "'look at the top three, put one into your hand' draws one and reorders the rest")
+def s_parser_dig():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    src_id = card_id_by_name(gs, "Thicket Brute"); player = to_battlefield(gs, src_id)
+    top3 = list(player["library"][:3])
+    hand_before = len(player["hand"])
+    lib_before = len(player["library"])
+    effs = EffectFactory.create_effects(
+        "Look at the top three cards of your library. Put one into your hand and the rest on the bottom.",
+        source_name="Dig")
+    assert effs and type(effs[0]).__name__ == "DigEffect", \
+        f"dig did not parse: {[type(e).__name__ for e in effs]}"
+    for e in effs:
+        e.apply(gs, src_id, player, {})
+    assert len(player["hand"]) == hand_before + 1, "dig did not put a card into hand"
+    assert len(player["library"]) == lib_before - 1, "dig changed library size incorrectly"
+    # Exactly one card left the top region into hand; the other two are now on
+    # the bottom. (Fixture libraries repeat card IDs across the 4 copies, so
+    # verify by net movement rather than ID membership.)
+    moved_to_bottom = player["library"][-2:]
+    assert all(c in top3 for c in moved_to_bottom), \
+        "the unchosen looked-at cards are not on the bottom of the library"
+
+
+@scenario("parser: put on top", "'put target creature on top of its owner's library' removes it from the battlefield")
+def s_parser_put_on_top():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    player, opp = gs.p1, gs.p2
+    src_id = card_id_by_name(gs, "Thicket Brute"); to_battlefield(gs, src_id)
+    victim = card_id_by_name(gs, "Vine Stalker")
+    vowner = owner_of(gs, victim)
+    assert gs.move_card(victim, vowner, "library", vowner, "battlefield")
+    effs = EffectFactory.create_effects("Put target creature on top of its owner's library.",
+                                        source_name="Temporal Spring")
+    assert effs and type(effs[0]).__name__ == "PutOnLibraryEffect", \
+        f"put-on-library did not parse: {[type(e).__name__ for e in effs]}"
+    for e in effs:
+        e.apply(gs, src_id, player, {"creatures": [victim]})
+    assert gs.find_card_location(victim)[1] == "library", "creature was not put into the library"
+    assert vowner["library"][0] == victim, "creature was not placed on TOP of the library"
+
+
+@scenario("parser: variable draw", "'draw cards equal to the number of creatures you control' scales")
+def s_parser_variable_draw():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    src_id = card_id_by_name(gs, "Thicket Brute"); player = to_battlefield(gs, src_id)
+    c2 = card_id_by_name(gs, "Vine Stalker")
+    assert gs.move_card(c2, owner_of(gs, c2), "library", player, "battlefield")
+    # 2 creatures controlled (Thicket Brute + Vine Stalker).
+    hand_before = len(player["hand"])
+    effs = EffectFactory.create_effects("Draw cards equal to the number of creatures you control.",
+                                        source_name="Harmonize")
+    assert effs and type(effs[0]).__name__ == "DrawCardEffect", \
+        f"variable draw did not parse: {[type(e).__name__ for e in effs]}"
+    for e in effs:
+        e.apply(gs, src_id, player, {})
+    assert len(player["hand"]) == hand_before + 2, \
+        f"drew {len(player['hand']) - hand_before} cards, expected 2 (creatures controlled)"
+
+
+@scenario("parser: variable life", "'gain life equal to the number of creatures you control' scales")
+def s_parser_variable_life():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    src_id = card_id_by_name(gs, "Thicket Brute"); player = to_battlefield(gs, src_id)
+    c2 = card_id_by_name(gs, "Vine Stalker")
+    assert gs.move_card(c2, owner_of(gs, c2), "library", player, "battlefield")
+    life_before = player["life"]
+    effs = EffectFactory.create_effects("You gain life equal to the number of creatures you control.",
+                                        source_name="Rest for the Weary")
+    assert effs and type(effs[0]).__name__ == "GainLifeEffect", \
+        f"variable life did not parse: {[type(e).__name__ for e in effs]}"
+    for e in effs:
+        e.apply(gs, src_id, player, {})
+    assert player["life"] == life_before + 2, \
+        f"gained {player['life'] - life_before} life, expected 2 (creatures controlled)"
+
+
+@scenario("parser: shuffle graveyard", "'shuffle your graveyard into your library' empties the graveyard")
+def s_parser_shuffle_graveyard():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    src_id = card_id_by_name(gs, "Thicket Brute"); player = to_battlefield(gs, src_id)
+    # Seed graveyard with a couple of cards.
+    for _ in range(2):
+        player["graveyard"].append(player["library"].pop(0))
+    gy_before = len(player["graveyard"])
+    lib_before = len(player["library"])
+    assert gy_before >= 2, "setup: graveyard not seeded"
+    effs = EffectFactory.create_effects("Shuffle your graveyard into your library.",
+                                        source_name="Gaea's Blessing")
+    assert effs and type(effs[0]).__name__ == "ShuffleGraveyardEffect", \
+        f"shuffle-graveyard did not parse: {[type(e).__name__ for e in effs]}"
+    for e in effs:
+        e.apply(gs, src_id, player, {})
+    assert len(player["graveyard"]) == 0, "graveyard was not emptied into the library"
+    assert len(player["library"]) == lib_before + gy_before, \
+        "library did not grow by the graveyard's contents"
+
+
+@scenario("parser: fog", "'prevent all combat damage this turn' registers a prevention effect")
+def s_parser_fog():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    src_id = card_id_by_name(gs, "Thicket Brute"); player = to_battlefield(gs, src_id)
+    effs = EffectFactory.create_effects("Prevent all combat damage that would be dealt this turn.",
+                                        source_name="Fog")
+    assert effs and type(effs[0]).__name__ == "PreventDamageEffect", \
+        f"fog did not parse: {[type(e).__name__ for e in effs]}"
+    for e in effs:
+        e.apply(gs, src_id, player, {})
+    # A combat-damage event should now be prevented via the replacement system.
+    ctx, replaced = gs.replacement_effects.apply_replacements(
+        'DAMAGE', {'damage_amount': 5, 'target_id': "p1", 'target_is_player': True,
+                   'is_combat_damage': True})
+    assert ctx.get('damage_amount') == 0, \
+        f"combat damage not prevented by fog (amount={ctx.get('damage_amount')})"
+    # Non-combat damage is NOT prevented by a combat-only fog.
+    ctx2, _ = gs.replacement_effects.apply_replacements(
+        'DAMAGE', {'damage_amount': 3, 'target_id': "p1", 'target_is_player': True,
+                   'is_combat_damage': False})
+    assert ctx2.get('damage_amount') == 3, "fog wrongly prevented non-combat damage"
+
+
+@scenario("parser: variable pump", "'+X/+X where X is the number of Mountains you control' scales P/T")
+def s_parser_variable_pump():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    src_id = card_id_by_name(gs, "Thicket Brute"); player = to_battlefield(gs, src_id)
+    target = card_id_by_name(gs, "Vine Stalker")
+    assert gs.move_card(target, owner_of(gs, target), "library", player, "battlefield")
+    # Give the controller two Mountains.
+    for _ in range(2):
+        m = inject_card(gs, {"name": "Mountain", "mana_cost": "", "type_line": "Basic Land — Mountain",
+                             "oracle_text": "{T}: Add {R}.", "subtypes": ["mountain"]})
+        player["library"].append(m)
+        assert gs.move_card(m, player, "library", player, "battlefield")
+    card = gs._safe_get_card(target)
+    base_p, base_t = card.power, card.toughness   # 2/2
+    effs = EffectFactory.create_effects(
+        "Target creature gets +X/+X until end of turn, where X is the number of Mountains you control.",
+        source_name="Kird Buff")
+    assert effs and type(effs[0]).__name__ == "BuffEffect", \
+        f"variable pump did not parse: {[type(e).__name__ for e in effs]}"
+    for e in effs:
+        e.apply(gs, src_id, player, {"creatures": [target]})
+    gs.layer_system.invalidate_cache(); gs.layer_system.apply_all_effects()
+    assert (card.power, card.toughness) == (base_p + 2, base_t + 2), \
+        f"variable pump gave {card.power}/{card.toughness}, expected {base_p+2}/{base_t+2} (2 Mountains)"
+
+
+@scenario("parser: animate land", "'target land becomes a 3/3 creature' makes the land a creature")
+def s_parser_animate_land():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    src_id = card_id_by_name(gs, "Thicket Brute"); player = to_battlefield(gs, src_id)
+    land = card_id_by_name(gs, "Forest")
+    assert gs.move_card(land, owner_of(gs, land), "library", player, "battlefield")
+    card = gs._safe_get_card(land)
+    assert 'creature' not in [t.lower() for t in card.card_types], "setup: land already a creature"
+    effs = EffectFactory.create_effects(
+        "Target land becomes a 3/3 creature until end of turn. It's still a land.",
+        source_name="Nature's Ruin")
+    assert effs and type(effs[0]).__name__ == "AnimateLandEffect", \
+        f"animate-land did not parse: {[type(e).__name__ for e in effs]}"
+    for e in effs:
+        e.apply(gs, src_id, player, {"lands": [land], "permanents": [land]})
+    gs.layer_system.invalidate_cache(); gs.layer_system.apply_all_effects()
+    assert gs._is_creature(land), "target land did not become a creature"
+    assert (card.power, card.toughness) == (3, 3), \
+        f"animated land P/T is {card.power}/{card.toughness}, expected 3/3"
+    assert 'land' in [t.lower() for t in card.card_types], "animated land lost its land type"
+
+
+@scenario("parser: reveal hand", "'target player reveals their hand' marks the hand revealed")
+def s_parser_reveal_hand():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    player, opp = gs.p1, gs.p2
+    src_id = card_id_by_name(gs, "Thicket Brute"); to_battlefield(gs, src_id)
+    effs = EffectFactory.create_effects("Target player reveals their hand.", source_name="Peek")
+    assert effs and type(effs[0]).__name__ == "RevealHandEffect", \
+        f"reveal-hand did not parse: {[type(e).__name__ for e in effs]}"
+    ok = False
+    for e in effs:
+        ok = e.apply(gs, src_id, player, {"players": ["p2"]}) or ok
+    assert ok, "reveal-hand effect reported failure"
+    assert opp.get("hand_revealed"), "target player's hand was not marked revealed"
+
+
 @scenario("616 (engine)", "legacy asap delayed triggers fire at the next state-based check")
 def s_delayed_trigger_asap():
     gs = fresh()

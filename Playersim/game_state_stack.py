@@ -144,6 +144,14 @@ class GameStateStackMixin:
              if final_cost_dict is None: return False
         else: # Normal cost
             base_cost_str = getattr(card, 'mana_cost', '')
+            # MDFC back-face casting (July 2026): use the BACK face's mana cost
+            # when this cast is flagged as the back face. Previously the spell
+            # path always used the front cost, so casting a spell MDFC's back
+            # face charged the wrong amount.
+            if context.get('cast_as_back_face') and hasattr(card, 'get_face_cost'):
+                _back_cost = card.get_face_cost(1)
+                base_cost_str = _back_cost if _back_cost is not None else base_cost_str
+                context['effect_text'] = card.get_face_text(1)
 
         # --- 4. Calculate Final Cost (Mana & Non-Mana) ---
         # Parse base cost if applicable

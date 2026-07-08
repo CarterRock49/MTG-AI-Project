@@ -81,8 +81,100 @@ Remaining Tier 2 work:
   consulted before the text parser, for cards regex can't express.
 - ▢ **Coverage report**: script that joins a format's card pool against the
   manifest to print "N of M cards fully supported" — the format milestone.
-- ▢ **Parser expansion, manifest-ranked**: grow clause coverage in
-  `EffectFactory` in order of manifest counts from real runs.
+- ◐ **Parser expansion** (started July 2026): a reusable diagnostic harness
+  measures the factory's no-op fallback rate across common oracle clauses.
+  Round 1 closed 6 gaps in a 40-clause sample (was 6/40 no-op, now 0/40):
+  * **Bounce was broken for standard phrasing** — "return target creature to
+    its owner's hand" embedded a regex pattern inside a plain substring `in`
+    check, so it literally searched for the pattern string and never matched;
+    only "to your hand" worked. High-impact: bounce is ubiquitous. Real regex now.
+  * **"target player loses N life"** (drain/edict) → added LoseLifeEffect (CR
+    118.4: life loss, not damage; unpreventable; fires LIFE_LOSS triggers).
+  * **"gains <keyword> until end of turn"** — the most common combat trick —
+    → added GainKeywordEffect (layer-6 add_ability, end-of-turn). Also fixes
+    the trample half of "gets +1/+1 and gains trample", previously dropped.
+  * **"distribute N +1/+1 counters"** parsed (single-target v1; the
+    multi-target split is a Tier 3 agent-choice item).
+  Regression-checked: previously-working clauses still route correctly. Four
+  scenarios guard the new coverage.
+  **Round 2 (July 2026)** closed 7 more gaps (13/20 no-op in the next sample,
+  now 0/20 for the targeted clauses):
+  * **Sacrifice / edict** — "sacrifice a <type>", "target player sacrifices",
+    "each player/opponent sacrifices" all hit the no-op fallback. Added
+    SacrificeEffect (v1 heuristic pick; player-choice is a Tier 3 item).
+  * **Reanimation** — "return ... from graveyard to the battlefield" was only
+    handled for the "to hand" phrasing; the battlefield destination no-opped.
+    Added ReanimateEffect (enters under controller's control), disambiguated
+    from bounce so "to hand" vs "to the battlefield" route correctly.
+  * **"can't attack/block"** combat restrictions → granted cant_attack /
+    cant_block abilities via the layer-6 path.
+  * Found and fixed a genuine phantom method: **GameState._is_creature never
+    existed** despite 6 call sites — including the environment's
+    my_dead_creatures / opp_dead_creatures OBSERVATIONS, meaning the agent's
+    dead-creature counts were ALWAYS ZERO in training, and BuffEffect/anthem
+    target sets silently excluded every creature. Added the helper.
+  **Round 3 (July 2026)** closed 4 more high-frequency clusters (14/20 no-op
+  in the next sample; the genuinely-missing spell effects now route):
+  * **Rituals / add-mana spell effects** — "Add {B}{B}{B}", "add N mana of any
+    color" as a SPELL effect (Dark Ritual etc.) hit the no-op fallback and
+    produced nothing. Added AddManaEffect. (Mana ACTIVATED abilities on
+    permanents were already handled by ManaAbility; the diagnostic's raw
+    "14/20" over-counts those since they aren't spell effects.)
+  * **Gain control** — "gain control of target creature" → ControlEffect via
+    apply_temporary_control (end-of-turn release already handled).
+  * **Regenerate** — "regenerate target creature" → RegenerateEffect (adds a
+    regeneration_shields entry; apply_regeneration consumes it).
+  * **Mass tap** — "tap all creatures target player controls" → TapEffect with
+    a new all_target_player scope.
+  Regression-checked 0/18 including single-target tap vs mass tap.
+  **Round 4 (July 2026)** closed 4 more clusters (9/20 no-op in the next
+  sample — miss rate falling as coverage grows):
+  * **Mass bounce** — "return all creatures to their owners' hands" → added an
+    'all'/'all_yours' scope to ReturnToHandEffect.
+  * **Untap-all** — "untap all lands you control" (ramp/combo staple) → added
+    an 'all_yours' scope to UntapEffect.
+  * **Dig** — "look at the top N, put one into your hand, rest on bottom/top"
+    → added DigEffect (v1 keeps the highest-CMC card; the pick is a Tier 3
+    agent-choice item).
+  * **Tuck / put-on-library** — "put target creature on top of its owner's
+    library" (tempo removal) → added PutOnLibraryEffect.
+  Regression-checked 0/17 including single-target vs mass bounce/untap.
+  **Round 5 (July 2026)** closed 4 more clusters (10/20 no-op in the next
+  sample):
+  * **Variable draw** — "draw cards equal to the number of X" → DrawCardEffect
+    gained a count_expr, resolved via a new shared GameState helper
+    count_dynamic_quantity (handles "creatures/lands/artifacts you control",
+    "cards in your graveyard", basic-land subtypes, etc.).
+  * **Variable life** — "gain life equal to the number of X" → GainLifeEffect
+    gained the same count_expr path.
+  * **Shuffle graveyard into library** (graveyard hate / recursion) → added
+    ShuffleGraveyardEffect.
+  * **Damage prevention (fog)** — "prevent all combat damage this turn",
+    "prevent the next N damage" → added PreventDamageEffect, which registers a
+    DAMAGE replacement (the replacement system was made functional earlier
+    this campaign, so this composes cleanly). Correctly distinguishes combat
+    vs non-combat damage and tracks "next N".
+  Regression-checked 0/21 including fixed-count vs variable draw/life.
+  **Round 6 (July 2026)** closed the last 3 gaps in the next sample (only
+  3/20 no-op — the common-effect surface is now largely covered):
+  * **Variable P/T pump** — "gets +X/+X ... where X is the number of Y" →
+    BuffEffect gained a count_expr resolved via count_dynamic_quantity. The
+    clause splitter severs the "where X is..." tail at the comma (same disease
+    as delayed triggers/search), so the branch reads the count expression from
+    the full effect_text, not just the clause.
+  * **Animate land** — "target land becomes a 3/3 creature (still a land)" →
+    added AnimateLandEffect (layer-4 add_type creature + layer-7b set_pt).
+  * **Reveal hand** — "target player reveals their hand" → added
+    RevealHandEffect (marks hand_revealed + fires a HAND_REVEALED trigger for
+    downstream discard-selection effects to key off).
+  Regression-checked 0/19 including fixed vs variable pump.
+  **Coverage status:** six rounds have closed ~33 effect classes across
+  removal, bounce, counters, tokens, keywords, sacrifice, reanimation,
+  control, mana, library manipulation, variable-count effects, prevention,
+  and animation. Miss rate fell 6→13→14→9→10→3 across samples. Remaining
+  gaps are increasingly specialized (dice/planar, complex modal riders,
+  "you choose a card" interactive discard, meld/specialize). Reorder by real
+  manifest counts whenever harvest runs begin.
 - ▢ **First-touch coverage sweep**: one scenario for every subsystem that has
   never had one (this practice found four phantom methods and three dead
   subsystems; assume more remain in untested corners — candidates: search
@@ -153,6 +245,18 @@ Remaining Tier 2 work:
   dependencies out of scope while `affected_ids` is a static snapshot.
 - Transform/DFC printed-identity re-snapshot not wired (`snapshot_printed`
   exists; call it on transform).
+- MDFC back-face casting — v1 support added (July 2026): is_mdfc() no longer
+  requires "//" in the text (two non-transform faces suffice), Card exposes
+  get_face_cost/get_face_text/get_face_type_line per face, and cast_spell uses
+  the back face's cost + text when cast_as_back_face is set (the spell path
+  previously always used the front cost). Remaining: MDFC back-face for
+  non-land permanents entering directly, and back-face targeting text.
+- Level-up creatures — v1 support added (July 2026): Card parses the
+  "LEVEL N-M / N+" band format (distinct from Class enchantments) into
+  is_leveler / leveler_bands / level_up_cost, with get_leveler_pt(counters)
+  and get_leveler_abilities(counters). P/T resolves by level-counter total.
+  Remaining: a LEVEL_UP creature action and applying band abilities through
+  the layer system (the P/T/ability data is now available for both).
 - Clones/MCTS copies start with an empty delayed-trigger registry.
 - Opponent auto-orders triggers and blockers (deadlock-safe scope cut until
   self-play).

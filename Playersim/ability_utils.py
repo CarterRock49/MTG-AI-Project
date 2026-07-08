@@ -340,7 +340,12 @@ class EffectFactory:
             DiscardEffect, MillEffect, TapEffect, UntapEffect, BuffEffect,
             SearchLibraryEffect, AddCountersEffect, ReturnToHandEffect,
             ScryEffect, SurveilEffect, CopySpellEffect, TransformEffect, FightEffect,
-            ImpulseDrawEffect)
+            ImpulseDrawEffect, LoseLifeEffect, GainKeywordEffect,
+            SacrificeEffect, ReanimateEffect, AddManaEffect, ControlEffect,
+            RegenerateEffect, DigEffect, PutOnLibraryEffect,
+            ShuffleGraveyardEffect, PreventDamageEffect,
+            AnimateLandEffect, RevealHandEffect)
+        from .card import Card  # for ALL_KEYWORDS in the keyword-grant branch
 
         # --- Offspring ETB Trigger Detection (before standard token creation) ---
         offspring_trigger_pattern = re.compile(
@@ -365,6 +370,18 @@ class EffectFactory:
                 effects.append(effect)
                 continue
 
+            # Variable draw: "draw cards equal to the number of X".
+            if re.search(r"draw\s+cards?\s+equal to the number of", clause_lower):
+                cem = re.search(r"equal to the number of\s+(.+?)(?:\.|$)", clause_lower)
+                expr = cem.group(1).strip() if cem else "creatures you control"
+                td = EffectFactory._extract_target_description(clause_lower) or "controller"
+                ts = "controller"
+                if "target player" in td: ts = "target_player"
+                elif "each player" in clause_lower: ts = "each_player"
+                created_effect = DrawCardEffect(1, target=ts, count_expr=expr)
+                effects.append(created_effect)
+                continue
+
             # Draw Card
             match = re.search(r"(?:target player|you)?\s*\b(draw(?:s)?)\b\s+(a|an|one|two|three|four|five|six|seven|eight|nine|ten|x|\d+)\s+cards?", clause_lower)
             if match:
@@ -377,6 +394,35 @@ class EffectFactory:
                 elif "opponent" in target_desc: target_specifier = "opponent"
                 elif "each player" in target_desc: target_specifier = "each_player"
                 created_effect = DrawCardEffect(count, target=target_specifier) # Pass 'x' or number
+
+            # Variable life gain: "gain life equal to the number of X".
+            elif re.search(r"gains?\s+life\s+equal to the number of", clause_lower):
+                cem = re.search(r"equal to the number of\s+(.+?)(?:\.|$)", clause_lower)
+                expr = cem.group(1).strip() if cem else "creatures you control"
+                td = EffectFactory._extract_target_description(clause_lower) or "controller"
+                ts = "controller"
+                if "target player" in td: ts = "target_player"
+                elif "each player" in clause_lower: ts = "each_player"
+                created_effect = GainLifeEffect(0, target=ts, count_expr=expr)
+
+            # Shuffle graveyard into library (graveyard hate / recursion).
+            elif re.search(r"shuffle\s+(your|target player's|his or her)\s+graveyard\s+into\s+(your|their|his or her|that player's)\s+library", clause_lower):
+                who = "controller"
+                if "target player" in clause_lower: who = "target_player"
+                elif "each player" in clause_lower: who = "each_player"
+                created_effect = ShuffleGraveyardEffect(who=who)
+
+            # Damage prevention (fog / prevention shields).
+            elif "prevent" in clause_lower and "damage" in clause_lower:
+                combat_only = "combat damage" in clause_lower
+                amount = None
+                nm = re.search(r"prevent the next\s+(\d+|x)\s+damage", clause_lower)
+                if nm and nm.group(1) != 'x':
+                    amount = int(nm.group(1))
+                scope = "all"
+                if "to you" in clause_lower: scope = "to_you"
+                elif "to any target" in clause_lower or "to target" in clause_lower: scope = "target"
+                created_effect = PreventDamageEffect(amount=amount, combat_only=combat_only, target_scope=scope)
 
             # Gain Life
             elif re.search(r"(?:target player|you)?\s*\b(gain(?:s)?)\b\s+(\d+|x)\s+life", clause_lower):
@@ -507,6 +553,121 @@ class EffectFactory:
                  created_effect = CreateTokenEffect(power, toughness, token_name_type, count, keywords, colors=colors, is_legendary=is_legendary)
 
 
+            # Reanimation: "return ... from (your/a) graveyard to the battlefield".
+            # Must come before the bounce branch (which handles "to hand").
+            elif re.search(r"return\s+.*from\s+(?:your|a|target player's)?\s*graveyard\s+to\s+the\s+battlefield", clause_lower):
+                tt = "creature"
+                if "artifact" in clause_lower: tt = "artifact"
+                elif "enchantment" in clause_lower: tt = "enchantment"
+                elif "permanent" in clause_lower: tt = "permanent"
+                elif "card" in clause_lower and "creature" not in clause_lower: tt = "card"
+                tapped = "tapped" in clause_lower
+                created_effect = ReanimateEffect(target_type=tt, from_zone="graveyard", enters_tapped=tapped)
+
+            # Sacrifice / Edict: "sacrifice a <type>", "target player sacrifices
+            # a <type>", "each player/opponent sacrifices a <type>".
+            elif re.search(r"sacrifices?\s+(?:a|an|one|two|\d+)\s+(\w+)", clause_lower):
+                m = re.search(r"sacrifices?\s+(a|an|one|two|three|\d+)\s+(\w+)", clause_lower)
+                ptype = m.group(2) if m else "creature"
+                cnt_raw = m.group(1) if m else "a"
+                if cnt_raw in ("a", "an", "one"): cnt = 1
+                elif cnt_raw.isdigit(): cnt = int(cnt_raw)
+                else: cnt = text_to_number(cnt_raw)
+                if not isinstance(cnt, int) or cnt <= 0: cnt = 1
+                if "each opponent" in clause_lower or "each other player" in clause_lower:
+                    who = "each_opponent"
+                elif "each player" in clause_lower:
+                    who = "each_player"
+                elif "target player" in clause_lower or "that player" in clause_lower:
+                    who = "target_player"
+                else:
+                    who = "controller"
+                created_effect = SacrificeEffect(permanent_type=ptype, who=who, count=cnt)
+
+            # Life loss: "target player loses N life" / "each opponent loses N life"
+            elif re.search(r"loses?\s+(\d+|x)\s+life", clause_lower):
+                amt_m = re.search(r"loses?\s+(\d+|x)\s+life", clause_lower)
+                amt = amt_m.group(1) if amt_m else "1"
+                amt = int(amt) if amt.isdigit() else 'x'
+                if "each opponent" in clause_lower or "each other player" in clause_lower:
+                    lt = "opponent"
+                elif "each player" in clause_lower:
+                    lt = "each_player"
+                elif "you lose" in clause_lower:
+                    lt = "controller"
+                else:
+                    lt = "target_player"
+                created_effect = LoseLifeEffect(amt, target=lt)
+
+            # Distribute +1/+1 counters among target creatures.
+            elif re.search(r"distribute\s+(\w+|\d+)?\s*\+1/\+1 counters", clause_lower):
+                num_m = re.search(r"distribute\s+(\w+|\d+)", clause_lower)
+                n = 1
+                if num_m and num_m.group(1):
+                    n = int(num_m.group(1)) if num_m.group(1).isdigit() else text_to_number(num_m.group(1))
+                if not isinstance(n, int) or n <= 0: n = 1
+                # v1: with a single chosen target all counters land there; the
+                # multi-target split is an agent-choice item (Tier 3).
+                created_effect = AddCountersEffect("+1/+1", count=n, target_type="target creature")
+
+            # Combat restrictions: "can't attack/block". Modeled as granted
+            # 'cant_attack'/'cant_block' abilities on the target (same layer-6
+            # add_ability path the static parser uses). July 2026 parser expansion.
+            elif "can't block" in clause_lower or "cant block" in clause_lower:
+                dur = "end_of_turn" if ("this turn" in clause_lower or "until end of turn" in clause_lower) else "permanent"
+                gt = "target creature" if "target" in clause_lower else "self"
+                created_effect = GainKeywordEffect("cant_block", target_type=gt, duration=dur)
+            elif "can't attack" in clause_lower or "cant attack" in clause_lower:
+                dur = "end_of_turn" if ("this turn" in clause_lower or "until end of turn" in clause_lower) else "permanent"
+                gt = "target creature" if "target" in clause_lower else "self"
+                created_effect = GainKeywordEffect("cant_attack", target_type=gt, duration=dur)
+
+            # Keyword grant: "target creature gains <keyword> [until end of turn]".
+            # Must come before the Buff branch (which only handles +N/+N) and
+            # only fire when there is NO P/T change in the clause.
+            elif re.search(r"(gains?|has)\s+(\w[\w'\- ]*?)(?:\s+until end of turn)?\s*\.?$", clause_lower) \
+                    and not re.search(r"[+\-]\d+/[+\-]\d+", clause_lower) \
+                    and any(re.search(rf"(gains?|has)\s+{re.escape(kw)}\b", clause_lower) for kw in Card.ALL_KEYWORDS):
+                granted = next(kw for kw in Card.ALL_KEYWORDS
+                               if re.search(rf"(gains?|has)\s+{re.escape(kw)}\b", clause_lower))
+                duration = "end_of_turn" if "until end of turn" in clause_lower else "permanent"
+                if "creatures you control" in clause_lower:
+                    gt = "creatures you control"
+                elif "target" in clause_lower:
+                    gt = "target creature"
+                else:
+                    gt = "self"
+                created_effect = GainKeywordEffect(granted, target_type=gt, duration=duration)
+
+            # Variable pump: "gets +X/+X ... where X is the number of Y". The
+            # clause splitter severs the "where X is..." part at the comma
+            # (same disease as delayed triggers), so read the count expression
+            # from the FULL effect_text, not just this clause.
+            elif re.search(r"get(?:s)?\s+\+x/\+x", clause_lower) and "where x is the number of" in effect_text.lower():
+                cem = re.search(r"where x is the number of\s+(.+?)(?:\.|$)", effect_text.lower())
+                expr = cem.group(1).strip() if cem else "creatures you control"
+                duration = "end_of_turn" if "until end of turn" in clause_lower else "permanent"
+                tt = "target creature" if "target" in clause_lower else "creatures you control"
+                created_effect = BuffEffect(0, 0, target_type=tt, duration=duration, count_expr=expr)
+
+            # Animate land: "target land becomes a N/N creature".
+            elif re.search(r"target\s+land\s+becomes?\s+a\s+(\d+)/(\d+)\s+creature", clause_lower) \
+                    or re.search(r"becomes?\s+a\s+(\d+)/(\d+)\s+creature", clause_lower) and "land" in clause_lower:
+                am = re.search(r"becomes?\s+a\s+(\d+)/(\d+)\s+creature", clause_lower)
+                p = int(am.group(1)) if am else 0
+                t = int(am.group(2)) if am else 0
+                duration = "end_of_turn" if "until end of turn" in clause_lower else "permanent"
+                keep = "still a land" in clause_lower or "in addition" in clause_lower
+                created_effect = AnimateLandEffect(power=p, toughness=t, duration=duration, keep_types=keep)
+
+            # Reveal hand: "target player reveals their hand".
+            elif re.search(r"(target player|each player|you)\s+reveals?\s+(their|his or her|your)\s+hand", clause_lower) \
+                    and "you choose" not in clause_lower and "discards" not in clause_lower:
+                who = "target_player"
+                if "each player" in clause_lower: who = "each_player"
+                elif clause_lower.strip().startswith("you reveal") or "you reveal your hand" in clause_lower: who = "controller"
+                created_effect = RevealHandEffect(who=who)
+
             # Buff (+X/+Y)
             elif re.search(r"(?:target |creatures you control|each creature\b)?\s*(get(?:s)?|has)\b\s*([+\-]\d+)/([+\-]\d+)", clause_lower):
                 match = re.search(r"(get(?:s)?|has)\s+([+\-]\d+)/([+\-]\d+)", clause_lower)
@@ -524,6 +685,53 @@ class EffectFactory:
                     created_effect = BuffEffect(p_mod, t_mod, duration=duration, target_type=target_type)
 
             # Tap
+            # Ritual / add-mana SPELL effect: "Add {B}{B}{B}", "add N mana of
+            # any color". (Mana ACTIVATED abilities on permanents are handled by
+            # ManaAbility, not here.) July 2026 parser expansion.
+            elif re.search(r"^\s*add\s+(\{[wubrgc0-9/p]+\}|\w+ mana)", clause_lower):
+                mana_syms = re.findall(r"\{([wubrgc])\}", clause_lower)
+                generic = re.findall(r"\{(\d+)\}", clause_lower)
+                mana_dict = {}
+                for s in mana_syms:
+                    mana_dict[s.upper()] = mana_dict.get(s.upper(), 0) + 1
+                for g in generic:
+                    mana_dict["C"] = mana_dict.get("C", 0) + int(g)
+                any_count = 0
+                any_m = re.search(r"add\s+(\w+)\s+mana of any (?:one )?color", clause_lower)
+                if any_m:
+                    w = any_m.group(1)
+                    any_count = int(w) if w.isdigit() else text_to_number(w)
+                    if not isinstance(any_count, int) or any_count <= 0: any_count = 1
+                if mana_dict or any_count:
+                    created_effect = AddManaEffect(mana_dict=mana_dict, any_color_count=any_count)
+
+            # Gain control of target permanent (Threaten / Control Magic).
+            elif re.search(r"gains?\s+control\s+of\s+target", clause_lower):
+                ct = "creature"
+                if "artifact" in clause_lower: ct = "artifact"
+                elif "enchantment" in clause_lower: ct = "enchantment"
+                elif "permanent" in clause_lower: ct = "permanent"
+                elif "land" in clause_lower: ct = "land"
+                dur = "end_of_turn" if ("until end of turn" in clause_lower or "this turn" in clause_lower) else "permanent"
+                created_effect = ControlEffect(target_type=ct, duration=dur)
+
+            # Regenerate target creature.
+            elif re.search(r"regenerate\s+(target\s+)?", clause_lower) and "regenerate" in clause_lower:
+                ct = "creature"
+                if "target" not in clause_lower and ("this" in clause_lower or "it" in clause_lower):
+                    created_effect = RegenerateEffect(target_type=ct)
+                else:
+                    created_effect = RegenerateEffect(target_type=ct)
+
+            # Mass tap: "tap all creatures target player controls".
+            elif re.search(r"tap\s+all\s+(\w+)\s+target player controls", clause_lower) \
+                    or re.search(r"tap\s+all\s+(\w+)\s+(?:that\s+)?(?:your\s+opponents?|target player)", clause_lower):
+                tt = "permanent"
+                if "creature" in clause_lower: tt = "creature"
+                elif "artifact" in clause_lower: tt = "artifact"
+                elif "land" in clause_lower: tt = "land"
+                created_effect = TapEffect(target_type=tt, scope="all_target_player")
+
             elif re.search(r"\b(tap(?:s)?)\b\s+target", clause_lower):
                  target_desc = EffectFactory._extract_target_description(clause_lower) or "permanent"
                  target_type = "permanent" # Refine based on desc
@@ -531,6 +739,14 @@ class EffectFactory:
                  elif "artifact" in target_desc: target_type = "artifact"
                  elif "land" in target_desc: target_type = "land"
                  created_effect = TapEffect(target_type=target_type)
+
+            # Mass untap: "untap all <type> you control".
+            elif re.search(r"untap\s+all\s+(\w+)\s+you control", clause_lower):
+                um = re.search(r"untap\s+all\s+(\w+)", clause_lower)
+                tt = um.group(1).rstrip('s') if um else "permanent"
+                if tt not in ("creature", "artifact", "land", "permanent"):
+                    tt = "permanent"
+                created_effect = UntapEffect(target_type=tt, scope="all_yours")
 
             # Untap
             elif re.search(r"\b(untap(?:s)?)\b\s+target", clause_lower):
@@ -639,8 +855,51 @@ class EffectFactory:
                 elif "each player mills" in clause_lower: target_specifier = "each_player"  # underscore: MillEffect's branch key (space form silently no-opped)
                 created_effect = MillEffect(count, target=target_specifier) # Pass 'x' or number
 
-            # Return to Hand (Bounce)
-            elif re.search(r"\breturn(?:s)?\b", clause_lower) and ("to (?:its|their) owner's hand" in clause_lower or "to your hand" in clause_lower):
+            # Mass bounce: "return all <type> to their owners' hands" / "...you
+            # control...". Must precede the single-target bounce branch.
+            elif re.search(r"return\s+all\s+(\w+)", clause_lower) and re.search(r"to (?:its|their) owner'?s?'? hands?|to your hand", clause_lower):
+                tt = "permanent"
+                if "creature" in clause_lower: tt = "creature"
+                elif "artifact" in clause_lower: tt = "artifact"
+                elif "enchantment" in clause_lower: tt = "enchantment"
+                elif "land" in clause_lower: tt = "land"
+                sc = "all_yours" if "you control" in clause_lower else "all"
+                created_effect = ReturnToHandEffect(target_type=tt, zone="battlefield", scope=sc)
+
+            # Dig: "look at the top N cards ... put one into your hand ... rest
+            # on the bottom/top".
+            elif re.search(r"look at the top\s+(\w+|\d+)\s+cards?", clause_lower) and ("into your hand" in clause_lower or "in your hand" in clause_lower):
+                lm = re.search(r"look at the top\s+(\w+|\d+)", clause_lower)
+                look = 3
+                if lm and lm.group(1):
+                    look = int(lm.group(1)) if lm.group(1).isdigit() else text_to_number(lm.group(1))
+                if not isinstance(look, int) or look <= 0: look = 3
+                rest = "bottom"
+                if "on the bottom" in clause_lower: rest = "bottom"
+                elif "on top" in clause_lower or "on the top" in clause_lower: rest = "top"
+                elif "graveyard" in clause_lower: rest = "graveyard"
+                take = 1
+                tm = re.search(r"put\s+(\w+|\d+)\s+(?:of them\s+)?into your hand", clause_lower)
+                if tm and tm.group(1) and tm.group(1) not in ("one", "a", "an"):
+                    take = int(tm.group(1)) if tm.group(1).isdigit() else text_to_number(tm.group(1))
+                if not isinstance(take, int) or take <= 0: take = 1
+                created_effect = DigEffect(look=look, take=take, rest=rest)
+
+            # Put target permanent on top/bottom of its owner's library (tuck).
+            elif re.search(r"put\s+target\s+(\w+).*on\s+(?:the\s+)?(top|bottom)\s+of\s+(?:its|their|his or her)\s+owner'?s?\s+library", clause_lower):
+                pm = re.search(r"put\s+target\s+(\w+).*on\s+(?:the\s+)?(top|bottom)", clause_lower)
+                tt = pm.group(1) if pm else "creature"
+                pos = pm.group(2) if pm else "top"
+                if tt not in ("creature", "artifact", "enchantment", "permanent", "land", "planeswalker"):
+                    tt = "creature"
+                created_effect = PutOnLibraryEffect(target_type=tt, position=pos)
+
+            # Return to Hand (Bounce). BUGFIX (July 2026): the owner's-hand
+            # test embedded a regex pattern inside a plain substring `in`
+            # check, so it literally searched for "to (?:its|their) owner's
+            # hand" and never matched -- standard bounce phrasing fell through
+            # to the no-op fallback. Use a real regex.
+            elif re.search(r"\breturn(?:s)?\b", clause_lower) and re.search(r"to (?:its|their) owner'?s hand|to your hand", clause_lower):
                 target_desc = EffectFactory._extract_target_description(clause_lower) or "permanent"
                 target_type = "permanent"
                 zone = "battlefield" # Default zone

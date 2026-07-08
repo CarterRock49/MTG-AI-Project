@@ -145,6 +145,14 @@ class Card:
         self.all_abilities = []
         self._parse_class_data(card_data) # Ensure this ignores Offspring/Impending
 
+        # Leveler creatures (Rise of the Eldrazi 'LEVEL N-M' format) --
+        # distinct from Class enchantments. July 2026 mechanic support.
+        self.is_leveler = False
+        self.leveler_bands = []   # [{'min': int, 'max': int|None, 'power': int, 'toughness': int, 'abilities': [str]}]
+        self.level_up_cost = None
+        self.level_counters = 0
+        self._parse_leveler_data()
+
         # Planeswalker attributes (if applicable)
         if 'planeswalker' in self.card_types:
             self._init_planeswalker(card_data)
@@ -573,6 +581,70 @@ class Card:
         
         return details
     
+    def _parse_leveler_data(self):
+        """Parse a level-up creature's LEVEL bands and level-up cost.
+
+        Format (CR 711):
+            Level up {COST}
+            LEVEL 1-6
+            4/4
+            <abilities>
+            LEVEL 7+
+            8/8
+            <abilities>
+        The base (0 level counters) uses the card's printed P/T. Each band's
+        P/T and abilities apply while the creature's level-counter total falls
+        in that band. Not a Class (is_class stays False).
+        """
+        text = getattr(self, 'oracle_text', '') or ''
+        if not re.search(r'\blevel up\b', text, re.IGNORECASE) or 'level ' not in text.lower():
+            return
+        # Level-up activated cost.
+        m = re.search(r'level up\s*(\{[^}]*\}(?:\{[^}]*\})*|\d+)', text, re.IGNORECASE)
+        if m:
+            cost = m.group(1)
+            self.level_up_cost = f"{{{cost}}}" if cost.isdigit() else cost
+        # Bands: "LEVEL a-b" or "LEVEL a+", each followed by "P/T" and abilities.
+        band_re = re.compile(
+            r'level\s+(\d+)\s*(?:-\s*(\d+)|(\+))\s*\n?\s*(\d+)\s*/\s*(\d+)\s*([\s\S]*?)(?=level\s+\d+\s*(?:-\s*\d+|\+)|$)',
+            re.IGNORECASE)
+        for mm in band_re.finditer(text):
+            lo = int(mm.group(1))
+            hi = None if mm.group(3) == '+' else (int(mm.group(2)) if mm.group(2) else lo)
+            power = int(mm.group(4))
+            tough = int(mm.group(5))
+            ability_text = mm.group(6).strip()
+            abilities = [a.strip() for a in re.split(r'\n+', ability_text) if a.strip()
+                         and not re.match(r'level\s+\d', a.strip(), re.IGNORECASE)]
+            self.leveler_bands.append({'min': lo, 'max': hi, 'power': power,
+                                       'toughness': tough, 'abilities': abilities})
+        if self.leveler_bands:
+            self.is_leveler = True
+            self.leveler_bands.sort(key=lambda b: b['min'])
+
+    def get_leveler_pt(self, level_counters):
+        """P/T for a given level-counter total. Base P/T below the first band."""
+        if not getattr(self, 'is_leveler', False):
+            return (getattr(self, 'power', 0), getattr(self, 'toughness', 0))
+        chosen = None
+        for band in self.leveler_bands:
+            lo, hi = band['min'], band['max']
+            if level_counters >= lo and (hi is None or level_counters <= hi):
+                chosen = band
+        if chosen:
+            return (chosen['power'], chosen['toughness'])
+        return (getattr(self, 'power', 0), getattr(self, 'toughness', 0))
+
+    def get_leveler_abilities(self, level_counters):
+        """Cumulative abilities granted up to the current level band."""
+        if not getattr(self, 'is_leveler', False):
+            return []
+        out = []
+        for band in self.leveler_bands:
+            if level_counters >= band['min']:
+                out.extend(band['abilities'])
+        return out
+
     def _parse_class_data(self, card_data):
         """
         Enhanced parsing of Class card data, handling base level and level-up costs/abilities.
@@ -1833,6 +1905,29 @@ class Card:
         # Otherwise, return back face
         return self.faces[1]
     
+    def get_face_cost(self, face_index):
+        """Mana cost string of a specific face (0=front, 1=back).
+
+        MDFC back-face support (July 2026): casting/playing the back face must
+        use the BACK face's cost, not the front's. Falls back to the card's
+        top-level mana_cost when faces aren't populated.
+        """
+        if self.faces and 0 <= face_index < len(self.faces):
+            return self.faces[face_index].get('mana_cost', '') or ''
+        return getattr(self, 'mana_cost', '') if face_index == 0 else ''
+
+    def get_face_text(self, face_index):
+        """Oracle text of a specific face (0=front, 1=back)."""
+        if self.faces and 0 <= face_index < len(self.faces):
+            return self.faces[face_index].get('oracle_text', '') or ''
+        return getattr(self, 'oracle_text', '') if face_index == 0 else ''
+
+    def get_face_type_line(self, face_index):
+        """Type line of a specific face (0=front, 1=back)."""
+        if self.faces and 0 <= face_index < len(self.faces):
+            return self.faces[face_index].get('type_line', '') or ''
+        return getattr(self, 'type_line', '') if face_index == 0 else ''
+
     def is_transforming_mdfc(self):
         """
         Determine if the card is a transforming Double-Faced Card (DFC).
@@ -1910,17 +2005,21 @@ class Card:
         if not self.faces:
             return False
             
-        # Check for MDFC indicator in oracle text or type line
-        if hasattr(self, 'oracle_text') and "//" in self.oracle_text:
+        # Needs at least two faces to be double-faced at all.
+        if len(self.faces) < 2:
+            return False
+        # MDFC indicator in oracle text (Scryfall uses "//" between faces).
+        if hasattr(self, 'oracle_text') and "//" in (self.oracle_text or ""):
             return True
-        
-        # If the card has faces but no transform mechanic, it's likely an MDFC
-        has_transform = False
-        if hasattr(self, 'oracle_text'):
-            transform_terms = ["transform", "night", "daybound", "nightbound", "werewolf"]
-            has_transform = any(term in self.oracle_text.lower() for term in transform_terms)
-        
-        return self.faces and not has_transform
+        # Two faces with no transform mechanic => MDFC (July 2026: the old
+        # code required "//" in the text, which most MDFC oracle text lacks,
+        # so real MDFCs were misclassified and back-face casting never fired).
+        transform_terms = ["transform", "daybound", "nightbound", "werewolf", "disturb", "meld"]
+        combined = (self.oracle_text or "").lower()
+        for f in self.faces:
+            combined += " " + (f.get('oracle_text', '') or '').lower()
+        has_transform = any(term in combined for term in transform_terms)
+        return not has_transform
 
     @property
     def back_face(self):

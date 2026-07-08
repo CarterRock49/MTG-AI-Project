@@ -1774,20 +1774,26 @@ class AbilityEffect:
 
 class DrawCardEffect(AbilityEffect):
     """Effect that causes players to draw cards."""
-    def __init__(self, count=1, target="controller", condition=None):
+    def __init__(self, count=1, target="controller", condition=None, count_expr=None):
         count_str = "X" if count == 'x' else str(count) if count != 1 else "a"
         card_str = "cards" if (isinstance(count, int) and count > 1) or count == 'x' else "card"
         target_text_map = {"controller": "You", "opponent": "Target opponent", "target_player": "Target player", "each_player": "Each player"}
         target_desc = target_text_map.get(target, "Target player")
         super().__init__(f"{target_desc} draw{'s' if target in ['controller','opponent','target_player'] else ''} {count_str} {card_str}", condition)
         self.base_count = count # Store original 'x' or number
+        # "draw cards equal to the number of X" -> counted at resolution
+        # against the controller (July 2026 parser expansion).
+        self.count_expr = count_expr
         self.target = target
         self.requires_target = "target" in target
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         # --- X Cost Handling ---
         x_value = targets.get('X', 0) if isinstance(targets, dict) else 0
-        if x_value > 0:
+        if self.count_expr:
+            effective_count = game_state.count_dynamic_quantity(self.count_expr, controller)
+            logging.debug(f"DrawCardEffect: dynamic count '{self.count_expr}' = {effective_count}.")
+        elif x_value > 0:
             effective_count = x_value
             logging.debug(f"DrawCardEffect: Using X={x_value} for draw count.")
         else:
@@ -1828,14 +1834,14 @@ class DrawCardEffect(AbilityEffect):
 
 class GainLifeEffect(AbilityEffect):
     """Effect that causes players to gain life."""
-    def __init__(self, amount, target="controller", condition=None):
+    def __init__(self, amount, target="controller", condition=None, count_expr=None):
         target_text_map = {"controller": "You", "opponent": "Target opponent", "target_player": "Target player", "each_player": "Each player"}
         target_desc = target_text_map.get(target, "Target player")
         amount_str = "X" if amount == 'x' else str(amount) # Represent X in description
         super().__init__(f"{target_desc} gain {amount_str} life", condition)
-        # Store original amount which might be 'x' or a number
-        # text_to_number handles 'x' -> 1, but we need the actual X from context
         self.base_amount = amount # Store the original 'x' or number
+        # "gain life equal to the number of X" -> dynamic (July 2026).
+        self.count_expr = count_expr
         self.target = target
         self.requires_target = "target" in target
 
@@ -1843,7 +1849,10 @@ class GainLifeEffect(AbilityEffect):
         # --- X Cost Handling ---
         # Use X from context if available, otherwise use the base amount (converted)
         x_value = targets.get('X', 0) if isinstance(targets, dict) else 0 # Get X value from resolved context
-        if x_value > 0:
+        if getattr(self, 'count_expr', None):
+            effective_amount = game_state.count_dynamic_quantity(self.count_expr, controller)
+            logging.debug(f"GainLifeEffect: dynamic count '{self.count_expr}' = {effective_amount}.")
+        elif x_value > 0:
             effective_amount = x_value
             logging.debug(f"GainLifeEffect: Using X={x_value} for life gain amount.")
         else:
@@ -1887,6 +1896,190 @@ class GainLifeEffect(AbilityEffect):
                   else: overall_success = False # Less precise check without gain_life
         return overall_success
 
+
+
+class SacrificeEffect(AbilityEffect):
+    """A player sacrifices permanent(s) (CR 701.17). "Sacrifice a creature" =
+    controller sacrifices; "target player sacrifices..." = that player does
+    (edict). Previously hit the generic no-op fallback (July 2026 parser
+    expansion). v1 picks the sacrifice via a simple heuristic (lowest-value
+    for the controller's own, per opponent for edicts); the player-choice
+    version is a Tier 3 agent-choice item.
+    """
+    def __init__(self, permanent_type="creature", who="controller", count=1, condition=None):
+        self.permanent_type = permanent_type.lower()
+        self.who = who  # 'controller' | 'target_player' | 'each_player' | 'each_opponent'
+        self.count = count
+        super().__init__(f"{who} sacrifices {count} {self.permanent_type}", condition)
+        self.requires_target = who == "target_player"
+
+    def _type_matches(self, game_state, cid):
+        card = game_state._safe_get_card(cid)
+        if not card:
+            return False
+        if self.permanent_type in ("permanent", "permanents"):
+            return True
+        types = getattr(card, 'card_types', [])
+        return self.permanent_type.rstrip('s') in [t.lower() for t in types]
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        players = []
+        if self.who == "controller":
+            players = [controller]
+        elif self.who == "each_player":
+            players = [p for p in (game_state.p1, game_state.p2) if p]
+        elif self.who == "each_opponent":
+            players = [game_state.p2 if controller == game_state.p1 else game_state.p1]
+        elif self.who == "target_player":
+            pids = targets.get("players", []) if isinstance(targets, dict) else []
+            if pids:
+                players = [game_state.p1 if pids[0] == "p1" else game_state.p2]
+            else:
+                logging.warning(f"SacrificeEffect (edict): no target player in {targets}")
+                return False
+        if not players:
+            return False
+        any_sacked = False
+        for p in players:
+            candidates = [c for c in list(p.get("battlefield", [])) if self._type_matches(game_state, c)]
+            if not candidates:
+                continue
+            # v1 heuristic: sacrifice the lowest-toughness matching permanent.
+            def _tough(cid):
+                c = game_state._safe_get_card(cid)
+                return getattr(c, 'toughness', 0) or 0
+            candidates.sort(key=_tough)
+            for cid in candidates[:self.count]:
+                owner = game_state._find_card_owner_fallback(cid) or p
+                if game_state.move_card(cid, p, "battlefield", owner, "graveyard", cause="sacrifice"):
+                    any_sacked = True
+                    game_state.trigger_ability(cid, "SACRIFICED", {"controller": p})
+        return any_sacked
+
+
+class ReanimateEffect(AbilityEffect):
+    """Return a creature (or other permanent) card from a graveyard to the
+    battlefield -- reanimation (CR 701.x). "Return ... to the battlefield" was
+    previously routed to ReturnToHandEffect only for the "to hand" phrasing;
+    the battlefield destination hit the generic no-op (July 2026 parser
+    expansion). Distinct effect so the card lands in play, not hand.
+    """
+    def __init__(self, target_type="creature", from_zone="graveyard", enters_tapped=False, condition=None):
+        self.target_type = target_type.lower()
+        self.from_zone = from_zone.lower()
+        self.enters_tapped = enters_tapped
+        super().__init__(f"Return target {self.target_type} card from {self.from_zone} to the battlefield", condition)
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        ids = []
+        if isinstance(targets, dict):
+            ids = list(targets.get("cards", []) or targets.get("creatures", []))
+        if not ids:
+            logging.warning(f"ReanimateEffect: no target card in {targets}")
+            return False
+        revived = 0
+        for cid in ids:
+            loc = game_state.find_card_location(cid)
+            if not loc or loc[1] != self.from_zone:
+                logging.debug(f"ReanimateEffect: {cid} not in {self.from_zone} (in {loc}).")
+                continue
+            owner = loc[0]
+            # Reanimated cards enter under the CONTROLLER's control (owner keeps ownership).
+            if game_state.move_card(cid, owner, self.from_zone, controller, "battlefield", cause="reanimate"):
+                revived += 1
+                if self.enters_tapped:
+                    controller.setdefault("tapped_permanents", set()).add(cid)
+        return revived > 0
+
+
+class LoseLifeEffect(AbilityEffect):
+    """A player loses life (CR 118.4). Distinct from damage: life loss is not
+    dealt by a source, cannot be prevented, and does not trigger damage
+    replacements. Common in drain/edict effects; previously hit the generic
+    no-op fallback (July 2026 parser expansion).
+    """
+    def __init__(self, amount, target="target_player", condition=None):
+        amount_str = "X" if amount == 'x' else str(amount)
+        target_map = {"target_player": "Target player", "opponent": "Each opponent",
+                      "controller": "You", "each_player": "Each player"}
+        super().__init__(f"{target_map.get(target, 'Target player')} loses {amount_str} life", condition)
+        self.base_amount = amount
+        self.target = target
+        self.requires_target = target == "target_player"
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        x_value = targets.get('X', 0) if isinstance(targets, dict) else 0
+        amount = x_value if x_value > 0 else text_to_number(self.base_amount)
+        if amount <= 0:
+            return True
+        target_players = []
+        if self.target == "controller":
+            target_players.append(controller)
+        elif self.target == "opponent":
+            target_players.append(game_state.p2 if controller == game_state.p1 else game_state.p1)
+        elif self.target == "each_player":
+            target_players.extend([p for p in (game_state.p1, game_state.p2) if p])
+        elif self.target == "target_player":
+            pids = targets.get("players", []) if isinstance(targets, dict) else []
+            if pids:
+                target_players.append(game_state.p1 if pids[0] == "p1" else game_state.p2)
+            else:
+                logging.warning(f"LoseLifeEffect: no target player in {targets}")
+                return False
+        if not target_players:
+            return False
+        for p in target_players:
+            p["life"] = p.get("life", 0) - amount
+            logging.debug(f"{p.get('name','player')} loses {amount} life (now {p['life']}).")
+            # Feed life-loss triggers (e.g. 'whenever an opponent loses life').
+            game_state.trigger_ability(source_id, "LIFE_LOSS",
+                                       {"player": p, "amount": amount, "controller": controller})
+        return True
+
+
+class GainKeywordEffect(AbilityEffect):
+    """Target creature(s) gain a keyword, usually until end of turn.
+
+    Registers a layer-6 add_ability effect (mirrors BuffEffect's layer-7
+    registration for P/T). The single most common combat-trick shape
+    ("gains flying/trample/indestructible until end of turn") previously hit
+    the generic no-op fallback (July 2026 parser expansion).
+    """
+    def __init__(self, keyword, target_type="creature", duration="end_of_turn", condition=None):
+        self.keyword = keyword.lower().strip()
+        self.target_type = target_type
+        self.duration = duration
+        super().__init__(f"{target_type} gains {self.keyword}", condition)
+        self.requires_target = "target" in target_type or target_type == "creature"
+
+    def apply(self, game_state, source_id, controller, targets=None):
+        if not getattr(game_state, 'layer_system', None):
+            logging.warning("GainKeywordEffect: LayerSystem unavailable.")
+            return False
+        affected = []
+        if self.requires_target:
+            if isinstance(targets, dict):
+                affected = list(targets.get("creatures", []) or targets.get("permanents", []))
+        elif self.target_type == "creatures you control":
+            affected = [c for c in controller.get("battlefield", []) if game_state._is_creature(c)]
+        elif self.target_type == "self":
+            affected = [source_id]
+        if not affected:
+            logging.debug(f"GainKeywordEffect '{self.keyword}': no affected creatures.")
+            return False
+        effect_id = game_state.layer_system.register_effect({
+            'source_id': source_id, 'layer': 6, 'affected_ids': affected,
+            'effect_type': 'add_ability', 'effect_value': self.keyword,
+            'duration': self.duration, 'description': f"grant {self.keyword} ({self.duration})",
+        })
+        if effect_id:
+            logging.debug(f"Granted '{self.keyword}' to {affected} ({self.duration}).")
+            return True
+        return False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        return self.apply(game_state, source_id, controller, targets)
 
 
 class DamageEffect(AbilityEffect):
@@ -2245,13 +2438,17 @@ class CreateTokenEffect(AbilityEffect):
 
 class ReturnToHandEffect(AbilityEffect):
     """Effect that returns cards to their owner's hand."""
-    def __init__(self, target_type="permanent", zone="battlefield", condition=None):
+    def __init__(self, target_type="permanent", zone="battlefield", condition=None, scope="target"):
         target_type_str = str(target_type).lower() if target_type is not None else "permanent"
         zone_str = str(zone).lower() if zone is not None else "battlefield"
-        super().__init__(f"Return target {target_type_str} from {zone_str} to its owner's hand", condition)
+        # scope: 'target' | 'all' (all matching permanents) | 'all_yours'
+        # (all you control). July 2026 parser expansion for mass bounce.
+        self.scope = scope
+        desc = "Return target" if scope == "target" else "Return all"
+        super().__init__(f"{desc} {target_type_str} from {zone_str} to its owner's hand", condition)
         self.target_type = target_type_str
         self.zone = zone_str
-        self.requires_target = "target" in self.effect_text.lower()
+        self.requires_target = scope == "target" and "target" in self.effect_text.lower()
 
 
     def _apply_effect(self, game_state, source_id, controller, targets):
@@ -2267,13 +2464,21 @@ class ReturnToHandEffect(AbilityEffect):
         elif "card" == self.target_type: relevant_categories.add("cards") # Assumes target dict might have 'cards' key for GY/Exile targets
         else: relevant_categories.add(self.target_type + "s") # Pluralize fallback
 
-        if self.requires_target:
+        if self.scope in ("all", "all_yours"):
+            # Mass bounce: gather matching permanents across battlefields.
+            players = [controller] if self.scope == "all_yours" else [game_state.p1, game_state.p2]
+            for p in players:
+                if not p: continue
+                for cid in list(p.get("battlefield", [])):
+                    card = game_state._safe_get_card(cid)
+                    if self.target_type in ("permanent",) or (card and self.target_type in [t.lower() for t in getattr(card, 'card_types', [])]):
+                        target_ids_to_process.append(cid)
+        elif self.requires_target:
             if not targets or not any(v for v in targets.values()):
                 logging.warning(f"ReturnToHandEffect requires targets, none provided/resolved: {targets}")
                 return False
             for category in relevant_categories:
                  target_ids_to_process.extend(targets.get(category, []))
-        # Add handling for non-targeted effects like "Return all creatures..." if needed
 
         if not target_ids_to_process:
              logging.warning(f"ReturnToHandEffect: No valid target IDs collected for '{self.effect_text}'. Targets: {targets}")
@@ -2631,20 +2836,130 @@ class SearchLibraryEffect(AbilityEffect):
 
         return success_moves > 0
 
+class AddManaEffect(AbilityEffect):
+    """Add mana to a player's pool (rituals, and spell effects that make mana).
+    July 2026 parser expansion: "Add {B}{B}{B}" as a SPELL effect (Dark Ritual
+    et al.) hit the generic no-op fallback and produced nothing. Mana
+    ACTIVATED abilities on permanents are handled separately (ManaAbility).
+    """
+    def __init__(self, mana_dict=None, any_color_count=0, condition=None):
+        self.mana_dict = mana_dict or {}
+        self.any_color_count = any_color_count  # "add N mana of any color/one color"
+        desc = "".join(f"{{{c}}}" * n for c, n in self.mana_dict.items()) or f"{any_color_count} any"
+        super().__init__(f"Add {desc}", condition)
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        added = False
+        if self.mana_dict:
+            mana_str = "".join(("{%s}" % c) * n for c, n in self.mana_dict.items())
+            if hasattr(game_state, 'mana_system') and game_state.mana_system:
+                game_state.mana_system.add_mana_to_pool(controller, mana_str)
+            else:
+                pool = controller.setdefault("mana_pool", {})
+                for c, n in self.mana_dict.items():
+                    pool[c] = pool.get(c, 0) + n
+            added = True
+        if self.any_color_count > 0:
+            # v1: default any-color to green (a deterministic legal choice);
+            # color choice is a Tier 3 agent-choice item.
+            pool = controller.setdefault("mana_pool", {})
+            pool["G"] = pool.get("G", 0) + self.any_color_count
+            added = True
+        return added
+
+
+class ControlEffect(AbilityEffect):
+    """Gain control of a permanent (Threaten / Control Magic style). July 2026
+    parser expansion: "gain control of target creature" hit the generic no-op.
+    Uses apply_temporary_control; duration is tracked for end-of-turn release
+    by the existing temp_control_effects machinery.
+    """
+    def __init__(self, target_type="creature", duration="end_of_turn", condition=None):
+        self.target_type = target_type.lower()
+        self.duration = duration
+        super().__init__(f"Gain control of target {self.target_type}", condition)
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        ids = []
+        if isinstance(targets, dict):
+            for cat in ("creatures", "permanents", "artifacts", "lands"):
+                ids.extend(targets.get(cat, []))
+        if not ids:
+            logging.warning(f"ControlEffect: no target in {targets}")
+            return False
+        gained = False
+        for cid in set(ids):
+            if hasattr(game_state, 'apply_temporary_control') and \
+                    game_state.apply_temporary_control(cid, controller):
+                gained = True
+                # Untap on gaining control is common (Threaten grants haste too,
+                # handled separately); leave tap state as-is for v1 accuracy.
+        return gained
+
+
+class RegenerateEffect(AbilityEffect):
+    """Grant a regeneration shield (CR 701.15). July 2026 parser expansion:
+    "regenerate target creature" hit the generic no-op. Adds the creature to
+    its controller's regeneration_shields; apply_regeneration consumes it in
+    place of the next destruction.
+    """
+    def __init__(self, target_type="creature", condition=None):
+        self.target_type = target_type.lower()
+        super().__init__(f"Regenerate target {self.target_type}", condition)
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        ids = []
+        if isinstance(targets, dict):
+            ids = list(targets.get("creatures", []) or targets.get("permanents", []))
+        if not ids and "self" in str(getattr(self, 'effect_text', '')).lower():
+            ids = [source_id]
+        if not ids:
+            logging.warning(f"RegenerateEffect: no target in {targets}")
+            return False
+        shielded = False
+        for cid in set(ids):
+            owner, zone = game_state.find_card_location(cid)
+            if owner and zone == "battlefield":
+                owner.setdefault("regeneration_shields", set()).add(cid)
+                shielded = True
+                logging.debug(f"Regeneration shield granted to {cid}.")
+        return shielded
+
+
 class TapEffect(AbilityEffect):
     """Effect that taps a permanent."""
-    def __init__(self, target_type="permanent", condition=None):
-        super().__init__(f"Tap target {target_type}", condition)
+    def __init__(self, target_type="permanent", condition=None, scope="target"):
+        super().__init__(f"Tap {scope} {target_type}", condition)
         self.target_type = target_type.lower()
+        # scope: 'target' (a specific permanent) or 'all_target_player' (mass
+        # tap of everything a target player controls). July 2026 parser expansion.
+        self.scope = scope
         self.requires_target = True
 
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         target_ids = []
-        # Collect targets from relevant categories
-        cats = ["creatures", "artifacts", "lands", "permanents"] # Add others if needed
-        for cat in cats:
-             target_ids.extend(targets.get(cat, []))
+        if self.scope == "all_target_player":
+            # Tap every matching permanent the target player controls.
+            pids = targets.get("players", []) if isinstance(targets, dict) else []
+            tp = None
+            if pids:
+                tp = game_state.p1 if pids[0] == "p1" else game_state.p2
+            else:
+                # Fallback: the opponent of the controller.
+                tp = game_state.p2 if controller == game_state.p1 else game_state.p1
+            for cid in list(tp.get("battlefield", [])):
+                card = game_state._safe_get_card(cid)
+                if self.target_type == "permanent" or (card and self.target_type in [t.lower() for t in getattr(card, 'card_types', [])]):
+                    target_ids.append(cid)
+        else:
+            # Collect targets from relevant categories
+            cats = ["creatures", "artifacts", "lands", "permanents"] # Add others if needed
+            for cat in cats:
+                 target_ids.extend(targets.get(cat, []))
         if not target_ids:
             logging.warning(f"TapEffect failed: No targets provided/resolved in dict {targets}")
             return False
@@ -2668,17 +2983,25 @@ class TapEffect(AbilityEffect):
 
 class UntapEffect(AbilityEffect):
     """Effect that untaps a permanent."""
-    def __init__(self, target_type="permanent", condition=None):
-        super().__init__(f"Untap target {target_type}", condition)
+    def __init__(self, target_type="permanent", condition=None, scope="target"):
+        # scope: 'target' | 'all_yours' (all you control of the type).
+        self.scope = scope
+        super().__init__(f"Untap {'target' if scope=='target' else 'all'} {target_type}", condition)
         self.target_type = target_type.lower()
-        self.requires_target = True
+        self.requires_target = scope == "target"
 
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         target_ids = []
-        cats = ["creatures", "artifacts", "lands", "permanents"]
-        for cat in cats:
-             target_ids.extend(targets.get(cat, []))
+        if self.scope == "all_yours":
+            for cid in list(controller.get("battlefield", [])):
+                card = game_state._safe_get_card(cid)
+                if self.target_type == "permanent" or (card and self.target_type in [t.lower() for t in getattr(card, 'card_types', [])]):
+                    target_ids.append(cid)
+        else:
+            cats = ["creatures", "artifacts", "lands", "permanents"]
+            for cat in cats:
+                 target_ids.extend(targets.get(cat, []))
         if not target_ids:
             logging.warning(f"UntapEffect failed: No targets provided/resolved in dict {targets}")
             return False
@@ -2699,6 +3022,178 @@ class UntapEffect(AbilityEffect):
                   # Logging inside untap_permanent
 
         return untapped_count > 0
+
+
+class DigEffect(AbilityEffect):
+    """Look at the top N cards; put one (or more) into your hand, the rest on
+    the bottom (or top). July 2026 parser expansion: impulsive-dig selection
+    ("look at the top three, put one into your hand and the rest on the
+    bottom") hit the no-op fallback. v1 keeps the highest-value card (a simple
+    deterministic pick); the choice is a Tier 3 agent-choice item.
+    """
+    def __init__(self, look=3, take=1, rest="bottom", condition=None):
+        self.look = look
+        self.take = take
+        self.rest = rest  # 'bottom' | 'top' | 'graveyard'
+        super().__init__(f"Look at the top {look}, put {take} into hand, rest on {rest}", condition)
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        lib = controller.get("library", [])
+        if not lib:
+            return True
+        n = min(self.look, len(lib))
+        looked = lib[:n]
+        del lib[:n]
+        # v1 heuristic: take the highest-CMC card(s) (usually the payoff).
+        def _cmc(cid):
+            c = game_state._safe_get_card(cid)
+            return getattr(c, 'cmc', 0) or 0
+        looked_sorted = sorted(looked, key=_cmc, reverse=True)
+        taken = looked_sorted[:self.take]
+        rest = [c for c in looked if c not in taken]
+        for cid in taken:
+            game_state.move_card(cid, controller, "library_implicit", controller, "hand", cause="dig")
+        if self.rest == "bottom":
+            controller["library"].extend(rest)
+        elif self.rest == "top":
+            for cid in reversed(rest):
+                controller["library"].insert(0, cid)
+        elif self.rest == "graveyard":
+            for cid in rest:
+                game_state.move_card(cid, controller, "library_implicit", controller, "graveyard", cause="dig_discard")
+        logging.debug(f"Dig: looked {n}, took {taken} to hand, {len(rest)} to {self.rest}.")
+        return True
+
+
+class PutOnLibraryEffect(AbilityEffect):
+    """Put a target permanent onto the top or bottom of its owner's library
+    (tempo removal / tuck). July 2026 parser expansion: "put target creature on
+    top of its owner's library" hit the no-op fallback.
+    """
+    def __init__(self, target_type="creature", position="top", condition=None):
+        self.target_type = target_type.lower()
+        self.position = position  # 'top' | 'bottom'
+        super().__init__(f"Put target {self.target_type} on {position} of its owner's library", condition)
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        ids = []
+        if isinstance(targets, dict):
+            for cat in ("creatures", "permanents", "artifacts", "enchantments", "lands"):
+                ids.extend(targets.get(cat, []))
+        if not ids:
+            logging.warning(f"PutOnLibraryEffect: no target in {targets}")
+            return False
+        moved = False
+        for cid in set(ids):
+            owner, zone = game_state.find_card_location(cid)
+            if not owner or zone != "battlefield":
+                continue
+            if game_state.move_card(cid, owner, "battlefield", owner, "library", cause="put_on_library"):
+                # move_card appends; reposition to top if needed.
+                if self.position == "top" and cid in owner["library"]:
+                    owner["library"].remove(cid)
+                    owner["library"].insert(0, cid)
+                moved = True
+        return moved
+
+
+class ShuffleGraveyardEffect(AbilityEffect):
+    """Shuffle a player's graveyard into their library (graveyard hate /
+    anti-mill / recursion). July 2026 parser expansion: "shuffle your
+    graveyard into your library" hit the no-op fallback.
+    """
+    def __init__(self, who="controller", condition=None):
+        self.who = who  # 'controller' | 'target_player' | 'each_player'
+        super().__init__(f"Shuffle {who} graveyard into library", condition)
+        self.requires_target = who == "target_player"
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        players = []
+        if self.who == "controller":
+            players = [controller]
+        elif self.who == "each_player":
+            players = [p for p in (game_state.p1, game_state.p2) if p]
+        elif self.who == "target_player":
+            pids = targets.get("players", []) if isinstance(targets, dict) else []
+            if pids:
+                players = [game_state.p1 if pids[0] == "p1" else game_state.p2]
+        if not players:
+            players = [controller]
+        did = False
+        for p in players:
+            gy = p.get("graveyard", [])
+            if not gy:
+                continue
+            p.setdefault("library", []).extend(gy)
+            p["graveyard"] = []
+            did = True
+            if hasattr(game_state, 'shuffle_library'):
+                game_state.shuffle_library(p)
+            else:
+                import random as _r
+                _r.shuffle(p["library"])
+        return did
+
+
+class PreventDamageEffect(AbilityEffect):
+    """Register a damage-prevention replacement (fog / prevention shields).
+
+    July 2026 parser expansion: "prevent all combat damage this turn" and
+    "prevent the next N damage" hit the no-op fallback. Registers a DAMAGE
+    replacement (the replacement system was made functional earlier this
+    campaign). combat_only restricts it to combat damage; amount=None means
+    prevent all (a fog), else prevent up to N.
+    """
+    def __init__(self, amount=None, combat_only=False, target_scope="all", condition=None):
+        self.amount = amount            # None = prevent all; int = prevent next N
+        self.combat_only = combat_only
+        self.target_scope = target_scope  # 'all' | 'to_you' | 'target'
+        super().__init__(f"Prevent {'all' if amount is None else amount} {'combat ' if combat_only else ''}damage", condition)
+        self.requires_target = target_scope == "target"
+
+    def apply(self, game_state, source_id, controller, targets=None):
+        re_sys = getattr(game_state, 'replacement_effects', None)
+        if not re_sys:
+            return False
+        remaining = {'n': self.amount}  # closure box for "next N" tracking
+        combat_only = self.combat_only
+
+        def _prevent(ctx):
+            if ctx.get('damage_amount', 0) <= 0:
+                return ctx
+            if combat_only and not ctx.get('is_combat_damage', False):
+                return ctx
+            amt = ctx['damage_amount']
+            if remaining['n'] is None:
+                ctx['damage_amount'] = 0
+            else:
+                prevented = min(amt, remaining['n'])
+                ctx['damage_amount'] = amt - prevented
+                remaining['n'] -= prevented
+            return ctx
+
+        def _condition(ctx):
+            if remaining['n'] is not None and remaining['n'] <= 0:
+                return False
+            if combat_only and not ctx.get('is_combat_damage', False):
+                return False
+            return True
+
+        re_sys.register_effect({
+            'event_type': 'DAMAGE',
+            'replacement': _prevent,
+            'condition': _condition,
+            'source_id': source_id,
+            'duration': 'end_of_turn',
+            'description': self.effect_text,
+        })
+        logging.debug(f"Registered prevention: {self.effect_text}")
+        return True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        return self.apply(game_state, source_id, controller, targets)
 
 
 class ScryEffect(AbilityEffect):
@@ -3082,14 +3577,92 @@ class FightEffect(AbilityEffect):
         # Return true if the fight happened (damage was attempted)
         return True
     
+class AnimateLandEffect(AbilityEffect):
+    """Target land becomes an N/N creature (still a land). July 2026 parser
+    expansion: "target land becomes a 3/3 creature until end of turn" hit the
+    no-op fallback. Registers layer-4 add_type (creature) and layer-7b set_pt.
+    """
+    def __init__(self, power=0, toughness=0, duration="end_of_turn", keep_types=True, condition=None):
+        self.power = power
+        self.toughness = toughness
+        self.duration = duration
+        self.keep_types = keep_types  # "it's still a land"
+        super().__init__(f"Target land becomes a {power}/{toughness} creature", condition)
+        self.requires_target = True
+
+    def apply(self, game_state, source_id, controller, targets=None):
+        if not getattr(game_state, 'layer_system', None):
+            return False
+        ids = []
+        if isinstance(targets, dict):
+            for cat in ("lands", "permanents", "creatures"):
+                ids.extend(targets.get(cat, []))
+        if not ids:
+            logging.warning(f"AnimateLandEffect: no target land in {targets}")
+            return False
+        applied = False
+        for cid in set(ids):
+            # Layer 4: add the creature type.
+            game_state.layer_system.register_effect({
+                'source_id': source_id, 'layer': 4, 'affected_ids': [cid],
+                'effect_type': 'add_type', 'effect_value': 'creature',
+                'duration': self.duration, 'description': f"animate: {cid} becomes creature",
+            })
+            # Layer 7b: set its P/T.
+            game_state.layer_system.register_effect({
+                'source_id': source_id, 'layer': 7, 'sublayer': 'b', 'affected_ids': [cid],
+                'effect_type': 'set_pt', 'effect_value': (self.power, self.toughness),
+                'duration': self.duration, 'description': f"animate: {cid} P/T {self.power}/{self.toughness}",
+            })
+            applied = True
+        return applied
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        return self.apply(game_state, source_id, controller, targets)
+
+
+class RevealHandEffect(AbilityEffect):
+    """A player reveals their hand. July 2026 parser expansion: "target player
+    reveals their hand" hit the no-op fallback. In a two-player perfect-info
+    sim this is mostly informational, but marking it lets downstream effects
+    ("you choose a card", discard-selection) and triggers key off it.
+    """
+    def __init__(self, who="target_player", condition=None):
+        self.who = who
+        super().__init__(f"{who} reveals their hand", condition)
+        self.requires_target = who == "target_player"
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        players = []
+        if self.who == "controller":
+            players = [controller]
+        elif self.who == "each_player":
+            players = [p for p in (game_state.p1, game_state.p2) if p]
+        elif self.who == "target_player":
+            pids = targets.get("players", []) if isinstance(targets, dict) else []
+            if pids:
+                players = [game_state.p1 if pids[0] == "p1" else game_state.p2]
+        if not players:
+            players = [controller]
+        for p in players:
+            p["hand_revealed"] = True
+            game_state.trigger_ability(source_id, "HAND_REVEALED",
+                                       {"player": p, "controller": controller})
+            logging.debug(f"{p.get('name','player')} reveals their hand ({len(p.get('hand', []))} cards).")
+        return True
+
+
 class BuffEffect(AbilityEffect):
     """Effect that buffs power/toughness. Registers with LayerSystem."""
-    def __init__(self, power_mod, toughness_mod, target_type="creature", duration="end_of_turn", condition=None):
+    def __init__(self, power_mod, toughness_mod, target_type="creature", duration="end_of_turn", condition=None, count_expr=None):
         super().__init__(f"{target_type} gets {power_mod:+}/{toughness_mod:+}", condition)
         self.power_mod = power_mod
         self.toughness_mod = toughness_mod
         self.target_type = target_type
         self.duration = duration # 'end_of_turn' or 'permanent' (until source leaves)
+        # "+X/+X where X is the number of ..." -> count computed at apply time
+        # against the controller (July 2026 parser expansion).
+        self.count_expr = count_expr
         self.requires_target = "target" in target_type # Check if it targets specifically
 
     def apply(self, game_state, source_id, controller, targets=None):
@@ -3097,6 +3670,13 @@ class BuffEffect(AbilityEffect):
         if not hasattr(game_state, 'layer_system') or not game_state.layer_system:
              logging.warning("BuffEffect: LayerSystem not available.")
              return False
+
+        # Resolve a dynamic "+X/+X where X is the number of ..." amount.
+        if getattr(self, 'count_expr', None):
+            x = game_state.count_dynamic_quantity(self.count_expr, controller)
+            self.power_mod = x
+            self.toughness_mod = x
+            logging.debug(f"BuffEffect: dynamic +X/+X, X('{self.count_expr}') = {x}.")
 
         if self.power_mod == 0 and self.toughness_mod == 0: return True # No change
 

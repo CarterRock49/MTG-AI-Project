@@ -1111,6 +1111,76 @@ class GameState(
         logging.info("GameState cloned successfully.")
         return cloned_state
  
+    def count_dynamic_quantity(self, expr, controller):
+        """Count a "number of X you control / in your graveyard" style quantity.
+
+        Shared by variable draw/life/pump effects (July 2026 parser expansion).
+        expr is a lowercased noun phrase such as "creatures you control",
+        "lands you control", "cards in your graveyard", "mountains you control".
+        Returns an int (0 if nothing matches).
+        """
+        expr = (expr or "").lower().strip()
+        p = controller
+        opp = self.p2 if controller == self.p1 else self.p1
+
+        def _types(cid):
+            c = self._safe_get_card(cid)
+            return [t.lower() for t in getattr(c, 'card_types', [])] if c else []
+
+        def _subtypes(cid):
+            c = self._safe_get_card(cid)
+            return [t.lower() for t in getattr(c, 'subtypes', [])] if c else []
+
+        # Graveyard counts.
+        if "in your graveyard" in expr or "cards in your graveyard" in expr:
+            zone = p.get("graveyard", [])
+            if "creature" in expr:
+                return sum(1 for c in zone if 'creature' in _types(c))
+            return len(zone)
+        if "in each graveyard" in expr or "in all graveyards" in expr:
+            return len(p.get("graveyard", [])) + len(opp.get("graveyard", []))
+
+        # Battlefield "you control" / "target player controls" / "opponents control".
+        target = p
+        if "you control" in expr or "under your control" in expr:
+            target = p
+        elif "an opponent controls" in expr or "opponents control" in expr or "your opponents control" in expr:
+            target = opp
+
+        bf = target.get("battlefield", [])
+        # Specific creature/land/artifact/etc, or a subtype like Mountains/Elves.
+        if "creature" in expr:
+            return sum(1 for c in bf if 'creature' in _types(c))
+        if "land" in expr and "island" not in expr and "mountain" not in expr and "forest" not in expr and "swamp" not in expr and "plains" not in expr:
+            return sum(1 for c in bf if 'land' in _types(c))
+        if "artifact" in expr:
+            return sum(1 for c in bf if 'artifact' in _types(c))
+        if "enchantment" in expr:
+            return sum(1 for c in bf if 'enchantment' in _types(c))
+        # Basic land subtypes and other subtypes ("Mountains you control").
+        for sub in ("mountain", "island", "forest", "swamp", "plains", "elf", "goblin", "zombie", "soldier"):
+            if sub + "s" in expr or (sub in expr):
+                return sum(1 for c in bf if sub in _subtypes(c))
+        # Fallback: total permanents controlled.
+        if "permanent" in expr:
+            return len(bf)
+        return 0
+
+    def _is_creature(self, card_id):
+        """Whether a card id currently refers to a creature.
+
+        Phantom-method fix (July 2026): this was called from at least 6 sites
+        (BuffEffect/GainKeywordEffect/SacrificeEffect target selection, and the
+        environment's my_dead_creatures / opp_dead_creatures OBSERVATIONS) but
+        never existed -- every call returned an AttributeError that callers
+        swallowed, so anthem/pump target sets silently excluded all creatures
+        and the agent's dead-creature observations were always zero.
+        """
+        card = self._safe_get_card(card_id)
+        if not card:
+            return False
+        return 'creature' in [t.lower() for t in getattr(card, 'card_types', [])]
+
     def _safe_get_card(self, card_id, default_value=None):
         """Safely get a card with proper error handling and type checking"""
         try:
