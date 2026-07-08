@@ -313,16 +313,27 @@ class CastingHandlersMixin:
             return 0.01, True
 
     def _get_kicker_cost_str(self, card):
-        """Helper to extract kicker cost string."""
+        """Helper to extract kicker cost string (mana or bare-number forms).
+
+        BUGFIX (July 2026 sweep): the fallback branch read .group(1) on a
+        regex with NO capture group -> IndexError('no such group') on any
+        card whose kicker cost wasn't in the '{X}' braces form immediately
+        after 'kicker'. That crash propagated up through PAY_KICKER and could
+        abort the whole cast. The fallback now captures its cost.
+        """
         if card and hasattr(card, 'oracle_text'):
-            # Prioritize kicker cost directly after the word 'kicker'
-            direct_match = re.search(r"\bkicker\s*(\{.*?\})\b", card.oracle_text.lower())
-            if direct_match: return direct_match.group(1)
-            # Fallback for kicker costs later in the text (less common format)
-            later_match = re.search(r"kicker (?:\{[^\}]+\}|[0-9]+)", card.oracle_text.lower()) # Original pattern as fallback
+            text = card.oracle_text.lower()
+            # Prioritize a braces cost directly after the word 'kicker'.
+            direct_match = re.search(r"\bkicker\s*(\{.*?\})", text)
+            if direct_match:
+                return direct_match.group(1)
+            # Fallback: 'kicker' followed by a braces OR a bare number
+            # ('kicker 3'). Capture the cost so .group(1) is always valid.
+            later_match = re.search(r"kicker\s+(\{[^\}]+\}|[0-9]+)", text)
             if later_match:
                 cost_str = later_match.group(1)
-                if cost_str.isdigit(): return f"{{{cost_str}}}"
+                if cost_str.isdigit():
+                    return f"{{{cost_str}}}"
                 return cost_str
         return None
 

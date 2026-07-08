@@ -737,7 +737,7 @@ class GameStateStackMixin:
                      # Pass targets that were selected *for the whole spell* if available
                      # If modes have separate targets, targeting phase needs modification. Assume shared targets for now.
                      mode_targets = context.get("targets") # Targets selected before spell was put on stack (if any)
-                     effects = EffectFactory.create_effects(mode_text, mode_targets)
+                     effects = EffectFactory.create_effects(mode_text, mode_targets, source_name=getattr(spell, 'name', None))
                      for effect_obj in effects:
                          if effect_obj.apply(self, spell_id, controller, mode_targets):
                               resolution_effects_applied = True
@@ -1021,7 +1021,11 @@ class GameStateStackMixin:
         if context is None: context = {}
         spell = self._safe_get_card(spell_id)
         valid_types = ['instant', 'sorcery']
-        if not spell or not any(t in getattr(spell, 'card_types', []) for t in valid_types):
+        # When cast as an Adventure, the card is a creature whose Adventure
+        # half is an instant/sorcery -- honor the flag rather than rejecting
+        # it on the creature type (July 2026 sweep).
+        if not spell or not (any(t in getattr(spell, 'card_types', []) for t in valid_types)
+                             or context.get('cast_as_adventure')):
              logging.warning(f"Attempted to resolve {spell_id} as instant/sorcery, but type is invalid.")
              if not context.get("is_copy", False): controller["graveyard"].append(spell_id)
              return False
@@ -1032,7 +1036,7 @@ class GameStateStackMixin:
         # Apply effects using AbilityHandler or EffectFactory
         if hasattr(self, 'ability_handler'):
             # --- MODIFIED: Pass full context ---
-            effects = EffectFactory.create_effects(getattr(spell, 'oracle_text', ''), context.get('targets'))
+            effects = EffectFactory.create_effects(getattr(spell, 'oracle_text', ''), context.get('targets'), source_name=getattr(spell, 'name', None))
             for effect_obj in effects:
                 effect_obj.apply(self, spell_id, controller, context.get('targets'))
             # --- END MODIFIED ---
@@ -1046,6 +1050,17 @@ class GameStateStackMixin:
 
         if context.get('cast_from_zone') == 'graveyard' and "flashback" in getattr(spell,'oracle_text','').lower():
             final_zone = "exile"
+        # --- Adventure (CR 715.3f, July 2026 sweep) ---
+        # A spell cast as its Adventure half goes to EXILE, and the owner may
+        # later cast the creature from exile. cast_as_adventure was set at
+        # cast time but nothing read it here, so adventure spells went to the
+        # graveyard and the creature half was lost forever.
+        elif context.get('cast_as_adventure'):
+            final_zone = "exile"
+            if not hasattr(self, 'cards_castable_from_exile'):
+                self.cards_castable_from_exile = set()
+            self.cards_castable_from_exile.add(spell_id)
+            logging.debug(f"{spell_name} exiled on Adventure; creature side castable from exile.")
         # --- MODIFIED: Rebound Logic ---
         elif has_rebound and was_cast_from_hand:
             final_zone = "exile"

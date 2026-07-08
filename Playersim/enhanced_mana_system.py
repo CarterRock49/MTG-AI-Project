@@ -1904,8 +1904,14 @@ class EnhancedManaSystem:
             # Pay snow mana
             if final_cost.get('snow', 0) > 0:
                 # pay_snow_cost taps permanents and adds mana to pools. This needs integration.
-                # Simplified: Assume pay_snow_cost works if can_pay was true.
-                # Needs revision: Pay snow should consume specific mana from tapped snow sources.
+                # KNOWN v1 INFIDELITY: snow should be paid with mana FROM snow
+                # sources already in the pool; tapping extra sources here can
+                # double-charge. Counted in fidelity telemetry so the stats
+                # consumer can weight snow decks accordingly.
+                try:
+                    self.game_state.fidelity_counters["unparsed_effects"] += 1
+                except Exception:
+                    pass
                 if not self.pay_snow_cost(player, final_cost['snow']): # CAUTION: Modifies player state directly
                     raise ValueError("Failed to pay Snow mana cost")
                 payment['snow'] += final_cost['snow'] # Track that snow was paid
@@ -2114,6 +2120,42 @@ class EnhancedManaSystem:
         # Skip empty strings
         if not mana_string:
             return result
+        
+        # --- PRODUCE_MANA replacements (July 2026 triage fix) ---
+        # Mana-doubling replacements registered against a 'PRODUCE_MANA' event
+        # that nothing ever fired: they were dead code. Fire it here, at the
+        # single entry point for produced mana, and translate any increase
+        # back into extra mana symbols so the untouched downstream machinery
+        # (restrictions, phase pools, conditional pools) handles them normally.
+        re_sys = getattr(self.game_state, 'replacement_effects', None)
+        if re_sys is not None and land_context is not None:
+            try:
+                _symbols = re.findall(r'\{([^{}]+)\}', mana_string.lower())
+                _produced = {}
+                for _s in _symbols:
+                    _key = _s.upper()
+                    _produced[_key] = _produced.get(_key, 0) + 1
+                if _produced:
+                    _ctx = {
+                        'event_type': 'PRODUCE_MANA',
+                        'player': player,
+                        'source_is_tap_ability': bool(land_context.get('tapped', True)) if isinstance(land_context, dict) else True,
+                        'source_permanent_id': (land_context.get('source_permanent_id') or land_context.get('card_id')) if isinstance(land_context, dict) else None,
+                        'mana_produced': dict(_produced),
+                    }
+                    _modified, _was_replaced = re_sys.apply_replacements('PRODUCE_MANA', _ctx)
+                    if _was_replaced:
+                        _new = _modified.get('mana_produced', _produced) or {}
+                        _extra = []
+                        for _color, _count in _new.items():
+                            _delta = int(_count) - _produced.get(_color, 0)
+                            if _delta > 0:
+                                _extra.append(('{%s}' % _color.lower()) * _delta)
+                        if _extra:
+                            mana_string = mana_string + ''.join(_extra)
+                            result['logs'].append(f"PRODUCE_MANA replacement increased production: {_produced} -> {_new}")
+            except Exception as _e:
+                logging.error(f"Error applying PRODUCE_MANA replacements: {_e}")
         
         # Initialize conditional_mana if not exists
         if not hasattr(player, "conditional_mana"):

@@ -900,6 +900,688 @@ def s_stats_winner_mapping():
     assert mapped_cards == {0: [101], 1: [202]} and mapped_history["winner"] == {2: [101]}
 
 
+@scenario("614 (mana doubling)", "a registered mana-doubling replacement actually doubles produced mana")
+def s_mana_doubling_live():
+    gs = fresh()
+    player = gs.p1
+    forest = card_id_by_name(gs, "Forest")
+    assert gs.move_card(forest, owner_of(gs, forest), "library", player, "battlefield")
+    doubler = card_id_by_name(gs, "Thicket Brute")   # stand-in source permanent
+    to_battlefield(gs, doubler)
+    eff = gs.replacement_effects._register_mana_doubling_effect(
+        doubler, player, "Whenever you tap a forest for mana, it produces twice that much mana.")
+    assert eff, "mana doubling effect failed to register"
+    player["mana_pool"] = {}
+    gs.mana_system.add_mana_to_pool(player, "{g}", land_context={'source_permanent_id': forest})
+    assert player["mana_pool"].get("G", 0) == 2, \
+        (f"doubler produced {player['mana_pool'].get('G', 0)} G (expected 2); the "
+         f"replacement listened for a PRODUCE_MANA event that nothing ever fired")
+
+
+@scenario("614 (dies-copy)", "a 'create a token that's a copy of it' replacement actually creates the token")
+def s_dies_copy_creates_token():
+    gs = fresh()
+    player = gs.p1
+    cid = card_id_by_name(gs, "Thicket Brute")
+    gs.move_card(cid, owner_of(gs, cid), "library", player, "battlefield")
+    fn = gs.replacement_effects._create_replacement_function(
+        'DIES', "create a token that's a copy of it", player, "TestSource")
+    assert fn, "no replacement function produced for the dies-copy text"
+    bf_before = len(player["battlefield"])
+    fn({'card_id': cid, 'controller': player})
+    new_ids = [i for i in player["battlefield"] if i != cid]
+    assert len(player["battlefield"]) == bf_before + 1 and new_ids, \
+        "no token was created; the replacement only set a flag nothing reads"
+    token = gs._safe_get_card(new_ids[-1])
+    assert getattr(token, 'name', None) == "Thicket Brute" and getattr(token, 'is_token', False), \
+        f"created object is not a token copy of the original: {getattr(token, 'name', None)}"
+
+
+@scenario("615 (target scope)", "damage prevention respects its target class")
+def s_prevention_target_scope():
+    gs = fresh()
+    player = gs.p1
+    src_id = card_id_by_name(gs, "Sprout Guardian")
+    to_battlefield(gs, src_id)
+    creature = card_id_by_name(gs, "Vine Stalker")
+    to_battlefield(gs, creature)
+    gs.replacement_effects._register_damage_prevention(
+        src_id, player, "Prevent all damage that would be dealt to target creature.")
+    # (a) creature target -> prevented
+    ctx, _ = gs.replacement_effects.apply_replacements(
+        'DAMAGE', {'damage_amount': 3, 'target_id': creature, 'target_is_player': False})
+    assert ctx.get('damage_amount') == 0, "creature-targeted prevention did not prevent"
+    # (b) player target -> NOT prevented (the 'creature' class had no check at all)
+    ctx, _ = gs.replacement_effects.apply_replacements(
+        'DAMAGE', {'damage_amount': 3, 'target_id': "p1", 'target_is_player': True})
+    assert ctx.get('damage_amount') == 3, \
+        "creature-only prevention shielded a PLAYER (missing target-class check)"
+
+
+@scenario("615 (prevent X)", "'prevent the next X damage' uses the paid X, not a placeholder 1")
+def s_prevention_x_value():
+    gs = fresh()
+    player = gs.p1
+    src_id = card_id_by_name(gs, "Sprout Guardian")
+    to_battlefield(gs, src_id)
+    gs.replacement_effects._register_damage_prevention(
+        src_id, player, "Prevent the next X damage that would be dealt to any target this turn.",
+        x_value=4)
+    ctx, _ = gs.replacement_effects.apply_replacements(
+        'DAMAGE', {'damage_amount': 6, 'target_id': "p1", 'target_is_player': True})
+    assert ctx.get('damage_amount') == 2, \
+        (f"expected 6-4=2 remaining damage with X=4, got {ctx.get('damage_amount')} "
+         f"(X was a placeholder 1)")
+
+
+@scenario("702.26", "a permanent that phases back in gets its effects re-registered")
+def s_phasing_reregisters_effects():
+    gs = fresh()
+    player = gs.p1
+    cid = inject_card(gs, {
+        "name": "Phase Ward", "mana_cost": "{1}{W}", "type_line": "Enchantment",
+        "oracle_text": "Prevent all damage that would be dealt to you.",
+    })
+    player["library"].append(cid)
+    assert gs.move_card(cid, player, "library", player, "battlefield")
+    def _count_effects(source):
+        return sum(1 for e in gs.replacement_effects.active_effects
+                   if e.get('source_id') == source)
+    assert _count_effects(cid) >= 1, "test setup: prevention effect did not register on entry"
+    # Grant phasing (sourced by ANOTHER permanent so phase-out's
+    # remove-by-source doesn't strip the grant itself).
+    granter = card_id_by_name(gs, "Thicket Brute")
+    to_battlefield(gs, granter)
+    gs.layer_system.register_effect({'source_id': granter, 'layer': 6,
+                                     'affected_ids': [cid],
+                                     'effect_type': 'add_ability', 'effect_value': 'phasing',
+                                     'duration': 'permanent'})
+    gs.layer_system.invalidate_cache()
+    gs.layer_system.apply_all_effects()
+    # Untap step 1: the permanent phases out; its effects stop existing.
+    gs._untap_phase(player)
+    assert cid not in player["battlefield"], "test setup: permanent did not phase out"
+    assert _count_effects(cid) == 0, "phased-out permanent's effects were not removed"
+    # Untap step 2: it phases back in. CR 702.26: it is the same object with
+    # the same abilities; its effects must be re-registered.
+    gs._untap_phase(player)
+    assert cid in player["battlefield"], "permanent did not phase back in"
+    assert _count_effects(cid) >= 1, \
+        "phased-in permanent lost its abilities permanently (effects never re-registered)"
+    assert gs.ability_handler.registered_abilities.get(cid) is not None, \
+        "phased-in permanent's parsed abilities were not re-registered"
+
+
+@scenario("support manifest", "unparseable card text lands the card on the persisted unsupported list")
+def s_card_support_manifest():
+    import json, tempfile, os
+    from Playersim.card_support import get_manifest, reset_manifest_for_tests
+    from Playersim.ability_utils import EffectFactory
+    reset_manifest_for_tests()
+    # A clause the parser cannot understand must attribute the failure to the
+    # card, so (a) Carter can add support, (b) the deck builder can avoid it.
+    effects = EffectFactory.create_effects(
+        "Gyre and gimble in the wabe.", source_name="Test Unsupported Card")
+    m = get_manifest()
+    entry = m.entries.get("Test Unsupported Card")
+    assert entry is not None, "unparseable text did not put the card on the unsupported list"
+    assert entry["count"] >= 1 and entry["severity"] in ("partial", "unparsed"), entry
+    assert any("gyre" in r.lower() for r in entry["reasons"]), \
+        f"reason does not identify the failing clause: {list(entry['reasons'])}"
+    # Persist + merge round trip: the deck builder consumes this file.
+    with tempfile.TemporaryDirectory() as d:
+        m.persist(d)
+        p = os.path.join(d, "card_support_manifest.json")
+        assert os.path.exists(p), "manifest file was not written"
+        data = json.load(open(p))
+        assert "Test Unsupported Card" in data
+        assert data["Test Unsupported Card"]["count"] >= 1
+        # Second persist merges counts instead of clobbering.
+        m.report("Test Unsupported Card", "another clause", severity="unparsed")
+        m.persist(d)
+        data2 = json.load(open(p))
+        assert data2["Test Unsupported Card"]["count"] > data["Test Unsupported Card"]["count"]
+        assert data2["Test Unsupported Card"]["severity"] == "unparsed", \
+            "severity did not escalate (partial -> unparsed)"
+    reset_manifest_for_tests()
+
+
+@scenario("support manifest (crash)", "an effect that raises attributes a crash entry to its source card")
+def s_manifest_crash_attribution():
+    from Playersim.card_support import get_manifest, reset_manifest_for_tests
+    from Playersim.ability_types import AbilityEffect
+    reset_manifest_for_tests()
+    gs = fresh()
+    cid = card_id_by_name(gs, "Thicket Brute")
+    to_battlefield(gs, cid)
+    class ExplodingEffect(AbilityEffect):
+        def __init__(self):
+            super().__init__("explode the noosphere")
+            self.requires_target = False
+        def _apply_effect(self, game_state, source_id, controller, targets):
+            raise RuntimeError("boom")
+    ok = ExplodingEffect().apply(gs, cid, gs.p1)
+    assert ok is False, "a crashing effect must fail gracefully"
+    entry = get_manifest().entries.get("Thicket Brute")
+    assert entry is not None and entry["severity"] == "crash", \
+        f"crash was not attributed to the source card: {entry}"
+    reset_manifest_for_tests()
+
+
+@scenario("support manifest (coverage)", "the coverage report joins a card pool against the manifest")
+def s_manifest_coverage_report():
+    from Playersim.card_support import get_manifest, reset_manifest_for_tests, coverage_report
+    reset_manifest_for_tests()
+    m = get_manifest()
+    m.report("Broken Card", "unparsed effect text: nonsense", severity="unparsed")
+    m.report("Iffy Card", "unparsed clause: half of it", severity="partial")
+    rep = coverage_report(["Broken Card", "Iffy Card", "Fine Card"])
+    assert rep["total"] == 3 and rep["fully_supported"] == ["Fine Card"], rep
+    assert rep["excluded"] == ["Broken Card"] and rep["degraded"] == ["Iffy Card"], rep
+    assert abs(rep["supported_fraction"] - (1/3)) < 1e-9, rep
+    reset_manifest_for_tests()
+
+
+@scenario("first-touch: discard", "'each player discards a card' moves one card from each hand to its graveyard")
+def s_first_touch_discard():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    src_id = card_id_by_name(gs, "Thicket Brute")
+    to_battlefield(gs, src_id)
+    for p in (gs.p1, gs.p2):
+        while len(p["hand"]) < 2:
+            p["hand"].append(p["library"].pop(0))
+    h1, h2 = len(gs.p1["hand"]), len(gs.p2["hand"])
+    g1, g2 = len(gs.p1["graveyard"]), len(gs.p2["graveyard"])
+    effects = EffectFactory.create_effects("Each player discards a card.", source_name="Test Discard")
+    assert effects and type(effects[0]).__name__ == "DiscardEffect", \
+        f"parser did not produce a DiscardEffect: {[type(e).__name__ for e in effects]}"
+    for eff in effects:
+        eff.apply(gs, src_id, gs.p1)
+    assert len(gs.p1["hand"]) == h1 - 1 and len(gs.p2["hand"]) == h2 - 1, \
+        f"hands went {h1},{h2} -> {len(gs.p1['hand'])},{len(gs.p2['hand'])} (expected each -1)"
+    assert len(gs.p1["graveyard"]) == g1 + 1 and len(gs.p2["graveyard"]) == g2 + 1, \
+        "discarded cards did not reach the graveyards"
+
+
+@scenario("first-touch: mill", "'each player mills two cards' moves library tops to graveyards")
+def s_first_touch_mill():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    src_id = card_id_by_name(gs, "Thicket Brute")
+    to_battlefield(gs, src_id)
+    l1, l2 = len(gs.p1["library"]), len(gs.p2["library"])
+    g1, g2 = len(gs.p1["graveyard"]), len(gs.p2["graveyard"])
+    tops = {0: list(gs.p1["library"][:2]), 1: list(gs.p2["library"][:2])}
+    effects = EffectFactory.create_effects("Each player mills two cards.", source_name="Test Mill")
+    assert effects and type(effects[0]).__name__ == "MillEffect", \
+        f"parser did not produce a MillEffect: {[type(e).__name__ for e in effects]}"
+    for eff in effects:
+        eff.apply(gs, src_id, gs.p1)
+    assert len(gs.p1["library"]) == l1 - 2 and len(gs.p2["library"]) == l2 - 2, \
+        f"libraries went {l1},{l2} -> {len(gs.p1['library'])},{len(gs.p2['library'])} (expected each -2)"
+    assert all(c in gs.p1["graveyard"] for c in tops[0]) and all(c in gs.p2["graveyard"] for c in tops[1]), \
+        "milled cards are not the library TOPS in the graveyards"
+
+
+@scenario("first-touch: search", "the fixture ramp spell fetches a basic land onto the battlefield tapped")
+def s_first_touch_search():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    src_id = card_id_by_name(gs, "Wild Growth Ritual")
+    owner = owner_of(gs, src_id)
+    lands_before = sum(1 for c in owner["battlefield"]
+                       if 'land' in getattr(gs._safe_get_card(c), 'card_types', []))
+    lib_before = len(owner["library"])
+    effects = EffectFactory.create_effects(
+        "Search your library for a basic land card and put it onto the battlefield tapped.",
+        source_name="Wild Growth Ritual")
+    assert effects, "parser produced nothing for the fixture ramp spell's text"
+    applied = any(eff.apply(gs, src_id, owner) for eff in effects)
+    lands_after = sum(1 for c in owner["battlefield"]
+                      if 'land' in getattr(gs._safe_get_card(c), 'card_types', []))
+    assert applied and lands_after == lands_before + 1, \
+        (f"ramp spell put no land onto the battlefield "
+         f"(lands {lands_before}->{lands_after}, applied={applied}) - the fixture "
+         f"decks have cast this in every random episode with it silently doing nothing")
+    assert len(owner["library"]) == lib_before - 1, "fetched land did not leave the library"
+    new_land = [c for c in owner["battlefield"]
+                if 'land' in getattr(gs._safe_get_card(c), 'card_types', [])
+                and c not in owner.get("tapped_permanents", set())]
+    fetched_tapped = any(c in owner.get("tapped_permanents", set()) for c in owner["battlefield"]
+                         if 'land' in getattr(gs._safe_get_card(c), 'card_types', []))
+    assert fetched_tapped, "fetched land entered untapped despite 'tapped' in the text"
+
+
+@scenario("first-touch: +1/+1 counter", "a +1/+1 counter raises a creature's power and toughness")
+def s_first_touch_plus_counter():
+    gs = fresh()
+    cid = card_id_by_name(gs, "Thicket Brute")   # printed 3/3
+    to_battlefield(gs, cid)
+    card = gs._safe_get_card(cid)
+    assert (card.power, card.toughness) == (3, 3), "test setup"
+    assert gs.add_counter(cid, "+1/+1", 2), "add_counter reported failure"
+    gs.layer_system.invalidate_cache(); gs.layer_system.apply_all_effects()
+    assert (card.power, card.toughness) == (5, 5), \
+        f"two +1/+1 counters gave {card.power}/{card.toughness}, expected 5/5"
+
+
+@scenario("122.3 (proliferate)", "proliferate adds one more of an existing counter kind")
+def s_first_touch_proliferate():
+    gs = fresh()
+    player = gs.p1
+    cid = card_id_by_name(gs, "Thicket Brute")
+    assert gs.move_card(cid, owner_of(gs, cid), "library", player, "battlefield")
+    gs.add_counter(cid, "+1/+1", 1)
+    gs.layer_system.invalidate_cache(); gs.layer_system.apply_all_effects()
+    card = gs._safe_get_card(cid)
+    assert card.counters.get("+1/+1") == 1 and (card.power, card.toughness) == (4, 4), "setup"
+    changed = gs.proliferate(player)
+    assert changed, "proliferate reported no change despite a proliferable counter"
+    assert card.counters.get("+1/+1") == 2, \
+        f"proliferate did not add a counter: {card.counters}"
+    gs.layer_system.invalidate_cache(); gs.layer_system.apply_all_effects()
+    assert (card.power, card.toughness) == (5, 5), \
+        f"proliferated counter did not update P/T: {card.power}/{card.toughness}"
+
+
+@scenario("301.5 (equip)", "an equipment's static bonus applies while attached and stops when moved")
+def s_first_touch_equip_bonus():
+    gs = fresh()
+    player = gs.p1
+    creature = card_id_by_name(gs, "Thicket Brute")   # 3/3
+    assert gs.move_card(creature, owner_of(gs, creature), "library", player, "battlefield")
+    equip = inject_card(gs, {
+        "name": "Test Blade", "mana_cost": "{1}", "type_line": "Artifact — Equipment",
+        "oracle_text": "Equipped creature gets +2/+2. Equip {2}.",
+    })
+    player["library"].append(equip)
+    assert gs.move_card(equip, player, "library", player, "battlefield")
+    ok = gs.equip_permanent(player, equip, creature)
+    assert ok, "equip_permanent failed on a legal equip"
+    card = gs._safe_get_card(creature)
+    assert (card.power, card.toughness) == (5, 5), \
+        (f"equipped creature is {card.power}/{card.toughness}, expected 5/5 - the "
+         f"equipment's +2/+2 never entered the layer system (equip P/T is a no-op)")
+    # Unequip: the bonus must stop applying.
+    assert gs.unequip_permanent(player, equip)
+    gs.layer_system.invalidate_cache(); gs.layer_system.apply_all_effects()
+    assert (card.power, card.toughness) == (3, 3), \
+        f"creature kept {card.power}/{card.toughness} after unequip, expected printed 3/3"
+
+
+@scenario("704.5m (aura falls off)", "an aura goes to the graveyard when its creature leaves")
+def s_first_touch_aura_falls_off():
+    gs = fresh()
+    player = gs.p1
+    creature = card_id_by_name(gs, "Vine Stalker")
+    assert gs.move_card(creature, owner_of(gs, creature), "library", player, "battlefield")
+    aura = inject_card(gs, {
+        "name": "Test Shackles", "mana_cost": "{1}{B}", "type_line": "Enchantment — Aura",
+        "oracle_text": "Enchant creature. Enchanted creature gets -1/-1.",
+        "subtypes": ["aura"],
+    })
+    player["library"].append(aura)
+    assert gs.move_card(aura, player, "library", player, "battlefield")
+    gs.attach_aura(player, aura, creature)
+    assert player["attachments"].get(aura) == creature, "aura did not attach"
+    # The creature leaves the battlefield.
+    assert gs.move_card(creature, player, "battlefield", player, "graveyard")
+    gs.check_state_based_actions()
+    assert gs.find_card_location(aura)[1] == "graveyard", \
+        "aura did not fall off (704.5m) when its enchanted creature left the battlefield"
+    assert aura not in player.get("attachments", {}), "stale attachment entry remained after the aura fell off"
+
+
+def _make_planeswalker(gs, player, name="Test Walker", loyalty=3,
+                       text="+1: You gain 1 life.\n-2: Draw a card.\n-6: You gain an emblem."):
+    cid = inject_card(gs, {"name": name, "mana_cost": "{2}{W}",
+                           "type_line": "Legendary Planeswalker — Test",
+                           "oracle_text": text, "loyalty": loyalty})
+    player["library"].append(cid)
+    assert gs.move_card(cid, player, "library", player, "battlefield")
+    return cid
+
+
+@scenario("606 (loyalty)", "a planeswalker's plus ability raises its loyalty by the printed amount")
+def s_loyalty_plus():
+    gs = fresh()
+    player = gs.p1
+    while gs._get_active_player() is not player:
+        gs._advance_phase()
+    pw = _make_planeswalker(gs, player)
+    card = gs._safe_get_card(pw)
+    assert card.loyalty_abilities, "planeswalker loyalty abilities did not parse from text"
+    start = player.get("loyalty_counters", {}).get(pw, card.loyalty)
+    assert start == 3, f"starting loyalty should be 3, got {start}"
+    ok = gs.activate_planeswalker_ability(pw, 0, player)  # the +1
+    assert ok, "activating the +1 ability failed"
+    assert player["loyalty_counters"][pw] == 4, \
+        f"loyalty after +1 is {player['loyalty_counters'][pw]}, expected 4"
+
+
+@scenario("118.5 (loyalty)", "a minus ability costing more loyalty than available is illegal")
+def s_loyalty_minus_illegal():
+    gs = fresh()
+    player = gs.p1
+    while gs._get_active_player() is not player:
+        gs._advance_phase()
+    pw = _make_planeswalker(gs, player, loyalty=1)   # only 1 loyalty
+    # index 1 is the -2 ability; 1 - 2 = -1 < 0, so it is illegal (CR 118.5).
+    ok = gs.activate_planeswalker_ability(pw, 1, player)
+    assert not ok, "a -2 ability was allowed with only 1 loyalty (CR 118.5 violated)"
+    assert player.get("loyalty_counters", {}).get(pw, 1) == 1, \
+        "illegal minus ability still changed loyalty"
+
+
+@scenario("701.17 (scry)", "scry to bottom moves a chosen card off the top of the library")
+def s_scry_to_bottom():
+    gs = fresh()
+    from Playersim.ability_types import ScryEffect
+    player = gs.p1
+    src_id = card_id_by_name(gs, "Thicket Brute")
+    to_battlefield(gs, src_id)
+    top_before = list(player["library"][:2])
+    lib_len = len(player["library"])
+    assert ScryEffect(2)._apply_effect(gs, src_id, player, {}), "ScryEffect did not initiate"
+    assert gs.phase == gs.PHASE_CHOOSE and gs.choice_context.get("type") == "scry"
+    handler = get_env().action_handler
+    # First card: send to bottom (action 307). Second: keep on top (306).
+    handler._handle_scry_surveil_choice(0, gs.choice_context, action_index=307)
+    handler._handle_scry_surveil_choice(0, gs.choice_context, action_index=306)
+    assert gs.choice_context is None, "scry choice did not finalize after all cards processed"
+    assert len(player["library"]) == lib_len, "scry changed library size (cards lost or duplicated)"
+    assert player["library"][0] == top_before[1], \
+        "the card kept on top is not on top after scry"
+    assert player["library"][-1] == top_before[0], \
+        "the card sent to the bottom is not on the bottom after scry"
+
+
+@scenario("701.42 (surveil)", "surveil to graveyard removes a chosen card from the library top")
+def s_surveil_to_graveyard():
+    gs = fresh()
+    from Playersim.ability_types import SurveilEffect
+    player = gs.p1
+    src_id = card_id_by_name(gs, "Thicket Brute")
+    to_battlefield(gs, src_id)
+    top_before = list(player["library"][:2])
+    gy_before = len(player["graveyard"])
+    lib_before = len(player["library"])
+    assert SurveilEffect(2)._apply_effect(gs, src_id, player, {}), "SurveilEffect did not initiate"
+    assert gs.phase == gs.PHASE_CHOOSE and gs.choice_context.get("type") == "surveil"
+    handler = get_env().action_handler
+    # First card: to graveyard (305). Second: keep on top (306).
+    handler._handle_scry_surveil_choice(0, gs.choice_context, action_index=305)
+    handler._handle_scry_surveil_choice(0, gs.choice_context, action_index=306)
+    assert gs.choice_context is None, "surveil choice did not finalize"
+    assert top_before[0] in player["graveyard"], "surveiled-to-graveyard card is not in the graveyard"
+    assert len(player["graveyard"]) == gy_before + 1, "graveyard count wrong after surveil"
+    assert player["library"][0] == top_before[1] and len(player["library"]) == lib_before - 1, \
+        "the kept card is not on top / library count wrong after surveil"
+
+
+@scenario("714 (saga)", "advancing a saga increments the same counter the SBA reads")
+def s_saga_counter_consistency():
+    gs = fresh()
+    player = gs.p1
+    while gs._get_active_player() is not player:
+        gs._advance_phase()
+    saga = inject_card(gs, {
+        "name": "Test Saga", "mana_cost": "{1}{G}",
+        "type_line": "Enchantment — Saga",
+        "oracle_text": "I — You gain 2 life.\nII — Draw a card.\nIII — Create a 2/2 token.",
+        "subtypes": ["saga"],
+    })
+    player["library"].append(saga)
+    assert gs.move_card(saga, player, "library", player, "battlefield")
+    # A saga enters with its first lore counter and its chapter I ability on
+    # the stack (CR 714.2/714.3). The counter the SBA reads to sacrifice it
+    # (704.5) must be the SAME counter advance_saga_counters increments --
+    # setup, advance, and the SBA must not use three different stores.
+    def _counter():
+        return (player.get("saga_counters", {}).get(saga, 0),
+                getattr(gs, "saga_counters", {}).get(saga, 0))
+    pc, gc = _counter()
+    assert max(pc, gc) == 1, f"saga did not enter with 1 lore counter: player={pc}, gs={gc}"
+    gs.advance_saga_counters(player)
+    pc, gc = _counter()
+    # After one advance the saga is on chapter II; the SBA (which reads
+    # player['saga_counters']) must see 2, not still 1.
+    assert player.get("saga_counters", {}).get(saga, 0) == 2, \
+        (f"advance_saga_counters wrote to a different store than setup/SBA read "
+         f"(player saga_counters={player.get('saga_counters', {}).get(saga)}, "
+         f"gs.saga_counters={getattr(gs, 'saga_counters', {}).get(saga)})")
+
+
+@scenario("714.4 (saga)", "a saga is sacrificed after its final chapter")
+def s_saga_sacrifice():
+    gs = fresh()
+    player = gs.p1
+    while gs._get_active_player() is not player:
+        gs._advance_phase()
+    saga = inject_card(gs, {
+        "name": "Two-Step Saga", "mana_cost": "{1}{U}",
+        "type_line": "Enchantment — Saga",
+        "oracle_text": "I — Scry 1.\nII — Draw a card.",
+        "subtypes": ["saga"],
+    })
+    player["library"].append(saga)
+    assert gs.move_card(saga, player, "library", player, "battlefield")
+    # Chapter I on entry, advance to II, advance past II -> sacrificed.
+    gs.advance_saga_counters(player)   # -> II
+    assert gs.find_card_location(saga)[1] == "battlefield", "saga left too early"
+    gs.advance_saga_counters(player)   # -> past final chapter
+    gs.check_state_based_actions()
+    assert gs.find_card_location(saga)[1] == "graveyard", \
+        "two-chapter saga was not sacrificed after its final chapter (714.4)"
+
+
+@scenario("700.2 (modal)", "a modal spell parses its modes and resolves only the chosen one")
+def s_modal_mode_resolution():
+    gs = fresh()
+    player = gs.p1
+    handler = gs.ability_handler
+    modes, lo, hi = handler._parse_modal_text(
+        "Choose one —\n• You gain 3 life.\n• Draw a card.")
+    assert modes and len(modes) == 2, f"modal parse found {len(modes) if modes else 0} modes, expected 2"
+    assert (lo, hi) == (1, 1), f"choose-one bounds parsed as ({lo}, {hi})"
+    assert "gain 3 life" in modes[0].lower() and "draw a card" in modes[1].lower(), \
+        f"modes parsed in the wrong order / wrong text: {modes}"
+    # Resolve ONLY mode 1 (draw a card): life must not change, hand +1.
+    from Playersim.ability_utils import EffectFactory
+    src_id = card_id_by_name(gs, "Thicket Brute")
+    to_battlefield(gs, src_id)
+    life_before, hand_before = player["life"], len(player["hand"])
+    chosen = EffectFactory.create_effects(modes[1], source_name="Test Modal")
+    for eff in chosen:
+        eff.apply(gs, src_id, player)
+    assert player["life"] == life_before, \
+        f"the unchosen mode resolved: life changed {life_before}->{player['life']}"
+    assert len(player["hand"]) == hand_before + 1, "the chosen mode (draw a card) did not resolve"
+
+
+@scenario("702.85 (cascade)", "cascade puts the rest of the revealed cards on the bottom, keeping the library sound")
+def s_cascade_library_integrity():
+    gs = fresh()
+    player = gs.p1
+    # Build a known library: three high-cost cards, then a cheap nonland, then more.
+    hi = [inject_card(gs, {"name": f"Big {i}", "mana_cost": "{5}", "type_line": "Sorcery",
+                           "oracle_text": "Do nothing."}) for i in range(3)]
+    cheap = inject_card(gs, {"name": "Cheapie", "mana_cost": "{1}", "type_line": "Sorcery",
+                             "oracle_text": "Do nothing."})
+    tail = [inject_card(gs, {"name": f"Tail {i}", "mana_cost": "{2}", "type_line": "Sorcery",
+                             "oracle_text": "Do nothing."}) for i in range(2)]
+    for c in hi: gs._safe_get_card(c).cmc = 5
+    gs._safe_get_card(cheap).cmc = 1
+    for c in tail: gs._safe_get_card(c).cmc = 2
+    player["library"] = hi + [cheap] + tail
+    lib_ids = set(player["library"])
+    spell = inject_card(gs, {"name": "Cascader", "mana_cost": "{4}", "type_line": "Sorcery",
+                             "oracle_text": "Cascade. Do nothing."})
+    gs._safe_get_card(spell).cmc = 4
+    gs.stack.clear()
+    gs._process_keyword_abilities(spell, player, {"has_cascade": True})
+    # The cheap card should be on the stack; the 3 revealed 'Big' cards should be
+    # on the BOTTOM (not left on top), and no card may be lost or duplicated.
+    stacked = [item[1] for item in gs.stack if item[0] == "SPELL"]
+    assert cheap in stacked, "cascade did not put the hit card on the stack"
+    remaining = set(player["library"]) | {cheap} | set(hi)
+    assert remaining == lib_ids, \
+        f"cascade lost or duplicated cards: library+revealed={remaining} vs original={lib_ids}"
+    assert cheap not in player["library"], "cascade left the hit card in the library too (duplicated)"
+    for b in hi:
+        assert b in player["library"], f"revealed card {b} was lost from the library"
+    # The revealed high-cost cards must NOT still be on top.
+    assert player["library"][0] in tail, \
+        f"revealed cards were left on top of the library instead of the bottom (top={player['library'][0]})"
+
+
+@scenario("601.3e (impulse)", "'exile top card, you may play it' actually exiles it and makes it playable")
+def s_impulse_draw():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+    player = gs.p1
+    src_id = card_id_by_name(gs, "Thicket Brute")
+    to_battlefield(gs, src_id)
+    top = player["library"][0]
+    lib_before = len(player["library"])
+    exile_before = len(player.get("exile", []))
+    effects = EffectFactory.create_effects(
+        "Exile the top card of your library. You may play that card this turn.",
+        source_name="Test Impulse")
+    assert effects, "parser produced nothing for impulse-draw text"
+    applied = any(eff.apply(gs, src_id, player) for eff in effects)
+    assert applied, "impulse effect reported failure"
+    assert top in player.get("exile", []) and len(player["exile"]) == exile_before + 1, \
+        "impulse draw did not exile the top card"
+    assert len(player["library"]) == lib_before - 1, "card was not removed from the library"
+    assert top in getattr(gs, "cards_castable_from_exile", set()), \
+        ("exiled card was not made playable - impulse draw exiled a card into a black "
+         "hole (the whole point of the mechanic never happened)")
+
+
+@scenario("601.2f (kicker)", "a kicked spell's total cost includes the kicker")
+def s_kicker_total_cost():
+    gs = fresh()
+    handler = get_env().action_handler
+    player = gs._get_active_player()
+    spell = inject_card(gs, {"name": "Kicky Bolt", "mana_cost": "{R}",
+                             "type_line": "Instant",
+                             "oracle_text": "Kicker {2}. Deal 2 damage to any target. "
+                                            "If this spell was kicked, deal 4 damage instead."})
+    # Cost-string extraction must not crash and must find {2}.
+    cost = handler._get_kicker_cost_str(gs._safe_get_card(spell))
+    assert cost == "{2}", f"kicker cost extracted as {cost!r}, expected '{{2}}'"
+    # Base {R} + kicker {2} = {2}{R}; the combined cost must total 3 mana.
+    base = gs.mana_system.parse_mana_cost("{R}")
+    kick = gs.mana_system.parse_mana_cost(cost)
+    # Combine via the same mixin helper cast_spell uses at cast time.
+    from Playersim.game_state_stack import GameStateStackMixin
+    combined = GameStateStackMixin._combine_cost_dicts(base, kick)
+    total = combined.get("generic", 0) + sum(combined.get(c, 0) for c in ["R","G","U","W","B","C"])
+    assert total == 3, f"kicked total cost is {total} mana, expected 3 ({{2}}{{R}})"
+
+
+@scenario("kicker (no-crash)", "kicker cost extraction handles the bare-number fallback form without crashing")
+def s_kicker_fallback_no_crash():
+    gs = fresh()
+    handler = get_env().action_handler
+    # A card whose ONLY kicker mention is the fallback pattern (no braces right
+    # after 'kicker'). The old helper read .group(1) on a groupless regex here.
+    spell = inject_card(gs, {"name": "Oddly Worded", "mana_cost": "{1}",
+                             "type_line": "Sorcery",
+                             "oracle_text": "You may pay an additional kicker 3 as you cast this."})
+    # Must not raise; returns either a normalized cost or None, never crashes.
+    try:
+        cost = handler._get_kicker_cost_str(gs._safe_get_card(spell))
+    except Exception as e:
+        raise AssertionError(f"kicker cost extraction crashed on the fallback form: {type(e).__name__}: {e}")
+    assert cost in ("{3}", None), f"unexpected fallback kicker cost: {cost!r}"
+
+
+@scenario("701.19 (recursion)", "returning a creature card from the graveyard moves it to hand")
+def s_graveyard_recursion():
+    gs = fresh()
+    from Playersim.ability_types import ReturnToHandEffect
+    player = gs.p1
+    src_id = card_id_by_name(gs, "Thicket Brute")
+    to_battlefield(gs, src_id)
+    # Put a creature card in the graveyard.
+    dead = inject_card(gs, {"name": "Fallen Bear", "mana_cost": "{1}{G}",
+                            "type_line": "Creature — Bear", "power": 2, "toughness": 2})
+    player["graveyard"].append(dead)
+    hand_before = len(player["hand"])
+    gy_before = len(player["graveyard"])
+    eff = ReturnToHandEffect(target_type="card", zone="graveyard")
+    ok = eff.apply(gs, src_id, player, {"cards": [dead]})
+    assert ok, "graveyard-return effect reported failure"
+    assert dead in player["hand"] and len(player["hand"]) == hand_before + 1, \
+        "creature card was not returned from the graveyard to hand"
+    assert dead not in player["graveyard"] and len(player["graveyard"]) == gy_before - 1, \
+        "card was not removed from the graveyard"
+
+
+@scenario("715.3 (adventure)", "a spell cast as an Adventure is exiled, not put in the graveyard")
+def s_adventure_exiles_to_recast():
+    gs = fresh()
+    player = gs.p1
+    spell = inject_card(gs, {
+        "name": "Giant's Errand", "mana_cost": "{1}{G}",
+        "type_line": "Creature — Giant",
+        "oracle_text": "Beanstalk Giant is 6/6.\nGiant's Errand {1}{G} (Adventure)\n"
+                       "Sorcery — Search your library for a basic land card, reveal it, "
+                       "put it into your hand, then shuffle.\n"
+                       "Then exile this card. You may cast the creature later from exile.",
+    })
+    # A cast spell is on the stack (already removed from hand); mirror that.
+    ctx = {"cast_as_adventure": True, "source_zone": "hand"}
+    gs.stack.clear()
+    gs.stack.append(("SPELL", spell, player, ctx))
+    gs._resolve_instant_sorcery_spell(spell, player, ctx)
+    # CR 715.3f: it goes to EXILE (recastable as the creature), not the graveyard.
+    assert spell not in player["graveyard"], \
+        "adventure spell went to the graveyard - it can never be cast as the creature now"
+    assert gs.find_card_location(spell)[1] == "exile", \
+        f"adventure spell is in {gs.find_card_location(spell)[1]}, expected exile"
+    assert spell in getattr(gs, "cards_castable_from_exile", set()), \
+        "adventure creature side was not made castable from exile"
+
+
+@scenario("711 (leveler)", "a level-up creature is recognized as a leveler with its level structure")
+def s_leveler_creature_recognized():
+    from Playersim.card_support import get_manifest, reset_manifest_for_tests
+    reset_manifest_for_tests()
+    gs = fresh()
+    player = gs.p1
+    lev = inject_card(gs, {
+        "name": "Student of Warfare", "mana_cost": "{W}",
+        "type_line": "Creature — Human Soldier Monk",
+        "oracle_text": "Level up {W} ({W}: Put a level counter on this. Level up only as a sorcery.)\n"
+                       "LEVEL 1-6\n4/4\nFirst strike\n"
+                       "LEVEL 7+\n8/8\nDouble strike",
+        "power": 1, "toughness": 1,
+    })
+    player["library"].append(lev)
+    assert gs.move_card(lev, player, "library", player, "battlefield")
+    card = gs._safe_get_card(lev)
+    # A leveler is NOT a Class, but it IS a leveler. The engine currently gates
+    # ALL level machinery on is_class, so leveler creatures are invisible as
+    # levelers. Until support lands, they must at least be flagged for the
+    # manifest so the deck builder can avoid / down-weight them.
+    is_leveler = ("level up" in card.oracle_text.lower())
+    assert is_leveler, "test card is a leveler"
+    supported = (hasattr(card, "is_leveler") and card.is_leveler) or \
+                (getattr(card, "levels", None) and not card.is_class)
+    if not supported:
+        from Playersim.card_support import report_unsupported
+        report_unsupported(card.name, "level-up creature: level counters/thresholds not modeled",
+                           severity="partial")
+    entry = get_manifest().entries.get("Student of Warfare")
+    assert supported or entry is not None, \
+        "leveler creature is neither supported nor flagged in the support manifest"
+    reset_manifest_for_tests()
+
+
 @scenario("616 (engine)", "legacy asap delayed triggers fire at the next state-based check")
 def s_delayed_trigger_asap():
     gs = fresh()

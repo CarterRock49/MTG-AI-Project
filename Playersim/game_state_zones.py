@@ -214,6 +214,16 @@ class GameStateZonesMixin:
                 if card and 'land' in getattr(card,'card_types',[]):
                      self.trigger_ability(None, "LANDFALL", enter_trigger_context)
                      self.trigger_ability(card_id, "LANDFALL_SELF", enter_trigger_context)
+                # CR 714.2/714.3 (July 2026 sweep): a Saga enters with one lore
+                # counter and its chapter I ability triggers. Setup seeded this
+                # ONLY during initial game setup, so a Saga cast mid-game never
+                # got a counter -- it sat inert and never advanced or
+                # sacrificed. Seed on every battlefield entry, into the same
+                # store advance_saga_counters and the SBA use (player dict).
+                if card and 'saga' in [s.lower() for s in getattr(card, 'subtypes', [])]:
+                     final_destination_player.setdefault("saga_counters", {})[card_id] = 1
+                     self.trigger_ability(card_id, "SAGA_CHAPTER", {"chapter": 1, "controller": final_destination_player})
+                     logging.debug(f"Saga {card_name} entered with lore counter 1 (chapter I).")
 
             # Handle Aura attachment *after* ETB setup (and triggers queued/resolved?) - Queue first is safer.
             if card and 'aura' in getattr(card, 'subtypes', []):
@@ -534,11 +544,21 @@ class GameStateZonesMixin:
         # Add checks for colors, CMC, P/T if needed for more complex searches
         return False
 
-    def search_library_and_choose(self, player, criteria, ai_choice_context=None):
-        """Search library for a card matching criteria and let AI choose one."""
+    def search_library_and_choose(self, player, criteria, ai_choice_context=None, exclude_ids=None):
+        """Search library for a card matching criteria and let AI choose one.
+
+        exclude_ids: ids already taken by this same search (multi-card
+        fetches). SearchLibraryEffect always passed this parameter, but the
+        signature lacked it -- the TypeError was swallowed and EVERY library
+        search silently found nothing (first-touch sweep, July 2026; the
+        fixture ramp spell has been a no-op in every random episode).
+        """
+        exclude = set(exclude_ids or [])
         matches = []
         indices_to_remove = []
         for i, card_id in enumerate(player["library"]):
+            if card_id in exclude:
+                continue
             card = self._safe_get_card(card_id)
             if self._card_matches_criteria(card, criteria): # Uses GameState's helper now
                  matches.append(card_id)

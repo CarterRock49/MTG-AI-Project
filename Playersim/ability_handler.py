@@ -443,7 +443,7 @@ class AbilityHandler:
 
         # Create effects for this mode using EffectFactory
         # Pass base_ability for context if EffectFactory uses it
-        mode_effects = EffectFactory.create_effects(mode_effect_text)
+        mode_effects = EffectFactory.create_effects(mode_effect_text, source_name=getattr(self.game_state._safe_get_card(card_id), 'name', None))
         if not mode_effects:
              logging.warning(f"Could not create effects for modal choice '{mode_effect_text}'")
              return False
@@ -2060,7 +2060,7 @@ class AbilityHandler:
                       return True # Fizzling counts as successful resolution
 
                  # Use EffectFactory to create effects from text
-                 effects = EffectFactory.create_effects(effect_text_from_context, targets=targets_on_stack)
+                 effects = EffectFactory.create_effects(effect_text_from_context, targets=targets_on_stack, source_name=source_name)
                  if not effects:
                      logging.error(f"Cannot resolve {ability_type} from {source_name}: EffectFactory failed for text '{effect_text_from_context}'.")
                      return False # Failure: couldn't parse effects

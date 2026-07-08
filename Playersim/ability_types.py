@@ -1726,12 +1726,32 @@ class AbilityEffect:
             return result
         except NotImplementedError:
              logging.error(f"Effect application not implemented for: {self.effect_text}")
+             self._report_support_issue(game_state, source_id,
+                                        f"unimplemented effect: {self.effect_text[:80]}", "unparsed")
              return False
         except Exception as e:
              logging.error(f"Error applying effect '{self.effect_text}': {e}")
              import traceback
              logging.error(traceback.format_exc())
+             # Card support manifest (July 2026): a crash during a card's
+             # effect is the highest-severity support issue -- attribute it
+             # so the deck builder can exclude the card.
+             self._report_support_issue(game_state, source_id,
+                                        f"crash in effect '{self.effect_text[:60]}': {type(e).__name__}: {e}",
+                                        "crash")
              return False
+
+    @staticmethod
+    def _report_support_issue(game_state, source_id, reason, severity):
+        """Attribute a support issue to the source card, if resolvable."""
+        try:
+            card = game_state._safe_get_card(source_id) if source_id is not None else None
+            name = getattr(card, 'name', None)
+            if name:
+                from .card_support import report_unsupported
+                report_unsupported(name, reason, severity=severity)
+        except Exception:
+            pass  # telemetry must never take the game down
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         """
@@ -2435,6 +2455,50 @@ class DiscardEffect(AbilityEffect):
 
         return overall_success
 
+class ImpulseDrawEffect(AbilityEffect):
+    """Exile the top N cards; the controller may play them for a duration.
+
+    First-touch sweep (July 2026): "exile the top card, you may play it this
+    turn" (impulse draw) had no handler -- it hit the generic no-op fallback,
+    so the cards were never exiled and never became playable. The whole
+    mechanic did nothing. This moves the cards to exile and registers them in
+    gs.cards_castable_from_exile, the set the action space already reads for
+    play-from-exile actions.
+    """
+    def __init__(self, count=1, duration="end_of_turn", condition=None):
+        super().__init__(f"Exile the top {count} card(s); you may play them", condition)
+        self.count = count
+        self.duration = duration
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        if not controller or not controller.get("library"):
+            return False
+        count = min(self.count, len(controller["library"]))
+        if count <= 0:
+            return True
+        exiled = []
+        for _ in range(count):
+            card_id = controller["library"][0]
+            if game_state.move_card(card_id, controller, "library", controller, "exile",
+                                    cause="impulse_draw"):
+                exiled.append(card_id)
+                if not hasattr(game_state, "cards_castable_from_exile"):
+                    game_state.cards_castable_from_exile = set()
+                game_state.cards_castable_from_exile.add(card_id)
+                # Track for end-of-turn cleanup so the permission expires.
+                if not hasattr(game_state, "impulse_until_eot"):
+                    game_state.impulse_until_eot = set()
+                if self.duration == "end_of_turn":
+                    game_state.impulse_until_eot.add(card_id)
+            else:
+                break
+        if exiled:
+            logging.debug(f"Impulse draw: exiled {exiled}, now playable from exile.")
+            return True
+        return False
+
+
 class MillEffect(AbilityEffect):
     """Effect that mills cards from library to graveyard."""
     def __init__(self, count=1, target="opponent", condition=None):
@@ -2500,7 +2564,7 @@ class MillEffect(AbilityEffect):
 
 class SearchLibraryEffect(AbilityEffect):
     """Effect that allows searching a library for cards."""
-    def __init__(self, search_type="any", destination="hand", count=1, condition=None, shuffle_required=True):
+    def __init__(self, search_type="any", destination="hand", count=1, condition=None, shuffle_required=True, enters_tapped=False):
         target_desc = "your library" # Assuming most searches target controller's library
         dest_desc = f"into {destination}" if destination != 'library' else "on top of your library" # Basic phrasing
         super().__init__(f"Search {target_desc} for {count} {search_type} card(s) and put {dest_desc}", condition)
@@ -2508,6 +2572,7 @@ class SearchLibraryEffect(AbilityEffect):
         self.destination = destination.lower()
         self.count = count
         self.shuffle_required = shuffle_required # Usually true unless effect says otherwise
+        self.enters_tapped = enters_tapped  # "...onto the battlefield tapped"
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         # Search usually targets controller's library unless specified otherwise
@@ -2547,7 +2612,10 @@ class SearchLibraryEffect(AbilityEffect):
                   # Card is implicitly removed by search_library_and_choose, use library_implicit source
                   if game_state.move_card(card_id, player_to_search, "library_implicit", player_to_search, self.destination, cause="search_effect"):
                       success_moves += 1
-                      logging.debug(f"Search found '{card_name}' matching '{self.search_type}', moved to {self.destination}.")
+                      if self.enters_tapped and self.destination == "battlefield":
+                          player_to_search.setdefault("tapped_permanents", set()).add(card_id)
+                      logging.debug(f"Search found '{card_name}' matching '{self.search_type}', moved to {self.destination}"
+                                    f"{' tapped' if self.enters_tapped and self.destination == 'battlefield' else ''}.")
                   else:
                       logging.warning(f"Search found '{card_name}', but failed to move to {self.destination}.")
                       # Return to library?
@@ -2649,6 +2717,11 @@ class ScryEffect(AbilityEffect):
 
         scried_cards = controller["library"][:count]
         if not scried_cards: return False # Should not happen
+        # BUGFIX (July 2026 sweep): pull the looked-at cards OFF the library.
+        # They were left in place, and finalize then re-prepended the kept
+        # cards -> kept cards duplicated, bottom cards never actually moved.
+        # The choice handler puts each card back at its chosen destination.
+        del controller["library"][:count]
 
         # --- Set up state for external AI/ActionHandler to make choices ---
         # Store previous phase if not already in a special choice phase
@@ -2690,6 +2763,10 @@ class SurveilEffect(AbilityEffect):
 
         surveiled_cards = controller["library"][:count]
         if not surveiled_cards: return False
+        # BUGFIX (July 2026 sweep): remove looked-at cards from the library;
+        # the handler re-inserts kept cards on top and moves the rest to the
+        # graveyard. Leaving them caused kept cards to duplicate.
+        del controller["library"][:count]
 
         # --- Set up state for external AI/ActionHandler to make choices ---
         # Store previous phase
@@ -3268,6 +3345,12 @@ class DelayedTriggerEffect(AbilityEffect):
         if phase_const is None:
             logging.warning(
                 f"DelayedTriggerEffect: unknown phase '{self.phase_key}' in '{self.effect_text}'")
+            _card = game_state._safe_get_card(source_id) if source_id is not None else None
+            if _card is not None:
+                from .card_support import report_unsupported
+                report_unsupported(getattr(_card, 'name', None),
+                                   f"delayed trigger with unknown phase: {self.phase_key}",
+                                   severity="unparsed")
             try:
                 gs.fidelity_counters["unparsed_effects"] += 1
             except Exception:
@@ -3312,7 +3395,8 @@ class DelayedTriggerEffect(AbilityEffect):
                 return
             # General case: parse the inner clause at fire time and apply it.
             from .ability_utils import EffectFactory
-            inner_effects = EffectFactory.create_effects(inner_text) or []
+            _src_name = getattr(gs._safe_get_card(source_id), 'name', None) if source_id is not None else None
+            inner_effects = EffectFactory.create_effects(inner_text, source_name=_src_name) or []
             applied = False
             for eff in inner_effects:
                 if isinstance(eff, DelayedTriggerEffect):

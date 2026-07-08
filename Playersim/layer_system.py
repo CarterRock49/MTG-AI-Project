@@ -31,6 +31,11 @@ class LayerSystem:
         self.effect_counter = 0
         self.dependencies = defaultdict(list)
         self._last_applied_state_hash = None # For optimization if state hasn't changed significantly
+        # Cards this system has written non-printed characteristics to. A card
+        # that loses ALL its effects (e.g. equipment unattached) drops out of
+        # the per-pass affected set; without re-including it here, its stale
+        # live P/T never resets to printed (first-touch sweep, July 2026).
+        self._ever_modified_ids = set()
         
 
     def apply_all_effects(self):
@@ -51,6 +56,13 @@ class LayerSystem:
                 for sub_effects in layer_effects.values():
                     cards_with_effects.update(data['source_id'] for _, data in sub_effects if 'source_id' in data)
         affected_card_ids.update(cards_with_effects)
+        # Re-include any card we've previously modified so it can reset to
+        # printed once its effects are gone (only while still on a battlefield).
+        if self._ever_modified_ids:
+            _live_bf = set()
+            for _p in (gs.p1, gs.p2):
+                if _p: _live_bf.update(_p.get("battlefield", []))
+            affected_card_ids.update(self._ever_modified_ids & _live_bf)
 
 
         # BUGFIX: cards carrying counters need layer 7c even when no layer effects
@@ -314,6 +326,7 @@ class LayerSystem:
             elif live_card_check != live_card:
                 # Reference changed, use the new one
                 live_card = live_card_check
+            self._ever_modified_ids.add(card_id)
 
 
             # Apply calculated characteristics

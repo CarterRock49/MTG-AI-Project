@@ -309,7 +309,7 @@ class EffectFactory:
         return delayed, " ".join(kept)
 
     @staticmethod
-    def create_effects(effect_text, targets=None): # targets arg currently unused here
+    def create_effects(effect_text, targets=None, source_name=None): # targets arg currently unused here
         """
         Create appropriate AbilityEffect objects based on the effect text.
         Handles clause splitting including em dashes and various common MTG effects.
@@ -339,7 +339,8 @@ class EffectFactory:
             CounterSpellEffect, CreateTokenEffect, DestroyEffect, ExileEffect,
             DiscardEffect, MillEffect, TapEffect, UntapEffect, BuffEffect,
             SearchLibraryEffect, AddCountersEffect, ReturnToHandEffect,
-            ScryEffect, SurveilEffect, CopySpellEffect, TransformEffect, FightEffect)
+            ScryEffect, SurveilEffect, CopySpellEffect, TransformEffect, FightEffect,
+            ImpulseDrawEffect)
 
         # --- Offspring ETB Trigger Detection (before standard token creation) ---
         offspring_trigger_pattern = re.compile(
@@ -610,9 +611,23 @@ class EffectFactory:
                  created_effect = DiscardEffect(count, target=target_specifier, is_random=is_random) # Pass 'x', -1, or number
 
             # Mill
+            # Impulse draw: "exile the top N cards, you may play them". Must
+            # come before generic exile handling. (July 2026 sweep.)
+            elif re.search(r"exile the top\s+(\w+)?\s*cards?\s+of\s+(?:your|their)\s+library", clause_lower) \
+                    and ("may play" in clause_lower or "may cast" in clause_lower):
+                num_match = re.search(r"exile the top\s+(\w+|\d+)?\s*cards?", clause_lower)
+                n = 1
+                if num_match and num_match.group(1):
+                    n = text_to_number(num_match.group(1)) if not num_match.group(1).isdigit() else int(num_match.group(1))
+                if not isinstance(n, int) or n <= 0:
+                    n = 1
+                created_effect = ImpulseDrawEffect(count=n)
+
             elif re.search(r"\bmill(?:s)?\b", clause_lower):
                 count = 1
-                count_match = re.search(r"mill(?:s)?\s+(\d+|x)\s+cards?", clause_lower) # Include 'x'
+                # Accept word numbers too ("mills two cards") -- digits-only
+                # left every worded count at 1 (first-touch sweep, July 2026).
+                count_match = re.search(r"mill(?:s)?\s+(\d+|x|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+cards?", clause_lower)
                 if count_match:
                     count_str = count_match.group(1)
                     count = 'x' if count_str == 'x' else text_to_number(count_str)
@@ -621,7 +636,7 @@ class EffectFactory:
                 target_specifier = "target_player"
                 if "you mill" in clause_lower: target_specifier = "controller"
                 elif "opponent mills" in clause_lower or "each opponent mills" in clause_lower: target_specifier = "opponent"
-                elif "each player mills" in clause_lower: target_specifier = "each player" # Added
+                elif "each player mills" in clause_lower: target_specifier = "each_player"  # underscore: MillEffect's branch key (space form silently no-opped)
                 created_effect = MillEffect(count, target=target_specifier) # Pass 'x' or number
 
             # Return to Hand (Bounce)
@@ -657,8 +672,13 @@ class EffectFactory:
                       known_simple_types = ["basic land", "creature", "artifact", "enchantment", "land", "instant", "sorcery", "planeswalker", "battle", "legendary", "card"]
                       if not any(kt in search_type for kt in known_simple_types): search_type = "any" # Reset if parse seems off
 
-                 # Determine destination
-                 dest_match = re.search(r"put (?:it|that card|them) (?:onto|into|in) (?:the|your) (\w+)", clause_lower)
+                 # Determine destination. The clause splitter severs
+                 # "search ... AND put it onto the battlefield" into two
+                 # clauses (same disease as the delayed-trigger comma split),
+                 # so fall back to the FULL effect text when this clause
+                 # carries no destination (first-touch sweep, July 2026).
+                 _dest_re = r"put (?:it|that card|them|those cards?) (?:onto|into|in) (?:the|your) (\w+)"
+                 dest_match = re.search(_dest_re, clause_lower) or re.search(_dest_re, effect_text.lower())
                  destination = "hand" # Default
                  if dest_match:
                       dest_word = dest_match.group(1)
@@ -669,7 +689,11 @@ class EffectFactory:
                  # Check if destination implies battlefield tapped
                  # tapped = "tapped" in (dest_match.group(0) if dest_match else "")
 
-                 created_effect = SearchLibraryEffect(search_type=search_type, destination=destination, count=count)
+                 _dest_span = (dest_match.group(0) if dest_match else "")
+                 _tap_scope = effect_text.lower()[effect_text.lower().find(_dest_span):] if _dest_span else clause_lower
+                 enters_tapped = destination == "battlefield" and bool(re.search(r"\btapped\b", _tap_scope))
+                 created_effect = SearchLibraryEffect(search_type=search_type, destination=destination, count=count,
+                                                      enters_tapped=enters_tapped)
 
             # Scry
             elif re.search(r"\bscry\b", clause_lower):
@@ -724,11 +748,21 @@ class EffectFactory:
                  effect_keywords = ["destroy", "exile", "draw", "gain", "lose", "counter", "create", "search", "tap", "untap", "put", "scry", "surveil", "fight", "transform", "copy", "mill", "discard", "return"]
                  if clause_clean and any(kw in clause_lower for kw in effect_keywords): # Check clean text and lower
                      logging.debug(f"Adding generic AbilityEffect for clause: '{clause_clean}'")
+                     # Card support manifest: a generic fallback means this clause
+                     # will not do anything faithful at resolution. Attribute it.
+                     if source_name:
+                         from .card_support import report_unsupported
+                         report_unsupported(source_name, f"unparsed clause: {clause_clean[:80]}", severity="partial")
                      effects.append(AbilityEffect(clause_clean)) # Store original case text
 
         # Final fallback if no clauses yielded effects
         if not effects and effect_text:
             logging.warning(f"Could not parse effect text into specific effects: '{effect_text}'. Adding as generic effect.")
+            # Card support manifest: NOTHING in this text parsed -- the whole
+            # effect is a no-op. Highest text-level severity.
+            if source_name:
+                from .card_support import report_unsupported
+                report_unsupported(source_name, f"unparsed effect text: {effect_text[:80]}", severity="unparsed")
             effects.append(AbilityEffect(effect_text)) # Store original case text
 
         return effects

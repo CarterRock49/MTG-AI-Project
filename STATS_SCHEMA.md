@@ -77,3 +77,36 @@ fingerprint of the card list; name mappings live under `meta/`.
 3. **`error` / `invalid_limit` results** are recorded as draws in the tracker
    aggregates; filter them out via `game_log.jsonl` when computing win rates.
 4. **Versioning**: bump handling when `schema_version` > 1 appears.
+
+---
+
+## card_support_manifest.json (added July 2026)
+
+Written to the same directory as the deck statistics, merged (never
+clobbered) on every persist, accumulating across games and process restarts.
+
+```json
+{
+  "<card name>": {
+    "reasons": {"unparsed clause: <text>": 3, "...": 1},
+    "severity": "crash" | "unparsed" | "partial",
+    "count": 4,
+    "first_seen": "2026-07-07",
+    "last_seen": "2026-07-07"
+  }
+}
+```
+
+Severity semantics (worst sticks per card):
+- `crash`   — handling the card raised an exception.
+- `unparsed`— an entire effect produced nothing the engine can run.
+- `partial` — some clauses parsed; at least one fell back to a no-op.
+
+**Deck-builder contract:** exclude `crash` and `unparsed` cards from
+candidate pools entirely; treat statistics for `partial` cards as
+lower-confidence (their recorded value is a floor, since some of their text
+did nothing). Re-include cards when their entries stop accumulating after an
+engine update (compare `last_seen` against the engine/agent version of the
+current harvest run).
+
+Loader: `Playersim.card_support.CardSupportManifest.load(directory)`.

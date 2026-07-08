@@ -26,8 +26,8 @@ class GameStateTurnMixin:
         """Reset mana and untap all permanents, handling Phasing."""
         # --- Phasing ---
         # 1. Phase In Permanents that should return
+        permanents_phasing_in = []
         if hasattr(self, 'phased_out'):
-            permanents_phasing_in = []
             # Check player's phased-out permanents first
             player_phased_out = player.get("phased_out_permanents", set())
             for card_id in list(player_phased_out): # Iterate copy
@@ -37,16 +37,44 @@ class GameStateTurnMixin:
                       player_phased_out.remove(card_id)
                       if card_id not in player.get("battlefield", []): # Avoid duplicates if already there somehow
                            player["battlefield"].append(card_id)
-                           # Remove from tapped state (enters untapped)
-                           player.get("tapped_permanents", set()).discard(card_id)
+                           # CR 702.26h (July 2026 fix): a permanent phases in
+                           # with the SAME status it had when it phased out --
+                           # the old code force-untapped it. Restore stored
+                           # status (the untap step may then untap it normally).
+                           stored = getattr(self, 'phased_out_state', {}).pop(card_id, None)
+                           if stored and stored.get('tapped'):
+                                player.setdefault("tapped_permanents", set()).add(card_id)
+                           else:
+                                player.get("tapped_permanents", set()).discard(card_id)
+                           # CR 702.26 (July 2026 fix): phase-out removed the
+                           # permanent's layer/replacement effects but nothing
+                           # ever re-registered them -- a phased-in permanent
+                           # lost its abilities for the rest of the game.
+                           if self.replacement_effects:
+                                try:
+                                     self.replacement_effects.register_card_replacement_effects(card_id, player)
+                                except Exception as _e:
+                                     logging.error(f"Error re-registering replacement effects on phase-in: {_e}")
+                           if hasattr(self, 'ability_handler') and self.ability_handler:
+                                try:
+                                     self.ability_handler.register_card_abilities(card_id, player)
+                                except Exception as _e:
+                                     logging.error(f"Error re-registering abilities on phase-in: {_e}")
                            card = self._safe_get_card(card_id)
                            logging.debug(f"Phased in: {getattr(card, 'name', card_id)}")
                            self.trigger_ability(card_id, "PHASED_IN", {"controller": player})
                            permanents_phasing_in.append(card_id)
 
         # 2. Check Permanents with Phasing on Battlefield
+        # CR 702.26 (July 2026 fix): all phasing events of an untap step are
+        # simultaneous -- a permanent that just phased in must NOT be phased
+        # right back out by this scan. The old sequential in-then-out made
+        # every phasing permanent oscillate invisibly (net: gone forever).
+        _just_phased_in = set(permanents_phasing_in)
         permanents_phasing_out = []
         for card_id in list(player.get("battlefield",[])): # Iterate copy
+             if card_id in _just_phased_in:
+                 continue
              card = self._safe_get_card(card_id)
              # Check keyword via Layer System result preferred
              if card and self.check_keyword(card_id, "phasing"):
@@ -61,7 +89,15 @@ class GameStateTurnMixin:
                     player["battlefield"].remove(card_id)
                     self.phased_out.add(card_id)
                     player_phased_out.add(card_id)
-                    # Store state if needed (tapped, counters etc.) - simplified for now
+                    # CR 702.26h: store status for identical restoration at
+                    # phase-in. Counters live on the card object and persist
+                    # automatically; attachments are a documented v1 gap.
+                    if not hasattr(self, 'phased_out_state'):
+                        self.phased_out_state = {}
+                    self.phased_out_state[card_id] = {
+                        'tapped': card_id in player.get("tapped_permanents", set()),
+                    }
+                    player.get("tapped_permanents", set()).discard(card_id)
                     card = self._safe_get_card(card_id)
                     logging.debug(f"Phased out: {getattr(card, 'name', card_id)}")
                     # Remove effects, etc.
@@ -448,6 +484,7 @@ class GameStateTurnMixin:
         self.attackers_this_turn = set()
         self.damage_dealt_this_turn = {}
         self.cards_drawn_this_turn = {'p1': 0, 'p2': 0} # Reset draw counts
+        self.cards_milled_this_turn = {'p1': 0, 'p2': 0} # Reset mill counts
         # Proper graveyard tracking reset
         if not hasattr(self, 'cards_to_graveyard_this_turn'): self.cards_to_graveyard_this_turn = {}
         self.cards_to_graveyard_this_turn[self.turn] = []
@@ -598,6 +635,15 @@ class GameStateTurnMixin:
         player["damage_counters"] = {}
         player["deathtouch_damage"] = {}
         logging.debug(f"Removed damage from {player['name']}'s creatures.")
+
+        # 2b. Impulse-draw permission expires (July 2026 sweep): cards exiled
+        # with "you may play this turn" lose that permission at end of turn.
+        _impulse = getattr(self, 'impulse_until_eot', None)
+        if _impulse:
+            _castable = getattr(self, 'cards_castable_from_exile', set())
+            for _cid in list(_impulse):
+                _castable.discard(_cid)
+            self.impulse_until_eot = set()
 
         # 3. "Until end of turn" and "this turn" effects end
         # --- LayerSystem handles duration removal ---
@@ -805,9 +851,12 @@ class GameStateTurnMixin:
         Returns:
             list: List of Sagas that were advanced
         """
-        # Check if saga counters tracking exists
-        if not hasattr(self, "saga_counters"):
-            self.saga_counters = {}
+        # CR 714 (July 2026 sweep): the single source of truth for lore
+        # counters is player['saga_counters'] -- the store setup seeds and the
+        # SBA (game_state_damage) reads. This method previously wrote to a
+        # SEPARATE gs.saga_counters dict, so advancing a saga never moved the
+        # counter the SBA checks: sagas advanced on paper but never sacrificed.
+        saga_store = player.setdefault("saga_counters", {})
         
         # Find all Sagas in the battlefield
         sagas = []
@@ -822,11 +871,11 @@ class GameStateTurnMixin:
         # Process each Saga
         for saga_id in sagas:
             # Get current chapter
-            current_chapter = self.saga_counters.get(saga_id, 0)
+            current_chapter = saga_store.get(saga_id, 0)
             
             # Advance to next chapter
             new_chapter = current_chapter + 1
-            self.saga_counters[saga_id] = new_chapter
+            saga_store[saga_id] = new_chapter
             advanced_sagas.append(saga_id)
             
             # Trigger chapter ability

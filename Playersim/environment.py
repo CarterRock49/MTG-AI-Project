@@ -597,6 +597,11 @@ class AlphaZeroMTGEnv(gym.Env):
             try:
                 if getattr(self, 'stats_tracker', None) and hasattr(self.stats_tracker, 'save_updates_sync'):
                     self.stats_tracker.save_updates_sync()
+                    try:
+                        from .card_support import get_manifest
+                        get_manifest().persist(getattr(self.stats_tracker, 'base_path', './deck_stats'))
+                    except Exception as _mf_e:
+                        logging.error(f"Error persisting card support manifest: {_mf_e}")
                 if getattr(self, 'card_memory', None) and hasattr(self.card_memory, 'save_all_card_data'):
                     self.card_memory.save_all_card_data()
             except Exception as save_e:
@@ -698,6 +703,11 @@ class AlphaZeroMTGEnv(gym.Env):
         try:
             if getattr(self, 'stats_tracker', None) and hasattr(self.stats_tracker, 'save_updates_sync'):
                 self.stats_tracker.save_updates_sync()
+                try:
+                    from .card_support import get_manifest
+                    get_manifest().persist(getattr(self.stats_tracker, 'base_path', './deck_stats'))
+                except Exception as _mf_e:
+                    logging.error(f"Error persisting card support manifest: {_mf_e}")
         except Exception as e:
             logging.error(f"close(): stats tracker save failed: {e}")
         try:

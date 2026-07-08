@@ -36,10 +36,10 @@ class GameState(
                  "turn", "phase", "agent_is_p1", "combat_damage_dealt", "day_night_state",
                  "current_attackers", "current_block_assignments", 'mulligan_data',
                  "current_spell_requires_target", "current_spell_card_id", "exhaust_ability_used",
-                 "optimal_attackers", "attack_suggestion_used", 'cards_played', 'play_history',
+                 "optimal_attackers", "attack_suggestion_used", 'cards_played', 'play_history', 'phased_out_state',
                  "p1", "p2", "ability_handler", "damage_dealt_this_turn",
                  "previous_priority_phase", "layer_system", "until_end_of_turn_effects",
-                 "mana_system", "replacement_effects", "cards_drawn_this_turn",
+                 "mana_system", "replacement_effects", "cards_drawn_this_turn", "cards_milled_this_turn",
                  "combat_resolver", "temp_control_effects", "abilities_activated_this_turn",
                  "card_evaluator", "spells_cast_this_turn", "_phase_history",
                  "strategic_planner", "attackers_this_turn", 'strategy_memory',
@@ -50,7 +50,7 @@ class GameState(
                  "action_handler", "impending_cards", "_offspring_cost_paid_context",
                  # Special card types
                  "adventure_cards", "saga_counters", "mdfc_cards", "battle_cards", 'battle_attack_targets',
-                 "cards_castable_from_exile", "cast_as_back_face", 'planeswalker_attack_targets',
+                 "cards_castable_from_exile", "impulse_until_eot", "cast_as_back_face", 'planeswalker_attack_targets',
                  # Additional slots for various tracking variables
                  "phased_out", 'original_p1_deck',
                  "suspended_cards",
@@ -441,6 +441,7 @@ class GameState(
             self.attackers_this_turn = set()
             self.damage_dealt_this_turn = {}
             self.cards_drawn_this_turn = {} # Initialize as empty, will be populated like {'p1': 0, 'p2': 0}
+            self.cards_milled_this_turn = {} # MillEffect tracking; was written but never declared (crashed on __slots__)
             self.life_gained_this_turn = {}
             self.damage_this_turn = {}
             self.cards_to_graveyard_this_turn = {} # {turn_num: [card_ids]}
@@ -488,6 +489,7 @@ class GameState(
 
             # Cast Tracking
             self.cards_castable_from_exile = set()
+            self.impulse_until_eot = set() # impulse-drawn cards whose play permission expires at end of turn
             self.cast_as_back_face = set()
 
             # Other state tracking

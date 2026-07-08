@@ -402,6 +402,8 @@ class GameStatePermanentsMixin:
 
         try:
             token = Card(copyable_values)
+            token.is_token = True  # Card.__init__ ignores the dict key; set explicitly (matters for stats: tokens aren't deck cards)
+            token.snapshot_printed()  # the copied values ARE the token's printed identity (CR 707.2)
             token.card_id = token_id # Assign the unique ID
         except Exception as e:
              logging.error(f"Error creating token copy Card object: {e} | Data: {copyable_values}")
@@ -930,7 +932,7 @@ class GameStatePermanentsMixin:
         # --- AI Choice ---
         # More complex AI would choose which subset of valid_targets to affect.
         # Simple: proliferate all possible targets chosen by the player activating proliferate
-        chosen_targets = [t for t in targets_to_proliferate if t == player or (isinstance(t, str) and self.get_card_controller(t) == player)]
+        chosen_targets = [t for t in targets_to_proliferate if t == player or (not isinstance(t, dict) and self.get_card_controller(t) == player)]
         # If the effect specified 'opponent' or 'target', selection would differ.
         # Assuming "You choose..." - AI chooses based on strategy (e.g., buff self, poison opponent)
         # Simplification: affect everything controlled by the player + opponent players
@@ -940,7 +942,7 @@ class GameStatePermanentsMixin:
                 chosen_targets.append(target)
             elif target == self._get_non_active_player() and target != player: # Target opponent (player counters)
                 chosen_targets.append(target)
-            elif isinstance(target, str): # Is a permanent ID
+            elif not isinstance(target, dict): # Is a permanent ID (ints, not str -- the SBA int/str bug again)
                 card = self._safe_get_card(target)
                 target_controller = self.get_card_controller(target)
                 # Simple heuristic: proliferate own good counters, opponent's bad counters
@@ -953,7 +955,7 @@ class GameStatePermanentsMixin:
         # Fallback if heuristic finds nothing: proliferate own first valid target with counters.
         if not chosen_targets:
              for target in valid_targets:
-                 if isinstance(target, str) and self.get_card_controller(target) == player:
+                 if not isinstance(target, dict) and self.get_card_controller(target) == player:
                      chosen_targets.append(target); break
 
         logging.debug(f"Proliferate choosing targets: {chosen_targets}")
@@ -980,7 +982,7 @@ class GameStatePermanentsMixin:
                     logging.debug(f"Proliferated {chosen_counter_type} counter on player {player_to_affect['name']}")
                     proliferated_something = True
 
-            elif isinstance(target, str): # Permanent card_id
+            elif not isinstance(target, dict): # Permanent card_id (int, not str)
                 card = self._safe_get_card(target)
                 target_controller = self.get_card_controller(target)
                 if not card or not target_controller: continue
@@ -1088,6 +1090,45 @@ class GameStatePermanentsMixin:
                 return True
         return False
 
+    def _register_attachment_effects(self, attach_id, target_id):
+        """Register an attachment's static P/T and keyword grants on its target.
+
+        First-touch sweep (July 2026): equipment/aura P/T bonuses never entered
+        the layer system at all -- "Equipped creature gets +2/+2" was parsed by
+        nothing and applied nowhere, so every Equipment and every stat-granting
+        Aura was cosmetic. Registers layer 7c (P/T) and layer 6 (keywords)
+        effects source-keyed to the attachment, so remove_effects_by_source at
+        unattach cleans them up. Parses the common templates:
+        "Equipped/Enchanted creature gets +X/+Y" and "... gains <keyword>".
+        """
+        import re as _re
+        if not self.layer_system:
+            return
+        card = self._safe_get_card(attach_id)
+        text = getattr(card, 'oracle_text', '') or ''
+        low = text.lower()
+        # Clear any prior registration for this attachment (re-attach case).
+        self.layer_system.remove_effects_by_source(attach_id, effect_description_contains="attachment:")
+        # P/T: "gets +A/+B" or "-A/-B" (either sign per component).
+        m = _re.search(r"(?:equipped|enchanted)\s+creature\s+gets\s+([+-]\d+)/([+-]\d+)", low)
+        if m:
+            self.layer_system.register_effect({
+                'source_id': attach_id, 'layer': 7, 'sublayer': 'c',
+                'affected_ids': [target_id], 'effect_type': 'modify_pt',
+                'effect_value': (int(m.group(1)), int(m.group(2))),
+                'duration': 'until_source_leaves',
+                'description': f"attachment: {getattr(card,'name',attach_id)} P/T",
+            })
+        # Keyword grants: "and gains flying", "has trample", etc.
+        for kw in Card.ALL_KEYWORDS:
+            if _re.search(r"(?:gains|has|have)\s+[^.]*\b" + _re.escape(kw) + r"\b", low):
+                self.layer_system.register_effect({
+                    'source_id': attach_id, 'layer': 6,
+                    'affected_ids': [target_id], 'effect_type': 'add_ability',
+                    'effect_value': kw, 'duration': 'until_source_leaves',
+                    'description': f"attachment: {getattr(card,'name',attach_id)} grants {kw}",
+                })
+
     def equip_permanent(self, player, equip_id, target_id):
         """Attach equipment, potentially replacing existing attachment."""
         equip_card = self._safe_get_card(equip_id)
@@ -1101,7 +1142,7 @@ class GameStatePermanentsMixin:
             logging.warning(f"Invalid equip: Eq:{equip_id} to Tgt:{target_id}. Target controller: {target_owner['name'] if target_owner else 'None'}")
             return False
 
-        if not hasattr(player, "attachments"): player["attachments"] = {}
+        if "attachments" not in player: player["attachments"] = {}
         # Remove previous attachment of this equipment, if any
         if equip_id in player["attachments"]:
             logging.debug(f"Unequipping {equip_card.name} from previous target {player['attachments'][equip_id]}")
@@ -1109,6 +1150,7 @@ class GameStatePermanentsMixin:
         # Attach to new target
         player["attachments"][equip_id] = target_id
         logging.debug(f"Equipped {equip_card.name} to {target_card.name}")
+        self._register_attachment_effects(equip_id, target_id)
         if self.layer_system: self.layer_system.invalidate_cache(); self.layer_system.apply_all_effects()
         self.trigger_ability(equip_id, "EQUIPPED", {"target_id": target_id})
         self.trigger_ability(target_id, "BECAME_EQUIPPED", {"equipment_id": equip_id})
@@ -1116,11 +1158,13 @@ class GameStatePermanentsMixin:
 
     def unequip_permanent(self, player, equip_id):
         """Unequip an equipment."""
-        if hasattr(player, "attachments") and equip_id in player["attachments"]:
+        if "attachments" in player and equip_id in player["attachments"]:
             equip_name = getattr(self._safe_get_card(equip_id), 'name', equip_id)
             target_id = player["attachments"].pop(equip_id)
             logging.debug(f"Unequipped {equip_name} from {target_id}")
-            if self.layer_system: self.layer_system.invalidate_cache(); self.layer_system.apply_all_effects()
+            if self.layer_system:
+                self.layer_system.remove_effects_by_source(equip_id, effect_description_contains="attachment:")
+                self.layer_system.invalidate_cache(); self.layer_system.apply_all_effects()
             # Trigger unequipped events? (Less common than equip)
             return True
         logging.debug(f"Cannot unequip {equip_id}: Not attached.")
@@ -1128,7 +1172,7 @@ class GameStatePermanentsMixin:
 
     def attach_aura(self, player, aura_id, target_id):
         """Attach an aura. Assumes validation (legal target) happened before."""
-        if not hasattr(player, "attachments"): player["attachments"] = {}
+        if "attachments" not in player: player["attachments"] = {}
         aura_card = self._safe_get_card(aura_id)
         target_card = self._safe_get_card(target_id)
         aura_name = getattr(aura_card, 'name', aura_id)
@@ -1147,6 +1191,7 @@ class GameStatePermanentsMixin:
 
         player["attachments"][aura_id] = target_id
         logging.debug(f"Attached {aura_name} to {target_name}")
+        self._register_attachment_effects(aura_id, target_id)
         if self.layer_system: self.layer_system.invalidate_cache(); self.layer_system.apply_all_effects()
         self.trigger_ability(aura_id, "ATTACHED", {"target_id": target_id})
         self.trigger_ability(target_id, "BECAME_ENCHANTED", {"aura_id": aura_id})
@@ -1165,7 +1210,7 @@ class GameStatePermanentsMixin:
             logging.warning(f"Invalid fortify: Fort:{fort_id} to Land:{target_id}. Target controller: {target_owner['name'] if target_owner else 'None'}")
             return False
 
-        if not hasattr(player, "attachments"): player["attachments"] = {}
+        if "attachments" not in player: player["attachments"] = {}
         if fort_id in player["attachments"]:
             logging.debug(f"Unequipping {fort_card.name} from previous land {player['attachments'][fort_id]}")
             del player["attachments"][fort_id]
@@ -1183,7 +1228,7 @@ class GameStatePermanentsMixin:
             logging.warning(f"Invalid reconfigure: Card {card_id} not found, not owned, or doesn't have reconfigure.")
             return False
 
-        if not hasattr(player, "attachments"): player["attachments"] = {}
+        if "attachments" not in player: player["attachments"] = {}
         is_attached = card_id in player["attachments"]
         # Must be a creature OR equipment to reconfigure
         can_reconfigure = 'creature' in getattr(card, 'card_types',[]) or 'equipment' in getattr(card, 'subtypes',[])

@@ -15,7 +15,8 @@ class ReplacementEffectSystem:
         'UNTAP', 'ATTACK', 'BLOCK', 'LIFE_GAIN', 'LIFE_LOSS', 'DISCARD',
         'CREATE_TOKEN', 'ADD_COUNTER', 'SHUFFLE', 'SCRY', 'REVEAL', 'SEARCH',
         'MILL', 'EXILE', 'DESTROY', 'COUNTER_SPELL', 'TAPPED', 'UNTAPPED',
-        'SACRIFICE', 'RETURN_TO_HAND', 'PAY_MANA', 'PAY_LIFE', 'PHASE_CHANGE'
+        'SACRIFICE', 'RETURN_TO_HAND', 'PAY_MANA', 'PAY_LIFE', 'PHASE_CHANGE',
+        'PRODUCE_MANA'
     ]
     
     def __init__(self, game_state):
@@ -422,7 +423,8 @@ class ReplacementEffectSystem:
             for effect in applicable_effects:
                 # ... (expiration check) ...
                 if self._is_effect_expired(effect, self.game_state.turn, self.game_state.phase):
-                     logging.warning(f"Applying replacement effect {effect.get('effect_id')} that should potentially be expired.")
+                     logging.debug(f"Skipping expired replacement effect {effect.get('effect_id')}.")
+                     continue
 
                 condition_met = True
                 if 'condition' in effect:
@@ -486,7 +488,13 @@ class ReplacementEffectSystem:
 
             # Sort groups by timestamp
             # ... (keep existing sorting logic) ...
-            get_timestamp = lambda e: self.game_state.card_db.get(e.get('source_id'), {}).get('_timestamp', e.get('start_turn', 0)) if hasattr(self.game_state, 'card_db') else e.get('start_turn', 0)
+            # Triage fix (July 2026): card_db values are Card OBJECTS, not
+            # dicts -- .get() on one crashed the ordering step (the second
+            # latent crash in this loop; both hidden because no fixture card
+            # ever registered a replacement effect).
+            get_timestamp = lambda e: getattr(
+                self.game_state.card_db.get(e.get('source_id')) if hasattr(self.game_state, 'card_db') else None,
+                '_timestamp', e.get('start_turn', 0))
             self_effects.sort(key=get_timestamp)
             controller_effects.sort(key=get_timestamp)
             other_effects.sort(key=get_timestamp)
@@ -1397,12 +1405,18 @@ class ReplacementEffectSystem:
                 def copy_token_replacement(ctx):
                     card_id = ctx.get('card_id')
                     owner = ctx.get('controller')
-                    if card_id and owner:
-                        # Make a token copy - simplified implementation
-                        logging.debug(f"Created a token copy of {gs._safe_get_card(card_id).name}")
-                        
-                        # Move the original to graveyard
-                        return {**ctx, 'create_token': True, 'copy_of': card_id}
+                    if card_id is not None and owner:
+                        # Triage fix (July 2026): this returned a
+                        # {'create_token': True} flag that no consumer ever
+                        # read -- the token silently never existed. Create it
+                        # for real via create_token_copy (CR 707-correct:
+                        # printed characteristics). The original still dies.
+                        original = gs._safe_get_card(card_id)
+                        token_id = gs.create_token_copy(original, owner) if original else None
+                        if token_id is not None:
+                            logging.debug(f"Created a token copy of {getattr(original, 'name', card_id)} (token {token_id})")
+                            return {**ctx, 'token_created_id': token_id, 'copy_of': card_id}
+                        logging.warning(f"Dies-copy replacement failed to create token for {card_id}")
                     return ctx
                 return copy_token_replacement
         
@@ -1960,7 +1974,7 @@ class ReplacementEffectSystem:
         return effect_id
 
 
-    def _register_damage_prevention(self, card_id, player, oracle_text):
+    def _register_damage_prevention(self, card_id, player, oracle_text, x_value=None):
         """Register static damage prevention effects."""
         source_card = self.game_state._safe_get_card(card_id)
         source_name = source_card.name if source_card and hasattr(source_card, 'name') else f"Card {card_id}"
@@ -1975,14 +1989,33 @@ class ReplacementEffectSystem:
              amount_match = re.search(r'prevent the next (\d+|x)', oracle_text.lower())
              if amount_match:
                   amount_str = amount_match.group(1)
-                  prevent_amount = int(amount_str) if amount_str.isdigit() else 1 # Placeholder for X
-                  # TODO: Handle X based on context
+                  if amount_str.isdigit():
+                       prevent_amount = int(amount_str)
+                  elif x_value is not None:
+                       # Triage fix (July 2026): use the actual paid X when the
+                       # caller provides it (resolution contexts know X).
+                       prevent_amount = max(0, int(x_value))
+                  else:
+                       # X unknown at registration (battlefield-scan path):
+                       # fall back to 1 and count the infidelity.
+                       prevent_amount = 1
+                       try:
+                           self.game_state.fidelity_counters["unparsed_effects"] += 1
+                       except Exception:
+                           pass
+                       logging.warning(f"Prevention X unknown at registration for card {card_id}; using 1.")
+                       _c = self.game_state._safe_get_card(card_id)
+                       if _c is not None:
+                           from .card_support import report_unsupported
+                           report_unsupported(getattr(_c, 'name', None),
+                                              "prevention X unknown at registration (using 1)",
+                                              severity="partial")
 
         # Target restrictions
         to_target = None
         if "would be dealt to you" in oracle_text.lower(): to_target = "player_self"
         elif "would be dealt to creatures you control" in oracle_text.lower(): to_target = "creatures_self"
-        elif "would be dealt to target creature or player" in oracle_text.lower(): to_target = "any_target" # Simplified
+        elif "would be dealt to target creature or player" in oracle_text.lower(): to_target = "creature_or_player"  # excludes planeswalkers (pre-2017 templating)
         elif "would be dealt to any target" in oracle_text.lower(): to_target = "any_target"
         elif "would be dealt to target creature" in oracle_text.lower(): to_target = "creature"
         elif "would be dealt to permanents you control" in oracle_text.lower(): to_target = "permanents_self"
@@ -2005,7 +2038,17 @@ class ReplacementEffectSystem:
 
                  if to_target == "player_self" and (not target_is_player or target_controller != player): return False
                  if to_target == "creatures_self" and (target_is_player or target_controller != player): return False
-                 # Add more target checks
+                 # Triage fix (July 2026): the 'creature' class had NO check at
+                 # all (creature-only shields silently protected players), and
+                 # 'target creature or player' was collapsed into any_target
+                 # (wrongly covering planeswalkers).
+                 if to_target in ("creature", "creature_or_player") and not target_is_player:
+                     target_card = self.game_state._safe_get_card(target_id)
+                     target_types = getattr(target_card, 'card_types', []) if target_card else []
+                     if to_target == "creature" and 'creature' not in target_types: return False
+                     if to_target == "creature_or_player" and 'creature' not in target_types: return False
+                 if to_target == "creature" and target_is_player: return False
+                 if to_target == "permanents_self" and (target_is_player or target_controller != player): return False
                  if to_target == "any_target": pass # Allow any target
 
             return True # Passed checks
@@ -2349,6 +2392,44 @@ class ReplacementEffectSystem:
         # Default to generic replacement
         return 'GENERIC_REPLACEMENT'
         
+    def _is_effect_expired(self, effect_data, current_turn, current_phase):
+        """Per-effect expiry predicate.
+
+        Triage fix (July 2026): apply_replacements called this method without
+        it existing anywhere -- a phantom call that CRASHED the apply loop the
+        moment any replacement effect was registered, turning the entire
+        replacement system into a silent no-op engine-wide (callers swallow
+        the exception). The fixture decks carry no replacement cards, which is
+        why no suite ever tripped it. Logic factored from
+        cleanup_expired_effects, which now shares it.
+        """
+        gs = self.game_state
+        duration = effect_data.get('duration', 'permanent')
+        start_turn = effect_data.get('start_turn', 0)
+        if duration == 'permanent':
+            return False
+        if duration == 'end_of_turn':
+            return start_turn < current_turn or (
+                start_turn == current_turn and current_phase >= gs.PHASE_CLEANUP)
+        if duration == 'next_turn':
+            return start_turn < current_turn - 1
+        if duration == 'until_my_next_turn':
+            active_player_is_p1 = (gs._get_active_player() == gs.p1)
+            return (effect_data.get('controller_is_p1') == active_player_is_p1
+                    and start_turn < current_turn)
+        if duration == 'until_source_leaves':
+            loc = gs.find_card_location(effect_data.get('source_id'))
+            return (not loc) or loc[1] != 'battlefield'
+        if duration == 'conditional' and callable(effect_data.get('duration_condition')):
+            try:
+                return not effect_data['duration_condition']()
+            except Exception as e:
+                logging.error(f"Error in duration condition for effect {effect_data.get('effect_id')}: {e}")
+                return True
+        if duration == 'one_shot':
+            return False  # removed explicitly after applying
+        return start_turn < current_turn
+
     def cleanup_expired_effects(self):
         """Remove effects that have expired."""
         current_turn = self.game_state.turn
@@ -2360,42 +2441,9 @@ class ReplacementEffectSystem:
 
         expired_ids = []
         for effect_data in list(self.active_effects): # Iterate over a copy
-            effect_id = effect_data.get('effect_id')
-            duration = effect_data.get('duration', 'permanent')
-            start_turn = effect_data.get('start_turn', 0)
-
-            is_expired = False
-            if duration == 'permanent' or duration == 'until_source_leaves': # until_source_leaves handled separately
-                is_expired = False # These don't expire based on time
-            elif duration == 'end_of_turn':
-                # Expired if it's not the turn it started AND it's the cleanup step or later
-                is_expired = start_turn < current_turn or (start_turn == current_turn and current_phase >= self.game_state.PHASE_CLEANUP)
-            elif duration == 'next_turn': # Expires at start of player's next turn AFTER the one it started
-                # Hard to track perfectly without start player context, approximate:
-                is_expired = start_turn < current_turn - 1
-            elif duration == 'until_my_next_turn':
-                effect_controller_is_p1 = effect_data.get('controller_is_p1')
-                # Expires if it's the controller's turn again and it's *not* the turn it started
-                is_expired = (effect_controller_is_p1 == active_player_is_p1 and start_turn < current_turn)
-            elif duration == 'until_source_leaves':
-                source_id = effect_data.get('source_id')
-                source_location = self.game_state.find_card_location(source_id)
-                if not source_location or source_location[1] != 'battlefield':
-                    is_expired = True
-            elif duration == 'conditional' and callable(effect_data.get('duration_condition')):
-                try:
-                    if not effect_data['duration_condition'](): is_expired = True
-                except Exception as e:
-                    logging.error(f"Error in duration condition for effect {effect_id}: {e}"); is_expired = True # Remove on error
-            elif duration == 'one_shot': # Handled during apply_replacements usually
-                pass # This should have been removed already if applied_once was True
-            else: # Default for unknown or standard time-based durations
-                # Assuming simple end-of-turn expiration for others for now
-                is_expired = start_turn < current_turn
-
-
-            if is_expired:
-                expired_ids.append(effect_id)
+            # Shared per-effect predicate (also used by apply_replacements).
+            if self._is_effect_expired(effect_data, current_turn, current_phase):
+                expired_ids.append(effect_data.get('effect_id'))
 
         # Remove expired effects
         for effect_id in expired_ids:
