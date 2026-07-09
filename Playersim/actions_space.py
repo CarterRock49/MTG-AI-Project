@@ -466,6 +466,7 @@ class ActionSpaceMixin:
             if hasattr(self, '_add_equip_actions') and callable(self._add_equip_actions): self._add_equip_actions(player, valid_actions, set_valid_action)
 
         self._add_morph_actions(player, valid_actions, set_valid_action)
+        self._add_exile_casting_actions(player, valid_actions, set_valid_action)
         self._add_alternative_casting_actions(player, valid_actions, set_valid_action, is_sorcery_speed=True)
         self._add_specific_mechanics_actions(player, valid_actions, set_valid_action, is_sorcery_speed=True)
 
@@ -2115,4 +2116,4 @@ class ActionSpaceMixin:
                         
                         if can_afford:
                             set_valid_action(428, f"REDIRECT_DAMAGE with {card.name}")
-
+

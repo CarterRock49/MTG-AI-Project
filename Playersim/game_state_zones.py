@@ -129,12 +129,18 @@ class GameStateZonesMixin:
         # ... (Keep existing destination logic) ...
         destination_list = final_destination_player.get(final_destination_zone)
         if destination_list is None: logging.error(f"Invalid destination zone '{final_destination_zone}'."); return False
-        # Avoid duplicates, important for sets
-        if card_id not in destination_list:
-             if isinstance(destination_list, list): destination_list.append(card_id)
-             elif isinstance(destination_list, set): destination_list.add(card_id)
-             elif isinstance(destination_list, dict): destination_list[card_id] = True # Example for dict zone
-             else: logging.error(f"Dest zone '{final_destination_zone}' not list/set/dict."); return False
+        # Lists model real zones that can contain multiple copies represented by
+        # the same card ID; sets/dicts model status trackers and remain unique.
+        if isinstance(destination_list, list):
+             destination_list.append(card_id)
+        elif isinstance(destination_list, set):
+             destination_list.add(card_id)
+        elif isinstance(destination_list, dict):
+             destination_list[card_id] = True # Example for dict zone
+        else:
+             logging.error(f"Dest zone '{final_destination_zone}' not list/set/dict."); return False
+        if hasattr(self, "_last_card_locations"):
+             self._last_card_locations[card_id] = (final_destination_player, final_destination_zone)
         logging.debug(f"Moved {card_name} from {from_player['name'] if from_player else actual_from_zone} to {final_destination_player['name']}'s {final_destination_zone}")
 
         # --- 4. Trigger ENTER Abilities & Handle ETB Effects ---
@@ -877,7 +883,19 @@ class GameStateZonesMixin:
         Returns:
             tuple: (player_object, zone_string) or (None, None) if not found
         """
-        zones = ["battlefield", "hand", "graveyard", "exile", "library"]
+        # Fixture decks store multiple copies as repeated card IDs, so the same
+        # ID can legitimately appear in several zones. If move_card has moved
+        # this ID during the current game, use that current-location hint first.
+        last = getattr(self, "_last_card_locations", {}).get(card_id)
+        if last:
+            player, zone = last
+            if player and zone in player and isinstance(player[zone], (list, set)) and card_id in player[zone]:
+                return player, zone
+
+        # Prefer the highest-impact zone across both players before falling
+        # through, otherwise a P1 hand copy can hide the P2 battlefield
+        # permanent that combat/effects target.
+        zones = ["battlefield", "exile", "graveyard", "hand", "library"]
         special_zones_map = {
              "adventure_cards": "adventure_zone", "phased_out": "phased_out",
              "foretold_cards": "foretold_zone", "suspended_cards": "suspended",
@@ -888,10 +906,11 @@ class GameStateZonesMixin:
              "companion": "companion_zone",
         }
 
-        # Check standard zones for both players
-        for player in [self.p1, self.p2]:
-            if not player: continue # Safety check
-            for zone in zones:
+        # Check standard zones by zone priority across both players.
+        for zone in zones:
+            for player in [self.p1, self.p2]:
+                if not player:
+                    continue # Safety check
                 if zone in player and isinstance(player[zone], (list, set)) and card_id in player[zone]:
                     return player, zone
 
@@ -927,22 +946,32 @@ class GameStateZonesMixin:
     # Add a helper to find original owner if controller isn't readily available
     def _find_card_owner_fallback(self, card_id):
         """Fallback to find card owner based on original deck assignment or DB."""
-        # Check original decks if tracked
-        if hasattr(self, 'original_p1_deck') and card_id in self.original_p1_deck:
+        in_p1 = hasattr(self, 'original_p1_deck') and card_id in self.original_p1_deck
+        in_p2 = hasattr(self, 'original_p2_deck') and card_id in self.original_p2_deck
+        if in_p1 and not in_p2:
              return self.p1
-        if hasattr(self, 'original_p2_deck') and card_id in self.original_p2_deck:
+        if in_p2 and not in_p1:
              return self.p2
-        # Last resort - default to p1 if owner ambiguous
+        # Mirror fixtures reuse the same card IDs in both decks. When ownership
+        # is ambiguous, prefer the current battlefield controller over always
+        # sending the card to P1's zone.
+        if in_p1 and in_p2:
+            controller = self._find_card_controller(card_id)
+            if controller:
+                return controller
+        # Last resort - default to p1 if owner ambiguous and not controlled.
         return self.p1
 
     # Consolidate get_card_controller (use find_card_location)
     def get_card_controller(self, card_id):
         """Find the controller of a card currently on the battlefield."""
-        player, zone = self.find_card_location(card_id)
-        if zone == "battlefield":
-             return player
+        # Do the battlefield scan directly. With repeated card IDs, a copy in
+        # hand/library must not obscure an on-battlefield permanent.
+        for player in [self.p1, self.p2]:
+            if player and card_id in player.get("battlefield", []):
+                return player
         # Consider returning controller even if not on battlefield?
         # Depends on rules context. For most purposes, only battlefield controller matters.
         # If you need owner regardless of zone, use _find_card_owner_fallback or similar.
         return None
-
+

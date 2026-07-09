@@ -581,6 +581,14 @@ class GameStateDamageMixin:
         target_owner = self.get_card_controller(target_id)
         if not target_card or not target_owner or 'creature' not in getattr(target_card, 'card_types', []):
             return 0 # Indicate no damage applied
+        source_card = self._safe_get_card(source_id)
+        source_controller = self.get_card_controller(source_id)
+        if source_card and source_controller and hasattr(self, 'targeting_system') and self.targeting_system:
+            if self.targeting_system._has_protection_from(
+                    target_card, source_card, target_owner, source_controller):
+                logging.debug(f"Damage from {getattr(source_card, 'name', source_id)} to "
+                              f"{getattr(target_card, 'name', target_id)} prevented by protection.")
+                return 0
 
         # Apply damage replacement effects targeting this creature
         damage_context = { "source_id": source_id, "target_id": target_id, "target_obj": target_card, "target_is_player": False, "damage_amount": amount, "is_combat_damage": is_combat_damage }

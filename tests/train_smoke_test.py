@@ -24,6 +24,7 @@ What it verifies:
 """
 
 import os
+import shutil
 import sys
 import tempfile
 import traceback
@@ -38,6 +39,18 @@ logging.disable(logging.CRITICAL)
 import numpy as np
 
 RESULTS = []
+TEST_ARTIFACT_ROOT = os.path.join(REPO_ROOT, "tests", "test_artifacts", "train_smoke")
+
+
+def reset_test_artifacts():
+    shutil.rmtree(TEST_ARTIFACT_ROOT, ignore_errors=True)
+
+
+def test_artifact_paths():
+    return {
+        "deck_stats_path": os.path.join(TEST_ARTIFACT_ROOT, "deck_stats"),
+        "card_memory_path": os.path.join(TEST_ARTIFACT_ROOT, "card_memory"),
+    }
 
 
 def stage(name):
@@ -74,7 +87,9 @@ def build_vec_env(deck_folder):
     decks, card_db = load_decks_and_card_db(deck_folder)
 
     def make_env():
-        return ActionMasker(AlphaZeroMTGEnv(decks, card_db), action_mask_fn="action_mask")
+        return ActionMasker(
+            AlphaZeroMTGEnv(decks, card_db, **test_artifact_paths()),
+            action_mask_fn="action_mask")
 
     return DummyVecEnv([make_env])
 
@@ -151,6 +166,7 @@ def save_load_roundtrip(model, vec_env):
 def main():
     print("Playersim training-stack smoke test")
     print("=" * 50)
+    reset_test_artifacts()
     if do_imports() is None:
         return finish()
 

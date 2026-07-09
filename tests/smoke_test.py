@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import random
+import shutil
 import sys
 import tempfile
 import traceback
@@ -38,6 +39,19 @@ logging.disable(logging.CRITICAL)
 SEED = 42
 MAX_STEPS_PER_EPISODE = 200
 NUM_EPISODES = 3
+TEST_ARTIFACT_ROOT = os.path.join(REPO_ROOT, "tests", "test_artifacts", "smoke")
+
+
+def test_artifact_paths(name):
+    root = os.path.join(TEST_ARTIFACT_ROOT, name)
+    return {
+        "deck_stats_path": os.path.join(root, "deck_stats"),
+        "card_memory_path": os.path.join(root, "card_memory"),
+    }
+
+
+def reset_test_artifacts():
+    shutil.rmtree(TEST_ARTIFACT_ROOT, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +271,7 @@ def load_data(folder):
 def build_env(decks, card_db):
     from Playersim.environment import AlphaZeroMTGEnv
     from Playersim.game_state import GameState
-    env = AlphaZeroMTGEnv(decks, card_db)
+    env = AlphaZeroMTGEnv(decks, card_db, **test_artifact_paths("runtime"))
     assert env.action_space is not None
     assert env.observation_space is not None
 
@@ -328,69 +342,70 @@ def play_episodes(env):
 
 @stage("stats pipeline records and persists games")
 def check_stats_pipeline(decks, card_db):
-    """The mission-critical path: finished games must land in deck_stats and
-    card_memory on disk, with fidelity telemetry exposed in the final info."""
+    """The mission-critical path: finished games must land in test deck_stats
+    and card_memory on disk, with fidelity telemetry exposed in the final info."""
     from Playersim.environment import AlphaZeroMTGEnv
-    repo = os.getcwd()
-    with tempfile.TemporaryDirectory() as d:
-        os.chdir(d)  # tracker/memory write to ./deck_stats and ./card_memory
-        try:
-            env = AlphaZeroMTGEnv(decks, card_db)
-            env.set_agent_version("smoke-test")
-            rng = random.Random(SEED)
-            recorded_any = False
-            last_info = {}
-            for ep in range(3):
-                env.reset(seed=SEED + ep)
-                done = trunc = False
-                steps = 0
-                while not (done or trunc) and steps < MAX_STEPS_PER_EPISODE:
-                    mask = env.action_mask()
-                    valid = np.where(mask)[0]
-                    _, _, done, trunc, last_info = env.step(int(rng.choice(list(valid))))
-                    steps += 1
-                recorded_any = recorded_any or getattr(env, "_game_result_recorded", False)
+    paths = test_artifact_paths("stats_pipeline")
+    env = None
+    try:
+        env = AlphaZeroMTGEnv(decks, card_db, **paths)
+        env.set_agent_version("smoke-test")
+        rng = random.Random(SEED)
+        recorded_any = False
+        last_info = {}
+        for ep in range(3):
+            env.reset(seed=SEED + ep)
+            done = trunc = False
+            steps = 0
+            while not (done or trunc) and steps < MAX_STEPS_PER_EPISODE:
+                mask = env.action_mask()
+                valid = np.where(mask)[0]
+                _, _, done, trunc, last_info = env.step(int(rng.choice(list(valid))))
+                steps += 1
+            recorded_any = recorded_any or getattr(env, "_game_result_recorded", False)
+        env.close()
+        env = None
+        assert recorded_any, "no game result recorded across 3 episodes"
+        assert "fidelity" in last_info, "fidelity telemetry missing from final info"
+        for path_name in ("deck_stats_path", "card_memory_path"):
+            p = paths[path_name]
+            assert os.path.isdir(p) and os.listdir(p), f"{path_name} not persisted to disk"
+
+        # The metadata contract for the downstream deck-builder.
+        log_path = os.path.join(paths["deck_stats_path"], "game_log.jsonl")
+        assert os.path.exists(log_path), "game_log.jsonl missing"
+        records = [json.loads(l) for l in open(log_path, encoding="utf-8")]
+        assert records, "game log is empty"
+        for r in records:
+            for field in ("schema_version", "ts", "result", "turn_count",
+                          "p1_deck", "p2_deck", "agent_is_p1",
+                          "agent_version", "fidelity"):
+                assert field in r, f"game log record missing '{field}'"
+            assert r["schema_version"] == 1, "unexpected game log schema version"
+            assert r["agent_version"] == "smoke-test", "agent version not stamped"
+        rep_path = os.path.join(paths["deck_stats_path"], "fidelity_report.json")
+        assert os.path.exists(rep_path), "fidelity_report.json missing"
+        rep = json.load(open(rep_path, encoding="utf-8"))
+        assert rep.get("games_recorded") == len(records), \
+            "fidelity report count does not match game log (double-append?)"
+
+        # Downstream metadata contract: per-game log + cumulative fidelity report.
+        log_path = os.path.join(paths["deck_stats_path"], "game_log.jsonl")
+        assert os.path.isfile(log_path), "game_log.jsonl missing"
+        with open(log_path, encoding="utf-8") as f:
+            entries = [json.loads(line) for line in f if line.strip()]
+        assert entries, "game_log.jsonl is empty"
+        for key in ("result", "turn_count", "agent_version", "fidelity", "p1_deck", "p2_deck"):
+            assert key in entries[0], f"game_log entry missing '{key}'"
+        rep_path = os.path.join(paths["deck_stats_path"], "fidelity_report.json")
+        assert os.path.isfile(rep_path), "fidelity_report.json missing"
+        with open(rep_path, encoding="utf-8") as f:
+            report = json.load(f)
+        assert report.get("games_recorded", 0) >= 1
+        assert "unparsed_cards" in report
+    finally:
+        if env is not None:
             env.close()
-            assert recorded_any, "no game result recorded across 3 episodes"
-            assert "fidelity" in last_info, "fidelity telemetry missing from final info"
-            for sub in ("deck_stats", "card_memory"):
-                p = os.path.join(d, sub)
-                assert os.path.isdir(p) and os.listdir(p), f"{sub} not persisted to disk"
-
-            # The metadata contract for the downstream deck-builder.
-            log_path = os.path.join(d, "deck_stats", "game_log.jsonl")
-            assert os.path.exists(log_path), "game_log.jsonl missing"
-            records = [json.loads(l) for l in open(log_path, encoding="utf-8")]
-            assert records, "game log is empty"
-            for r in records:
-                for field in ("schema_version", "ts", "result", "turn_count",
-                              "p1_deck", "p2_deck", "agent_is_p1",
-                              "agent_version", "fidelity"):
-                    assert field in r, f"game log record missing '{field}'"
-                assert r["schema_version"] == 1, "unexpected game log schema version"
-                assert r["agent_version"] == "smoke-test", "agent version not stamped"
-            rep_path = os.path.join(d, "deck_stats", "fidelity_report.json")
-            assert os.path.exists(rep_path), "fidelity_report.json missing"
-            rep = json.load(open(rep_path, encoding="utf-8"))
-            assert rep.get("games_recorded") == len(records), \
-                "fidelity report count does not match game log (double-append?)"
-
-            # Downstream metadata contract: per-game log + cumulative fidelity report.
-            log_path = os.path.join(d, "deck_stats", "game_log.jsonl")
-            assert os.path.isfile(log_path), "game_log.jsonl missing"
-            with open(log_path, encoding="utf-8") as f:
-                entries = [json.loads(line) for line in f if line.strip()]
-            assert entries, "game_log.jsonl is empty"
-            for key in ("result", "turn_count", "agent_version", "fidelity", "p1_deck", "p2_deck"):
-                assert key in entries[0], f"game_log entry missing '{key}'"
-            rep_path = os.path.join(d, "deck_stats", "fidelity_report.json")
-            assert os.path.isfile(rep_path), "fidelity_report.json missing"
-            with open(rep_path, encoding="utf-8") as f:
-                report = json.load(f)
-            assert report.get("games_recorded", 0) >= 1
-            assert "unparsed_cards" in report
-        finally:
-            os.chdir(repo)
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +415,7 @@ def check_stats_pipeline(decks, card_db):
 def main():
     print("Playersim smoke test")
     print("=" * 50)
+    reset_test_artifacts()
     check_regressions()
     check_import_hygiene()
     with tempfile.TemporaryDirectory() as folder:
@@ -411,9 +427,12 @@ def main():
         env = build_env(decks, card_db)
         if env is None:
             return finish()
-        if check_reset(env) is not None:
-            check_agent_ownership(env)
-            play_episodes(env)
+        try:
+            if check_reset(env) is not None:
+                check_agent_ownership(env)
+                play_episodes(env)
+        finally:
+            env.close()
         check_stats_pipeline(decks, card_db)
     return finish()
 

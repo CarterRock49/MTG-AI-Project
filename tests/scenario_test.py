@@ -19,6 +19,7 @@ report as XPASS, reminding you to flip the flag.
 import logging
 import os
 import random
+import shutil
 import sys
 import tempfile
 import traceback
@@ -36,6 +37,14 @@ SEED = 11
 SCENARIOS = []
 _ENV = None
 _TMP = None
+TEST_ARTIFACT_ROOT = os.path.join(REPO_ROOT, "tests", "test_artifacts", "scenario")
+
+
+def test_artifact_paths():
+    return {
+        "deck_stats_path": os.path.join(TEST_ARTIFACT_ROOT, "deck_stats"),
+        "card_memory_path": os.path.join(TEST_ARTIFACT_ROOT, "card_memory"),
+    }
 
 
 def scenario(cr, title, known_bug=False):
@@ -54,10 +63,11 @@ def get_env():
     if _ENV is None:
         from Playersim.card import load_decks_and_card_db
         from Playersim.environment import AlphaZeroMTGEnv
+        shutil.rmtree(TEST_ARTIFACT_ROOT, ignore_errors=True)
         _TMP = tempfile.mkdtemp()
         build_fixture_decks(_TMP)
         decks, card_db = load_decks_and_card_db(_TMP)
-        _ENV = AlphaZeroMTGEnv(decks, card_db)
+        _ENV = AlphaZeroMTGEnv(decks, card_db, **test_artifact_paths())
     return _ENV
 
 
@@ -729,6 +739,19 @@ def _combat_setup(gs, attacker_name, blocker_name, attacker_keywords=()):
     return agent, defender, atk, blk
 
 
+def grant_keyword(gs, cid, keyword, source_id=None):
+    """Grant a keyword through layer 6 and refresh characteristics."""
+    if source_id is None:
+        source_id = cid
+    gs.layer_system.register_effect({'source_id': source_id, 'layer': 6,
+                                     'affected_ids': [cid],
+                                     'effect_type': 'add_ability',
+                                     'effect_value': keyword,
+                                     'duration': 'permanent'})
+    gs.layer_system.invalidate_cache()
+    gs.layer_system.apply_all_effects()
+
+
 def _zone_of(gs, cid):
     return gs.find_card_location(cid)[1]
 
@@ -777,6 +800,156 @@ def s_deathtouch_trample():
         f"expected 5 trample damage with deathtouch assignment, life went {life_before} -> {defender['life']}"
     assert _zone_of(gs, blk) == "graveyard", \
         "blocker survived deathtouch damage (SBA 704.5h not honoring the deathtouch mark)"
+
+
+@scenario("702.9 / 702.17", "a creature with flying can be blocked by reach but not by a vanilla creature")
+def s_flying_reach_block_legality():
+    gs = fresh()
+    from Playersim.combat_integration import integrate_combat_actions
+    handler = integrate_combat_actions(gs)
+    agent = gs.p1 if getattr(gs, 'agent_is_p1', True) else gs.p2
+    defender = gs.p2 if agent is gs.p1 else gs.p1
+    atk = card_id_by_name(gs, "Cinder Brawler")
+    vanilla = card_id_by_name(gs, "Vine Stalker")
+    reacher = card_id_by_name(gs, "Canopy Sentinel")  # printed Reach
+    assert gs.move_card(atk, owner_of(gs, atk), "library", agent, "battlefield")
+    for bid in (vanilla, reacher):
+        assert gs.move_card(bid, owner_of(gs, bid), "library", defender, "battlefield")
+    grant_keyword(gs, atk, "flying")
+    gs.current_attackers = [atk]
+    gs.current_block_assignments = {}
+    assert not handler._can_block(vanilla, atk), "vanilla creature could block a flier"
+    assert handler._can_block(reacher, atk), "creature with reach could not block a flier"
+
+
+@scenario("702.111", "a creature with menace is not legally blocked by only one creature")
+def s_menace_requires_two_blockers_to_finish_declaration():
+    gs = fresh()
+    from Playersim.combat_integration import integrate_combat_actions
+    handler = integrate_combat_actions(gs)
+    agent = gs.p1 if getattr(gs, 'agent_is_p1', True) else gs.p2
+    defender = gs.p2 if agent is gs.p1 else gs.p1
+    atk = card_id_by_name(gs, "Cinder Brawler")
+    b1 = card_id_by_name(gs, "Vine Stalker")
+    b2 = card_id_by_name(gs, "Sprout Guardian")
+    assert gs.move_card(atk, owner_of(gs, atk), "library", agent, "battlefield")
+    for bid in (b1, b2):
+        assert gs.move_card(bid, owner_of(gs, bid), "library", defender, "battlefield")
+    grant_keyword(gs, atk, "menace")
+    gs.current_attackers = [atk]
+    gs.current_block_assignments = {atk: [b1]}
+    gs.phase = gs.PHASE_DECLARE_BLOCKERS
+    assert not handler.handle_declare_blockers_done(), \
+        "declare-blockers step accepted a single blocker on a menace attacker"
+    assert gs.phase == gs.PHASE_DECLARE_BLOCKERS, \
+        "phase advanced despite an illegal menace block assignment"
+    gs.current_block_assignments = {atk: [b1, b2]}
+    assert handler.handle_declare_blockers_done(), \
+        "declare-blockers step rejected two blockers on a menace attacker"
+    assert gs.phase in (gs.PHASE_COMBAT_DAMAGE, gs.PHASE_FIRST_STRIKE_DAMAGE), \
+        "phase did not advance after a legal menace block assignment"
+
+
+@scenario("702.16b/e", "protection from red prevents red blocking and red damage")
+def s_protection_from_red_blocks_and_prevents_damage():
+    gs = fresh()
+    from Playersim.combat_integration import integrate_combat_actions
+    handler = integrate_combat_actions(gs)
+    agent = gs.p1 if getattr(gs, 'agent_is_p1', True) else gs.p2
+    defender = gs.p2 if agent is gs.p1 else gs.p1
+    protected = inject_card(gs, {
+        "name": "Shielded Adept", "mana_cost": "{W}",
+        "type_line": "Creature — Human Wizard",
+        "oracle_text": "Protection from red",
+        "color_identity": ["W"], "power": 2, "toughness": 2,
+    })
+    red_blocker = card_id_by_name(gs, "Cinder Brawler")  # red 2/2
+    agent["library"].append(protected)
+    gs._last_card_locations[protected] = (agent, "library")
+    assert gs.move_card(protected, agent, "library", agent, "battlefield")
+    assert gs.move_card(red_blocker, owner_of(gs, red_blocker), "library", defender, "battlefield")
+    grant_keyword(gs, protected, "protection from red")
+    gs.current_attackers = [protected]
+    gs.current_block_assignments = {}
+    assert not handler._can_block(red_blocker, protected), \
+        "red creature could block a creature with protection from red"
+    marked = gs.apply_damage_to_permanent(protected, 2, red_blocker, is_combat_damage=True)
+    assert marked == 0, "red damage was not prevented by protection from red"
+    assert agent.get("damage_counters", {}).get(protected, 0) == 0, \
+        "protection-prevented red damage was still marked"
+
+
+@scenario("702.16b", "protection from red makes red spells unable to target the permanent")
+def s_protection_from_red_targeting():
+    gs = fresh()
+    caster = gs.p1
+    target_owner = gs.p2
+    red_spell = inject_card(gs, {
+        "name": "Red Bolt", "mana_cost": "{R}",
+        "type_line": "Instant",
+        "oracle_text": "Red Bolt deals 3 damage to target creature.",
+        "color_identity": ["R"], "cmc": 1,
+    })
+    protected = inject_card(gs, {
+        "name": "Red Warded Guard", "mana_cost": "{W}",
+        "type_line": "Creature — Human Soldier",
+        "oracle_text": "Protection from red",
+        "color_identity": ["W"], "power": 2, "toughness": 2,
+    })
+    vulnerable = card_id_by_name(gs, "Vine Stalker")
+    caster["library"].append(red_spell)
+    target_owner["library"].append(protected)
+    gs._last_card_locations[red_spell] = (caster, "library")
+    gs._last_card_locations[protected] = (target_owner, "library")
+    assert gs.move_card(red_spell, caster, "library", caster, "hand")
+    assert gs.move_card(protected, target_owner, "library", target_owner, "battlefield")
+    assert gs.move_card(vulnerable, owner_of(gs, vulnerable), "library", target_owner, "battlefield")
+    grant_keyword(gs, protected, "protection from red")
+    valid = gs.targeting_system.get_valid_targets(red_spell, caster)
+    creature_targets = set(valid.get("creatures", [])) | set(valid.get("creature", []))
+    assert protected not in creature_targets, "red spell could target protection-from-red creature"
+    assert vulnerable in creature_targets, "red spell lost ordinary legal creature targets"
+
+
+@scenario("702.21", "ward parses and registers its target-tax cost")
+def s_ward_keyword_cost_parses():
+    gs = fresh()
+    player = gs.p1
+    warded = inject_card(gs, {
+        "name": "Tollhide Bear", "mana_cost": "{1}{G}",
+        "type_line": "Creature - Bear",
+        "oracle_text": "Ward {2}",
+        "color_identity": ["G"], "power": 2, "toughness": 2,
+    })
+    player["library"].append(warded)
+    gs._last_card_locations[warded] = (player, "library")
+    assert gs.move_card(warded, player, "library", player, "battlefield")
+    gs.ability_handler._parse_and_register_abilities(warded, gs._safe_get_card(warded))
+    gs.layer_system.invalidate_cache()
+    gs.layer_system.apply_all_effects()
+    ward_abilities = [
+        ability for ability in gs.ability_handler.registered_abilities.get(warded, [])
+        if getattr(ability, "keyword", None) == "ward"
+    ]
+    assert ward_abilities, "Ward {2} did not register a ward static ability"
+    assert any(getattr(ability, "keyword_value", None) == "{2}" for ability in ward_abilities), \
+        f"ward cost was not normalized to {{2}}: {[getattr(a, 'keyword_value', None) for a in ward_abilities]}"
+    assert gs.check_keyword(warded, "ward"), "registered ward keyword was not visible through keyword checks"
+
+
+@scenario("702.21 / 702.18", "lifelink gains life equal to damage actually dealt")
+def s_lifelink_gains_life_from_combat_damage():
+    gs = fresh()
+    agent, defender, atk, blk = _combat_setup(gs, "Vine Stalker", "Sprout Guardian",
+                                              attacker_keywords=("lifelink",))
+    # Remove the blocker so the lifelinker connects with the defending player.
+    gs.current_block_assignments = {}
+    life_before = agent["life"]
+    opp_life_before = defender["life"]
+    gs.combat_resolver.resolve_combat()
+    assert defender["life"] == opp_life_before - 2, "lifelink attacker did not deal combat damage"
+    assert agent["life"] == life_before + 2, \
+        f"lifelink gained {agent['life'] - life_before}, expected 2"
 
 
 @scenario("engine (leak)", "layer-written card state does not leak into the next game")
@@ -1545,6 +1718,38 @@ def s_adventure_exiles_to_recast():
         f"adventure spell is in {gs.find_card_location(spell)[1]}, expected exile"
     assert spell in getattr(gs, "cards_castable_from_exile", set()), \
         "adventure creature side was not made castable from exile"
+
+
+@scenario("715.3d/f (adventure)", "an adventurer exiled on Adventure can later be cast as the creature")
+def s_adventure_creature_castable_from_exile_action():
+    gs = fresh()
+    handler = get_env().action_handler
+    player = gs._get_active_player()
+    adv = inject_card(gs, {
+        "name": "Errant Trailblazer", "mana_cost": "{G}",
+        "type_line": "Creature — Human Scout",
+        "oracle_text": "Trailblazer's Trick {G} (Adventure)\n"
+                       "Sorcery — Search your library for a basic land card, reveal it, "
+                       "put it into your hand, then shuffle.",
+        "power": 2, "toughness": 2,
+    })
+    player["exile"].append(adv)
+    gs.cards_castable_from_exile = {adv}
+    gs._last_card_locations[adv] = (player, "exile")
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    player["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 1, 'C': 0}
+
+    mask = handler.generate_valid_actions()
+    assert mask[230], "CAST_FROM_EXILE was not offered for the exiled Adventure creature"
+    reward, ok = handler._handle_cast_from_exile(0)
+    assert ok, "CAST_FROM_EXILE failed for an Adventure creature in exile"
+    assert adv not in player["exile"], "Adventure creature was not removed from exile when cast"
+    assert adv not in getattr(gs, "cards_castable_from_exile", set()), \
+        "Adventure exile permission was not consumed after casting the creature side"
+    assert gs.stack and gs.stack[-1][1] == adv, "Adventure creature side did not go onto the stack"
+    gs.resolve_top_of_stack()
+    assert adv in player["battlefield"], "Adventure creature side did not resolve onto the battlefield"
 
 
 @scenario("711 (leveler)", "a level-up creature is recognized as a leveler with its level structure")

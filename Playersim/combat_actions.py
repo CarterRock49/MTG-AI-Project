@@ -757,6 +757,12 @@ class CombatActionHandler:
              logging.warning(f"Tried to end Declare Blockers in phase {gs.phase}")
              return False
 
+        for attacker_id, blockers in list(getattr(gs, 'current_block_assignments', {}).items()):
+            attacker_card = gs._safe_get_card(attacker_id)
+            if attacker_card and self._has_keyword(attacker_card, "menace") and len(blockers) == 1:
+                logging.warning(f"Illegal block assignment: {attacker_card.name} has menace and only one blocker.")
+                return False
+
         # Determine if First Strike combat step is needed
         needs_first_strike_step = False
         combatants = gs.current_attackers[:]

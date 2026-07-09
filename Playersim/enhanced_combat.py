@@ -324,7 +324,7 @@ class ExtendedCombatResolver(CombatResolver):
         # Update potential lifegain (approximate)
         if total_potential_damage > 0 and has_lifelink:
              player_key = "p2" if defender_player == gs.p2 else "p1"
-             self.potential_lifegain[player_key] += total_potential_damage
+             self.potential_lifegain[player_key][blocker_id] += total_potential_damage
              logging.debug(f"COMBAT EXT Potential Lifelink: {blocker_card.name} may gain {total_potential_damage} life")
 
         return total_potential_damage
@@ -444,7 +444,7 @@ class ExtendedCombatResolver(CombatResolver):
             # Update potential lifegain (this remains approximate until final application)
             if has_lifelink:
                  player_key = "p1" if attacker_player == gs.p1 else "p2"
-                 self.potential_lifegain[player_key] += total_potential_damage
+                 self.potential_lifegain[player_key][attacker_id] += total_potential_damage
                  logging.debug(f"COMBAT EXT Potential Lifelink: {attacker_card.name} may gain {total_potential_damage} life")
 
         return total_potential_damage

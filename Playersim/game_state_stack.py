@@ -262,6 +262,8 @@ class GameStateStackMixin:
              if paid_mana_details: self.mana_system.add_mana(player, paid_mana_details.get('spent_specific',{}))
              if context.get('pay_additional') and additional_cost_info: self.mana_system._rollback_non_mana_cost(player, additional_cost_info, context)
              return False
+        if source_zone == "exile" and hasattr(self, "cards_castable_from_exile"):
+             self.cards_castable_from_exile.discard(card_id)
 
         # --- Prepare FINAL stack context ---
         final_stack_context = context.copy()
@@ -1681,4 +1683,4 @@ class GameStateStackMixin:
         if hasattr(spell, 'card_types') and ('instant' in spell.card_types or 'sorcery' in spell.card_types):
             if not context.get("is_copy", False) and not context.get("skip_default_movement", False):
                 controller["graveyard"].append(spell_id)
-
+

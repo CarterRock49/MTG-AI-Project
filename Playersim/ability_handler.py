@@ -1179,15 +1179,46 @@ class AbilityHandler:
             mapping = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
             if isinstance(word, str) and word.isdigit(): return int(word)
             return mapping.get(str(word).lower(), 1)
+
+        def _keyword_source_texts():
+            """Return full text candidates for parameterized keyword parsing."""
+            texts = []
+            if full_text:
+                texts.append(full_text)
+            current_face_index = getattr(card, 'current_face', 0)
+            faces = getattr(card, 'faces', None)
+            if faces and current_face_index < len(faces):
+                face_text = faces[current_face_index].get('oracle_text', '')
+                if face_text:
+                    texts.append(face_text)
+            oracle_text = getattr(card, 'oracle_text', '')
+            if oracle_text:
+                texts.append(oracle_text)
+            seen = set()
+            unique_texts = []
+            for text in texts:
+                normalized = str(text).lower().strip()
+                if normalized and normalized not in seen:
+                    seen.add(normalized)
+                    unique_texts.append(normalized)
+            return unique_texts
         # --- End Internal Helpers ---
 
 
         # --- Value/Cost Parsing (Moved Ward before N to handle complex ward first) ---
         if keyword_lower == "protection":
-            match = re.search(r"protection from (.*)", full_text)
-            if match: current_value = match.group(1).strip(); is_parametrized_keyword = True
+            for source_text in _keyword_source_texts():
+                match = re.search(r"protection from ([^.\n]+)", source_text)
+                if match:
+                    current_value = match.group(1).strip()
+                    break
+            is_parametrized_keyword = True
         elif keyword_lower == "ward":
-            cost_str = _parse_cost(full_text, keyword_lower) # Use cost parser
+            cost_str = None
+            for source_text in _keyword_source_texts():
+                cost_str = _parse_cost(source_text, keyword_lower) # Use cost parser
+                if cost_str and cost_str != "{0}":
+                    break
             if cost_str and cost_str != "{0}": current_value = cost_str # Use parsed cost as value
             else: current_value = "ward_generic" # Fallback
             is_parametrized_keyword = True

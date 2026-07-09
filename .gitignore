@@ -36,6 +36,7 @@ build/
 models/
 logs/
 tensorboard_logs/
+tests/test_artifacts/
 *.log
 *.pt
 *.pth
@@ -69,3 +70,6 @@ sqlite:///
 # Backup files
 *~
 *.bak
+
+#other garbage
+.agents

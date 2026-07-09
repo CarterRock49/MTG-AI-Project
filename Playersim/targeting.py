@@ -535,7 +535,7 @@ class TargetingSystem:
         if not target_card_id: return False
 
         # 1. Use central check_keyword for the general "protection" keyword
-        if self.check_keyword(target_card, "protection"): # Check if the *general* keyword is active
+        if self._check_keyword(target_card, "protection"): # Check if the *general* keyword is active
              # 2. Get specific protection details (Needs reliable source like AbilityHandler/LayerSystem)
              # Attempt to get details via AbilityHandler first
              protection_details = []
@@ -907,7 +907,7 @@ class TargetingSystem:
             # --- Banding Interactions (Rules 702.22) ---
             # 702.22c: Creature with banding can block creatures with evasion that normally couldn't be blocked.
             attacker_has_evasion_blocked_by_banding = False
-            if self._has_keyword(attacker,"fear") or self._has_keyword(attacker,"intimidate") or self._get_landwalk_type(attacker):
+            if self._check_keyword(attacker,"fear") or self._check_keyword(attacker,"intimidate") or self._get_landwalk_type(attacker):
                 attacker_has_evasion_blocked_by_banding = True
 
             if self._check_keyword(blocker, "banding") and attacker_has_evasion_blocked_by_banding:

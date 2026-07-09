@@ -1950,8 +1950,11 @@ class SacrificeEffect(AbilityEffect):
                 return getattr(c, 'toughness', 0) or 0
             candidates.sort(key=_tough)
             for cid in candidates[:self.count]:
-                owner = game_state._find_card_owner_fallback(cid) or p
-                if game_state.move_card(cid, p, "battlefield", owner, "graveyard", cause="sacrifice"):
+                # The engine represents deck copies as repeated card IDs, not
+                # per-copy objects. For v1, put sacrificed permanents into the
+                # sacrificing player's graveyard; owner reconstruction is
+                # ambiguous in mirror/fixture games.
+                if game_state.move_card(cid, p, "battlefield", p, "graveyard", cause="sacrifice"):
                     any_sacked = True
                     game_state.trigger_ability(cid, "SACRIFICED", {"controller": p})
         return any_sacked

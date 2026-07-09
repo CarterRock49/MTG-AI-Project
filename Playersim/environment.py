@@ -51,11 +51,14 @@ class AlphaZeroMTGEnv(gym.Env):
     """
     ACTION_SPACE_SIZE = 480 # Moved constant here
 
-    def __init__(self, decks, card_db, max_turns=20, max_hand_size=7, max_battlefield=20):
+    def __init__(self, decks, card_db, max_turns=20, max_hand_size=7, max_battlefield=20,
+                 deck_stats_path="./deck_stats", card_memory_path="./card_memory"):
         logging.info("Initializing AlphaZeroMTGEnv...")
         super().__init__()
         self.decks = decks
         self.card_db = card_db
+        self.deck_stats_path = deck_stats_path
+        self.card_memory_path = card_memory_path
         # Version stamp for recorded games: card values measured under a weak agent
         # are not card values. main.py sets this to the run id; update it at
         # checkpoints for finer granularity.
@@ -74,7 +77,9 @@ class AlphaZeroMTGEnv(gym.Env):
 
         # Initialize deck statistics tracker (Corrected class name usage)
         try:
-            self.stats_tracker = DeckStatsTracker(card_db=card_db) # BUGFIX: was constructed without the card database
+            self.stats_tracker = DeckStatsTracker(
+                storage_path=self.deck_stats_path,
+                card_db=card_db) # BUGFIX: was constructed without the card database
             self.has_stats_tracker = True
         except (ImportError, ModuleNotFoundError, NameError):
             logging.warning("DeckStatsTracker not available, statistics will not be recorded")
@@ -83,7 +88,7 @@ class AlphaZeroMTGEnv(gym.Env):
 
         # --- ADDED: Initialize Card Memory ---
         try:
-            self.card_memory = CardMemory() # Initialize CardMemory
+            self.card_memory = CardMemory(storage_path=self.card_memory_path) # Initialize CardMemory
             self.has_card_memory = True
             logging.debug("CardMemory system initialized successfully")
         except (ImportError, ModuleNotFoundError, NameError):

@@ -43,7 +43,7 @@ The project is complete when all of the following hold:
 - Tier 1 (rules correctness): ✅ complete — all seven items plus the P1
   placeholder triage delivered; see appendix for the bug catalog.
 - Test gates: smoke 8/8 (fixture decks now exercise triggers every episode),
-  training 6/6, scenarios 45/45 (grown from 12).
+  training 6/6, scenarios 99/99 (grown from 12).
 - **Stats collected before July 2026 are unusable** (wrong player, wrong
   winner, fictional play turns, cosmetic first strike, compounding P/T,
   dead replacement system). Wipe and re-harvest after the current engine
@@ -75,11 +75,11 @@ severity sticks per card.
    unsupported cards can't silently poison deck search.
 
 Remaining Tier 2 work:
-- ▢ **Crash-severity wiring**: wrap per-card resolution paths so exceptions
-  attribute `crash` entries instead of only logging.
+- ✅ **Crash-severity wiring**: per-card resolution exceptions now attribute
+  `crash` entries to the support manifest instead of only logging.
 - ▢ **Per-card override registry**: card name → hand-written effect callable,
   consulted before the text parser, for cards regex can't express.
-- ▢ **Coverage report**: script that joins a format's card pool against the
+- ✅ **Coverage report**: script joins a format's card pool against the
   manifest to print "N of M cards fully supported" — the format milestone.
 - ◐ **Parser expansion** (started July 2026): a reusable diagnostic harness
   measures the factory's no-op fallback rate across common oracle clauses.
@@ -168,18 +168,46 @@ Remaining Tier 2 work:
     RevealHandEffect (marks hand_revealed + fires a HAND_REVEALED trigger for
     downstream discard-selection effects to key off).
   Regression-checked 0/19 including fixed vs variable pump.
-  **Coverage status:** six rounds have closed ~33 effect classes across
+  **Round 7 (July 2026)** first-touched level-up creatures and Adventure cast
+  paths:
+  * **Level-up creatures** — Cards now parse `LEVEL N-M` / `LEVEL N+` bands,
+    expose level-up costs, offer a `LEVEL_UP_CREATURE` action at sorcery speed,
+    pay the cost, add level counters, and apply level-band P/T and abilities
+    through layers. +1/+1 counters stack correctly on top of the band base.
+  * **Adventure recast path** — Adventure spells exile on resolution, mark the
+    creature side castable from exile, expose `CAST_FROM_EXILE`, consume that
+    permission on cast, and resolve the creature side onto the battlefield.
+  * **Repeated card-ID zone repair** — fixture decks represent multiple copies
+    by repeating card IDs, so a hand/library copy could hide the battlefield
+    permanent an effect targeted. Zone lookup now honors last movement and
+    preserves duplicate IDs in list zones, repairing combat, edict, tuck, mass
+    tap, and mass bounce guards.
+  **Round 7.1 (July 2026)** first-touched combat keyword legality:
+  * **Flying/reach** — blocking legality now rejects vanilla blockers for
+    fliers and accepts reach.
+  * **Menace** — the declare-blockers step no longer advances when a menace
+    attacker has only one blocker assigned.
+  * **Protection from red** — red creatures cannot block protected attackers,
+    red spell targeting excludes protected permanents, and red damage is
+    prevented before it is marked.
+  * **Ward** — binary keyword data now falls back to oracle text so `Ward {2}`
+    registers with the normalized `{2}` cost instead of `ward_generic`.
+  * **Lifelink** — combat lifegain bookkeeping no longer crashes and lifegain
+    is based on damage actually dealt.
+  Regression-checked 105/105 scenarios after the round.
+  **Coverage status:** seven rounds plus 7.1 have closed ~41 effect/mechanic classes across
   removal, bounce, counters, tokens, keywords, sacrifice, reanimation,
   control, mana, library manipulation, variable-count effects, prevention,
-  and animation. Miss rate fell 6→13→14→9→10→3 across samples. Remaining
-  gaps are increasingly specialized (dice/planar, complex modal riders,
-  "you choose a card" interactive discard, meld/specialize). Reorder by real
-  manifest counts whenever harvest runs begin.
-- ▢ **First-touch coverage sweep**: one scenario for every subsystem that has
+  animation, levelers, Adventure, and duplicate-ID zone semantics. Miss rate
+  fell 6→13→14→9→10→3 across parser samples before the first-touch sweep moved
+  into mechanic subsystems. Remaining gaps are increasingly specialized
+  (dice/planar, complex modal riders, "you choose a card" interactive discard,
+  meld/specialize). Reorder by real manifest counts whenever harvest runs begin.
+- ◐ **First-touch coverage sweep**: one scenario for every subsystem that has
   never had one (this practice found four phantom methods and three dead
-  subsystems; assume more remain in untested corners — candidates: search
-  effects, library manipulation, discard/mill paths, auras/equipment
-  attachment lifecycle, planeswalker loyalty, sagas).
+  subsystems; assume more remain in untested corners — next candidates:
+  ward target-tax resolution, hexproof/shroud targeting, phasing attachments,
+  reflexive triggers, and remaining special card-frame mechanics).
 
 ## Tier 3 — Training & environment quality
 
@@ -199,7 +227,7 @@ Remaining Tier 2 work:
 
 ## Tier 4 — Verification & calibration
 
-1. ✅ Golden scenario harness — 45 scenarios and growing; scenario-first is a
+1. ✅ Golden scenario harness — 105 scenarios and growing; scenario-first is a
    working agreement, not a suggestion.
 2. ▢ **Property tests**: zone-count conservation per action; SBA idempotence;
    the action mask never permits an illegal action (fuzz); mana pools empty
@@ -254,9 +282,18 @@ Remaining Tier 2 work:
 - Level-up creatures — v1 support added (July 2026): Card parses the
   "LEVEL N-M / N+" band format (distinct from Class enchantments) into
   is_leveler / leveler_bands / level_up_cost, with get_leveler_pt(counters)
-  and get_leveler_abilities(counters). P/T resolves by level-counter total.
-  Remaining: a LEVEL_UP creature action and applying band abilities through
-  the layer system (the P/T/ability data is now available for both).
+  and get_leveler_abilities(counters). The action space exposes
+  LEVEL_UP_CREATURE, pays the printed cost, adds level counters, and the layer
+  system applies current-band P/T and abilities. Remaining: richer player
+  choice around when/whether to spend mana beyond the basic action mask.
+- Adventure cards — v1 support added (July 2026): casting the Adventure half
+  resolves to exile instead of graveyard, marks the creature side castable from
+  exile, exposes CAST_FROM_EXILE, consumes that permission on cast, and resolves
+  the creature side to the battlefield. Remaining: adventure-half parsing and
+  targeting are still heuristic.
+- Repeated card IDs still model copies coarsely; last-moved location tracking
+  and duplicate-preserving list zones repair the known first-touch failures,
+  but true per-copy object identity remains a deeper future cleanup.
 - Clones/MCTS copies start with an empty delayed-trigger registry.
 - Opponent auto-orders triggers and blockers (deadlock-safe scope cut until
   self-play).
@@ -266,7 +303,8 @@ Remaining Tier 2 work:
   "you control X" only).
 - `prevent_damage`/`redirect_damage` in game_state_damage are a dead API
   (no callers) — remove or wire deliberately.
-- Protection/menace combat interactions unaudited.
+- Ward parses and surfaces its keyword cost, but target-tax resolution
+  ("counter unless paid") is not wired into spell resolution yet.
 
 ---
 
