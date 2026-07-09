@@ -239,8 +239,13 @@ ACTION_MEANINGS = {
     # Param = Relative battle index (0-4). Handler uses context to know which attacker.
     **{462 + i: ("ATTACK_BATTLE", i) for i in range(5)}, # 462-466
 
-    # Fill the remaining space (467-479) = 13 actions
-    **{i: ("NO_OP", None) for i in range(467, 480)} # 467-479
+    # Level up a leveler creature (467-471) = 5 actions (CR 711)
+    # Param = battlefield index 0-4 of the leveler. Distinct from LEVEL_UP_CLASS
+    # (Class enchantments, 253-257); levelers pay a repeatable "Level up {cost}".
+    **{467 + i: ("LEVEL_UP_CREATURE", i) for i in range(5)}, # 467-471
+
+    # Fill the remaining space (472-479) = 8 actions
+    **{i: ("NO_OP", None) for i in range(472, 480)} # 472-479
 }
 # Ensure size is correct after updates
 if len(ACTION_MEANINGS) != 480:
@@ -410,6 +415,7 @@ class ActionHandler(
                 # Room/Class
                 "UNLOCK_DOOR": self._handle_unlock_door, # Indices 248-252
                 "LEVEL_UP_CLASS": self._handle_level_up_class, # Indices 253-257
+                "LEVEL_UP_CREATURE": self._handle_level_up_creature, # Indices 467-471
                 # Discard / Spree
                 "DISCARD_CARD": self._handle_discard_card, # Indices 238-247
                 "SELECT_SPREE_MODE": self._handle_select_spree_mode, # Indices 258-273

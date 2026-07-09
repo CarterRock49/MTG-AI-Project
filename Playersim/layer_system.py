@@ -68,11 +68,16 @@ class LayerSystem:
         # BUGFIX: cards carrying counters need layer 7c even when no layer effects
         # are registered at all; without this, +1/+1 and -1/-1 counters never
         # modified power/toughness in games with no other static effects.
+        # Leveler creatures (CR 711) are added for the same reason: their band
+        # P/T and abilities are level-dependent and must be recomputed here even
+        # with no counters yet, otherwise the printed keyword array (which bakes
+        # in every band's keywords) is never corrected down to the base section.
         for _p in (gs.p1, gs.p2):
             if _p:
                 for _cid in _p.get("battlefield", []):
                     _c = gs._safe_get_card(_cid)
-                    if _c is not None and getattr(_c, 'counters', None):
+                    if _c is not None and (getattr(_c, 'counters', None)
+                                           or getattr(_c, 'is_leveler', False)):
                         affected_card_ids.add(_cid)
 
         if not affected_card_ids:
@@ -266,6 +271,10 @@ class LayerSystem:
             if effect_data.get('source_id') in self._stripped_sources: continue
             # Apply effect data to modify _granted_abilities and _removed_abilities sets
             self._calculate_layer6_abilities(effect_data, calculated_characteristics)
+        # Leveler creatures (CR 711.4): band abilities are conditional on the
+        # current level counter total, so they must be resolved here in layer 6
+        # BEFORE the keyword array is finalized.
+        self._apply_leveler_abilities(calculated_characteristics)
         # Finalize keywords array and protection details for each card AFTER all layer 6 effects are calculated
         for card_id in calculated_characteristics:
             self._update_final_keywords(calculated_characteristics[card_id])
@@ -287,6 +296,11 @@ class LayerSystem:
             if callable(effect_data.get('condition')) and not effect_data['condition'](gs): continue
             if effect_data.get('source_id') in self._stripped_sources: continue  # CR 613.8: source lost all abilities; effect no longer exists (skip)
             self._calculate_layer7b_set_specific(effect_data, calculated_characteristics) # Use correct method
+
+        # 7b (leveler): a leveler's level band SETS its P/T (CR 711.4 / 613.4c).
+        # Applied after other set-P/T effects and before 7c so that +1/+1 and
+        # -1/-1 counters stack on top of the band's base values.
+        self._apply_leveler_pt(calculated_characteristics)
 
         # 7c: P/T modifications from counters (+1/+1, -1/-1)
         for card_id in calculated_characteristics:
@@ -957,6 +971,84 @@ class LayerSystem:
         active_kws = [kw for i, kw in enumerate(Card.ALL_KEYWORDS) if final_keyword_list[i] == 1]
         #if active_kws: logging.debug(f"Final keywords for {char_dict.get('name', 'Unknown')}: {active_kws}")
         if current_protection_details: logging.debug(f"Final protection details for {char_dict.get('name', 'Unknown')}: {current_protection_details}")
+
+    def _leveler_counter_total(self, live_card):
+        """Level-counter total for a leveler, read from its per-permanent counters.
+
+        The count lives in the permanent's `counters` dict (the same store as
+        +1/+1 counters), NOT the shared Card.level_counters int, so it is reset
+        with the rest of the board between games instead of leaking across them.
+        """
+        counters = getattr(live_card, 'counters', None)
+        return counters.get('level', 0) if counters else 0
+
+    def _apply_leveler_abilities(self, calculated_characteristics):
+        """CR 711.4: a leveler's abilities are determined by its current level.
+
+        Keywords printed in a LEVEL band are NOT inherent and NOT always-on -
+        they apply only while the level-counter total is in that band. Because
+        both the Card constructor's keyword array and the ability parser treat
+        every band keyword as printed/static, this pass is the single authority:
+        it strips ALL band keywords from the inherent and granted sets, then
+        re-grants exactly the current band's keywords. Runs in layer 6 before
+        keyword finalization.
+        """
+        for card_id, chars in calculated_characteristics.items():
+            if 'creature' not in chars.get('card_types', []):
+                continue
+            live = chars.get('_live_card_ref')
+            if (not live or not getattr(live, 'is_leveler', False)
+                    or not getattr(live, 'leveler_bands', None)):
+                continue
+            lvl = self._leveler_counter_total(live)
+            # Union of every band's keywords - all level-conditional.
+            all_band_kw = set()
+            for band in live.leveler_bands:
+                try:
+                    all_band_kw |= self._approximate_keywords_set(
+                        " ".join(band.get('abilities', [])))
+                except Exception:
+                    pass
+            # Recompute inherent from the base (pre-band) section only, then drop
+            # any band keyword that slipped in.
+            text = chars.get('oracle_text', '') or ''
+            m = re.search(r'level\s+\d+\s*(?:-\s*\d+|\+)', text, re.IGNORECASE)
+            base_text = text[:m.start()] if m else text
+            chars['_inherent_abilities'] = (
+                self._approximate_keywords_set(base_text) - all_band_kw)
+            # Strip band keywords from grants (constructor/parser), then grant
+            # exactly the current band's keywords.
+            granted = chars.setdefault('_granted_abilities', set())
+            granted -= all_band_kw
+            try:
+                current = self._approximate_keywords_set(
+                    " ".join(live.get_leveler_abilities(lvl)))
+            except Exception:
+                current = set()
+            granted |= current
+
+    def _apply_leveler_pt(self, calculated_characteristics):
+        """CR 711.4 / 613.4c: while a leveler's level-counter total is in a band,
+        that band SETS the creature's P/T (layer 7b). Below the first band the
+        printed P/T stands. Applied before 7c so counters stack on top.
+        """
+        for card_id, chars in calculated_characteristics.items():
+            if 'creature' not in chars.get('card_types', []):
+                continue
+            live = chars.get('_live_card_ref')
+            if not live or not getattr(live, 'is_leveler', False):
+                continue
+            bands = getattr(live, 'leveler_bands', None)
+            if not bands:
+                continue
+            lvl = self._leveler_counter_total(live)
+            if lvl < bands[0].get('min', 1):
+                continue  # below the first band: keep printed/base P/T
+            try:
+                p, t = live.get_leveler_pt(lvl)
+            except Exception:
+                continue
+            chars['power'], chars['toughness'] = p, t
 
     def _get_all_inherent_abilities(self, card_id):
         """ Helper to get the set of inherent abilities/keywords from a card's (potentially modified) text. """

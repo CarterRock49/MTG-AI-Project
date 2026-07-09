@@ -33,6 +33,75 @@ class MechanicsHandlersMixin:
             logging.debug(f"Leveling up class at index {class_idx} failed (handled by ability_handler).")
             return -0.1, False # Failure
 
+    def _handle_level_up_creature(self, param, context, **kwargs):
+        """Level up a leveler creature (CR 711).
+
+        Pays the creature's "Level up {cost}" and adds one level counter, which
+        moves it into the next band (P/T + abilities applied by the layer system).
+        Distinct from LEVEL_UP_CLASS: levelers pay a repeatable activated cost and
+        track progress with per-permanent level counters, not a Class level index.
+        """
+        gs = self.game_state
+        player = gs._get_active_player()
+        bf_idx = param
+
+        if bf_idx is None or not isinstance(bf_idx, int):
+            logging.error(f"LEVEL_UP_CREATURE failed: invalid index parameter '{bf_idx}'.")
+            return -0.15, False
+        battlefield = player.get("battlefield", [])
+        if not (0 <= bf_idx < len(battlefield)):
+            logging.warning(f"LEVEL_UP_CREATURE failed: index {bf_idx} out of range.")
+            return -0.15, False
+
+        card_id = battlefield[bf_idx]
+        card = gs._safe_get_card(card_id)
+        if not card or not getattr(card, 'is_leveler', False):
+            logging.warning(f"LEVEL_UP_CREATURE failed: card at index {bf_idx} is not a leveler.")
+            return -0.15, False
+
+        cost_str = getattr(card, 'level_up_cost', None)
+        if not cost_str:
+            logging.warning(f"LEVEL_UP_CREATURE failed: no level-up cost on {getattr(card, 'name', '?')}.")
+            return -0.15, False
+
+        if not getattr(gs, 'mana_system', None):
+            logging.warning("LEVEL_UP_CREATURE failed: mana system unavailable.")
+            return -0.15, False
+
+        # Check affordability, then pay.
+        try:
+            parsed = gs.mana_system.parse_mana_cost(cost_str)
+            if not gs.mana_system.can_pay_mana_cost(player, parsed):
+                logging.debug(f"Cannot afford level up for {card.name} (cost {cost_str}).")
+                return -0.1, False
+        except Exception as e:
+            logging.error(f"LEVEL_UP_CREATURE cost check error for {card.name}: {e}")
+            return -0.15, False
+
+        if not gs.mana_system.pay_mana_cost(player, parsed):
+            logging.warning(f"LEVEL_UP_CREATURE failed to pay {cost_str} for {card.name}.")
+            return -0.1, False
+
+        # Add one level counter. It lives in the permanent's counters dict (the
+        # same per-permanent store as +1/+1), so the layer system reads it for
+        # band P/T/abilities and it resets with the board between games rather
+        # than leaking on the shared Card object. add_counter also fires
+        # COUNTER_ADDED and runs state-based actions.
+        before = (getattr(card, 'counters', {}) or {}).get('level', 0)
+        gs.add_counter(card_id, 'level', 1)
+        after = (getattr(card, 'counters', {}) or {}).get('level', 0)
+        if after <= before:
+            logging.warning(f"LEVEL_UP_CREATURE: level counter did not increase on {card.name}.")
+            return -0.1, False
+
+        # Recompute characteristics so the new band's P/T and abilities apply now.
+        if getattr(gs, 'layer_system', None):
+            gs.layer_system.invalidate_cache()
+            gs.layer_system.apply_all_effects()
+
+        logging.info(f"Leveled up {card.name}: level counters {before} -> {after}.")
+        return 0.15, True
+
     def _handle_transform(self, param, **kwargs):
         gs = self.game_state; player = gs._get_active_player() # Transforming usually happens on owner's turn/initiative
         bf_idx = param

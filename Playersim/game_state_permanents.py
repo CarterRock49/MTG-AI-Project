@@ -1090,6 +1090,69 @@ class GameStatePermanentsMixin:
                 return True
         return False
 
+    def transform_card(self, card_id):
+        """Transform a double-faced permanent to its other face (CR 712).
+
+        The generic transform primitive for TransformEffect and for
+        triggered/activated 'transform' abilities. TransformEffect already
+        called gs.transform_card() assuming it existed - it did not, so every
+        parsed 'transform ~' effect logged an error and silently did nothing.
+        This flips the face via Card.transform(), recomputes continuous effects
+        (the new face has different P/T, types, and abilities), and fires the
+        TRANSFORMED trigger - matching the day/night transform path.
+
+        Modal DFCs are excluded: they are cast face-up, not transformed.
+
+        Returns True if the permanent transformed, False otherwise.
+        """
+        card = self._safe_get_card(card_id)
+        player = self.get_card_controller(card_id)
+        if not card or not hasattr(card, 'transform'):
+            return False
+        # Only transforming DFCs transform; MDFCs and single-faced cards cannot.
+        if not getattr(card, 'faces', None) or len(card.faces) < 2:
+            logging.debug(f"transform_card: {getattr(card, 'name', card_id)} has no alternate face.")
+            return False
+        if hasattr(card, 'is_transforming_mdfc') and not card.is_transforming_mdfc():
+            logging.debug(f"transform_card: {getattr(card, 'name', card_id)} is a modal DFC; cannot transform.")
+            return False
+
+        prev_face = getattr(card, 'current_face', 0)
+        card.transform()
+        if getattr(card, 'current_face', prev_face) == prev_face:
+            logging.debug(f"transform_card: {getattr(card, 'name', card_id)} did not change face.")
+            return False
+
+        # New face => different P/T, types, keywords: force a full recompute.
+        if self.layer_system:
+            self.layer_system.invalidate_cache()
+            self.layer_system.apply_all_effects()
+
+        self.trigger_ability(card_id, "TRANSFORMED", {"controller": player, "card": card})
+        logging.debug(f"transform_card: transformed to face {getattr(card, 'current_face', None)} "
+                      f"({getattr(card, 'name', card_id)}).")
+        return True
+
+    def _build_type_line(self, type_data):
+        """Construct a canonical type-line string from type components.
+
+        Produces "supertypes card_types - subtypes" (em dash) so that
+        Card.parse_type_line() round-trips the components back correctly.
+        Token creation depends on this: Card.__init__ ALWAYS re-derives
+        card_types/subtypes/supertypes from the type_line string, so a token
+        built with only a crude 'Token Creature' line silently drops every
+        subtype and supertype (a Goblin's Offspring token became a typeless
+        Creature, corrupting tribal/type statistics). Previously this method
+        was called but never defined, so that crude fallback always ran.
+        """
+        supertypes = type_data.get('supertypes', []) or []
+        card_types = type_data.get('card_types', []) or []
+        subtypes = type_data.get('subtypes', []) or []
+        main = " ".join([str(t) for t in list(supertypes) + list(card_types)]).strip()
+        if subtypes:
+            return f"{main} — {' '.join(str(s) for s in subtypes)}".strip()
+        return main or "Creature"
+
     def _register_attachment_effects(self, attach_id, target_id):
         """Register an attachment's static P/T and keyword grants on its target.
 

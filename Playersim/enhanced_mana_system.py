@@ -2090,7 +2090,69 @@ class EnhancedManaSystem:
             if not paid_hybrid:
                 return False # Failed to pay this hybrid cost
         return True # All hybrid costs paid
-    
+
+    def tap_land_for_mana(self, player, card_id):
+        """Tap a land the player controls to add its mana to the pool (CR 605).
+
+        Primitive behind the explicit TAP_LAND_FOR_MANA action. That handler
+        called gs.mana_system.tap_land_for_mana() assuming it existed - it did
+        not, so every explicit land tap silently failed and produced no mana
+        (spells still cast via auto-tap during payment, masking it). Determines
+        the land's output, taps it, and adds the mana via add_mana_to_pool.
+
+        Returns True if mana was produced, False otherwise.
+        """
+        gs = self.game_state
+        if not player or card_id is None:
+            return False
+        card = gs._safe_get_card(card_id)
+        if not card:
+            return False
+        if card_id not in player.get("battlefield", []):
+            return False
+        if card_id in player.get("tapped_permanents", set()):
+            logging.debug(f"tap_land_for_mana: {getattr(card, 'name', card_id)} is already tapped.")
+            return False
+        if 'land' not in (getattr(card, 'type_line', '') or '').lower():
+            logging.debug(f"tap_land_for_mana: {getattr(card, 'name', card_id)} is not a land.")
+            return False
+
+        mana_string = self._land_mana_output(card)
+        if not mana_string:
+            logging.debug(f"tap_land_for_mana: could not determine mana output for {getattr(card, 'name', card_id)}.")
+            return False
+
+        # Tap the land (fall back to the tapped set if tap_permanent is unavailable).
+        tapped = gs.tap_permanent(card_id, player) if hasattr(gs, 'tap_permanent') else False
+        if not tapped:
+            player.setdefault("tapped_permanents", set()).add(card_id)
+
+        self.add_mana_to_pool(player, "".join(f"{{{c}}}" for c in mana_string),
+                              land_context={"card_id": card_id, "tapped": True})
+        logging.debug(f"tap_land_for_mana: {getattr(card, 'name', card_id)} tapped for {mana_string}.")
+        return True
+
+    def _land_mana_output(self, card):
+        """Best-effort determination of the mana a land taps for.
+
+        Basic-land subtypes map to their colour; otherwise the first 'Add {..}'
+        symbol in the oracle text is used. Multi-colour lands yield the first
+        colour, since the explicit tap action carries no colour choice.
+        """
+        BASIC = {'plains': 'W', 'island': 'U', 'swamp': 'B',
+                 'mountain': 'R', 'forest': 'G', 'wastes': 'C'}
+        subtypes = [str(s).lower() for s in (getattr(card, 'subtypes', []) or [])]
+        for sub, sym in BASIC.items():
+            if sub in subtypes:
+                return sym  # a land with several basic types still taps for one
+        text = getattr(card, 'oracle_text', '') or ''
+        syms = re.findall(r'add\b[^.\n]*?\{([WUBRGCwubrgc])\}', text, re.IGNORECASE)
+        if syms:
+            return syms[0].upper()
+        if re.search(r'add\s+one\s+mana\s+of\s+any\s+colou?r', text, re.IGNORECASE):
+            return 'W'  # deterministic pick; the action carries no colour choice
+        return ""
+
     def add_mana_to_pool(self, player, mana_string, land_context=None, phase_restricted=False):
         """
         Advanced mana addition method that handles complex MTG land mechanics.

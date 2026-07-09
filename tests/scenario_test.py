@@ -1766,6 +1766,76 @@ def s_leveler_pt_by_level():
     assert card.get_leveler_pt(7) == (8, 8), f"level 7 P/T wrong: {card.get_leveler_pt(7)}"
 
 
+@scenario("711 (leveler)", "a leveler levels up in-game: pay the cost, gain a level counter, grow to the band P/T and abilities")
+def s_leveler_level_up_action():
+    gs = fresh()
+    handler = get_env().action_handler
+    player = gs._get_active_player()
+    lev = inject_card(gs, {
+        "name": "Ascending Cadet", "mana_cost": "{W}",
+        "type_line": "Creature — Human Soldier",
+        "oracle_text": "Level up {W}\nLEVEL 1-6\n4/4\nFirst strike\nLEVEL 7+\n8/8\nDouble strike",
+        "power": 1, "toughness": 1,
+    })
+    player["library"].append(lev)
+    assert gs.move_card(lev, player, "library", player, "battlefield")
+    card = gs._safe_get_card(lev)
+    assert getattr(card, "is_leveler", False), "test card not recognized as a leveler"
+
+    ls = gs.layer_system
+    ls.invalidate_cache(); ls.apply_all_effects()
+    # Base band (0 counters): printed 1/1, no band keyword yet.
+    assert (card.power, card.toughness) == (1, 1), f"base P/T wrong: {(card.power, card.toughness)}"
+    assert _kw(gs, lev, "first strike") == 0, "leveler already had its band keyword before leveling"
+
+    # The agent must be able to see and afford the level-up action.
+    bf_idx = player["battlefield"].index(lev)
+    from Playersim.actions import ACTION_MEANINGS
+    lu_idx = next((i for i, (n, p) in ACTION_MEANINGS.items()
+                   if n == "LEVEL_UP_CREATURE" and p == bf_idx), None)
+    assert lu_idx is not None, "no LEVEL_UP_CREATURE action index is defined"
+    # With no mana, the action must NOT be offered (cost gating).
+    player["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
+    mask = handler.generate_valid_actions()
+    assert not mask[lu_idx], "level-up offered for free (cost gate missing)"
+    # Give the {W} it costs; now it must be offered.
+    player["mana_pool"]["W"] = 1
+    mask = handler.generate_valid_actions()
+    assert mask[lu_idx], "level-up not offered for an affordable leveler"
+
+    # Perform it: pays {W}, adds exactly one level counter.
+    reward, ok = handler._handle_level_up_creature(bf_idx, {})
+    assert ok, "level-up action reported failure"
+    assert (getattr(card, "counters", {}) or {}).get("level", 0) == 1, \
+        f"level counter not added (counters={getattr(card, 'counters', {})})"
+    assert player["mana_pool"]["W"] == 0, "level-up did not spend the mana"
+
+    # 1 counter -> band LEVEL 1-6 -> 4/4 + First strike, via the layer system.
+    ls.invalidate_cache(); ls.apply_all_effects()
+    assert (card.power, card.toughness) == (4, 4), \
+        f"leveler P/T did not reflect its band after leveling: {(card.power, card.toughness)}"
+    assert _kw(gs, lev, "first strike") == 1, "leveled creature did not gain its band keyword"
+
+    # A +1/+1 counter must still stack on the band base (CR 711.4 / layer 7c).
+    gs.add_counter(lev, "+1/+1", 1)
+    ls.invalidate_cache(); ls.apply_all_effects()
+    assert (card.power, card.toughness) == (5, 5), \
+        f"+1/+1 counter did not stack on the leveler band: {(card.power, card.toughness)}"
+
+    # Climb to the top band: six more level counters -> 7 total -> 8/8 + Double strike.
+    for _ in range(6):
+        player["mana_pool"]["W"] = 1
+        _, ok2 = handler._handle_level_up_creature(bf_idx, {})
+        assert ok2, "a later level-up failed"
+    assert (card.counters or {}).get("level", 0) == 7, \
+        f"expected 7 level counters, got {(card.counters or {}).get('level')}"
+    ls.invalidate_cache(); ls.apply_all_effects()
+    # 8/8 top band + the +1/+1 counter -> 9/9.
+    assert (card.power, card.toughness) == (9, 9), \
+        f"top-band P/T (+counter) wrong: {(card.power, card.toughness)}"
+    assert _kw(gs, lev, "double strike") == 1, "top-band creature did not gain Double strike"
+
+
 @scenario("712 (MDFC)", "casting an MDFC's back face uses the back face's cost and text")
 def s_mdfc_back_face_cast():
     gs = fresh()
@@ -1792,6 +1862,130 @@ def s_mdfc_back_face_cast():
     assert back_cost == "", f"back face (land) cost wrong: {back_cost!r}"
     assert "enters the battlefield tapped" in card.get_face_text(1).lower(), \
         "back face text not retrievable for casting/playing the back face"
+
+
+@scenario("712 (transform)", "a 'transform' effect flips a double-faced permanent to its other face")
+def s_transform_effect_flips_dfc():
+    gs = fresh()
+    player = gs._get_active_player()
+    front = {"name": "Village Watchman", "type_line": "Creature — Human Warrior",
+             "oracle_text": "At the beginning of your upkeep, transform Village Watchman.",
+             "power": 2, "toughness": 2}
+    back = {"name": "Moonrage Brute", "type_line": "Creature — Werewolf",
+            "oracle_text": "At the beginning of your end step, transform Moonrage Brute.",
+            "power": 5, "toughness": 5}
+    cid = inject_card(gs, {**front, "faces": [front, back]})
+    player["library"].append(cid)
+    assert gs.move_card(cid, player, "library", player, "battlefield")
+    card = gs._safe_get_card(cid)
+    assert getattr(card, "current_face", None) == 0, "card should start on its front face"
+    assert (card.power, card.toughness) == (2, 2), f"front P/T wrong: {(card.power, card.toughness)}"
+
+    # TransformEffect calls gs.transform_card(); without that method every parsed
+    # 'transform ~' effect silently fails. It must exist and actually flip the card.
+    assert hasattr(gs, "transform_card"), \
+        "GameState lacks transform_card - every transform effect is a silent no-op"
+    ok = gs.transform_card(cid)
+    assert ok, "transform_card reported failure on a transforming DFC"
+    assert card.current_face == 1, "card did not flip to its back face"
+    assert card.name == "Moonrage Brute", f"name did not update to back face: {card.name}"
+    assert (card.power, card.toughness) == (5, 5), f"back-face P/T wrong: {(card.power, card.toughness)}"
+
+    # And the parser's TransformEffect must drive that same path end to end.
+    from Playersim.ability_types import TransformEffect
+    ok2 = TransformEffect().apply(gs, cid, player, None)
+    assert ok2, "TransformEffect did not apply (parsed transform effect is a no-op)"
+    assert card.current_face == 0, "TransformEffect did not flip the permanent back to its front face"
+    assert card.name == "Village Watchman", f"TransformEffect did not restore front face: {card.name}"
+
+
+@scenario("707 (token copy)", "a token copy preserves the original's subtypes and supertypes")
+def s_token_copy_type_line_roundtrip():
+    from Playersim.card import Card
+    gs = fresh()
+    # An original whose type carries both a supertype and subtypes worth keeping.
+    orig = Card({"name": "Goblin Chieftain", "type_line": "Legendary Creature — Goblin Warrior",
+                 "oracle_text": "", "power": 2, "toughness": 2})
+    assert "legendary" in orig.supertypes and "goblin" in orig.subtypes, "test-card sanity"
+
+    # The token-copy path builds token_data with the original's type components
+    # and then a type_line via gs._build_type_line. Card.__init__ re-parses that
+    # string, so without the helper the token drops all sub/supertypes.
+    assert hasattr(gs, "_build_type_line"), \
+        "GameState lacks _build_type_line - token copies lose subtypes/supertypes"
+    token_data = {
+        "name": orig.name, "power": 1, "toughness": 1, "is_token": True,
+        "card_types": list(orig.card_types),
+        "subtypes": list(orig.subtypes),
+        "supertypes": list(orig.supertypes),
+        "oracle_text": orig.oracle_text,
+    }
+    token_data["type_line"] = gs._build_type_line(token_data)
+    token = Card(token_data)
+    assert "creature" in token.card_types, f"token lost its card type: {token.card_types}"
+    assert "goblin" in token.subtypes, f"token lost a subtype: {token.subtypes}"
+    assert "warrior" in token.subtypes, f"token lost a subtype: {token.subtypes}"
+    assert "legendary" in token.supertypes, f"token lost its supertype: {token.supertypes}"
+
+
+@scenario("605 (mana ability)", "the TAP_LAND_FOR_MANA action taps a land and adds its mana to the pool")
+def s_tap_land_for_mana_produces_mana():
+    gs = fresh()
+    handler = get_env().action_handler
+    player = gs._get_active_player()
+    land = inject_card(gs, {"name": "Wooded Grove", "type_line": "Land",
+                            "oracle_text": "{T}: Add {G}."})
+    player["library"].append(land)
+    assert gs.move_card(land, player, "library", player, "battlefield")
+    land_idx = player["battlefield"].index(land)
+    assert player["mana_pool"].get("G", 0) == 0, "pool should start empty of green"
+
+    # The handler relies on gs.mana_system.tap_land_for_mana(); without it every
+    # explicit land tap silently fails and adds no mana.
+    reward, ok = handler._handle_tap_land_for_mana(land_idx)
+    assert ok, "TAP_LAND_FOR_MANA reported failure (tap_land_for_mana missing/no-op)"
+    assert player["mana_pool"].get("G", 0) == 1, \
+        f"tapping the land added no mana to the pool: {player['mana_pool']}"
+    assert land in player.get("tapped_permanents", set()), "the land was not tapped"
+
+    # Tapping an already-tapped land must not add more mana.
+    _, ok2 = handler._handle_tap_land_for_mana(land_idx)
+    assert not ok2, "an already-tapped land produced mana again"
+    assert player["mana_pool"].get("G", 0) == 1, "already-tapped land added extra mana"
+
+    # Basic-land output is derived from its subtype even with no oracle text.
+    forest = gs._safe_get_card(inject_card(gs, {"name": "Forest", "type_line": "Basic Land — Forest",
+                                                "oracle_text": ""}))
+    assert gs.mana_system._land_mana_output(forest) == "G", \
+        "basic Forest did not resolve to green mana output"
+
+
+@scenario("119.3 (life gain)", "effect-based life gain fires GAIN_LIFE so 'whenever you gain life' triggers see it")
+def s_gain_life_fires_trigger():
+    gs = fresh()
+    player = gs._get_active_player()
+    watcher = inject_card(gs, {"name": "Lifewatch Sage", "type_line": "Creature — Cat Cleric",
+                               "oracle_text": "Whenever you gain life, draw a card.",
+                               "power": 1, "toughness": 1})
+    player["library"].append(watcher)
+    assert gs.move_card(watcher, player, "library", player, "battlefield")
+
+    # gain_life is the canonical entry that fires GAIN_LIFE; without it, effect-
+    # based (non-lifelink) life gain increments life directly and the trigger
+    # never fires.
+    assert hasattr(gs, "gain_life"), \
+        "GameState lacks gain_life - non-lifelink life gain skips GAIN_LIFE triggers"
+    ah = gs.ability_handler
+    ah.active_triggers = []
+    life0 = player["life"]
+    gained = gs.gain_life(player, 3)
+    assert gained == 3, f"gain_life returned {gained}, expected 3"
+    assert player["life"] == life0 + 3, f"life did not increase: {life0} -> {player['life']}"
+
+    # The 'whenever you gain life' trigger must have fired for this gain.
+    fired_sources = [getattr(ab, "card_id", None) for ab, *_ in ah.active_triggers]
+    assert watcher in fired_sources, \
+        f"GAIN_LIFE trigger did not fire for effect-based life gain (queue sources: {fired_sources})"
 
 
 @scenario("parser: ritual", "'Add {B}{B}{B}' as a spell effect fills the mana pool")

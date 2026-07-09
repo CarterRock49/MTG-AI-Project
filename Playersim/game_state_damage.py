@@ -538,6 +538,43 @@ class GameStateDamageMixin:
              # Trigger GAIN_LIFE event
              self.trigger_ability(source_id, "GAIN_LIFE", {"player": player_gaining_life, "amount": final_life_gain, "source_id": source_id})
 
+    def gain_life(self, player, amount, source_id=None):
+        """Canonical life-gain entry (CR 119.3).
+
+        Applies LIFE_GAIN replacement effects, increases the player's life, and
+        fires the GAIN_LIFE trigger so that 'whenever you gain life' abilities
+        work for ALL life gain. Previously only lifelink fired GAIN_LIFE (via
+        handle_lifelink_gain); spell/ability life gain fell back to incrementing
+        player['life'] directly and silently skipped the trigger, so life-gain-
+        matters cards never saw non-lifelink life gain. GainLifeEffect already
+        called gs.gain_life() behind a hasattr guard, so defining it here routes
+        that path through the trigger.
+
+        Returns the amount of life actually gained.
+        """
+        if not player or amount is None or amount <= 0:
+            return 0
+        gain_context = {'player': player, 'life_amount': amount, 'source_id': source_id}
+        final_gain = amount
+        if hasattr(self, 'replacement_effects') and self.replacement_effects:
+            try:
+                modified, _ = self.replacement_effects.apply_replacements("LIFE_GAIN", gain_context)
+                final_gain = modified.get('life_amount', 0)
+                if final_gain <= 0 or modified.get('prevented'):
+                    logging.debug(f"gain_life: gain prevented/reduced to 0 for {player.get('name', '?')}.")
+                    return 0
+            except Exception as e:
+                logging.warning(f"gain_life: replacement error: {e}")
+                final_gain = amount
+        if final_gain <= 0:
+            return 0
+        player['life'] = player.get('life', 0) + final_gain
+        player['gained_life_this_turn'] = True
+        self.trigger_ability(source_id, "GAIN_LIFE",
+                             {"player": player, "amount": final_gain, "source_id": source_id})
+        logging.debug(f"gain_life: {player.get('name', '?')} gained {final_gain} life (now {player['life']}).")
+        return final_gain
+
     def apply_damage_to_permanent(self, target_id, amount, source_id, is_combat_damage=False, has_deathtouch=False):
         """Marks damage on a creature, considering deathtouch. Returns actual damage marked."""
         target_card = self._safe_get_card(target_id)

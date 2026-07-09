@@ -738,7 +738,7 @@ class ActionSpaceMixin:
                 set_valid_action(11, "PASS_PRIORITY (Targets selected)")
 
     def _add_level_up_actions(self, player, valid_actions, set_valid_action):
-        """Add actions for leveling up Class cards."""
+        """Add actions for leveling up Class cards and leveler creatures."""
         gs = self.game_state
         for i in range(min(len(player["battlefield"]), 5)): # Class index 0-4
             card_id = player["battlefield"][i]
@@ -748,6 +748,13 @@ class ActionSpaceMixin:
                  cost = card.get_level_cost(next_level)
                  if self._can_afford_cost_string(player, cost):
                      set_valid_action(253 + i, f"LEVEL_UP_CLASS {card.name} to {next_level}")
+        # Leveler creatures (CR 711): repeatable "Level up {cost}", sorcery-speed.
+        for i in range(min(len(player["battlefield"]), 5)):  # Leveler index 0-4
+            card_id = player["battlefield"][i]
+            card = gs._safe_get_card(card_id)
+            if card and getattr(card, 'is_leveler', False) and getattr(card, 'level_up_cost', None):
+                if self._can_afford_cost_string(player, card.level_up_cost):
+                    set_valid_action(467 + i, f"LEVEL_UP_CREATURE {card.name}")
 
     def _add_unlock_door_actions(self, player, valid_actions, set_valid_action):
         """Add actions for unlocking Room doors."""
