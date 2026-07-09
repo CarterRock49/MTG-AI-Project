@@ -684,13 +684,21 @@ class TargetingSystem:
         if not targets: return True # No targets to validate
 
         valid_targets_now = self.get_valid_targets(card_id, controller)
+        all_valid_target_ids = set()
+        for ids in valid_targets_now.values():
+            all_valid_target_ids.update(ids)
 
         for category, target_list in targets.items():
             if not isinstance(target_list, list): # Ensure it's a list
                  logging.warning(f"Invalid target list format for category '{category}' in validate_targets.")
                  return False
 
-            valid_in_category = valid_targets_now.get(category, [])
+            valid_in_category = set()
+            if category in ("chosen", "target", "targets"):
+                valid_in_category = set(all_valid_target_ids)
+            else:
+                for alias in self._target_category_aliases(category):
+                    valid_in_category.update(valid_targets_now.get(alias, []))
             for target_id in target_list:
                 if target_id not in valid_in_category:
                     # Log details about why the target is invalid
@@ -702,6 +710,22 @@ class TargetingSystem:
                     return False
 
         return True
+
+    def _target_category_aliases(self, category):
+        """Return accepted singular/plural aliases for target category keys."""
+        aliases = {category}
+        singular_to_plural = {
+            "creature": "creatures", "player": "players", "permanent": "permanents",
+            "spell": "spells", "ability": "abilities", "land": "lands",
+            "artifact": "artifacts", "enchantment": "enchantments",
+            "planeswalker": "planeswalkers", "card": "cards", "battle": "battles",
+        }
+        plural_to_singular = {v: k for k, v in singular_to_plural.items()}
+        if category in singular_to_plural:
+            aliases.add(singular_to_plural[category])
+        if category in plural_to_singular:
+            aliases.add(plural_to_singular[category])
+        return aliases
 
     def _select_targets_by_strategy(self, card, valid_targets, target_count, target_requirements, controller):
         """

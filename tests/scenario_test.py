@@ -117,6 +117,16 @@ def inject_card(gs, data):
     return new_id
 
 
+def inject_into_zone(gs, player, data, zone):
+    """Register a synthetic card, stage it in library, then move it to zone."""
+    cid = inject_card(gs, data)
+    player["library"].append(cid)
+    gs._last_card_locations[cid] = (player, "library")
+    assert gs.move_card(cid, player, "library", player, zone), \
+        f"move_card refused library->{zone} for synthetic card {cid}"
+    return cid
+
+
 def to_battlefield(gs, cid):
     """Move a card from its owner's library onto that owner's battlefield
     through the engine, and return the owning player."""
@@ -911,6 +921,103 @@ def s_protection_from_red_targeting():
     assert vulnerable in creature_targets, "red spell lost ordinary legal creature targets"
 
 
+@scenario("702.11 / 702.18", "hexproof stops opposing targets but not your own, while shroud stops all")
+def s_hexproof_and_shroud_targeting_legality():
+    gs = fresh()
+    friendly_caster = gs.p1
+    opposing_caster = gs.p2
+    spell = inject_card(gs, {
+        "name": "Test Blessing", "mana_cost": "{G}",
+        "type_line": "Instant",
+        "oracle_text": "Target creature gets +1/+1 until end of turn.",
+        "color_identity": ["G"], "cmc": 1,
+    })
+    friendly_hexproof = inject_into_zone(gs, friendly_caster, {
+        "name": "Canopy Mystic", "mana_cost": "{G}",
+        "type_line": "Creature - Elf Druid",
+        "oracle_text": "Hexproof",
+        "color_identity": ["G"], "power": 2, "toughness": 2,
+    }, "battlefield")
+    opposing_hexproof = inject_into_zone(gs, opposing_caster, {
+        "name": "Mistfield Scout", "mana_cost": "{U}",
+        "type_line": "Creature - Merfolk Scout",
+        "oracle_text": "Hexproof",
+        "color_identity": ["U"], "power": 2, "toughness": 2,
+    }, "battlefield")
+    shrouded = inject_into_zone(gs, opposing_caster, {
+        "name": "Veiled Ancient", "mana_cost": "{3}{G}",
+        "type_line": "Creature - Treefolk",
+        "oracle_text": "Shroud",
+        "color_identity": ["G"], "power": 3, "toughness": 3,
+    }, "battlefield")
+    vulnerable = inject_into_zone(gs, opposing_caster, {
+        "name": "Open Target", "mana_cost": "{1}{G}",
+        "type_line": "Creature - Bear",
+        "oracle_text": "",
+        "color_identity": ["G"], "power": 2, "toughness": 2,
+    }, "battlefield")
+    grant_keyword(gs, friendly_hexproof, "hexproof")
+    grant_keyword(gs, opposing_hexproof, "hexproof")
+    grant_keyword(gs, shrouded, "shroud")
+
+    friendly_valid = gs.targeting_system.get_valid_targets(spell, friendly_caster)
+    friendly_targets = set(friendly_valid.get("creature", [])) | set(friendly_valid.get("creatures", []))
+    assert friendly_hexproof in friendly_targets, "your own hexproof creature was not targetable"
+    assert opposing_hexproof not in friendly_targets, "opponent's hexproof creature was targetable"
+    assert shrouded not in friendly_targets, "shrouded creature was targetable"
+    assert vulnerable in friendly_targets, "ordinary opposing creature was not targetable"
+
+    opposing_valid = gs.targeting_system.get_valid_targets(spell, opposing_caster)
+    opposing_targets = set(opposing_valid.get("creature", [])) | set(opposing_valid.get("creatures", []))
+    assert opposing_hexproof in opposing_targets, "controller could not target their own hexproof creature"
+    assert friendly_hexproof not in opposing_targets, "opponent could target a hexproof creature"
+    assert shrouded not in opposing_targets, "controller could target their own shrouded creature"
+
+
+@scenario("target mask", "hexproof-filtered targeting actions expose only legal selectable targets")
+def s_target_action_mask_excludes_illegal_hexproof_targets():
+    gs = fresh()
+    handler = get_env().action_handler
+    gs.agent_is_p1 = True
+    caster = gs.p1
+    opponent = gs.p2
+    spell = inject_card(gs, {
+        "name": "Precise Bolt", "mana_cost": "{R}",
+        "type_line": "Instant",
+        "oracle_text": "Precise Bolt deals 3 damage to target creature.",
+        "color_identity": ["R"], "cmc": 1,
+    })
+    illegal = inject_into_zone(gs, opponent, {
+        "name": "Hidden Adept", "mana_cost": "{G}",
+        "type_line": "Creature - Elf",
+        "oracle_text": "Hexproof",
+        "color_identity": ["G"], "power": 2, "toughness": 2,
+    }, "battlefield")
+    legal = inject_into_zone(gs, opponent, {
+        "name": "Exposed Adept", "mana_cost": "{G}",
+        "type_line": "Creature - Elf",
+        "oracle_text": "",
+        "color_identity": ["G"], "power": 2, "toughness": 2,
+    }, "battlefield")
+    grant_keyword(gs, illegal, "hexproof")
+    gs.add_to_stack("SPELL", spell, caster, {"requires_target": True, "num_targets": 1})
+    gs.phase = gs.PHASE_TARGETING
+    gs.targeting_context = {
+        "source_id": spell, "controller": caster,
+        "required_type": "creature", "required_count": 1,
+        "min_targets": 1, "max_targets": 1,
+        "selected_targets": [],
+        "effect_text": "Precise Bolt deals 3 damage to target creature.",
+    }
+    mask = handler.generate_valid_actions()
+    select_actions = [idx for idx in range(274, 284) if mask[idx]]
+    assert select_actions == [274], f"expected one legal SELECT_TARGET action, got {select_actions}"
+    reward, ok = handler._handle_select_target(0, {})
+    assert ok, "SELECT_TARGET failed for the only legal target"
+    assert gs.stack[-1][3].get("targets") == {"creatures": [legal]}, \
+        f"targeting chose {gs.stack[-1][3].get('targets')}, expected only the non-hexproof creature"
+
+
 @scenario("702.21", "ward parses and registers its target-tax cost")
 def s_ward_keyword_cost_parses():
     gs = fresh()
@@ -935,6 +1042,107 @@ def s_ward_keyword_cost_parses():
     assert any(getattr(ability, "keyword_value", None) == "{2}" for ability in ward_abilities), \
         f"ward cost was not normalized to {{2}}: {[getattr(a, 'keyword_value', None) for a in ward_abilities]}"
     assert gs.check_keyword(warded, "ward"), "registered ward keyword was not visible through keyword checks"
+
+
+@scenario("702.21", "ward counters an opposing targeted spell when its tax cannot be paid")
+def s_ward_counters_spell_when_tax_unpaid():
+    gs = fresh()
+    caster = gs.p1
+    defender = gs.p2
+    bolt = inject_card(gs, {
+        "name": "Ward Probe", "mana_cost": "{R}",
+        "type_line": "Instant",
+        "oracle_text": "Ward Probe deals 3 damage to target creature.",
+        "color_identity": ["R"], "cmc": 1,
+    })
+    warded = inject_into_zone(gs, defender, {
+        "name": "Taxing Guardian", "mana_cost": "{1}{W}",
+        "type_line": "Creature - Human Cleric",
+        "oracle_text": "Ward {2}",
+        "color_identity": ["W"], "power": 2, "toughness": 4,
+    }, "battlefield")
+    gs.ability_handler._parse_and_register_abilities(warded, gs._safe_get_card(warded))
+    gs.layer_system.invalidate_cache()
+    gs.layer_system.apply_all_effects()
+    caster["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
+    gs.add_to_stack("SPELL", bolt, caster, {
+        "targets": {"creatures": [warded]},
+        "requires_target": True,
+        "num_targets": 1,
+        "source_zone": "stack_implicit",
+    })
+    assert gs.resolve_top_of_stack(), "ward-countered spell did not finish resolving"
+    assert bolt in caster["graveyard"], "ward-countered spell did not go to graveyard"
+    assert defender.get("damage_counters", {}).get(warded, 0) == 0, \
+        "unpaid ward spell still damaged the warded creature"
+
+
+@scenario("702.21", "ward auto-pays available mana tax before the targeted spell resolves")
+def s_ward_tax_paid_then_spell_resolves():
+    gs = fresh()
+    caster = gs.p1
+    defender = gs.p2
+    bolt = inject_card(gs, {
+        "name": "Ward Payment Probe", "mana_cost": "{R}",
+        "type_line": "Instant",
+        "oracle_text": "Ward Payment Probe deals 3 damage to target creature.",
+        "color_identity": ["R"], "cmc": 1,
+    })
+    warded = inject_into_zone(gs, defender, {
+        "name": "Taxing Sentinel", "mana_cost": "{1}{W}",
+        "type_line": "Creature - Human Soldier",
+        "oracle_text": "Ward {2}",
+        "color_identity": ["W"], "power": 2, "toughness": 4,
+    }, "battlefield")
+    gs.ability_handler._parse_and_register_abilities(warded, gs._safe_get_card(warded))
+    gs.layer_system.invalidate_cache()
+    gs.layer_system.apply_all_effects()
+    caster["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 2}
+    gs.add_to_stack("SPELL", bolt, caster, {
+        "targets": {"creatures": [warded]},
+        "requires_target": True,
+        "num_targets": 1,
+        "source_zone": "stack_implicit",
+    })
+    assert gs.resolve_top_of_stack(), "spell with payable ward tax did not resolve"
+    assert caster["mana_pool"].get('C', 0) == 0, "ward tax did not consume the available generic mana"
+    assert defender.get("damage_counters", {}).get(warded, 0) == 3, \
+        "spell did not damage the warded creature after paying ward"
+    assert bolt in caster["graveyard"], "resolved instant did not go to graveyard"
+
+
+@scenario("702.21", "ward auto-pays a simple life tax before the targeted spell resolves")
+def s_ward_life_tax_paid_then_spell_resolves():
+    gs = fresh()
+    caster = gs.p1
+    defender = gs.p2
+    bolt = inject_card(gs, {
+        "name": "Life Ward Probe", "mana_cost": "{R}",
+        "type_line": "Instant",
+        "oracle_text": "Life Ward Probe deals 3 damage to target creature.",
+        "color_identity": ["R"], "cmc": 1,
+    })
+    warded = inject_into_zone(gs, defender, {
+        "name": "Blood Toll Sentinel", "mana_cost": "{1}{B}",
+        "type_line": "Creature - Vampire Soldier",
+        "oracle_text": "Ward - Pay 3 life.",
+        "color_identity": ["B"], "power": 2, "toughness": 4,
+    }, "battlefield")
+    gs.ability_handler._parse_and_register_abilities(warded, gs._safe_get_card(warded))
+    gs.layer_system.invalidate_cache()
+    gs.layer_system.apply_all_effects()
+    life_before = caster["life"]
+    gs.add_to_stack("SPELL", bolt, caster, {
+        "targets": {"creatures": [warded]},
+        "requires_target": True,
+        "num_targets": 1,
+        "source_zone": "stack_implicit",
+    })
+    assert gs.resolve_top_of_stack(), "spell with payable life ward tax did not resolve"
+    assert caster["life"] == life_before - 3, "ward tax did not consume the required life"
+    assert defender.get("damage_counters", {}).get(warded, 0) == 3, \
+        "spell did not damage the warded creature after paying life for ward"
+    assert bolt in caster["graveyard"], "resolved instant did not go to graveyard"
 
 
 @scenario("702.21 / 702.18", "lifelink gains life equal to damage actually dealt")

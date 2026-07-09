@@ -16,7 +16,7 @@ possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 8/8, 6/6, 45/45).
+   every delivery (currently 8/8, 6/6, 110/110).
 2. **Zero known stats-corrupting bugs.** The silent-bug catalog (appendix)
    is closed; every fixed bug has a permanent guard scenario.
 3. **Quantified card coverage.** For each target format's card pool, the
@@ -43,7 +43,7 @@ The project is complete when all of the following hold:
 - Tier 1 (rules correctness): ✅ complete — all seven items plus the P1
   placeholder triage delivered; see appendix for the bug catalog.
 - Test gates: smoke 8/8 (fixture decks now exercise triggers every episode),
-  training 6/6, scenarios 99/99 (grown from 12).
+  training 6/6, scenarios 110/110 (grown from 12).
 - **Stats collected before July 2026 are unusable** (wrong player, wrong
   winner, fictional play turns, cosmetic first strike, compounding P/T,
   dead replacement system). Wipe and re-harvest after the current engine
@@ -195,7 +195,19 @@ Remaining Tier 2 work:
   * **Lifelink** — combat lifegain bookkeeping no longer crashes and lifegain
     is based on damage actually dealt.
   Regression-checked 105/105 scenarios after the round.
-  **Coverage status:** seven rounds plus 7.1 have closed ~41 effect/mechanic classes across
+  **Round 7.2 (July 2026)** tightened targeting keyword resolution:
+  * **Hexproof/shroud** — controller and opponent targeting are guarded, with
+    shroud correctly prohibiting targeting by every player.
+  * **Target action masks** — target-selection actions expose only legal
+    targets and preserve the selected category for stack resolution.
+  * **Ward target tax** — opposing targeted stack items now auto-pay parsed
+    mana or simple life costs when possible; an unpaid ward cost counters the
+    item before its effects apply.
+  * **Target validation aliases** — singular/plural category keys and generic
+    chosen-target contexts resolve consistently instead of spuriously fizzling.
+  Regression-checked 110/110 scenarios after the round.
+  **Coverage status:** seven rounds plus 7.2 have closed ~45
+  effect/mechanic classes across
   removal, bounce, counters, tokens, keywords, sacrifice, reanimation,
   control, mana, library manipulation, variable-count effects, prevention,
   animation, levelers, Adventure, and duplicate-ID zone semantics. Miss rate
@@ -206,8 +218,8 @@ Remaining Tier 2 work:
 - ◐ **First-touch coverage sweep**: one scenario for every subsystem that has
   never had one (this practice found four phantom methods and three dead
   subsystems; assume more remain in untested corners — next candidates:
-  ward target-tax resolution, hexproof/shroud targeting, phasing attachments,
-  reflexive triggers, and remaining special card-frame mechanics).
+  phasing attachments, reflexive triggers, spell-copy retargeting, modal/X
+  choice audits, and remaining special card-frame mechanics).
 
 ## Tier 3 — Training & environment quality
 
@@ -227,7 +239,7 @@ Remaining Tier 2 work:
 
 ## Tier 4 — Verification & calibration
 
-1. ✅ Golden scenario harness — 105 scenarios and growing; scenario-first is a
+1. ✅ Golden scenario harness — 110 scenarios and growing; scenario-first is a
    working agreement, not a suggestion.
 2. ▢ **Property tests**: zone-count conservation per action; SBA idempotence;
    the action mask never permits an illegal action (fuzz); mana pools empty
@@ -303,8 +315,9 @@ Remaining Tier 2 work:
   "you control X" only).
 - `prevent_damage`/`redirect_damage` in game_state_damage are a dead API
   (no callers) — remove or wire deliberately.
-- Ward parses and surfaces its keyword cost, but target-tax resolution
-  ("counter unless paid") is not wired into spell resolution yet.
+- Ward target-tax v1 supports parsed mana costs and simple "pay N life" costs
+  by auto-paying when possible. Sacrifice/discard costs and letting the agent
+  deliberately decline payment remain future choice-exposure work.
 
 ---
 

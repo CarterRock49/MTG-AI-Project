@@ -493,6 +493,102 @@ class GameStateStackMixin:
             logging.warning("Cannot validate targets: TargetingSystem not available.")
             return True # Assume valid if no system? Safer than failing spells.
 
+    def _flatten_target_ids(self, targets):
+        """Flatten a target dict/list into ordered target ids."""
+        flattened = []
+        seen = set()
+
+        def add_target(target_id):
+            if target_id is None or target_id == "X":
+                return
+            try:
+                hash(target_id)
+            except TypeError:
+                return
+            if target_id not in seen:
+                seen.add(target_id)
+                flattened.append(target_id)
+
+        if isinstance(targets, dict):
+            for key, value in targets.items():
+                if key == "X":
+                    continue
+                if isinstance(value, (list, tuple, set)):
+                    for target_id in value:
+                        add_target(target_id)
+                else:
+                    add_target(value)
+        elif isinstance(targets, (list, tuple, set)):
+            for target_id in targets:
+                add_target(target_id)
+        return flattened
+
+    def _pay_ward_costs_for_targets(self, item_type, source_id, controller, targets, context=None):
+        """Auto-pay ward costs for opposing ward permanents targeted by a stack item."""
+        if context is None:
+            context = {}
+        target_ids = self._flatten_target_ids(targets)
+        if not target_ids:
+            return True
+
+        paid_costs = context.setdefault("ward_costs_paid", [])
+        checked_targets = set()
+        for target_id in target_ids:
+            if target_id in checked_targets or target_id in ["p1", "p2"]:
+                continue
+            checked_targets.add(target_id)
+            target_card = self._safe_get_card(target_id)
+            target_controller = self.get_card_controller(target_id)
+            if not target_card or not target_controller or target_controller == controller:
+                continue
+            if not hasattr(self, 'check_keyword') or not self.check_keyword(target_id, "ward"):
+                continue
+
+            ward_costs = []
+            if self.ability_handler and hasattr(self.ability_handler, 'get_ward_costs'):
+                ward_costs = self.ability_handler.get_ward_costs(target_id)
+            if not ward_costs:
+                ward_costs = ["ward_generic"]
+
+            for ward_cost in ward_costs:
+                if not self._pay_single_ward_cost(controller, ward_cost, source_id, target_id, context):
+                    context["countered_by_ward"] = True
+                    context["unpaid_ward_cost"] = ward_cost
+                    return False
+                paid_costs.append({"target_id": target_id, "cost": ward_cost})
+        return True
+
+    def _pay_single_ward_cost(self, player, ward_cost, source_id, target_id, context):
+        """Pay one ward cost. Supports mana costs and simple life-payment ward."""
+        if ward_cost is None:
+            return False
+        cost_text = str(ward_cost).strip()
+        if not cost_text or cost_text == "ward_generic":
+            return False
+
+        life_match = re.fullmatch(r"pay\s+(\d+)\s+life", cost_text, re.IGNORECASE)
+        if life_match:
+            amount = int(life_match.group(1))
+            if player.get("life", 0) < amount:
+                return False
+            player["life"] -= amount
+            return True
+
+        if cost_text.isdigit():
+            cost_text = f"{{{cost_text}}}"
+        if "{" not in cost_text:
+            logging.debug(f"Unsupported ward cost '{ward_cost}' on target {target_id}.")
+            return False
+        if not hasattr(self, 'mana_system') or not self.mana_system:
+            return False
+
+        parsed_cost = self.mana_system.parse_mana_cost(cost_text)
+        ward_context = dict(context)
+        ward_context.update({"card_id": source_id, "ward_target_id": target_id})
+        if not self.mana_system.can_pay_mana_cost(player, parsed_cost, ward_context):
+            return False
+        return self.mana_system.pay_mana_cost_get_details(player, parsed_cost, ward_context) is not None
+
     def _determine_target_category(self, target_id):
         """Helper to determine the primary category ('creatures', 'players', etc.) for logging/categorization."""
         # This can reuse the logic from the Environment's helper if preferred,
@@ -558,6 +654,11 @@ class GameStateStackMixin:
                         self.move_card(item_id, controller, "stack_implicit", controller, "graveyard", cause="spell_fizzle", context=context)
                     # If ability fizzles, it just leaves the stack.
                     resolution_success = True # Fizzling counts as resolution finishing
+                elif not self._pay_ward_costs_for_targets(item_type, item_id, controller, validation_targets, context):
+                    logging.info(f"Stack Item {item_type} {card_name} countered by unpaid ward.")
+                    if item_type == "SPELL" and not context.get("is_copy", False) and not context.get("skip_default_movement", False):
+                        self.move_card(item_id, controller, "stack_implicit", controller, "graveyard", cause="ward_countered", context=context)
+                    resolution_success = True # Countering by ward successfully finishes this stack item
                 else:
                     # --- Proceed with resolution ---
                     if item_type == "SPELL": resolution_success = self._resolve_spell(item_id, controller, context)

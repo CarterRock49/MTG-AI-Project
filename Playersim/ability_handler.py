@@ -2214,6 +2214,32 @@ class AbilityHandler:
 
         logging.debug(f"Final protection details for {getattr(live_card,'name','Unknown')} ({card_id}): {final_details if final_details else None}")
         return final_details if final_details else None
+
+    def get_ward_costs(self, card_id):
+        """Return parsed ward costs for a card's active ward keyword abilities."""
+        gs = self.game_state
+        live_card = gs._safe_get_card(card_id)
+        if not live_card:
+            return []
+
+        costs = []
+        for ability in self.registered_abilities.get(card_id, []):
+            if getattr(ability, 'keyword', None) == "ward":
+                cost = getattr(ability, 'keyword_value', None)
+                if cost and cost != "ward_generic":
+                    costs.append(str(cost))
+
+        if costs:
+            return costs
+
+        text = getattr(live_card, 'oracle_text', '') or ''
+        for match in re.finditer(
+                r"ward\s*(?:—|-|–|:)?\s*((?:\{[WUBRGCXSPMTQA0-9\/\.]+\})+|\d+|pay \d+ life)",
+                text,
+                re.IGNORECASE):
+            cost = match.group(1).strip()
+            costs.append(f"{{{cost}}}" if cost.isdigit() else cost)
+        return costs
             
     def handle_attack_triggers(self, attacker_id):
         """Handle abilities triggering when a specific creature attacks."""
