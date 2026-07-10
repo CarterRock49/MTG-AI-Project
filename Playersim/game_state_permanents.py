@@ -239,9 +239,13 @@ class GameStatePermanentsMixin:
     def activate_planeswalker_ability(self, card_id, ability_idx, controller):
         """Activates a planeswalker ability: Pays cost, potentially enters targeting, adds ability to stack."""
         card = self._safe_get_card(card_id)
-        # Ensure card exists, is a planeswalker, and is on the controller's battlefield
-        if not card or 'planeswalker' not in getattr(card, 'card_types', []) or card_id not in controller.get('battlefield', []):
-            logging.warning(f"Invalid attempt to activate PW ability: Card {card_id} invalid or not controlled PW.")
+        # Loyalty abilities remain on a permanent even when a type-changing
+        # effect (Kaito) makes it stop being a planeswalker.
+        has_loyalty_ability = bool(getattr(card, "loyalty_abilities", []))
+        tracks_loyalty = card_id in controller.get("loyalty_counters", {})
+        if (not card or not has_loyalty_ability or not tracks_loyalty
+                or card_id not in controller.get('battlefield', [])):
+            logging.warning(f"Invalid attempt to activate loyalty ability from card {card_id}.")
             return False
 
         # Check activation limit (only once per turn per PW)
@@ -1675,139 +1679,163 @@ class GameStatePermanentsMixin:
     def turn_face_up(self, player, card_id, pay_morph_cost=False, pay_manifest_cost=False):
         """Turn a face-down Morph or Manifest card face up."""
         card = self._safe_get_card(card_id)
-        if not card or card_id not in player["battlefield"]: return False
-
-        is_face_down = False
-        original_info = None
-        cost_to_pay_str = None
-        source_mechanic = None
-
-        # Check if manifested
-        manifest_info = getattr(self, 'manifested_cards', {}).get(card_id)
-        if manifest_info and manifest_info.get('face_down', True):
-            is_face_down = True
-            source_mechanic = "Manifest"
-            if pay_manifest_cost:
-                 original_info = manifest_info.get('original')
-                 if original_info and 'creature' in original_info.get('card_types', []): # Only creatures can be turned up via manifest cost
-                     cost_to_pay_str = original_info.get('mana_cost')
-                 else:
-                     logging.debug(f"Cannot turn up non-creature manifest {card_id} via cost.")
-                     return False # Cannot turn non-creature manifest up this way
-
-        # Check if morphed (if not already identified as manifest)
-        morph_info = getattr(self, 'morphed_cards', {}).get(card_id)
-        if not is_face_down and morph_info and morph_info.get('face_down', True):
-             is_face_down = True
-             source_mechanic = "Morph"
-             if pay_morph_cost:
-                  original_info = morph_info.get('original')
-                  original_card_temp = Card(original_info) # Temporary card to parse cost
-                  match = re.search(r"morph\s*(\{.*?\})", getattr(original_card_temp, 'oracle_text', '').lower())
-                  if match: cost_to_pay_str = match.group(1)
-                  else: logging.warning(f"Could not parse Morph cost for {original_info.get('name')}")
-
-        # Check generic face-down attribute if specific tracking missed
-        if not is_face_down and getattr(card, 'face_down', False):
-             is_face_down = True
-             source_mechanic = "Unknown Face-down" # Possibly from other effects
-             # Cannot determine original info or cost for generic face-down easily
-             logging.warning(f"Cannot turn face-down card {card_id} up: Unknown origin or cost.")
-             return False
-
-
-        if not is_face_down:
-            logging.debug(f"Cannot turn {card.name} face up: Not face down.")
+        if not card or card_id not in player["battlefield"]:
             return False
 
-        if (pay_morph_cost or pay_manifest_cost):
+        original_printed = None
+        cost_to_pay_str = None
+        source_mechanic = None
+        manifest_info = getattr(self, "manifested_cards", {}).get(card_id)
+        if manifest_info and manifest_info.get("face_down", True):
+            source_mechanic = "Manifest"
+            original_printed = manifest_info.get("original_printed")
+            if pay_manifest_cost:
+                if (not original_printed
+                        or "creature" not in original_printed.get("card_types", [])):
+                    return False
+                cost_to_pay_str = original_printed.get("mana_cost", "")
+
+        morph_info = getattr(self, "morphed_cards", {}).get(card_id)
+        if source_mechanic is None and morph_info and morph_info.get("face_down", True):
+            source_mechanic = "Morph"
+            original_printed = morph_info.get("original_printed")
+            if original_printed is None and morph_info.get("original"):
+                original_card = Card(morph_info["original"])
+                original_printed = copy.deepcopy(original_card._printed)
+            if pay_morph_cost and original_printed:
+                match = re.search(
+                    r"morph\s*((?:\{[^}]+\})+)",
+                    original_printed.get("oracle_text", ""), re.IGNORECASE)
+                cost_to_pay_str = match.group(1) if match else None
+
+        if source_mechanic is None or not original_printed:
+            return False
+        if pay_manifest_cost or pay_morph_cost:
             if not cost_to_pay_str:
-                logging.debug(f"Cannot turn {card.name} face up: No valid cost found for {source_mechanic}.")
                 return False
-            # Check and Pay Cost
-            if not self.mana_system.can_pay_mana_cost(player, cost_to_pay_str):
-                 logging.debug(f"Cannot turn {card.name} face up: Cannot afford cost {cost_to_pay_str}.")
-                 return False
-            if not self.mana_system.pay_mana_cost(player, cost_to_pay_str):
-                 logging.warning(f"Failed to pay cost {cost_to_pay_str} for turning {card.name} face up.")
-                 return False
+            parsed_cost = self.mana_system.parse_mana_cost(cost_to_pay_str)
+            if not self.mana_system.can_pay_mana_cost(player, parsed_cost):
+                return False
+            if self.mana_system.pay_mana_cost_get_details(
+                    player, parsed_cost) is None:
+                return False
 
-        # If cost paid or turning face up for other reason (e.g., effect):
-        if not original_info: # If turning up a generic face-down, we might not have original info
-             # Maybe check card's own definition if it wasn't morphed/manifested? Complex.
-             logging.warning(f"Turning {card.name} face up, but original info unknown (not Morph/Manifest).")
-             # Minimal change: just mark face up, assume current stats are correct.
-             card.face_down = False
+        if self.ability_handler:
+            self.ability_handler.unregister_card_abilities(card_id)
+        card._printed = copy.deepcopy(original_printed)
+        card.reset_to_printed()
+        card.face_down = False
+        if source_mechanic == "Manifest":
+            self.manifested_cards.pop(card_id, None)
         else:
-             # Restore original card properties from original_info dict
-             original_card_temp = Card(original_info) # Create temp instance to avoid modifying original_info
-             card.name = getattr(original_card_temp, 'name', card.name)
-             card.power = getattr(original_card_temp, 'power', card.power)
-             card.toughness = getattr(original_card_temp, 'toughness', card.toughness)
-             card.card_types = getattr(original_card_temp, 'card_types', card.card_types).copy()
-             card.subtypes = getattr(original_card_temp, 'subtypes', card.subtypes).copy()
-             card.supertypes = getattr(original_card_temp, 'supertypes', card.supertypes).copy()
-             card.oracle_text = getattr(original_card_temp, 'oracle_text', card.oracle_text)
-             card.mana_cost = getattr(original_card_temp, 'mana_cost', card.mana_cost)
-             card.cmc = getattr(original_card_temp, 'cmc', card.cmc)
-             card.colors = getattr(original_card_temp, 'colors', card.colors).copy()
-             card.keywords = getattr(original_card_temp, 'keywords', card.keywords).copy()
-             card.type_line = getattr(original_card_temp, 'type_line', card.type_line)
-             # Restore other necessary attributes
-
-             card.face_down = False
-             # Clear from morph/manifest tracking
-             if source_mechanic == "Morph": self.morphed_cards.pop(card_id, None)
-             if source_mechanic == "Manifest": self.manifested_cards.pop(card_id, None)
-
-        logging.debug(f"Turned {card.name} face up.")
-        self.trigger_ability(card_id, "TURNED_FACE_UP")
-        if self.layer_system: self.layer_system.invalidate_cache(); self.layer_system.apply_all_effects() # Abilities might change
+            self.morphed_cards.pop(card_id, None)
+        if self.ability_handler:
+            self.ability_handler.register_card_abilities(card_id, player)
+        if self.layer_system:
+            self.layer_system.invalidate_cache()
+            self.layer_system.apply_all_effects()
+        self.trigger_ability(
+            card_id, "TURNED_FACE_UP", {"controller": player})
         return True
+
+    @staticmethod
+    def _face_down_creature_printed():
+        return {
+            "name": "Face-down creature",
+            "mana_cost": "",
+            "cmc": 0,
+            "colors": [0, 0, 0, 0, 0],
+            "card_types": ["creature"],
+            "subtypes": [],
+            "supertypes": [],
+            "type_line": "Creature",
+            "oracle_text": "",
+            "keywords": [0] * len(Card.ALL_KEYWORDS),
+            "power": 2,
+            "toughness": 2,
+            "loyalty": None,
+            "defense": None,
+        }
+
+    def manifest_selected_card(self, player, card_id,
+                               source_zone="library"):
+        """Put one physical card onto the battlefield face down as a 2/2."""
+        card = self._safe_get_card(card_id)
+        if not card:
+            return False
+        if source_zone != "library_implicit" and card_id not in player.get(source_zone, []):
+            return False
+        original_printed = copy.deepcopy(getattr(card, "_printed", {}))
+        if not original_printed:
+            card.snapshot_printed()
+            original_printed = copy.deepcopy(card._printed)
+        card._printed = self._face_down_creature_printed()
+        card.reset_to_printed()
+        card.face_down = True
+        self.manifested_cards[card_id] = {
+            "original_printed": original_printed,
+            "face_down": True,
+        }
+        if self.move_card(
+                card_id, player, source_zone, player, "battlefield",
+                cause="manifest"):
+            return True
+        self.manifested_cards.pop(card_id, None)
+        card._printed = original_printed
+        card.reset_to_printed()
+        card.face_down = False
+        return False
 
     def manifest_card(self, player, count=1):
          """Manifest the top card(s) of the library."""
          manifested_ids = []
-         for _ in range(count):
-             if not player["library"]: break
-             card_id = player["library"].pop(0)
-             original_info = self._safe_get_card(card_id).__dict__.copy() # Store original data
+         for _ in range(max(0, int(count))):
+             if not player.get("library"):
+                 break
+             card_id = player["library"][0]
+             if self.manifest_selected_card(player, card_id, "library"):
+                 manifested_ids.append(card_id)
+             else:
+                 break
+         return manifested_ids or None
 
-             # Create face-down creature state
-             manifest_data = {
-                 "name": "Manifested Creature", # Generic name
-                 "power": 2, "toughness": 2,
-                 "card_types": ["creature"], "subtypes": [], "supertypes": [],
-                 "colors": [0,0,0,0,0], # Colorless
-                 "mana_cost": "", "cmc": 0,
-                 "oracle_text": "Face-down creature (2/2). Can be turned face up.",
-                 "face_down": True
-             }
-             # Create a new Card object for the face-down state *or* modify existing?
-             # Modifying existing is simpler for tracking, but needs careful state management.
-             # Let's modify the existing card object in card_db.
-             manifested_card = self._safe_get_card(card_id)
-             if manifested_card:
-                 manifested_card.power = manifest_data["power"]
-                 manifested_card.toughness = manifest_data["toughness"]
-                 manifested_card.card_types = manifest_data["card_types"]
-                 manifested_card.subtypes = manifest_data["subtypes"]
-                 # Keep original name/mana cost/etc hidden but associated? Use tracking dict.
-                 if not hasattr(self, 'manifested_cards'): self.manifested_cards = {}
-                 self.manifested_cards[card_id] = {'original': original_info, 'face_down': True} # Store original
-                 manifested_card.face_down = True # Set flag on card object too
+    def complete_manifest_dread_choice(self, option_index):
+        choice = getattr(self, "choice_context", None)
+        if not (self.phase == self.PHASE_CHOOSE and choice
+                and choice.get("type") == "manifest_dread"):
+            return False
+        options = list(choice.get("options", []))
+        if not isinstance(option_index, int) or not 0 <= option_index < len(options):
+            return False
+        controller = choice.get("controller") or choice.get("player")
+        selected_id = options[option_index]
+        graveyard_id = options[1 - option_index]
+        if not self.manifest_selected_card(
+                controller, selected_id, "library_implicit"):
+            controller["library"][:0] = options
+            return False
+        if not self.move_card(
+                graveyard_id, controller, "library_implicit", controller,
+                "graveyard", cause="manifest_dread"):
+            self.move_card(
+                selected_id, controller, "battlefield", controller,
+                "library", cause="manifest_dread_rollback")
+            controller["library"].insert(
+                0 if option_index == 0 else 1, graveyard_id)
+            return False
 
-                 # Move to battlefield
-                 success = self.move_card(card_id, player, "library_implicit", player, "battlefield")
-                 if success: manifested_ids.append(card_id)
-                 else: # Failed move, undo?
-                      player["library"].insert(0, card_id) # Put back
-                      if card_id in self.manifested_cards: del self.manifested_cards[card_id] # Clean up tracking
-                      manifested_card.face_down = False # Reset flag
-         if manifested_ids:
-             logging.debug(f"Manifested {len(manifested_ids)} card(s).")
-             return manifested_ids
-         return None
+        return_phase = self.previous_priority_phase
+        self.choice_context = None
+        self.previous_priority_phase = None
+        self.phase = return_phase if return_phase is not None else self.PHASE_PRIORITY
+        self.priority_player = controller
+        self.priority_pass_count = 0
+        self.trigger_ability(choice.get("source_id"), "MANIFEST_DREAD", {
+            "controller": controller,
+            "manifested_card_id": selected_id,
+            "graveyard_card_id": graveyard_id,
+        })
+        return True
 
     def amass(self, player, amount):
         """Perform Amass N. Finds or creates Army token and adds counters."""

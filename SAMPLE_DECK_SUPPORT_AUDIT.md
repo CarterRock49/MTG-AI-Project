@@ -41,9 +41,9 @@ untap does not fire "becomes untapped" triggers. Kaito's -2 sequence and
 Floodpits Drowner's targeted ETB both preserve the selected target when adding
 their counters.
 
-This closes the stun mechanic, not every ability on those cards. Kaito still
-depends on emblem and type-changing support, while Floodpits Drowner's second
-ability still needs its stun-counter target filter and two-object shuffle.
+This closed the stun mechanic, not every ability on those cards. Kaito's emblem
+and type change and Floodpits Drowner's second ability were deferred to Round
+7.17.
 
 ## Closed In Round 7.14
 
@@ -64,9 +64,9 @@ the token ceasing to exist. Monstrous Rage has a full cast/target/Valiant/Role
 scenario; The Witch's Vanity's chapter III wording has a focused parser and
 resolution scenario.
 
-This closes these mechanics, not every line on the cards. Heartfire Hero's
-power-based death damage still needs last-known-power support. The Witch's
-Vanity still inherits the separate Food activated-ability gap listed below.
+This closed these mechanics, not every line on the cards. Heartfire Hero's
+power-based death damage was deferred to Round 7.17. The Witch's Vanity's Food
+token was completed in Round 7.18.
 
 ## Closed In Round 7.15
 
@@ -110,6 +110,75 @@ additional-cost selections are visible in the policy action mask. Ride's End's
 This closes Leyline Binding's Domain cost line, not every Domain effect. Herd
 Migration's basic-land-type-scaled token count remains listed below.
 
+## Closed In Round 7.17
+
+Map tokens and explore are now supported for all 13 affected slots. Map is a
+colorless artifact token with its printed pay, tap, sacrifice, target, and
+sorcery-timing restrictions. The target is selected before costs are paid, and
+the ability remains on the stack after its token source ceases to exist.
+Explore moves a revealed land to hand, gives a +1/+1 counter for a nonland or
+empty library, and exposes the nonland top-or-graveyard decision to the acting
+policy. Spyglass Siren and Get Lost have exact scenarios, including Get Lost
+giving both Maps to the destroyed permanent's controller.
+
+Floodpits Drowner's remaining activated ability is supported for all 8 copies.
+Only a creature with a stun counter is legal; resolution shuffles Drowner and
+that creature into their owners' libraries. If the target loses its last stun
+counter before resolution, the whole targeted ability fizzles and Drowner
+stays on the battlefield.
+
+Heartfire Hero's remaining death rider is supported for all 8 copies. A
+battlefield-leave snapshot preserves its power before counters and continuous
+effects reset, and its dies trigger deals that last-known amount to each
+opponent.
+
+Command-zone emblems and Kaito's conditional animation are supported for all
+11 affected Kaito and Wrenn slots. Kaito becomes only a 3/4 Ninja creature with
+hexproof during its controller's turn while it has loyalty, can still activate
+loyalty abilities in that form, and reverts when either condition ends. Its
+Ninja anthem emblem applies cumulatively. Wrenn's emblem exposes legal land
+plays and permanent spells from its controller's graveyard through the policy
+action space.
+
+Enduring Curiosity's death return is supported for all 6 copies. It returns
+under its owner's control only when its death snapshot says it was a creature,
+returns as an enchantment without its creature subtypes, and does not return if
+the dying object was a token.
+
+## Closed In Round 7.18
+
+Mockingbird's bounded copy-as-enters replacement is supported for all 6 copies.
+The policy may choose any battlefield creature whose mana value is no greater
+than the total mana actually spent on Mockingbird, or decline to copy. It uses
+copyable printed characteristics rather than counters or continuous effects,
+adds Bird without removing copied subtypes, grants flying, and has copied
+enters abilities before it enters.
+
+Food tokens are supported for all 5 Restless Cottage and The Witch's Vanity
+slots. Food is a colorless artifact token with the Food subtype and its printed
+`{2}`, tap, sacrifice ability. The activation pays every cost atomically,
+survives its token source ceasing to exist, and gains exactly 3 life.
+
+Plot is supported for all 4 Slickshot Show-Off copies. Plot is a hand-indexed
+sorcery-speed special action that pays `{1}{R}` and moves the card to exile
+without using the stack. The card cannot be cast that turn; a later-turn
+sorcery-speed action casts it from exile without paying its mana cost and
+consumes exactly one Plot permission.
+
+Bargain and Torch the Tower are supported for all 4 copies. Casting exposes an
+optional policy choice among controlled artifacts, enchantments, and tokens,
+then sacrifices the selected permanent as a casting cost. Torch deals 2 when
+declined or 3 and scries 1 when bargained. A creature it actually damaged is
+exiled instead if it would die later that turn.
+
+Manifest dread and Turn Inside Out are supported for all 4 copies. The policy
+chooses one of the top two cards to put onto the battlefield face down and the
+other moves to the graveyard; one-card and empty libraries are handled without
+phantom choices. A face-down object exposes only colorless 2/2 creature
+characteristics, and a creature card can turn face up for its mana cost without
+entering again. Turn Inside Out creates a one-shot, same-turn death trigger for
+only its chosen creature.
+
 ## Confirmed Gaps
 
 These should make affected card statistics ineligible for harvest until the
@@ -117,16 +186,7 @@ listed behavior is implemented and guarded by scenarios.
 
 | Mechanic or rule object | Copies | Affected cards | Missing behavior |
 | --- | ---: | --- | --- |
-| Map tokens | 13 | Get Lost (3), Restless Anchorage (2), Sentinel of the Nameless City (4), Spyglass Siren (4) | Token's activated sacrifice and agent-controlled explore |
-| Emblems and Kaito's changing card type | 11 | Kaito, Bane of Nightmares (9), Wrenn and Realmbreaker (2) | Command-zone emblem effects and Kaito's turn/loyalty layer changes |
-| Stun-linked shuffle | 8 | Floodpits Drowner (8) | Require a creature with a stun counter, then shuffle source and target into their owners' libraries |
-| Death return with type change | 6 | Enduring Curiosity (6) | Return only after dying as a creature, then remove creature type |
-| Bounded copy-as-enters replacement | 6 | Mockingbird (6) | Agent target choice, mana-spent bound, copy exception, added type/keyword |
 | Domain effect value | 1 | Herd Migration (1) | Use the distinct basic-land-type count for its token effect |
-| Food token activated ability | 5 | Restless Cottage (4), The Witch's Vanity (1) | Food can be created, but its pay/tap/sacrifice life ability is absent |
-| Plot | 4 | Slickshot Show-Off (4) | Sorcery-speed exile cost and later free-cast permission |
-| Bargain | 4 | Torch the Tower (4) | Optional sacrifice cost and bargained resolution branch |
-| Manifest dread | 4 | Turn Inside Out (4) | Two-card look, agent selection, graveyard move, and face-down permanent |
 | Additional combat | 4 | Fear of Missing Out (4) | Untap chosen creature and insert one additional combat phase |
 | Opening-hand replacement | 4 | Leyline of Resonance (4) | Begin-game battlefield choice before normal turn play |
 | Rest-of-game life restriction | 4 | Screaming Nemesis (4) | Persistent player effect preventing future life gain |
@@ -145,13 +205,11 @@ trusted.
 
 | Mechanic or behavior | Copies | Cards or concern |
 | --- | ---: | --- |
-| Power-based death damage | 8 | Heartfire Hero (8): use last-known power after the source has left the battlefield |
 | Delirium | 8 | Patchwork Beastie (4), Fear of Missing Out (4): four-card-type threshold and conditional effects |
 | Eerie | 4 | Optimistic Scavenger (4): enchantment entry and fully-unlocked Room event |
 | Damage reflexive/optional branches | 8 | Screaming Nemesis (4), Cacophony Scamp (4) |
 | Hand-information choices | 8 | Duress (4), Oildeep Gearhulk (4): chooser, visibility, and legal-card filtering |
 | Restless-land animation and attack riders | 16 | Anchorage (2), Cottage (4), Reef (7), Ridgeline (3) |
-| Map/explore decisions | 13 | Explore exists, but the keep-or-graveyard decision is currently strategic auto-resolution |
 
 ## Implemented Paths To Verify With Real Cards
 
@@ -170,13 +228,13 @@ each sample card's complete text still needs a card-specific scenario:
 
 ## Recommended Order
 
-1. Map tokens and agent-controlled explore, because 13 slots otherwise gain
-   incomplete card advantage and hide a player decision.
-2. Floodpits Drowner's stun-linked shuffle, to finish the remaining unsupported
-   text on the audit's highest-copy stun card.
-3. Heartfire Hero's power-based death damage, to complete the remaining text on
-   the highest-copy card touched in Round 7.14.
-4. Emblems and Kaito's changing type, because 11 slots still cross a missing
-   command-zone and continuous-type boundary.
-5. Enduring Curiosity's dies-as-a-creature return, because 6 slots still depend
-   on a zone-change trigger followed by a type-changing battlefield return.
+1. Herd Migration's Domain effect value, because the shared distinct-basic-land-
+   type counter already exists and only its token effect still needs to consume it.
+2. Fear of Missing Out's additional combat, because all 4 copies need both the
+   chosen-creature untap and a real inserted combat phase.
+3. Leyline of Resonance's opening-hand replacement, because all 4 copies need a
+   pre-turn battlefield choice rather than being evaluated as ordinary casts.
+4. Screaming Nemesis's rest-of-game life restriction, because all 4 copies can
+   otherwise produce seriously misleading damage and recovery statistics.
+5. Anoint with Affliction's Corrupted branch, because all 4 copies need the
+   opponent-poison threshold and its broader conditional exile targeting.

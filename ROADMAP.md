@@ -16,7 +16,7 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 8/8, 6/6, 155/155).
+   every delivery (currently 8/8, 6/6, 187/187).
 2. **Zero known stats-corrupting bugs.** The silent-bug catalog (appendix)
    is closed; every fixed bug has a permanent guard scenario.
 3. **Quantified card coverage.** For each target format's card pool, the
@@ -43,7 +43,7 @@ The project is complete when all of the following hold:
 - Tier 1 (rules correctness): ✅ complete — all seven items plus the P1
   placeholder triage delivered; see appendix for the bug catalog.
 - Test gates: smoke 8/8 (fixture decks now exercise triggers every episode),
-  training 6/6, scenarios 155/155 (grown from 12).
+  training 6/6, scenarios 187/187 (grown from 12).
 - **Stats collected before July 2026 are unusable** (wrong player, wrong
   winner, fictional play turns, cosmetic first strike, compounding P/T,
   dead replacement system). Wipe and re-harvest after the current engine
@@ -350,7 +350,8 @@ Remaining Tier 2 work:
     counter clauses retain the target selected by the preceding effect.
   * **Sample cards** - Kaito's -2 taps and adds two counters; Floodpits Drowner's
     ETB asks for a target, taps it, and adds one counter. Their unrelated
-    emblem/type-changing and stun-linked shuffle gaps remain explicit.
+    emblem/type-changing and stun-linked shuffle gaps were deferred to Round
+    7.17.
   This closes stun semantics for 17 sample-deck slots.
   Regression-checked 150/150 scenarios after the round.
   **Round 7.14 (July 2026)** implemented Valiant and the sample decks' Role
@@ -370,9 +371,10 @@ Remaining Tier 2 work:
     parse, targeted combat tricks keep their targets, timed spell layers survive
     the source card entering the graveyard, and layer hashes accept mixed deck
     and token ID types.
-  This closes Valiant for 16 sample-deck slots and Role behavior for 9 slots;
-  unrelated Heartfire Hero and The Witch's Vanity gaps remain explicit in the
-  sample-deck audit. Regression-checked 155/155 scenarios after the round.
+  This closes Valiant for 16 sample-deck slots and Role behavior for 9 slots.
+  Heartfire Hero's remaining rider was deferred to Round 7.17; The Witch's
+  Vanity's Food gap remains in the sample-deck audit. Regression-checked 155/155
+  scenarios after the round.
   **Round 7.15 (July 2026)** implemented linked temporary exile and Nowhere to
   Run's targeting exceptions:
   * **Linked one-shot effects** - `Deep-Cavern Bat` exposes its optional filtered
@@ -421,21 +423,71 @@ Remaining Tier 2 work:
   This closes nonmana additional costs for 10 sample slots and conditional cost
   reductions for 13 slots. Herd Migration's separate Domain effect value remains
   open. Regression-checked 168/168 scenarios after the round.
-  **Coverage status:** rounds 1-7.16 have closed ~70
+  **Round 7.17 (July 2026)** completed the five highest-priority support-audit
+  items in their recommended order:
+  * **Map and explore** - Map tokens carry their printed artifact subtype and
+    activated ability. Target selection precedes mana, tap, and sacrifice
+    payment; the ability survives its token source ceasing to exist. Explore
+    handles land, nonland, and empty-library outcomes, with the nonland
+    top-or-graveyard decision exposed to the agent. Get Lost preserves the
+    destroyed permanent's controller for its two Map tokens.
+  * **Floodpits Drowner** - its second ability requires a creature with a stun
+    counter and shuffles source and target into their respective owners'
+    libraries. Losing the stun counter before resolution makes the target
+    illegal and leaves Drowner in place.
+  * **Last-known information** - battlefield exits snapshot controller, owner,
+    types, power/toughness, and token status before resetting the object.
+    Heartfire Hero now deals its last-known power to each opponent when it dies.
+  * **Emblems and Kaito** - persistent command-zone emblem records drive
+    Kaito's cumulative Ninja anthem and Wrenn's graveyard land/permanent-spell
+    permissions. Kaito's turn-and-loyalty condition changes it into only a 3/4
+    Ninja creature with hexproof while retaining access to loyalty activation.
+  * **Enduring Curiosity** - the dies trigger checks its creature and token
+    snapshot, then returns the physical card under its owner as an enchantment
+    with creature types removed.
+  The integration work also repaired post-resolution sorcery timing, synthetic
+  owner fallback, player-ID damage routing, and conditional keyword parsing.
+  Regression-checked 178/178 scenarios after the round.
+  **Round 7.18 (July 2026)** completed the next five support-audit items in one
+  scenario-first pass:
+  * **Mockingbird** - resolution exposes an optional bounded creature choice
+    using total mana actually spent. The selected object contributes printed
+    copyable values; counters and continuous effects are excluded, while Bird
+    and flying are added before enters abilities trigger.
+  * **Food** - exact colorless artifact Food tokens carry `{2}, {T}, Sacrifice
+    this token: You gain 3 life.` The atomic activation transaction pays all
+    costs and leaves the ability on the stack after the token ceases.
+  * **Plot** - eight hand-index actions pay the parsed Plot cost as a
+    sorcery-speed special action. A tracked permission blocks same-turn use,
+    exposes a later free cast from exile, and is consumed on casting.
+  * **Bargain and Torch the Tower** - casting exposes eligible artifacts,
+    enchantments, and tokens or a decline action. Torch's atomic effect chooses
+    2 versus 3 damage, conditionally scries, and registers its same-turn
+    damage-linked death-to-exile replacement.
+  * **Manifest dread and Turn Inside Out** - top-two selection, graveyard
+    movement, one/zero-card edge cases, anonymous colorless 2/2
+    characteristics, paid face-up restoration, and the exact target's
+    same-turn delayed death trigger are represented end to end.
+  Shared repairs found by these scenarios make generated action context reach
+  handlers, constrain named self-ETB triggers to their own object, and let
+  replacement conditions inspect live zone events without deep-copying thread
+  locks. Regression-checked 187/187 scenarios after the round.
+  **Coverage status:** rounds 1-7.18 have closed ~80
   effect/mechanic classes across
   removal, bounce, counters, tokens, keywords, sacrifice, reanimation,
   control, mana, library manipulation, variable-count effects, prevention,
   animation, levelers, Adventure, and duplicate-ID zone semantics. Miss rate
   fell 6→13→14→9→10→3 across parser samples before the first-touch sweep moved
   into mechanic subsystems. The sample-deck audit now supersedes speculative
-  subsystem ordering: Map/explore behavior and remaining high-copy card riders
-  are the highest-impact gaps. Reorder by
+  subsystem ordering: Domain effect value, additional combat, opening-hand
+  replacement, rest-of-game life restriction, and Corrupted are the next
+  confirmed gaps. Reorder by
   real manifest counts whenever harvest runs begin.
 - ◐ **First-touch coverage sweep**: one scenario for every subsystem that has
   never had one (this practice found four phantom methods and three dead
   subsystems; assume more remain in untested corners). Next candidates come
-  from `SAMPLE_DECK_SUPPORT_AUDIT.md`, starting with Map tokens and
-  agent-controlled explore, then Floodpits Drowner's stun-linked shuffle.
+  from `SAMPLE_DECK_SUPPORT_AUDIT.md`, starting with Herd Migration's Domain
+  effect value and Fear of Missing Out's additional combat.
 
 ## Tier 3 — Training & environment quality
 
@@ -455,7 +507,7 @@ Remaining Tier 2 work:
 
 ## Tier 4 — Verification & calibration
 
-1. ✅ Golden scenario harness — 168 scenarios and growing; scenario-first is a
+1. ✅ Golden scenario harness — 187 scenarios and growing; scenario-first is a
    working agreement, not a suggestion.
 2. ▢ **Property tests**: zone-count conservation per action; SBA idempotence;
    the action mask never permits an illegal action (fuzz); mana pools empty
@@ -497,8 +549,10 @@ Remaining Tier 2 work:
 - Role support currently covers the Monster and Wicked Role definitions used by
   the sample decks. Cursed, Royal, Sorcerer, Young Hero, and Virtuous Roles still
   need definitions when a target deck requires them.
-- Heartfire Hero's Valiant counter is supported, but its separate power-based
-  death-damage rider still needs last-known-power effect support.
+- Emblem execution currently recognizes the Kaito Ninja anthem and Wrenn
+  graveyard-permission texts used by the sample decks. Other emblem text is
+  retained as a command-zone record but needs an effect implementation before
+  its card can be considered supported.
 - Delayed-trigger pronouns referring to objects created earlier in the same
   resolution mis-bind to the source (token-maker riders) and no-op safely.
 - Specific `remove_ability` is not an existence dependency in layer sorting;

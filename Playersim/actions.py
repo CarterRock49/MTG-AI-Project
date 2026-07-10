@@ -118,8 +118,8 @@ ACTION_MEANINGS = {
     294: ("CAST_FOR_IMPENDING", None),  # Context={'hand_idx': X}
     295: ("PAY_OFFSPRING_COST", None),  # Context implicit via gs.pending_spell_context
 
-    # Gaps filled with NO_OP (296-298) = 3 actions
-    **{i: ("NO_OP", None) for i in range(296, 299)},
+    # Plot hand slots 0-2. Remaining hand slots use 309-313.
+    **{296 + i: ("PLOT_CARD", i) for i in range(3)},
 
     # Library/Card Movement (299-308) = 10 actions
     # Param = Choice index 0-4 for specific library search
@@ -130,8 +130,8 @@ ACTION_MEANINGS = {
     307: ("PUT_ON_BOTTOM", None), # Scry Choice - Contextual
     308: ("DREDGE", None), # Param = GY index 0-5? Or Contextual? Use context.
 
-    # Gaps filled with NO_OP (309-313) = 5 actions
-    **{i: ("NO_OP", None) for i in range(309, 314)}, # 309-313
+    # Plot hand slots 3-7.
+    **{309 + i: ("PLOT_CARD", i + 3) for i in range(5)},
 
     # Counter Management (314-334) = 21 actions
     # Param = Target Index 0-9 (relative to valid targets?) Context needed: {'counter_type': X}
@@ -244,8 +244,9 @@ ACTION_MEANINGS = {
     # (Class enchantments, 253-257); levelers pay a repeatable "Level up {cost}".
     **{467 + i: ("LEVEL_UP_CREATURE", i) for i in range(5)}, # 467-471
 
-    # Fill the remaining space (472-479) = 8 actions
-    **{i: ("NO_OP", None) for i in range(472, 480)} # 472-479
+    # Wrenn emblem: play/cast graveyard permanent by relative index 0-5.
+    **{472 + i: ("PLAY_FROM_GRAVEYARD", i) for i in range(6)}, # 472-477
+    **{i: ("NO_OP", None) for i in range(478, 480)} # 478-479
 }
 # Ensure size is correct after updates
 if len(ACTION_MEANINGS) != 480:
@@ -320,6 +321,8 @@ class ActionHandler(
                 "PLAY_MDFC_BACK": self._handle_play_mdfc_back,
                 "PLAY_ADVENTURE": self._handle_play_adventure,
                 "CAST_FROM_EXILE": self._handle_cast_from_exile,
+                "PLOT_CARD": self._handle_plot_card,
+                "PLAY_FROM_GRAVEYARD": self._handle_play_from_graveyard,
                 # Combat
                 "ATTACK": self._handle_attack,
                 "BLOCK": self._handle_block,
@@ -551,7 +554,13 @@ class ActionHandler(
                 self.current_valid_actions[11] = True # Pass
                 self.current_valid_actions[12] = True # Concede
 
-        action_context = kwargs.get('context', {})
+        generated_context = {}
+        if hasattr(self, "action_reasons_with_context"):
+            generated_context = dict(
+                self.action_reasons_with_context.get(action_idx, {}).get(
+                    "context", {}) or {})
+        action_context = generated_context
+        action_context.update(kwargs.get('context', {}) or {})
         # --- Merge context (remains the same) ---
         if hasattr(gs, 'phase'): # Check phase exists first
                 if gs.phase == gs.PHASE_TARGETING and hasattr(gs, 'targeting_context') and gs.targeting_context:

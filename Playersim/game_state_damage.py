@@ -426,7 +426,8 @@ class GameStateDamageMixin:
 
         return initial_actions_performed
 
-    def damage_planeswalker(self, planeswalker_id, amount, source_id):
+    def damage_planeswalker(self, planeswalker_id, amount, source_id,
+                            defer_sba=False):
         """Deal damage to a planeswalker (removes loyalty counters). Returns actual damage dealt."""
         pw_card = self._safe_get_card(planeswalker_id)
         owner = self.get_card_controller(planeswalker_id)
@@ -454,7 +455,8 @@ class GameStateDamageMixin:
                 current_loyalty = owner.get("loyalty_counters", {}).get(planeswalker_id, 0)
                 logging.debug(f"{source_name} dealt {counters_removed} damage to {pw_card.name}. Loyalty now {current_loyalty}")
                 self.trigger_ability(planeswalker_id, "DAMAGED", {"amount": counters_removed, "source_id": source_id})
-                self.check_state_based_actions() # PW might die
+                if not defer_sba:
+                    self.check_state_based_actions() # PW might leave
                 return counters_removed # Return damage actually applied as counter removal
         return 0 # No damage applied or counters removed
 

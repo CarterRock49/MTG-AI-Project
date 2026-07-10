@@ -32,6 +32,7 @@ class GameState(
     # (Keep existing class variables like PHASE_ constants and __slots__)
     __slots__ = ["card_db", "max_turns", "max_hand_size", "max_battlefield", "day_night_checked_this_turn",
                  "fidelity_counters", "_sba_in_progress", "delayed_triggers",
+                 "delayed_event_triggers", "copy_overrides", "plotted_cards",
                  "phase_history", "stack", "priority_pass_count", "last_stack_size",
                  "turn", "phase", "agent_is_p1", "combat_damage_dealt", "day_night_state",
                  "current_attackers", "current_block_assignments", 'mulligan_data',
@@ -383,6 +384,7 @@ class GameState(
             # Entries: dicts from register_delayed_trigger, or bare callables
             # (fire at the next state-based check).
             self.delayed_triggers = []
+            self.delayed_event_triggers = []
             self.last_die_roll = {}
             self.die_roll_history = []
             for _meld_id, _meld_info in getattr(self, 'melded_permanents', {}).items():
@@ -402,6 +404,19 @@ class GameState(
                     _specialized_card._printed = copy.deepcopy(
                         _specialized_info['original_printed'])
                     _specialized_card.reset_to_printed()
+            for _manifest_id, _manifest_info in getattr(self, 'manifested_cards', {}).items():
+                _manifest_card = self._safe_get_card(_manifest_id)
+                if _manifest_card and _manifest_info.get('original_printed'):
+                    _manifest_card._printed = copy.deepcopy(
+                        _manifest_info['original_printed'])
+                    _manifest_card.reset_to_printed()
+                    _manifest_card.face_down = False
+            for _copy_id, _copy_info in getattr(self, 'copy_overrides', {}).items():
+                _copy_card = self._safe_get_card(_copy_id)
+                if _copy_card and _copy_info.get('original_printed'):
+                    _copy_card._printed = copy.deepcopy(
+                        _copy_info['original_printed'])
+                    _copy_card.reset_to_printed()
             # BUGFIX: Card objects are shared via card_db across games, and
             # in-play state written onto them (counters) leaked into later
             # games -- game N+1 started with game N's +1/+1 counters, silently
@@ -464,6 +479,8 @@ class GameState(
             self.crewed_vehicles = set()
             self.morphed_cards = {}
             self.manifested_cards = {}
+            self.copy_overrides = {}
+            self.plotted_cards = []
             self.epic_spells = {}
             self.myriad_tokens = []
             self.persist_returned = set()
@@ -870,6 +887,8 @@ class GameState(
         # clone would mutate the original game. Clones start with none (v1
         # limitation: pending delayed triggers are invisible to lookahead).
         cloned_state.delayed_triggers = []
+        cloned_state.delayed_event_triggers = copy.deepcopy(
+            getattr(self, "delayed_event_triggers", []))
         for attr in primitive_attrs:
             if hasattr(self, attr):
                 setattr(cloned_state, attr, getattr(self, attr))
@@ -898,6 +917,7 @@ class GameState(
             "saga_counters", "battle_cards", "suspended_cards", "rebounded_cards", "phased_out_state",
             "melded_permanents", "mutated_permanents", "specialized_cards", "last_die_roll", "die_roll_history",
             "foretold_cards", "epic_spells", "morphed_cards", "manifested_cards",
+            "copy_overrides", "plotted_cards",
             "planeswalker_attack_targets", "battle_attack_targets", "planeswalker_protectors",
             "mulligan_count", "mulligan_data" # Dicts need deepcopy
             # Contexts will be handled separately due to player references

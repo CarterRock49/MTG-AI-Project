@@ -113,6 +113,8 @@ class Card:
         self.impending_n = 0
         self.is_specialize = False
         self.specialize_cost = None
+        self.is_plot = False
+        self.plot_cost = None
 
         # Enhanced keyword/cost parsing within __init__
         self._parse_special_keywords(self.oracle_text) # Parse Offspring/Impending
@@ -222,6 +224,7 @@ class Card:
                 setattr(self, attr, _copy.deepcopy(value) if isinstance(value, (list, dict, set)) else value)
             except Exception:
                 pass
+        self.compute_subtype_vector()
 
     def printed(self, attr, default=None):
         """Printed (pre-continuous-effects) value of a characteristic."""
@@ -256,6 +259,12 @@ class Card:
             self.is_specialize = True
             self.specialize_cost = specialize_match.group(1)
             logging.debug(f"Parsed Specialize cost '{self.specialize_cost}' for {self.name}")
+
+        plot_match = re.search(r"\bplot\s*((?:\{[^}]+\})+)", oracle_lower)
+        if plot_match:
+            self.is_plot = True
+            self.plot_cost = plot_match.group(1)
+            logging.debug(f"Parsed Plot cost '{self.plot_cost}' for {self.name}")
             
     def reset_state_on_zone_change(self):
          """Reset temporary states when card leaves battlefield (e.g., flip, morph)."""
@@ -265,25 +274,10 @@ class Card:
          if getattr(self, 'faces', None) and getattr(self, 'current_face', 0) != 0:
              self.set_current_face(0)
 
-         # Reset morph/manifest state
-         if hasattr(self, 'face_down') and self.face_down:
-             gs = self.game_state # Need access to game state
-             # Restore original state if possible
-             original_info = None
-             if self.card_id in getattr(gs, 'morphed_cards', {}):
-                 original_info = gs.morphed_cards[self.card_id]['original']
-                 del gs.morphed_cards[self.card_id]
-             elif self.card_id in getattr(gs, 'manifested_cards', {}):
-                 original_info = gs.manifested_cards[self.card_id]['original']
-                 del gs.manifested_cards[self.card_id]
-
-             if original_info:
-                 temp_card = Card(original_info) # Create temp instance to read from
-                 self.name = getattr(temp_card, 'name', self.name)
-                 self.power = getattr(temp_card, 'power', self.power)
-                 # ... restore other properties ...
-                 self.face_down = False
-                 logging.debug(f"Resetting face-down state for {self.name} leaving battlefield.")
+         # GameState owns the original identity snapshot for face-down cards
+         # and restores it before calling this hook.
+         if getattr(self, 'face_down', False):
+             self.face_down = False
 
          # Reset Class level? Usually Class state persists, check rules.
          # if hasattr(self, 'is_class') and self.is_class: self.current_level = 1
@@ -1823,8 +1817,9 @@ class Card:
         
         # Parse oracle text for loyalty abilities
         if self.oracle_text:
+            loyalty_text = self.oracle_text.replace("−", "-")
             ability_pattern = r'([+\-]?[0-9]+):\s+(.*?)(?=(?:[+\-]?[0-9]+:|$))'
-            matches = re.findall(ability_pattern, self.oracle_text, re.DOTALL)
+            matches = re.findall(ability_pattern, loyalty_text, re.DOTALL)
             for cost, effect in matches:
                 self.loyalty_abilities.append({
                     "cost": int(cost),
@@ -2218,12 +2213,14 @@ class Card:
         """
         cost_vector = self.get_cost_vector()
         
-        # Get back face info for MDFCs
-        is_mdfc_val = 1.0 if self.is_mdfc() else 0.0
+        # A face-down permanent has only its public face-down characteristics.
+        # Keep private double-face metadata out of policy observations.
+        is_face_down = bool(getattr(self, 'face_down', False))
+        is_mdfc_val = 0.0 if is_face_down else (1.0 if self.is_mdfc() else 0.0)
         back_power = 0
         back_toughness = 0
         
-        if self.is_mdfc() and self.back_face:
+        if not is_face_down and self.is_mdfc() and self.back_face:
             back_face = self.back_face
             if 'power' in back_face and back_face['power'] and isinstance(back_face['power'], str) and back_face['power'].isdigit():
                 back_power = int(back_face['power'])

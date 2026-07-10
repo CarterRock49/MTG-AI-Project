@@ -755,6 +755,25 @@ class AbilityHandler:
                 parsed_keywords_from_data = self._get_parsed_keywords(keywords_from_card_data)
                 for keyword_text in parsed_keywords_from_data:
                     base_kw = keyword_text.split()[0].lower() # Get base keyword (e.g., 'flying')
+                    oracle_lines = [
+                        line.strip().lower()
+                        for line in (getattr(card, 'oracle_text', '') or '').splitlines()
+                        if line.strip()
+                    ]
+                    keyword_lines = [
+                        line for line in oracle_lines
+                        if re.search(r'\b' + re.escape(base_kw) + r'\b', line)
+                    ]
+                    conditional_markers = re.compile(
+                        r'\b(?:during|as long as|if|when|whenever|until|unless)\b')
+                    if (keyword_lines
+                            and all(conditional_markers.search(line)
+                                    for line in keyword_lines)):
+                        # Scryfall's keyword list includes words used only by a
+                        # conditional ability. The condition's own StaticAbility
+                        # registers the layer effect; an unconditional keyword
+                        # ability here would make it permanently active.
+                        continue
                     if base_kw in Card.ALL_KEYWORDS:
                         if base_kw not in handled_keywords:
                             if self._create_keyword_ability(card_id, card, base_kw, abilities_list, full_keyword_text=keyword_text):
@@ -802,6 +821,13 @@ class AbilityHandler:
                     # Process each resulting clause/line
                     for clause_text in final_clauses:
                         if not clause_text: continue
+
+                        # Loyalty abilities are parsed and activated by Card's
+                        # dedicated loyalty engine. Treating their effect text
+                        # as a normal static/activated ability can apply quoted
+                        # emblem rules directly from the planeswalker.
+                        if re.match(r'^[+\-\u2212]?\d+\s*:', clause_text):
+                            continue
 
                         clause_hash = hash(clause_text)
                         if clause_hash in processed_clauses_hashes: continue # Skip identical text blocks
@@ -2105,7 +2131,10 @@ class AbilityHandler:
             try:
                 resolve_method = None; resolve_kwargs = {'game_state': gs, 'controller': controller}; resolve_method_name = "None"
                 # ...(logic to find resolve method)...
-                if hasattr(ability, 'resolve_with_targets') and callable(ability.resolve_with_targets): resolve_method_name = "resolve_with_targets"; resolve_method = ability.resolve_with_targets; resolve_kwargs['targets'] = targets_on_stack
+                if hasattr(ability, 'resolve_with_targets') and callable(ability.resolve_with_targets):
+                    resolve_method_name = "resolve_with_targets"
+                    resolve_method = ability.resolve_with_targets
+                    resolve_kwargs['targets'] = targets_on_stack
                 elif hasattr(ability, 'resolve') and callable(ability.resolve):
                     resolve_method_name = "resolve"; resolve_method = ability.resolve
                     import inspect; sig = inspect.signature(ability.resolve)
@@ -2120,6 +2149,9 @@ class AbilityHandler:
                      if 'targets' in sig.parameters: resolve_kwargs['targets'] = targets_on_stack
 
                 if resolve_method:
+                    import inspect
+                    if 'context' in inspect.signature(resolve_method).parameters:
+                        resolve_kwargs['context'] = context
                     logging.debug(f"Resolving via Ability object method: {resolve_method_name}")
                     resolve_result = resolve_method(**resolve_kwargs)
                     resolution_success = resolve_result is not False # Assume True unless explicitly False
@@ -2131,7 +2163,9 @@ class AbilityHandler:
                         if effects:
                             temp_success = True
                             for effect_obj in effects:
-                                 if not effect_obj.apply(gs, card_id, controller, targets_on_stack):
+                                 if not effect_obj.apply(
+                                         gs, card_id, controller, targets_on_stack,
+                                         context=context):
                                      temp_success = False
                             resolution_success = temp_success
                         else:
@@ -2173,7 +2207,9 @@ class AbilityHandler:
                  for effect_obj in effects:
                       try:
                           target_arg = targets_on_stack if isinstance(targets_on_stack, dict) else None
-                          if not effect_obj.apply(gs, card_id, controller, target_arg):
+                          if not effect_obj.apply(
+                                  gs, card_id, controller, target_arg,
+                                  context=context):
                                temp_success = False # Track failure
                       except Exception as e:
                           logging.error(f"Error applying fallback effect '{effect_obj.effect_text}': {e}", exc_info=True)

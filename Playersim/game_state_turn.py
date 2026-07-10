@@ -302,8 +302,16 @@ class GameStateTurnMixin:
         if player != self._get_active_player():
             return False
             
-        # Must be in a main phase
-        if self.phase not in [self.PHASE_MAIN_PRECOMBAT, self.PHASE_MAIN_POSTCOMBAT]:
+        # Priority is represented as a transient phase while the underlying
+        # turn phase is retained in previous_priority_phase. After a spell or
+        # ability resolves, the active player still has sorcery-speed timing
+        # in that same main phase when the stack is empty.
+        effective_phase = self.phase
+        if (effective_phase == self.PHASE_PRIORITY
+                and self.previous_priority_phase is not None):
+            effective_phase = self.previous_priority_phase
+        if effective_phase not in [self.PHASE_MAIN_PRECOMBAT,
+                                   self.PHASE_MAIN_POSTCOMBAT]:
             return False
             
         # Stack must be empty
@@ -327,6 +335,12 @@ class GameStateTurnMixin:
                 choice_type = self.choice_context.get("type")
                 if choice_type == "linked_exile" and self.choice_context.get("optional", False):
                     self.decline_linked_exile_choice()
+                    return
+                if choice_type == "mockingbird_copy":
+                    self.complete_mockingbird_copy_choice(None)
+                    return
+                if choice_type == "bargain":
+                    self.complete_bargain_choice(None)
                     return
                 if choice_type == "choose_mode":
                     self.finalize_modal_spell_choice()
@@ -764,8 +778,18 @@ class GameStateTurnMixin:
             # on LayerSystem -> AttributeError on every cleanup step.
             removed_count = self.layer_system.cleanup_expired_effects() or 0
             if removed_count > 0: logging.debug(f"Cleanup: Removed {removed_count} temporary layer effects.")
+        if getattr(self, "replacement_effects", None):
+            removed_replacements = (
+                self.replacement_effects.cleanup_expired_effects() or 0)
+            if removed_replacements > 0:
+                logging.debug(
+                    f"Cleanup: Removed {removed_replacements} replacement effects.")
         # Clear other temporary game state trackers (need specific cleanup logic)
         if hasattr(self, 'haste_until_eot'): self.haste_until_eot.clear()
+        self.delayed_event_triggers = [
+            entry for entry in getattr(self, "delayed_event_triggers", [])
+            if entry.get("expires_turn", self.turn) > self.turn
+        ]
         return False
 
     def _get_next_turn_player(self):

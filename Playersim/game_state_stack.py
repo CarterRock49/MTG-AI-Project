@@ -9,6 +9,7 @@ import logging
 from .ability_utils import EffectFactory
 import re
 from .ability_types import TriggeredAbility
+from .card import Card
 
 
 class GameStateStackMixin:
@@ -20,8 +21,14 @@ class GameStateStackMixin:
     def _get_target_type_from_text(self, text):
          """Simple helper to guess target type."""
          text = text.lower()
+         if re.search(
+                 r"target\s+creature\s*,\s*enchantment\s*,\s*or\s+planeswalker",
+                 text):
+             return "permanent"
          if "target creature or vehicle" in text:
              return "creature_or_vehicle"
+         if "target creature or planeswalker" in text:
+             return "permanent"
          if ("target creature" in text
                  or re.search(r"\btarget(?:\s+[a-z-]+){1,4}\s+creatures?\b", text)):
              return "creature"
@@ -37,12 +44,46 @@ class GameStateStackMixin:
 
     def trigger_ability(self, card_id, event_type, context=None):
         """Forward ability triggering to the AbilityHandler"""
+        queued = False
         if hasattr(self, 'ability_handler') and self.ability_handler:
             # BUGFIX: AbilityHandler's method is check_abilities; the old name
             # raised AttributeError on EVERY trigger check, which step()'s broad
             # exception handling converted into 'error' game endings.
-            return self.ability_handler.check_abilities(card_id, event_type, context)
-        return []
+            queued = bool(self.ability_handler.check_abilities(
+                card_id, event_type, context))
+            remaining = []
+            for delayed in getattr(self, "delayed_event_triggers", []):
+                if delayed.get("expires_turn", self.turn) < self.turn:
+                    continue
+                if (delayed.get("event_type") != event_type
+                        or delayed.get("watched_card_id") != card_id):
+                    remaining.append(delayed)
+                    continue
+                if (event_type == "DIES"
+                        and not (context or {}).get(
+                            "last_known", {}).get("was_creature", False)):
+                    remaining.append(delayed)
+                    continue
+                controller = (self.p1 if delayed.get("controller") == "p1"
+                              else self.p2)
+                effect_text = delayed.get("effect_text", "")
+                ability = TriggeredAbility(
+                    card_id=card_id,
+                    trigger_condition="when that creature dies",
+                    effect=effect_text,
+                    effect_text=f"When that creature dies, {effect_text}.")
+                trigger_context = dict(context or {})
+                trigger_context.update({
+                    "ability": ability,
+                    "source_id": delayed.get("source_id", card_id),
+                    "effect_text": ability.effect_text,
+                    "delayed_event_trigger": True,
+                })
+                self.ability_handler.active_triggers.append(
+                    (ability, controller, trigger_context))
+                queued = True
+            self.delayed_event_triggers = remaining
+        return queued
 
     def notify_targets_committed(self, source_id, controller, targets, stack_context=None):
         """Emit target events after a spell or ability's targets are final.
@@ -463,6 +504,151 @@ class GameStateStackMixin:
             return False
         return self.cast_spell(card_id, controller, cast_context)
 
+    @staticmethod
+    def _mana_spent_on_cast(context):
+        """Return the amount of mana actually spent for a resolving spell."""
+        details = (context or {}).get("final_paid_details", {})
+        spent = details.get("spent_specific", {}) if isinstance(details, dict) else {}
+        total = 0
+        for amount in spent.values() if isinstance(spent, dict) else ():
+            try:
+                total += max(0, int(amount))
+            except (TypeError, ValueError):
+                continue
+        return total
+
+    def _mockingbird_copy_options(self, mana_spent):
+        options = []
+        for player in (self.p1, self.p2):
+            for permanent_id in player.get("battlefield", []):
+                permanent = self._safe_get_card(permanent_id)
+                if not permanent or "creature" not in getattr(permanent, "card_types", []):
+                    continue
+                try:
+                    mana_value = int(getattr(permanent, "cmc", 0) or 0)
+                except (TypeError, ValueError):
+                    mana_value = 0
+                if mana_value <= mana_spent:
+                    options.append(permanent_id)
+        return options
+
+    def _apply_mockingbird_copy_identity(self, card_id, target_id):
+        """Apply Mockingbird's copyable values and its Bird/flying exception."""
+        card = self._safe_get_card(card_id)
+        target = self._safe_get_card(target_id)
+        if not card or not target:
+            return False
+        target_controller, target_zone = self.find_card_location(target_id)
+        if target_zone != "battlefield" or "creature" not in getattr(target, "card_types", []):
+            return False
+
+        original_printed = copy_module.deepcopy(getattr(card, "_printed", {}))
+        copied = copy_module.deepcopy(getattr(target, "_printed", {}))
+        if not copied:
+            target.snapshot_printed()
+            copied = copy_module.deepcopy(target._printed)
+
+        subtypes = list(copied.get("subtypes", []) or [])
+        if "bird" not in {str(subtype).lower() for subtype in subtypes}:
+            subtypes.append("bird")
+        copied["subtypes"] = subtypes
+        copied["type_line"] = self._build_type_line({
+            "supertypes": copied.get("supertypes", []),
+            "card_types": copied.get("card_types", []),
+            "subtypes": subtypes,
+        })
+
+        keywords = list(copied.get("keywords", []) or [])
+        if len(keywords) != len(Card.ALL_KEYWORDS):
+            keywords = [0] * len(Card.ALL_KEYWORDS)
+        flying_index = Card.ALL_KEYWORDS.index("flying")
+        keywords[flying_index] = 1
+        copied["keywords"] = keywords
+        oracle_text = str(copied.get("oracle_text", "") or "")
+        if not re.search(r"(?:^|\n)flying(?:\s|,|$)", oracle_text, re.IGNORECASE):
+            oracle_text = f"{oracle_text}\nFlying".strip()
+        copied["oracle_text"] = oracle_text
+
+        self.copy_overrides[card_id] = {
+            "original_printed": original_printed,
+            "copied_from": target_id,
+        }
+        card._printed = copied
+        card.reset_to_printed()
+        return True
+
+    def complete_mockingbird_copy_choice(self, option_index=None):
+        """Choose Mockingbird's copy object, or pass None to decline."""
+        choice = getattr(self, "choice_context", None)
+        if not (self.phase == self.PHASE_CHOOSE and choice
+                and choice.get("type") == "mockingbird_copy"):
+            return False
+        controller = choice.get("controller") or choice.get("player")
+        card_id = choice.get("card_id")
+        options = choice.get("options", [])
+        selected_id = None
+        if option_index is not None:
+            if not isinstance(option_index, int) or not 0 <= option_index < len(options):
+                return False
+            selected_id = options[option_index]
+            if not self._apply_mockingbird_copy_identity(card_id, selected_id):
+                return False
+
+        return_phase = self.previous_priority_phase
+        self.choice_context = None
+        self.previous_priority_phase = None
+        self.phase = return_phase if return_phase is not None else self.PHASE_PRIORITY
+        self.priority_player = controller
+        self.priority_pass_count = 0
+        context = dict(choice.get("resolution_context", {}))
+        context["mockingbird_copy_choice_complete"] = True
+        context["mockingbird_copied_from"] = selected_id
+        success = self.move_card(
+            card_id, controller, "stack_implicit", controller, "battlefield",
+            cause="spell_resolution", context=context)
+        if not success:
+            override = self.copy_overrides.pop(card_id, None)
+            card = self._safe_get_card(card_id)
+            if card and override and override.get("original_printed"):
+                card._printed = copy_module.deepcopy(override["original_printed"])
+                card.reset_to_printed()
+            controller.setdefault("graveyard", []).append(card_id)
+        return success
+
+    @staticmethod
+    def _bargain_options(player, card_lookup):
+        options = []
+        for permanent_id in player.get("battlefield", []):
+            permanent = card_lookup(permanent_id)
+            if not permanent:
+                continue
+            types = set(getattr(permanent, "card_types", []))
+            if (types.intersection({"artifact", "enchantment"})
+                    or bool(getattr(permanent, "is_token", False))):
+                options.append(permanent_id)
+        return options
+
+    def complete_bargain_choice(self, option_index=None):
+        """Stage an optional Bargain sacrifice and resume casting."""
+        choice = getattr(self, "choice_context", None)
+        if not (self.phase == self.PHASE_CHOOSE and choice
+                and choice.get("type") == "bargain"):
+            return False
+        options = choice.get("options", [])
+        selected_id = None
+        if option_index is not None:
+            if not isinstance(option_index, int) or not 0 <= option_index < len(options):
+                return False
+            selected_id = options[option_index]
+            controller = choice.get("controller") or choice.get("player")
+            if selected_id not in self._bargain_options(controller, self._safe_get_card):
+                return False
+        cast_context = dict(choice.get("original_cast_context", {}))
+        cast_context["bargain_choice_complete"] = True
+        cast_context["bargained"] = selected_id is not None
+        cast_context["bargain_sacrifice_id"] = selected_id
+        return self._resume_after_casting_choice(choice, cast_context)
+
     def choose_casting_additional_return(self, option_index):
         """Pay a mandatory casting cost by returning one controlled permanent."""
         choice = self.choice_context
@@ -577,6 +763,78 @@ class GameStateStackMixin:
             combined[key] = combined.get(key, 0) + value
         return combined
 
+    @staticmethod
+    def _player_key_for_permission(player, p1):
+        return "p1" if player is p1 else "p2"
+
+    def plot_card(self, player, hand_index):
+        """Take the Plot special action from hand at sorcery speed."""
+        if not self._can_act_at_sorcery_speed(player):
+            return False
+        if not isinstance(hand_index, int) or not 0 <= hand_index < len(player.get("hand", [])):
+            return False
+        card_id = player["hand"][hand_index]
+        card = self._safe_get_card(card_id)
+        plot_cost = getattr(card, "plot_cost", None) if card else None
+        if not card or not getattr(card, "is_plot", False) or not plot_cost:
+            return False
+        parsed_cost = self.mana_system.parse_mana_cost(plot_cost)
+        if not self.mana_system.can_pay_mana_cost(player, parsed_cost):
+            return False
+        paid = self.mana_system.pay_mana_cost_get_details(player, parsed_cost)
+        if paid is None:
+            return False
+        if not self.move_card(
+                card_id, player, "hand", player, "exile", cause="plot",
+                context={"plot_cost": plot_cost}):
+            self.mana_system.add_mana(player, paid.get("spent_specific", {}))
+            return False
+        self.plotted_cards.append({
+            "card_id": card_id,
+            "controller": self._player_key_for_permission(player, self.p1),
+            "plotted_turn": self.turn,
+        })
+        return True
+
+    def get_exile_cast_options(self, player):
+        """Return deterministic ordinary and Plot casting permissions in exile."""
+        options = []
+        ordinary = getattr(self, "cards_castable_from_exile", set())
+        seen_ordinary = set()
+        for source_idx, card_id in enumerate(player.get("exile", [])):
+            if card_id in ordinary and card_id not in seen_ordinary:
+                options.append({
+                    "card_id": card_id,
+                    "source_idx": source_idx,
+                    "permission": "ordinary",
+                })
+                seen_ordinary.add(card_id)
+
+        if self._can_act_at_sorcery_speed(player):
+            player_key = self._player_key_for_permission(player, self.p1)
+            for entry in getattr(self, "plotted_cards", []):
+                card_id = entry.get("card_id")
+                if (entry.get("controller") != player_key
+                        or entry.get("plotted_turn", self.turn) >= self.turn
+                        or card_id not in player.get("exile", [])):
+                    continue
+                options.append({
+                    "card_id": card_id,
+                    "source_idx": player["exile"].index(card_id),
+                    "permission": "plot",
+                    "plotted_turn": entry.get("plotted_turn"),
+                })
+        return options
+
+    def _consume_plot_permission(self, player, card_id):
+        player_key = self._player_key_for_permission(player, self.p1)
+        for index, entry in enumerate(self.plotted_cards):
+            if (entry.get("card_id") == card_id
+                    and entry.get("controller") == player_key):
+                self.plotted_cards.pop(index)
+                return True
+        return False
+
     def cast_spell(self, card_id, player, context=None):
         """
         Cast a spell: Validate source/timing -> Determine Cost -> Pay Costs -> Move to Stack (or Enter Choice Phase) -> Set up Targeting/Choices.
@@ -590,6 +848,18 @@ class GameStateStackMixin:
 
         # --- 1. Validate Source Zone and Timing ---
         source_zone = context.get("source_zone", "hand") # Default source
+        if context.get("emblem_graveyard_cast"):
+            permanent_spell_types = {
+                "creature", "artifact", "enchantment", "planeswalker", "battle"
+            }
+            has_permission = any(
+                emblem.get("kind") == "graveyard_permanents"
+                for emblem in player.get("emblems", []))
+            if (source_zone != "graveyard" or not has_permission
+                    or not permanent_spell_types.intersection(
+                        getattr(card, "card_types", []))):
+                logging.warning("Invalid Wrenn-emblem graveyard cast permission.")
+                return False
         source_idx = context.get("source_idx")
         source_list = None
         card_in_source = False
@@ -656,6 +926,8 @@ class GameStateStackMixin:
              if not impending_cost_str: return False
              base_cost_str = impending_cost_str
              # context['cast_for_impending'] = True # Already set by caller
+        elif alt_cost_type == 'plot':
+             final_cost_dict = self.mana_system.parse_mana_cost("")
         elif alt_cost_type: # Other alternative costs handled first
              final_cost_dict = self.mana_system.calculate_alternative_cost(card_id, player, alt_cost_type, context)
              if final_cost_dict is None: return False
@@ -679,7 +951,7 @@ class GameStateStackMixin:
 
         # Add additional mana costs ONLY IF NOT using a fully replacing alternative cost
         # Check alt_cost_type (Impending is handled above, others might replace fully)
-        apply_additional_costs = alt_cost_type is None # Apply only if no replacing alt cost
+        apply_additional_costs = alt_cost_type in (None, 'plot')
 
         if apply_additional_costs:
             pay_offspring = context.get('pay_offspring', False)
@@ -762,6 +1034,26 @@ class GameStateStackMixin:
             self.priority_pass_count = 0
             logging.info(f"Waiting for X choice before casting {card.name}.")
             return True
+
+        has_bargain = bool(re.search(
+            r"(?:^|\n)\s*bargain(?:\s|\(|$)", getattr(card, "oracle_text", ""),
+            re.IGNORECASE))
+        if has_bargain and not context.get("bargain_choice_complete", False):
+            bargain_options = self._bargain_options(player, self._safe_get_card)
+            if bargain_options:
+                return self._begin_casting_choice({
+                    "type": "bargain",
+                    "player": player,
+                    "controller": player,
+                    "card_id": card_id,
+                    "source_id": card_id,
+                    "options": bargain_options,
+                    "optional": True,
+                    "original_cast_context": dict(context),
+                })
+            context["bargain_choice_complete"] = True
+            context["bargained"] = False
+            context["bargain_sacrifice_id"] = None
 
         # --- Check Targets and target-conditioned affordability ---
         if requires_target and num_targets > 0:
@@ -897,6 +1189,30 @@ class GameStateStackMixin:
                   self.mana_system._rollback_non_mana_cost(player, additional_cost_info, context)
              return False
 
+        bargain_sacrifice_id = context.get("bargain_sacrifice_id")
+        bargain_sacrifice_was_token = False
+        if context.get("bargained"):
+             if bargain_sacrifice_id not in self._bargain_options(player, self._safe_get_card):
+                  self.mana_system.add_mana(
+                      player, paid_mana_details.get('spent_specific', {}))
+                  if context.get('pay_additional') and additional_cost_info:
+                      self.mana_system._rollback_non_mana_cost(
+                          player, additional_cost_info, context)
+                  return False
+             bargain_card = self._safe_get_card(bargain_sacrifice_id)
+             bargain_sacrifice_was_token = bool(
+                 getattr(bargain_card, "is_token", False))
+             if not self.move_card(
+                     bargain_sacrifice_id, player, "battlefield", player,
+                     "graveyard", cause="bargain",
+                     context={"source_id": card_id}):
+                  self.mana_system.add_mana(
+                      player, paid_mana_details.get('spent_specific', {}))
+                  if context.get('pay_additional') and additional_cost_info:
+                      self.mana_system._rollback_non_mana_cost(
+                          player, additional_cost_info, context)
+                  return False
+
         # --- Move Card from Source Zone ---
         removed = False
         source_list_live = player.get(source_zone)
@@ -914,9 +1230,17 @@ class GameStateStackMixin:
              logging.error(f"CRITICAL: Could not remove {card.name} from {source_zone} after paying costs.")
              if paid_mana_details: self.mana_system.add_mana(player, paid_mana_details.get('spent_specific',{}))
              if context.get('pay_additional') and additional_cost_info: self.mana_system._rollback_non_mana_cost(player, additional_cost_info, context)
+             if (bargain_sacrifice_id is not None
+                     and not bargain_sacrifice_was_token
+                     and bargain_sacrifice_id in player.get("graveyard", [])):
+                  self.move_card(
+                      bargain_sacrifice_id, player, "graveyard", player,
+                      "battlefield", cause="bargain_rollback")
              return False
         if source_zone == "exile" and hasattr(self, "cards_castable_from_exile"):
              self.cards_castable_from_exile.discard(card_id)
+        if source_zone == "exile":
+             self._consume_plot_permission(player, card_id)
 
         # --- Prepare FINAL stack context ---
         final_stack_context = context.copy()
@@ -1006,7 +1330,8 @@ class GameStateStackMixin:
         
         return has_priority
 
-    def play_land(self, card_id, controller, play_back_face=False):
+    def play_land(self, card_id, controller, play_back_face=False,
+                  source_zone="hand", permission=None):
             """
             Play a land card from hand to battlefield, respecting the one-land-per-turn rule.
             Handles MDFC (Modal Double-Faced Card) lands.
@@ -1019,10 +1344,19 @@ class GameStateStackMixin:
             Returns:
                 bool: Whether the land was successfully played
             """
-            # Check if card exists in hand
-            if card_id not in controller["hand"]:
-                logging.warning(f"Land {card_id} not found in hand")
+            source_cards = controller.get(source_zone, [])
+            if card_id not in source_cards:
+                logging.warning(f"Land {card_id} not found in {source_zone}")
                 return False
+            if source_zone == "graveyard":
+                has_permission = (
+                    permission == "graveyard_permanents"
+                    and any(
+                        emblem.get("kind") == "graveyard_permanents"
+                        for emblem in controller.get("emblems", [])))
+                if not has_permission:
+                    logging.warning("No effect permits this graveyard land play.")
+                    return False
             
             # Check if the card is actually a land (checking the correct face)
             card = self._safe_get_card(card_id)
@@ -1071,8 +1405,10 @@ class GameStateStackMixin:
             # Prepare context for move_card
             move_context = {'play_back_face': play_back_face}
 
-            # Move the land from hand to battlefield
-            result = self.move_card(card_id, controller, "hand", controller, "battlefield", cause="land_play", context=move_context)
+            # Move the land from its permitted source zone to the battlefield.
+            result = self.move_card(
+                card_id, controller, source_zone, controller, "battlefield",
+                cause="land_play", context=move_context)
             
             if result:
                 # Mark that player has played a land this turn
@@ -1665,6 +2001,34 @@ class GameStateStackMixin:
             logging.debug(f"Resolved copy of Creature spell {spell.name} as token {token_id}.")
             return token_id is not None
         else:
+            oracle_text = getattr(spell, "oracle_text", "")
+            is_mockingbird = (
+                getattr(spell, "name", "").lower() == "mockingbird"
+                and "amount of mana spent to cast this creature" in oracle_text.lower()
+                and not context.get("mockingbird_copy_choice_complete"))
+            if is_mockingbird:
+                mana_spent = self._mana_spent_on_cast(context)
+                options = self._mockingbird_copy_options(mana_spent)
+                if options:
+                    if self.phase not in [self.PHASE_TARGETING,
+                                          self.PHASE_SACRIFICE,
+                                          self.PHASE_CHOOSE]:
+                        self.previous_priority_phase = self.phase
+                    self.phase = self.PHASE_CHOOSE
+                    self.choice_context = {
+                        "type": "mockingbird_copy",
+                        "player": controller,
+                        "controller": controller,
+                        "card_id": spell_id,
+                        "source_id": spell_id,
+                        "options": options,
+                        "mana_spent": mana_spent,
+                        "resolution_context": dict(context),
+                        "optional": True,
+                    }
+                    self.priority_player = controller
+                    self.priority_pass_count = 0
+                    return True
             # Move the actual card to the battlefield
             success = self.move_card(spell_id, controller, "stack_implicit", controller, "battlefield", cause="spell_resolution", context=context)
             if success:
@@ -1807,7 +2171,9 @@ class GameStateStackMixin:
             effect_targets = self._effect_targets_from_context(context)
             effects = EffectFactory.create_effects(getattr(spell, 'oracle_text', ''), effect_targets, source_name=getattr(spell, 'name', None))
             for effect_obj in effects:
-                effect_obj.apply(self, spell_id, controller, effect_targets)
+                effect_obj.apply(
+                    self, spell_id, controller, effect_targets,
+                    context=context)
         else:
             logging.warning("No ability handler found to resolve instant/sorcery effects.")
 

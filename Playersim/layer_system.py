@@ -64,6 +64,13 @@ class LayerSystem:
                 if _p: _live_bf.update(_p.get("battlefield", []))
             affected_card_ids.update(self._ever_modified_ids & _live_bf)
 
+        # Emblems are command-zone rules objects rather than layer sources, so
+        # explicitly include the battlefield objects they may affect.
+        if any(p and p.get("emblems") for p in (gs.p1, gs.p2)):
+            for player in (gs.p1, gs.p2):
+                if player:
+                    affected_card_ids.update(player.get("battlefield", []))
+
 
         # BUGFIX: cards carrying counters need layer 7c even when no layer effects
         # are registered at all; without this, +1/+1 and -1/-1 counters never
@@ -120,13 +127,29 @@ class LayerSystem:
              if gs._safe_get_card(cid) is not None),
             key=lambda item: id_sort_key(item[0])
         ))
+        loyalty_tuple = tuple(
+            (player_key, tuple(sorted(
+                player.get("loyalty_counters", {}).items(),
+                key=lambda item: id_sort_key(item[0]))))
+            for player_key, player in (("p1", gs.p1), ("p2", gs.p2))
+            if player
+        )
+        emblems_tuple = tuple(
+            (player_key, tuple(
+                (emblem.get("kind"), emblem.get("text"))
+                for emblem in player.get("emblems", [])))
+            for player_key, player in (("p1", gs.p1), ("p2", gs.p2))
+            if player
+        )
         current_state_tuple = (
             tuple(sorted(state_tuple_items, key=id_sort_key)),
             self.effect_counter, # Track effect registrations/removals
             gs.turn, # Include turn number
             gs.phase, # Include phase
             timestamps_tuple, # Include timestamps of registered effects
-            counters_tuple
+            counters_tuple,
+            loyalty_tuple,
+            emblems_tuple,
         )
         current_state_hash = hash(current_state_tuple)
 
@@ -310,6 +333,27 @@ class LayerSystem:
             if 'creature' in calculated_characteristics[card_id].get('card_types', []):
                 self._calculate_layer7c_counters(card_id, calculated_characteristics[card_id]) # Use correct method
 
+        # Kaito's emblem is a cumulative static +1/+1 effect for Ninjas the
+        # emblem's owner controls, including objects that became Ninjas in
+        # layer 4 during this same pass.
+        for player in (gs.p1, gs.p2):
+            if not player:
+                continue
+            ninja_bonus = sum(
+                1 for emblem in player.get("emblems", [])
+                if emblem.get("kind") == "ninja_anthem")
+            if not ninja_bonus:
+                continue
+            for card_id in player.get("battlefield", []):
+                chars = calculated_characteristics.get(card_id)
+                if not chars or "creature" not in chars.get("card_types", []):
+                    continue
+                if "ninja" not in {
+                        str(subtype).lower() for subtype in chars.get("subtypes", [])}:
+                    continue
+                chars["power"] = (chars.get("power") or 0) + ninja_bonus
+                chars["toughness"] = (chars.get("toughness") or 0) + ninja_bonus
+
         # 7d: P/T modifications from static abilities (+X/+Y, Anthems)
         sorted_layer7d = self._sort_layer_effects(7, self.layers[7].get('c', []), sublayer='c')
         for _, effect_data in sorted_layer7d:
@@ -403,6 +447,8 @@ class LayerSystem:
                     live_card.power = 0
                 if hasattr(live_card, 'toughness') and live_card.toughness is not None and live_card.toughness != 0:
                     live_card.toughness = 0
+            if hasattr(live_card, "compute_subtype_vector"):
+                live_card.compute_subtype_vector()
 
         self._last_applied_state_hash = current_state_hash
         # logging.debug(f"LayerSystem: Finished applying effects.")
@@ -793,7 +839,7 @@ class LayerSystem:
                      elif isinstance(type_val, str) and type_val not in current_types:
                          current_types.append(type_val)
                  elif effect_type == 'set_type':
-                      chars['card_types'] = list(type_val) if isinstance(type_val, list) else [type_val]
+                      current_types = list(type_val) if isinstance(type_val, list) else [type_val]
                       # Rule 613.1d: Setting type removes previous card types but not supertypes/subtypes initially.
                       # However, new type might make subtypes invalid. Check needed?
                       # For simplicity, we keep subtypes unless explicitly removed or set.
@@ -809,7 +855,7 @@ class LayerSystem:
                      elif isinstance(type_val, str) and type_val not in current_subtypes:
                           current_subtypes.append(type_val)
                  elif effect_type == 'set_subtype': # Non-standard, but useful
-                      chars['subtypes'] = list(type_val) if isinstance(type_val, list) else [type_val]
+                      current_subtypes = list(type_val) if isinstance(type_val, list) else [type_val]
                  elif effect_type == 'remove_subtype':
                      if isinstance(type_val, list):
                          current_subtypes = [s for s in current_subtypes if s not in type_val]
@@ -1067,6 +1113,9 @@ class LayerSystem:
          found_keywords = set()
          if not oracle_text: return found_keywords
          text_lower = oracle_text.lower()
+         text_lines = [line.strip() for line in text_lower.splitlines() if line.strip()]
+         conditional_markers = re.compile(
+             r'\b(?:during|as long as|if|when|whenever|until|unless)\b')
 
          # Check canonical keywords
          for kw in Card.ALL_KEYWORDS:
@@ -1074,6 +1123,13 @@ class LayerSystem:
               # More precise matching to avoid substrings ("linking" != "lifelink")
               # Regex with word boundaries for single words, simple check for multi-word
               pattern = r'\b' + re.escape(kw_lower) + r'\b' if ' ' not in kw_lower else re.escape(kw_lower)
+              matching_lines = [line for line in text_lines if re.search(pattern, line)]
+              if (matching_lines
+                      and all(conditional_markers.search(line)
+                              for line in matching_lines)):
+                    # Conditional grants are registered as their own layer
+                    # effects. They are not inherent printed keywords.
+                    continue
               if re.search(pattern, text_lower):
                     # Specific exclusions (e.g., don't match "haste" in "afterhaste") are handled by word boundaries mostly.
                     # Handle parametrized keywords - mark the base keyword only

@@ -430,7 +430,7 @@ class ReplacementEffectSystem:
                 if 'condition' in effect:
                     if callable(effect['condition']):
                         try:
-                            condition_met = effect['condition'](copy.deepcopy(modified_context))
+                            condition_met = effect['condition'](dict(modified_context))
                         except Exception as e:
                             logging.error(f"Error evaluating condition for effect {effect.get('effect_id')}: {str(e)}")
                             condition_met = False
@@ -522,7 +522,7 @@ class ReplacementEffectSystem:
                     if effect.get('effect_id') in applied_ids: continue
                     condition_met = True
                     if 'condition' in effect and callable(effect['condition']):
-                        try: condition_met = effect['condition'](copy.deepcopy(modified_context))
+                        try: condition_met = effect['condition'](dict(modified_context))
                         except Exception as e: condition_met = False; logging.error(f"Error re-evaluating condition for {effect.get('effect_id')}: {e}")
                     if condition_met:
                         valid_effects_for_loop.append(effect)
@@ -553,7 +553,11 @@ class ReplacementEffectSystem:
                         source_id = effect_to_apply.get('source_id')
                         source_name = getattr(self.game_state._safe_get_card(source_id), 'name', source_id)
                         try:
-                            original_context_before_apply = copy.deepcopy(modified_context)
+                            # Zone-event contexts contain live Card/player
+                            # objects and subsystem locks that cannot be deep
+                            # copied. A shallow snapshot is sufficient to
+                            # detect routing-field changes made by a replacement.
+                            original_context_before_apply = dict(modified_context)
                             result = effect_to_apply['replacement'](modified_context)
                             if result is not None: modified_context = result
 
@@ -2410,7 +2414,7 @@ class ReplacementEffectSystem:
             return False
         if duration == 'end_of_turn':
             return start_turn < current_turn or (
-                start_turn == current_turn and current_phase >= gs.PHASE_CLEANUP)
+                start_turn == current_turn and current_phase == gs.PHASE_CLEANUP)
         if duration == 'next_turn':
             return start_turn < current_turn - 1
         if duration == 'until_my_next_turn':
@@ -2449,6 +2453,7 @@ class ReplacementEffectSystem:
         for effect_id in expired_ids:
             self.remove_effect(effect_id)
             logging.debug(f"Removed expired replacement effect {effect_id}")
+        return len(expired_ids)
 
     def remove_effects_by_source(self, source_id_to_remove):
         """Remove all replacement effects originating from a specific source."""
@@ -2457,3 +2462,4 @@ class ReplacementEffectSystem:
              logging.debug(f"Removing {len(effects_to_remove)} replacement effects from source {source_id_to_remove}")
              for effect_id in effects_to_remove:
                  self.remove_effect(effect_id)
+        return len(effects_to_remove)

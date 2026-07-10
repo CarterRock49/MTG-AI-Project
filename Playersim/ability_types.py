@@ -82,7 +82,8 @@ class Ability:
             logging.warning(f"TargetingSystem instance not found on GameState or AbilityHandler. Falling back to simple targeting for {self.card_id}")
             return self._resolve_simple_targeting(game_state, controller, text_for_targeting)
 
-    def _resolve_ability_implementation(self, game_state, controller, targets=None):
+    def _resolve_ability_implementation(self, game_state, controller, targets=None,
+                                        resolution_context=None):
         """Ability-specific implementation of resolution. Uses EffectFactory and handles sequences."""
         effect_text_to_use = getattr(self, 'effect', getattr(self, 'effect_text', None))
         if not effect_text_to_use:
@@ -134,7 +135,9 @@ class Ability:
 
         success = True
         for effect_obj in effects:
-            if not effect_obj.apply(game_state, self.card_id, controller, targets):
+            if not effect_obj.apply(
+                    game_state, self.card_id, controller, targets,
+                    context=resolution_context):
                  success = False # Mark failure if any effect fails, but try others
         return success
 
@@ -466,6 +469,57 @@ class ActivatedAbility(Ability):
              self._perform_rollback(game_state, controller, rollback_steps)
              return False
          
+    def _pay_sacrifice_cost_with_rollback(self, game_state, controller,
+                                           sacrifice_req, ability_source_id,
+                                           rollback_steps):
+        """Pay one sacrifice cost after all choices and mana were preflighted."""
+        req_lower = str(sacrifice_req or "").lower().strip(" .,;")
+        if not req_lower:
+            return False, None
+
+        self_sacrifice = (
+            req_lower in {"it", "this", "this permanent", "this creature",
+                          "this artifact", "this enchantment", "this land"}
+            or req_lower.startswith("this ")
+        )
+        required_type = next(
+            (card_type for card_type in
+             ("creature", "artifact", "enchantment", "land", "planeswalker", "permanent")
+             if card_type in req_lower),
+            None)
+        candidates = []
+        for candidate_id in controller.get("battlefield", []):
+            if "another" in req_lower and candidate_id == ability_source_id:
+                continue
+            if self_sacrifice and candidate_id != ability_source_id:
+                continue
+            candidate = game_state._safe_get_card(candidate_id)
+            candidate_types = getattr(candidate, "card_types", []) if candidate else []
+            if (required_type and required_type != "permanent"
+                    and required_type not in candidate_types):
+                continue
+            candidates.append(candidate_id)
+
+        if not candidates:
+            return False, None
+        sacrifice_id = ability_source_id if self_sacrifice else min(
+            candidates,
+            key=lambda cid: (
+                not bool(getattr(game_state._safe_get_card(cid), "is_token", False)),
+                getattr(game_state._safe_get_card(cid), "cmc", 0) or 0,
+            ))
+        sacrificed_card = game_state._safe_get_card(sacrifice_id)
+        was_token = bool(getattr(sacrificed_card, "is_token", False))
+        if not game_state.move_card(
+                sacrifice_id, controller, "battlefield", controller, "graveyard",
+                cause="ability_cost"):
+            return False, None
+        # A token ceases to exist and cannot be rolled back. The caller
+        # preflights mana and tap legality before committing this cost.
+        if not was_token:
+            rollback_steps.append(("return_from_graveyard", sacrifice_id))
+        return True, sacrifice_id
+
     def _pay_discard_cost_with_rollback(self, game_state, controller, count, rollback_steps):
         """Helper to handle discard cost payment and potential rollback."""
         # Logic assumes discarding first N cards. Need choice logic if not random.
@@ -847,6 +901,21 @@ class TriggeredAbility(Ability):
         
         # Check if our trigger condition matches any of the patterns
         if matches_any_pattern(self.trigger_condition, event_patterns):
+            if event_type == "ENTERS_BATTLEFIELD":
+                context = context or {}
+                source_card_id = context.get("source_card_id")
+                event_card_id = context.get("event_card_id")
+                source_card = context.get("source_card")
+                source_name = re.escape(
+                    str(getattr(source_card, "name", "") or "").lower())
+                self_entry = bool(
+                    re.search(r"\bthis\s+(?:creature|permanent|card)\b.*\benters\b",
+                              self.trigger_condition, re.IGNORECASE)
+                    or (source_name and re.search(
+                        rf"^\s*when(?:ever)?\s+{source_name}\s+enters\b",
+                        self.trigger_condition, re.IGNORECASE)))
+                if self_entry and source_card_id != event_card_id:
+                    return False
             if event_type == "BECOMES_TARGET":
                 context = context or {}
                 target_id = context.get("target_id", context.get("event_card_id"))
@@ -880,12 +949,13 @@ class TriggeredAbility(Ability):
                     
         return False
 
-    def resolve_with_targets(self, game_state, controller, targets=None):
+    def resolve_with_targets(self, game_state, controller, targets=None, context=None):
         """Resolve this ability with specific targets."""
-        if not self._intervening_if_met(game_state, controller):
+        if not self._intervening_if_met(game_state, controller, context):
             logging.debug(f"CR 603.4: intervening 'if' no longer true at resolution; ability does nothing: {self.effect_text}")
             return False  # Fizzle convention: resolves, does nothing
-        return self._resolve_ability_implementation(game_state, controller, targets)
+        return self._resolve_ability_implementation(
+            game_state, controller, targets, resolution_context=context)
 
 
              
@@ -913,6 +983,11 @@ class TriggeredAbility(Ability):
         gs = context.get('game_state')
         controller = context.get('controller') # Controller of the trigger source
         if not gs or not controller: return True
+
+        normalized_condition = str(condition_text).lower().strip(" .,;")
+        last_known = context.get("last_known") or {}
+        if normalized_condition in {"if it was a creature", "it was a creature"}:
+            return bool(last_known.get("was_creature", False))
 
         # Use the card evaluator for condition checking if available
         if hasattr(gs, 'card_evaluator') and gs.card_evaluator and hasattr(gs.card_evaluator, 'evaluate_condition'):
@@ -973,12 +1048,14 @@ class TriggeredAbility(Ability):
         m = re.search(r'(?:when|whenever|at)\b[^,]*,\s*if\s+([^,]+?),', text or '', re.IGNORECASE)
         return ("if " + m.group(1).strip()) if m else None
 
-    def _intervening_if_met(self, game_state, controller):
+    def _intervening_if_met(self, game_state, controller, context=None):
         """Evaluate the intervening 'if' right now (used at resolution, CR 603.4)."""
         cond = getattr(self, 'intervening_if', None)
         if not cond:
             return True
-        return self._evaluate_condition(cond, {'game_state': game_state, 'controller': controller})
+        resolution_context = dict(context or {})
+        resolution_context.update({'game_state': game_state, 'controller': controller})
+        return self._evaluate_condition(cond, resolution_context)
 
     def _check_additional_condition(self, context):
         """Checks self.additional_condition using the same evaluation logic."""
@@ -986,12 +1063,13 @@ class TriggeredAbility(Ability):
         return self._evaluate_condition(self.additional_condition, context)
     
 
-    def resolve(self, game_state, controller, targets=None):
+    def resolve(self, game_state, controller, targets=None, context=None):
         """Resolve this triggered ability using the default implementation."""
-        if not self._intervening_if_met(game_state, controller):
+        if not self._intervening_if_met(game_state, controller, context):
             logging.debug(f"CR 603.4: intervening 'if' no longer true at resolution; ability does nothing: {self.effect_text}")
             return False  # Fizzle convention: resolves, does nothing
-        return super()._resolve_ability_implementation(game_state, controller, targets)
+        return super()._resolve_ability_implementation(
+            game_state, controller, targets, resolution_context=context)
 
 
 class StaticAbility(Ability):
@@ -1050,7 +1128,8 @@ class StaticAbility(Ability):
 
         # --- Parse and Register Potentially Multiple Layer Effects ---
         # Handle complex static abilities that affect multiple layers (like Kaito)
-        parsed_effects_data = self._parse_multi_layer_effect(effect_lower_clean)
+        parsed_effects_data = self._parse_multi_layer_effect(
+            effect_lower_clean, game_state, controller)
         registered_count = 0
 
         if parsed_effects_data: # Got specific parsed data
@@ -1106,7 +1185,7 @@ class StaticAbility(Ability):
                  return False
 
 
-    def _parse_multi_layer_effect(self, effect_lower_clean):
+    def _parse_multi_layer_effect(self, effect_lower_clean, game_state, controller):
         """
         Attempt to parse complex static abilities that affect multiple layers.
         Returns a list of effect data dictionaries, one for each layer/sublayer.
@@ -1117,30 +1196,33 @@ class StaticAbility(Ability):
         if kaito_match:
             turn_restriction, condition_part, power_str, toughness_str, types_part, extra_keywords = kaito_match.groups()
             power = safe_int(power_str); toughness = safe_int(toughness_str)
-            # --- Extract conditional logic ---
-            # Base condition is presence on battlefield. Add "as long as" condition.
-            # More complex conditional function generation needed here. Simplified for now.
-            conditional_func = lambda gs: (self.card_id in self.game_state.get_card_controller(self.card_id).get("battlefield", [])) # Basic presence
-            # Add loyalty check for Kaito
-            if "loyalty counter" in (condition_part or ""):
-                 controller = self.game_state.get_card_controller(self.card_id)
-                 conditional_func = lambda gs: (controller and controller.get("loyalty_counters", {}).get(self.card_id, 0) > 0 and
-                                                  self.card_id in controller.get("battlefield", []))
+
+            def conditional_func(gs):
+                live_controller = gs.get_card_controller(self.card_id)
+                if not live_controller or self.card_id not in live_controller.get("battlefield", []):
+                    return False
+                if turn_restriction and gs._get_active_player() is not live_controller:
+                    return False
+                if ("loyalty counter" in (condition_part or "")
+                        and live_controller.get("loyalty_counters", {}).get(self.card_id, 0) <= 0):
+                    return False
+                return True
 
             # Base effect data for this ability
             base_data = {'affected_ids': [self.card_id], 'condition': conditional_func}
 
             effects = []
             # Layer 4: Add types (e.g., "Ninja")
-            types_to_add = [t.strip() for t in types_part.split() if t.strip().capitalize() in Card.SUBTYPE_VOCAB or t.strip() in Card.ALL_CARD_TYPES]
-            if types_to_add:
-                # Determine if it adds *in addition* or sets the type
-                # Kaito becomes a Ninja Creature -> SETS Creature type, adds Ninja subtype? Rules check.
-                # Rule 205.1b: If effect makes it a type without "in addition", it loses other card types.
-                # It keeps supertypes and subtypes appropriate to the new type.
-                # This is complex. Simplify: Assume SET Creature type, ADD relevant subtypes.
-                effects.append({**base_data, 'layer': 4, 'effect_type': 'set_type', 'effect_value': ["Creature"]})
-                effects.append({**base_data, 'layer': 4, 'effect_type': 'add_subtype', 'effect_value': [t for t in types_to_add if t.lower() != 'creature']}) # Add non-creature parts as subtypes
+            subtype_words = [
+                word.strip().lower() for word in types_part.split()
+                if word.strip() and word.strip().lower() not in Card.ALL_CARD_TYPES
+            ]
+            effects.append({
+                **base_data, 'layer': 4, 'effect_type': 'set_type',
+                'effect_value': ["creature"]})
+            effects.append({
+                **base_data, 'layer': 4, 'effect_type': 'set_subtype',
+                'effect_value': subtype_words})
             # Layer 6: Add keywords (e.g., "hexproof")
             if extra_keywords:
                  keywords_to_add = [kw.strip() for kw in extra_keywords.split('and') if kw.strip()]
@@ -1690,7 +1772,7 @@ class AbilityEffect:
         cleaned_text = re.sub(r'"[^"]*?"', '', cleaned_text)
         self.requires_target = "target" in cleaned_text
 
-    def apply(self, game_state, source_id, controller, targets=None):
+    def apply(self, game_state, source_id, controller, targets=None, context=None):
         """
         Apply the effect to the game state with improved targeting.
 
@@ -1720,6 +1802,7 @@ class AbilityEffect:
                  logging.error(f"Offspring effect cannot find source creature {source_id}")
                  return False
              
+        self.resolution_context = context or {}
         targets_were_supplied = targets is not None
         effective_targets = targets if targets_were_supplied else {} # Ensure targets is a dict
 
@@ -2166,7 +2249,8 @@ class GainKeywordEffect(AbilityEffect):
         super().__init__(f"{target_type} gains {self.keyword}", condition)
         self.requires_target = "target" in target_type or target_type == "creature"
 
-    def apply(self, game_state, source_id, controller, targets=None):
+    def apply(self, game_state, source_id, controller, targets=None, context=None):
+        self.resolution_context = context or {}
         if not getattr(game_state, 'layer_system', None):
             logging.warning("GainKeywordEffect: LayerSystem unavailable.")
             return False
@@ -2199,7 +2283,10 @@ class DamageEffect(AbilityEffect):
     """Effect that deals damage to targets."""
     def __init__(self, amount, target_type="any target", condition=None):
         target_type_str = str(target_type).lower() if target_type is not None else "any target"
-        amount_str = "X" if amount == 'x' else str(amount) # Represent X in description
+        if amount == "source_last_known_power":
+            amount_str = "its last-known power"
+        else:
+            amount_str = "X" if amount == 'x' else str(amount) # Represent X in description
         super().__init__(f"Deal {amount_str} damage to {target_type_str}", condition)
         # Store original amount which might be 'x' or a number
         self.base_amount = amount
@@ -2213,6 +2300,9 @@ class DamageEffect(AbilityEffect):
         if self.base_amount == 'x' and has_chosen_x:
             effective_amount = x_value
             logging.debug(f"DamageEffect: Using X={x_value} for damage amount.")
+        elif self.base_amount == "source_last_known_power":
+            last_known = getattr(self, "resolution_context", {}).get("last_known", {})
+            effective_amount = max(0, safe_int(last_known.get("power"), 0) or 0)
         else:
             effective_amount = text_to_number(self.base_amount)
         # --- End X Cost Handling ---
@@ -2265,8 +2355,12 @@ class DamageEffect(AbilityEffect):
         success_overall = False
 
         for target_id in targets_to_damage:
-             target_owner, target_zone = game_state.find_card_location(target_id)
              is_player_target = target_id in ["p1", "p2"]
+             if is_player_target:
+                 target_owner = game_state.p1 if target_id == "p1" else game_state.p2
+                 target_zone = "player"
+             else:
+                 target_owner, target_zone = game_state.find_card_location(target_id)
              target_obj = target_owner if is_player_target else game_state._safe_get_card(target_id)
 
              if not target_obj or (not is_player_target and target_zone != "battlefield"):
@@ -2311,6 +2405,75 @@ class DamageEffect(AbilityEffect):
             else: controller['life'] += total_actual_damage
 
         return success_overall
+
+
+class TorchTheTowerEffect(AbilityEffect):
+    """Resolve Torch's Bargain branch and damage-linked exile replacement."""
+
+    def __init__(self, condition=None):
+        super().__init__(
+            "Torch the Tower deals damage to target creature or planeswalker",
+            condition)
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        target_ids = []
+        if isinstance(targets, dict):
+            for ids in targets.values():
+                if isinstance(ids, (list, tuple, set)):
+                    target_ids.extend(ids)
+        if not target_ids:
+            return False
+        target_id = target_ids[0]
+        target = game_state._safe_get_card(target_id)
+        target_controller, target_zone = game_state.find_card_location(target_id)
+        if (not target or target_zone != "battlefield"
+                or not set(getattr(target, "card_types", [])).intersection(
+                    {"creature", "planeswalker"})):
+            return False
+
+        bargained = bool(getattr(self, "resolution_context", {}).get("bargained"))
+        amount = 3 if bargained else 2
+        if "creature" in getattr(target, "card_types", []):
+            damage_dealt = game_state.apply_damage_to_permanent(
+                target_id, amount, source_id)
+        else:
+            damage_dealt = game_state.damage_planeswalker(
+                target_id, amount, source_id, defer_sba=True)
+
+        if damage_dealt > 0 and game_state.replacement_effects:
+            def _is_torch_damaged_creature_dying(event_context):
+                if event_context.get("card_id") != target_id:
+                    return False
+                dying = game_state._safe_get_card(target_id)
+                return bool(
+                    dying
+                    and "creature" in getattr(dying, "card_types", []))
+
+            def _exile_instead(event_context):
+                event_context["to_player"] = (
+                    event_context.get("to_player") or target_controller)
+                event_context["to_zone"] = "exile"
+                event_context["torch_exile_replacement"] = True
+                return event_context
+
+            game_state.replacement_effects.register_effect({
+                "event_type": "DIES",
+                "condition": _is_torch_damaged_creature_dying,
+                "replacement": _exile_instead,
+                "source_id": source_id,
+                "controller_id": controller,
+                "duration": "end_of_turn",
+                "description": "Torch the Tower exiles its damaged permanent instead",
+            })
+
+        # No player receives priority between Torch's instructions. Run SBAs
+        # only after its damage-linked replacement exists.
+        game_state.check_state_based_actions()
+        if bargained:
+            ScryEffect(1)._apply_effect(
+                game_state, source_id, controller, targets or {})
+        return damage_dealt > 0
 
 class AddCountersEffect(AbilityEffect):
     """Effect that adds counters to permanents or players."""
@@ -2550,6 +2713,280 @@ class CreateTokenEffect(AbilityEffect):
 
 
         return len(created_token_ids) > 0
+
+
+class ManifestDreadEffect(AbilityEffect):
+    """Look at the top two cards, manifest one, and graveyard the other."""
+
+    def __init__(self, condition=None):
+        super().__init__("Manifest dread", condition)
+        self.requires_target = False
+
+    @staticmethod
+    def _emit(game_state, source_id, controller, manifested_id=None,
+              graveyard_id=None):
+        game_state.trigger_ability(source_id, "MANIFEST_DREAD", {
+            "controller": controller,
+            "manifested_card_id": manifested_id,
+            "graveyard_card_id": graveyard_id,
+        })
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        library = controller.get("library", [])
+        if not library:
+            self._emit(game_state, source_id, controller)
+            return True
+        if len(library) == 1:
+            card_id = library[0]
+            success = game_state.manifest_selected_card(
+                controller, card_id, "library")
+            if success:
+                self._emit(game_state, source_id, controller,
+                           manifested_id=card_id)
+            return success
+
+        looked_at = list(library[:2])
+        del library[:2]
+        if game_state.phase not in [game_state.PHASE_CHOOSE,
+                                    game_state.PHASE_TARGETING,
+                                    game_state.PHASE_SACRIFICE]:
+            game_state.previous_priority_phase = game_state.phase
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.choice_context = {
+            "type": "manifest_dread",
+            "player": controller,
+            "controller": controller,
+            "source_id": source_id,
+            "options": looked_at,
+            "resolved": False,
+        }
+        game_state.priority_player = controller
+        game_state.priority_pass_count = 0
+        return True
+
+
+class CreateFoodEffect(AbilityEffect):
+    """Create the predefined colorless Food artifact token."""
+
+    FOOD_ORACLE_TEXT = "{2}, {T}, Sacrifice this token: You gain 3 life."
+
+    def __init__(self, count=1, condition=None):
+        self.count = max(1, int(count))
+        super().__init__(f"Create {self.count} Food token(s)", condition)
+        self.requires_target = False
+
+    @classmethod
+    def create_for(cls, game_state, player, count):
+        created = []
+        token_data = {
+            "name": "Food",
+            "type_line": "Token Artifact - Food",
+            "card_types": ["artifact"],
+            "subtypes": ["food"],
+            "supertypes": [],
+            "oracle_text": cls.FOOD_ORACLE_TEXT,
+            "power": 0,
+            "toughness": 0,
+            "keywords": [0] * len(Card.ALL_KEYWORDS),
+            "colors": [0, 0, 0, 0, 0],
+            "is_token": True,
+        }
+        for _ in range(max(0, int(count))):
+            token_id = game_state.create_token(player, token_data.copy())
+            if token_id:
+                created.append(token_id)
+        return created
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        return bool(self.create_for(game_state, controller, self.count))
+
+
+class CreateMapEffect(AbilityEffect):
+    """Create the predefined colorless Map artifact token."""
+
+    MAP_ORACLE_TEXT = (
+        "{1}, {T}, Sacrifice this artifact: Target creature you control explores. "
+        "Activate only as a sorcery."
+    )
+
+    def __init__(self, count=1, condition=None):
+        self.count = max(1, int(count))
+        super().__init__(f"Create {self.count} Map token(s)", condition)
+        self.requires_target = False
+
+    @classmethod
+    def create_for(cls, game_state, player, count):
+        created = []
+        token_data = {
+            "name": "Map",
+            "type_line": "Token Artifact - Map",
+            "card_types": ["artifact"],
+            "subtypes": ["map"],
+            "supertypes": [],
+            "oracle_text": cls.MAP_ORACLE_TEXT,
+            "power": 0,
+            "toughness": 0,
+            "keywords": [0] * len(Card.ALL_KEYWORDS),
+            "colors": [0, 0, 0, 0, 0],
+            "is_token": True,
+        }
+        for _ in range(max(0, int(count))):
+            token_id = game_state.create_token(player, token_data.copy())
+            if token_id:
+                created.append(token_id)
+        return created
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        return bool(self.create_for(game_state, controller, self.count))
+
+
+class DestroyAndCreateMapsEffect(AbilityEffect):
+    """Get Lost's linked instructions with the pre-destruction controller."""
+
+    def __init__(self, count=2, condition=None):
+        self.count = max(1, int(count))
+        super().__init__(
+            "Destroy target creature, enchantment, or planeswalker. "
+            f"Its controller creates {self.count} Map tokens.",
+            condition)
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        target_ids = []
+        if isinstance(targets, dict):
+            for category_ids in targets.values():
+                if isinstance(category_ids, (list, tuple, set)):
+                    target_ids.extend(category_ids)
+        if not target_ids:
+            return False
+        target_id = target_ids[0]
+        target_controller, target_zone = game_state.find_card_location(target_id)
+        if not target_controller or target_zone != "battlefield":
+            return False
+
+        # The second instruction happens even if indestructible or another
+        # replacement prevents the destruction.
+        destroy = DestroyEffect(target_type="permanent")
+        destroy._apply_effect(game_state, source_id, controller, targets)
+        return bool(CreateMapEffect.create_for(
+            game_state, target_controller, self.count))
+
+
+class ExploreEffect(AbilityEffect):
+    """Have the selected creature explore, deferring its nonland choice."""
+
+    def __init__(self, condition=None):
+        super().__init__("Target creature you control explores", condition)
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        candidates = []
+        if isinstance(targets, dict):
+            candidates.extend(targets.get("creatures", []))
+            candidates.extend(targets.get("permanents", []))
+        for creature_id in dict.fromkeys(candidates):
+            target_controller, target_zone = game_state.find_card_location(creature_id)
+            target = game_state._safe_get_card(creature_id)
+            if (target_controller is controller and target_zone == "battlefield"
+                    and target and "creature" in getattr(target, "card_types", [])):
+                return game_state.explore(
+                    controller, creature_id, source_id=source_id)
+        return False
+
+
+class ShufflePermanentsIntoOwnersLibrariesEffect(AbilityEffect):
+    """Shuffle the source and a chosen permanent into their owners' libraries."""
+
+    def __init__(self, condition=None):
+        super().__init__(
+            "Shuffle source and target creature with a stun counter on it into "
+            "their owners' libraries",
+            condition)
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        target_ids = []
+        if isinstance(targets, dict):
+            target_ids.extend(targets.get("creatures", []))
+            target_ids.extend(targets.get("permanents", []))
+        if not target_ids:
+            return False
+
+        moved = False
+        owners_to_shuffle = []
+        for permanent_id in dict.fromkeys([source_id, target_ids[0]]):
+            current_controller, current_zone = game_state.find_card_location(permanent_id)
+            if not current_controller or current_zone != "battlefield":
+                continue
+            owner = game_state._find_card_owner_fallback(permanent_id) or current_controller
+            if game_state.move_card(
+                    permanent_id, current_controller, "battlefield", owner, "library",
+                    cause="shuffle_into_library"):
+                moved = True
+                if owner not in owners_to_shuffle:
+                    owners_to_shuffle.append(owner)
+        for owner in owners_to_shuffle:
+            game_state.shuffle_library(owner)
+        return moved
+
+
+class CreateEmblemEffect(AbilityEffect):
+    """Create a persistent command-zone emblem rules object."""
+
+    def __init__(self, emblem_text, condition=None):
+        self.emblem_text = str(emblem_text).strip().strip('"')
+        normalized = self.emblem_text.lower()
+        if "ninjas you control get +1/+1" in normalized:
+            self.kind = "ninja_anthem"
+        elif ("play lands" in normalized and "cast permanent spells" in normalized
+              and "from your graveyard" in normalized):
+            self.kind = "graveyard_permanents"
+        else:
+            self.kind = "generic"
+        super().__init__(f"Create emblem: {self.emblem_text}", condition)
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        source = game_state._safe_get_card(source_id)
+        controller.setdefault("emblems", []).append({
+            "kind": self.kind,
+            "text": self.emblem_text,
+            "source_name": getattr(source, "name", None),
+        })
+        if game_state.layer_system:
+            game_state.layer_system.invalidate_cache()
+            game_state.layer_system.apply_all_effects()
+        return True
+
+
+class ReturnAsEnchantmentEffect(AbilityEffect):
+    """Return Enduring Curiosity if its death snapshot permits it."""
+
+    def __init__(self, condition=None):
+        super().__init__(
+            "Return source to the battlefield under its owner's control as an enchantment",
+            condition)
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        last_known = getattr(self, "resolution_context", {}).get("last_known", {})
+        if not last_known.get("was_creature", False):
+            return True
+        if last_known.get("was_token", False):
+            return True
+        owner_key = last_known.get("owner_key")
+        owner = game_state.p1 if owner_key == "p1" else (
+            game_state.p2 if owner_key == "p2" else None)
+        if not owner:
+            owner, zone = game_state.find_card_location(source_id)
+        else:
+            zone = "graveyard" if source_id in owner.get("graveyard", []) else None
+        if not owner or zone != "graveyard":
+            return True
+        return game_state.move_card(
+            source_id, owner, "graveyard", owner, "battlefield",
+            cause="enduring_return",
+            context={"return_as_enchantment": True})
 
 
 class CreateRoleEffect(AbilityEffect):
@@ -3328,7 +3765,8 @@ class PreventDamageEffect(AbilityEffect):
         super().__init__(f"Prevent {'all' if amount is None else amount} {'combat ' if combat_only else ''}damage", condition)
         self.requires_target = target_scope == "target"
 
-    def apply(self, game_state, source_id, controller, targets=None):
+    def apply(self, game_state, source_id, controller, targets=None, context=None):
+        self.resolution_context = context or {}
         re_sys = getattr(game_state, 'replacement_effects', None)
         if not re_sys:
             return False
@@ -3734,7 +4172,8 @@ class AnimateLandEffect(AbilityEffect):
         super().__init__(f"Target land becomes a {power}/{toughness} creature", condition)
         self.requires_target = True
 
-    def apply(self, game_state, source_id, controller, targets=None):
+    def apply(self, game_state, source_id, controller, targets=None, context=None):
+        self.resolution_context = context or {}
         if not getattr(game_state, 'layer_system', None):
             return False
         ids = []
@@ -3809,7 +4248,8 @@ class BuffEffect(AbilityEffect):
         self.count_expr = count_expr
         self.requires_target = "target" in target_type # Check if it targets specifically
 
-    def apply(self, game_state, source_id, controller, targets=None):
+    def apply(self, game_state, source_id, controller, targets=None, context=None):
+        self.resolution_context = context or {}
         """Register the buff with the Layer System."""
         if not hasattr(game_state, 'layer_system') or not game_state.layer_system:
              logging.warning("BuffEffect: LayerSystem not available.")
@@ -3874,7 +4314,45 @@ class BuffEffect(AbilityEffect):
         logging.warning("BuffEffect._apply_effect called directly. Buffs should be registered via LayerSystem.")
         # Re-register for safety?
         return self.apply(game_state, source_id, controller, targets)
-    
+
+
+class TurnInsideOutEffect(AbilityEffect):
+    """Pump one creature and create its one-turn manifest-dread death trigger."""
+
+    def __init__(self, condition=None):
+        super().__init__(
+            "Target creature gets +3/+0 until end of turn. "
+            "When it dies this turn, manifest dread.", condition)
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        target_ids = []
+        if isinstance(targets, dict):
+            target_ids.extend(targets.get("creatures", []))
+            target_ids.extend(targets.get("permanents", []))
+            target_ids.extend(targets.get("chosen", []))
+        if not target_ids:
+            return False
+        target_id = target_ids[0]
+        _, target_zone = game_state.find_card_location(target_id)
+        if target_zone != "battlefield" or not game_state._is_creature(target_id):
+            return False
+        if not BuffEffect(
+                3, 0, target_type="target creature",
+                duration="end_of_turn").apply(
+                    game_state, source_id, controller, targets):
+            return False
+        game_state.delayed_event_triggers.append({
+            "event_type": "DIES",
+            "watched_card_id": target_id,
+            "controller": "p1" if controller is game_state.p1 else "p2",
+            "effect_text": "manifest dread",
+            "expires_turn": game_state.turn,
+            "source_id": source_id,
+        })
+        return True
+
+
 class DestroyEffect(AbilityEffect):
     """Effect that destroys permanents."""
     def __init__(self, target_type="permanent", condition=None):

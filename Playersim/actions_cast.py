@@ -100,6 +100,38 @@ class CastingHandlersMixin:
             logging.debug(f"PLAY_LAND: Failed (handled by gs.play_land). Card: {card_id}, Back: {context.get('play_back_face', False)}")
             return -0.1, False # Failure
 
+    def _handle_play_from_graveyard(self, param, context=None, **kwargs):
+        """Use Wrenn's emblem to play a land or cast a permanent spell."""
+        gs = self.game_state
+        player = gs._get_active_player()
+        if not any(
+                emblem.get("kind") == "graveyard_permanents"
+                for emblem in player.get("emblems", [])):
+            return -0.15, False
+        if not isinstance(param, int) or not 0 <= param < len(player.get("graveyard", [])):
+            return -0.15, False
+        card_id = player["graveyard"][param]
+        card = gs._safe_get_card(card_id)
+        if not card:
+            return -0.15, False
+        card_types = set(getattr(card, "card_types", []))
+        if "land" in card_types:
+            success = gs.play_land(
+                card_id, player, source_zone="graveyard",
+                permission="graveyard_permanents")
+            return (0.2, True) if success else (-0.1, False)
+        if not card_types.intersection(
+                {"creature", "artifact", "enchantment", "planeswalker", "battle"}):
+            return -0.1, False
+        cast_context = dict(context or {})
+        cast_context.update({
+            "source_zone": "graveyard",
+            "source_idx": param,
+            "emblem_graveyard_cast": True,
+        })
+        success = gs.cast_spell(card_id, player, context=cast_context)
+        return (0.2, True) if success else (-0.1, False)
+
     def _handle_play_spell(self, param, **kwargs):
         gs = self.game_state
         player = gs._get_active_player()
@@ -150,21 +182,25 @@ class CastingHandlersMixin:
     def _handle_cast_from_exile(self, param, **kwargs):
         gs = self.game_state
         player = gs._get_active_player()
-        context = kwargs.get('context', {})
-        castable_cards = list(getattr(gs, 'cards_castable_from_exile', set())) # Ensure it's a list for indexing
+        context = dict(kwargs.get('context', {}) or {})
+        castable_options = gs.get_exile_cast_options(player)
 
-        if param >= len(castable_cards):
-             logging.warning(f"CAST_FROM_EXILE: Invalid index {param}, only {len(castable_cards)} available.")
+        if param >= len(castable_options):
+             logging.warning(f"CAST_FROM_EXILE: Invalid index {param}, only {len(castable_options)} available.")
              return -0.2, False
 
-        card_id = castable_cards[param]
+        option = castable_options[param]
+        card_id = option["card_id"]
         # Verify card still exists in player's exile (might have moved)
         if card_id not in player.get("exile",[]):
              logging.warning(f"CAST_FROM_EXILE: Card {card_id} no longer in {player['name']}'s exile.")
              return -0.15, False
 
         context['source_zone'] = 'exile'
-        context['source_idx'] = player['exile'].index(card_id) # Find index in exile list for cast_spell
+        context['source_idx'] = option.get('source_idx', player['exile'].index(card_id))
+        if option.get("permission") == "plot":
+            context['use_alt_cost'] = 'plot'
+            context['plot_cast'] = True
 
         card_value = 0
         if self.card_evaluator:
@@ -176,6 +212,13 @@ class CastingHandlersMixin:
         else:
             logging.debug(f"CAST_FROM_EXILE: Failed (handled by gs.cast_spell). Card: {card_id}")
             return -0.1, False # Failure
+
+    def _handle_plot_card(self, param, context=None, **kwargs):
+        """Pay a card's Plot cost and exile it as a special action."""
+        gs = self.game_state
+        player = gs._get_active_player()
+        success = gs.plot_card(player, param)
+        return (0.1, True) if success else (-0.1, False)
 
     def _handle_tap_land_for_mana(self, param, **kwargs):
          gs = self.game_state

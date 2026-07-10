@@ -57,7 +57,8 @@ class CombatActionHandler:
         for idx, card_id in enumerate(player["battlefield"]):
             if idx >= 5: break # ACTION_MEANINGS only maps up to index 4 for ATTACK_PLANESWALKER/DEFEND_BATTLE
             card = gs._safe_get_card(card_id)
-            if card and hasattr(card, 'card_types') and 'planeswalker' in card.card_types:
+            if (card and getattr(card, "loyalty_abilities", [])
+                    and card_id in player.get("loyalty_counters", {})):
                 already_activated = card_id in player.get("activated_this_turn", set())
                 warning = " (ALREADY ACTIVATED)" if already_activated else ""
 

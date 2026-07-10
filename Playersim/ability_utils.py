@@ -342,6 +342,63 @@ class EffectFactory:
 
         effects = []
 
+        # Sample-card compound instructions whose parts share information or
+        # must remain atomic at resolution.
+        if re.fullmatch(r"\s*manifest dread\s*[.]?\s*", effect_text,
+                        re.IGNORECASE):
+            from .ability_types import ManifestDreadEffect
+            return [ManifestDreadEffect()]
+
+        if ((source_name or "").lower() == "turn inside out"
+                or (re.search(r"target creature gets \+3/\+0 until end of turn",
+                              effect_text, re.IGNORECASE)
+                    and re.search(r"when it dies this turn,\s*manifest dread",
+                                  effect_text, re.IGNORECASE))):
+            from .ability_types import TurnInsideOutEffect
+            return [TurnInsideOutEffect()]
+
+        if ((source_name or "").lower() == "torch the tower"
+                or (re.search(r"torch the tower deals 2 damage", effect_text,
+                              re.IGNORECASE)
+                    and re.search(r"if this spell was bargained", effect_text,
+                                  re.IGNORECASE))):
+            from .ability_types import TorchTheTowerEffect
+            return [TorchTheTowerEffect()]
+
+        if (re.search(
+                r"destroy target creature, enchantment, or planeswalker",
+                effect_text, re.IGNORECASE)
+                and re.search(
+                    r"its controller creates two map tokens",
+                    effect_text, re.IGNORECASE)):
+            from .ability_types import DestroyAndCreateMapsEffect
+            return [DestroyAndCreateMapsEffect(count=2)]
+
+        if re.search(
+                r"shuffle\s+.+?\s+and target creature with a stun counter on it "
+                r"into their owners['’] libraries",
+                effect_text, re.IGNORECASE):
+            from .ability_types import ShufflePermanentsIntoOwnersLibrariesEffect
+            return [ShufflePermanentsIntoOwnersLibrariesEffect()]
+
+        if (re.search(r"return it to the battlefield under its owner['’]s control",
+                      effect_text, re.IGNORECASE)
+                and re.search(r"it['’]s an enchantment", effect_text, re.IGNORECASE)):
+            from .ability_types import ReturnAsEnchantmentEffect
+            return [ReturnAsEnchantmentEffect()]
+
+        emblem_match = re.search(
+            r"(?:you\s+)?get(?:s)?\s+an emblem with\s+[“\"](.+?)[”\"]",
+            effect_text, re.IGNORECASE | re.DOTALL)
+        if emblem_match:
+            from .ability_types import CreateEmblemEffect
+            return [CreateEmblemEffect(emblem_match.group(1))]
+
+        if re.search(r"target creature you control explores\b", effect_text,
+                     re.IGNORECASE):
+            from .ability_types import ExploreEffect
+            return [ExploreEffect()]
+
         # Numeric die tables are one effect. Keep their result rows together
         # before generic dash/clause splitting can turn each row into an
         # unrelated ability.
@@ -575,16 +632,18 @@ class EffectFactory:
                 if amount_match:
                     amount_str = amount_match.group(1)
                     amount = 'x' if amount_str == 'x' else text_to_number(amount_str)
+                elif "damage equal to its power" in clause_lower:
+                    amount = "source_last_known_power"
                 target_desc = EffectFactory._extract_target_description(clause_lower) or "any target" # Changed default
                 target_type = "any target" # Default
                 if "creature or player" in target_desc or "any target" in target_desc: target_type="any target"
+                elif "each opponent" in target_desc: target_type="each opponent"
+                elif "each creature" in target_desc: target_type="each creature"
+                elif "each player" in target_desc: target_type="each player"
                 elif "creature" in target_desc: target_type="creature"
                 elif "player" in target_desc or "opponent" in target_desc: target_type="player"
                 elif "planeswalker" in target_desc: target_type="planeswalker"
                 elif "battle" in target_desc: target_type="battle"
-                elif "each opponent" in target_desc: target_type="each opponent"
-                elif "each creature" in target_desc: target_type="each creature"
-                elif "each player" in target_desc: target_type="each player" # Added
                 created_effect = DamageEffect(amount, target_type=target_type) # Pass 'x' or number
 
             # Destroy
@@ -640,6 +699,33 @@ class EffectFactory:
                      clause_lower)
                  created_effect = CreateRoleEffect(
                      role_match.group(1), attachment_text=role_match.group(2).strip(". "))
+
+            # Map is a noncreature artifact token with a rules-bearing
+            # activated ability, so it cannot use the generic 1/1 token path.
+            elif re.search(r"\bcreate(?:s)?\s+(?:a|an|one|two|three|four|five|\d+)\s+food tokens?\b",
+                           clause_lower):
+                 count_match = re.search(
+                     r"create(?:s)?\s+(a|an|one|two|three|four|five|\d+)\s+food",
+                     clause_lower)
+                 count = text_to_number(count_match.group(1)) if count_match else 1
+                 from .ability_types import CreateFoodEffect
+                 created_effect = CreateFoodEffect(count=count)
+
+            # Map is also a noncreature artifact token with a rules-bearing
+            # activated ability.
+            elif re.search(r"\bcreate(?:s)?\s+(?:a|an|one|two|\d+)\s+map tokens?\b",
+                           clause_lower):
+                 count_match = re.search(
+                     r"create(?:s)?\s+(a|an|one|two|three|four|five|\d+)\s+map",
+                     clause_lower)
+                 count = text_to_number(count_match.group(1)) if count_match else 1
+                 from .ability_types import CreateMapEffect
+                 created_effect = CreateMapEffect(count=count)
+
+            # Explore
+            elif re.search(r"\b(?:target\s+)?creature\b.*\bexplores\b", clause_lower):
+                 from .ability_types import ExploreEffect
+                 created_effect = ExploreEffect()
 
             # Create Token
             elif re.search(r"\b(create(?:s)?)\b", clause_lower) and "token" in clause_lower:

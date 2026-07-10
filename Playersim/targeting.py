@@ -38,10 +38,10 @@ class TargetingSystem:
         """
         gs = self.game_state
         card = gs._safe_get_card(card_id)
-        if not card or not hasattr(card, 'oracle_text'):
+        if effect_text is None and (not card or not hasattr(card, 'oracle_text')):
             return {}
 
-        oracle_text = (effect_text or card.oracle_text).lower()
+        oracle_text = (effect_text or getattr(card, "oracle_text", "")).lower()
         opponent = gs.p2 if controller == gs.p1 else gs.p1
 
         valid_targets = {
@@ -228,6 +228,9 @@ class TargetingSystem:
              valid_type = "creature" in actual_types or "vehicle" in actual_types
         elif target_type == "spell" and target_zone == "stack" and isinstance(target_obj, Card): valid_type = True # Targeting spell on stack
 
+        allowed_types = set(requirement.get("allowed_types", []))
+        if allowed_types and not allowed_types.intersection(actual_types):
+            return False
         if not valid_type: return False
 
         # 3. Protection / Hexproof / Shroud / Ward (Only for permanents, players, spells)
@@ -306,6 +309,10 @@ class TargetingSystem:
                  if not is_blocker: return False # Must be blocking but isn't
             # --- END MODIFICATION ---
             if requirement.get("must_be_face_down") and not getattr(target_obj, 'face_down', False): return False
+            required_counter = requirement.get("must_have_counter")
+            if (required_counter
+                    and getattr(target_obj, "counters", {}).get(required_counter, 0) <= 0):
+                return False
 
             # Color Restriction
             colors_req = requirement.get("color_restriction", [])
@@ -450,6 +457,14 @@ class TargetingSystem:
             requirements.append({"type": "creature_or_vehicle"})
             oracle_text = re.sub(creature_vehicle_pattern, "", oracle_text)
 
+        creature_planeswalker_pattern = r"target\s+creature\s+or\s+planeswalker"
+        if re.search(creature_planeswalker_pattern, oracle_text):
+            requirements.append({
+                "type": "permanent",
+                "allowed_types": ["creature", "planeswalker"],
+            })
+            oracle_text = re.sub(creature_planeswalker_pattern, "", oracle_text)
+
         # Mutate reminder text uses both an adjective before the type and the
         # ownership wording "you own". The generic target parser otherwise
         # reads "non" as the target type and silently offers no legal targets.
@@ -461,6 +476,16 @@ class TargetingSystem:
                 "exclude_subtypes": ["human"],
             })
             oracle_text = re.sub(mutate_target_pattern, "", oracle_text)
+
+        counter_target_pattern = (
+            r"target\s+(creature|permanent)\s+with\s+"
+            r"(?:a|an|one or more|\d+)\s+([+\-\w/]+)\s+counters?\s+on\s+it")
+        for counter_target in list(re.finditer(counter_target_pattern, oracle_text)):
+            requirements.append({
+                "type": counter_target.group(1),
+                "must_have_counter": counter_target.group(2).lower(),
+            })
+        oracle_text = re.sub(counter_target_pattern, "", oracle_text)
 
         # The generic adjective parser historically treated "nonland" as the
         # target's noun. Pull this common permanent shape out first so cards
@@ -474,6 +499,16 @@ class TargetingSystem:
                 requirement["controller_is_opponent"] = True
             requirements.append(requirement)
         oracle_text = re.sub(nonland_permanent_pattern, "", oracle_text)
+
+        # One chosen target from an explicit union of permanent types.
+        union_pattern = (
+            r"target\s+creature\s*,\s*enchantment\s*,\s*or\s+planeswalker")
+        if re.search(union_pattern, oracle_text):
+            requirements.append({
+                "type": "permanent",
+                "allowed_types": ["creature", "enchantment", "planeswalker"],
+            })
+            oracle_text = re.sub(union_pattern, "", oracle_text)
 
         # Pattern to find "target X" phrases, excluding nested clauses
         # Matches "target [adjectives] type [restrictions]"
@@ -512,6 +547,11 @@ class TargetingSystem:
             if "attacking" in adjectives: req["must_be_attacking"] = True
             if "blocking" in adjectives: req["must_be_blocking"] = True
             if "face-down" in adjectives or "face down" in restrictions: req["must_be_face_down"] = True
+            counter_match = re.search(
+                r"with\s+(?:a|an|one or more|\d+)?\s*([+\-\w/]+)\s+counters?",
+                restrictions)
+            if counter_match:
+                req["must_have_counter"] = counter_match.group(1).lower()
 
             # Card Type / Supertype / Subtype Restrictions
             if "nonland" in adjectives: req["exclude_land"] = True

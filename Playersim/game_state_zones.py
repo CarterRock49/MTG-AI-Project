@@ -16,6 +16,24 @@ class GameStateZonesMixin:
     # Empty slots: preserves GameState's __slots__ semantics (no instance __dict__).
     __slots__ = ()
 
+    def _snapshot_battlefield_object(self, card_id, controller):
+        """Capture characteristics used by leave/dies triggers before the move."""
+        card = self._safe_get_card(card_id)
+        owner = self._find_card_owner_fallback(card_id) or controller
+        owner_key = "p1" if owner is self.p1 else ("p2" if owner is self.p2 else None)
+        card_types = list(getattr(card, "card_types", []) or []) if card else []
+        return {
+            "card_id": card_id,
+            "controller_key": "p1" if controller is self.p1 else "p2",
+            "owner_key": owner_key,
+            "card_types": card_types,
+            "subtypes": list(getattr(card, "subtypes", []) or []) if card else [],
+            "power": getattr(card, "power", 0) if card else 0,
+            "toughness": getattr(card, "toughness", 0) if card else 0,
+            "was_creature": "creature" in card_types,
+            "was_token": bool(getattr(card, "is_token", False)) if card else False,
+        }
+
     def _enters_battlefield_tapped(self, card, controller, card_id=None, context=None):
         """Return whether a permanent's own text makes it enter tapped.
 
@@ -331,18 +349,36 @@ class GameStateZonesMixin:
         event_context = {'card_id': card_id, 'card': card, 'from_player': from_player, 'from_zone': actual_from_zone, 'to_player': to_player, 'to_zone': to_zone, 'cause': cause, **context }
         prevented = False
         if hasattr(self, 'replacement_effects') and self.replacement_effects:
+            # "Dies" means a creature would move from the battlefield to a
+            # graveyard. Apply that replacement event before the component
+            # leave/enter events so "exile it instead" can change the move.
+            if (actual_from_zone == "battlefield"
+                    and final_destination_zone == "graveyard"
+                    and card
+                    and "creature" in getattr(card, "card_types", [])):
+                modified_die_ctx, replaced_die = self.replacement_effects.apply_replacements(
+                    "DIES", event_context.copy())
+                if replaced_die:
+                    event_context.update(modified_die_ctx)
+                    final_destination_player = event_context.get(
+                        "to_player", final_destination_player)
+                    final_destination_zone = event_context.get(
+                        "to_zone", final_destination_zone)
+                    prevented = event_context.get("prevented", False)
             # Check LEAVE zone replacements first
-            leave_event = f"LEAVE_{actual_from_zone.upper()}"
-            modified_leave_ctx, replaced_leave = self.replacement_effects.apply_replacements(leave_event, event_context.copy())
-            if replaced_leave:
-                 event_context.update(modified_leave_ctx); final_destination_player = event_context.get('to_player'); final_destination_zone = event_context.get('to_zone'); prevented = event_context.get('prevented', False)
-                 logging.debug(f"Leave replacement applied for {card_name}: New Dest: {final_destination_zone}, Prevented: {prevented}")
+            if not prevented:
+                leave_event = f"LEAVE_{actual_from_zone.upper()}"
+                modified_leave_ctx, replaced_leave = self.replacement_effects.apply_replacements(leave_event, event_context.copy())
+                if replaced_leave:
+                     event_context.update(modified_leave_ctx); final_destination_player = event_context.get('to_player'); final_destination_zone = event_context.get('to_zone'); prevented = event_context.get('prevented', False)
+                     logging.debug(f"Leave replacement applied for {card_name}: New Dest: {final_destination_zone}, Prevented: {prevented}")
             # Check ENTER zone replacements (only if not prevented)
             if not prevented:
                  enter_event = f"ENTER_{final_destination_zone.upper()}" if final_destination_zone else None
                  if enter_event:
                      modified_enter_ctx, replaced_enter = self.replacement_effects.apply_replacements(enter_event, event_context.copy())
                      if replaced_enter:
+                          event_context.update(modified_enter_ctx)
                           final_destination_player = modified_enter_ctx.get('to_player'); final_destination_zone = modified_enter_ctx.get('to_zone'); prevented = modified_enter_ctx.get('prevented', False)
                           # Carry over ETB modifiers like 'tapped' or 'counters'
                           if 'enters_tapped' in modified_enter_ctx: event_context['enters_tapped'] = modified_enter_ctx['enters_tapped']
@@ -357,6 +393,11 @@ class GameStateZonesMixin:
         if (final_destination_zone == "battlefield" and actual_from_zone != "battlefield"
                 and card and hasattr(self, "prepare_day_night_entry")):
             self.prepare_day_night_entry(card_id)
+
+        last_known = None
+        if actual_from_zone == "battlefield" and from_player:
+            last_known = self._snapshot_battlefield_object(card_id, from_player)
+            event_context["last_known"] = last_known
 
         # --- Perform Actual Move ---
         # ... (Keep existing removal logic) ...
@@ -377,6 +418,11 @@ class GameStateZonesMixin:
                  return False
         else: removed_successfully = True # Implicit removal assumed
 
+        if (actual_from_zone == "exile" and from_player
+                and final_destination_zone != "exile"
+                and hasattr(self, "_consume_plot_permission")):
+            self._consume_plot_permission(from_player, card_id)
+
 
         meld_partner_id = None
         mutation_info = None
@@ -388,6 +434,8 @@ class GameStateZonesMixin:
                 if player:
                     player.get("targeted_permanents_this_turn", set()).discard(card_id)
             ltb_trigger_context = { 'controller': from_player, 'from_zone': actual_from_zone, 'to_zone': final_destination_zone, 'cause': cause, **context }
+            if last_known is not None:
+                ltb_trigger_context["last_known"] = last_known
             self.trigger_ability(card_id, "LEAVE_BATTLEFIELD", ltb_trigger_context)
             self._return_linked_exile_cards(card_id)
             logging.debug(f"Cleaning up state for {card_name} ({card_id}) leaving battlefield.")
@@ -427,8 +475,26 @@ class GameStateZonesMixin:
                     card._printed = copy.deepcopy(component_printed[card_id])
                     card.reset_to_printed()
 
+            copy_info = getattr(self, "copy_overrides", {}).pop(card_id, None)
+            if copy_info and card and copy_info.get("original_printed"):
+                card._printed = copy.deepcopy(copy_info["original_printed"])
+                card.reset_to_printed()
+
+            if final_destination_zone != "battlefield":
+                manifest_info = getattr(self, "manifested_cards", {}).pop(
+                    card_id, None)
+                if (manifest_info and card
+                        and manifest_info.get("original_printed")):
+                    card._printed = copy.deepcopy(
+                        manifest_info["original_printed"])
+                    card.reset_to_printed()
+                    card.face_down = False
+
             # Reset card state itself (e.g., face-down)
-            if card and hasattr(card, 'reset_state_on_zone_change'): card.reset_state_on_zone_change()
+            if card and hasattr(card, 'reset_state_on_zone_change'):
+                card.reset_state_on_zone_change()
+                if hasattr(card, "reset_to_printed"):
+                    card.reset_to_printed()
 
             # A melded permanent is represented by one battlefield ID plus its
             # partner waiting in exile. It has result characteristics for LTB,
@@ -467,6 +533,25 @@ class GameStateZonesMixin:
         enter_trigger_context = {'controller': final_destination_player, 'from_zone': actual_from_zone, 'to_zone': final_destination_zone, 'cause': cause, **event_context } # Pass merged context
 
         if final_destination_zone == "battlefield":
+            if event_context.get("return_as_enchantment") and self.layer_system:
+                self.layer_system.register_effect({
+                    "source_id": card_id,
+                    "layer": 4,
+                    "affected_ids": [card_id],
+                    "effect_type": "set_type",
+                    "effect_value": ["enchantment"],
+                    "duration": "permanent",
+                })
+                self.layer_system.register_effect({
+                    "source_id": card_id,
+                    "layer": 4,
+                    "affected_ids": [card_id],
+                    "effect_type": "set_subtype",
+                    "effect_value": [],
+                    "duration": "permanent",
+                })
+                self.layer_system.apply_all_effects()
+
             # --- Standard ETB Setup ---
             final_destination_player.setdefault("entered_battlefield_this_turn", set()).add(card_id)
             etb_tapped_from_text = self._enters_battlefield_tapped(
@@ -573,9 +658,11 @@ class GameStateZonesMixin:
              if final_destination_zone == "graveyard":
                  if not hasattr(self, 'cards_to_graveyard_this_turn'): self.cards_to_graveyard_this_turn = defaultdict(list)
                  self.cards_to_graveyard_this_turn[self.turn].append(card_id)
-                 if actual_from_zone == "battlefield": # From BF to GY = Dies
+                 if actual_from_zone == "battlefield":
                      # Trigger "dies" ability
                      dies_context = {'controller': from_player, 'from_zone': actual_from_zone, 'to_zone': final_destination_zone, 'cause': cause, **context}
+                     if last_known is not None:
+                         dies_context["last_known"] = last_known
                      self.trigger_ability(card_id, "DIES", dies_context)
                      self.gravestorm_count = getattr(self, 'gravestorm_count', 0) + 1
             # --- END UPDATE ---
@@ -1150,11 +1237,23 @@ class GameStateZonesMixin:
              # Could potentially add lookup by name here if needed, but ID/index preferred
         return None
 
-    def explore(self, player, creature_id):
-        """Perform explore for a creature."""
-        if not player or "library" not in player or not player["library"]:
-            logging.debug("Explore: Library empty.")
-            return False # Nothing to reveal
+    def explore(self, player, creature_id, source_id=None):
+        """Perform explore through its reveal and, when needed, open a choice."""
+        if not player or "library" not in player:
+            return False
+        if not player["library"]:
+            # CR 701.40a: no card is revealed, so the result is nonland and the
+            # exploring permanent still gets a +1/+1 counter if it is present.
+            self.add_counter(creature_id, "+1/+1", 1)
+            self.trigger_ability(
+                creature_id, "EXPLORED_NONLAND_EMPTY",
+                {"controller": player, "source_id": source_id})
+            self.trigger_ability(
+                creature_id, "EXPLORED",
+                {"controller": player, "source_id": source_id,
+                 "revealed_card_id": None})
+            logging.debug("Explore: Library empty; no card revealed.")
+            return True
 
         top_card_id = player["library"].pop(0) # Remove from top
         top_card = self._safe_get_card(top_card_id)
@@ -1177,30 +1276,28 @@ class GameStateZonesMixin:
                  player["library"].insert(0, top_card_id) # Put back if move fails? Rare.
             return success_move
         else:
-            # Put +1/+1 counter on exploring creature
+            # Put +1/+1 counter on the exploring permanent if it is still on
+            # the battlefield, then let its controller choose top or graveyard.
             success_counter = self.add_counter(creature_id, "+1/+1", 1)
             if success_counter: logging.debug(f"Explore hit nonland, put +1/+1 counter on {exploring_creature_name}")
-
-            # AI choice: top or graveyard? Use CardEvaluator if available.
-            put_in_gy = True # Default to graveyard
-            if self.card_evaluator:
-                 value = self.card_evaluator.evaluate_card(top_card_id, "explore_nonland")
-                 if value > 0.6: # Threshold to keep non-land on top
-                      put_in_gy = False
-            elif getattr(top_card, 'cmc', 0) >= 4: # Simple heuristic: Keep expensive non-lands
-                put_in_gy = False
-
-            if put_in_gy:
-                 success_move = self.move_card(top_card_id, player, "library_implicit", player, "graveyard")
-                 if success_move: logging.debug(f"Explore: Put nonland {card_name} into graveyard.")
-                 else: player["library"].insert(0, top_card_id) # Put back if move fails
-                 self.trigger_ability(creature_id, "EXPLORED_NONLAND_GY", {"revealed_card_id": top_card_id})
-                 return success_move
-            else:
-                 player["library"].insert(0, top_card_id) # Put back on top
-                 logging.debug(f"Explore: Kept nonland {card_name} on top.")
-                 self.trigger_ability(creature_id, "EXPLORED_NONLAND_TOP", {"revealed_card_id": top_card_id})
-                 return True
+            if (self.previous_priority_phase is None
+                    and self.phase not in [self.PHASE_TARGETING,
+                                           self.PHASE_SACRIFICE,
+                                           self.PHASE_CHOOSE]):
+                self.previous_priority_phase = self.phase
+            self.phase = self.PHASE_CHOOSE
+            self.choice_context = {
+                "type": "explore",
+                "player": player,
+                "controller": player,
+                "source_id": source_id or creature_id,
+                "exploring_creature_id": creature_id,
+                "cards": [top_card_id],
+            }
+            self.priority_player = player
+            self.priority_pass_count = 0
+            logging.debug(f"Explore: Waiting for top/graveyard choice for {card_name}.")
+            return True
 
     def _find_card_controller(self, card_id):
         """Find which player controls a card currently on the battlefield."""
@@ -1299,6 +1396,16 @@ class GameStateZonesMixin:
         # is ambiguous, prefer the current battlefield controller over always
         # sending the card to P1's zone.
         if in_p1 and in_p2:
+            controller = self._find_card_controller(card_id)
+            if controller:
+                return controller
+        # Synthetic cards and tokens are not present in either original deck.
+        # Their latest tracked player is the best available ownership record;
+        # this avoids silently routing every such object to Player 1.
+        if not in_p1 and not in_p2:
+            last_location = getattr(self, "_last_card_locations", {}).get(card_id)
+            if last_location and last_location[0] in (self.p1, self.p2):
+                return last_location[0]
             controller = self._find_card_controller(card_id)
             if controller:
                 return controller

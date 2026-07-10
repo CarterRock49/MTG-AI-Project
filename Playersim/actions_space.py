@@ -454,6 +454,7 @@ class ActionSpaceMixin:
                  logging.warning(f"IndexError accessing hand for PLAY_SPELL at index {i}"); break
 
         # --- Other Sorcery-speed Actions ---
+        self._add_plot_actions(player, valid_actions, set_valid_action)
         self._add_ability_activation_actions(player, valid_actions, set_valid_action, is_sorcery_speed=True)
         # PW abilities handled by _add_planeswalker_actions
         if hasattr(self, 'combat_handler') and self.combat_handler:
@@ -470,6 +471,9 @@ class ActionSpaceMixin:
         self._add_morph_actions(player, valid_actions, set_valid_action)
         self._add_exile_casting_actions(player, valid_actions, set_valid_action)
         self._add_alternative_casting_actions(player, valid_actions, set_valid_action, is_sorcery_speed=True)
+        self._add_emblem_graveyard_actions(
+            player, opponent, valid_actions, set_valid_action,
+            is_sorcery_speed=True)
         self._add_specific_mechanics_actions(player, valid_actions, set_valid_action, is_sorcery_speed=True)
 
     def _add_instant_speed_actions(self, player, opponent, valid_actions, set_valid_action):
@@ -512,9 +516,13 @@ class ActionSpaceMixin:
                  logging.warning(f"IndexError accessing hand for Instant/Flash spell at index {i}"); break
 
         # --- Other instant speed actions (no changes needed) ---
+        self._add_morph_actions(player, valid_actions, set_valid_action)
         self._add_ability_activation_actions(player, valid_actions, set_valid_action, is_sorcery_speed=False)
         self._add_land_tapping_actions(player, valid_actions, set_valid_action)
         self._add_alternative_casting_actions(player, valid_actions, set_valid_action, is_sorcery_speed=False)
+        self._add_emblem_graveyard_actions(
+            player, opponent, valid_actions, set_valid_action,
+            is_sorcery_speed=False)
         self._add_cycling_actions(player, valid_actions, set_valid_action)
         if gs.stack: self._add_response_actions(player, valid_actions, set_valid_action)
         self._add_specific_mechanics_actions(player, valid_actions, set_valid_action, is_sorcery_speed=False)
@@ -578,6 +586,38 @@ class ActionSpaceMixin:
                     )
 
             # Non-target choices made while paying a spell's casting cost.
+            elif choice_type == "mockingbird_copy":
+                for option_index, card_id in enumerate(context.get("options", [])[:10]):
+                    card = gs._safe_get_card(card_id)
+                    card_name = getattr(card, "name", card_id)
+                    set_valid_action(
+                        353 + option_index,
+                        f"COPY_AS {card_name}",
+                        context={"option_index": option_index},
+                    )
+                set_valid_action(11, "DECLINE_MOCKINGBIRD_COPY")
+
+            elif choice_type == "bargain":
+                for option_index, card_id in enumerate(context.get("options", [])[:10]):
+                    card = gs._safe_get_card(card_id)
+                    card_name = getattr(card, "name", card_id)
+                    set_valid_action(
+                        353 + option_index,
+                        f"BARGAIN {card_name}",
+                        context={"option_index": option_index},
+                    )
+                set_valid_action(11, "DECLINE_BARGAIN")
+
+            elif choice_type == "manifest_dread":
+                for option_index, card_id in enumerate(context.get("options", [])[:2]):
+                    card = gs._safe_get_card(card_id)
+                    card_name = getattr(card, "name", card_id)
+                    set_valid_action(
+                        353 + option_index,
+                        f"MANIFEST_DREAD {card_name}",
+                        context={"option_index": option_index},
+                    )
+
             elif choice_type == "casting_additional_return":
                 for option_index, card_id in enumerate(context.get("options", [])[:10]):
                     card = gs._safe_get_card(card_id)
@@ -617,15 +657,15 @@ class ActionSpaceMixin:
                 if context.get("optional", False):
                     set_valid_action(11, "DECLINE_LINKED_EXILE")
 
-            # Scry / Surveil
-            elif choice_type in ["scry", "surveil"] and context.get("cards"):
+            # Scry / Surveil / Explore
+            elif choice_type in ["scry", "surveil", "explore"] and context.get("cards"):
                 card_id = context["cards"][0] # Process one card at a time
                 card = gs._safe_get_card(card_id)
                 card_name = getattr(card, 'name', card_id)
                 set_valid_action(306, f"PUT_ON_TOP {card_name}") # Action for Top - Index 306 maps to PUT_ON_TOP
                 if choice_type == "scry":
                     set_valid_action(307, f"PUT_ON_BOTTOM {card_name}") # Action for Bottom - Index 307 maps to PUT_ON_BOTTOM
-                else: # Surveil
+                else: # Surveil / Explore
                     set_valid_action(305, f"PUT_TO_GRAVEYARD {card_name}") # Action for GY - Index 305 maps to PUT_TO_GRAVEYARD
 
             # Dredge (Replace Draw)
@@ -906,19 +946,35 @@ class ActionSpaceMixin:
     def _add_morph_actions(self, player, valid_actions, set_valid_action):
          """Add actions for turning Morph/Manifest cards face up."""
          gs = self.game_state
+         morph_added = False
+         manifest_added = False
          for i in range(min(len(player["battlefield"]), 20)):
              card_id = player["battlefield"][i]
-             card = gs._safe_get_card(card_id)
-             # Check Morph
-             if card and hasattr(card, 'oracle_text') and "morph" in card.oracle_text.lower() and getattr(gs.morphed_cards.get(card_id, {}), 'face_down', False):
-                 cost_match = re.search(r"morph (\{[^\}]+\})", card.oracle_text.lower())
-                 if cost_match and self._can_afford_cost_string(player, cost_match.group(1)):
-                     set_valid_action(450, f"MORPH {gs.morphed_cards[card_id]['original']['name']}") # Param = battlefield index i
-             # Check Manifest
-             elif card and hasattr(gs, 'manifested_cards') and card_id in gs.manifested_cards:
-                 original_card = gs.manifested_cards[card_id]['original']
-                 if hasattr(original_card, 'mana_cost') and self._can_afford_card(player, original_card):
-                     set_valid_action(451, f"MANIFEST {original_card.name}") # Param = battlefield index i
+             if not morph_added and card_id in getattr(gs, "morphed_cards", {}):
+                 info = gs.morphed_cards[card_id]
+                 original = info.get("original_printed", {})
+                 if not original and info.get("original"):
+                     original_card = Card(info["original"])
+                     original = original_card._printed
+                 cost_match = re.search(
+                     r"morph\s*((?:\{[^}]+\})+)",
+                     original.get("oracle_text", ""), re.IGNORECASE)
+                 if (cost_match and self._can_afford_cost_string(
+                         player, cost_match.group(1))):
+                     set_valid_action(
+                         455, f"TURN_MORPH_FACE_UP {original.get('name', card_id)}",
+                         context={"battlefield_idx": i})
+                     morph_added = True
+             if not manifest_added and card_id in getattr(gs, "manifested_cards", {}):
+                 original = gs.manifested_cards[card_id].get(
+                     "original_printed", {})
+                 if ("creature" in original.get("card_types", [])
+                         and self._can_afford_cost_string(
+                             player, original.get("mana_cost", ""))):
+                     set_valid_action(
+                         456, f"TURN_MANIFEST_FACE_UP {original.get('name', card_id)}",
+                         context={"battlefield_idx": i})
+                     manifest_added = True
 
     def _add_attack_target_actions(self, player, opponent, valid_actions, set_valid_action, possible_attackers):
         """Add actions for choosing targets for attackers (Planeswalkers, Battles)."""
@@ -1558,22 +1614,36 @@ class ActionSpaceMixin:
     def _add_exile_casting_actions(self, player, valid_actions, set_valid_action):
         """Add actions for casting spells from exile."""
         gs = self.game_state
-        
-        if hasattr(gs, 'cards_castable_from_exile'):
-            for i, card_id in enumerate(gs.cards_castable_from_exile):
-                if card_id in player["exile"] and i < 8:  # Limit to 8 exile castable cards
-                    card = gs._safe_get_card(card_id)
-                    if not card:
-                        continue
-                    
-                    # Check if we can afford to cast it
-                    if hasattr(gs, 'mana_system'):
-                        can_afford = gs.mana_system.can_pay_mana_cost(player, card.mana_cost if hasattr(card, 'mana_cost') else "")
-                    else:
-                        can_afford = sum(player["mana_pool"].values()) > 0
-                    
-                    if can_afford:
-                        set_valid_action(230 + i, f"CAST_FROM_EXILE {card.name}")
+
+        for i, option in enumerate(gs.get_exile_cast_options(player)[:8]):
+            card = gs._safe_get_card(option["card_id"])
+            if not card:
+                continue
+            if option.get("permission") == "plot":
+                can_afford = True
+            elif hasattr(gs, 'mana_system'):
+                can_afford = gs.mana_system.can_pay_mana_cost(
+                    player, getattr(card, "mana_cost", ""))
+            else:
+                can_afford = sum(player["mana_pool"].values()) > 0
+            if can_afford:
+                permission = option.get("permission", "exile")
+                set_valid_action(
+                    230 + i, f"CAST_FROM_EXILE {card.name} ({permission})",
+                    context={"exile_option_index": i})
+
+    def _add_plot_actions(self, player, valid_actions, set_valid_action):
+        """Expose Plot as one hand-indexed sorcery-speed special action."""
+        gs = self.game_state
+        action_indices = [296, 297, 298, 309, 310, 311, 312, 313]
+        for hand_index, card_id in enumerate(player.get("hand", [])[:8]):
+            card = gs._safe_get_card(card_id)
+            cost = getattr(card, "plot_cost", None) if card else None
+            if (card and getattr(card, "is_plot", False) and cost
+                    and self._can_afford_cost_string(player, cost)):
+                set_valid_action(
+                    action_indices[hand_index], f"PLOT {card.name}",
+                    context={"hand_idx": hand_index})
 
     def _add_token_copy_actions(self, player, valid_actions, set_valid_action):
         """Add actions for token creation and copying."""
@@ -2018,6 +2088,46 @@ class ActionSpaceMixin:
                     if len(player.get("graveyard",[])) > 0 and self._can_afford_card(player, card): # Simplified check
                         context = {'hand_idx': i}
                         set_valid_action(399, f"CAST_FOR_DELVE {card.name}", context=context)
+
+    def _add_emblem_graveyard_actions(self, player, opponent, valid_actions,
+                                      set_valid_action, is_sorcery_speed):
+        """Expose Wrenn-emblem land plays and permanent-spell casts."""
+        if not any(
+                emblem.get("kind") == "graveyard_permanents"
+                for emblem in player.get("emblems", [])):
+            return
+        gs = self.game_state
+        permanent_spell_types = {
+            "creature", "artifact", "enchantment", "planeswalker", "battle"
+        }
+        for graveyard_index, card_id in enumerate(player.get("graveyard", [])[:6]):
+            card = gs._safe_get_card(card_id)
+            if not card:
+                continue
+            card_types = set(getattr(card, "card_types", []))
+            is_land = "land" in card_types
+            if is_land:
+                if not is_sorcery_speed or player.get("land_played", False):
+                    continue
+            elif not card_types.intersection(permanent_spell_types):
+                continue
+            elif not is_sorcery_speed and not self._has_flash(card_id):
+                continue
+            cast_context = {
+                "source_zone": "graveyard",
+                "source_idx": graveyard_index,
+                "emblem_graveyard_cast": True,
+            }
+            if not is_land:
+                if not self._can_afford_card(player, card, context=cast_context):
+                    continue
+                if not self._targets_available(card, player, opponent):
+                    continue
+            verb = "PLAY" if is_land else "CAST"
+            set_valid_action(
+                472 + graveyard_index,
+                f"{verb}_FROM_GRAVEYARD {card.name}",
+                context=cast_context)
 
     def _add_x_cost_actions(self, player, valid_actions, set_valid_action):
         """Add actions for X cost spells on the stack."""

@@ -110,7 +110,8 @@ def inject_card(gs, data):
     """Register a synthetic card in the database and return its new id."""
     from Playersim.card import Card
     card = Card(data)
-    new_id = max(int(k) for k in gs.card_db.keys()) + 1
+    numeric_ids = [int(k) for k in gs.card_db.keys() if str(k).isdigit()]
+    new_id = max(numeric_ids, default=-1) + 1
     gs.card_db[new_id] = card
     if hasattr(card, 'card_id'):
         card.card_id = new_id
@@ -5232,6 +5233,929 @@ def s_delayed_trigger_asap():
     gs.check_state_based_actions()
     assert fired == [True], "asap delayed trigger did not fire at the next SBA check"
     assert not gs.delayed_triggers, "fired asap trigger was not removed"
+
+
+@scenario("111.10 / 701.40", "a Map token pays, taps, sacrifices, and exposes the explore destination")
+def s_map_token_agent_explore():
+    gs = fresh()
+    controller, opponent = gs.p1, gs.p2
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    explorer = inject_into_zone(gs, controller, {
+        "name": "Map Scout", "mana_cost": "{G}",
+        "type_line": "Creature - Scout", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    siren = inject_into_zone(gs, controller, {
+        "name": "Spyglass Siren", "mana_cost": "{U}",
+        "type_line": "Creature - Siren Pirate", "oracle_text": (
+            "Flying\nWhen Spyglass Siren enters the battlefield, create a Map token."
+        ),
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+
+    gs.ability_handler.process_triggered_abilities()
+    assert gs.resolve_top_of_stack(), "Spyglass Siren's Map trigger did not resolve"
+    maps = [
+        token_id for token_id in controller.get("tokens", [])
+        if getattr(gs._safe_get_card(token_id), "name", "") == "Map"
+    ]
+    assert len(maps) == 1, f"Spyglass Siren created the wrong tokens: {maps}"
+    map_id = maps[0]
+    map_card = gs._safe_get_card(map_id)
+    assert map_card.card_types == ["artifact"] and "map" in {
+        subtype.lower() for subtype in map_card.subtypes
+    }, "the Map token did not have its artifact/Map characteristics"
+    abilities = gs.ability_handler.get_activated_abilities(map_id)
+    assert len(abilities) == 1 and "explores" in abilities[0].effect.lower(), \
+        "the Map token's activated explore ability was not registered"
+
+    nonland = inject_card(gs, {
+        "name": "Explore Decision", "mana_cost": "{2}{U}",
+        "type_line": "Instant", "oracle_text": "Draw a card.",
+    })
+    controller["library"].insert(0, nonland)
+    gs._last_card_locations[nonland] = (controller, "library")
+    controller["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 1}
+    handler = get_env().action_handler
+    reward, ok = handler._handle_activate_ability(None, {
+        "battlefield_idx": controller["battlefield"].index(map_id),
+        "ability_idx": 0,
+    })
+    assert ok, f"Map activation did not begin targeting: {reward}"
+    assert gs.phase == gs.PHASE_TARGETING and not gs.stack, \
+        "Map paid a cost or entered the stack before choosing its target"
+    valid_map = gs.targeting_system.get_valid_targets(
+        map_id, controller, gs.targeting_context["required_type"],
+        effect_text=gs.targeting_context["effect_text"])
+    valid_targets = sorted({target_id for ids in valid_map.values() for target_id in ids})
+    assert explorer in valid_targets and all(
+        target_id not in opponent["battlefield"] for target_id in valid_targets
+    ), "Map did not restrict its target to a creature its controller controls"
+    reward, ok = handler._handle_select_target(valid_targets.index(explorer), {})
+    assert ok, f"Map target selection failed: {reward}"
+    assert map_id not in controller["battlefield"] and map_id not in gs.card_db, \
+        "Map was not sacrificed as an activation cost"
+    assert sum(controller["mana_pool"].values()) == 0, "Map did not pay {1}"
+    assert gs.stack and gs.stack[-1][1] == map_id, \
+        "Map's ability was not independent of its sacrificed source"
+
+    assert gs.resolve_top_of_stack(), "Map's explore ability did not resolve"
+    assert gs.phase == gs.PHASE_CHOOSE and gs.choice_context.get("type") == "explore", \
+        "nonland explore was auto-resolved instead of becoming an agent choice"
+    assert gs._safe_get_card(explorer).counters.get("+1/+1", 0) == 1, \
+        "explore did not put a +1/+1 counter on the exploring creature"
+    choice_mask = handler.generate_valid_actions()
+    assert choice_mask[305] and choice_mask[306] and not choice_mask[307], \
+        "explore did not expose exactly graveyard/top destinations"
+    reward, ok = handler._handle_scry_surveil_choice(
+        None, {}, action_index=306)
+    assert ok, f"keeping the explored card on top failed: {reward}"
+    assert controller["library"][0] == nonland and gs.choice_context is None, \
+        "the chosen explore destination was not committed"
+
+
+@scenario("701.40a", "explore moves a land to hand and an empty library still gives a counter")
+def s_explore_land_and_empty_library():
+    gs = fresh()
+    controller = gs.p1
+    explorer = inject_into_zone(gs, controller, {
+        "name": "Empty-Library Explorer", "mana_cost": "{G}",
+        "type_line": "Creature - Scout", "oracle_text": "",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    land = inject_card(gs, {
+        "name": "Explore Land", "type_line": "Land - Island", "oracle_text": "",
+    })
+    controller["library"].insert(0, land)
+    gs._last_card_locations[land] = (controller, "library")
+    assert gs.explore(controller, explorer), "land explore failed"
+    assert land in controller["hand"] and gs.choice_context is None, \
+        "explore did not put the revealed land directly into hand"
+
+    controller["library"].clear()
+    before = gs._safe_get_card(explorer).counters.get("+1/+1", 0)
+    assert gs.explore(controller, explorer), "exploring an empty library was treated as failure"
+    assert gs._safe_get_card(explorer).counters.get("+1/+1", 0) == before + 1, \
+        "an empty-library explore did not put a +1/+1 counter on the creature"
+    assert gs.choice_context is None, "empty-library explore opened a nonexistent card choice"
+
+
+@scenario("701.7 / 111.10", "Get Lost gives two Map tokens to the destroyed permanent's controller")
+def s_get_lost_creates_maps_for_target_controller():
+    gs = fresh()
+    caster, target_controller = gs.p1, gs.p2
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.agent_is_p1 = True
+    gs.priority_player = caster
+    target = inject_into_zone(gs, target_controller, {
+        "name": "Lost Enchantment", "mana_cost": "{1}{W}",
+        "type_line": "Enchantment", "oracle_text": "",
+    }, "battlefield")
+    spell = inject_into_zone(gs, caster, {
+        "name": "Get Lost", "mana_cost": "{1}{W}",
+        "type_line": "Instant", "oracle_text": (
+            "Destroy target creature, enchantment, or planeswalker. "
+            "Its controller creates two Map tokens."
+        ),
+    }, "hand")
+    caster["mana_pool"] = {'W': 1, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 1}
+
+    assert gs.cast_spell(spell, caster), "Get Lost could not be cast"
+    assert gs.targeting_context.get("required_type") == "permanent", \
+        "Get Lost did not preserve its three-type target union"
+    valid_map = gs.targeting_system.get_valid_targets(
+        spell, caster, "permanent", effect_text=gs.targeting_context["effect_text"])
+    valid_targets = sorted({target_id for ids in valid_map.values() for target_id in ids})
+    assert target in valid_targets, "Get Lost did not offer an enchantment target"
+    _, ok = get_env().action_handler._handle_select_target(valid_targets.index(target), {})
+    assert ok and gs.resolve_top_of_stack(), "Get Lost did not resolve"
+    maps = [
+        token_id for token_id in target_controller.get("tokens", [])
+        if getattr(gs._safe_get_card(token_id), "name", "") == "Map"
+    ]
+    assert target in target_controller["graveyard"] and len(maps) == 2, \
+        "Get Lost did not destroy the target and give its controller two Maps"
+    assert not any(
+        getattr(gs._safe_get_card(token_id), "name", "") == "Map"
+        for token_id in caster.get("tokens", [])
+    ), "Get Lost gave the Maps to its caster"
+
+
+@scenario("701.20 / 122.1d", "Floodpits Drowner shuffles itself and only a stun-counter creature")
+def s_floodpits_drowner_stun_shuffle():
+    gs = fresh()
+    controller, opponent = gs.p1, gs.p2
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    source = inject_into_zone(gs, controller, {
+        "name": "Floodpits Drowner", "mana_cost": "{1}{U}",
+        "type_line": "Creature - Merfolk", "oracle_text": (
+            "Flash\nVigilance\n"
+            "When Floodpits Drowner enters, tap target creature an opponent controls "
+            "and put a stun counter on it.\n"
+            "{1}{U}, {T}: Shuffle Floodpits Drowner and target creature with a stun "
+            "counter on it into their owners' libraries."
+        ),
+        "power": 2, "toughness": 1,
+    }, "battlefield")
+    stunned = inject_into_zone(gs, opponent, {
+        "name": "Stunned Shuffle Target", "mana_cost": "{2}{G}",
+        "type_line": "Creature - Beast", "oracle_text": "",
+        "power": 3, "toughness": 3,
+    }, "battlefield")
+    clean = inject_into_zone(gs, opponent, {
+        "name": "Counterless Creature", "mana_cost": "{G}",
+        "type_line": "Creature - Elf", "oracle_text": "",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    gs.ability_handler.active_triggers.clear()
+    gs._safe_get_card(stunned).counters["stun"] = 1
+    controller["entered_battlefield_this_turn"].discard(source)
+    controller["mana_pool"] = {'W': 0, 'U': 1, 'B': 0, 'R': 0, 'G': 0, 'C': 1}
+    handler = get_env().action_handler
+
+    _, ok = handler._handle_activate_ability(None, {
+        "battlefield_idx": controller["battlefield"].index(source),
+        "ability_idx": 0,
+    })
+    assert ok and gs.phase == gs.PHASE_TARGETING, "Drowner's shuffle did not ask for a target"
+    valid_map = gs.targeting_system.get_valid_targets(
+        source, controller, "creature", effect_text=gs.targeting_context["effect_text"])
+    valid_targets = sorted({target_id for ids in valid_map.values() for target_id in ids})
+    assert stunned in valid_targets and clean not in valid_targets, \
+        "Drowner did not require its target to have a stun counter"
+    _, ok = handler._handle_select_target(valid_targets.index(stunned), {})
+    assert ok, "Drowner's target could not be committed"
+    assert source in controller["tapped_permanents"] and sum(controller["mana_pool"].values()) == 0, \
+        "Drowner did not pay both its tap and mana costs"
+    assert gs.resolve_top_of_stack(), "Drowner's shuffle ability did not resolve"
+    assert source in controller["library"] and stunned in opponent["library"], \
+        "Drowner and its target were not shuffled into their owners' libraries"
+    assert clean in opponent["battlefield"], "Drowner shuffled a creature without a stun counter"
+
+
+@scenario("608.2b", "an illegal Drowner target leaves the source on the battlefield")
+def s_floodpits_drowner_illegal_target_fizzles_atomically():
+    gs = fresh()
+    controller, opponent = gs.p1, gs.p2
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    source = inject_into_zone(gs, controller, {
+        "name": "Floodpits Drowner", "mana_cost": "{1}{U}",
+        "type_line": "Creature - Merfolk", "oracle_text": (
+            "{1}{U}, {T}: Shuffle Floodpits Drowner and target creature with a stun "
+            "counter on it into their owners' libraries."
+        ), "power": 2, "toughness": 1,
+    }, "battlefield")
+    target = inject_into_zone(gs, opponent, {
+        "name": "Fleeting Stun Target", "mana_cost": "{G}",
+        "type_line": "Creature - Beast", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    gs._safe_get_card(target).counters["stun"] = 1
+    controller["entered_battlefield_this_turn"].discard(source)
+    controller["mana_pool"] = {'W': 0, 'U': 1, 'B': 0, 'R': 0, 'G': 0, 'C': 1}
+    handler = get_env().action_handler
+    _, ok = handler._handle_activate_ability(None, {
+        "battlefield_idx": controller["battlefield"].index(source), "ability_idx": 0,
+    })
+    assert ok
+    valid_map = gs.targeting_system.get_valid_targets(
+        source, controller, "creature", effect_text=gs.targeting_context["effect_text"])
+    valid_targets = sorted({target_id for ids in valid_map.values() for target_id in ids})
+    _, ok = handler._handle_select_target(valid_targets.index(target), {})
+    assert ok
+    gs._safe_get_card(target).counters.pop("stun")
+    assert gs.resolve_top_of_stack(), "the counterless target did not make the ability fizzle cleanly"
+    assert source in controller["battlefield"] and target in opponent["battlefield"], \
+        "Drowner shuffled an object after its only target became illegal"
+
+
+@scenario("603.6c / 608.2h", "Heartfire Hero deals its last-known power when it dies")
+def s_heartfire_hero_last_known_power_damage():
+    gs = fresh()
+    controller, opponent = gs.p1, gs.p2
+    hero = inject_into_zone(gs, controller, {
+        "name": "Heartfire Hero", "mana_cost": "{R}",
+        "type_line": "Creature - Mouse Soldier", "oracle_text": (
+            "Vigilance\nHaste\n"
+            "Valiant - Whenever Heartfire Hero becomes the target of a spell or "
+            "ability you control for the first time each turn, put a +1/+1 counter on it.\n"
+            "When Heartfire Hero dies, it deals damage equal to its power to each opponent."
+        ),
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    gs._safe_get_card(hero).counters["+1/+1"] = 2
+    gs.layer_system.apply_all_effects()
+    assert gs._safe_get_card(hero).power == 3, "the Hero's live power setup failed"
+    life_before = opponent["life"]
+
+    assert gs.move_card(hero, controller, "battlefield", controller, "graveyard", cause="destroy")
+    assert gs._safe_get_card(hero).power == 1, "the Hero did not reset after changing zones"
+    gs.ability_handler.process_triggered_abilities()
+    assert gs.resolve_top_of_stack(), "Heartfire Hero's dies trigger did not resolve"
+    assert opponent["life"] == life_before - 3, \
+        "Heartfire Hero did not deal damage equal to its last-known power"
+    assert controller["life"] == 20, "Heartfire Hero damaged its controller"
+
+
+@scenario("205.1a / 613 / 606", "Kaito becomes a hexproof Ninja creature and can still use loyalty abilities")
+def s_kaito_type_change_and_ninja_emblem():
+    gs = fresh()
+    controller = gs.p1
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    kaito = inject_into_zone(gs, controller, {
+        "name": "Kaito, Bane of Nightmares", "mana_cost": "{2}{U}{B}",
+        "type_line": "Legendary Planeswalker - Kaito", "loyalty": 4,
+        "oracle_text": (
+            "Ninjutsu {1}{U}{B}\n"
+            "During your turn, as long as Kaito has one or more loyalty counters on "
+            "him, he's a 3/4 Ninja creature and has hexproof.\n"
+            "+1: You get an emblem with \"Ninjas you control get +1/+1.\"\n"
+            "0: Surveil 2. Then draw a card for each opponent who lost life this turn.\n"
+            "-2: Tap target creature. Put two stun counters on it."
+        ),
+    }, "battlefield")
+    ninja = inject_into_zone(gs, controller, {
+        "name": "Emblem Ninja", "mana_cost": "{1}{U}",
+        "type_line": "Creature - Human Ninja", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    non_ninja = inject_into_zone(gs, controller, {
+        "name": "Emblem Bystander", "mana_cost": "{1}{U}",
+        "type_line": "Creature - Human", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    gs.layer_system.apply_all_effects()
+    live = gs._safe_get_card(kaito)
+    assert live.card_types == ["creature"] and {
+        subtype.lower() for subtype in live.subtypes
+    } == {"ninja"}, f"Kaito's active types were wrong: {live.card_types} {live.subtypes}"
+    assert (live.power, live.toughness) == (3, 4) and gs.check_keyword(kaito, "hexproof"), \
+        "Kaito did not gain its active P/T and hexproof"
+    assert gs.activate_planeswalker_ability(kaito, 0, controller), \
+        "animated Kaito could not activate its loyalty ability"
+    assert gs.resolve_top_of_stack(), "Kaito's +1 did not resolve"
+    assert controller.get("emblems") and controller["emblems"][-1]["kind"] == "ninja_anthem", \
+        "Kaito did not create its command-zone emblem"
+    gs.layer_system.apply_all_effects()
+    assert (gs._safe_get_card(ninja).power, gs._safe_get_card(ninja).toughness) == (3, 3), \
+        "Kaito's emblem did not give a controlled Ninja +1/+1"
+    assert (gs._safe_get_card(non_ninja).power, gs._safe_get_card(non_ninja).toughness) == (2, 2), \
+        "Kaito's emblem affected a non-Ninja"
+
+    gs.turn = 2
+    gs.layer_system.apply_all_effects()
+    live = gs._safe_get_card(kaito)
+    assert live.card_types == ["planeswalker"] and not gs.check_keyword(kaito, "hexproof"), \
+        "Kaito did not revert to a planeswalker on the opponent's turn"
+    gs.turn = 1
+    controller["loyalty_counters"][kaito] = 0
+    gs.layer_system.apply_all_effects()
+    assert gs._safe_get_card(kaito).card_types == ["planeswalker"], \
+        "zero-loyalty Kaito remained a creature"
+
+
+@scenario("113.7a / 305.2", "Wrenn's emblem exposes lands and permanent spells from the graveyard")
+def s_wrenn_emblem_graveyard_permissions():
+    gs = fresh()
+    controller = gs.p1
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    wrenn = inject_into_zone(gs, controller, {
+        "name": "Wrenn and Realmbreaker", "mana_cost": "{1}{G}{G}",
+        "type_line": "Legendary Planeswalker - Wrenn", "loyalty": 4,
+        "oracle_text": (
+            "Lands you control have \"{T}: Add one mana of any color.\"\n"
+            "+1: Up to one target land you control becomes a 3/3 Elemental creature "
+            "with vigilance, hexproof, and haste until your next turn. It's still a land.\n"
+            "-2: Mill three cards. You may put a permanent card from among the milled "
+            "cards into your hand.\n"
+            "-7: You get an emblem with \"You may play lands and cast permanent spells "
+            "from your graveyard.\""
+        ),
+    }, "battlefield")
+    controller["loyalty_counters"][wrenn] = 7
+    assert gs.activate_planeswalker_ability(wrenn, 2, controller), "Wrenn's -7 could not activate"
+    assert gs.resolve_top_of_stack(), "Wrenn's emblem ability did not resolve"
+    assert controller.get("emblems") and controller["emblems"][-1]["kind"] == "graveyard_permanents", \
+        "Wrenn did not create its graveyard-permission emblem"
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = controller
+    gs.priority_pass_count = 0
+
+    land = inject_into_zone(gs, controller, {
+        "name": "Emblem Land", "type_line": "Land - Forest", "oracle_text": "",
+    }, "graveyard")
+    creature = inject_into_zone(gs, controller, {
+        "name": "Emblem Creature", "mana_cost": "{1}{G}",
+        "type_line": "Creature - Plant", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "graveyard")
+    instant = inject_into_zone(gs, controller, {
+        "name": "Emblem Instant", "mana_cost": "{U}",
+        "type_line": "Instant", "oracle_text": "Draw a card.",
+    }, "graveyard")
+    controller["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 1, 'C': 1}
+    handler = get_env().action_handler
+    mask = handler.generate_valid_actions()
+    land_action = 472 + controller["graveyard"].index(land)
+    creature_action = 472 + controller["graveyard"].index(creature)
+    instant_action = 472 + controller["graveyard"].index(instant)
+    assert mask[land_action] and mask[creature_action] and not mask[instant_action], \
+        "Wrenn's emblem exposed the wrong graveyard card types"
+
+    reward, ok = handler._handle_play_from_graveyard(controller["graveyard"].index(land), {})
+    assert ok, f"playing a land through Wrenn's emblem failed: {reward}"
+    assert land in controller["battlefield"] and controller["land_played"], \
+        "Wrenn's emblem did not play the graveyard land normally"
+    reward, ok = handler._handle_play_from_graveyard(controller["graveyard"].index(creature), {})
+    assert ok, f"casting a permanent through Wrenn's emblem failed: {reward}"
+    assert gs.stack and gs.stack[-1][1] == creature, \
+        "the graveyard permanent spell did not enter the stack"
+    assert gs.resolve_top_of_stack() and creature in controller["battlefield"], \
+        "the graveyard permanent spell did not resolve"
+
+
+@scenario("603.4 / 611.2e", "Enduring Curiosity returns to its owner as only an enchantment")
+def s_enduring_curiosity_dies_return_type_change():
+    gs = fresh()
+    owner, controller = gs.p1, gs.p2
+    enduring = inject_card(gs, {
+        "name": "Enduring Curiosity", "mana_cost": "{2}{U}{U}",
+        "type_line": "Enchantment Creature - Cat Glimmer", "oracle_text": (
+            "Flash\nWhenever a creature you control deals combat damage to a player, "
+            "draw a card.\nWhen Enduring Curiosity dies, if it was a creature, return "
+            "it to the battlefield under its owner's control. It's an enchantment."
+        ),
+        "power": 4, "toughness": 3,
+    })
+    gs.original_p1_deck.append(enduring)
+    owner["library"].append(enduring)
+    gs._last_card_locations[enduring] = (owner, "library")
+    assert gs.move_card(enduring, owner, "library", controller, "battlefield"), \
+        "could not put the owner's Enduring Curiosity under opposing control"
+    assert gs.move_card(enduring, controller, "battlefield", owner, "graveyard", cause="destroy"), \
+        "Enduring Curiosity did not die into its owner's graveyard"
+    gs.ability_handler.process_triggered_abilities()
+    assert gs.resolve_top_of_stack(), "Enduring Curiosity's dies trigger did not resolve"
+    live = gs._safe_get_card(enduring)
+    assert enduring in owner["battlefield"] and enduring not in controller["battlefield"], \
+        "Enduring Curiosity did not return under its owner's control"
+    assert live.card_types == ["enchantment"] and live.subtypes == [], \
+        f"Enduring Curiosity returned with the wrong types: {live.card_types} {live.subtypes}"
+    assert (live.power, live.toughness) == (0, 0), \
+        "the enchantment-only Enduring Curiosity retained creature P/T"
+
+    gs.ability_handler.active_triggers.clear()
+    assert gs.move_card(enduring, owner, "battlefield", owner, "graveyard", cause="destroy"), \
+        "the returned enchantment could not leave the battlefield"
+    assert not any(entry[0].card_id == enduring for entry in gs.ability_handler.active_triggers), \
+        "Enduring Curiosity returned after dying while it was not a creature"
+
+
+@scenario("111.4 / 603.4", "a token Enduring Curiosity does not return after dying")
+def s_enduring_curiosity_token_does_not_return():
+    gs = fresh()
+    controller = gs.p1
+    token = gs.create_token(controller, {
+        "name": "Enduring Curiosity", "mana_cost": "{2}{U}{U}",
+        "type_line": "Token Enchantment Creature - Cat Glimmer",
+        "card_types": ["enchantment", "creature"],
+        "subtypes": ["cat", "glimmer"],
+        "oracle_text": (
+            "When Enduring Curiosity dies, if it was a creature, return it to the "
+            "battlefield under its owner's control. It's an enchantment."
+        ),
+        "power": 4, "toughness": 3,
+    })
+    assert token and gs.move_card(token, controller, "battlefield", controller, "graveyard", cause="destroy")
+    gs.ability_handler.process_triggered_abilities()
+    assert gs.resolve_top_of_stack(), "the token's dies trigger did not finish resolving"
+    assert token not in controller["battlefield"] and token not in gs.card_db, \
+        "a token Enduring Curiosity returned from the graveyard"
+
+
+@scenario("707.9 / Mockingbird", "Mockingbird offers only creatures within the mana-spent bound and copies before entering")
+def s_mockingbird_bounded_copy_as_enters():
+    gs = fresh()
+    controller, opponent = gs.p1, gs.p2
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    eligible = inject_into_zone(gs, opponent, {
+        "name": "Eligible Visionary", "mana_cost": "{2}{G}", "cmc": 3,
+        "type_line": "Creature - Elf Druid", "oracle_text": (
+            "When Eligible Visionary enters the battlefield, you gain 2 life."
+        ),
+        "power": 3, "toughness": 3,
+    }, "battlefield")
+    too_large = inject_into_zone(gs, opponent, {
+        "name": "Too-Large Giant", "mana_cost": "{3}{G}", "cmc": 4,
+        "type_line": "Creature - Giant", "oracle_text": "",
+        "power": 4, "toughness": 4,
+    }, "battlefield")
+    gs._safe_get_card(eligible).counters["+1/+1"] = 2
+    gs.layer_system.apply_all_effects()
+    gs.ability_handler.active_triggers.clear()
+    mockingbird = inject_into_zone(gs, controller, {
+        "name": "Mockingbird", "mana_cost": "{X}{U}", "cmc": 1,
+        "type_line": "Creature - Bird Bard", "oracle_text": (
+            "Flying\nYou may have this creature enter as a copy of any creature on "
+            "the battlefield with mana value less than or equal to the amount of "
+            "mana spent to cast this creature, except it's a Bird in addition to "
+            "its other types and it has flying."
+        ),
+        "power": 1, "toughness": 1,
+    }, "hand")
+    controller["mana_pool"] = {'W': 0, 'U': 1, 'B': 0, 'R': 0, 'G': 0, 'C': 2}
+
+    assert gs.cast_spell(mockingbird, controller, {"X": 2}), "Mockingbird could not be cast"
+    assert gs.resolve_top_of_stack(), "Mockingbird did not reach its as-enters choice"
+    assert gs.phase == gs.PHASE_CHOOSE and gs.choice_context.get("type") == "mockingbird_copy", \
+        "Mockingbird did not expose its optional copy choice"
+    options = gs.choice_context.get("options", [])
+    assert eligible in options and too_large not in options, \
+        "Mockingbird ignored the total-mana-spent copy bound"
+    handler = get_env().action_handler
+    mask = handler.generate_valid_actions()
+    assert mask[353 + options.index(eligible)] and mask[11], \
+        "Mockingbird did not expose both copy and decline actions"
+    _, ok = handler._handle_choose_mode(options.index(eligible), {})
+    assert ok and mockingbird in controller["battlefield"], \
+        "Mockingbird's selected copy did not enter"
+    copied = gs._safe_get_card(mockingbird)
+    assert copied.name == "Eligible Visionary" and (copied.power, copied.toughness) == (3, 3), \
+        "Mockingbird copied modified values instead of copyable printed values"
+    assert {"elf", "druid", "bird"}.issubset({s.lower() for s in copied.subtypes}), \
+        f"Mockingbird's copy exception produced the wrong subtypes: {copied.subtypes}"
+    assert gs.check_keyword(mockingbird, "flying"), \
+        "Mockingbird's copy exception did not grant flying"
+    assert any(entry[0].card_id == mockingbird for entry in gs.ability_handler.active_triggers), \
+        "Mockingbird did not queue the copied enters ability"
+    assert any(entry[0].card_id == mockingbird and entry[1] is controller
+               for entry in gs.ability_handler.active_triggers), \
+        "Mockingbird queued its copied enters ability for the wrong controller"
+    queued_effects = [entry[0].effect for entry in gs.ability_handler.active_triggers
+                      if entry[0].card_id == mockingbird]
+    gs.ability_handler.process_triggered_abilities()
+    assert gs.resolve_top_of_stack(), "the copied enters ability did not resolve"
+    assert controller["life"] == 22, \
+        f"Mockingbird copied ETB failed: life={controller['life']} effects={queued_effects}"
+
+
+@scenario("707.9", "Mockingbird may decline its copy replacement and enter with its own identity")
+def s_mockingbird_declines_copy():
+    gs = fresh()
+    controller = gs.p1
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    inject_into_zone(gs, gs.p2, {
+        "name": "Copy Candidate", "mana_cost": "{G}", "cmc": 1,
+        "type_line": "Creature - Elf", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    mockingbird = inject_into_zone(gs, controller, {
+        "name": "Mockingbird", "mana_cost": "{X}{U}", "cmc": 1,
+        "type_line": "Creature - Bird Bard", "oracle_text": (
+            "Flying\nYou may have this creature enter as a copy of any creature on "
+            "the battlefield with mana value less than or equal to the amount of "
+            "mana spent to cast this creature, except it's a Bird in addition to "
+            "its other types and it has flying."
+        ), "power": 1, "toughness": 1,
+    }, "hand")
+    controller["mana_pool"] = {'W': 0, 'U': 1, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
+    assert gs.cast_spell(mockingbird, controller, {"X": 0})
+    assert gs.resolve_top_of_stack() and gs.choice_context
+    gs._pass_priority()
+    card = gs._safe_get_card(mockingbird)
+    assert mockingbird in controller["battlefield"] and card.name == "Mockingbird", \
+        "declining Mockingbird's replacement did not enter the original card"
+    assert (card.power, card.toughness) == (1, 1) and {
+        s.lower() for s in card.subtypes
+    } == {"bird", "bard"}, "declined Mockingbird entered with copied characteristics"
+
+
+@scenario("111.10b", "a Food token pays two, taps, sacrifices, and gains 3 life")
+def s_food_token_activation():
+    from Playersim.ability_utils import EffectFactory
+
+    gs = fresh()
+    controller = gs.p1
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    effects = EffectFactory.create_effects("Create a Food token.")
+    assert len(effects) == 1 and effects[0].apply(gs, None, controller), \
+        "Food creation did not use a rules-bearing token effect"
+    foods = [
+        token_id for token_id in controller.get("tokens", [])
+        if getattr(gs._safe_get_card(token_id), "name", "") == "Food"
+    ]
+    assert len(foods) == 1, f"Food creation produced the wrong tokens: {foods}"
+    food_id = foods[0]
+    food = gs._safe_get_card(food_id)
+    assert food.card_types == ["artifact"] and {
+        subtype.lower() for subtype in food.subtypes
+    } == {"food"}, "Food did not have its token artifact characteristics"
+    abilities = gs.ability_handler.get_activated_abilities(food_id)
+    assert len(abilities) == 1 and "gain 3 life" in abilities[0].effect.lower(), \
+        "Food's activated life ability was not registered"
+    controller["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 2}
+    life_before = controller["life"]
+    reward, ok = get_env().action_handler._handle_activate_ability(None, {
+        "battlefield_idx": controller["battlefield"].index(food_id),
+        "ability_idx": 0,
+    })
+    assert ok, f"Food activation failed: {reward}"
+    assert food_id not in controller["battlefield"] and food_id not in gs.card_db, \
+        "Food was not sacrificed as an activation cost"
+    assert sum(controller["mana_pool"].values()) == 0, "Food did not pay {2}"
+    assert gs.stack and gs.stack[-1][1] == food_id, \
+        "Food's ability did not survive its token source ceasing to exist"
+    assert gs.resolve_top_of_stack() and controller["life"] == life_before + 3, \
+        "Food's ability did not gain exactly 3 life"
+
+
+@scenario("702.170", "Plot exiles at sorcery speed and permits a free cast only on a later turn")
+def s_plot_special_action_and_later_cast():
+    gs = fresh()
+    controller = gs.p1
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    slickshot = inject_into_zone(gs, controller, {
+        "name": "Slickshot Show-Off", "mana_cost": "{1}{R}", "cmc": 2,
+        "type_line": "Creature - Bird Wizard", "oracle_text": (
+            "Flying, haste\nWhenever you cast a noncreature spell, this creature "
+            "gets +2/+0 until end of turn.\nPlot {1}{R}"
+        ), "power": 1, "toughness": 2,
+    }, "hand")
+    controller["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 1, 'G': 0, 'C': 1}
+    handler = get_env().action_handler
+    mask = handler.generate_valid_actions()
+    hand_index = controller["hand"].index(slickshot)
+    plot_action = [296, 297, 298, 309, 310, 311, 312, 313][hand_index]
+    assert mask[plot_action], "the policy action mask did not expose Plot"
+    reward, ok = handler._handle_plot_card(hand_index, {})
+    assert ok, f"Plot special action failed: {reward}"
+    assert slickshot in controller["exile"] and slickshot not in controller["hand"], \
+        "Plot did not move Slickshot from hand to exile"
+    assert sum(controller["mana_pool"].values()) == 0, "Plot did not pay its printed cost"
+    assert not any(option["card_id"] == slickshot for option in gs.get_exile_cast_options(controller)), \
+        "Slickshot was castable on the same turn it was plotted"
+
+    gs.turn = 3
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = controller
+    gs.priority_pass_count = 0
+    controller["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
+    options = gs.get_exile_cast_options(controller)
+    option_index = next(i for i, option in enumerate(options)
+                        if option["card_id"] == slickshot and option.get("permission") == "plot")
+    mask = handler.generate_valid_actions()
+    assert mask[230 + option_index], "the later free Plot cast was absent from the action mask"
+    reward, ok = handler._handle_cast_from_exile(option_index)
+    assert ok, f"casting the plotted card failed: {reward}"
+    assert gs.stack and gs.stack[-1][1] == slickshot, "the plotted spell did not enter the stack"
+    assert sum(controller["mana_pool"].values()) == 0, "the Plot cast charged mana"
+    assert gs.resolve_top_of_stack() and slickshot in controller["battlefield"], \
+        "the plotted Slickshot did not resolve as a creature"
+    assert not any(entry.get("card_id") == slickshot for entry in gs.plotted_cards), \
+        "the consumed Plot permission remained available"
+
+
+@scenario("702.166 / Torch the Tower", "bargained Torch sacrifices an eligible permanent, deals 3, scries, and exiles its victim")
+def s_bargained_torch_the_tower():
+    gs = fresh()
+    controller, opponent = gs.p1, gs.p2
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    artifact = inject_into_zone(gs, controller, {
+        "name": "Bargain Bauble", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Artifact", "oracle_text": "",
+    }, "battlefield")
+    land = inject_into_zone(gs, controller, {
+        "name": "Not a Bargain", "type_line": "Land - Mountain", "oracle_text": "",
+    }, "battlefield")
+    victim = inject_into_zone(gs, opponent, {
+        "name": "Three-Toughness Victim", "mana_cost": "{2}{G}", "cmc": 3,
+        "type_line": "Creature - Beast", "oracle_text": "",
+        "power": 3, "toughness": 3,
+    }, "battlefield")
+    top = inject_card(gs, {
+        "name": "Torch Scry Card", "mana_cost": "{U}", "cmc": 1,
+        "type_line": "Instant", "oracle_text": "Draw a card.",
+    })
+    controller["library"].insert(0, top)
+    gs._last_card_locations[top] = (controller, "library")
+    torch = inject_into_zone(gs, controller, {
+        "name": "Torch the Tower", "mana_cost": "{R}", "cmc": 1,
+        "type_line": "Instant", "oracle_text": (
+            "Bargain\nTorch the Tower deals 2 damage to target creature or planeswalker. "
+            "If this spell was bargained, instead it deals 3 damage to that permanent "
+            "and you scry 1.\nIf a permanent dealt damage by Torch the Tower would die "
+            "this turn, exile it instead."
+        ),
+    }, "hand")
+    controller["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 1, 'G': 0, 'C': 0}
+    handler = get_env().action_handler
+
+    assert gs.cast_spell(torch, controller), "Torch could not begin casting"
+    assert gs.phase == gs.PHASE_CHOOSE and gs.choice_context.get("type") == "bargain", \
+        "Torch did not expose its optional Bargain cost"
+    options = gs.choice_context.get("options", [])
+    assert artifact in options and land not in options, "Bargain offered an ineligible permanent"
+    _, ok = handler._handle_choose_mode(options.index(artifact), {})
+    assert ok and gs.phase == gs.PHASE_TARGETING, "Bargain did not resume into target selection"
+    valid_map = gs.targeting_system.get_valid_targets(
+        torch, controller, gs.targeting_context["required_type"],
+        effect_text=gs.targeting_context["effect_text"])
+    valid_targets = sorted({target_id for ids in valid_map.values() for target_id in ids})
+    assert victim in valid_targets, "Torch did not accept a creature target"
+    _, ok = handler._handle_select_target(valid_targets.index(victim), {})
+    assert ok, "Torch target selection failed"
+    assert artifact in controller["graveyard"] and artifact not in controller["battlefield"], \
+        "Torch did not sacrifice the bargained artifact while casting"
+    assert gs.resolve_top_of_stack(), "bargained Torch did not resolve"
+    torch_replacements = [
+        (entry.get("event_type"), entry.get("description"), entry.get("start_turn"))
+        for entry in gs.replacement_effects.active_effects
+    ]
+    assert victim in opponent["exile"] and victim not in opponent["graveyard"], \
+        f"Torch victim zones were wrong: bf={victim in opponent['battlefield']} " \
+        f"gy={victim in opponent['graveyard']} exile={victim in opponent['exile']} " \
+        f"replacements={torch_replacements}"
+    assert gs.phase == gs.PHASE_CHOOSE and gs.choice_context.get("type") == "scry", \
+        "bargained Torch did not scry 1"
+
+
+@scenario("614.6 / Torch the Tower", "unbargained Torch deals 2 and its damaged permanent is exiled if it dies later that turn")
+def s_unbargained_torch_delayed_exile_replacement():
+    gs = fresh()
+    controller, opponent = gs.p1, gs.p2
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    victim = inject_into_zone(gs, opponent, {
+        "name": "Later-Dying Victim", "mana_cost": "{3}{G}", "cmc": 4,
+        "type_line": "Creature - Beast", "oracle_text": "",
+        "power": 4, "toughness": 4,
+    }, "battlefield")
+    torch = inject_into_zone(gs, controller, {
+        "name": "Torch the Tower", "mana_cost": "{R}", "cmc": 1,
+        "type_line": "Instant", "oracle_text": (
+            "Bargain\nTorch the Tower deals 2 damage to target creature or planeswalker. "
+            "If this spell was bargained, instead it deals 3 damage to that permanent "
+            "and you scry 1.\nIf a permanent dealt damage by Torch the Tower would die "
+            "this turn, exile it instead."
+        ),
+    }, "hand")
+    controller["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 1, 'G': 0, 'C': 0}
+    handler = get_env().action_handler
+    assert gs.cast_spell(torch, controller)
+    gs._pass_priority()
+    assert gs.phase == gs.PHASE_TARGETING, "declining Bargain did not continue casting Torch"
+    valid_map = gs.targeting_system.get_valid_targets(
+        torch, controller, gs.targeting_context["required_type"],
+        effect_text=gs.targeting_context["effect_text"])
+    valid_targets = sorted({target_id for ids in valid_map.values() for target_id in ids})
+    _, ok = handler._handle_select_target(valid_targets.index(victim), {})
+    assert ok and gs.resolve_top_of_stack(), "unbargained Torch failed"
+    assert opponent["damage_counters"].get(victim) == 2, \
+        "unbargained Torch did not deal exactly 2 damage"
+    assert gs.choice_context is None, "unbargained Torch incorrectly scried"
+    assert gs.apply_damage_to_permanent(victim, 2, source_id=None) == 2
+    gs.check_state_based_actions()
+    assert victim in opponent["exile"] and victim not in opponent["graveyard"], \
+        "a permanent damaged by Torch was not exiled when it died later that turn"
+
+
+@scenario("701.60", "manifest dread exposes the top-two choice, graves the other card, and creates an exact face-down 2/2")
+def s_manifest_dread_choice_and_turn_face_up():
+    from Playersim.ability_utils import EffectFactory
+
+    gs = fresh()
+    controller = gs.p1
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    creature = inject_card(gs, {
+        "name": "Hidden Bear", "mana_cost": "{1}{G}", "cmc": 2,
+        "type_line": "Creature - Bear", "oracle_text": (
+            "When Hidden Bear enters the battlefield, you gain 5 life."
+        ), "power": 2, "toughness": 2,
+        "faces": [
+            {
+                "name": "Hidden Bear", "mana_cost": "{1}{G}",
+                "type_line": "Creature - Bear", "power": "2", "toughness": "2",
+                "oracle_text": "When Hidden Bear enters the battlefield, you gain 5 life.",
+            },
+            {
+                "name": "Hidden Den", "mana_cost": "{3}{G}",
+                "type_line": "Creature - Beast", "power": "4", "toughness": "4",
+                "oracle_text": "Trample",
+            },
+        ],
+    })
+    noncreature = inject_card(gs, {
+        "name": "Dread Instant", "mana_cost": "{U}", "cmc": 1,
+        "type_line": "Instant", "oracle_text": "Draw a card.",
+    })
+    controller["library"][:0] = [creature, noncreature]
+    gs._last_card_locations[creature] = (controller, "library")
+    gs._last_card_locations[noncreature] = (controller, "library")
+    effects = EffectFactory.create_effects("Manifest dread.")
+    assert len(effects) == 1 and effects[0].apply(gs, None, controller), \
+        "manifest dread did not begin its top-two choice"
+    assert gs.phase == gs.PHASE_CHOOSE and gs.choice_context.get("type") == "manifest_dread", \
+        "manifest dread did not expose the looked-at cards"
+    options = gs.choice_context.get("options", [])
+    _, ok = get_env().action_handler._handle_choose_mode(options.index(creature), {})
+    assert ok, "the manifest dread selection failed"
+    assert creature in controller["battlefield"] and noncreature in controller["graveyard"], \
+        "manifest dread sent its selected cards to the wrong zones"
+    face_down = gs._safe_get_card(creature)
+    assert face_down.name == "Face-down creature" and face_down.mana_cost == "" and face_down.cmc == 0, \
+        "the manifested card leaked its hidden name or mana characteristics"
+    assert face_down.card_types == ["creature"] and not face_down.subtypes \
+        and not face_down.supertypes and face_down.oracle_text == "", \
+        "the manifested card leaked types or abilities"
+    assert not any(face_down.subtype_vector), \
+        "the manifested card leaked its original subtype through model features"
+    assert not any(face_down.to_feature_vector()[-3:]), \
+        "the manifested card leaked its double-face metadata through model features"
+    assert (face_down.power, face_down.toughness) == (2, 2) \
+        and not any(face_down.colors) and getattr(face_down, "face_down", False), \
+        "the manifested permanent did not have exact face-down characteristics"
+    assert controller["life"] == 20, "manifesting a creature incorrectly fired its enters ability"
+    gs.turn = 2
+    gs.phase = gs.PHASE_PRIORITY
+    gs.previous_priority_phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = controller
+    controller["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 1, 'C': 1}
+    handler = get_env().action_handler
+    mask = handler.generate_valid_actions()
+    assert mask[456], \
+        "the policy action mask did not expose turning a manifest face up at instant timing"
+    _, ok = handler._handle_manifest(None, {
+        "battlefield_idx": controller["battlefield"].index(creature),
+    })
+    assert ok, "the manifested creature could not turn face up for its mana cost"
+    restored = gs._safe_get_card(creature)
+    assert restored.name == "Hidden Bear" and restored.mana_cost == "{1}{G}" \
+        and {s.lower() for s in restored.subtypes} == {"bear"}, \
+        "turning the manifest face up did not restore its printed identity"
+    assert list(restored.to_feature_vector()[-3:]) == [1.0, 4.0, 4.0], \
+        "turning the manifest face up did not restore its public MDFC features"
+    assert controller["life"] == 20, "turning a manifest face up incorrectly fired an enters ability"
+
+
+@scenario("701.60", "manifest dread handles one-card and empty libraries without inventing a choice")
+def s_manifest_dread_small_libraries():
+    from Playersim.ability_types import ManifestDreadEffect
+
+    gs = fresh()
+    controller = gs.p1
+    only_card = inject_card(gs, {
+        "name": "Only Dread Card", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Artifact", "oracle_text": "",
+    })
+    controller["library"] = [only_card]
+    gs._last_card_locations[only_card] = (controller, "library")
+    assert ManifestDreadEffect().apply(gs, None, controller)
+    assert only_card in controller["battlefield"] and gs.choice_context is None, \
+        "a one-card library did not automatically manifest its only card"
+    assert gs._safe_get_card(only_card).name == "Face-down creature"
+
+    gs2 = fresh(seed=SEED + 1)
+    gs2.p1["library"].clear()
+    assert ManifestDreadEffect().apply(gs2, None, gs2.p1), \
+        "manifest dread on an empty library was treated as a failure"
+    assert gs2.choice_context is None, "empty-library manifest dread opened a phantom choice"
+
+
+@scenario("603.7 / Turn Inside Out", "Turn Inside Out manifests dread only when its exact target dies that turn")
+def s_turn_inside_out_delayed_manifest_dread():
+    gs = fresh()
+    controller, opponent = gs.p1, gs.p2
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    target = inject_into_zone(gs, controller, {
+        "name": "Inside-Out Target", "mana_cost": "{G}", "cmc": 1,
+        "type_line": "Creature - Elf", "oracle_text": "",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    other = inject_into_zone(gs, controller, {
+        "name": "Other Creature", "mana_cost": "{G}", "cmc": 1,
+        "type_line": "Creature - Elf", "oracle_text": "",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    dread_a = inject_card(gs, {
+        "name": "Dread A", "mana_cost": "{1}{G}", "cmc": 2,
+        "type_line": "Creature - Beast", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    })
+    dread_b = inject_card(gs, {
+        "name": "Dread B", "mana_cost": "{U}", "cmc": 1,
+        "type_line": "Instant", "oracle_text": "Draw a card.",
+    })
+    controller["library"][:0] = [dread_a, dread_b]
+    gs._last_card_locations[dread_a] = (controller, "library")
+    gs._last_card_locations[dread_b] = (controller, "library")
+    spell = inject_into_zone(gs, controller, {
+        "name": "Turn Inside Out", "mana_cost": "{R}", "cmc": 1,
+        "type_line": "Instant", "oracle_text": (
+            "Target creature gets +3/+0 until end of turn. When it dies this turn, "
+            "manifest dread."
+        ),
+    }, "hand")
+    controller["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 1, 'G': 0, 'C': 0}
+    handler = get_env().action_handler
+    assert gs.cast_spell(spell, controller)
+    valid_map = gs.targeting_system.get_valid_targets(
+        spell, controller, gs.targeting_context["required_type"],
+        effect_text=gs.targeting_context["effect_text"])
+    valid_targets = sorted({target_id for ids in valid_map.values() for target_id in ids})
+    _, ok = handler._handle_select_target(valid_targets.index(target), {})
+    assert ok and gs.resolve_top_of_stack(), "Turn Inside Out did not resolve"
+    gs.layer_system.apply_all_effects()
+    assert gs._safe_get_card(target).power == 4, "Turn Inside Out did not grant +3/+0"
+
+    assert gs.move_card(other, controller, "battlefield", controller, "graveyard", cause="destroy")
+    assert not gs.ability_handler.active_triggers, \
+        "Turn Inside Out's delayed trigger watched the wrong creature"
+    assert gs.move_card(target, controller, "battlefield", controller, "graveyard", cause="destroy")
+    gs.ability_handler.process_triggered_abilities()
+    assert gs.stack, "the exact target's death did not create the delayed trigger"
+    assert gs.resolve_top_of_stack(), "Turn Inside Out's delayed trigger did not resolve"
+    assert gs.phase == gs.PHASE_CHOOSE and gs.choice_context.get("type") == "manifest_dread", \
+        "Turn Inside Out's death rider did not manifest dread"
+
 
 
 # ---------------------------------------------------------------------------

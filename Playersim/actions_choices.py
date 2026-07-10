@@ -56,7 +56,7 @@ class ChoiceHandlersMixin:
         logging.warning("PUT_TO_GRAVEYARD called outside of Surveil context.")
         return -0.1, False
 
-    def _handle_scry_surveil_choice(self, param, context, **kwargs):
+    def _handle_scry_surveil_choice(self, param, context, action_index=None, **kwargs):
         """
         Unified and improved handler for Scry/Surveil actions with better validation and outcomes tracking.
         
@@ -69,7 +69,8 @@ class ChoiceHandlersMixin:
         """
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
-        action_index = kwargs.get('action_index')
+        if action_index is None:
+            action_index = kwargs.get('action_index')
 
         # Determine action type based on action index
         if action_index == 305:  # PUT_TO_GRAVEYARD (Surveil only)
@@ -94,7 +95,7 @@ class ChoiceHandlersMixin:
         current_choice_type = context.get("type")
 
         # Validate context type matches action
-        if current_choice_type not in ["scry", "surveil"]:
+        if current_choice_type not in ["scry", "surveil", "explore"]:
             logging.warning(f"{action_name} called in incorrect context: {current_choice_type}")
             return -0.2, False
             
@@ -111,7 +112,7 @@ class ChoiceHandlersMixin:
             return -0.1, False
 
         # Validate action type against context type
-        if (destination == "graveyard" and current_choice_type != "surveil") or \
+        if (destination == "graveyard" and current_choice_type not in ["surveil", "explore"]) or \
         (destination == "bottom" and current_choice_type != "scry"):
             logging.warning(f"Invalid action {action_name} for {current_choice_type}")
             return -0.1, False
@@ -135,10 +136,10 @@ class ChoiceHandlersMixin:
                 context.setdefault("kept_on_top", []).append(card_id)
                 logging.debug(f"Scry: Keeping {card_name} on top (pending order)")
                 reward = 0.05 + card_value * 0.05  # Higher reward for keeping good cards on top
-            else:  # Surveil
+            else:  # Surveil / explore
                 # Put directly back on top of library
                 player["library"].insert(0, card_id)
-                logging.debug(f"Surveil: Kept {card_name} on top")
+                logging.debug(f"{current_choice_type.capitalize()}: Kept {card_name} on top")
                 reward = 0.05 + card_value * 0.05
                 
         elif destination == "bottom":  # Scry only
@@ -146,15 +147,17 @@ class ChoiceHandlersMixin:
             logging.debug(f"Scry: Putting {card_name} on bottom")
             reward = 0.05 - card_value * 0.05  # Lower reward for putting good cards on bottom
             
-        elif destination == "graveyard":  # Surveil only
-            success_move = gs.move_card(card_id, player, "library_implicit", player, "graveyard", cause="surveil")
+        elif destination == "graveyard":  # Surveil / explore
+            success_move = gs.move_card(
+                card_id, player, "library_implicit", player, "graveyard",
+                cause=current_choice_type)
             if not success_move:
                 logging.error(f"Failed to move {card_name} to graveyard during surveil")
                 gs.choice_context = None
                 gs.phase = gs.PHASE_PRIORITY
                 return -0.1, False
                 
-            logging.debug(f"Surveil: Put {card_name} into graveyard")
+            logging.debug(f"{current_choice_type.capitalize()}: Put {card_name} into graveyard")
             # Higher reward for putting bad cards in graveyard, but also reward for
             # putting good recursion targets there
             has_recursion = False
@@ -168,6 +171,18 @@ class ChoiceHandlersMixin:
         if not context.get("cards"):
             logging.debug(f"{current_choice_type.capitalize()} finished")
             
+            if current_choice_type == "explore":
+                exploring_id = context.get("exploring_creature_id")
+                event = ("EXPLORED_NONLAND_GY" if destination == "graveyard"
+                         else "EXPLORED_NONLAND_TOP")
+                event_context = {
+                    "controller": player,
+                    "revealed_card_id": card_id,
+                    "source_id": context.get("source_id"),
+                }
+                gs.trigger_ability(exploring_id, event, event_context)
+                gs.trigger_ability(exploring_id, "EXPLORED", event_context)
+
             # For Scry, finalize the library order
             if current_choice_type == "scry":
                 bottom_cards = context.get("put_on_bottom", [])
@@ -182,9 +197,10 @@ class ChoiceHandlersMixin:
                 logging.debug(f"Scry final: {len(top_cards)} cards on top, {len(bottom_cards)} on bottom")
 
             # Clear context and return to previous phase
-            previous_phase = getattr(gs, 'previous_priority_phase', gs.PHASE_PRIORITY)
+            previous_phase = getattr(gs, 'previous_priority_phase', None) or gs.PHASE_PRIORITY
             gs.choice_context = None
             gs.phase = previous_phase
+            gs.previous_priority_phase = None
             gs.priority_pass_count = 0
             gs.priority_player = gs._get_active_player()
             
@@ -318,7 +334,9 @@ class ChoiceHandlersMixin:
             if not any(valid_map.values()):
                 logging.debug(f"Cannot activate {card.name}: no legal targets.")
                 return -0.05, False
-            if gs.phase not in [gs.PHASE_TARGETING, gs.PHASE_SACRIFICE, gs.PHASE_CHOOSE]:
+            if (gs.phase not in [gs.PHASE_TARGETING, gs.PHASE_SACRIFICE,
+                                gs.PHASE_CHOOSE]
+                    and gs.previous_priority_phase is None):
                 gs.previous_priority_phase = gs.phase
             gs.phase = gs.PHASE_TARGETING
             gs.targeting_context = {
@@ -363,8 +381,15 @@ class ChoiceHandlersMixin:
             logging.debug(f"Cannot afford cost {cost_str} for {card.name} ability {ability_idx}")
             return -0.05, False
         
-        # Pay costs
-        costs_paid = gs.mana_system.pay_mana_cost(player, cost_str, cost_context) if gs.mana_system else True
+        cost_lower = cost_str.lower()
+        if ("sacrifice this" in cost_lower
+                and card_id not in player.get("battlefield", [])):
+            return -0.05, False
+
+        # ActivatedAbility owns the full cost transaction. This preserves the
+        # target-before-cost order while actually committing tap, sacrifice,
+        # life, counter, and mana components together.
+        costs_paid = ability.pay_cost(gs, player)
         
         if not costs_paid:
             logging.warning(f"Failed to pay cost for {card.name} ability {ability_idx}")
@@ -416,8 +441,9 @@ class ChoiceHandlersMixin:
 
         card_id = player["battlefield"][bf_idx]
         card = gs._safe_get_card(card_id)
-        if not card or 'planeswalker' not in getattr(card, 'card_types', []):
-            logging.warning(f"Card at index {bf_idx} ({getattr(card, 'name', 'N/A')}) is not a planeswalker.")
+        if (not card or not getattr(card, "loyalty_abilities", [])
+                or card_id not in player.get("loyalty_counters", {})):
+            logging.warning(f"Card at index {bf_idx} ({getattr(card, 'name', 'N/A')}) has no live loyalty ability.")
             return -0.15, False
 
         # Find appropriate ability index
@@ -745,14 +771,14 @@ class ChoiceHandlersMixin:
             return -0.2, False
         
         # Delegate to appropriate choice handler based on type
-        if choice_type == "scry" or choice_type == "surveil":
+        if choice_type in ["scry", "surveil", "explore"]:
             # Handle scry/surveil choices (PUT_ON_TOP, PUT_ON_BOTTOM, PUT_TO_GRAVEYARD)
             action_index = kwargs.get('action_index')
             
             if action_index == 306:  # PUT_ON_TOP
                 return self._handle_scry_surveil_choice(param, context, action_index=306)
             elif action_index == 307:  # PUT_ON_BOTTOM
-                if choice_type == "surveil":
+                if choice_type in ["surveil", "explore"]:
                     logging.warning("Cannot PUT_ON_BOTTOM during Surveil choice.")
                     return -0.1, False
                 return self._handle_scry_surveil_choice(param, context, action_index=307)
@@ -833,6 +859,30 @@ class ChoiceHandlersMixin:
     def _handle_choose_mode(self, param, context, **kwargs):
         """Handles the CHOOSE_MODE action. Param is the chosen mode index (0-9). Finalizes choice if criteria met."""
         gs = self.game_state
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'mockingbird_copy'):
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if gs.choice_context.get('player') is not player:
+                logging.warning("Mockingbird copy choice called for the wrong player.")
+                return -0.2, False
+            success = gs.complete_mockingbird_copy_choice(param)
+            return (0.05 if success else -0.1), success
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'bargain'):
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if gs.choice_context.get('player') is not player:
+                logging.warning("Bargain choice called for the wrong player.")
+                return -0.2, False
+            success = gs.complete_bargain_choice(param)
+            return (0.05 if success else -0.1), success
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'manifest_dread'):
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if gs.choice_context.get('player') is not player:
+                logging.warning("Manifest dread choice called for the wrong player.")
+                return -0.2, False
+            success = gs.complete_manifest_dread_choice(param)
+            return (0.05 if success else -0.1), success
         casting_choice = getattr(gs, 'choice_context', None)
         if casting_choice and casting_choice.get('type') in (
                 'casting_additional_return', 'collect_evidence'):
