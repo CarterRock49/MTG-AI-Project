@@ -16,8 +16,10 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 8/8, 6/6, 225/225, plus 10/10 harvest CLI tests
-   and 3 seeded invariant-fuzz runs).
+   every delivery (currently 9/9, 10/10, and 228/228, plus 10/10 fixture-
+   harvest tests, 5/5 production-protocol tests, 6/6 fuzz/replay tests, and
+   the deterministic 8-seed / 8,000-action default fuzz profile, and the
+   strict 32-seed / 320,000-action long profile).
 2. **Zero known stats-corrupting bugs.** The silent-bug catalog (appendix)
    is closed; every fixed bug has a permanent guard scenario.
 3. **Quantified card coverage.** For each target format's card pool, the
@@ -43,9 +45,10 @@ The project is complete when all of the following hold:
 - Tier 0 (stats plumbing): ✅ complete.
 - Tier 1 (rules correctness): ✅ complete — all seven items plus the P1
   placeholder triage delivered; see appendix for the bug catalog.
-- Test gates: smoke 8/8 (fixture decks now exercise triggers every episode),
-  training 6/6, scenarios 225/225 (grown from 12), harvest CLI 10/10, and
-  deterministic invariant fuzz 3/3 seeds x 100 valid actions.
+- Test gates: smoke 9/9, training 10/10, scenarios 228/228 (grown from 12),
+  fixture harvest 10/10, production Harvest protocol 5/5, fuzz/replay
+  configuration 6/6, deterministic default fuzz 8 seeds x 1,000 valid
+  actions, and strict long fuzz 32 seeds x 10,000 valid actions.
 - **Stats collected before July 2026 are unusable** (wrong player, wrong
   winner, fictional play turns, cosmetic first strike, compounding P/T,
   dead replacement system). Wipe and re-harvest after the current engine
@@ -643,30 +646,71 @@ conservation, SBA/layer idempotence, and mana-boundary clearing. It exposed and
 closed phase-boundary mana retention and mask-valid combat-done dispatch bugs.
 Regression-checked 225/225 scenarios, 10/10 harvest tests, and 3/3 fuzz seeds.
 
+**Round 7.26 (July 2026):** audited the complete policy boundary across
+`main.py`, the 480-action map, action-mask generation, dispatch contexts, and
+the observation API. The audit repaired an all-zero production observation
+path; strict observation-space bounds/dtypes and degradation reporting;
+ten-card ordinary-spell/land accessibility; instant Adventure/MDFC timing;
+non-active-player action ownership; context loss and unsafe TypeError retries;
+alternative-cost indices and payment context; card-ID-zero handling (including
+pending-cast and dredge choices); exact
+post-action history; stack-card conservation across resolution continuations;
+mask-valid combat, paging, loyalty, prevention, and mana actions; and
+non-card mana-choice observations. Mask
+generation is now non-mutating for paged choices, training/evaluation use
+separate environments and statistics, callbacks/evaluation are mask-aware,
+failures cannot be saved as final models, and training alternates both player
+seats. Mask construction refuses to expose an unhandled action, and checkpoint
+opponents can no longer fall back to scripted play after an illegal prediction.
+
+The same round added failure-only atomic fuzz artifacts, exact action and
+generated-context replay validation, deterministic state summaries,
+short/default/long profiles, and a weekly/manual CI job.
+It also delivered `harvest_protocol.py`: isolated parallel shards, global
+deterministic schedule offsets, checkpoint SHA-256 identity, checkpoint-vs-
+checkpoint play, aggregate throughput/fidelity manifests, paired-seat
+promotion scoring, and fidelity/severe-manifest promotion gates. A final strict
+two-worker plumbing run completed 2/2 games at 0.296 games/second with zero
+fidelity counters; this tiny run validates orchestration, not throughput or
+strength. Regression-checked 9/9 smoke stages, 10/10 training stages, 228/228
+scenarios, 10/10 fixture-harvest tests, 5/5 protocol tests, and 6/6 fuzz/replay
+tests. The default 8,000-action fuzz profile is green.
+The final post-audit long profile is also green at 320,000/320,000 actions
+across all 32 checked-in seeds, with no failure artifact.
+
 ## Tier 4 — Verification & calibration
 
-1. ✅ Golden scenario harness — 225 scenarios and growing; scenario-first is a
+1. ✅ Golden scenario harness — 228 scenarios and growing; scenario-first is a
    working agreement, not a suggestion.
 2. ✅ **Property/invariant harness**: exact non-token zone/stack conservation,
-   SBA fixed points, mask-valid action execution, finite observations/rewards,
-   phase-boundary mana clearing, and repeated layer idempotence run under fixed
-   seeds in `tests/invariant_fuzz_test.py`.
-3. ◐ **Long-game fuzzing**: the deterministic seeded runner exists and is green
-   at 3 x 100 actions. Remaining: raise seed/step budgets in scheduled CI and
-   retain minimal replay artifacts for any future failing seed.
+   SBA fixed points, mask-valid action execution/handler coverage, declared
+   observation bounds and degradation checks, observation/info mask agreement,
+   repeated mask purity, finite rewards, phase-boundary mana clearing, and
+   repeated layer idempotence run under fixed seeds in
+   `tests/invariant_fuzz_test.py`.
+3. ✅ **Long-game fuzzing**: short (3 x 100), default (8 x 1,000), and long
+   (32 x 10,000) profiles exist. Failures are written atomically with the seed,
+   exact action/context history, state summary, and a one-command `--replay`
+   path; successes leave no artifact directory. Weekly/manual CI runs the long
+   profile and retains failure artifacts for 14 days. The final local run on
+   the post-audit engine snapshot passed all 320,000 actions with no artifact.
 4. ▢ **Calibration study**: 3–5 deck pairs with well-known matchup winrates;
    run at harvest scale; compare. This is the acceptance test for the whole
    pipeline and gates "harvest at scale."
 
 ## Tier 5 — Harvest operations & deck-builder integration
 
-1. ▢ **Throughput**: profile games/hour; parallel envs; identify the hot
-   paths (layer recalcs and text parsing are the likely suspects — consider
-   caching parsed abilities per card name).
-2. ◐ **Harvest protocol**: `harvest_fixtures.py` provides fresh-directory runs,
-   seeded eight-deck matchup rotation, agent-version stamping, strict completed-
-   game/artifact validation, and a success-only per-run manifest. Remaining:
-   throughput/parallel operation and checkpoint-vs-checkpoint promotion.
+1. ◐ **Throughput**: isolated parallel workers and aggregate games/second
+   telemetry are implemented. The final 2-game orchestration smoke measured 0.296
+   games/second; profile a production-size checkpoint run before treating that
+   number as capacity planning, then optimize measured hot paths.
+2. ✅ **Harvest protocol**: `harvest_fixtures.py` supplies strict deterministic
+   shards and `harvest_protocol.py` supplies parallel operation, checkpoint
+   loading/identity, aggregate success-only manifests, paired-seat candidate
+   scoring, and promotion gates. The protocol is complete and regression-
+   tested. Operational next step: train a candidate and baseline checkpoint,
+   then run the first real promotion; no checkpoint currently exists in
+   `models/`, so random-vs-scripted plumbing data remains non-strength data.
 3. ▢ **Deck-builder contract**: `STATS_SCHEMA.md` + support manifest are the
    full interface; the builder's exclusion logic and confidence weighting
    consume them directly.
@@ -722,6 +766,33 @@ Regression-checked 225/225 scenarios, 10/10 harvest tests, and 3/3 fuzz seeds.
   exile, exposes CAST_FROM_EXILE, consumes that permission on cast, and resolves
   the creature side to the battlefield. Remaining: adventure-half parsing and
   targeting are still heuristic.
+- The fixed 480-action layout can expose only the first three activated
+  abilities on each permanent. Specialized hand actions such as MDFC,
+  Adventure, Plot, cycling, and alternate costs still inspect only the first
+  eight of the ten observed hand slots. Indices 205–223 retain dormant labels
+  for mechanics that have no handler and are deliberately never mask-valid.
+  Several singleton mechanic slots (notably
+  Equipment/Fortification and loyalty families) also retain only one generated
+  source/target context when several equivalent pairs are legal. Every exposed
+  slot is executable after the Round 7.26 audit, but full choice coverage needs
+  a staged/paginated generic source-target chooser or a versioned action-space
+  redesign before those cards are suitable for strength comparisons.
+- Legacy singleton shortcuts for Investigate, Amass, Venture, Explore, Adapt,
+  and Goad execute their mechanic directly instead of committing the source's
+  parsed activated-ability cost through the generic transaction. Their exposed
+  masks now carry executable contexts, but cards relying on those activated
+  forms must remain out of strength harvests until the shortcuts delegate to
+  `activate_ability()` (or are removed in favor of the generic action).
+- Target-selection actions and their masks use one canonical paged ordering,
+  but the legacy `targetable_*` observation fields are category summaries rather
+  than an identity-preserving encoding of those exact ten action choices. Card
+  choice phases have aligned `choice_cards`; ordinary targeting still needs the
+  same explicit page-aligned representation for best learning quality.
+- `CompletelyFixedMTGExtractor` labels a length-one, zero-initialized LSTM as
+  sequential processing. Its gates are trainable, but hidden state is not
+  carried across policy steps, so it provides no temporal memory. Use a truly
+  recurrent mask-aware policy or rename/replace this layer before claiming a
+  recurrent agent.
 - Repeated card IDs still model copies coarsely; last-moved location tracking
   and duplicate-preserving list zones repair the known first-touch failures,
   but true per-copy object identity remains a deeper future cleanup. Linked

@@ -220,6 +220,13 @@ def check_regressions():
                      "CombatHandlersMixin", "ChoiceHandlersMixin", "MechanicsHandlersMixin"):
         assert expected in ah_mro, f"{expected} missing from ActionHandler MRO"
     assert len(ACTION_MEANINGS) == 480, "ACTION_MEANINGS must stay at 480 entries"
+    assert set(ACTION_MEANINGS) == set(range(480)), \
+        "ACTION_MEANINGS must cover every public index exactly from 0 through 479"
+    apply_source = inspect.getsource(ActionHandler.apply_action)
+    assert "inspect.Parameter.VAR_KEYWORD" in apply_source, \
+        "generated action context is not forwarded to **kwargs handlers"
+    assert "Attempting fallback" not in apply_source, \
+        "handler TypeErrors must not retry a potentially partially-mutated action"
 
     from Playersim.strategic_planner import MTGStrategicPlanner, MCTSNode  # noqa: F401
     sp_mro = {c.__name__ for c in MTGStrategicPlanner.__mro__}
@@ -298,8 +305,21 @@ def check_reset(env):
         assert tuple(arr.shape) == tuple(space.shape), (
             f"obs['{key}'] shape {arr.shape} != space shape {space.shape}")
         assert np.all(np.isfinite(arr)), f"obs['{key}'] contains non-finite values"
+    assert env.observation_space.contains(obs), \
+        "reset observation falls outside the declared observation space"
+    assert env.last_observation_error is None, \
+        f"reset observation silently degraded: {env.last_observation_error}"
+    me = env.game_state.p1 if env.game_state.agent_is_p1 else env.game_state.p2
+    assert int(obs["my_life"][0]) == me["life"], "my_life is not the live game state"
+    assert int(obs["p1_life"][0]) == env.game_state.p1["life"]
+    assert int(obs["p2_life"][0]) == env.game_state.p2["life"]
+    assert int(obs["my_hand_count"][0]) == len(me["hand"]), \
+        "reset returned a fallback/zero hand count instead of the policy state"
+    assert np.any(obs["my_hand"]), "visible hand features are unexpectedly all zero"
     mask = env.action_mask()
     assert mask.any(), "no valid actions available immediately after reset"
+    assert np.array_equal(obs["action_mask"], mask), \
+        "embedded action mask disagrees with the environment mask"
     return obs
 
 
@@ -321,6 +341,32 @@ def check_agent_ownership(env):
     assert clone.action_handler.game_state is clone, "clone's handler must bind to the clone"
 
 
+@stage("training environments alternate policy seats")
+def check_agent_seat_alternation(decks, card_db):
+    from Playersim.environment import AlphaZeroMTGEnv
+    env = AlphaZeroMTGEnv(
+        decks, card_db, agent_is_p1=False, alternate_agent_seat=True,
+        **test_artifact_paths("seat_alternation"))
+    try:
+        first_obs, _ = env.reset(seed=SEED)
+        assert env.game_state.agent_is_p1 is False
+        assert int(first_obs['my_life'][0]) == env.game_state.p2['life']
+        first_mask = env.action_mask()
+        first_action = int(np.flatnonzero(first_mask)[0])
+        stepped_obs, reward, terminated, truncated, info = env.step(first_action)
+        assert np.isfinite(reward) and env.observation_space.contains(stepped_obs)
+        assert np.array_equal(stepped_obs['action_mask'], info['action_mask'])
+        assert not info.get('execution_failed'), \
+            "the P2 policy seat could not execute its first mask-valid action"
+        second_obs, _ = env.reset(seed=SEED + 1)
+        assert env.game_state.agent_is_p1 is True
+        assert int(second_obs['my_life'][0]) == env.game_state.p1['life']
+        assert env.observation_space.contains(first_obs)
+        assert env.observation_space.contains(second_obs)
+    finally:
+        env.close()
+
+
 @stage("play random-valid-action episodes")
 def play_episodes(env):
     rng = random.Random(SEED)
@@ -335,6 +381,16 @@ def play_episodes(env):
             action = int(rng.choice(list(valid)))
             obs, reward, terminated, truncated, info = env.step(action)
             assert np.isfinite(reward), f"episode {episode}: non-finite reward at step {steps}"
+            assert env.observation_space.contains(obs), \
+                f"episode {episode}: invalid observation at step {steps}"
+            assert env.last_observation_error is None, \
+                f"episode {episode}: observation degraded: {env.last_observation_error}"
+            assert np.array_equal(obs["action_mask"], info["action_mask"]), \
+                f"episode {episode}: embedded and info masks disagree at step {steps}"
+            assert int(obs["previous_actions"][0]) == action, \
+                f"episode {episode}: action history lags at step {steps}"
+            assert np.isclose(float(obs["previous_rewards"][0]), reward), \
+                f"episode {episode}: reward history lags at step {steps}"
             steps += 1
         print(f"        episode {episode}: {steps} steps, "
               f"terminated={terminated}, truncated={truncated}")
@@ -350,19 +406,16 @@ def check_stats_pipeline(decks, card_db):
     try:
         env = AlphaZeroMTGEnv(decks, card_db, **paths)
         env.set_agent_version("smoke-test")
-        rng = random.Random(SEED)
-        recorded_any = False
-        last_info = {}
-        for ep in range(3):
-            env.reset(seed=SEED + ep)
-            done = trunc = False
-            steps = 0
-            while not (done or trunc) and steps < MAX_STEPS_PER_EPISODE:
-                mask = env.action_mask()
-                valid = np.where(mask)[0]
-                _, _, done, trunc, last_info = env.step(int(rng.choice(list(valid))))
-                steps += 1
-            recorded_any = recorded_any or getattr(env, "_game_result_recorded", False)
+        env.reset(seed=SEED)
+        # Drive a deterministic normal terminal through env.step. Random play is
+        # intentionally covered above, but is not guaranteed to finish within a
+        # small smoke budget and therefore made persistence coverage flaky.
+        loser = env.game_state.p2 if env.game_state.agent_is_p1 else env.game_state.p1
+        loser["lost_game"] = True
+        valid = np.flatnonzero(env.action_mask())
+        _, _, done, trunc, last_info = env.step(int(valid[0]))
+        recorded_any = getattr(env, "_game_result_recorded", False)
+        assert done and not trunc, "controlled loss flag did not terminate through env.step"
         env.close()
         env = None
         assert recorded_any, "no game result recorded across 3 episodes"
@@ -456,6 +509,7 @@ def main():
         try:
             if check_reset(env) is not None:
                 check_agent_ownership(env)
+                check_agent_seat_alternation(decks, card_db)
                 play_episodes(env)
         finally:
             env.close()

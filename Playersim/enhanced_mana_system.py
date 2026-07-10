@@ -1887,9 +1887,9 @@ class EnhancedManaSystem:
             convoke_list = context.get("convoke_creatures", [])
             improvise_list = context.get("improvise_artifacts", [])
             for identifier in convoke_list + improvise_list:
-                perm_id = gs._resolve_permanent_identifier(player, identifier) # Assumes GS has this helper
-                if not perm_id or perm_id in player.get("tapped_permanents", set()): # Cannot tap invalid or already tapped
-                     reason = "already tapped" if perm_id and perm_id in player.get("tapped_permanents", set()) else "invalid identifier"
+                perm_id = gs._find_permanent_id(player, identifier)
+                if perm_id is None or perm_id in player.get("tapped_permanents", set()): # Cannot tap invalid or already tapped
+                     reason = "already tapped" if perm_id is not None and perm_id in player.get("tapped_permanents", set()) else "invalid identifier"
                      raise ValueError(f"Convoke/Improvise payment failed: {perm_id} ({reason}).")
                 if hasattr(gs, 'tap_permanent') and gs.tap_permanent(perm_id, player):
                     tapped_for_cost.append(perm_id)
@@ -1941,8 +1941,8 @@ class EnhancedManaSystem:
             discard_additional = context.get("discard_additional", [])
 
             for identifier in sac_additional:
-                 sac_id = gs._resolve_permanent_identifier(player, identifier)
-                 if not sac_id or sac_id not in player.get("battlefield",[]):
+                 sac_id = gs._find_permanent_id(player, identifier)
+                 if sac_id is None or sac_id not in player.get("battlefield",[]):
                       raise ValueError(f"Additional Sacrifice payment failed: Invalid/missing permanent {identifier}.")
                  # Use move_card; if it fails, raise error
                  if not gs.move_card(sac_id, player, "battlefield", player, "graveyard", cause="additional_cost_sacrifice"):

@@ -43,7 +43,7 @@ class MechanicsHandlersMixin:
     def _handle_level_up_class(self, param, context, **kwargs):
         """Handle leveling up a class card."""
         gs = self.game_state
-        player = gs._get_active_player()
+        player = self._get_policy_player(context)
         class_idx = param
 
         if not hasattr(gs, 'ability_handler') or not gs.ability_handler:
@@ -69,7 +69,7 @@ class MechanicsHandlersMixin:
         track progress with per-permanent level counters, not a Class level index.
         """
         gs = self.game_state
-        player = gs._get_active_player()
+        player = self._get_policy_player(context)
         bf_idx = param
 
         if bf_idx is None or not isinstance(bf_idx, int):
@@ -130,7 +130,7 @@ class MechanicsHandlersMixin:
         return 0.15, True
 
     def _handle_transform(self, param, **kwargs):
-        gs = self.game_state; player = gs._get_active_player() # Transforming usually happens on owner's turn/initiative
+        gs = self.game_state; player = self._get_policy_player(kwargs.get('context'))
         bf_idx = param
         if bf_idx >= len(player.get("battlefield", [])): return -0.2, False
 
@@ -159,7 +159,7 @@ class MechanicsHandlersMixin:
     def _handle_dredge(self, param, context=None, **kwargs):
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2 # Who has dredge choice? Needs context. Assume active.
-        player = gs._get_active_player()
+        player = self._get_policy_player(context)
         gy_choice_idx = param # Agent chose which dredge option (index 0-5)
 
         # Need context to know which card/value this corresponds to
@@ -193,7 +193,7 @@ class MechanicsHandlersMixin:
         gs = self.game_state
         target_idx = param # Combined battlefield index
         target_id, target_owner = gs.get_permanent_by_combined_index(target_idx)
-        if not target_id:
+        if target_id is None:
             logging.warning(f"ADD_COUNTER: Invalid target index {target_idx}.")
             return -0.1, False
 
@@ -216,7 +216,7 @@ class MechanicsHandlersMixin:
         gs = self.game_state
         target_idx = param
         target_id, target_owner = gs.get_permanent_by_combined_index(target_idx)
-        if not target_id:
+        if target_id is None:
              logging.warning(f"REMOVE_COUNTER: Invalid target index {target_idx}.")
              return -0.1, False
 
@@ -241,7 +241,7 @@ class MechanicsHandlersMixin:
 
     def _handle_proliferate(self, param, context=None, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player() # Player choosing proliferate targets
+        player = self._get_policy_player(context)
         if hasattr(gs, 'proliferate') and callable(gs.proliferate):
             chosen_targets = context.get('proliferate_targets') if context else None
             # gs.proliferate returns True if *any* counter was added
@@ -254,7 +254,7 @@ class MechanicsHandlersMixin:
 
     def _handle_return_from_graveyard(self, param, context=None, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player() # Assume player with priority/activating returns
+        player = self._get_policy_player(context)
         gy_idx = param
 
         if gy_idx >= len(player.get("graveyard", [])):
@@ -269,7 +269,7 @@ class MechanicsHandlersMixin:
 
     def _handle_reanimate(self, param, context=None, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player()
+        player = self._get_policy_player(context)
         gy_idx = param
 
         if gy_idx >= len(player.get("graveyard", [])):
@@ -290,7 +290,7 @@ class MechanicsHandlersMixin:
 
     def _handle_return_from_exile(self, param, context=None, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player()
+        player = self._get_policy_player(context)
         exile_idx = param
 
         if exile_idx >= len(player.get("exile", [])):
@@ -304,7 +304,7 @@ class MechanicsHandlersMixin:
         return reward, success # Return success flag from move_card
 
     def _handle_copy_permanent(self, param, context, **kwargs):
-        gs = self.game_state; player = gs._get_active_player()
+        gs = self.game_state; player = self._get_policy_player(context)
         target_identifier = context.get('target_identifier', context.get('target_permanent_idx'))
 
         if target_identifier is None:
@@ -312,7 +312,7 @@ class MechanicsHandlersMixin:
              return -0.15, False
 
         target_id, target_owner = gs.get_permanent_by_identifier(target_identifier)
-        if not target_id:
+        if target_id is None:
              logging.warning(f"Target identifier invalid for copy: {target_identifier}")
              return -0.15, False
 
@@ -338,7 +338,7 @@ class MechanicsHandlersMixin:
         return None
 
     def _handle_populate(self, param, context, **kwargs):
-        gs = self.game_state; player = gs._get_active_player()
+        gs = self.game_state; player = self._get_policy_player(context)
         target_identifier = context.get('target_token_identifier', context.get('target_token_idx'))
 
         if target_identifier is None:
@@ -362,7 +362,7 @@ class MechanicsHandlersMixin:
 
     def _handle_investigate(self, param, context=None, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player() # Assume player whose effect triggered investigates
+        player = self._get_policy_player(context)
 
         # Use game state helper to get token data
         token_data = gs.get_token_data_by_index(4) # Clue index from ACTION_MEANINGS
@@ -375,7 +375,7 @@ class MechanicsHandlersMixin:
         return reward, success # Return success flag
 
     def _handle_foretell(self, param, context, **kwargs):
-        gs = self.game_state; player = gs._get_active_player() # Player choosing to foretell
+        gs = self.game_state; player = self._get_policy_player(context)
         hand_idx = context.get('hand_idx')
 
         if hand_idx is None:
@@ -417,7 +417,7 @@ class MechanicsHandlersMixin:
 
     def _handle_amass(self, param, context, **kwargs):
         gs = self.game_state;
-        player = gs._get_active_player() # Player whose effect triggered Amass
+        player = self._get_policy_player(context)
         amount = context.get('amount', 1)
         if not isinstance(amount, int) or amount <= 0: amount = 1
 
@@ -431,7 +431,7 @@ class MechanicsHandlersMixin:
 
     def _handle_learn(self, param, context, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player() # Player Learning
+        player = self._get_policy_player(context)
         drew_card = False; discarded_card = False
         reward = 0.0; overall_success = False
 
@@ -472,7 +472,7 @@ class MechanicsHandlersMixin:
 
     def _handle_venture(self, param, context, **kwargs):
         gs = self.game_state;
-        player = gs._get_active_player() # Player venturing
+        player = self._get_policy_player(context)
         success = False
         if hasattr(gs, 'venture') and callable(gs.venture):
             success = gs.venture(player)
@@ -483,7 +483,7 @@ class MechanicsHandlersMixin:
 
     def _handle_explore(self, param, context, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player() # Player whose creature explores
+        player = self._get_policy_player(context)
         creature_idx = context.get('creature_idx')
 
         if creature_idx is None: logging.warning(f"Explore context missing 'creature_idx'"); return -0.15, False
@@ -502,7 +502,7 @@ class MechanicsHandlersMixin:
         return reward, success # Return success flag
 
     def _handle_adapt(self, param, context, **kwargs):
-        gs = self.game_state; player = gs._get_active_player() # Player activating adapt
+        gs = self.game_state; player = self._get_policy_player(context)
         creature_idx = context.get('creature_idx')
         amount = context.get('amount', 1)
 
@@ -523,7 +523,7 @@ class MechanicsHandlersMixin:
 
     def _handle_mutate(self, param, context, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player() # Player casting mutate spell
+        player = self._get_policy_player(context)
         context = dict(context or {})
         context.update(kwargs.get('context', {}))
         hand_idx = context.get('hand_idx')
@@ -565,7 +565,7 @@ class MechanicsHandlersMixin:
 
     def _handle_goad(self, param, context, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player() # Player applying goad
+        player = self._get_policy_player(context)
         target_idx = context.get('target_creature_idx') # Combined index
 
         if target_idx is None: logging.warning(f"Goad context missing 'target_creature_idx'"); return -0.15, False
@@ -573,8 +573,8 @@ class MechanicsHandlersMixin:
         except (ValueError, TypeError): logging.warning(f"Goad context has non-integer index: {context}"); return -0.15, False
 
         target_id, target_owner = gs.get_permanent_by_combined_index(target_idx)
-        opponent = gs._get_non_active_player() # Get current opponent
-        if target_id and target_owner == opponent: # Can only goad opponent's creatures
+        opponent = self._get_policy_opponent(context)
+        if target_id is not None and target_owner == opponent: # Can only goad opponent's creatures
             success = False
             if hasattr(gs, 'goad_creature'): success = gs.goad_creature(target_id)
             else: logging.error("goad_creature method missing in GameState.")
@@ -585,7 +585,7 @@ class MechanicsHandlersMixin:
 
     def _handle_flip_card(self, param, context, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player() # Assume player activating controls the card
+        player = self._get_policy_player(context)
         target_idx = context.get('battlefield_idx')
 
         if target_idx is None: logging.warning(f"Flip Card context missing 'battlefield_idx'"); return -0.15, False
@@ -605,7 +605,7 @@ class MechanicsHandlersMixin:
 
     def _handle_equip(self, param, context, **kwargs): # Param is None
         gs = self.game_state
-        player = gs._get_active_player()
+        player = self._get_policy_player(context)
         if context is None: context = {}
 
         equip_identifier = context.get('equipment_identifier', context.get('equip_identifier'))
@@ -652,7 +652,7 @@ class MechanicsHandlersMixin:
         # If mapped to NO_OP, this handler shouldn't be called.
         # If kept as a potential (non-standard) action:
         gs = self.game_state
-        player = gs._get_active_player()
+        player = self._get_policy_player(context)
         equip_idx = context.get('equip_idx') # Context needed
 
         if equip_idx is None: logging.warning("Unequip context missing 'equip_idx'"); return -0.15, False
@@ -672,7 +672,7 @@ class MechanicsHandlersMixin:
         # Attach usually happens on spell resolution, not as a separate action.
         # This might be for effects that say "Attach target Aura..."
         gs = self.game_state
-        player = gs._get_active_player() # Assume active player controls effect
+        player = self._get_policy_player(context)
         aura_id = context.get('aura_id')
         target_id = context.get('target_id')
 
@@ -690,7 +690,7 @@ class MechanicsHandlersMixin:
 
     def _handle_fortify(self, param, context, **kwargs): # Param is None
         gs = self.game_state
-        player = gs._get_active_player()
+        player = self._get_policy_player(context)
         if context is None: context = {}
 
         fort_identifier = context.get('fort_identifier')
@@ -729,7 +729,7 @@ class MechanicsHandlersMixin:
 
     def _handle_reconfigure(self, param, context, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player()
+        player = self._get_policy_player(context)
         card_identifier = context.get('card_identifier', context.get('battlefield_idx')) # Use context, fallback index
 
         if card_identifier is None:
@@ -737,7 +737,7 @@ class MechanicsHandlersMixin:
              return -0.15, False
 
         card_id = self._find_permanent_id(player, card_identifier)
-        if not card_id:
+        if card_id is None:
              logging.warning(f"Reconfigure failed: Invalid identifier '{card_identifier}' -> {card_id}")
              return -0.15, False
 
@@ -755,11 +755,11 @@ class MechanicsHandlersMixin:
         is_attached = hasattr(player, 'attachments') and card_id in player["attachments"]
         if not is_attached: # Trying to attach
              target_identifier_ctx = context.get('target_identifier')
-             if not target_identifier_ctx:
+             if target_identifier_ctx is None:
                   logging.error("Reconfigure attach requires target identifier in context.")
                   return -0.1, False # Expect agent choice via context
              target_id = self._find_permanent_id(player, target_identifier_ctx)
-             if not target_id:
+             if target_id is None:
                   logging.warning(f"Reconfigure attach target invalid: {target_identifier_ctx}")
                   return -0.1, False
 
@@ -798,8 +798,8 @@ class MechanicsHandlersMixin:
 
     def _handle_clash(self, param, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player() # Player initiating clash
-        opponent = gs._get_non_active_player()
+        player = self._get_policy_player(kwargs.get('context'))
+        opponent = self._get_policy_opponent(kwargs.get('context'))
 
         winner = None
         if hasattr(gs, 'clash') and callable(gs.clash):
@@ -812,7 +812,7 @@ class MechanicsHandlersMixin:
              return -0.1, False # Cannot perform action
 
     def _handle_grandeur(self, param, context, **kwargs):
-        gs = self.game_state; player = gs._get_active_player() # Player activating grandeur
+        gs = self.game_state; player = self._get_policy_player(context)
         hand_idx = context.get('hand_idx')
 
         if hand_idx is None: logging.warning(f"Grandeur context missing 'hand_idx'"); return -0.15, False
@@ -854,7 +854,7 @@ class MechanicsHandlersMixin:
 
     def _handle_create_token(self, param, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player() # Player whose effect creates token
+        player = self._get_policy_player(kwargs.get('context'))
         token_data = gs.get_token_data_by_index(param) # Index 0-4
         if not token_data:
             logging.error(f"CREATE_TOKEN failed: No data found for index {param}.")
@@ -866,7 +866,7 @@ class MechanicsHandlersMixin:
 
     def _handle_cycling(self, param, context, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player() # Player cycling
+        player = self._get_policy_player(context)
         hand_idx = context.get('hand_idx')
 
         if hand_idx is None: logging.warning(f"Cycling context missing 'hand_idx'"); return -0.15, False

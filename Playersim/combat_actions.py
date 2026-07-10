@@ -60,7 +60,8 @@ class CombatActionHandler:
             if (card and getattr(card, "loyalty_abilities", [])
                     and card_id in player.get("loyalty_counters", {})):
                 already_activated = card_id in player.get("activated_this_turn", set())
-                warning = " (ALREADY ACTIVATED)" if already_activated else ""
+                if already_activated:
+                    continue
 
                 current_loyalty = player.get("loyalty_counters", {}).get(card_id, getattr(card, 'loyalty', 0))
 
@@ -72,22 +73,25 @@ class CombatActionHandler:
                         # Check affordability based on loyalty
                         if current_loyalty + cost < 0 and cost < 0: continue # Cannot pay minus if loyalty goes < 0
 
-                        # Allow setting action even if already activated, handle penalty in reward/env
-                        param_for_action = idx # Use the battlefield index as parameter
+                        action_context = {
+                            "battlefield_idx": idx,
+                            "ability_idx": ability_idx,
+                            "controller_id": "p1" if player is gs.p1 else "p2",
+                        }
 
                         if cost > 0:
                             # Corrected from 435 to 440 to match ACTION_MEANINGS
-                            set_valid_action(440, f"LOYALTY_ABILITY_PLUS for {card.name}{warning} (Index {idx})")
+                            set_valid_action(440, f"LOYALTY_ABILITY_PLUS for {card.name} (Index {idx})", context=action_context)
                         elif cost == 0:
                             # Corrected from 436 to 441 to match ACTION_MEANINGS
-                            set_valid_action(441, f"LOYALTY_ABILITY_ZERO for {card.name}{warning} (Index {idx})")
+                            set_valid_action(441, f"LOYALTY_ABILITY_ZERO for {card.name} (Index {idx})", context=action_context)
                         else: # cost < 0
                             if is_ultimate:
                                 # Corrected from 438 to 443 to match ACTION_MEANINGS
-                                set_valid_action(443, f"ULTIMATE_ABILITY for {card.name}{warning} (Index {idx})")
+                                set_valid_action(443, f"ULTIMATE_ABILITY for {card.name} (Index {idx})", context=action_context)
                             else:
                                 # Corrected from 437 to 442 to match ACTION_MEANINGS
-                                set_valid_action(442, f"LOYALTY_ABILITY_MINUS for {card.name}{warning} (Index {idx})")
+                                set_valid_action(442, f"LOYALTY_ABILITY_MINUS for {card.name} (Index {idx})", context=action_context)
 
     def _add_equipment_aura_actions(self, player, valid_actions, set_valid_action):
         """Add actions for equipment and aura manipulation with improved cost handling."""
@@ -189,8 +193,12 @@ class CombatActionHandler:
         # Check phase
         if gs.phase != gs.PHASE_DECLARE_BLOCKERS or not gs.current_attackers: return
 
-        possible_blockers = [cid for cid in player["battlefield"]
-                            if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', []) and cid not in player.get("tapped_permanents", set())]
+        possible_blockers = [
+            (bf_idx, cid)
+            for bf_idx, cid in enumerate(player["battlefield"])
+            if gs._safe_get_card(cid)
+            and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])
+            and cid not in player.get("tapped_permanents", set())]
 
         if len(possible_blockers) < 2: return # Need at least 2 to multi-block
 
@@ -201,14 +209,18 @@ class CombatActionHandler:
 
              # Check if at least two valid blockers exist for this attacker
              num_valid_for_this_attacker = 0
-             for blocker_id in possible_blockers:
+             valid_blocker_indices = []
+             for blocker_idx, blocker_id in possible_blockers:
                   if self._can_block(blocker_id, attacker_id):
                        num_valid_for_this_attacker += 1
-                  if num_valid_for_this_attacker >= 2: break
+                       valid_blocker_indices.append(blocker_idx)
 
              if num_valid_for_this_attacker >= 2:
                  if atk_idx < 10: # Action 383-392 assume attacker index 0-9
-                    set_valid_action(383 + atk_idx, f"ASSIGN_MULTIPLE_BLOCKERS to {attacker_card.name} (Atk Index {atk_idx})")
+                    set_valid_action(
+                        383 + atk_idx,
+                        f"ASSIGN_MULTIPLE_BLOCKERS to {attacker_card.name} (Atk Index {atk_idx})",
+                        context={"blocker_identifiers": valid_blocker_indices})
 
             
     def setup_combat_systems(self):
@@ -563,7 +575,10 @@ class CombatActionHandler:
             logging.error("handle_attack_battle called with None param.")
             return False
 
-        opponent = gs.p2 if gs.agent_is_p1 else gs.p1
+        # Combat targets belong to the defending (non-active) player.  Using
+        # the fixed agent seat here made scripted/P2 policy actions inspect the
+        # wrong battlefield.
+        opponent = gs._get_non_active_player()
         # Get battles relative to opponent's battlefield
         opponent_battles = [(idx, cid) for idx, cid in enumerate(opponent["battlefield"])
                             if gs._safe_get_card(cid) and 'battle' in getattr(gs._safe_get_card(cid), 'type_line', '')]
@@ -601,21 +616,20 @@ class CombatActionHandler:
     # --- Helpers for finding targets based on identifiers ---
     def _find_planeswalker_target(self, pw_identifier):
         gs = self.game_state
-        opponent = gs.p2 if gs.agent_is_p1 else gs.p1
         pw_targets_on_stack = getattr(gs, 'planeswalker_attack_targets', {})
 
         target_pw_id = None
-        # Try finding by ID first
-        if isinstance(pw_identifier, str):
-            if pw_identifier in opponent["battlefield"]: target_pw_id = pw_identifier
-        # Try finding by index relative to opponent's PWs
-        elif isinstance(pw_identifier, int):
-             opponent_pws = [(idx, cid) for idx, cid in enumerate(opponent["battlefield"]) if gs._safe_get_card(cid) and 'planeswalker' in getattr(gs._safe_get_card(cid), 'card_types', [])]
-             if 0 <= pw_identifier < len(opponent_pws):
-                  target_pw_id = opponent_pws[pw_identifier][1]
+        attacked_targets = list(dict.fromkeys(pw_targets_on_stack.values()))
+        # Card IDs are integers in the fixture database, so distinguish a
+        # direct ID from a relative option index by checking the live mapping
+        # first.
+        if pw_identifier in attacked_targets:
+            target_pw_id = pw_identifier
+        elif isinstance(pw_identifier, int) and 0 <= pw_identifier < len(attacked_targets):
+            target_pw_id = attacked_targets[pw_identifier]
 
         # Find attacker targeting this PW ID
-        if target_pw_id:
+        if target_pw_id is not None:
              for atk_id, target_pw in pw_targets_on_stack.items():
                   if target_pw == target_pw_id:
                        return target_pw_id, atk_id
@@ -623,21 +637,17 @@ class CombatActionHandler:
 
     def _find_battle_target(self, battle_identifier):
         gs = self.game_state
-        opponent = gs.p2 if gs.agent_is_p1 else gs.p1
         battle_targets_on_stack = getattr(gs, 'battle_attack_targets', {})
 
         target_battle_id = None
-        # Try finding by ID first
-        if isinstance(battle_identifier, str):
-             if battle_identifier in opponent["battlefield"]: target_battle_id = battle_identifier
-        # Try finding by index relative to opponent's Battles
-        elif isinstance(battle_identifier, int):
-            opponent_battles = [(idx, cid) for idx, cid in enumerate(opponent["battlefield"]) if gs._safe_get_card(cid) and 'battle' in getattr(gs._safe_get_card(cid), 'type_line', '')]
-            if 0 <= battle_identifier < len(opponent_battles):
-                target_battle_id = opponent_battles[battle_identifier][1]
+        attacked_targets = list(dict.fromkeys(battle_targets_on_stack.values()))
+        if battle_identifier in attacked_targets:
+            target_battle_id = battle_identifier
+        elif isinstance(battle_identifier, int) and 0 <= battle_identifier < len(attacked_targets):
+            target_battle_id = attacked_targets[battle_identifier]
 
         # Find attacker targeting this Battle ID
-        if target_battle_id:
+        if target_battle_id is not None:
              for atk_id, target_battle in battle_targets_on_stack.items():
                   if target_battle == target_battle_id:
                        return target_battle_id, atk_id
@@ -700,7 +710,7 @@ class CombatActionHandler:
 
         # --- Validate Attacker ---
         attacker_id = self._find_permanent_id(player, attacker_identifier)
-        if not attacker_id: logging.warning(f"Invalid attacker identifier: {attacker_identifier}."); return False
+        if attacker_id is None: logging.warning(f"Invalid attacker identifier: {attacker_identifier}."); return False
         attacker_card = gs._safe_get_card(attacker_id)
         if not attacker_card:
             logging.warning(f"Attacker card not found for ID {attacker_id}"); return False
@@ -831,7 +841,7 @@ class CombatActionHandler:
              logging.error("handle_attack_planeswalker called with None param.")
              return False
 
-        opponent = gs.p2 if gs.agent_is_p1 else gs.p1
+        opponent = gs._get_non_active_player()
         opponent_planeswalkers = [(idx, cid) for idx, cid in enumerate(opponent["battlefield"])
                                    if gs._safe_get_card(cid) and 'planeswalker' in getattr(gs._safe_get_card(cid), 'card_types', [])]
 
@@ -839,6 +849,10 @@ class CombatActionHandler:
             abs_bf_idx, pw_id = opponent_planeswalkers[pw_target_idx]
             attacker_id = gs.current_attackers[-1] # Assign to last declared attacker
             if not hasattr(gs, 'planeswalker_attack_targets'): gs.planeswalker_attack_targets = {}
+            # One attacker has exactly one defender. Retargeting from a Battle
+            # must clear the old assignment just as the Battle path clears a
+            # planeswalker assignment.
+            getattr(gs, 'battle_attack_targets', {}).pop(attacker_id, None)
             gs.planeswalker_attack_targets[attacker_id] = pw_id
             logging.debug(f"{gs._safe_get_card(attacker_id).name} now targeting PW {gs._safe_get_card(pw_id).name}")
             return True
@@ -870,7 +884,7 @@ class CombatActionHandler:
         for identifier in blocker_identifiers:
             # Use helper to find ID from index or string ID
             blocker_id = self._find_permanent_id(player, identifier)
-            if not blocker_id:
+            if blocker_id is None:
                  logging.warning(f"Invalid blocker identifier {identifier} for multi-block.")
                  return False
             blocker_card = gs._safe_get_card(blocker_id)
@@ -916,14 +930,14 @@ class CombatActionHandler:
 
         # --- Find Battle Being Attacked and the Attacker ---
         target_battle_id, attacker_id = self._find_battle_target(battle_identifier)
-        if not attacker_id:
+        if attacker_id is None:
             logging.warning(f"Battle {battle_identifier} not found or not being attacked.")
             return False
 
         # --- Find Defender ---
-        player = gs.p1 if gs.agent_is_p1 else gs.p2 # Player controlling the blocker
+        player = gs._get_non_active_player()
         defender_id = self._find_permanent_id(player, defender_identifier)
-        if not defender_id:
+        if defender_id is None:
              logging.warning(f"Invalid defender identifier {defender_identifier}.")
              return False
 
@@ -946,7 +960,8 @@ class CombatActionHandler:
         gs = self.game_state
         
         # Only applicable in certain phases
-        if gs.phase not in [gs.PHASE_MAIN_PRECOMBAT, gs.PHASE_MAIN_POSTCOMBAT, gs.PHASE_DECLARE_ATTACKERS]:
+        if (gs.phase != gs.PHASE_DECLARE_ATTACKERS
+                or not getattr(gs, 'current_attackers', [])):
             return
             
         # Get opponent's battlefield
@@ -1014,8 +1029,10 @@ class CombatActionHandler:
                 logging.warning(f"Combat Handler: IndexError accessing battlefield for ATTACK at index {i}")
                 break
 
-        # Add actions for declaring targets for attackers (Planeswalkers, Battles)
-        if possible_attackers:
+        # Target-selection actions apply to the most recently declared
+        # attacker.  Do not expose them before one exists: both public handlers
+        # correctly reject that state, so the old mask violated its contract.
+        if gs.current_attackers:
             # Add actions for attacking Planeswalkers (action indices 378-382, corrected from 373-377)
             opponent_planeswalkers = [(idx, card_id) for idx, card_id in enumerate(opponent.get("battlefield", []))
                                     if gs._safe_get_card(card_id) and 'planeswalker' in getattr(gs._safe_get_card(card_id), 'card_types', [])]
@@ -1074,20 +1091,50 @@ class CombatActionHandler:
             for atk_idx, attacker_id in enumerate(gs.current_attackers[:10]):
                 attacker_card = gs._safe_get_card(attacker_id)
                 attacker_name = getattr(attacker_card, 'name', f"Attacker {atk_idx}") if attacker_card else f"Attacker {atk_idx}"
-                valid_multi_blockers_for_attacker = [b_id for _, b_id in possible_blockers if self._can_block(b_id, attacker_id)]
+                valid_multi_blockers_for_attacker = [
+                    (bf_idx, blocker_id)
+                    for bf_idx, blocker_id in possible_blockers
+                    if self._can_block(blocker_id, attacker_id)
+                ]
                 if len(valid_multi_blockers_for_attacker) >= 2:
                     # Corrected from 383 to match ACTION_MEANINGS
-                    set_valid_action(383 + atk_idx, f"Assign Multiple Blockers to {attacker_name}")
+                    set_valid_action(
+                        383 + atk_idx,
+                        f"Assign Multiple Blockers to {attacker_name}",
+                        context={
+                            "blocker_identifiers": [
+                                bf_idx for bf_idx, _ in
+                                valid_multi_blockers_for_attacker
+                            ]
+                        })
 
-        # Protect planeswalker action - corrected from 439 to 444
-        attacked_pws = getattr(gs, 'planeswalker_attack_targets', {}).values()
-        if attacked_pws and possible_blockers:
-            set_valid_action(444, "Assign Blocker to protect Planeswalker")
+        # The specialized labels share only one slot apiece, so expose one
+        # deterministic legal pair and carry the exact identifiers required by
+        # the handler.  Previously both actions were mask-valid with an empty
+        # context and therefore guaranteed to fail.
+        for attacker_id, pw_id in getattr(
+                gs, 'planeswalker_attack_targets', {}).items():
+            legal = [(bf_idx, blocker_id) for bf_idx, blocker_id in possible_blockers
+                     if self._can_block(blocker_id, attacker_id)]
+            if legal:
+                blocker_idx, _ = legal[0]
+                set_valid_action(
+                    444, "Assign Blocker to protect Planeswalker",
+                    context={"pw_identifier": pw_id,
+                             "defender_identifier": blocker_idx})
+                break
 
-        # Defend battle action - already correctly using 204
-        attacked_battles = getattr(gs, 'battle_attack_targets', {}).values()
-        if attacked_battles and possible_blockers:
-            set_valid_action(204, "Assign Blocker to defend Battle")
+        for attacker_id, battle_id in getattr(
+                gs, 'battle_attack_targets', {}).items():
+            legal = [(bf_idx, blocker_id) for bf_idx, blocker_id in possible_blockers
+                     if self._can_block(blocker_id, attacker_id)]
+            if legal:
+                blocker_idx, _ = legal[0]
+                set_valid_action(
+                    204, "Assign Blocker to defend Battle",
+                    context={"battle_identifier": battle_id,
+                             "defender_identifier": blocker_idx})
+                break
 
         # Allow finishing block declaration - corrected from 434 to 439
         set_valid_action(439, "Finish Declaring Blockers")
@@ -1132,15 +1179,15 @@ class CombatActionHandler:
         # --- Find Planeswalker Being Attacked ---
         # Use _find_planeswalker_target helper which uses context identifiers
         target_pw_id, attacker_id = self._find_planeswalker_target(pw_identifier)
-        if not attacker_id:
+        if attacker_id is None:
             logging.warning(f"PW {pw_identifier} not found or not being attacked.")
             return False
 
         # --- Find Defender ---
         # Blocker is the non-agent player
-        player = gs.p1 if not gs.agent_is_p1 else gs.p2
+        player = gs._get_non_active_player()
         defender_id = self._find_permanent_id(player, defender_identifier)
-        if not defender_id:
+        if defender_id is None:
              logging.warning(f"Invalid defender identifier {defender_identifier}.")
              return False
         defender_card = gs._safe_get_card(defender_id)
@@ -1280,7 +1327,7 @@ class CombatActionHandler:
         """Checks if a card has a keyword using the central checker (AbilityHandler preferred)."""
         gs = self.game_state
         card_id = getattr(card, 'card_id', None)
-        if not card_id: return False
+        if card_id is None: return False
 
         # 1. Prefer AbilityHandler (handles static grants/removals)
         if hasattr(gs, 'ability_handler') and gs.ability_handler:

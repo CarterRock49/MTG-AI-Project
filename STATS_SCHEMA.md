@@ -38,8 +38,9 @@ The primary join table. Append-only; each line:
 Games with no adjudicated result (aborted simulations, opponent-loop truncations)
 are deliberately **not** recorded — absence of a line means the game produced no
 trustworthy signal. `harvest_fixtures.py` is stricter: any reset fallback,
-mask-valid execution failure, error, repeated wait state, or step-cap abort
-fails the run and therefore never writes its `harvest_run.json` success marker.
+degraded/out-of-space observation, mask-valid execution failure, mask-invalid
+checkpoint choice, error, repeated wait state, or step-cap abort fails the run
+and therefore never writes its `harvest_run.json` success marker.
 
 ### fidelity object
 
@@ -128,3 +129,49 @@ The fixture policy is random-valid against the scripted opponent. These records
 prove execution and telemetry coverage; they are not suitable for card/deck
 strength estimates. Statistical harvest begins only after a trained checkpoint
 beats scripted play and the schedule is promoted to checkpoint/self-play.
+
+## Production parallel harvest
+
+`harvest_protocol.py harvest` partitions one deterministic global game schedule
+into isolated `shard_NNN/` directories. Each shard must independently satisfy
+the fixture contract above. The root publishes files only after every shard
+succeeds:
+
+- `harvest_protocol.json` — success marker and aggregate run metadata.
+- `card_support_manifest.json` — count/severity/reason merge across shards.
+- `shard_NNN/harvest_run.json` and normal stats artifacts — auditable source
+  records; shard tracker databases are never concurrently shared.
+
+`harvest_protocol.json` schema version 1 fields:
+
+| key | meaning |
+|---|---|
+| `status` | Always `complete`; absence means the run is incomplete/invalid. |
+| `protocol_version` | Harvest orchestrator behavior version. |
+| `seed`, `games`, `workers`, `max_steps` | Deterministic schedule and safety-cap inputs. |
+| `elapsed_seconds`, `games_per_second` | Whole-run wall-clock throughput. |
+| `agent_policy`, `opponent_policy` | Policy identity. A checkpoint identity includes filename, byte size, and SHA-256; non-checkpoint fixtures use `kind`. |
+| `results` | Aggregate completed result counts. |
+| `fidelity` | Sum of all fidelity counters across shards. |
+| `manifest_entries` | Number of merged card-support entries. |
+| `shards` | Ordered shard number, global game offset/count, directory, agent version, and result counts. |
+
+Use the root manifest for run-level filtering and the append-only shard game
+logs for individual outcomes. Never merge shard aggregate gzip files by adding
+already-cumulative snapshots; consume each shard as its own stats scope or
+rebuild downstream aggregates from `game_log.jsonl`.
+
+## Checkpoint promotion decision
+
+`harvest_protocol.py promote` evaluates a candidate against a baseline in two
+equal seeded halves, swapping the candidate between P1 and P2. It writes
+`promotion.json` only after both parallel harvests validate. Draws score 0.5.
+A candidate is promoted only when its score reaches `minimum_score`, every
+fidelity counter is zero, and the merged support manifest has no `unparsed` or
+`crash` card.
+
+Important `promotion.json` fields are the SHA-256 candidate/baseline identities,
+`games`, `games_per_seat`, `candidate_points`, `candidate_score`,
+`minimum_score`, merged `fidelity`, `severe_manifest_cards`, and the final
+boolean `promote` / string `decision`. The protocol records the decision; model
+file copying or champion alias updates are deliberately left to the caller.

@@ -492,6 +492,19 @@ class EnhancedCardEvaluator:
                     value += ramp_value
         
         return value
+
+    def _evaluate_for_play(self, card_id: int) -> float:
+        """Evaluate the immediate value of playing or casting a card.
+
+        The base evaluator already accounts for mana value, card type, stats,
+        keywords, card advantage, interaction, and ramp.  Reusing that score
+        here gives the play context a stable, card-specific signal without
+        introducing mutable board state into the evaluator's cache.
+        """
+        card = self.game_state._safe_get_card(card_id)
+        if not card:
+            return 0.0
+        return self._calculate_base_value(card)
     
     def _evaluate_for_attack(self, card_id: int) -> float:
         """Evaluate a card for attacking with it."""

@@ -53,7 +53,9 @@ class AlphaZeroMTGEnv(gym.Env):
     ACTION_SPACE_SIZE = 480 # Moved constant here
 
     def __init__(self, decks, card_db, max_turns=20, max_hand_size=7, max_battlefield=20,
-                 deck_stats_path="./deck_stats", card_memory_path="./card_memory"):
+                 deck_stats_path="./deck_stats", card_memory_path="./card_memory",
+                 planner_recommendations=False, agent_is_p1=True,
+                 alternate_agent_seat=False):
         logging.info("Initializing AlphaZeroMTGEnv...")
         super().__init__()
         self.decks = decks
@@ -69,13 +71,27 @@ class AlphaZeroMTGEnv(gym.Env):
                               "unparsed_effects": 0, "unparsed_cards": {}}
         self.max_turns = max_turns
         self.max_hand_size = max_hand_size
+        # The rules hand limit is seven, but the public action map exposes hand
+        # slots 0-7 for casting and 0-9 for mandatory discards.  Keep the rules
+        # limit on GameState while observing every directly actionable hand slot.
+        self.hand_observation_size = max(10, max_hand_size)
         self.max_battlefield = max_battlefield
         self.strategy_memory = StrategyMemory()
         self.current_episode_actions = []
         self.replay_actions = []
         self.reset_seed = None
         self.opponent_policy = None
+        # Training can alternate the learned policy between seats without
+        # changing the default behavior used by fixtures and direct callers.
+        self.initial_agent_is_p1 = bool(agent_is_p1)
+        self.alternate_agent_seat = bool(alternate_agent_seat)
+        self._successful_reset_count = 0
         self.current_analysis = None
+        # Calling the full planner from observation construction can launch MCTS
+        # for every policy step.  That is both circular (a policy recommendation
+        # becomes a policy input) and far too expensive for rollouts.  Keep the
+        # legacy feature opt-in for diagnostics; training uses the cheap default.
+        self.planner_recommendations = bool(planner_recommendations)
         self._feature_dim = FEATURE_DIM if 'FEATURE_DIM' in globals() else 223  # Store determined feature dim with fallback
         logging.info(f"Using feature dimension: {self._feature_dim}")
 
@@ -133,21 +149,25 @@ class AlphaZeroMTGEnv(gym.Env):
             # --- Existing Fields (mostly unchanged shapes) ---
             "phase": spaces.Box(low=0, high=MAX_PHASE, shape=(1,), dtype=np.int32),
             "phase_onehot": spaces.Box(low=0, high=1, shape=(MAX_PHASE + 1,), dtype=np.float32),
-            "turn": spaces.Box(low=0, high=self.max_turns, shape=(1,), dtype=np.int32),
+            # Turn-limit adjudication occurs after the counter advances past
+            # max_turns, so the terminal observation legitimately sees +1.
+            "turn": spaces.Box(low=0, high=self.max_turns + 1, shape=(1,), dtype=np.int32),
             "is_my_turn": spaces.Box(low=0, high=1, shape=(1,), dtype=np.int32),
-            "my_life": spaces.Box(low=0, high=40, shape=(1,), dtype=np.int32),
-            "opp_life": spaces.Box(low=0, high=40, shape=(1,), dtype=np.int32),
-            "life_difference": spaces.Box(low=-40, high=40, shape=(1,), dtype=np.int32),
-            "p1_life": spaces.Box(low=0, high=40, shape=(1,), dtype=np.int32),
-            "p2_life": spaces.Box(low=0, high=40, shape=(1,), dtype=np.int32),
-            "my_hand": spaces.Box(low=-1, high=50, shape=(self.max_hand_size, self._feature_dim), dtype=np.float32),
-            "my_hand_count": spaces.Box(low=0, high=self.max_hand_size, shape=(1,), dtype=np.int32),
-            "opp_hand_count": spaces.Box(low=0, high=self.max_hand_size, shape=(1,), dtype=np.int32),
-            "hand_playable": spaces.Box(low=0, high=1, shape=(self.max_hand_size,), dtype=np.float32),
-            "hand_card_types": spaces.Box(low=0, high=1, shape=(self.max_hand_size, 5), dtype=np.float32),
-            "hand_performance": spaces.Box(low=0, high=1, shape=(self.max_hand_size,), dtype=np.float32),
-            "hand_synergy_scores": spaces.Box(low=0, high=1, shape=(self.max_hand_size,), dtype=np.float32),
-            "opportunity_assessment": spaces.Box(low=0, high=10, shape=(self.max_hand_size,), dtype=np.float32),
+            # Life can exceed the starting total and may be negative in a terminal
+            # state.  The former 0..40 bounds rejected legal observations.
+            "my_life": spaces.Box(low=-10000, high=10000, shape=(1,), dtype=np.int32),
+            "opp_life": spaces.Box(low=-10000, high=10000, shape=(1,), dtype=np.int32),
+            "life_difference": spaces.Box(low=-20000, high=20000, shape=(1,), dtype=np.int32),
+            "p1_life": spaces.Box(low=-10000, high=10000, shape=(1,), dtype=np.int32),
+            "p2_life": spaces.Box(low=-10000, high=10000, shape=(1,), dtype=np.int32),
+            "my_hand": spaces.Box(low=-1, high=50, shape=(self.hand_observation_size, self._feature_dim), dtype=np.float32),
+            "my_hand_count": spaces.Box(low=0, high=1000, shape=(1,), dtype=np.int32),
+            "opp_hand_count": spaces.Box(low=0, high=1000, shape=(1,), dtype=np.int32),
+            "hand_playable": spaces.Box(low=0, high=1, shape=(self.hand_observation_size,), dtype=np.float32),
+            "hand_card_types": spaces.Box(low=0, high=1, shape=(self.hand_observation_size, 5), dtype=np.float32),
+            "hand_performance": spaces.Box(low=0, high=1, shape=(self.hand_observation_size,), dtype=np.float32),
+            "hand_synergy_scores": spaces.Box(low=0, high=1, shape=(self.hand_observation_size,), dtype=np.float32),
+            "opportunity_assessment": spaces.Box(low=0, high=10, shape=(self.hand_observation_size,), dtype=np.float32),
             "my_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, self._feature_dim), dtype=np.float32),
             "my_battlefield_flags": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5), dtype=np.float32),
             "my_battlefield_keywords": spaces.Box(low=0, high=1, shape=(self.max_battlefield, keyword_dimension), dtype=np.float32),
@@ -192,7 +212,7 @@ class AlphaZeroMTGEnv(gym.Env):
             "planeswalker_activations": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=np.float32),
             "planeswalker_activation_counts": spaces.Box(low=0, high=10, shape=(self.max_battlefield,), dtype=np.float32),
             "previous_actions": spaces.Box(low=-1, high=self.ACTION_SPACE_SIZE, shape=(self.action_memory_size,), dtype=np.int32),
-            "previous_rewards": spaces.Box(low=-10, high=10, shape=(self.action_memory_size,), dtype=np.float32),
+            "previous_rewards": spaces.Box(low=-1000, high=1000, shape=(self.action_memory_size,), dtype=np.float32),
             "phase_history": spaces.Box(low=-1, high=MAX_PHASE, shape=(5,), dtype=np.int32),
             "action_mask": spaces.Box(low=0, high=1, shape=(self.ACTION_SPACE_SIZE,), dtype=bool),
             "recommended_action": spaces.Box(low=-1, high=self.ACTION_SPACE_SIZE - 1, shape=(1,), dtype=np.int32),
@@ -204,7 +224,7 @@ class AlphaZeroMTGEnv(gym.Env):
             "ability_recommendations": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5, 2), dtype=np.float32),
             "strategic_metrics": spaces.Box(low=-1, high=1, shape=(10,), dtype=np.float32),
             "position_advantage": spaces.Box(low=-1, high=1, shape=(1,), dtype=np.float32),
-            "estimated_opponent_hand": spaces.Box(low=-1, high=50, shape=(self.max_hand_size, self._feature_dim), dtype=np.float32), # Use dynamic feature dim
+            "estimated_opponent_hand": spaces.Box(low=-1, high=50, shape=(self.hand_observation_size, self._feature_dim), dtype=np.float32), # Use dynamic feature dim
             "deck_composition_estimate": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
             "opponent_archetype": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
             "future_state_projections": spaces.Box(low=-1, high=1, shape=(7,), dtype=np.float32),
@@ -228,8 +248,8 @@ class AlphaZeroMTGEnv(gym.Env):
             "choice_kind": spaces.Box(low=0, high=16, shape=(1,), dtype=np.int32),
             "choice_remaining": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "choice_allocation_counts": spaces.Box(low=0, high=100, shape=(10,), dtype=np.int32),
-            "valid_x_range": spaces.Box(low=0, high=100, shape=(2,), dtype=np.int32),
-            "bottomable_cards": spaces.Box(low=0, high=1, shape=(self.max_hand_size,), dtype=bool),
+            "valid_x_range": spaces.Box(low=-1, high=100, shape=(2,), dtype=np.int32),
+            "bottomable_cards": spaces.Box(low=0, high=1, shape=(self.hand_observation_size,), dtype=bool),
             "dredgeable_cards_in_gy": spaces.Box(low=-1, high=100, shape=(6,), dtype=np.int32),
         })
         # *** End Observation Space Modification ***
@@ -251,6 +271,8 @@ class AlphaZeroMTGEnv(gym.Env):
 
         # Valid actions mask
         self.current_valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
+        self.last_observation_error = None
+        self.last_observation_traceback = None
         # Added attribute tracking phase/choice context specifically
         self.current_choice_context = None
 
@@ -291,7 +313,10 @@ class AlphaZeroMTGEnv(gym.Env):
             self.current_valid_actions = self.action_handler.generate_valid_actions()
 
             # Validate the generated mask
-            if self.current_valid_actions is None or not isinstance(self.current_valid_actions, np.ndarray) or self.current_valid_actions.shape != (self.ACTION_SPACE_SIZE,):
+            if (self.current_valid_actions is None
+                    or not isinstance(self.current_valid_actions, np.ndarray)
+                    or self.current_valid_actions.shape != (self.ACTION_SPACE_SIZE,)
+                    or not self.current_valid_actions.astype(bool).any()):
                 raise ValueError(f"generate_valid_actions returned invalid mask: shape {getattr(self.current_valid_actions, 'shape', 'None')}, type {type(self.current_valid_actions)}")
 
         except Exception as e:
@@ -375,6 +400,11 @@ class AlphaZeroMTGEnv(gym.Env):
                 # Reset GameState (Initializes players, hands, subsystems)
                 self.game_state.reset(self.original_p1_deck, self.original_p2_deck, seed)
                 gs = self.game_state # Alias
+                seat_is_p1 = self.initial_agent_is_p1
+                if (self.alternate_agent_seat
+                        and self._successful_reset_count % 2 == 1):
+                    seat_is_p1 = not seat_is_p1
+                gs.agent_is_p1 = seat_is_p1
 
                 # --- Link Subsystems to Environment ---
                 # 1. External Systems
@@ -427,6 +457,7 @@ class AlphaZeroMTGEnv(gym.Env):
                     "mulligan_active": gs.mulligan_in_progress
                 }
 
+                self._successful_reset_count += 1
                 logging.info(f"Environment {env_id} reset complete. P1: {self.current_deck_name_p1} vs P2: {self.current_deck_name_p2}")
                 return obs, info
 
@@ -445,6 +476,7 @@ class AlphaZeroMTGEnv(gym.Env):
             # Init minimal players
             dummy_card_id = next(iter(self.card_db.keys())) if self.card_db else "dummy"
             self.game_state.reset([dummy_card_id]*60, [dummy_card_id]*60)
+            self.game_state.agent_is_p1 = self.initial_agent_is_p1
             
             # Ensure ActionHandler exists
             self.action_handler = ActionHandler(self.game_state)
@@ -1177,6 +1209,15 @@ class AlphaZeroMTGEnv(gym.Env):
             # --- 7. Get Final Observation and Mask for the AGENT ---
             # *** Ensure perspective is set to agent BEFORE getting obs and mask ***
             gs.agent_is_p1 = initial_agent_is_p1
+            # The returned next-state observation must include the action and
+            # reward that produced it.  Updating these after observation building
+            # left policy history permanently one transition behind.
+            if hasattr(self, 'last_n_actions'):
+                self.last_n_actions = np.roll(self.last_n_actions, 1)
+                self.last_n_actions[0] = action_idx
+            if hasattr(self, 'last_n_rewards'):
+                self.last_n_rewards = np.roll(self.last_n_rewards, 1)
+                self.last_n_rewards[0] = step_reward
             obs = self._get_obs_safe()
             # *** Regenerate mask AFTER perspective is confirmed ***
             # ---> ADDED LOGGING <---
@@ -1197,8 +1238,6 @@ class AlphaZeroMTGEnv(gym.Env):
             # ---> END ADDED LOGGING <---
 
             # --- 8. Record History and Finalize ---
-            if hasattr(self, 'last_n_actions'): self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
-            if hasattr(self, 'last_n_rewards'): self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = step_reward
             if hasattr(self, 'current_episode_actions'): self.current_episode_actions.append(action_idx)
             self.replay_actions.append({"action": int(action_idx), "context": dict(action_context)})
             if hasattr(self, 'episode_rewards'): self.episode_rewards.append(step_reward)
@@ -1432,18 +1471,19 @@ class AlphaZeroMTGEnv(gym.Env):
             return self._get_scripted_opponent_action(
                 opponent_player, opponent_mask, opponent_context)
         obs = self._get_obs()
-        try:
-            result = policy.predict(obs, action_masks=opponent_mask, deterministic=True)
-        except TypeError:
-            result = policy.predict(obs, deterministic=True)
+        if self.last_observation_error is not None:
+            raise RuntimeError(
+                "Opponent checkpoint observation degraded: "
+                f"{self.last_observation_error}")
+        result = policy.predict(
+            obs, action_masks=opponent_mask, deterministic=True)
         action = result[0] if isinstance(result, tuple) else result
         action = int(np.asarray(action).reshape(-1)[0])
         if 0 <= action < self.ACTION_SPACE_SIZE and opponent_mask[action]:
             return action, self.action_handler.action_reasons_with_context.get(
                 action, {}).get('context', {})
-        logging.warning(f"Opponent policy returned illegal action {action}; using scripted fallback.")
-        return self._get_scripted_opponent_action(
-            opponent_player, opponent_mask, opponent_context)
+        raise RuntimeError(
+            f"Opponent checkpoint returned mask-invalid action {action}")
 
     def export_replay(self, path=None):
         """Return (and optionally persist) a deterministic episode replay."""
@@ -1474,8 +1514,73 @@ class AlphaZeroMTGEnv(gym.Env):
                 break
         return result
         
+    def _record_observation_error(self, section, error):
+        """Preserve the first degraded feature so strict runs can reject it."""
+        if self.last_observation_error is None:
+            self.last_observation_error = (
+                f"{section}: {type(error).__name__}: {error}")
+            import traceback
+            current_traceback = traceback.format_exc()
+            if not current_traceback.startswith("NoneType: None"):
+                self.last_observation_traceback = current_traceback
+
+    def _coerce_observation(self, obs):
+        """Return an observation that strictly conforms to ``observation_space``.
+
+        Feature helpers are intentionally independent, so this is the final API
+        boundary: malformed features are replaced, finite values are cast, and
+        genuinely out-of-range values are saturated instead of leaking an invalid
+        Gymnasium observation into a rollout.
+        """
+        normalized = {}
+        source = obs if isinstance(obs, dict) else {}
+        for key, space in self.observation_space.spaces.items():
+            value = source.get(key)
+            try:
+                array = np.asarray(value)
+                if array.shape != space.shape:
+                    raise ValueError(f"shape {array.shape}, expected {space.shape}")
+                if np.issubdtype(array.dtype, np.floating):
+                    if not np.all(np.isfinite(array)):
+                        self._record_observation_error(
+                            f"feature {key}",
+                            ValueError("value contained NaN or infinity"))
+                    array = np.nan_to_num(array, nan=0.0)
+                # Bound values before narrowing the dtype. Casting a large
+                # int64 directly to int32 can wrap it into an apparently valid
+                # (but false) value that clipping can no longer repair.
+                bounded = np.clip(array, space.low, space.high)
+                if not np.array_equal(array, bounded):
+                    self._record_observation_error(
+                        f"feature {key}",
+                        ValueError("value exceeded declared observation bounds"))
+                    logging.warning(
+                        "Observation feature '%s' exceeded its declared bounds; "
+                        "the public value was clipped.", key)
+                normalized[key] = bounded.astype(space.dtype, copy=False)
+            except Exception as exc:
+                self._record_observation_error(f"feature {key}", exc)
+                logging.error(
+                    "Observation feature '%s' was malformed (%s); using zeros.",
+                    key, exc)
+                normalized[key] = np.zeros(space.shape, dtype=space.dtype)
+        return normalized
+
     def _get_obs_safe(self):
-        """Return a minimal, safe observation dictionary in case of errors. (Reinforced)"""
+        """Build the real policy observation, falling back only on failure."""
+        try:
+            return self._get_obs()
+        except Exception as exc:
+            self._record_observation_error("policy observation", exc)
+            logging.critical(
+                "Failed to build the policy observation: %s", exc,
+                exc_info=True)
+            return self._get_obs_fallback()
+
+    def _get_obs_fallback(self):
+        """Return a minimal observation dictionary after observation failure."""
+        self._record_observation_error(
+            "observation fallback", RuntimeError("fallback observation used"))
         gs = self.game_state
         obs = {} # Initialize empty dict
 
@@ -1612,8 +1717,17 @@ class AlphaZeroMTGEnv(gym.Env):
                     obs[key] = np.zeros((self.max_battlefield, 5, 2), dtype=np.float32)
                 elif key == "ability_timing":
                     obs[key] = np.zeros((5,), dtype=np.float32)
-            
-        return obs
+        if "action_mask" in obs and len(obs["action_mask"]) == self.ACTION_SPACE_SIZE:
+            try:
+                # Even an observation fallback must preserve the public mask
+                # contract.  Adding PASS/CONCEDE unconditionally can expose an
+                # action that the current special phase will reject.
+                obs["action_mask"] = self.action_mask().astype(bool)
+            except Exception:
+                obs["action_mask"] = np.zeros(
+                    self.ACTION_SPACE_SIZE, dtype=bool)
+                obs["action_mask"][12] = True
+        return self._coerce_observation(obs)
 
     def _check_game_end_conditions(self, info):
             """Helper to check standard game end conditions and update info dict."""
@@ -2050,7 +2164,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 # --- End modification ---
 
         # Create estimated hand based on deck profile
-        estimated_hand = np.zeros((self.max_hand_size, feature_dim), dtype=np.float32) # Use correct feature_dim
+        estimated_hand = np.zeros((self.hand_observation_size, feature_dim), dtype=np.float32) # Use correct feature_dim
 
         # Create pool of likely cards based on observed deck profile
         likely_cards = []
@@ -2069,7 +2183,7 @@ class AlphaZeroMTGEnv(gym.Env):
 
         # Fill estimated hand with top weighted cards
         opp_hand_size = len(opp.get("hand", [])) if opp else 0 # Safe get hand size
-        hand_size_to_fill = min(opp_hand_size, self.max_hand_size)
+        hand_size_to_fill = min(opp_hand_size, self.hand_observation_size)
         for i in range(hand_size_to_fill):
             if i < len(likely_cards):
                 # --- Pass the correct feature_dim ---
@@ -2209,12 +2323,15 @@ class AlphaZeroMTGEnv(gym.Env):
 
     def _get_obs(self):
         """Build the observation dictionary. Assumes helpers are implemented."""
+        self.last_observation_error = None
+        self.last_observation_traceback = None
         try:
             # 0. Ensure layer effects are applied first
             if hasattr(self, 'layer_system') and self.layer_system:
                 try:
                     self.layer_system.apply_all_effects()
                 except Exception as layer_e:
+                    self._record_observation_error("layers", layer_e)
                     logging.error(f"Error applying layer effects in _get_obs: {layer_e}", exc_info=True)
                     # Continue generating obs, but layers might be inconsistent
 
@@ -2238,10 +2355,13 @@ class AlphaZeroMTGEnv(gym.Env):
                 try:
                     current_mask = self.action_mask()
                 except Exception as mask_e:
+                    self._record_observation_error("action mask", mask_e)
                     logging.error(f"Error generating action mask in _get_obs: {mask_e}", exc_info=True)
                     # Use default mask with pass/concede if generation fails
                     current_mask[11] = True; current_mask[12] = True;
             else:
+                self._record_observation_error(
+                    "action mask", RuntimeError("action handler unavailable"))
                 logging.warning("ActionHandler not available in _get_obs, using default mask.")
                 current_mask[11] = True; current_mask[12] = True;
             obs["action_mask"] = current_mask.astype(bool) # Assign the potentially corrected mask
@@ -2260,15 +2380,15 @@ class AlphaZeroMTGEnv(gym.Env):
             obs["my_life"] = np.array([agent_player_obj.get('life', 0)], dtype=np.int32)
             obs["opp_life"] = np.array([opp.get('life', 0)], dtype=np.int32)
             obs["life_difference"] = np.array([agent_player_obj.get('life', 0) - opp.get('life', 0)], dtype=np.int32)
-            obs["p1_life"] = np.array([getattr(gs.p1, 'life', 0)], dtype=np.int32)
-            obs["p2_life"] = np.array([getattr(gs.p2, 'life', 0)], dtype=np.int32)
+            obs["p1_life"] = np.array([gs.p1.get('life', 0)], dtype=np.int32)
+            obs["p2_life"] = np.array([gs.p2.get('life', 0)], dtype=np.int32)
 
             # --- 4. Populate Zone Features and Related Info ---
             # Wrap potentially complex population blocks in try/excepts to prevent
             # errors in one section from stopping others, and ensuring defaults remain.
             try:
                 # Hand state
-                obs["my_hand"] = self._get_zone_features(agent_player_obj.get("hand", []), self.max_hand_size)
+                obs["my_hand"] = self._get_zone_features(agent_player_obj.get("hand", []), self.hand_observation_size)
                 obs["my_hand_count"] = np.array([len(agent_player_obj.get("hand", []))], dtype=np.int32)
                 obs["opp_hand_count"] = np.array([len(opp.get("hand", []))], dtype=np.int32)
                 obs["hand_card_types"] = self._get_hand_card_types(agent_player_obj.get("hand", []))
@@ -2277,6 +2397,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 obs["hand_synergy_scores"] = self._get_hand_synergy_scores(agent_player_obj.get("hand", []), agent_player_obj.get("battlefield", []))
                 obs["opportunity_assessment"] = self._get_opportunity_assessment(agent_player_obj.get("hand", []), agent_player_obj)
             except Exception as e:
+                self._record_observation_error("hand features", e)
                 logging.error(f"Error populating hand features in _get_obs: {e}", exc_info=True)
                 # Keep default zero values initialized earlier
 
@@ -2293,6 +2414,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 obs["p1_bf_count"] = np.array([len(gs.p1.get("battlefield", []))], dtype=np.int32)
                 obs["p2_bf_count"] = np.array([len(gs.p2.get("battlefield", []))], dtype=np.int32)
             except Exception as e:
+                self._record_observation_error("battlefield features", e)
                 logging.error(f"Error populating battlefield features in _get_obs: {e}", exc_info=True)
 
             try:
@@ -2311,6 +2433,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 obs["threat_assessment"] = self._get_threat_assessment(opp.get("battlefield", []))
                 obs["card_synergy_scores"] = self._calculate_card_synergies(agent_player_obj.get("battlefield", []))
             except Exception as e:
+                self._record_observation_error("creature features", e)
                 logging.error(f"Error populating creature stats in _get_obs: {e}", exc_info=True)
 
             try:
@@ -2322,6 +2445,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 obs["turn_vs_mana"] = np.array([min(1.0, len([cid for cid in agent_player_obj.get("battlefield",[]) if self._is_land(cid)]) / max(1.0, float(current_turn)))], dtype=np.float32)
                 obs["remaining_mana_sources"] = np.array([obs["untapped_land_count"][0]], dtype=np.int32) # Same as untapped lands for now
             except Exception as e:
+                self._record_observation_error("mana features", e)
                 logging.error(f"Error populating mana features in _get_obs: {e}", exc_info=True)
 
             try:
@@ -2333,6 +2457,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 obs["graveyard_key_cards"] = self._get_zone_features(agent_player_obj.get("graveyard", []), 10)
                 obs["exile_key_cards"] = self._get_zone_features(agent_player_obj.get("exile", []), 10)
             except Exception as e:
+                self._record_observation_error("graveyard/exile features", e)
                 logging.error(f"Error populating graveyard/exile features in _get_obs: {e}", exc_info=True)
 
             try:
@@ -2342,6 +2467,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 obs["stack_controller"] = stack_controllers
                 obs["stack_card_types"] = stack_types
             except Exception as e:
+                self._record_observation_error("stack features", e)
                 logging.error(f"Error populating stack features in _get_obs: {e}", exc_info=True)
 
             try:
@@ -2350,6 +2476,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 obs["blockers_count"] = np.array([sum(len(b) for b in getattr(gs, 'current_block_assignments', {}).values())], dtype=np.int32)
                 obs["potential_combat_damage"] = np.zeros(1, dtype=np.int32) # Placeholder
             except Exception as e:
+                self._record_observation_error("combat features", e)
                 logging.error(f"Error populating combat state features in _get_obs: {e}", exc_info=True)
 
 
@@ -2363,6 +2490,9 @@ class AlphaZeroMTGEnv(gym.Env):
                 # --->>> ADDED Check and Correction: <<<---
                 expected_space = self.observation_space.spaces[ability_features_key]
                 if not isinstance(ability_features_result, np.ndarray) or ability_features_result.shape != expected_space.shape or ability_features_result.dtype != expected_space.dtype:
+                    self._record_observation_error(
+                        "ability features",
+                        ValueError("ability feature helper returned invalid shape or dtype"))
                     logging.error(f"CRITICAL: _get_ability_features returned invalid result! "
                                 f"Got type {type(ability_features_result)}, shape {getattr(ability_features_result, 'shape', 'N/A')}, dtype {getattr(ability_features_result, 'dtype', 'N/A')}. "
                                 f"Expected shape {expected_space.shape}, dtype {expected_space.dtype}. Resetting to zeros.")
@@ -2371,6 +2501,7 @@ class AlphaZeroMTGEnv(gym.Env):
                     obs[ability_features_key] = ability_features_result
 
             except Exception as ab_feat_e:
+                self._record_observation_error("ability features", ab_feat_e)
                 logging.error(f"CRITICAL error during _get_ability_features call or assignment: {ab_feat_e}", exc_info=True)
                 # Reset to zeros explicitly if any error occurred during processing
                 expected_shape = self.observation_space[ability_features_key].shape
@@ -2384,12 +2515,13 @@ class AlphaZeroMTGEnv(gym.Env):
                 obs["planeswalker_activations"] = self._get_planeswalker_activation_flags(agent_player_obj.get("battlefield", []), agent_player_obj)
                 obs["planeswalker_activation_counts"] = self._get_planeswalker_activation_counts(agent_player_obj.get("battlefield", []), agent_player_obj)
             except Exception as e:
+                self._record_observation_error("post-ability features", e)
                 logging.error(f"Error populating post-ability features: {e}", exc_info=True)
 
 
             # --- 6. Populate History & Planning Features (inside try/except) ---
             try:
-                phase_hist = getattr(self,'_phase_history',[]) # Use getattr
+                phase_hist = getattr(gs, '_phase_history', [])
                 phase_hist_len = len(phase_hist)
                 phase_hist_arr = np.full(5, -1, dtype=np.int32)
                 if phase_hist_len > 0: phase_hist_arr[-min(phase_hist_len, 5):] = phase_hist[-min(phase_hist_len, 5):] # Fill from end
@@ -2422,17 +2554,40 @@ class AlphaZeroMTGEnv(gym.Env):
                 obs["targetable_cards_in_graveyards"] = self._get_potential_targets_vector('graveyard_card')
                 choice = getattr(gs, 'choice_context', None)
                 if choice and choice.get('player') is agent_player_obj:
-                    all_choice_ids = choice.get('options', choice.get('cards', []))
+                    all_choice_options = choice.get(
+                        'options', choice.get('cards', []))
                     choice_page = int(choice.get('choice_page', 0))
-                    choice_ids = all_choice_ids[choice_page * 10:(choice_page + 1) * 10]
-                    obs['choice_cards'] = self._get_zone_features(choice_ids, 10)
-                    obs['choice_card_mask'][:len(choice_ids)] = True
+                    choice_options = all_choice_options[
+                        choice_page * 10:(choice_page + 1) * 10]
+                    choice_card_ids = []
+                    for option in choice_options:
+                        candidate_id = (
+                            option.get('card_id', option.get('id'))
+                            if isinstance(option, dict) else option)
+                        try:
+                            candidate_card = gs._safe_get_card(candidate_id)
+                        except (TypeError, ValueError):
+                            candidate_card = None
+                        choice_card_ids.append(
+                            candidate_id if candidate_card is not None else None)
+                    for option_index, candidate_id in enumerate(choice_card_ids):
+                        if candidate_id is None:
+                            continue
+                        obs['choice_cards'][option_index] = self._get_card_feature(
+                            candidate_id, self._feature_dim)
+                        obs['choice_card_mask'][option_index] = True
                     obs['choice_remaining'] = np.array(
                         [max(0, int(choice.get('remaining', 0)))], dtype=np.int32)
                     allocations = choice.get('allocations', {})
-                    for option_index, card_id in enumerate(choice_ids):
+                    for option_index, card_id in enumerate(choice_card_ids):
+                        if card_id is None:
+                            continue
+                        try:
+                            allocation_count = allocations.get(card_id, 0)
+                        except TypeError:
+                            allocation_count = 0
                         obs['choice_allocation_counts'][option_index] = max(
-                            0, int(allocations.get(card_id, 0)))
+                            0, int(allocation_count))
                     choice_kinds = {
                         'dig_select': 1, 'sacrifice_effect': 2,
                         'distribute_counters': 3, 'manifest_dread': 4,
@@ -2449,6 +2604,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 obs["dredgeable_cards_in_gy"] = self._get_dredge_options(agent_player_obj)
 
             except Exception as e:
+                self._record_observation_error("history/planning/context features", e)
                 logging.error(f"Error populating history/planning/context features in _get_obs: {e}", exc_info=True)
 
 
@@ -2465,7 +2621,9 @@ class AlphaZeroMTGEnv(gym.Env):
 
                     if analysis:
                         obs["strategic_metrics"][:10] = self._analysis_to_metrics(analysis)[:10]
-                        obs["position_advantage"][0] = analysis.get("position", {}).get("score", 0)
+                        obs["position_advantage"][0] = np.clip(
+                            analysis.get("position", {}).get("score", 0),
+                            -1.0, 1.0)
 
                     opp_arch = self.strategic_planner.predict_opponent_archetype()
                     arch_len = min(len(obs["opponent_archetype"]), len(opp_arch))
@@ -2479,7 +2637,10 @@ class AlphaZeroMTGEnv(gym.Env):
                     wc_keys = ["combat_damage", "direct_damage", "card_advantage", "combo", "control", "alternate"]
                     wc_viab_len = min(len(obs["win_condition_viability"]), len(wc_keys))
                     wc_time_len = min(len(obs["win_condition_timings"]), len(wc_keys))
-                    obs["win_condition_viability"][:wc_viab_len] = np.array([win_cons.get(k, {}).get("score", 0.0) for k in wc_keys[:wc_viab_len]], dtype=np.float32)
+                    obs["win_condition_viability"][:wc_viab_len] = np.array([
+                        np.clip(win_cons.get(k, {}).get("score", 0.0), 0.0, 1.0)
+                        for k in wc_keys[:wc_viab_len]
+                    ], dtype=np.float32)
                     obs["win_condition_timings"][:wc_time_len] = np.array([min(self.max_turns + 1, win_cons.get(k, {}).get("turns_to_win", 99)) for k in wc_keys[:wc_time_len]], dtype=np.float32)
 
                     plan_len = min(len(obs["multi_turn_plan"]), 6)
@@ -2512,6 +2673,7 @@ class AlphaZeroMTGEnv(gym.Env):
                     if obs["ability_recommendations"].shape == ability_recs.shape: obs["ability_recommendations"][:,:,:] = ability_recs
 
             except Exception as planner_e:
+                self._record_observation_error("strategic planner features", planner_e)
                 logging.warning(f"Error getting strategic info for observation: {planner_e}", exc_info=False)
 
             # --- 8. Populate Mulligan Info ---
@@ -2523,27 +2685,29 @@ class AlphaZeroMTGEnv(gym.Env):
                     reason_len = min(len(obs["mulligan_reasons"]), len(mull_reasons))
                     obs["mulligan_reasons"][:reason_len] = mull_reasons[:reason_len]
             except Exception as e:
+                self._record_observation_error("mulligan features", e)
                 logging.error(f"Error populating mulligan features in _get_obs: {e}", exc_info=True)
 
             # --- 9. FINAL VALIDATION AND GUARANTEE OF ALL KEYS ---
             # Extra check to ensure all keys defined in observation_space are present
             for key, space in self.observation_space.spaces.items():
                 if key not in obs:
+                    self._record_observation_error(
+                        f"feature {key}", KeyError("missing from final observation"))
                     logging.critical(f"Key '{key}' missing in final observation! Adding default.")
                     obs[key] = np.zeros(space.shape, dtype=space.dtype)
                 elif not isinstance(obs[key], np.ndarray):
+                    self._record_observation_error(
+                        f"feature {key}", TypeError("final value is not an ndarray"))
                     logging.critical(f"Key '{key}' is not a numpy array in final observation! Re-creating.")
                     obs[key] = np.zeros(space.shape, dtype=space.dtype)
                 elif obs[key].shape != space.shape:
+                    self._record_observation_error(
+                        f"feature {key}", ValueError(
+                            f"shape {obs[key].shape}, expected {space.shape}"))
                     logging.critical(f"Key '{key}' has wrong shape in final observation! Expected {space.shape}, got {obs[key].shape}. Re-creating.")
                     obs[key] = np.zeros(space.shape, dtype=space.dtype)
                 
-                # Special case for action_mask
-                if key == "action_mask":
-                    # Ensure at least pass and concede are valid
-                    obs[key][11] = True  # PASS_PRIORITY
-                    obs[key][12] = True  # CONCEDE
-            
             # Final guarantees for critical keys before returning
             critical_keys = ["action_mask", "ability_features", "ability_recommendations", "ability_timing", "phase", "turn"]
             for critical_key in critical_keys:
@@ -2569,13 +2733,13 @@ class AlphaZeroMTGEnv(gym.Env):
                         elif critical_key == "turn":
                             obs[critical_key] = np.array([1], dtype=np.int32)
 
-            return obs
+            return self._coerce_observation(obs)
 
         # --- Main Exception Handling for _get_obs ---
         except Exception as e:
+            self._record_observation_error("observation builder", e)
             logging.critical(f"CRITICAL error during _get_obs execution: {str(e)}", exc_info=True)
-            # Attempt to return safe observation
-            return self._get_obs_safe()
+            return self._get_obs_fallback()
 
     def observation_for(self, player):
         """Build an observation from one player's information boundary."""
@@ -2751,13 +2915,13 @@ class AlphaZeroMTGEnv(gym.Env):
 
     def _get_hand_synergy_scores(self, hand_ids, bf_ids):
         """Calculate synergy for each card in hand with current board/hand state."""
-        scores = np.zeros(self.max_hand_size, dtype=np.float32)
+        scores = np.zeros(self.hand_observation_size, dtype=np.float32)
         if not self.strategic_planner or not hasattr(self.strategic_planner, 'identify_card_synergies'):
             return scores
 
         current_hand_and_board = hand_ids + bf_ids
         for i, card_id in enumerate(hand_ids):
-            if i >= self.max_hand_size: break
+            if i >= self.hand_observation_size: break
             # Compare card i with all *other* cards currently available
             other_cards = [cid for cid in current_hand_and_board if cid != card_id]
             synergy_score, _ = self.strategic_planner.identify_card_synergies(card_id, other_cards, []) # Compare with hand+board
@@ -2932,7 +3096,12 @@ class AlphaZeroMTGEnv(gym.Env):
             agent_player_obj = gs.p1 if gs.agent_is_p1 else gs.p2
 
             # Determine space properties dynamically
-            obs_key = f"selectable_{choice_kind}s" if choice_kind in ['mode', 'color'] else f"valid_{choice_kind}_range"
+            if choice_kind in ['mode', 'color']:
+                obs_key = f"selectable_{choice_kind}s"
+            elif choice_kind == 'x_range':
+                obs_key = "valid_x_range"
+            else:
+                obs_key = f"valid_{choice_kind}_range"
             space = self.observation_space.spaces.get(obs_key)
             if space is None:
                 logging.warning(f"Observation space missing for choice kind '{choice_kind}'.")
@@ -3008,10 +3177,10 @@ class AlphaZeroMTGEnv(gym.Env):
     def _get_bottoming_mask(self, player):
         """Helper to get mask of cards available to bottom after mulligan."""
         gs = self.game_state
-        mask = np.zeros(self.max_hand_size, dtype=bool)
+        mask = np.zeros(self.hand_observation_size, dtype=bool)
         if getattr(gs, 'bottoming_in_progress', False) and getattr(gs, 'bottoming_player', None) == player:
             for i in range(len(player.get("hand", []))):
-                if i < self.max_hand_size: mask[i] = True
+                if i < self.hand_observation_size: mask[i] = True
         return mask
 
 
@@ -3068,8 +3237,13 @@ class AlphaZeroMTGEnv(gym.Env):
             if i >= max_size: break
             card = gs._safe_get_card(card_id)
             flags[i, 0] = float(card_id in tapped_set)
-            # Check summoning sickness and haste using _has_haste helper
-            has_haste = self._has_haste(card_id) if card else False
+            # AbilityHandler owns layer-aware keyword checks; the environment
+            # must not call the similarly named ActionHandler mixin method.
+            has_haste = bool(
+                card and getattr(gs, 'ability_handler', None)
+                and gs.ability_handler.check_keyword(card_id, "haste"))
+            if card and not getattr(gs, 'ability_handler', None):
+                has_haste = "haste" in getattr(card, "oracle_text", "").lower()
             is_sick = card_id in sick_set and not has_haste
             flags[i, 1] = float(is_sick)
             flags[i, 2] = float(card_id in attackers_set)
@@ -3095,10 +3269,10 @@ class AlphaZeroMTGEnv(gym.Env):
 
     def _get_hand_card_types(self, hand_ids):
         """Helper to get one-hot encoding of card types in hand."""
-        types = np.zeros((self.max_hand_size, 5), dtype=np.float32)
+        types = np.zeros((self.hand_observation_size, 5), dtype=np.float32)
         gs = self.game_state
         for i, card_id in enumerate(hand_ids):
-            if i >= self.max_hand_size: break
+            if i >= self.hand_observation_size: break
             card = gs._safe_get_card(card_id)
             if card:
                 type_line = getattr(card, 'type_line', '').lower()
@@ -3112,13 +3286,13 @@ class AlphaZeroMTGEnv(gym.Env):
 
     def _get_hand_playable(self, hand_ids, player, is_my_turn):
         """Helper to determine playability flags for hand cards."""
-        playable = np.zeros(self.max_hand_size, dtype=np.float32)
+        playable = np.zeros(self.hand_observation_size, dtype=np.float32)
         gs = self.game_state
         # Use GameState method which checks phase, stack, priority correctly
         can_play_sorcery = hasattr(gs, '_can_act_at_sorcery_speed') and gs._can_act_at_sorcery_speed(player)
 
         for i, card_id in enumerate(hand_ids):
-            if i >= self.max_hand_size: break
+            if i >= self.hand_observation_size: break
             card = gs._safe_get_card(card_id)
             if card:
                 is_land = 'land' in getattr(card, 'type_line', '').lower()
@@ -3250,9 +3424,9 @@ class AlphaZeroMTGEnv(gym.Env):
     def _get_hand_performance(self, hand_ids):
         """Get performance ratings for cards in hand."""
         gs = self.game_state
-        perf = np.full(self.max_hand_size, 0.5, dtype=np.float32) # Default 0.5
+        perf = np.full(self.hand_observation_size, 0.5, dtype=np.float32) # Default 0.5
         for i, card_id in enumerate(hand_ids):
-            if i >= self.max_hand_size: break
+            if i >= self.hand_observation_size: break
             card = gs._safe_get_card(card_id)
             if card and hasattr(card, 'performance_rating'):
                  perf[i] = card.performance_rating
@@ -3327,12 +3501,12 @@ class AlphaZeroMTGEnv(gym.Env):
         # Fallback: Return zeros if card evaluator is not available
         gs = self.game_state
         if not self.card_evaluator:
-            return np.zeros(self.max_hand_size, dtype=np.float32)
+            return np.zeros(self.hand_observation_size, dtype=np.float32)
 
-        opportunities = np.zeros(self.max_hand_size, dtype=np.float32)
+        opportunities = np.zeros(self.hand_observation_size, dtype=np.float32)
         if self.card_evaluator:
              for i, card_id in enumerate(hand_ids):
-                  if i >= self.max_hand_size: break
+                  if i >= self.hand_observation_size: break
                   card = gs._safe_get_card(card_id)
                   if card:
                       # Evaluate playability *and* potential impact
@@ -3519,7 +3693,10 @@ class AlphaZeroMTGEnv(gym.Env):
         matches = 0
 
         # Planner Recommendation (Check existence first)
-        if hasattr(self, 'strategic_planner') and self.strategic_planner and hasattr(self.strategic_planner, 'recommend_action'):
+        if (self.planner_recommendations
+                and hasattr(self, 'strategic_planner')
+                and self.strategic_planner
+                and hasattr(self.strategic_planner, 'recommend_action')):
              try:
                  # Pass the list of valid actions
                  rec_action = self.strategic_planner.recommend_action(valid_actions_list)

@@ -159,8 +159,10 @@ ACTION_MEANINGS = {
     **{378 + i: ("ATTACK_PLANESWALKER", i) for i in range(5)},  # 378-382
     # Assign Multiple Blockers 0-9 (relative to current attackers)
     **{383 + i: ("ASSIGN_MULTIPLE_BLOCKERS", i) for i in range(10)}, # 383-392
-    # Gaps filled (393-397) = 5 actions
-    **{i: ("NO_OP", None) for i in range(393, 398)},            # 393-397
+    # Extra hand slots for lands. The main 13-19 block only reaches slots 0-6,
+    # while draw/discard interfaces expose a ten-card actionable window.
+    **{393 + i: ("PLAY_LAND", i + 7) for i in range(3)},        # 393-395
+    **{396 + i: ("PLAY_SPELL", i + 8) for i in range(2)},       # 396-397
 
     # Alternative Casting (398-409) = 12 actions -> Some require context
     398: ("CAST_WITH_FLASHBACK", None), # Context={'gy_idx': X}
@@ -302,6 +304,27 @@ class ActionHandler(
                 self.game_state.current_block_assignments = {}
 
         self.action_handlers = self._get_action_handlers() # Initialize handlers
+
+    def _get_policy_player(self, context=None):
+        """Return the player whose policy is executing the current action.
+
+        Active player and acting player are not interchangeable: the non-active
+        player can cast instants, activate mana abilities, cycle, and make choices.
+        Generated contexts may pin a controller explicitly; otherwise
+        ``agent_is_p1`` is the environment's current policy perspective.
+        """
+        gs = self.game_state
+        context = context or {}
+        controller = context.get("controller")
+        if controller is gs.p1 or context.get("controller_id") in ("p1", 1):
+            return gs.p1
+        if controller is gs.p2 or context.get("controller_id") in ("p2", 2):
+            return gs.p2
+        return gs.p1 if gs.agent_is_p1 else gs.p2
+
+    def _get_policy_opponent(self, context=None):
+        player = self._get_policy_player(context)
+        return self.game_state.p2 if player is self.game_state.p1 else self.game_state.p1
         
     def _get_action_handlers(self):
             """Maps action type strings to their handler methods. (Updated for new mapping)"""
@@ -316,6 +339,7 @@ class ActionHandler(
                 "BEGIN_COMBAT_END": self._handle_begin_combat_end, "END_COMBAT": self._handle_end_combat,
                 "END_STEP": self._handle_end_step, "PASS_PRIORITY": self._handle_pass_priority,
                 "CONCEDE": self._handle_concede,
+                "NO_OP_SEARCH_FAIL": self._handle_no_op_search_fail,
                 # Play Cards
                 "PLAY_LAND": self._handle_play_land, "PLAY_SPELL": self._handle_play_spell,
                 "PLAY_MDFC_LAND_BACK": self._handle_play_mdfc_land_back,
@@ -637,11 +661,20 @@ class ActionHandler(
                     import inspect
                     sig = inspect.signature(handler_func)
                     handler_args = {}
-                    # Prepare arguments based on handler signature
-                    if 'param' in sig.parameters: handler_args['param'] = param
-                    if 'context' in sig.parameters: handler_args['context'] = action_context
-                    if 'action_type' in sig.parameters: handler_args['action_type'] = action_type
-                    if 'action_index' in sig.parameters: handler_args['action_index'] = action_idx # Include if needed
+                    # Handlers that expose **kwargs intentionally consume generated
+                    # action metadata there (several read kwargs['context']).  The
+                    # old explicit-name-only dispatch silently dropped that context.
+                    accepts_kwargs = any(
+                        parameter.kind == inspect.Parameter.VAR_KEYWORD
+                        for parameter in sig.parameters.values())
+                    if 'param' in sig.parameters:
+                        handler_args['param'] = param
+                    if 'context' in sig.parameters or accepts_kwargs:
+                        handler_args['context'] = action_context
+                    if 'action_type' in sig.parameters:
+                        handler_args['action_type'] = action_type
+                    if 'action_index' in sig.parameters or accepts_kwargs:
+                        handler_args['action_index'] = action_idx
 
                     # Call the handler
                     result = handler_func(**handler_args)
@@ -668,23 +701,14 @@ class ActionHandler(
                         logging.error(f"Handler {action_type} returned unexpected type: {type(result)}. Result: {result}. Standardize to (reward, success). Assuming failure.")
                         action_reward, action_executed = -0.2, False # Penalize failure
 
-                except TypeError as te: # Handle signature mismatches more gracefully
-                    # --- Reworked TypeError Handling ---
-                    handler_args_used = {k: v for k, v in handler_args.items() if k in sig.parameters} # Use only valid args
-                    logging.warning(f"TypeError calling {action_type} with args {handler_args} (Signature: {sig}). Attempting fallback with args {handler_args_used}. Error: {te}")
-                    try:
-                        result = handler_func(**handler_args_used) # Retry with filtered args
-                        # Process result again, expecting 2-tuple
-                        if isinstance(result, tuple) and len(result) == 2:
-                            action_reward, action_executed = result
-                            if not isinstance(action_executed, bool): action_executed = False
-                            if not isinstance(action_reward, (float, int)): action_reward = 0.0
-                        else:
-                            logging.error(f"Handler {action_type} fallback call returned unexpected type: {type(result)}. Assuming failure.")
-                            action_reward, action_executed = -0.2, False
-                    except Exception as handler_e:
-                        logging.error(f"Error executing handler {action_type} (fallback call): {handler_e}", exc_info=True)
-                        action_reward, action_executed = -0.2, False # Fail on inner error
+                except TypeError as handler_e:
+                    # The signature has already been inspected, so a TypeError here
+                    # came from inside the handler.  Retrying can apply a partial
+                    # mutation twice and corrupt zones; fail this action once.
+                    logging.error(
+                        f"TypeError inside handler {action_type} with params "
+                        f"{handler_args}: {handler_e}", exc_info=True)
+                    action_reward, action_executed = -0.2, False
                 except Exception as handler_e:
                     logging.error(f"Error executing handler {action_type} with params {handler_args}: {handler_e}", exc_info=True)
                     action_reward, action_executed = -0.2, False # Fail on general error
@@ -960,7 +984,7 @@ class ActionHandler(
         elif isinstance(card_id_or_hand_idx, str):
              card_id = card_id_or_hand_idx
 
-        if not card_id: return 0.0
+        if card_id is None: return 0.0
 
         if hasattr(self.game_state, 'strategic_planner') and self.game_state.strategic_planner:
              # Ensure context is a dict

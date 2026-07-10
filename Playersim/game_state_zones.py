@@ -332,6 +332,7 @@ class GameStateZonesMixin:
         if from_zone == "stack_implicit": actual_from_zone = "stack"; source_list = [] # Card data exists, just not in player list yet
         elif from_zone == "library_implicit": actual_from_zone = "library"; source_list = []
         elif from_zone == "hand_implicit": actual_from_zone = "hand"; source_list = []
+        elif from_zone == "graveyard_implicit": actual_from_zone = "graveyard"; source_list = []
         elif from_zone == "nonexistent_zone": actual_from_zone = "nonexistent"; source_list = [] # For tokens entering
         elif from_player is None: # Moving from a game-level zone (e.g., phased_out)
              container = getattr(self, actual_from_zone, None)
@@ -403,7 +404,7 @@ class GameStateZonesMixin:
         # --- Perform Actual Move ---
         # ... (Keep existing removal logic) ...
         removed_successfully = False
-        if source_list is not None and original_from_zone not in ["stack_implicit", "library_implicit", "hand_implicit", "nonexistent_zone"]:
+        if source_list is not None and original_from_zone not in ["stack_implicit", "library_implicit", "hand_implicit", "graveyard_implicit", "nonexistent_zone"]:
              source_list_live = None
              if from_player: source_list_live = from_player.get(actual_from_zone)
              else: source_list_live = getattr(self, actual_from_zone, None)
@@ -1440,4 +1441,3 @@ class GameStateZonesMixin:
         # Depends on rules context. For most purposes, only battlefield controller matters.
         # If you need owner regardless of zone, use _find_card_owner_fallback or similar.
         return None
-

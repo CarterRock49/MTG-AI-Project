@@ -17,16 +17,37 @@ class ChoiceHandlersMixin:
     def _handle_target_page_next(self, param=None, context=None, **kwargs):
         gs = self.game_state
         ctx = getattr(gs, 'targeting_context', None)
-        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        player = self._get_policy_player(context)
+        requested_page_count = (context or {}).get('page_count')
         if ctx and ctx.get('controller') is player:
-            ctx['target_page'] = int(ctx.get('target_page', 0)) + 1
+            if requested_page_count is None:
+                valid_map = gs.targeting_system.get_valid_targets(
+                    ctx.get('source_id'), player,
+                    ctx.get('required_type', 'target'),
+                    effect_text=ctx.get('effect_text'))
+                candidates = sorted(
+                    {target for targets in valid_map.values()
+                     for target in targets
+                     if target not in ctx.get('selected_targets', [])},
+                    key=lambda target_id: (
+                        isinstance(target_id, str), target_id))
+                page_count = max(1, (len(candidates) + 9) // 10)
+            else:
+                page_count = max(1, int(requested_page_count))
+            ctx['target_page'] = (
+                int(ctx.get('target_page', 0)) + 1) % page_count
             return 0.0, True
         choice = getattr(gs, 'choice_context', None)
         if (choice and choice.get('player') is player
                 and choice.get('type') in (
                     'sacrifice_effect', 'activation_sacrifice_cost',
                     'dig_select', 'distribute_counters')):
-            choice['choice_page'] = int(choice.get('choice_page', 0)) + 1
+            page_count = max(
+                1, int(requested_page_count)
+                if requested_page_count is not None
+                else (len(choice.get('options', [])) + 9) // 10)
+            choice['choice_page'] = (
+                int(choice.get('choice_page', 0)) + 1) % page_count
             return 0.0, True
         return -0.1, False
 
@@ -601,9 +622,9 @@ class ChoiceHandlersMixin:
 
     def _handle_loyalty_ability(self, param, action_type, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player() # Needs priority to activate PW ability
-        bf_idx = param # Param IS the battlefield index from action mapping
         context = kwargs.get('context',{})
+        player = self._get_policy_player(context)
+        bf_idx = context.get('battlefield_idx', param)
 
         if bf_idx is None or not isinstance(bf_idx, int):
             logging.error(f"Loyalty ability handler called without valid param (battlefield_idx): {bf_idx}.")
@@ -1143,7 +1164,9 @@ class ChoiceHandlersMixin:
             gs.mana_system.add_mana(player, {options[param]: int(ctx.get('amount', 1))})
             gs.phase = ctx.get('resume_phase', gs.PHASE_PRIORITY)
             gs.choice_context = None
-            gs.priority_player = gs._get_active_player()
+            # Mana abilities can be activated by the non-active player. The
+            # color sub-choice must return priority to that same player.
+            gs.priority_player = player
             gs.priority_pass_count = 0
             return 0.05, True
         if (getattr(gs, 'choice_context', None)
@@ -1460,7 +1483,7 @@ class ChoiceHandlersMixin:
              found_stack_item = False
              source_id = ctx.get("source_id")
              copy_instance_id = ctx.get("copy_instance_id")
-             if source_id:
+             if source_id is not None:
                  for i in range(len(gs.stack) - 1, -1, -1):
                      item = gs.stack[i]
                      item_matches = (isinstance(item, tuple) and item[1] == source_id)
@@ -1500,7 +1523,7 @@ class ChoiceHandlersMixin:
 
     def _handle_search_library(self, param, context=None, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player() # Assumes active player searches
+        player = self._get_policy_player(context)
         criteria = self._get_search_criteria_from_param(param)
         if not criteria: return -0.1, False # Invalid search param
 
@@ -1540,7 +1563,7 @@ class ChoiceHandlersMixin:
 
     def _handle_select_spree_mode(self, param, context, **kwargs): # Param is None
         gs = self.game_state
-        player = gs._get_active_player() # Assume player choosing mode has priority
+        player = self._get_policy_player(context)
         hand_idx = context.get('hand_idx')
         mode_idx = context.get('mode_idx')
 

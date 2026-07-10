@@ -163,7 +163,8 @@ class ArchetypeAnalysisMixin:
             
             # Calculate turns to win through combat
             if effective_power > 0:
-                turns_to_win = np.ceil(opp["life"] / effective_power)
+                turns_to_win = max(1.0, float(np.ceil(
+                    max(0, opp["life"]) / effective_power)))
                 
                 # Combat damage is viable if we can win in a reasonable timeframe
                 win_conditions["combat_damage"]["viable"] = turns_to_win < 10
@@ -197,7 +198,8 @@ class ArchetypeAnalysisMixin:
             # If we have enough damage to kill opponent, or close
             if total_direct_damage >= opp["life"] * 0.7:
                 win_conditions["direct_damage"]["viable"] = True
-                turns_to_win = np.ceil(opp["life"] / total_direct_damage) * 2  # Conservative estimate
+                turns_to_win = max(1.0, float(np.ceil(
+                    max(0, opp["life"]) / total_direct_damage) * 2))  # Conservative estimate
                 win_conditions["direct_damage"]["turns_to_win"] = turns_to_win
                 win_conditions["direct_damage"]["score"] = min(1.0, 10 / turns_to_win)
                 win_conditions["direct_damage"]["key_cards"] = [card_id for card_id, _ in direct_damage_sources]
@@ -225,7 +227,8 @@ class ArchetypeAnalysisMixin:
             pieces_needed = combo_pieces.get("needed", 3)
             pieces_have = combo_pieces.get("have", 0)
             win_conditions["combo"]["turns_to_win"] = max(1, pieces_needed - pieces_have) * 2
-            win_conditions["combo"]["score"] = pieces_have / pieces_needed
+            win_conditions["combo"]["score"] = min(
+                1.0, pieces_have / max(1, pieces_needed))
             win_conditions["combo"]["key_cards"] = combo_pieces.get("cards", [])
             win_conditions["combo"]["description"] = f"Win with {combo_pieces.get('combo', 'unknown')} combo"
         
@@ -644,10 +647,19 @@ class ArchetypeAnalysisMixin:
             scores["ramp"] += 0.3
             scores["aggro"] -= 0.3
         
-        # Normalize scores to probabilities
-        total = sum(scores.values())
         archetypes = ["aggro", "control", "midrange", "combo", "tempo", "ramp"]
-        probs = np.array([scores[arch] / total for arch in archetypes], dtype=np.float32)
+        # Penalties above are allowed to push a raw score below zero, but a
+        # probability vector cannot contain negative entries (which also made
+        # other entries exceed one after division by the signed total).
+        score_vector = np.array(
+            [max(0.0, float(scores[arch])) for arch in archetypes],
+            dtype=np.float64)
+        total = float(score_vector.sum())
+        if total <= 0.0:
+            score_vector = np.array(
+                [0.20, 0.20, 0.25, 0.15, 0.10, 0.10], dtype=np.float64)
+            total = 1.0
+        probs = (score_vector / total).astype(np.float32)
         
         # Store opponent archetype for reference
         self.opponent_archetype = archetypes[np.argmax(probs)]

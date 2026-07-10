@@ -15,7 +15,7 @@ class CastingHandlersMixin:
 
     def _handle_pay_offspring_cost(self, param, context=None, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player()
+        player = self._get_policy_player(context)
         pending_context = getattr(gs, 'pending_spell_context', None)
 
         if not pending_context or 'card_id' not in pending_context:
@@ -45,7 +45,7 @@ class CastingHandlersMixin:
 
     def _handle_cast_for_impending(self, param, context=None, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player()
+        player = self._get_policy_player(context)
         if context is None: context = {}
         if kwargs.get('context'): context.update(kwargs['context'])
 
@@ -84,7 +84,7 @@ class CastingHandlersMixin:
 
     def _handle_play_land(self, param, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player()
+        player = self._get_policy_player(kwargs.get('context'))
         hand_idx = param
         context = kwargs.get('context', {})
 
@@ -103,7 +103,7 @@ class CastingHandlersMixin:
     def _handle_play_from_graveyard(self, param, context=None, **kwargs):
         """Use Wrenn's emblem to play a land or cast a permanent spell."""
         gs = self.game_state
-        player = gs._get_active_player()
+        player = self._get_policy_player(context)
         if not any(
                 emblem.get("kind") == "graveyard_permanents"
                 for emblem in player.get("emblems", [])):
@@ -134,7 +134,7 @@ class CastingHandlersMixin:
 
     def _handle_play_spell(self, param, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player()
+        player = self._get_policy_player(kwargs.get('context'))
         context = kwargs.get('context', {})
         hand_idx = param
 
@@ -181,7 +181,7 @@ class CastingHandlersMixin:
 
     def _handle_cast_from_exile(self, param, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player()
+        player = self._get_policy_player(kwargs.get('context'))
         context = dict(kwargs.get('context', {}) or {})
         castable_options = gs.get_exile_cast_options(player)
 
@@ -216,13 +216,13 @@ class CastingHandlersMixin:
     def _handle_plot_card(self, param, context=None, **kwargs):
         """Pay a card's Plot cost and exile it as a special action."""
         gs = self.game_state
-        player = gs._get_active_player()
+        player = self._get_policy_player(context)
         success = gs.plot_card(player, param)
         return (0.1, True) if success else (-0.1, False)
 
     def _handle_tap_land_for_mana(self, param, **kwargs):
          gs = self.game_state
-         player = gs._get_active_player()
+         player = self._get_policy_player(kwargs.get('context'))
          land_idx = param
 
          if land_idx >= len(player.get("battlefield", [])):
@@ -245,7 +245,7 @@ class CastingHandlersMixin:
 
     def _handle_tap_land_for_effect(self, param, **kwargs):
          gs = self.game_state
-         player = gs._get_active_player() # Context might specify controller? Assume active for now.
+         player = self._get_policy_player(kwargs.get('context'))
          land_idx = param
          # Assume ability index 0 for non-mana tap ability from context
          context = kwargs.get('context', {})
@@ -327,7 +327,7 @@ class CastingHandlersMixin:
              return -0.05, False
 
         kicker_cost_str = self._get_kicker_cost_str(card) # Use helper
-        player = self.game_state._get_active_player() # Get player from GS
+        player = self._get_policy_player(context)
 
         # If trying to pay, check affordability now
         if param is True:
@@ -389,7 +389,7 @@ class CastingHandlersMixin:
              logging.warning(f"PAY_ADDITIONAL_COST called, but no additional cost found on {card.name}")
              return -0.05, False # Action inappropriate if no cost
 
-        player = self.game_state._get_active_player()
+        player = self._get_policy_player(context)
 
         # If trying to pay, check if the non-mana part can be met (mana checked later)
         if param is True:
@@ -520,7 +520,7 @@ class CastingHandlersMixin:
              return -0.05, False
 
         escalate_cost_str = self._get_escalate_cost_str(card) # Use helper
-        player = self.game_state._get_active_player()
+        player = self._get_policy_player(context)
 
         # Check affordability for *each* extra mode
         if not escalate_cost_str:
@@ -547,7 +547,7 @@ class CastingHandlersMixin:
         return 0.01, True
 
     def _handle_copy_spell(self, param, context, **kwargs):
-        gs = self.game_state; player = gs._get_active_player()
+        gs = self.game_state; player = self._get_policy_player(context)
         target_identifier = context.get('target_stack_identifier', context.get('target_spell_idx'))
 
         if target_identifier is None:
@@ -585,7 +585,7 @@ class CastingHandlersMixin:
 
     def _handle_counter_spell(self, param, context, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player() # Player casting counter
+        player = self._get_policy_player(context)
         hand_idx = context.get('hand_idx')
         target_stack_idx = context.get('target_spell_idx') # Index on stack
 
@@ -608,7 +608,7 @@ class CastingHandlersMixin:
 
     def _handle_prevent_damage(self, param, context, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player()
+        player = self._get_policy_player(context)
         hand_idx = context.get('hand_idx')
 
         if hand_idx is None: logging.warning(f"Prevent Damage context missing 'hand_idx'"); return -0.15, False
@@ -628,7 +628,7 @@ class CastingHandlersMixin:
 
     def _handle_redirect_damage(self, param, context, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player()
+        player = self._get_policy_player(context)
         hand_idx = context.get('hand_idx')
 
         if hand_idx is None: logging.warning(f"Redirect Damage context missing 'hand_idx'"); return -0.15, False
@@ -647,7 +647,7 @@ class CastingHandlersMixin:
 
     def _handle_stifle_trigger(self, param, context, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player()
+        player = self._get_policy_player(context)
         hand_idx = context.get('hand_idx')
         target_stack_idx = context.get('target_trigger_idx') # Use specific key
 
@@ -669,7 +669,7 @@ class CastingHandlersMixin:
 
     def _handle_counter_ability(self, param, context, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player()
+        player = self._get_policy_player(context)
         hand_idx = context.get('hand_idx')
         target_stack_idx = context.get('target_ability_idx') # Use specific key
 
@@ -691,7 +691,7 @@ class CastingHandlersMixin:
 
     def _handle_conspire(self, param, context, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player() # Player conspiring
+        player = self._get_policy_player(context)
         spell_stack_idx = context.get('spell_stack_idx')
         c1_identifier = context.get('creature1_identifier')
         c2_identifier = context.get('creature2_identifier')
@@ -849,6 +849,10 @@ class CastingHandlersMixin:
         # Set up context for alternative casting
         context["source_zone"] = source_zone
         context["use_alt_cost"] = action_type.replace('CAST_WITH_', '').replace('CAST_FOR_', '').replace('CAST_', '').replace('_', ' ').lower()
+        # Jump-start and delve use the printed mana cost; they add permission
+        # and non-mana payment/cost reduction rather than replacing that cost.
+        if action_type in {"CAST_WITH_JUMP_START", "CAST_FOR_DELVE"}:
+            context.pop("use_alt_cost", None)
         
         # Handle special card-half logic
         if cast_config.get("cast_right_half"):
@@ -865,7 +869,7 @@ class CastingHandlersMixin:
                 logging.error(f"{action_type}: Invalid discard_idx {discard_idx}")
                 return -0.1, False
             
-            context["additional_cost_to_pay"] = {"type": "discard", "hand_idx": discard_idx}
+            context["discard_additional"] = [discard_idx]
         
         if cast_config.get("requires_sacrifice"):
             if "sacrifice_idx" not in context:
@@ -883,7 +887,8 @@ class CastingHandlersMixin:
                 logging.error(f"{action_type} sacrifice target must be a creature")
                 return -0.1, False
             
-            context["additional_cost_to_pay"] = {"type": "sacrifice", "target_id": sac_id}
+            context["sacrificed_creature"] = sac_id
+            context["sacrifice_additional"] = [sac_idx]
             context["sacrificed_cmc"] = getattr(sac_card, 'cmc', 0)
         
         # Handle escape exile requirements
@@ -906,7 +911,7 @@ class CastingHandlersMixin:
                 logging.warning(f"{action_type}: Not enough valid graveyard cards to exile ({len(actual_gy_indices)}/{required_exile_count})")
                 return -0.1, False
             
-            context["additional_cost_to_pay"] = {"type": "escape_exile", "gy_indices": actual_gy_indices[:required_exile_count]}
+            context["escape_cards"] = actual_gy_indices[:required_exile_count]
         
         # Handle delve cost reduction
         if action_type == "CAST_FOR_DELVE":
@@ -915,7 +920,7 @@ class CastingHandlersMixin:
                 return -0.1, False
             
             actual_gy_indices = [idx for idx in context["gy_indices"] if idx < len(player.get("graveyard", []))]
-            context["additional_cost_to_pay"] = {"type": "delve", "gy_indices": actual_gy_indices}
+            context["delve_cards"] = actual_gy_indices
             context["delve_count"] = len(actual_gy_indices)
         
         # Cast the spell using game state
@@ -943,10 +948,10 @@ class CastingHandlersMixin:
         """Handler for casting split cards. (Updated Context)"""
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
-        hand_idx = param # Param is hand index
         context = kwargs.get('context', {}) # Use context passed in
+        hand_idx = context.get('hand_idx', param)
 
-        if hand_idx < len(player["hand"]):
+        if isinstance(hand_idx, int) and 0 <= hand_idx < len(player["hand"]):
             card_id = player["hand"][hand_idx]
             card = gs._safe_get_card(card_id)
             if not card: return -0.2, False

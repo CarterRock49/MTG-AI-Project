@@ -13,13 +13,15 @@ neural network / SB3 integration.
 What it verifies:
   1. main.py imports and its custom extractor/policy construct against the
      real observation space.
-  2. Every feature-extractor parameter is registered with PyTorch and covered
+  2. Periodic and hyperparameter evaluations are mask-aware and isolated from
+     training environments, and callback CLI frequencies have timestep semantics.
+  3. Every feature-extractor parameter is registered with PyTorch and covered
      by the optimizer (regression for the plain-dict extractors bug and the
      lazily-created feature_merger bug — both used to leave weights untrained).
-  3. The phase embedding is large enough for every engine phase constant
+  4. The phase embedding is large enough for every engine phase constant
      (regression for the Embedding(10, ...) IndexError crash).
-  4. A short MaskablePPO training run completes.
-  5. Save -> load -> predict round-trips (used to fail because feature_merger
+  5. A short MaskablePPO training run completes.
+  6. Save -> load -> predict round-trips (used to fail because feature_merger
      did not exist on a freshly constructed policy).
 """
 
@@ -73,8 +75,418 @@ def stage(name):
 def do_imports():
     import torch  # noqa: F401
     from sb3_contrib.ppo_mask import MaskablePPO  # noqa: F401
+    stdout_before = sys.stdout
+    stderr_before = sys.stderr
     import main  # noqa: F401  (must not execute training on import)
+    assert sys.stdout is stdout_before and sys.stderr is stderr_before, (
+        "importing main.py replaced the host process's standard streams")
     return True
+
+
+@stage("mask-aware callback and evaluation enforce action masks")
+def check_mask_aware_evaluation():
+    from types import SimpleNamespace
+
+    import gymnasium as gym
+    from gymnasium import spaces
+    from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback
+    from sb3_contrib.common.maskable.evaluation import (
+        evaluate_policy as maskable_evaluate_policy,
+    )
+    from sb3_contrib.common.wrappers import ActionMasker
+    import main as m
+
+    # Periodic training evaluation goes through create_callbacks(), while
+    # Optuna calls main.evaluate_policy directly. Guard both call sites.
+    assert m.evaluate_policy is maskable_evaluate_policy
+
+    class OnlyActionZeroEnv(gym.Env):
+        """One-step env that fails immediately if evaluation ignores its mask."""
+
+        metadata = {"render_modes": []}
+
+        def __init__(self):
+            self.action_space = spaces.Discrete(2)
+            self.observation_space = spaces.Box(
+                low=0.0, high=1.0, shape=(1,), dtype=np.float32)
+
+        def reset(self, *, seed=None, options=None):
+            super().reset(seed=seed)
+            return np.zeros(1, dtype=np.float32), {}
+
+        def step(self, action):
+            action = int(action)
+            assert action == 0, f"evaluation executed masked action {action}"
+            return np.zeros(1, dtype=np.float32), 1.0, True, False, {}
+
+    eval_env = ActionMasker(
+        OnlyActionZeroEnv(),
+        lambda _env: np.array([True, False], dtype=bool),
+    )
+
+    class MaskSensitiveModel:
+        """Would choose illegal action 1 unless evaluation supplies masks."""
+
+        def __init__(self):
+            self.seen_masks = []
+
+        def predict(self, observations, state=None, episode_start=None,
+                    deterministic=False, action_masks=None):
+            batch_size = len(observations)
+            if action_masks is None:
+                return np.ones(batch_size, dtype=np.int64), state
+            masks = np.asarray(action_masks, dtype=bool)
+            self.seen_masks.append(masks.copy())
+            return np.argmax(masks, axis=1), state
+
+    model = MaskSensitiveModel()
+    mean_reward, std_reward = m.evaluate_policy(
+        model, eval_env, n_eval_episodes=3, deterministic=True, warn=False)
+    assert mean_reward == 1.0 and std_reward == 0.0
+    assert model.seen_masks
+    assert all(np.array_equal(mask, [[True, False]])
+               for mask in model.seen_masks)
+
+    args = SimpleNamespace(
+        eval_freq=10,
+        checkpoint_freq=20,
+        record_network=True,
+        record_freq=30,
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        old_model_dir, old_log_dir = m.MODEL_DIR, m.LOG_DIR
+        m.MODEL_DIR = os.path.join(tmp, "models")
+        m.LOG_DIR = os.path.join(tmp, "logs")
+        try:
+            callbacks = m.create_callbacks(
+                eval_env, "mask_smoke", args, num_train_envs=2)
+            assert isinstance(callbacks[0], MaskableEvalCallback)
+            assert callbacks[0].use_masking is True
+            assert callbacks[0].deterministic is True
+            assert callbacks[0].eval_freq == 5
+            assert callbacks[1].save_freq == 10
+            assert callbacks[0].best_model_save_path == os.path.join(
+                m.MODEL_DIR, "mask_smoke", "best_model")
+            assert callbacks[0].log_path == os.path.join(
+                m.LOG_DIR, "mask_smoke", "evaluation", "evaluations")
+            assert callbacks[1].save_path == os.path.join(
+                m.MODEL_DIR, "mask_smoke", "checkpoints")
+            network_callbacks = [
+                callback for callback in callbacks
+                if isinstance(callback, m.NetworkRecordingCallback)]
+            assert len(network_callbacks) == 1
+            assert network_callbacks[0].record_freq == 15
+
+            args.record_network = False
+            callbacks = m.create_callbacks(
+                eval_env, "mask_smoke_2", args, num_train_envs=2)
+            assert not any(isinstance(callback, m.NetworkRecordingCallback)
+                           for callback in callbacks)
+        finally:
+            m.MODEL_DIR, m.LOG_DIR = old_model_dir, old_log_dir
+    eval_env.close()
+
+
+@stage("hyperparameter evaluation uses an isolated environment")
+def check_hyperparameter_eval_isolation():
+    import main as m
+
+    class FakeTrial:
+        def suggest_float(self, _name, low, _high, **_kwargs):
+            return low
+
+        def suggest_categorical(self, _name, choices):
+            return choices[0]
+
+        def suggest_int(self, _name, low, _high):
+            return low
+
+        def report(self, _reward, _step):
+            pass
+
+        def should_prune(self):
+            return False
+
+    class FakeVecEnv:
+        def __init__(self, number):
+            self.number = number
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    made_envs = []
+    evaluated_envs = []
+    trained_envs = []
+
+    def fake_make_vec_env(_factory, n_envs):
+        assert n_envs == 2
+        env = FakeVecEnv(len(made_envs))
+        made_envs.append(env)
+        return env
+
+    class FakeMaskablePPO:
+        def __init__(self, policy, env, **_kwargs):
+            assert policy is m.FixedDimensionMaskableActorCriticPolicy
+            self.env = env
+
+        def learn(self, **_kwargs):
+            trained_envs.append(self.env)
+
+    def fake_evaluate_policy(_model, env, **_kwargs):
+        evaluated_envs.append(env)
+        return 7.0, 0.0
+
+    patched = {
+        "load_decks_and_card_db": lambda _path: ([], {}),
+        "make_vec_env": fake_make_vec_env,
+        "MaskablePPO": FakeMaskablePPO,
+        "evaluate_policy": fake_evaluate_policy,
+    }
+    originals = {name: getattr(m, name) for name in patched}
+    try:
+        for name, replacement in patched.items():
+            setattr(m, name, replacement)
+        score = m.objective(FakeTrial())
+
+        class FailingMaskablePPO:
+            def __init__(self, *_args, **_kwargs):
+                raise RuntimeError("synthetic constructor failure")
+
+        m.MaskablePPO = FailingMaskablePPO
+        failure_score = m.objective(FakeTrial())
+    finally:
+        for name, original in originals.items():
+            setattr(m, name, original)
+
+    assert score == 7.0
+    assert failure_score == float("-inf")
+    assert len(made_envs) == 4
+    assert trained_envs and all(env is made_envs[0] for env in trained_envs)
+    assert evaluated_envs and all(env is made_envs[1]
+                                  for env in evaluated_envs)
+    assert all(env.closed for env in made_envs)
+
+
+@stage("CPU fallback and complete Optuna configuration propagation")
+def check_runtime_configuration():
+    from types import SimpleNamespace
+
+    import gymnasium as gym
+    import torch
+    import main as m
+
+    original_cpu_count = m.os.cpu_count
+    try:
+        for reported in (None, 0, 1):
+            m.os.cpu_count = lambda value=reported: value
+            assert m.safe_cpu_count() == 1
+    finally:
+        m.os.cpu_count = original_cpu_count
+
+    args = SimpleNamespace(
+        learning_rate=3e-4,
+        n_steps=2048,
+        batch_size=256,
+    )
+    optimized = {
+        "learning_rate": 8e-5,
+        "n_steps": 4096,
+        "batch_size": 128,
+        "gamma_complement": 0.02,
+        "gae_lambda": 0.987,
+        "clip_range": 0.17,
+        "ent_coef": 0.004,
+        "policy_neurons": "large",
+        "n_epochs": 9,
+        "max_grad_norm": 0.77,
+        "activation_fn": "tanh",
+    }
+    config = m.build_training_config(args, optimized)
+    assert config == {
+        "learning_rate": 8e-5,
+        "n_steps": 4096,
+        "batch_size": 128,
+        "gamma": 0.98,
+        "gae_lambda": 0.987,
+        "clip_range": 0.17,
+        "ent_coef": 0.004,
+        "net_arch": m.NETWORK_ARCHITECTURES["large"],
+        "n_epochs": 9,
+        "max_grad_norm": 0.77,
+        "activation_fn": torch.nn.Tanh,
+    }
+
+    try:
+        m.build_training_config(args, {"not_a_real_parameter": 1})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unknown optimized parameters were ignored")
+
+    captured = {}
+
+    class CapturingMaskablePPO:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    original_ppo = m.MaskablePPO
+    try:
+        m.MaskablePPO = CapturingMaskablePPO
+        m.create_training_model("training-env", config)
+    finally:
+        m.MaskablePPO = original_ppo
+
+    assert captured["env"] == "training-env"
+    assert captured["learning_rate"].initial_lr == optimized["learning_rate"]
+    for key in (
+        "n_steps", "batch_size", "gamma", "gae_lambda", "clip_range",
+        "ent_coef", "n_epochs", "max_grad_norm",
+    ):
+        assert captured[key] == config[key]
+    assert captured["policy_kwargs"]["net_arch"] == config["net_arch"]
+    assert captured["policy_kwargs"]["activation_fn"] is torch.nn.Tanh
+
+    environment_calls = []
+
+    class FakeRawEnv(gym.Env):
+        def action_mask(self, _env=None):
+            return np.array([True], dtype=bool)
+
+    def fake_alpha_env(decks, card_db, **kwargs):
+        environment_calls.append((decks, card_db, kwargs))
+        return FakeRawEnv()
+
+    original_alpha_env = m.AlphaZeroMTGEnv
+    try:
+        m.AlphaZeroMTGEnv = fake_alpha_env
+        with tempfile.TemporaryDirectory() as tmp:
+            train_root = os.path.join(tmp, "train")
+            eval_root = os.path.join(tmp, "eval")
+            train_env = m.make_masked_mtg_env([], {}, train_root)
+            eval_env = m.make_masked_mtg_env(
+                [], {}, eval_root, agent_is_p1=False,
+                alternate_agent_seat=True)
+            train_env.close()
+            eval_env.close()
+    finally:
+        m.AlphaZeroMTGEnv = original_alpha_env
+
+    assert environment_calls[0][2]["deck_stats_path"] != (
+        environment_calls[1][2]["deck_stats_path"])
+    assert environment_calls[0][2]["card_memory_path"] != (
+        environment_calls[1][2]["card_memory_path"])
+    assert environment_calls[0][2]["agent_is_p1"] is True
+    assert environment_calls[0][2]["alternate_agent_seat"] is False
+    assert environment_calls[1][2]["agent_is_p1"] is False
+    assert environment_calls[1][2]["alternate_agent_seat"] is True
+
+
+@stage("training failures are nonzero and never saved as final")
+def check_main_failure_semantics():
+    import main as m
+
+    saved_paths = []
+    made_vec_envs = []
+
+    class FakeVecEnv:
+        def __init__(self, _factories):
+            self.closed = False
+            made_vec_envs.append(self)
+
+        def env_method(self, *_args, **_kwargs):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    class FakeModel:
+        def __init__(self, fail):
+            self.fail = fail
+
+        def learn(self, **_kwargs):
+            if self.fail:
+                raise RuntimeError("synthetic training failure")
+
+        def save(self, path):
+            saved_paths.append(path)
+
+    class FailingLoader:
+        @classmethod
+        def load(cls, *_args, **_kwargs):
+            raise RuntimeError("synthetic load failure")
+
+    original_argv = sys.argv
+    patched_names = (
+        "MODEL_DIR", "LOG_DIR", "TENSORBOARD_DIR",
+        "load_decks_and_card_db", "DummyVecEnv", "VecMonitor",
+        "create_callbacks", "create_training_model", "MaskablePPO",
+        "record_network_architecture", "set_random_seed", "safe_cpu_count",
+    )
+    originals = {name: getattr(m, name) for name in patched_names}
+    original_set_num_threads = m.torch.set_num_threads
+    original_cuda_available = m.torch.cuda.is_available
+    original_strftime = m.time.strftime
+
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            m.MODEL_DIR = os.path.join(tmp, "models")
+            m.LOG_DIR = os.path.join(tmp, "logs")
+            m.TENSORBOARD_DIR = os.path.join(tmp, "tensorboard")
+            m.load_decks_and_card_db = lambda _path: ([object()], {})
+            m.DummyVecEnv = FakeVecEnv
+            m.VecMonitor = lambda env: env
+            m.create_callbacks = lambda *_args, **_kwargs: []
+            m.record_network_architecture = lambda *_args, **_kwargs: None
+            m.set_random_seed = lambda _seed: None
+            m.safe_cpu_count = lambda: 1
+            m.torch.set_num_threads = lambda _count: None
+            m.torch.cuda.is_available = lambda: False
+            m.time.strftime = lambda _format: "20000101_000000"
+
+            # A failed learn() must return nonzero and save only a clearly
+            # incomplete artifact.
+            m.create_training_model = lambda *_args: FakeModel(fail=True)
+            sys.argv = ["main.py", "--timesteps", "1", "--n-envs", "1"]
+            assert m.main() == 1
+            assert saved_paths and saved_paths[-1].endswith("failed_model")
+            assert not any("final_model" in path for path in saved_paths)
+            assert made_vec_envs and all(env.closed for env in made_vec_envs)
+
+            # A successful learn() is the only path allowed to publish final_model.
+            saved_paths.clear()
+            made_vec_envs.clear()
+            m.create_training_model = lambda *_args: FakeModel(fail=False)
+            assert m.main() == 0
+            assert saved_paths and saved_paths[-1].endswith("final_model")
+            assert not any("failed_model" in path for path in saved_paths)
+            assert all(env.closed for env in made_vec_envs)
+
+            # A checkpoint load failure must also be observable to the shell.
+            saved_paths.clear()
+            made_vec_envs.clear()
+            m.MaskablePPO = FailingLoader
+            sys.argv = [
+                "main.py", "--timesteps", "1", "--n-envs", "1",
+                "--resume", "missing.zip",
+            ]
+            assert m.main() == 1
+            assert not saved_paths
+            assert all(env.closed for env in made_vec_envs)
+
+            # Deck-loading failures happen before environments exist but still
+            # must return a nonzero process status.
+            m.load_decks_and_card_db = lambda _path: (_ for _ in ()).throw(
+                RuntimeError("synthetic deck-load failure"))
+            sys.argv = ["main.py"]
+            assert m.main() == 1
+        finally:
+            sys.argv = original_argv
+            for name, original in originals.items():
+                setattr(m, name, original)
+            m.torch.set_num_threads = original_set_num_threads
+            m.torch.cuda.is_available = original_cuda_available
+            m.time.strftime = original_strftime
 
 
 @stage("build masked vec env from fixture decks")
@@ -169,6 +581,10 @@ def main():
     reset_test_artifacts()
     if do_imports() is None:
         return finish()
+    check_mask_aware_evaluation()
+    check_hyperparameter_eval_isolation()
+    check_runtime_configuration()
+    check_main_failure_semantics()
 
     # Reuse the fixture decks from the engine smoke test.
     from smoke_test import build_fixture_decks  # tests/ is on sys.path via cwd

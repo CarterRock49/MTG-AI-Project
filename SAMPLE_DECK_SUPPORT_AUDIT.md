@@ -303,11 +303,14 @@ branches, but these cards no longer rely on wholly unproved routing.
    `harvest_fixtures.py` now performs a strict seeded rotation across all eight
    decks, rejects incomplete/error games, and writes a success-only run manifest.
    The seed-20260710 baseline completed 8/8 games with zero fidelity counters
-   and no support-manifest entries.
+   and no support-manifest entries. The parallel checkpoint-aware Harvest
+   protocol is also complete; its final two-worker plumbing run completed 2/2
+   games at 0.296 games/second with no fidelity or support-manifest issue.
 2. ✅ Begin Tier 4 property tests and invariant fuzzing. The deterministic
-   harness is green at 3 seeds x 100 mask-valid actions and guards card
-   conservation, action execution, SBA/layer fixed points, finite observations,
-   and phase-boundary mana clearing.
+   harness is green through the strict 32-seed x 10,000-action long profile
+   (320,000/320,000). It guards card conservation, mask/handler execution,
+   observation bounds and non-degradation, mask purity, SBA/layer fixed points,
+   finite rewards, exact replay contexts, and phase-boundary mana clearing.
 3. **Next:** train and benchmark a checkpoint against scripted play before
    promoting harvest runs to policy-vs-policy. Treat the random-valid fixture
    results as plumbing/support evidence only, never as card-strength statistics.

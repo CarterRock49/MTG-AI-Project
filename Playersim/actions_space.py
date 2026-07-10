@@ -25,7 +25,7 @@ class ActionSpaceMixin:
         """Checks if a card has a keyword using the central checker."""
         gs = self.game_state
         card_id = getattr(card, 'card_id', None)
-        if not card_id: return False
+        if card_id is None: return False
 
         if hasattr(gs, 'ability_handler') and gs.ability_handler:
             # Use AbilityHandler's check method if available
@@ -65,6 +65,7 @@ class ActionSpaceMixin:
             Handles all phases, sub-steps, and complex casting sequences.
             """
             gs = self.game_state
+            self.last_mask_error = None
             try:
                 valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
                 action_reasons = {} # Reset reasons for this generation
@@ -72,6 +73,11 @@ class ActionSpaceMixin:
                 def set_valid_action(index, reason="", context=None):
                     # Ensures CONCEDE (12) isn't added here, handled at the end.
                     if 0 <= index < self.ACTION_SPACE_SIZE and index != 12:
+                        action_type, _ = self.get_action_info(index)
+                        if action_type not in self.action_handlers:
+                            raise RuntimeError(
+                                f"Mask attempted to expose unhandled action "
+                                f"{index} ({action_type}): {reason}")
                         valid_actions[index] = True
                         action_reasons[index] = {"reason": reason, "context": context or {}}
                     elif index != 12:
@@ -177,21 +183,10 @@ class ActionSpaceMixin:
                 ]
 
                 if priority_player_obj is None and gs.phase in interactive_phases:
-                    active_p = gs._get_active_player()
-                    logging.warning(f"STATE RECOVERY: Priority was None in {gs._PHASE_NAMES.get(gs.phase)}. Auto-assigning to {active_p.get('name', 'AP')} inside mask generation.")
-                    
-                    # Direct GameState Mutation to fix the error immediately
-                    gs.priority_player = active_p
-                    gs.priority_pass_count = 0
-                    
-                    # Update local variable so the rest of this function runs correctly
-                    priority_player_obj = active_p
-                    
-                    # If stack is empty and we're in a phase that should auto-progress, do it
-                    if not gs.stack and gs.phase == gs.PHASE_UPKEEP:
-                        logging.info("Auto-progressing from UPKEEP to DRAW phase after priority fix")
-                        gs._empty_mana_pools()
-                        gs.phase = gs.PHASE_DRAW
+                    self.last_mask_error = (
+                        f"priority is missing in interactive phase "
+                        f"{gs._PHASE_NAMES.get(gs.phase, gs.phase)}")
+                    logging.error("Invalid state during mask generation: %s", self.last_mask_error)
 
                 # --- Check Priority Match ---
                 has_priority = (priority_player_obj == perspective_player)
@@ -201,9 +196,6 @@ class ActionSpaceMixin:
                     # Allow NO_OP when waiting.
                     set_valid_action(224, "NO_OP (Waiting for priority)")
                     
-                    # Allow instant-speed MANA abilities (allowed without priority - Rule 605.3a)
-                    self._add_mana_ability_actions(perspective_player, valid_actions, set_valid_action)
-
                 else:
                     # --- Perspective Player HAS Priority (or was just auto-assigned it) ---
                     set_valid_action(11, "PASS_PRIORITY") # Always allowed
@@ -250,12 +242,9 @@ class ActionSpaceMixin:
                             self.combat_handler._add_ninjutsu_actions(
                                 perspective_player, valid_actions, set_valid_action)
 
-                        # Stack Interactions
-                        self._add_x_cost_actions(perspective_player, valid_actions, set_valid_action)
-                        
                         # Pending Spell Contexts (Complex Casting)
                         pending_context = getattr(gs, 'pending_spell_context', None)
-                        if pending_context and pending_context.get('card_id') and \
+                        if pending_context and 'card_id' in pending_context and \
                         pending_context.get('controller') == perspective_player:
                             
                             card_id = pending_context['card_id']
@@ -297,6 +286,7 @@ class ActionSpaceMixin:
 
             except Exception as e:
                 # Critical Fallback
+                self.last_mask_error = f"{type(e).__name__}: {e}"
                 logging.critical(f"CRITICAL error generating valid actions: {str(e)}", exc_info=True)
                 fallback_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
                 fallback_actions[11] = True # Pass Priority
@@ -390,18 +380,21 @@ class ActionSpaceMixin:
         gs = self.game_state
         # --- Play Land ---
         if not player.get("land_played", False): # Use .get for safety
-            for i in range(min(len(player["hand"]), 7)): # Hand index 0-6 -> Land Actions 13-19
+            for i in range(min(len(player["hand"]), 10)):
                 try:
                     card_id = player["hand"][i]
                     card = gs._safe_get_card(card_id)
                     if card and 'land' in getattr(card, 'type_line', '').lower():
                         # Context needed: hand_idx for the land card itself
                         play_land_context = {'hand_idx': i}
-                        set_valid_action(13 + i, f"PLAY_LAND {card.name}", context=play_land_context)
+                        action_index = 13 + i if i < 7 else 393 + (i - 7)
+                        set_valid_action(action_index, f"PLAY_LAND {card.name}", context=play_land_context)
 
                         # MDFC Land Back - Hand index 0-7 -> Actions 180-187
                         back_face_data = getattr(card, 'back_face', None)
-                        if hasattr(card, 'is_mdfc') and card.is_mdfc() and back_face_data and 'land' in back_face_data.get('type_line','').lower():
+                        if (i < 8 and hasattr(card, 'is_mdfc') and card.is_mdfc()
+                                and back_face_data
+                                and 'land' in back_face_data.get('type_line','').lower()):
                             mdfc_land_context = {'hand_idx': i, 'play_back_face': True}
                             set_valid_action(180 + i, f"PLAY_MDFC_LAND_BACK {back_face_data.get('name', 'Unknown')}", context=mdfc_land_context)
                 except IndexError:
@@ -409,7 +402,7 @@ class ActionSpaceMixin:
                     break # Stop if index is out of bounds
 
         # --- Play Sorcery-speed Spells ---
-        for i in range(min(len(player["hand"]), 8)): # Hand index 0-7 -> Spell Actions 20-27
+        for i in range(min(len(player["hand"]), 10)):
             try:
                 card_id = player["hand"][i]
                 card = gs._safe_get_card(card_id)
@@ -425,13 +418,8 @@ class ActionSpaceMixin:
                             # --- STANDARD PLAY_SPELL ACTION ---
                             # Provide context: hand_idx
                             play_context = {'hand_idx': i}
-                            set_valid_action(20 + i, f"PLAY_SPELL {card.name}", context=play_context)
-                            # Offer Offspring PAYMENT option *after* PLAY_SPELL is deemed valid
-                            if getattr(card, 'is_offspring', False) and getattr(card, 'offspring_cost', None):
-                                 if self._can_afford_cost_string(player, card.offspring_cost):
-                                      # No extra context needed, applies to pending spell
-                                      set_valid_action(295, f"Optional: PAY_OFFSPRING_COST for {card.name}")
-
+                            action_index = 20 + i if i < 8 else 396 + (i - 8)
+                            set_valid_action(action_index, f"PLAY_SPELL {card.name}", context=play_context)
                             # Offer Kicker / Additional Cost Payment (If applicable) - Should check affordability
                             # ... Add checks for PAY_KICKER (405/406), PAY_ADDITIONAL_COST (407/408) based on card text ...
 
@@ -445,13 +433,17 @@ class ActionSpaceMixin:
                     # --- Other alternative/related actions (MDFC back, Adventure) ---
                     # Offer MDFC Spell Back (Sorcery) - Hand index 0-7 -> Actions 188-195
                     back_face_data = getattr(card, 'back_face', None)
-                    if (hasattr(card, 'is_mdfc') and card.is_mdfc()
+                    if (i < 8 and hasattr(card, 'is_mdfc') and card.is_mdfc()
                             and getattr(card, 'layout', '') != 'adventure'
                             and back_face_data):
                         back_type_line = back_face_data.get('type_line','').lower()
-                        back_types = back_face_data.get('card_types', [])
+                        back_types = [
+                            str(card_type).lower()
+                            for card_type in back_face_data.get('card_types', [])]
                         back_has_flash = self._has_flash_text(back_face_data.get('oracle_text',''))
-                        if 'land' not in back_type_line and not ('instant' in back_types or back_has_flash):
+                        if ('land' not in back_type_line
+                                and 'instant' not in back_type_line
+                                and not ('instant' in back_types or back_has_flash)):
                             if self._can_afford_card(player, back_face_data, is_back_face=True, context={}):
                                  if self._targets_available_from_data(back_face_data, player, opponent):
                                      mdfc_back_context = {
@@ -461,7 +453,7 @@ class ActionSpaceMixin:
                                      set_valid_action(188 + i, f"PLAY_MDFC_BACK {back_face_data.get('name', 'Unknown')}", context=mdfc_back_context)
 
                     # Offer Adventure (Sorcery) - Hand index 0-7 -> Actions 196-203
-                    if hasattr(card, 'has_adventure') and card.has_adventure():
+                    if i < 8 and hasattr(card, 'has_adventure') and card.has_adventure():
                         adv_data = card.get_adventure_data()
                         if adv_data and ('sorcery' in adv_data.get('type','').lower() or 'instant' in adv_data.get('type','').lower()):
                             if self._can_afford_cost_string(player, adv_data.get('cost',''), context={}):
@@ -498,8 +490,8 @@ class ActionSpaceMixin:
     def _add_instant_speed_actions(self, player, opponent, valid_actions, set_valid_action):
         """Adds actions performable at instant speed. (Updated for Offspring/Impending)"""
         gs = self.game_state
-        # --- Play Instant/Flash Spells (Modified) ---
-        for i in range(min(len(player["hand"]), 8)): # Spell Actions 20-27
+        # --- Play Instant/Flash Spells and instant-speed alternate faces ---
+        for i in range(min(len(player["hand"]), 10)):
             try:
                 card_id = player["hand"][i]
                 card = gs._safe_get_card(card_id)
@@ -507,29 +499,58 @@ class ActionSpaceMixin:
 
                 is_instant_speed = 'instant' in card.card_types or self._has_flash(card_id)
 
-                if is_instant_speed and 'land' not in card.type_line.lower():
-                     if self._can_afford_card(player, card, context={}):
-                         if self._targets_available(card, player, opponent):
-                            # --- MAIN PLAY ACTION ---
-                            play_context = {'hand_idx': i}
-                            set_valid_action(20 + i, f"PLAY_SPELL (Instant) {card.name}", context=play_context)
+                if (is_instant_speed and 'land' not in card.type_line.lower()
+                        and self._can_afford_card(player, card, context={})
+                        and self._targets_available(card, player, opponent)):
+                    play_context = {'hand_idx': i}
+                    action_index = 20 + i if i < 8 else 396 + (i - 8)
+                    set_valid_action(
+                        action_index, f"PLAY_SPELL (Instant) {card.name}",
+                        context=play_context)
 
-                            # --- OFFER ADDITIONAL/ALTERNATIVE ACTIONS ---
-                            # Offer Offspring Payment (Optional Additional)
-                            if getattr(card, 'is_offspring', False) and getattr(card, 'offspring_cost', None):
-                                 if self._can_afford_cost_string(player, card.offspring_cost):
-                                      set_valid_action(295, f"Optional: PAY_OFFSPRING_COST for {card.name}")
-                                      
-                            # Offer MDFC Back (Instant/Flash)
-                            back_face_data = getattr(card, 'back_face', None)
-                            if hasattr(card, 'is_mdfc') and card.is_mdfc() and back_face_data:
-                                # ... (existing logic for instant back face, using hand_idx i) ...
-                                pass
+                # The front of an MDFC/Adventure is commonly a sorcery-speed
+                # permanent. Its instant back/adventure half is nevertheless
+                # castable while only instant-speed actions are available.
+                if i >= 8:
+                    continue
+                back_face_data = getattr(card, 'back_face', None)
+                if (hasattr(card, 'is_mdfc') and card.is_mdfc()
+                        and getattr(card, 'layout', '') != 'adventure'
+                        and back_face_data):
+                    back_type_line = back_face_data.get('type_line', '').lower()
+                    back_types = [
+                        str(card_type).lower()
+                        for card_type in back_face_data.get('card_types', [])]
+                    back_has_flash = self._has_flash_text(
+                        back_face_data.get('oracle_text', ''))
+                    if (('instant' in back_type_line or 'instant' in back_types
+                            or back_has_flash)
+                            and self._can_afford_card(
+                                player, back_face_data, is_back_face=True,
+                                context={})
+                            and self._targets_available_from_data(
+                                back_face_data, player, opponent)):
+                        set_valid_action(
+                            188 + i,
+                            f"PLAY_MDFC_BACK {back_face_data.get('name', 'Unknown')}",
+                            context={
+                                'hand_idx': i,
+                                'cast_as_back_face': True,
+                            })
 
-                            # Offer Adventure (Instant)
-                            if hasattr(card, 'has_adventure') and card.has_adventure():
-                                # ... (existing logic for instant adventure, using hand_idx i) ...
-                                pass
+                if hasattr(card, 'has_adventure') and card.has_adventure():
+                    adventure_data = card.get_adventure_data()
+                    if (adventure_data
+                            and 'instant' in adventure_data.get('type', '').lower()
+                            and self._can_afford_cost_string(
+                                player, adventure_data.get('cost', ''), context={})
+                            and self._targets_available_from_text(
+                                adventure_data.get('effect', ''), player,
+                                opponent)):
+                        set_valid_action(
+                            196 + i,
+                            f"PLAY_ADVENTURE {adventure_data.get('name', 'Unknown')}",
+                            context={'hand_idx': i, 'play_adventure': True})
 
             except IndexError:
                  logging.warning(f"IndexError accessing hand for Instant/Flash spell at index {i}"); break
@@ -552,7 +573,7 @@ class ActionSpaceMixin:
         oracle_text = card_data.get('oracle_text', '').lower()
         if 'target' not in oracle_text: return True
         card_id = card_data.get('id') # Need ID
-        if not card_id: return True # Cannot check without ID
+        if card_id is None: return True # Cannot check without ID
 
         if hasattr(gs, 'targeting_system') and gs.targeting_system:
             try:
@@ -656,18 +677,16 @@ class ActionSpaceMixin:
                                      context={"option_index": option_index})
 
             elif choice_type == "activation_sacrifice_cost":
-                selected = set(context.get('selected', []))
-                candidates = [
-                    card_id for card_id in context.get('options', [])
-                    if card_id in player.get('battlefield', [])
-                    and card_id not in selected
-                ]
-                context['options'] = candidates
+                # Choice construction/execution owns the option list.  Mask
+                # generation is observational and must not rewrite live state
+                # (or desynchronize the parallel option_occurrences list).
+                candidates = list(context.get('options', []))
                 page_count = max(1, (len(candidates) + 9) // 10)
                 page = int(context.get('choice_page', 0)) % page_count
-                context['choice_page'] = page
                 for option_index, card_id in enumerate(
                         candidates[page * 10:(page + 1) * 10]):
+                    if card_id not in player.get('battlefield', []):
+                        continue
                     card = gs._safe_get_card(card_id)
                     set_valid_action(
                         353 + option_index,
@@ -676,27 +695,29 @@ class ActionSpaceMixin:
                 if page_count > 1:
                     set_valid_action(
                         479,
-                        f"SACRIFICE_COST_PAGE_NEXT ({page + 1}/{page_count})")
+                        f"SACRIFICE_COST_PAGE_NEXT ({page + 1}/{page_count})",
+                        context={"page_count": page_count})
 
             elif choice_type == "sacrifice_effect":
                 permanent_type = str(context.get('permanent_type', 'permanent')).rstrip('s')
-                candidates = []
-                for card_id in player.get('battlefield', []):
-                    card = gs._safe_get_card(card_id)
-                    types = {str(t).lower() for t in getattr(card, 'card_types', [])} if card else set()
-                    if permanent_type == 'permanent' or permanent_type in types:
-                        candidates.append(card_id)
-                context['options'] = candidates
+                candidates = list(context.get('options', []))
                 page_count = max(1, (len(candidates) + 9) // 10)
                 page = int(context.get('choice_page', 0)) % page_count
-                context['choice_page'] = page
                 for option_index, card_id in enumerate(candidates[page * 10:(page + 1) * 10]):
                     card = gs._safe_get_card(card_id)
+                    types = ({str(t).lower() for t in getattr(card, 'card_types', [])}
+                             if card else set())
+                    if (card_id not in player.get('battlefield', [])
+                            or (permanent_type != 'permanent'
+                                and permanent_type not in types)):
+                        continue
                     set_valid_action(353 + option_index,
                                      f"SACRIFICE_EFFECT {getattr(card, 'name', card_id)}",
                                      context={"option_index": option_index})
                 if page_count > 1:
-                    set_valid_action(479, f"SACRIFICE_PAGE_NEXT ({page + 1}/{page_count})")
+                    set_valid_action(
+                        479, f"SACRIFICE_PAGE_NEXT ({page + 1}/{page_count})",
+                        context={"page_count": page_count})
                 if context.get('optional'):
                     set_valid_action(11, "DECLINE_SACRIFICE_EFFECT")
 
@@ -708,7 +729,6 @@ class ActionSpaceMixin:
                                  else all_options)
                 page_count = max(1, (len(all_options) + 9) // 10)
                 page = int(context.get('choice_page', 0)) % page_count
-                context['choice_page'] = page
                 page_options = all_options[page * 10:(page + 1) * 10]
                 for option_index, card_id in enumerate(page_options):
                     if card_id not in legal_options:
@@ -718,20 +738,23 @@ class ActionSpaceMixin:
                                      f"PUT_{context.get('counter_type', '+1/+1')}_COUNTER {getattr(card, 'name', card_id)}",
                                      context={"option_index": option_index})
                 if page_count > 1:
-                    set_valid_action(479, f"COUNTER_PAGE_NEXT ({page + 1}/{page_count})")
+                    set_valid_action(
+                        479, f"COUNTER_PAGE_NEXT ({page + 1}/{page_count})",
+                        context={"page_count": page_count})
 
             elif choice_type == "dig_select":
                 options = context.get('options', [])
                 page_count = max(1, (len(options) + 9) // 10)
                 page = int(context.get('choice_page', 0)) % page_count
-                context['choice_page'] = page
                 for option_index, card_id in enumerate(options[page * 10:(page + 1) * 10]):
                     card = gs._safe_get_card(card_id)
                     set_valid_action(353 + option_index,
                                      f"DIG_TAKE {getattr(card, 'name', card_id)}",
                                      context={"option_index": option_index})
                 if page_count > 1:
-                    set_valid_action(479, f"DIG_PAGE_NEXT ({page + 1}/{page_count})")
+                    set_valid_action(
+                        479, f"DIG_PAGE_NEXT ({page + 1}/{page_count})",
+                        context={"page_count": page_count})
 
             elif choice_type == "optional_sacrifice_proliferate":
                 source_id = context.get('source_id')
@@ -833,7 +856,7 @@ class ActionSpaceMixin:
                     set_valid_action(305, f"PUT_TO_GRAVEYARD {card_name}") # Action for GY - Index 305 maps to PUT_TO_GRAVEYARD
 
             # Dredge (Replace Draw)
-            elif choice_type == "dredge" and context.get("card_id"):
+            elif choice_type == "dredge" and "card_id" in context:
                 card_id = context.get("card_id")
                 dredge_val = context.get("value")
                 if len(player["library"]) >= dredge_val:
@@ -1022,7 +1045,6 @@ class ActionSpaceMixin:
                 page_count = max(1, (len(valid_targets_list) + 9) // 10)
                 if page >= page_count:
                     page = 0
-                    context['target_page'] = 0
                 page_targets = valid_targets_list[page * 10:(page + 1) * 10]
                 for i, target_id in enumerate(page_targets):
                     target_card = gs._safe_get_card(target_id)
@@ -1031,7 +1053,9 @@ class ActionSpaceMixin:
                         target_name = "Player 1" if target_id == "p1" else "Player 2"
                     set_valid_action(274 + i, f"SELECT_TARGET ({i}): {target_name} for {source_name}")
                 if page_count > 1:
-                    set_valid_action(479, f"TARGET_PAGE_NEXT ({page + 1}/{page_count})")
+                    set_valid_action(
+                        479, f"TARGET_PAGE_NEXT ({page + 1}/{page_count})",
+                        context={"page_count": page_count})
 
     def _add_level_up_actions(self, player, valid_actions, set_valid_action):
         """Add actions for leveling up Class cards and leveler creatures."""
@@ -1153,6 +1177,8 @@ class ActionSpaceMixin:
     def _add_attack_target_actions(self, player, opponent, valid_actions, set_valid_action, possible_attackers):
         """Add actions for choosing targets for attackers (Planeswalkers, Battles)."""
         gs = self.game_state
+        if not getattr(gs, 'current_attackers', []):
+            return
         # Attacker ID needs to be associated with the target choice.
         # Current approach assumes the *last declared attacker* is the one choosing target.
 
@@ -1162,8 +1188,7 @@ class ActionSpaceMixin:
         for i in range(min(len(opponent_planeswalkers), 5)): # PW index 0-4
             pw_idx, pw_id = opponent_planeswalkers[i]
             pw_card = gs._safe_get_card(pw_id)
-            # Action 373-377 assume param is the PW index (0-4)
-            set_valid_action(373 + i, f"ATTACK_PLANESWALKER {pw_card.name}") # Param = i
+            set_valid_action(378 + i, f"ATTACK_PLANESWALKER {pw_card.name}")
 
         # Battles
         opponent_battles = [(idx, card_id) for idx, card_id in enumerate(opponent["battlefield"])
@@ -1171,10 +1196,7 @@ class ActionSpaceMixin:
         for battle_idx_rel, (abs_idx, battle_id) in enumerate(opponent_battles):
             if battle_idx_rel >= 5: break # Battle index 0-4 relative to available battles
             battle_card = gs._safe_get_card(battle_id)
-            # ACTION_MEANINGS has a complex mapping (battle_idx * 4 + creature_idx)
-            # This needs rework. Simplify: Use actions 460-464 to target battle 0-4.
-            # The handler needs to associate the *last declared attacker* with this battle target.
-            set_valid_action(460 + battle_idx_rel, f"ATTACK_BATTLE {battle_card.name}") # Param = battle_idx_rel
+            set_valid_action(462 + battle_idx_rel, f"ATTACK_BATTLE {battle_card.name}")
 
     def _add_response_actions(self, player, valid_actions, set_valid_action):
         """Add actions for responding to stack (counters, etc.)."""
@@ -1732,7 +1754,7 @@ class ActionSpaceMixin:
         """Check target availability using TargetingSystem."""
         gs = self.game_state
         card_id = getattr(card, 'card_id', None)
-        if not card_id or not hasattr(card, 'oracle_text') or 'target' not in card.oracle_text.lower():
+        if card_id is None or not hasattr(card, 'oracle_text') or 'target' not in card.oracle_text.lower():
             return True # No target needed or cannot check
         if gs._target_bounds_from_text(card.oracle_text)[0] == 0:
             return True
@@ -1767,18 +1789,17 @@ class ActionSpaceMixin:
                 if not requires_sorcery and is_sorcery_speed: continue # If checking only sorcery speed
 
                 if gs.ability_handler.can_activate_ability(card_id, j, player):
-                    # Check activation limit
-                    activation_count = sum(1 for act_id, act_idx in getattr(gs, 'abilities_activated_this_turn', [])
-                                            if act_id == card_id and act_idx == j)
-                    if activation_count < 3: # Limit activation
-                       set_valid_action(
-                           100 + (i * 3) + j,
-                           f"ACTIVATE {card.name} ability {j}",
-                           context={
-                               "battlefield_idx": i,
-                               "ability_idx": j,
-                               "controller_id": "p1" if player is gs.p1 else "p2",
-                           })
+                   # Repeatable abilities remain legal as long as their real
+                   # costs and timing permit them.  A synthetic three-use cap
+                   # changed game rules and biased harvested card values.
+                   set_valid_action(
+                       100 + (i * 3) + j,
+                       f"ACTIVATE {card.name} ability {j}",
+                       context={
+                           "battlefield_idx": i,
+                           "ability_idx": j,
+                           "controller_id": "p1" if player is gs.p1 else "p2",
+                       })
 
     def _add_land_tapping_actions(self, player, valid_actions, set_valid_action):
         """Add actions for tapping lands for mana or effects."""
@@ -2091,12 +2112,19 @@ class ActionSpaceMixin:
                     # Check if there are valid targets (opponent's creatures)
                     opponent = gs.p2 if player == gs.p1 else gs.p1
                     valid_targets = [
-                        idx for idx, creature_id in enumerate(opponent.get("battlefield", []))
+                        ((0 if opponent is gs.p1 else len(gs.p1.get('battlefield', []))) + idx)
+                        for idx, creature_id in enumerate(opponent.get("battlefield", []))
                         if 'creature' in getattr(gs._safe_get_card(creature_id), 'card_types', [])
                     ]
                     
                     if valid_targets:
-                        goad_context = {'battlefield_idx': i}
+                        # The fixed slot can carry one deterministic legal target.
+                        # Without this field the mask exposed an action that its
+                        # handler was guaranteed to reject.
+                        goad_context = {
+                            'battlefield_idx': i,
+                            'target_creature_idx': valid_targets[0],
+                        }
                         set_valid_action(428, f"GOAD with {card.name}", context=goad_context)
 
         # --- Boast (Action 429 - Only after attacking) ---
@@ -2213,7 +2241,12 @@ class ActionSpaceMixin:
                 if is_sorcery_speed or is_instant: # Check timing
                     if len(player["hand"]) > 0 and self._can_afford_card(player, card):
                         # FIXED: Use correct action ID for CAST_WITH_JUMP_START (399)
-                        context = {'gy_idx': i}
+                        discard_idx = min(
+                            range(len(player["hand"])),
+                            key=lambda idx: self.card_evaluator.evaluate_card(
+                                player["hand"][idx], "discard")
+                            if self.card_evaluator else idx)
+                        context = {'gy_idx': i, 'discard_idx': discard_idx}
                         set_valid_action(399, f"CAST_WITH_JUMP_START {card.name}", context=context)
 
         # Escape
@@ -2232,7 +2265,14 @@ class ActionSpaceMixin:
                         # Check if enough *other* cards exist in GY
                         if len(player["graveyard"]) > exile_count and self._can_afford_cost_string(player, cost_str):
                             # FIXED: Use correct action ID for CAST_WITH_ESCAPE (400)
-                            context = {'gy_idx': i}
+                            escape_indices = [
+                                idx for idx in range(len(player["graveyard"]))
+                                if idx != i
+                            ][:exile_count]
+                            context = {
+                                'gy_idx': i,
+                                'gy_indices_escape': escape_indices,
+                            }
                             set_valid_action(400, f"CAST_WITH_ESCAPE {card.name}", context=context)
 
         # Madness (Triggered when discarded, check if castable)
@@ -2266,7 +2306,7 @@ class ActionSpaceMixin:
                     cost_match = re.search(r"overload (\{[^\}]+\})", card.oracle_text.lower())
                     if cost_match and self._can_afford_cost_string(player, cost_match.group(1)):
                         context = {'hand_idx': i}
-                        set_valid_action(397, f"CAST_WITH_OVERLOAD {card.name}", context=context)
+                        set_valid_action(402, f"CAST_WITH_OVERLOAD {card.name}", context=context)
 
         # Emerge (Sorcery speed only)
         if is_sorcery_speed:
@@ -2277,11 +2317,23 @@ class ActionSpaceMixin:
                     cost_match = re.search(r"emerge (\{[^\}]+\})", card.oracle_text.lower())
                     if cost_match:
                         # Check if there's a creature to sacrifice
-                        can_sac = any('creature' in getattr(gs._safe_get_card(cid), 'card_types', []) for cid in player.get("battlefield",[]))
+                        sacrifice_options = [
+                            (idx, cid) for idx, cid in enumerate(player.get("battlefield", []))
+                            if 'creature' in getattr(
+                                gs._safe_get_card(cid), 'card_types', [])
+                        ]
                         # Simplified cost check - full check happens later
-                        if can_sac and self._can_afford_cost_string(player, cost_match.group(1)):
-                             context = {'hand_idx': i}
-                             set_valid_action(398, f"CAST_FOR_EMERGE {card.name}", context=context)
+                        if sacrifice_options and self._can_afford_cost_string(player, cost_match.group(1)):
+                             sacrifice_idx, sacrifice_id = max(
+                                 sacrifice_options,
+                                 key=lambda pair: getattr(
+                                     gs._safe_get_card(pair[1]), 'cmc', 0) or 0)
+                             context = {
+                                 'hand_idx': i,
+                                 'sacrifice_idx': sacrifice_idx,
+                                 'sacrificed_creature': sacrifice_id,
+                             }
+                             set_valid_action(403, f"CAST_FOR_EMERGE {card.name}", context=context)
 
         # Delve (Sorcery speed only)
         if is_sorcery_speed:
@@ -2289,9 +2341,15 @@ class ActionSpaceMixin:
                 card_id = player["hand"][i]
                 card = gs._safe_get_card(card_id)
                 if card and hasattr(card, 'oracle_text') and "delve" in card.oracle_text.lower():
-                    if len(player.get("graveyard",[])) > 0 and self._can_afford_card(player, card): # Simplified check
-                        context = {'hand_idx': i}
-                        set_valid_action(399, f"CAST_FOR_DELVE {card.name}", context=context)
+                    delve_indices = list(range(len(player.get("graveyard", []))))
+                    affordability_context = {'delve_cards': delve_indices}
+                    if delve_indices and self._can_afford_card(
+                            player, card, context=affordability_context):
+                        context = {
+                            'hand_idx': i,
+                            'gy_indices': delve_indices,
+                        }
+                        set_valid_action(404, f"CAST_FOR_DELVE {card.name}", context=context)
 
     def _add_emblem_graveyard_actions(self, player, opponent, valid_actions,
                                       set_valid_action, is_sorcery_speed):
@@ -2334,29 +2392,14 @@ class ActionSpaceMixin:
                 context=cast_context)
 
     def _add_x_cost_actions(self, player, valid_actions, set_valid_action):
-        """Add actions for X cost spells on the stack."""
-        gs = self.game_state
-        
-        # Check if there is a spell with X in its cost on the stack
-        if gs.stack and len(gs.stack) > 0:
-            stack_item = gs.stack[-1]
-            
-            if isinstance(stack_item, tuple) and len(stack_item) >= 3:
-                stack_type, card_id, controller = stack_item[:3]
-                
-                # Only process if this is the player's spell
-                if controller == player and stack_type == "SPELL":
-                    card = gs._safe_get_card(card_id)
-                    
-                    if card and hasattr(card, 'mana_cost') and 'X' in card.mana_cost:
-                        # Calculate available mana for X
-                        available_mana = sum(player["mana_pool"].values())
-                        
-                        # Allow X values up to available mana (max 10)
-                        max_x = min(available_mana, 10)
-                        for i in range(max_x):
-                            x_value = i + 1  # X values start at 1
-                            set_valid_action(358 + i, f"CHOOSE_X_VALUE {x_value} for {card.name}")
+        """Legacy no-op: X is chosen before a spell is paid for and stacked.
+
+        The old post-cast path used indices 358+, which are CHOOSE_MODE actions,
+        and exposed them without a choose-X context.  The casting pipeline now
+        creates the dedicated ``choose_x`` phase and actions 363-372 (plus PASS
+        for X=0), so a spell already on the stack needs no further X action.
+        """
+        return
 
     def _add_kicker_options(self, player, valid_actions, set_valid_action):
         """Add options for paying kicker and related additional costs."""
@@ -2364,7 +2407,7 @@ class ActionSpaceMixin:
         
         # Check for pending spell context that might need kicker decisions
         pending_context = getattr(gs, 'pending_spell_context', None)
-        if pending_context and pending_context.get('card_id') and pending_context.get('controller') == player:
+        if pending_context and 'card_id' in pending_context and pending_context.get('controller') == player:
             card_id = pending_context['card_id']
             card = gs._safe_get_card(card_id)
             
@@ -2533,7 +2576,9 @@ class ActionSpaceMixin:
                             can_afford = sum(player["mana_pool"].values()) > 0
                         
                         if can_afford:
-                            set_valid_action(427, f"PREVENT_DAMAGE with {card.name}")
+                            set_valid_action(
+                                432, f"PREVENT_DAMAGE with {card.name}",
+                                context={'hand_idx': idx})
                     
                     if "redirect" in card.oracle_text.lower() and "damage" in card.oracle_text.lower():
                         # Check if we can afford it
@@ -2544,5 +2589,7 @@ class ActionSpaceMixin:
                             can_afford = sum(player["mana_pool"].values()) > 0
                         
                         if can_afford:
-                            set_valid_action(428, f"REDIRECT_DAMAGE with {card.name}")
+                            set_valid_action(
+                                433, f"REDIRECT_DAMAGE with {card.name}",
+                                context={'hand_idx': idx})
 

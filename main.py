@@ -8,22 +8,21 @@ import numpy as np
 import traceback
 from typing import Dict, List, Type, Union, Optional
 import sys
-import io
 
 # Stable Baselines and Contrib Imports
 from sb3_contrib.ppo_mask import MaskablePPO
 import sb3_contrib.common.maskable.policies
 from stable_baselines3.common.callbacks import (
-    EvalCallback, 
     CheckpointCallback, 
     ProgressBarCallback,
     BaseCallback
 )
 from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.utils import set_random_seed
+from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback
+from sb3_contrib.common.maskable.evaluation import evaluate_policy
 from sb3_contrib.common.wrappers import ActionMasker
 # Optuna for Hyperparameter Optimization
 import optuna
@@ -662,8 +661,12 @@ class ResourceMonitorCallback(BaseCallback):
         if self.writer is not None:
             self.writer.close()
             
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+# Keep the host's stream objects intact. Replacing them during import used to
+# reorder buffered output and failed in IDE/notebook hosts whose streams do not
+# expose ``.buffer``.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -675,7 +678,12 @@ logging.basicConfig(
 )
 
 # Optimization and Configuration
-torch.set_num_threads(os.cpu_count())
+def safe_cpu_count():
+    """Return a usable logical CPU count even on constrained/unknown hosts."""
+    return max(1, os.cpu_count() or 1)
+
+
+torch.set_num_threads(safe_cpu_count())
 torch.set_float32_matmul_precision('high')
 
 # Path Configuration
@@ -688,6 +696,79 @@ TENSORBOARD_DIR = os.path.join(BASE_DIR, "tensorboard_logs")
 
 # Feature Dimension Configuration
 FEATURE_OUTPUT_DIM = 512
+
+NETWORK_ARCHITECTURES = {
+    'small': {'pi': [128, 64, 32], 'vf': [128, 64, 32]},
+    'medium': {'pi': [256, 128, 64], 'vf': [256, 128, 64]},
+    'large': {'pi': [512, 256, 128], 'vf': [512, 256, 128]},
+}
+
+ACTIVATION_FUNCTIONS = {
+    'relu': torch.nn.ReLU,
+    'leaky_relu': torch.nn.LeakyReLU,
+    'tanh': torch.nn.Tanh,
+}
+
+
+def build_training_config(args, optuna_params=None):
+    """Build the complete MaskablePPO configuration for the final model."""
+    config = {
+        'learning_rate': args.learning_rate,
+        'n_steps': args.n_steps,
+        'batch_size': args.batch_size,
+        'gamma': 0.995,
+        'gae_lambda': 0.95,
+        'clip_range': 0.2,
+        'ent_coef': 0.01,
+        'net_arch': NETWORK_ARCHITECTURES['medium'],
+        'n_epochs': 5,
+        'max_grad_norm': 0.5,
+        'activation_fn': ACTIVATION_FUNCTIONS['relu'],
+    }
+    if not optuna_params:
+        return config
+
+    expected = {
+        'learning_rate', 'n_steps', 'batch_size', 'gamma_complement',
+        'gae_lambda', 'clip_range', 'ent_coef', 'policy_neurons',
+        'n_epochs', 'max_grad_norm', 'activation_fn',
+    }
+    unknown = set(optuna_params) - expected
+    if unknown:
+        raise ValueError(f"Unknown optimized hyperparameters: {sorted(unknown)}")
+
+    for key in (
+        'learning_rate', 'n_steps', 'batch_size', 'gae_lambda',
+        'clip_range', 'ent_coef', 'n_epochs', 'max_grad_norm',
+    ):
+        if key in optuna_params:
+            config[key] = optuna_params[key]
+    if 'gamma_complement' in optuna_params:
+        config['gamma'] = 1.0 - optuna_params['gamma_complement']
+    if 'policy_neurons' in optuna_params:
+        config['net_arch'] = NETWORK_ARCHITECTURES[
+            optuna_params['policy_neurons']]
+    if 'activation_fn' in optuna_params:
+        config['activation_fn'] = ACTIVATION_FUNCTIONS[
+            optuna_params['activation_fn']]
+    return config
+
+
+def make_masked_mtg_env(decks, card_db, storage_root, *, agent_is_p1=True,
+                        alternate_agent_seat=False):
+    """Create an environment whose generated statistics stay in one scope."""
+    os.makedirs(storage_root, exist_ok=True)
+    return ActionMasker(
+        AlphaZeroMTGEnv(
+            decks,
+            card_db,
+            deck_stats_path=os.path.join(storage_root, 'deck_stats'),
+            card_memory_path=os.path.join(storage_root, 'card_memory'),
+            agent_is_p1=agent_is_p1,
+            alternate_agent_seat=alternate_agent_seat,
+        ),
+        action_mask_fn='action_mask',
+    )
 
 class CustomLearningRateScheduler:
     """Advanced learning rate scheduler with adaptive decay"""
@@ -714,6 +795,36 @@ class CustomLearningRateScheduler:
         )
         return self.current_lr
 
+
+def create_training_model(env, training_config):
+    """Construct the final MaskablePPO model from one complete config."""
+    policy_kwargs = {
+        'features_extractor_class': CompletelyFixedMTGExtractor,
+        'features_extractor_kwargs': {
+            'features_dim': FEATURE_OUTPUT_DIM,
+        },
+        'net_arch': training_config['net_arch'],
+        'activation_fn': training_config['activation_fn'],
+    }
+    lr_scheduler = CustomLearningRateScheduler(
+        initial_lr=training_config['learning_rate'])
+    return MaskablePPO(
+        policy=FixedDimensionMaskableActorCriticPolicy,
+        env=env,
+        learning_rate=lr_scheduler,
+        tensorboard_log=TENSORBOARD_DIR,
+        policy_kwargs=policy_kwargs,
+        n_steps=training_config['n_steps'],
+        batch_size=training_config['batch_size'],
+        gamma=training_config['gamma'],
+        gae_lambda=training_config['gae_lambda'],
+        clip_range=training_config['clip_range'],
+        ent_coef=training_config['ent_coef'],
+        max_grad_norm=training_config['max_grad_norm'],
+        verbose=1,
+        n_epochs=training_config['n_epochs'],
+    )
+
 def objective(trial):
     """
     Advanced Optuna objective function with more sophisticated parameter space
@@ -733,12 +844,7 @@ def objective(trial):
     
     # Network architecture
     policy_neurons = trial.suggest_categorical('policy_neurons', ['small', 'medium', 'large'])
-    network_architectures = {
-        'small': {'pi': [128, 64, 32], 'vf': [128, 64, 32]},
-        'medium': {'pi': [256, 128, 64], 'vf': [256, 128, 64]},
-        'large': {'pi': [512, 256, 128], 'vf': [512, 256, 128]}
-    }
-    net_arch = network_architectures[policy_neurons]
+    net_arch = NETWORK_ARCHITECTURES[policy_neurons]
     
     # Optimization parameters
     n_epochs = trial.suggest_int('n_epochs', 3, 10)
@@ -746,12 +852,7 @@ def objective(trial):
     
     # Activation function
     activation_name = trial.suggest_categorical('activation_fn', ['relu', 'leaky_relu', 'tanh'])
-    activation_fns = {
-        'relu': torch.nn.ReLU,
-        'leaky_relu': torch.nn.LeakyReLU,
-        'tanh': torch.nn.Tanh
-    }
-    activation_fn = activation_fns[activation_name]
+    activation_fn = ACTIVATION_FUNCTIONS[activation_name]
 
     # Load decks and card database
     try:
@@ -760,14 +861,38 @@ def objective(trial):
         logging.error(f"Failed to load decks for optimization: {e}")
         return float('-inf')
 
-    # Create environment (fewer environments for hyperparameter optimization)
-    def make_env():
-        # This creates a fresh environment instance each time it's called
-        return ActionMasker(
-            AlphaZeroMTGEnv(decks, card_db), 
-            action_mask_fn='action_mask'
-        )
-    vec_env = make_vec_env(make_env, n_envs=2)
+    # Create environments (fewer environments for hyperparameter optimization).
+    # Training and evaluation statistics must not feed the same trackers.
+    trial_root = os.path.join(
+        LOG_DIR, 'optuna', f"trial_{getattr(trial, 'number', 'unknown')}")
+    train_env_index = 0
+    eval_env_index = 0
+
+    def make_train_env():
+        nonlocal train_env_index
+        env_index = train_env_index
+        storage = os.path.join(trial_root, 'train', f'env_{env_index}')
+        train_env_index += 1
+        return make_masked_mtg_env(
+            decks, card_db, storage,
+            agent_is_p1=(env_index % 2 == 0),
+            alternate_agent_seat=True)
+
+    def make_eval_env():
+        nonlocal eval_env_index
+        env_index = eval_env_index
+        storage = os.path.join(trial_root, 'eval', f'env_{env_index}')
+        eval_env_index += 1
+        return make_masked_mtg_env(
+            decks, card_db, storage,
+            agent_is_p1=(env_index % 2 == 0),
+            alternate_agent_seat=True)
+
+    # Evaluation must not step the training VecEnv. Doing so leaves PPO's
+    # cached ``_last_obs`` out of sync with the environment before the next
+    # learn() call and couples evaluation trajectories to training state.
+    train_env = make_vec_env(make_train_env, n_envs=2)
+    eval_env = make_vec_env(make_eval_env, n_envs=2)
 
     # Construct policy configuration
     policy_kwargs = {
@@ -779,25 +904,26 @@ def objective(trial):
         "activation_fn": activation_fn
     }
 
-    # Create model
-    model = MaskablePPO(
-        policy=FixedDimensionMaskableActorCriticPolicy,
-        env=vec_env,
-        learning_rate=learning_rate,
-        n_steps=n_steps,
-        batch_size=batch_size,
-        gamma=gamma,
-        gae_lambda=gae_lambda,
-        clip_range=clip_range,
-        ent_coef=ent_coef,
-        policy_kwargs=policy_kwargs,
-        verbose=0,
-        tensorboard_log=TENSORBOARD_DIR,
-        n_epochs=n_epochs,
-        max_grad_norm=max_grad_norm
-    )
-
     try:
+        # Create model after both environments are owned by the try/finally so
+        # a constructor failure cannot leak worker environments.
+        model = MaskablePPO(
+            policy=FixedDimensionMaskableActorCriticPolicy,
+            env=train_env,
+            learning_rate=learning_rate,
+            n_steps=n_steps,
+            batch_size=batch_size,
+            gamma=gamma,
+            gae_lambda=gae_lambda,
+            clip_range=clip_range,
+            ent_coef=ent_coef,
+            policy_kwargs=policy_kwargs,
+            verbose=0,
+            tensorboard_log=TENSORBOARD_DIR,
+            n_epochs=n_epochs,
+            max_grad_norm=max_grad_norm
+        )
+
         # Training with pruning support
         for step in range(5):  # 5 evaluation points
             # Train for a short period
@@ -805,7 +931,8 @@ def objective(trial):
             model.learn(total_timesteps=step_size, reset_num_timesteps=(step==0))
             
             # Evaluate current performance
-            mean_reward, std_reward = evaluate_policy(model, vec_env, n_eval_episodes=5)
+            mean_reward, std_reward = evaluate_policy(
+                model, eval_env, n_eval_episodes=5)
             
             # Report to Optuna for pruning decision
             trial.report(mean_reward, step)
@@ -815,7 +942,8 @@ def objective(trial):
                 raise optuna.TrialPruned()
         
         # Final evaluation with more episodes
-        mean_reward, _ = evaluate_policy(model, vec_env, n_eval_episodes=10)
+        mean_reward, _ = evaluate_policy(
+            model, eval_env, n_eval_episodes=10)
         
         return mean_reward
     except optuna.TrialPruned:
@@ -834,7 +962,8 @@ def objective(trial):
         # raise optuna.TrialPruned() # If you want Optuna to handle it as pruned
         return float('-inf') # If you want Optuna to just record a bad score
     finally:
-        vec_env.close()
+        train_env.close()
+        eval_env.close()
 
 def optimize_hyperparameters(n_trials=50, study_name="mtg_optimization"):
     """Run Optuna hyperparameter optimization with persistence and pruning"""
@@ -1079,41 +1208,57 @@ def record_network_architecture(model, run_id):
     except Exception as e:
         logging.error(f"Failed to record network architecture: {str(e)}")
 
-def create_callbacks(eval_env, run_id, args):
+def create_callbacks(eval_env, run_id, args, num_train_envs=1):
     """Create a comprehensive set of callbacks"""
+    # BaseCallback.n_calls counts VecEnv steps, not individual transitions.
+    # Keep CLI frequencies expressed in total training timesteps as documented.
+    def callback_frequency(timestep_frequency):
+        if timestep_frequency <= 0:
+            return timestep_frequency
+        return max(timestep_frequency // max(num_train_envs, 1), 1)
+
+    run_model_dir = os.path.join(MODEL_DIR, run_id)
+    best_model_dir = os.path.join(run_model_dir, 'best_model')
+    checkpoint_dir = os.path.join(run_model_dir, 'checkpoints')
+    evaluation_log_dir = os.path.join(LOG_DIR, run_id, 'evaluation')
+    for path in (best_model_dir, checkpoint_dir, evaluation_log_dir):
+        os.makedirs(path, exist_ok=True)
+
     # Evaluation callback
-    eval_callback = EvalCallback(
+    eval_callback = MaskableEvalCallback(
         eval_env=eval_env,
-        best_model_save_path=MODEL_DIR,
-        log_path=LOG_DIR,
-        eval_freq=args.eval_freq,
-        deterministic=False,
+        best_model_save_path=best_model_dir,
+        log_path=evaluation_log_dir,
+        eval_freq=callback_frequency(args.eval_freq),
+        deterministic=True,
         n_eval_episodes=20
     )
 
     # Checkpoint callback
     checkpoint_callback = CheckpointCallback(
-        save_freq=args.checkpoint_freq,
-        save_path=MODEL_DIR,
+        save_freq=callback_frequency(args.checkpoint_freq),
+        save_path=checkpoint_dir,
         name_prefix=f"ppo_mtg_{run_id}"
     )
 
     # Progress bar callback
     progress_callback = ProgressBarCallback()
     
-    # Network recording callback
-    network_callback = NetworkRecordingCallback(
-        log_dir=os.path.join(TENSORBOARD_DIR, f"network_logs_{run_id}"),
-        record_freq=5000  # Record weights every 5000 steps
-    )
-    
     # Resource monitoring callback
     resource_callback = ResourceMonitorCallback(
         log_dir=os.path.join(TENSORBOARD_DIR, f"system_logs_{run_id}"),
-        monitor_freq=5000
+        monitor_freq=callback_frequency(5000)
     )
 
-    return [eval_callback, checkpoint_callback, progress_callback, network_callback, resource_callback]
+    callbacks = [eval_callback, checkpoint_callback, progress_callback]
+    if args.record_network:
+        callbacks.append(NetworkRecordingCallback(
+            log_dir=os.path.join(
+                TENSORBOARD_DIR, f"network_logs_{run_id}"),
+            record_freq=callback_frequency(args.record_freq)
+        ))
+    callbacks.append(resource_callback)
+    return callbacks
 
 def analyze_model_weights(model_path):
     """
@@ -1242,6 +1387,8 @@ def main():
                         help="Frequency for recording network parameters")
     parser.add_argument("--cpu-only", action="store_true", help="Force CPU training even if GPU is available")
     args = parser.parse_args()
+    if args.resume and args.optimize_hp:
+        parser.error("--resume and --optimize-hp cannot be used together")
 
     # Set random seed for reproducibility
     set_random_seed(42)
@@ -1272,7 +1419,8 @@ def main():
         logging.info("Running in CPU-only mode as requested")
     
     # CPU optimization settings for Ryzen 5 5600 (6 cores/12 threads)
-    n_cpu_threads = min(10, os.cpu_count())  # Use up to 10 threads (leave 2 for OS)
+    detected_cpus = safe_cpu_count()
+    n_cpu_threads = min(10, detected_cpus)  # Leave capacity for the OS on larger hosts.
     torch.set_num_threads(n_cpu_threads)
     logging.info(f"PyTorch using {n_cpu_threads} CPU threads")
     
@@ -1291,13 +1439,14 @@ def main():
         logging.info(f"Loaded {len(decks)} decks with {len(card_db)} unique cards")
     except Exception as e:
         logging.error(f"Failed to load decks: {str(e)}")
-        return
+        return 1
 
     # Optional Hyperparameter Optimization
+    best_params = None
     if args.optimize_hp:
         # Determine level of optimization based on CPU
         import psutil
-        cpu_count = psutil.cpu_count(logical=True)
+        cpu_count = psutil.cpu_count(logical=True) or detected_cpus
         
         if cpu_count <= 4:
             n_trials = 10
@@ -1311,33 +1460,32 @@ def main():
         
         # Run the optimization with appropriate trial count
         best_params = optimize_hyperparameters(n_trials=n_trials)
-        logging.info("Hyperparameter optimization completed. Updating training configuration.")
-        # BUGFIX: was setattr(args, key.replace('_', '-'), value), which wrote to
-        # attributes like "learning-rate" that argparse never reads -> the optimized
-        # values were silently discarded. Optuna keys already use underscores.
-        applied, skipped = [], []
-        for key, value in best_params.items():
-            if hasattr(args, key):
-                setattr(args, key, value)
-                applied.append(f"{key}={value}")
-            else:
-                skipped.append(key)
-        logging.info(f"Applied optimized hyperparameters: {applied}")
-        if skipped:
-            logging.warning(f"Optimized params with no matching CLI arg (not applied): {skipped}")
+        logging.info(
+            "Hyperparameter optimization completed; applying the complete "
+            f"winning configuration: {best_params}")
+
+    training_config = build_training_config(args, best_params)
 
     # Determine number of environments - optimized for Ryzen 5 5600
-    num_envs = args.n_envs if args.n_envs > 0 else min(6, os.cpu_count() // 2)  # Default to 6 envs for 12 threads
+    num_envs = (
+        args.n_envs if args.n_envs > 0
+        else max(1, min(6, detected_cpus // 2))
+    )
     logging.info(f"Creating {num_envs} environments")
+
+    environment_data_dir = os.path.join(
+        LOG_DIR, run_id, 'environment_data')
+    train_storage_dir = os.path.join(environment_data_dir, 'train')
+    eval_storage_dir = os.path.join(environment_data_dir, 'eval')
 
     # Create vectorized environment with factory pattern to ensure unique instances
     def make_env_factory(idx):
         def _init():
             # Create a completely fresh environment
-            return ActionMasker(
-                AlphaZeroMTGEnv(decks, card_db),
-                action_mask_fn='action_mask'
-            )
+            return make_masked_mtg_env(
+                decks, card_db, os.path.join(train_storage_dir, f'env_{idx}'),
+                agent_is_p1=(idx % 2 == 0),
+                alternate_agent_seat=True)
         return _init
 
     env_fns = [make_env_factory(i) for i in range(num_envs)]
@@ -1349,33 +1497,16 @@ def main():
     # underlying env, so records stayed "unversioned". env_method reaches the env.
     vec_env.env_method("set_agent_version", run_id)
     
-    # Learning rate scheduler
-    lr_scheduler = CustomLearningRateScheduler(
-        initial_lr=args.learning_rate
-    )
-
-    # Policy configuration - optimized for CPU
-    policy_kwargs = {
-        "features_extractor_class": CompletelyFixedMTGExtractor,
-        "features_extractor_kwargs": {
-            "features_dim": FEATURE_OUTPUT_DIM  # Keep original output dimension
-        },
-        "net_arch": {
-            "pi": [256, 128, 64],  # Keep original network size
-            "vf": [256, 128, 64]   # Keep original network size
-        },
-        "activation_fn": torch.nn.ReLU  # Changed from LeakyReLU to standard ReLU for better CPU performance
-    }
-
     # Create evaluation environment with factory pattern
     eval_decks = random.sample(decks, min(10, len(decks)))  # Reduced from 15 to 10
     
     def make_eval_env_factory(idx):
         def _init():
-            return ActionMasker(
-                AlphaZeroMTGEnv(eval_decks, card_db),
-                action_mask_fn='action_mask'
-            )
+            return make_masked_mtg_env(
+                eval_decks, card_db,
+                os.path.join(eval_storage_dir, f'env_{idx}'),
+                agent_is_p1=(idx % 2 == 0),
+                alternate_agent_seat=True)
         return _init
 
     eval_env_fns = [make_eval_env_factory(i) for i in range(2)]  # Reduced from 4 to 2 for CPU
@@ -1383,12 +1514,15 @@ def main():
     eval_env.env_method("set_agent_version", f"{run_id}-eval")
 
     # Create callbacks
-    callbacks = create_callbacks(eval_env, run_id, args)
+    callbacks = create_callbacks(eval_env, run_id, args, num_train_envs=num_envs)
     
     # Start time for tracking
     start_time = time.time()
 
     model = None  # BUGFIX: defined before try so the finally block can't NameError
+    exit_code = 1
+    run_model_dir = os.path.join(MODEL_DIR, run_id)
+    os.makedirs(run_model_dir, exist_ok=True)
     try:
         # Create or resume model
         if args.resume:
@@ -1399,20 +1533,7 @@ def main():
             )
             logging.info(f"Resuming training from {args.resume}")
         else:
-            model = MaskablePPO(
-                policy=FixedDimensionMaskableActorCriticPolicy,
-                env=vec_env,
-                learning_rate=lr_scheduler,
-                tensorboard_log=TENSORBOARD_DIR,
-                policy_kwargs=policy_kwargs,
-                n_steps=args.n_steps,
-                batch_size=args.batch_size,
-                gamma=0.995,
-                gae_lambda=0.95,
-                ent_coef=0.01,
-                verbose=1,
-                n_epochs=5  # Reduced from default 10 for CPU efficiency
-            )
+            model = create_training_model(vec_env, training_config)
 
         # Start training
         logging.info(f"Starting training run: {run_id}")
@@ -1433,31 +1554,46 @@ def main():
         logging.info("Recording neural network architecture...")
         record_network_architecture(model, run_id)
 
+        if hasattr(model, "policy") and hasattr(
+                model.policy, "features_extractor"):
+            feature_extractor_path = os.path.join(
+                run_model_dir, "feature_extractor.pth")
+            torch.save(
+                model.policy.features_extractor.state_dict(),
+                feature_extractor_path)
+            logging.info(
+                f"Saved feature extractor to {feature_extractor_path}")
+
+        final_model_path = os.path.join(run_model_dir, "final_model")
+        logging.info(f"Saving final model to {final_model_path}")
+        model.save(final_model_path)
+        exit_code = 0
+
     except Exception as e:
         logging.error(f"Training error: {str(e)}")
         logging.error(traceback.format_exc())
-    finally:
-        # BUGFIX: if model construction itself failed, this block used to raise
-        # NameError and bury the original exception.
+        # Preserve a resumable diagnostic artifact without presenting a
+        # partially trained model as the completed run output.
         if model is not None:
-            # Save final model
-            final_model_path = os.path.join(MODEL_DIR, f"{run_id}_final")
-            logging.info(f"Saving final model to {final_model_path}")
-            model.save(final_model_path)
-        
-        # Save network parameters separately
-        if model is not None and hasattr(model, "policy") and hasattr(model.policy, "features_extractor"):
-            # Save feature extractor separately for easier analysis
-            feature_extractor_path = os.path.join(MODEL_DIR, f"{run_id}_feature_extractor.pth")
-            torch.save(model.policy.features_extractor.state_dict(), feature_extractor_path)
-            logging.info(f"Saved feature extractor to {feature_extractor_path}")
-        
+            failed_model_path = os.path.join(run_model_dir, "failed_model")
+            try:
+                logging.info(
+                    f"Saving incomplete model to {failed_model_path}")
+                model.save(failed_model_path)
+            except Exception as save_error:
+                logging.error(
+                    f"Could not save incomplete model: {save_error}")
+    finally:
         # Clean up environments
         vec_env.close()
         eval_env.close()
-        
+
+    if exit_code == 0:
         logging.info(f"Training run {run_id} completed")
+    else:
+        logging.error(f"Training run {run_id} failed")
+    return exit_code
     
 if __name__ == "__main__":
     # Code to run only when the script is executed directly
-    main()
+    sys.exit(main())

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import logging
 import math
@@ -29,11 +30,11 @@ DEFAULT_DECKS_DIRECTORY = PROJECT_ROOT / "Decks"
 DEFAULT_OUTPUT_DIRECTORY = PROJECT_ROOT / "harvest_fixture_output"
 DEFAULT_GAMES = 8
 DEFAULT_SEED = 42
-MAX_STEPS_PER_GAME = 450
+MAX_STEPS_PER_GAME = 2000
 MAX_REPEATED_WAIT_STATES = 8
 CONCEDE_ACTION = 12
 NO_OP_ACTION = 224
-HARVEST_VERSION = "fixture-harvest-v1"
+HARVEST_VERSION = "fixture-harvest-v2"
 VALID_RESULTS = {"win", "loss", "draw", "draw_both_loss"}
 FIDELITY_COUNTERS = (
     "unimplemented_action", "unparsed_mana", "unparsed_modal", "unparsed_effects",
@@ -128,6 +129,70 @@ def choose_fixture_action(action_mask: Iterable, rng: random.Random) -> int:
         raise RuntimeError("Environment returned an empty valid-action mask")
     useful = [action for action in legal if action != CONCEDE_ACTION]
     return int(rng.choice(useful or legal))
+
+
+def resolve_checkpoint_path(path: Path | str) -> Path:
+    """Resolve an SB3 checkpoint, accepting an omitted ``.zip`` suffix."""
+    checkpoint = Path(path).expanduser().resolve()
+    if not checkpoint.is_file() and checkpoint.suffix != ".zip":
+        zipped = checkpoint.with_suffix(".zip")
+        if zipped.is_file():
+            checkpoint = zipped
+    if not checkpoint.is_file():
+        raise FileNotFoundError(f"Checkpoint does not exist: {checkpoint}")
+    return checkpoint
+
+
+def checkpoint_identity(path: Path | str) -> dict:
+    """Return stable provenance without embedding a machine-specific path."""
+    checkpoint = resolve_checkpoint_path(path)
+    digest = hashlib.sha256()
+    with checkpoint.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "name": checkpoint.name,
+        "sha256": digest.hexdigest(),
+        "size": checkpoint.stat().st_size,
+    }
+
+
+def load_checkpoint_policy(path: Path | str):
+    """Load a MaskablePPO checkpoint with this project's custom classes known."""
+    import main as _training_entrypoint  # noqa: F401 - registers custom policy classes
+    from sb3_contrib import MaskablePPO
+
+    return MaskablePPO.load(str(resolve_checkpoint_path(path)), device="auto")
+
+
+def choose_checkpoint_action(policy, observation: dict, action_mask: Iterable) -> int:
+    """Predict deterministically and reject a checkpoint that violates its mask."""
+    mask = list(bool(value) for value in action_mask)
+    try:
+        prediction = policy.predict(
+            observation, action_masks=mask, deterministic=True)
+    except TypeError as exc:
+        raise RuntimeError(
+            "Checkpoint policy does not support MaskablePPO action masks") from exc
+    action = prediction[0] if isinstance(prediction, tuple) else prediction
+    action_index = int(getattr(action, "item", lambda: action)())
+    if not 0 <= action_index < len(mask) or not mask[action_index]:
+        raise RuntimeError(
+            f"Checkpoint selected mask-invalid action {action_index}")
+    return action_index
+
+
+def policy_version(seed: int, agent_identity: dict | None,
+                   opponent_identity: dict | None) -> str:
+    if agent_identity is None and opponent_identity is None:
+        return f"{HARVEST_VERSION}-seed-{seed}"
+    provenance = json.dumps(
+        {"agent": agent_identity or "random-valid",
+         "opponent": opponent_identity or "scripted"},
+        sort_keys=True,
+    ).encode("utf-8")
+    digest = hashlib.sha256(provenance).hexdigest()[:16]
+    return f"{HARVEST_VERSION}-policy-{digest}-seed-{seed}"
 
 
 def _wait_state_signature(env, action_mask: Iterable):
@@ -726,15 +791,22 @@ def print_summary(
 
 
 def run_harvest(games: int, seed: int, output_directory: Path,
-                max_steps: int = MAX_STEPS_PER_GAME):
+                max_steps: int = MAX_STEPS_PER_GAME, *, game_offset: int = 0,
+                agent_model: Path | str | None = None,
+                opponent_model: Path | str | None = None):
     """Run fixture games and return their validated artifact data."""
     if games < 1:
         raise ValueError("games must be at least 1")
     if max_steps < 1:
         raise ValueError("max_steps must be at least 1")
+    if isinstance(game_offset, bool) or not isinstance(game_offset, int) \
+            or game_offset < 0:
+        raise ValueError("game_offset must be a non-negative integer")
 
     output = prepare_output_directory(Path(output_directory))
-    agent_version = f"{HARVEST_VERSION}-seed-{seed}"
+    agent_identity = checkpoint_identity(agent_model) if agent_model else None
+    opponent_identity = checkpoint_identity(opponent_model) if opponent_model else None
+    agent_version = policy_version(seed, agent_identity, opponent_identity)
     previous_log_disable = logging.root.manager.disable
     previous_root_level = None
     previous_debug_action_steps = None
@@ -742,6 +814,8 @@ def run_harvest(games: int, seed: int, output_directory: Path,
     expected_matchups: list[tuple[str, str]] = []
     logging.disable(logging.CRITICAL)
     env = None
+    agent_policy = None
+    opponent_policy = None
     try:
         # Programmatic calls can share a process with prior simulations. A
         # fresh output directory must start with a fresh in-memory manifest too.
@@ -754,6 +828,10 @@ def run_harvest(games: int, seed: int, output_directory: Path,
         environment_module.DEBUG_ACTION_STEPS = False
         AlphaZeroMTGEnv = environment_module.AlphaZeroMTGEnv
         previous_root_level = _quiet_engine_console_logging()
+        if agent_model:
+            agent_policy = load_checkpoint_policy(agent_model)
+        if opponent_model:
+            opponent_policy = load_checkpoint_policy(opponent_model)
 
         env = AlphaZeroMTGEnv(
             decks,
@@ -762,17 +840,25 @@ def run_harvest(games: int, seed: int, output_directory: Path,
             card_memory_path=str(output / "card_memory"),
         )
         env.set_agent_version(agent_version)
+        if opponent_policy is not None:
+            env.set_opponent_policy(opponent_policy)
 
-        for game_index in range(games):
+        for local_game_index in range(games):
+            game_index = game_offset + local_game_index
             game_seed = seed + game_index
             p1_deck, p2_deck = scheduled_matchup(decks, game_index, seed)
             expected_pair = (p1_deck["name"], p2_deck["name"])
             expected_matchups.append(expected_pair)
             env.decks = _ScheduledDeckPair(p1_deck, p2_deck)
-            _, reset_info = env.reset(seed=game_seed)
+            observation, reset_info = env.reset(seed=game_seed)
             if reset_info.get("error_reset"):
                 raise RuntimeError(
                     f"Fixture game {game_index + 1} used the emergency reset")
+            if getattr(env, "last_observation_error", None):
+                raise RuntimeError(
+                    f"Fixture game {game_index + 1} reset observation degraded: "
+                    f"{env.last_observation_error}\n"
+                    f"{getattr(env, 'last_observation_traceback', '') or ''}")
             actual_pair = (
                 getattr(env, "current_deck_name_p1", None),
                 getattr(env, "current_deck_name_p2", None),
@@ -794,6 +880,13 @@ def run_harvest(games: int, seed: int, output_directory: Path,
                     abort_reason = "engine NO_OP recovery limit"
                     break
                 mask = env.action_mask()
+                mask_error = getattr(
+                    getattr(env, "action_handler", None),
+                    "last_mask_error", None)
+                if mask_error:
+                    raise RuntimeError(
+                        f"Fixture game {game_index + 1} action mask degraded: "
+                        f"{mask_error}")
                 wait_signature = _wait_state_signature(env, mask)
                 previous_wait_signature, repeated_waits = _advance_wait_counter(
                     previous_wait_signature, repeated_waits, wait_signature)
@@ -801,12 +894,21 @@ def run_harvest(games: int, seed: int, output_directory: Path,
                     abort_reason = f"repeated wait state {wait_signature}"
                     break
 
-                action = choose_fixture_action(mask, rng)
+                action = (
+                    choose_checkpoint_action(agent_policy, observation, mask)
+                    if agent_policy is not None
+                    else choose_fixture_action(mask, rng)
+                )
                 action_metadata = getattr(
                     getattr(env, "action_handler", None),
                     "action_reasons_with_context", {}).get(action, {})
-                _, _, terminated, truncated, final_info = env.step(action)
+                observation, _, terminated, truncated, final_info = env.step(action)
                 steps += 1
+                if getattr(env, "last_observation_error", None):
+                    raise RuntimeError(
+                        f"Fixture game {game_index + 1} observation degraded: "
+                        f"{env.last_observation_error}\n"
+                        f"{getattr(env, 'last_observation_traceback', '') or ''}")
                 if final_info.get("execution_failed"):
                     actor = ("opponent" if final_info.get("opponent_execution_failed")
                              else "agent")
@@ -854,7 +956,10 @@ def run_harvest(games: int, seed: int, output_directory: Path,
         "agent_version": agent_version,
         "seed": seed,
         "games": games,
+        "game_offset": game_offset,
         "max_steps": max_steps,
+        "agent_policy": agent_identity or {"kind": "random-valid"},
+        "opponent_policy": opponent_identity or {"kind": "scripted"},
         "decks": list(EXPECTED_SAMPLE_DECKS),
         "matchups": [
             {"p1": p1_name, "p2": p2_name}
@@ -905,13 +1010,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_OUTPUT_DIRECTORY,
         help="fresh directory for game_log, fidelity, manifest, and tracker artifacts",
     )
+    parser.add_argument(
+        "--game-offset", type=int, default=0,
+        help="global schedule offset used by parallel protocol shards",
+    )
+    parser.add_argument(
+        "--agent-model", type=Path,
+        help="optional MaskablePPO checkpoint for the learning/P1 seat",
+    )
+    parser.add_argument(
+        "--opponent-model", type=Path,
+        help="optional MaskablePPO checkpoint for the environment/P2 seat",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        run_harvest(args.games, args.seed, args.output, max_steps=args.max_steps)
+        run_harvest(
+            args.games, args.seed, args.output, max_steps=args.max_steps,
+            game_offset=args.game_offset, agent_model=args.agent_model,
+            opponent_model=args.opponent_model)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

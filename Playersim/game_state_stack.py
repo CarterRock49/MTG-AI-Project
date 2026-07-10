@@ -28,6 +28,42 @@ class GameStateStackMixin:
     def _effect_controller_from_id(self, controller_id):
         return self.p1 if controller_id == "p1" else self.p2
 
+    def _copy_stack_context(self, context):
+        """Copy rule data without dragging runtime engine objects into it.
+
+        Casting context contains a live ``Card`` object for mana-cost helpers.
+        Cards retain engine-owned objects (including locks), so blindly deep
+        copying that context during resolution raises and can strand the popped
+        physical spell outside every zone.  Finalizers only need declarative rule
+        data; runtime object references are deliberately omitted.
+        """
+        copied = {}
+        for key, value in dict(context or {}).items():
+            if key in {"card", "controller", "player", "ability"}:
+                continue
+            try:
+                copied[key] = copy_module.deepcopy(value)
+            except Exception:
+                logging.warning(
+                    "Omitting non-copyable stack context key %r during resolution.",
+                    key)
+        return copied
+
+    def _physical_occurrence_count(self, card_id):
+        """Count real occurrences of one shared card-database ID."""
+        count = 0
+        for player in (self.p1, self.p2):
+            for zone in ("library", "hand", "battlefield", "graveyard", "exile"):
+                count += player.get(zone, []).count(card_id)
+        for item in self.stack:
+            if not (isinstance(item, tuple) and len(item) >= 2
+                    and item[0] == "SPELL" and item[1] == card_id):
+                continue
+            item_context = item[3] if len(item) > 3 else {}
+            if not item_context.get("is_copy", False):
+                count += 1
+        return count
+
     def _run_effect_sequence(self, effects, source_id, controller, targets=None,
                              context=None, finalizer=None,
                              initial_success=True):
@@ -61,7 +97,7 @@ class GameStateStackMixin:
                     'source_id': source_id,
                     'controller_id': self._effect_controller_id(controller),
                     'targets': copy_module.deepcopy(targets),
-                    'resolution_context': copy_module.deepcopy(context or {}),
+                    'resolution_context': self._copy_stack_context(context),
                     'finalizer': copy_module.deepcopy(finalizer),
                     'success': success,
                 }
@@ -74,7 +110,7 @@ class GameStateStackMixin:
                     'source_id': source_id,
                     'controller_id': self._effect_controller_id(controller),
                     'targets': copy_module.deepcopy(targets),
-                    'resolution_context': copy_module.deepcopy(context or {}),
+                    'resolution_context': self._copy_stack_context(context),
                     'finalizer': copy_module.deepcopy(finalizer),
                     'success': success,
                 }
@@ -90,7 +126,7 @@ class GameStateStackMixin:
         controller = self._effect_controller_from_id(
             (finalizer or {}).get('controller_id'))
         source_id = (finalizer or {}).get('source_id')
-        context = copy_module.deepcopy((finalizer or {}).get('context', {}))
+        context = self._copy_stack_context((finalizer or {}).get('context', {}))
         if kind == 'instant_sorcery':
             return self._finish_instant_sorcery_resolution(
                 source_id, controller, context)
@@ -446,7 +482,7 @@ class GameStateStackMixin:
             logging.warning(f"Cannot copy missing spell card {spell_id}.")
             return None
 
-        new_context = copy_module.deepcopy(original_context or {})
+        new_context = self._copy_stack_context(original_context)
         existing_copy_ids = {
             item[3].get("copy_instance_id")
             for item in self.stack
@@ -466,7 +502,7 @@ class GameStateStackMixin:
             "copy_instance_id": copy_instance_id,
         })
         if context_overrides:
-            new_context.update(copy_module.deepcopy(context_overrides))
+            new_context.update(self._copy_stack_context(context_overrides))
 
         original_targets = new_context.get("targets")
         target_count = 0
@@ -1754,6 +1790,15 @@ class GameStateStackMixin:
         """Resolve the top item of the stack."""
         if not self.stack: return False
         top_item = self.stack.pop()
+        expected_spell_occurrences = None
+        if (isinstance(top_item, tuple) and len(top_item) >= 3
+                and top_item[0] == "SPELL"):
+            popped_context = top_item[3] if len(top_item) > 3 else {}
+            if not popped_context.get("is_copy", False):
+                # The stack object has already been popped, so add its one real
+                # occurrence to the count still visible in physical zones/stack.
+                expected_spell_occurrences = (
+                    self._physical_occurrence_count(top_item[1]) + 1)
         resolution_success = False
         new_special_phase_entered = False
         resolved_item_had_split_second = False # Track if the resolved item had split second
@@ -1844,6 +1889,24 @@ class GameStateStackMixin:
                 pass
         finally:
             # --- Post-Resolution Cleanup ---
+            # A resolving spell can legitimately live outside every physical
+            # zone while a policy choice (Dig, mutate position, etc.) is
+            # pending.  Its continuation/finalizer owns that occurrence until
+            # the choice completes, so recovering it here would duplicate or
+            # prematurely graveyard the spell.
+            if (expected_spell_occurrences is not None
+                    and not new_special_phase_entered):
+                spell_id = top_item[1]
+                actual_occurrences = self._physical_occurrence_count(spell_id)
+                if actual_occurrences < expected_spell_occurrences:
+                    controller = top_item[2]
+                    missing = expected_spell_occurrences - actual_occurrences
+                    controller.setdefault("graveyard", []).extend(
+                        [spell_id] * missing)
+                    logging.error(
+                        "Recovered %d lost physical occurrence(s) of spell %r "
+                        "after stack resolution.", missing, spell_id)
+
             # Clear split second flag *after* resolution if it was the last one
             if resolved_item_had_split_second:
                 continuation = (
@@ -2035,7 +2098,7 @@ class GameStateStackMixin:
             finalizer = {
                 'kind': 'modal_spell', 'source_id': spell_id,
                 'controller_id': self._effect_controller_id(controller),
-                'context': copy_module.deepcopy(context),
+                'context': self._copy_stack_context(context),
             }
             success, pending = self._run_effect_sequence(
                 modal_effects, spell_id, controller, mode_targets,
@@ -2382,7 +2445,7 @@ class GameStateStackMixin:
         finalizer = {
             'kind': 'instant_sorcery', 'source_id': spell_id,
             'controller_id': self._effect_controller_id(controller),
-            'context': copy_module.deepcopy(context),
+            'context': self._copy_stack_context(context),
         }
         success, pending = self._run_effect_sequence(
             effects, spell_id, controller, effect_targets,

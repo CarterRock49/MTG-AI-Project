@@ -16,6 +16,7 @@ wrong. They report as XFAIL and do not fail the suite; when a fix lands they
 report as XPASS, reminding you to flip the flag.
 """
 
+import copy
 import logging
 import numpy as np
 import os
@@ -3451,7 +3452,10 @@ def s_x_spell_choice_payment_and_resolution():
         "X spell did not ask the agent to choose X before payment"
     assert spell in player["hand"], "X spell left hand before its X choice was complete"
     assert sum(player["mana_pool"].values()) == pool_before, "mana was spent before X was chosen"
-    mask = get_env().action_handler.generate_valid_actions()
+    env = get_env()
+    assert np.array_equal(env._get_obs()["valid_x_range"], np.array([0, 3], dtype=np.int32)), \
+        "the observation did not publish the affordable X interval"
+    mask = env.action_handler.generate_valid_actions()
     assert all(mask[i] for i in (363, 364, 365)), "affordable X values 1-3 were not exposed"
     assert not mask[366], "an unaffordable X=4 action was exposed"
 
@@ -7643,6 +7647,11 @@ def s_beza_multi_condition_etb():
     assert len(activated) == 1 and isinstance(activated[0], ManaAbility), \
         f"Beza's Treasure did not register its printed mana ability: {[(type(a).__name__, getattr(a, 'cost', None), getattr(a, 'effect', None)) for a in activated]}"
     stack_before = list(gs.stack)
+    # Exercise the non-active-player path: the color sub-choice must return
+    # priority to the activator, not silently hand it to the active player.
+    gs.turn = 2
+    gs.cards_to_graveyard_this_turn.setdefault(gs.turn, [])
+    gs.priority_player = controller
     bf_idx = controller["battlefield"].index(treasure_id)
     _, ok = get_env().action_handler._handle_activate_ability(
         None, {"battlefield_idx": bf_idx, "ability_idx": 0})
@@ -7657,6 +7666,8 @@ def s_beza_multi_condition_etb():
     _, ok = get_env().action_handler._handle_choose_mode(green_index, {})
     assert ok and controller["mana_pool"].get("G", 0) == green_before + 1, \
         "choosing green did not add exactly one green mana"
+    assert gs.priority_player is controller, \
+        "mana color choice returned priority to AP instead of its activator"
 
     # Second game: opponent behind on every axis -> nothing happens.
     gs2 = fresh(seed=SEED + 3)
@@ -8073,7 +8084,280 @@ def scenario_policy_opponent_trigger_ordering():
     mask = env.action_handler.generate_valid_actions()
     action, _ = env._get_opponent_policy_action(opponent, mask, {"phase_context": "CHOOSE"})
     assert action == 353
+    class IllegalPolicy:
+        def predict(self, obs, action_masks=None, deterministic=True):
+            return int(np.flatnonzero(~np.asarray(action_masks, dtype=bool))[0]), None
+    env.set_opponent_policy(IllegalPolicy())
+    try:
+        env._get_opponent_policy_action(opponent, mask, {"phase_context": "CHOOSE"})
+        raise AssertionError("a mask-invalid checkpoint action used scripted fallback")
+    except RuntimeError as exc:
+        assert "mask-invalid" in str(exc)
     env.set_opponent_policy(None)
+
+
+@scenario("policy contract / combat", "every specialized combat action exposed by the mask carries executable context")
+def scenario_specialized_combat_mask_contexts():
+    gs = fresh(); env = get_env(); handler = env.action_handler
+    attacker = inject_into_zone(gs, gs.p1, {
+        "name": "Contract Attacker", "mana_cost": "", "type_line": "Creature",
+        "oracle_text": "", "power": 3, "toughness": 3}, "battlefield")
+    planeswalker = inject_into_zone(gs, gs.p2, {
+        "name": "Contract Walker", "mana_cost": "", "type_line": "Planeswalker",
+        "oracle_text": "", "loyalty": 3}, "battlefield")
+    battle = inject_into_zone(gs, gs.p2, {
+        "name": "Contract Battle", "mana_cost": "", "type_line": "Battle - Siege",
+        "oracle_text": "", "defense": 4}, "battlefield")
+    blocker_ids = [inject_into_zone(gs, gs.p2, {
+        "name": f"Contract Blocker {i}", "mana_cost": "", "type_line": "Creature",
+        "oracle_text": "", "power": 2, "toughness": 2}, "battlefield")
+        for i in range(2)]
+    gs.p1.get('entered_battlefield_this_turn', set()).discard(attacker)
+    for blocker_id in blocker_ids:
+        gs.p2.get('entered_battlefield_this_turn', set()).discard(blocker_id)
+
+    gs.mulligan_in_progress = False
+    gs.turn = 1
+    gs.phase = gs.PHASE_DECLARE_ATTACKERS
+    gs.priority_player = gs.p1
+    gs.agent_is_p1 = True
+    gs.current_attackers = []
+    mask = handler.generate_valid_actions()
+    assert not mask[378] and not mask[462], \
+        "a target action was exposed before an attacker was declared"
+
+    gs.current_attackers = [attacker]
+    mask = handler.generate_valid_actions()
+    assert mask[378] and mask[462], \
+        "declared attacker did not expose planeswalker/battle targets"
+    _, ok = handler._handle_attack_planeswalker(0, {})
+    assert ok and gs.planeswalker_attack_targets.get(attacker) == planeswalker
+    _, ok = handler._handle_attack_battle(0, context={})
+    assert ok and gs.battle_attack_targets.get(attacker) == battle \
+        and attacker not in gs.planeswalker_attack_targets
+    _, ok = handler._handle_attack_planeswalker(0, {})
+    assert ok and gs.planeswalker_attack_targets.get(attacker) == planeswalker \
+        and attacker not in gs.battle_attack_targets
+
+    gs.phase = gs.PHASE_DECLARE_BLOCKERS
+    gs.priority_player = gs.p2
+    gs.agent_is_p1 = False
+    gs.current_block_assignments = {}
+    gs.planeswalker_attack_targets = {}
+    gs.battle_attack_targets = {}
+    mask = handler.generate_valid_actions()
+    assert mask[383], "multi-block action was not exposed"
+    multi_context = handler.action_reasons_with_context[383]['context']
+    assert len(multi_context.get('blocker_identifiers', [])) >= 2
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(383)
+    assert not info.get('execution_failed') and len(
+        gs.current_block_assignments.get(attacker, [])) >= 2
+
+    gs.current_block_assignments = {}
+    gs.battle_attack_targets = {attacker: battle}
+    mask = handler.generate_valid_actions()
+    assert mask[204] and handler.action_reasons_with_context[204]['context']
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(204)
+    assert not info.get('execution_failed'), "mask-valid DEFEND_BATTLE failed"
+
+    gs.current_block_assignments = {}
+    gs.battle_attack_targets = {}
+    gs.planeswalker_attack_targets = {attacker: planeswalker}
+    mask = handler.generate_valid_actions()
+    assert mask[444] and handler.action_reasons_with_context[444]['context']
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(444)
+    assert not info.get('execution_failed'), \
+        "mask-valid PROTECT_PLANESWALKER failed"
+
+
+@scenario("policy contract / mask purity", "generating a paged action mask is deterministic and does not mutate choice state")
+def scenario_action_mask_is_pure_for_paged_choices():
+    gs = fresh(); env = get_env(); handler = env.action_handler
+    player = gs.p1 if gs.agent_is_p1 else gs.p2
+    gs.mulligan_in_progress = False
+    gs.phase = gs.PHASE_CHOOSE
+    gs.priority_player = player
+    gs.choice_context = {
+        "type": "dig_select", "player": player,
+        "options": list(range(10000, 10012)), "remaining": 1,
+        "selected": [], "rest_destination": "bottom", "choice_page": 0,
+    }
+    before = copy.deepcopy(gs.choice_context)
+    first = handler.generate_valid_actions()
+    second = handler.generate_valid_actions()
+    assert np.array_equal(first, second) and gs.choice_context == before
+    assert first[479], "paged choice omitted its next-page action"
+
+    handler.current_valid_actions = first
+    _, _, _, info = handler.apply_action(479)
+    assert not info.get('execution_failed') and gs.choice_context['choice_page'] == 1
+    page_one = copy.deepcopy(gs.choice_context)
+    next_mask = handler.generate_valid_actions()
+    assert gs.choice_context == page_one and next_mask[479]
+    handler.current_valid_actions = next_mask
+    _, _, _, info = handler.apply_action(479)
+    assert not info.get('execution_failed') and gs.choice_context['choice_page'] == 0, \
+        "page-next did not wrap using its generated page count"
+
+    gs.phase = gs.PHASE_CHOOSE
+    gs.priority_player = player
+    gs.choice_context = {
+        'type': 'land_mana', 'player': player, 'controller': player,
+        'source_id': player['battlefield'][0] if player['battlefield'] else 0,
+        'card_id': player['battlefield'][0] if player['battlefield'] else 0,
+        'options': [
+            {'symbol': 'W', 'damage': 0},
+            {'symbol': 'U', 'damage': 1},
+        ],
+    }
+    obs = env._get_obs()
+    assert env.last_observation_error is None, \
+        f"non-card choice options degraded the observation: {env.last_observation_error}"
+    assert not obs['choice_card_mask'].any(), \
+        "mana-option dictionaries were misrepresented as visible cards"
+
+
+@scenario("policy contract / hand window", "all ten observed hand slots expose ordinary land and spell actions")
+def scenario_ten_card_hand_action_window():
+    gs = fresh(); env = get_env(); handler = env.action_handler
+    player = gs.p1 if gs.agent_is_p1 else gs.p2
+    gs.mulligan_in_progress = False
+    gs.turn = 1 if player is gs.p1 else 2
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    gs.stack.clear()
+    player['mana_pool'] = {color: 10 for color in ('W', 'U', 'B', 'R', 'G', 'C')}
+    replace_hand(gs, player, [{
+        "name": f"Window Spell {i}", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Sorcery", "oracle_text": "You gain 1 life."
+    } for i in range(10)])
+    tenth_spell = player['hand'][9]
+    play_value = env.card_evaluator.evaluate_card(tenth_spell, "play")
+    assert np.isfinite(play_value) and play_value > 0, \
+        "the play-context evaluator silently collapsed a valid spell to zero"
+    mask = handler.generate_valid_actions()
+    assert mask[397] and handler.action_reasons_with_context[397][
+        'context'].get('hand_idx') == 9
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(397)
+    assert not info.get('execution_failed') and tenth_spell not in player['hand'], \
+        f"the tenth observed spell could not use its public action: {info}"
+
+    gs = fresh(); env = get_env(); handler = env.action_handler
+    player = gs.p1 if gs.agent_is_p1 else gs.p2
+    gs.mulligan_in_progress = False
+    gs.turn = 1 if player is gs.p1 else 2
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    replace_hand(gs, player, [{
+        "name": f"Window Filler {i}", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Sorcery", "oracle_text": ""
+    } for i in range(9)] + [{
+        "name": "Window Land 9", "mana_cost": "", "cmc": 0,
+        "type_line": "Basic Land - Forest", "oracle_text": "{T}: Add {G}."
+    }])
+    tenth_land = player['hand'][9]
+    mask = handler.generate_valid_actions()
+    assert mask[395] and handler.action_reasons_with_context[395][
+        'context'].get('hand_idx') == 9
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(395)
+    assert not info.get('execution_failed') and tenth_land in player['battlefield'], \
+        "the tenth observed land could not use its public action"
+
+    # Card identifier zero is a valid database key. It must not disappear from
+    # pending-cast and replacement-choice masks through truth-value checks.
+    gs = fresh(); env = get_env(); handler = env.action_handler
+    player = gs.p1 if gs.agent_is_p1 else gs.p2
+    gs.mulligan_in_progress = False
+    gs.turn = 1 if player is gs.p1 else 2
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    zero_card = gs._safe_get_card(0)
+    original_text = zero_card.oracle_text
+    try:
+        zero_card.oracle_text = "Kicker {1}"
+        player['mana_pool'] = {
+            color: 2 for color in ('W', 'U', 'B', 'R', 'G', 'C')}
+        gs.pending_spell_context = {'card_id': 0, 'controller': player}
+        mask = handler.generate_valid_actions()
+        assert mask[405] and mask[406], \
+            "card ID zero lost its pending kicker actions"
+
+        gs.pending_spell_context = None
+        if 0 not in player['graveyard']:
+            player['graveyard'].append(0)
+        gs.phase = gs.PHASE_CHOOSE
+        gs.priority_player = player
+        gs.choice_context = {
+            'type': 'dredge', 'player': player, 'card_id': 0, 'value': 1}
+        mask = handler.generate_valid_actions()
+        assert mask[308] and mask[11], \
+            "card ID zero lost its dredge/skip choice actions"
+    finally:
+        zero_card.oracle_text = original_text
+        gs.pending_spell_context = None
+        gs.choice_context = None
+
+    # Alternate faces keep their own timing. A creature-front Adventure/MDFC
+    # with an instant alternate half must remain available on the other turn.
+    adventure_spec = {
+        'name': 'Night Courier', 'mana_cost': '{2}{U}', 'cmc': 3,
+        'type_line': 'Creature - Human Scout', 'power': 2, 'toughness': 2,
+        'oracle_text': 'Quick Study {U} (Adventure)\n'
+                       'Instant - Adventure\nDraw a card.',
+    }
+    mdfc_spec = {
+        'name': 'Patient Adept // Sudden Insight', 'layout': 'modal_dfc',
+        'mana_cost': '{2}{U}', 'cmc': 3,
+        'type_line': 'Creature - Human Wizard', 'oracle_text': '',
+        'card_faces': [
+            {'name': 'Patient Adept', 'mana_cost': '{2}{U}',
+             'type_line': 'Creature - Human Wizard', 'oracle_text': ''},
+            {'name': 'Sudden Insight', 'mana_cost': '{U}',
+             'type_line': 'Instant', 'oracle_text': 'Draw a card.'},
+        ],
+    }
+
+    gs = fresh(); env = get_env(); handler = env.action_handler
+    player = gs.p1 if gs.agent_is_p1 else gs.p2
+    gs.mulligan_in_progress = False
+    gs.turn = 2 if player is gs.p1 else 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    gs.stack.clear()
+    player['mana_pool'] = {
+        color: 5 for color in ('W', 'U', 'B', 'R', 'G', 'C')}
+    replace_hand(gs, player, [adventure_spec, mdfc_spec])
+    adventure_id = player['hand'][0]
+    mask = handler.generate_valid_actions()
+    assert mask[196] and mask[189], \
+        "instant Adventure/MDFC alternate faces vanished outside sorcery timing"
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(196)
+    assert not info.get('execution_failed') and adventure_id not in player['hand'], \
+        "the mask-valid instant Adventure action failed"
+
+    gs = fresh(); env = get_env(); handler = env.action_handler
+    player = gs.p1 if gs.agent_is_p1 else gs.p2
+    gs.mulligan_in_progress = False
+    gs.turn = 2 if player is gs.p1 else 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    gs.stack.clear()
+    player['mana_pool'] = {
+        color: 5 for color in ('W', 'U', 'B', 'R', 'G', 'C')}
+    replace_hand(gs, player, [mdfc_spec])
+    mdfc_id = player['hand'][0]
+    mask = handler.generate_valid_actions()
+    assert mask[188], "instant MDFC back face was not exposed on the other turn"
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(188)
+    assert not info.get('execution_failed') and mdfc_id not in player['hand'], \
+        "the mask-valid instant MDFC back-face action failed"
 
 
 @scenario("deck legality", "format status, copy limits, bans, restrictions, basics, and minimum size are validated")

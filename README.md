@@ -1,6 +1,6 @@
 # MTG-RL: A Reinforcement Learning Agent for Magic: The Gathering
 
-This project implements a reinforcement learning agent that learns to play Magic: The Gathering through self-play. It uses the Stable Baselines 3 framework with a customized PPO (Proximal Policy Optimization) implementation for training.
+This project implements a reinforcement learning agent for two-player Magic: The Gathering. It uses Stable Baselines 3 with mask-aware PPO; the current training default plays a scripted opponent, while the Harvest protocol supports checkpoint-vs-checkpoint evaluation and promotion.
 
 ## Project Overview
 
@@ -40,7 +40,7 @@ not part of the current verification gates.
   - Combat resolution with combat tricks and blocking strategies
   - Mana system with proper color requirements
   - Card synergy evaluation
-  - Multi-turn planning
+  - Heuristic multi-turn planning features
   - Strategic memory for pattern recognition
 
 ## Neural Network Architecture
@@ -56,7 +56,9 @@ The model uses a custom architecture designed specifically for the structure of 
   
 - **FixedDimensionMaskableActorCriticPolicy**: Policy network that uses action masking to ensure only legal actions are selected.
 
-- **LSTM Integration**: Uses recurrent layers to capture sequential decision making and maintain game state memory.
+- **Sequence feature block**: The current extractor applies an LSTM-shaped gated
+  transform to a length-one input. Its parameters train, but hidden state is not
+  carried between policy calls, so this is not a recurrent policy yet.
 
 ## Prerequisites
 
@@ -78,7 +80,9 @@ python tests/smoke_test.py
 python tests/scenario_test.py
 python tests/train_smoke_test.py
 python tests/harvest_fixtures_test.py
-python tests/invariant_fuzz_test.py
+python tests/harvest_protocol_test.py
+python tests/invariant_fuzz_config_test.py
+python tests/invariant_fuzz_test.py --profile default
 ```
 
 On Windows, the checked-out virtual environment can be used explicitly with
@@ -87,9 +91,10 @@ On Windows, the checked-out virtual environment can be used explicitly with
 ### Sample-Deck Support Harvest
 
 The fixture harvester rotates through all eight audited decks by default and
-requires a fresh output directory. It rejects reset fallbacks, aborted games,
-mask-valid execution failures, corrupt compressed data, and cross-file count
-mismatches, then writes `harvest_run.json` as its success marker.
+requires a fresh output directory. It rejects reset fallbacks, degraded or
+out-of-space observations, mask-valid execution failures, mask-invalid
+checkpoint choices, aborted games, corrupt compressed data, and cross-file
+count mismatches, then writes `harvest_run.json` as its success marker.
 
 ```bash
 python harvest_fixtures.py --seed 20260710 --output harvest_runs/seed_20260710
@@ -98,11 +103,50 @@ python harvest_fixtures.py --seed 20260710 --output harvest_runs/seed_20260710
 This random-valid-vs-scripted run is for plumbing and support-manifest coverage;
 its win rates are not card- or deck-strength evidence.
 
+### Long-game invariant fuzzing
+
+The deterministic runner has `short` (300 actions), `default` (8,000 actions),
+and `long` (320,000 actions) profiles. A successful run creates no artifact
+directory. On failure it writes an atomic JSON payload containing the exact
+seed, actions, contexts, and state needed for replay.
+
+```bash
+python tests/invariant_fuzz_test.py --profile long --artifact-dir fuzz_failures
+python tests/invariant_fuzz_test.py --replay fuzz_failures/invariant_fuzz_seed_1701.json
+```
+
+The long profile also runs weekly and on demand through
+`.github/workflows/long-game-fuzz.yml`; failed-run replay files are retained as
+CI artifacts for 14 days.
+
+### Parallel checkpoint harvest and promotion
+
+Production harvesting uses isolated worker directories and publishes
+`harvest_protocol.json` only after every shard passes the strict fixture
+contract. Checkpoints are stamped by filename, size, and SHA-256 digest.
+
+```bash
+python harvest_protocol.py harvest --games 256 --workers 4 \
+  --agent-model models/candidate.zip --opponent-model models/champion.zip \
+  --output harvest_runs/candidate
+
+python harvest_protocol.py promote --games 64 --workers 4 \
+  --candidate models/candidate.zip --baseline models/champion.zip \
+  --minimum-score 0.55 --output harvest_runs/promotion_001
+```
+
+Promotion evaluates the candidate in both seats and requires both the score
+threshold and a clean fidelity/severe-support manifest. The protocol is ready,
+but a real promotion requires trained candidate and baseline checkpoints.
+
 ### Training an Agent
 
 ```bash
 python main.py --timesteps 1000000 --learning-rate 3e-4 --batch-size 256
 ```
+
+Training and evaluation use separate statistics directories and alternate the
+learned policy between P1 and P2 on successive episodes.
 
 ### Hyperparameter Optimization
 
@@ -171,7 +215,10 @@ The `enhanced_card_evaluator.py` module provides context-aware card evaluation t
 
 ### Multi-turn Planning
 
-The agent attempts to plan multiple turns ahead using the `strategic_planner.py` module, which uses a simplified simulation of future game states.
+The observation includes heuristic projections from the strategic-planner
+modules. Planner action recommendations are opt-in; training does not inject a
+planner-selected action by default. These features do not provide recurrent
+memory across policy calls.
 
 ## License
 

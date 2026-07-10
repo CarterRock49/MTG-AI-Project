@@ -116,7 +116,7 @@ class CombatHandlersMixin:
             if blocker_id in blockers_list:
                 currently_blocking_attacker = atk_id; break
 
-        if currently_blocking_attacker:
+        if currently_blocking_attacker is not None:
             gs.current_block_assignments[currently_blocking_attacker].remove(blocker_id)
             if not gs.current_block_assignments[currently_blocking_attacker]:
                 del gs.current_block_assignments[currently_blocking_attacker]
@@ -256,28 +256,16 @@ class CombatHandlersMixin:
         success = apply_combat_action(self.game_state, "PROTECT_PLANESWALKER", param, context=context)
         return (0.15 if success else -0.1), success
 
-    def _handle_attack_battle(self, param, **kwargs):
-         # Param needs to be (attacker_idx, battle_idx)
-         # The ACTION_MEANING needs fixing.
-         # We need to select an attacker.
-         gs = self.game_state
-         player = gs.p1 if gs.agent_is_p1 else gs.p2
-         # Select first valid attacker? This needs better logic.
-         attacker_idx = -1
-         for idx, cid in enumerate(player["battlefield"]):
-             if self.is_valid_attacker(cid):
-                 attacker_idx = idx
-                 break
-         if attacker_idx != -1 and param is not None:
-             # Store mapping for combat handler
-             gs._battle_attack_creatures = getattr(gs, '_battle_attack_creatures', {})
-             gs._battle_attack_creatures[param] = attacker_idx # Map battle_idx to creature_idx
-             success = apply_combat_action(gs, "ATTACK_BATTLE", param)
-             return (0.1 if success else -0.1), success
-         return -0.15, False # No valid attacker or battle index
+    def _handle_attack_battle(self, param, context=None, **kwargs):
+         # The combat handler assigns the target to the last declared attacker,
+         # matching the public mask's two-step declare-then-target contract.
+         success = apply_combat_action(
+             self.game_state, "ATTACK_BATTLE", param, context=context or {})
+         return (0.1 if success else -0.1), success
 
-    def _handle_defend_battle(self, param, **kwargs):
-         success = apply_combat_action(self.game_state, "DEFEND_BATTLE", param)
+    def _handle_defend_battle(self, param, context=None, **kwargs):
+         success = apply_combat_action(
+             self.game_state, "DEFEND_BATTLE", param, context=context or {})
          return (0.1 if success else -0.1), success
 
     def _handle_ninjutsu(self, param, context=None, **kwargs):
