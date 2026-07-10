@@ -113,13 +113,15 @@ class LayerSystem:
         timestamps_tuple = tuple(sorted(self.timestamps.items()))
         # BUGFIX: counters were absent from this hash, so adding/removing +1/+1
         # or -1/-1 counters never invalidated the cache -> stale power/toughness.
+        id_sort_key = lambda value: (type(value).__name__, str(value))
         counters_tuple = tuple(sorted(
-            (cid, tuple(sorted(getattr(gs._safe_get_card(cid), 'counters', {}).items())))
-            for cid in set(state_tuple_items)
-            if gs._safe_get_card(cid) is not None
+            ((cid, tuple(sorted(getattr(gs._safe_get_card(cid), 'counters', {}).items())))
+             for cid in set(state_tuple_items)
+             if gs._safe_get_card(cid) is not None),
+            key=lambda item: id_sort_key(item[0])
         ))
         current_state_tuple = (
-            tuple(sorted(state_tuple_items)),
+            tuple(sorted(state_tuple_items, key=id_sort_key)),
             self.effect_counter, # Track effect registrations/removals
             gs.turn, # Include turn number
             gs.phase, # Include phase
@@ -1411,10 +1413,18 @@ class LayerSystem:
                 
         return list(reversed(result))  # Reverse to get correct order
     
-    def remove_effects_by_source(self, source_id_to_remove, effect_description_contains=None):
-        """Remove all continuous effects originating from a specific source."""
+    def remove_effects_by_source(self, source_id_to_remove,
+                                 effect_description_contains=None,
+                                 preserve_durations=None):
+        """Remove continuous effects originating from a specific source.
+
+        Timed effects created by a resolving spell can outlive the physical
+        spell card. Callers handling a zone change may preserve those explicit
+        durations while still removing source-dependent static effects.
+        """
         ids_to_remove = []
         removed_count = 0 # Track number removed
+        preserved = set(preserve_durations or ())
 
         for layer_num in range(1, 8):
              effects_pool = []
@@ -1432,8 +1442,9 @@ class LayerSystem:
                        matches_source = data.get('source_id') == source_id_to_remove
                        matches_desc = (not effect_description_contains or
                                        (effect_description_contains in data.get('description','').lower()))
+                       preserves_duration = data.get('duration') in preserved
 
-                       if matches_source and matches_desc:
+                       if matches_source and matches_desc and not preserves_duration:
                             ids_to_remove.append((layer_num, sublayer_key, eid))
 
         # Perform removal

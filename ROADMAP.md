@@ -6,8 +6,8 @@ deck-construction AI searching for the best deck per format. Everything in
 this plan is ranked by one question: *does it make the statistics more
 trustworthy for the deck-builder?*
 
-Out of scope permanently: multiplayer, Commander, match-play (Bo3 is a
-possible late add only if target formats demand it).
+Out of scope permanently: multiplayer, Commander, Planechase/planar dice,
+and match-play (Bo3 is a possible late add only if target formats demand it).
 
 ---
 
@@ -16,7 +16,7 @@ possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 8/8, 6/6, 110/110).
+   every delivery (currently 8/8, 6/6, 155/155).
 2. **Zero known stats-corrupting bugs.** The silent-bug catalog (appendix)
    is closed; every fixed bug has a permanent guard scenario.
 3. **Quantified card coverage.** For each target format's card pool, the
@@ -25,7 +25,7 @@ The project is complete when all of the following hold:
    fully supported or explicitly excluded by the deck builder.
 4. **Choices are the agent's.** No rules decision that affects card value is
    silently auto-resolved for the agent (trigger order ✅, damage assignment
-   order ✅, targeting ▢, modal choice audit ▢, X choice audit ▢).
+   order ✅, targeting ▢, modal choice audit ✅, X choice audit ✅).
 5. **Trained play beats scripted play** and stats are harvested under
    self-play or league play, not vs. the random opponent.
 6. **Calibration passes.** Engine winrates for a small set of known-matchup
@@ -43,7 +43,7 @@ The project is complete when all of the following hold:
 - Tier 1 (rules correctness): ✅ complete — all seven items plus the P1
   placeholder triage delivered; see appendix for the bug catalog.
 - Test gates: smoke 8/8 (fixture decks now exercise triggers every episode),
-  training 6/6, scenarios 110/110 (grown from 12).
+  training 6/6, scenarios 155/155 (grown from 12).
 - **Stats collected before July 2026 are unusable** (wrong player, wrong
   winner, fictional play turns, cosmetic first strike, compounding P/T,
   dead replacement system). Wipe and re-harvest after the current engine
@@ -206,27 +206,243 @@ Remaining Tier 2 work:
   * **Target validation aliases** — singular/plural category keys and generic
     chosen-target contexts resolve consistently instead of spuriously fizzling.
   Regression-checked 110/110 scenarios after the round.
-  **Coverage status:** seven rounds plus 7.2 have closed ~45
+  **Round 7.3 (July 2026)** preserved attachments through phasing:
+  * **Indirect phasing groups** — Auras, Equipment, and other tracked
+    attachments phase out and in with the permanent they are attached to.
+  * **Cross-controller restoration** — an opponent-controlled Aura returns on
+    the enchanted permanent's phase-in rather than waiting for its controller.
+  * **Continuous effects** — attachment effects unregister while phased out
+    and rebuild on phase-in without severing the attachment relationship.
+  * **Clone-safe state** — phased groups store controller keys and their state
+    is copied into cloned game states used by lookahead.
+  Regression-checked 112/112 scenarios after the round.
+  **Round 7.4 (July 2026)** implemented reflexive-trigger sequencing:
+  * **Reflexive parser** — exact "When you do" and "When that player does"
+    riders stay paired with their prerequisite instead of ordinary clause
+    splitting resolving them unconditionally.
+  * **Separate response window** — a successful prerequisite queues a real
+    trigger through the APNAP pipeline; its effect no longer resolves inline.
+  * **Failure gating** — if the prerequisite action cannot happen, no reflexive
+    trigger is created.
+  * **Trigger-zone correctness** — battlefield death triggers no longer fire
+    from unrelated copies sitting in hand or graveyard.
+  Regression-checked 115/115 scenarios after the round.
+  **Round 7.5 (July 2026)** made spell copies rules-faithful and targetable:
+  * **Copied decisions** - modes, X, color, kicker/additional-cost state, and
+    original targets are deep-copied instead of erased.
+  * **Optional retargeting** - the action mask offers both legal new targets
+    and an explicit keep-original-targets path; selecting a target updates only
+    the identified copy stack item.
+  * **Shared copy path** - parsed copy effects, the legacy copy action, and
+    conspire now use one deterministic stack-copy implementation.
+  * **Target restrictions** - parsed "instant or sorcery" copy effects reject
+    creature and other ineligible spells while retaining the new-target rider.
+  * **Physical-card safety** - resolving or countering a copy never moves the
+    original card; the original spell retains and resolves against its targets.
+  Regression-checked 119/119 scenarios after the round.
+  **Round 7.6 (July 2026)** exposed modal and X decisions to the agent:
+  * **Rules-order casting** - modes and X are chosen while the card remains in
+    hand and before mana is paid; the normal cast path resumes afterward.
+  * **Modal finalization** - choose-one and optional choose-one-or-both spells
+    preserve selected modes, paid costs, priority state, and card movement.
+  * **Mode-aware targeting** - only selected modal text determines whether and
+    what kind of target the spell requests.
+  * **X payment and resolution** - affordable values 0-10 are action-masked,
+    the chosen value is paid once, copied into effect context, and X=0 remains
+    zero instead of falling back to a placeholder one.
+  * **Fixed-number isolation** - choosing X no longer overwrites unrelated
+    printed effect amounts; targeted destroy effects retain target semantics.
+  Regression-checked 124/124 scenarios after the round.
+  **Round 7.7 (July 2026)** exposed discard decisions to the affected player:
+  * **Card-level choices** - nonrandom discard effects enter `PHASE_CHOOSE` and
+    expose hand indices 0-9 through the existing `DISCARD_CARD` action range.
+  * **Queued counts and players** - multi-card and each-player effects remain
+    pending until every required card has been selected; the scripted opponent
+    now makes its own discard action instead of stalling the choice phase.
+  * **One discard pipeline** - effect and cleanup discards share replacement,
+    zone-movement, and Madness handling; random discard remains immediate.
+  * **Cleanup correctness** - maximum-hand-size cleanup pauses for the active
+    player's choice and no longer incorrectly makes the nonactive player
+    discard down to the active player's maximum hand size.
+  Regression-checked 130/130 scenarios after the round.
+  **Round 7.8 (July 2026)** completed ability targeting exposure and added meld:
+  * **Triggered targets** - targeted triggers are stacked with pending target
+    decisions, pause for `SELECT_TARGET`, and never enter the stack when no
+    legal required target exists.
+  * **Activated targets** - activated abilities choose targets before costs are
+    paid, then resume payment and stack placement with the selected targets.
+  * **Opponent target policy** - scripted opponents select their first legal
+    target action instead of stalling targeted abilities.
+  * **Effect-aware legality** - targeting validates the specific stack effect
+    text instead of depending only on the source card's full oracle text.
+  * **Meld** - Scryfall-style `all_parts` metadata identifies the partner and
+    result; both components exile, one combined permanent returns with the
+    result identity, and both physical cards separate when it leaves.
+  Regression-checked 135/135 scenarios after the round.
+  **Round 7.9 (July 2026)** completed direct and optional target choices:
+  * **Direct-effect targets** - invoking a targeted `AbilityEffect` without a
+    stack item now pauses for `SELECT_TARGET` and resumes only after the
+    controller chooses; the strategic auto-target fallback is gone.
+  * **Optional target counts** - "up to N targets" remains open after its
+    minimum is met, then commits on Pass or automatically at the maximum.
+  * **Shared finalization** - spells, copied spells, activated abilities, and
+    resumable direct effects use one bounded target-commit path.
+  * **Plural target parsing** - recognized plural target nouns normalize to
+    their singular rules types, so phrases such as "target creatures" expose
+    legal creature choices.
+  Regression-checked 137/137 scenarios after the round.
+  **Round 7.10 (July 2026)** first-touched numeric dice and Specialize:
+  * **Die-result tables** - multiline numeric result rows stay attached to the
+    spell or ability that rolls; exactly the row covering the rolled value is
+    parsed and resolved.
+  * **Roll state and triggers** - numeric rolls record side count, result,
+    roller, source, and turn in clone-safe history, then fire `DIE_ROLLED` for
+    cards watching die rolls.
+  * **Specialize choices** - the action mask exposes Specialize at sorcery
+    speed, asks which card to discard, and asks for a color when that card is
+    multicolored before paying either cost.
+  * **Linked perpetual identity** - the permanent keeps its physical ID while
+    adopting the selected `all_parts` variant's characteristics and abilities;
+    `SPECIALIZES` triggers fire, the identity persists across zones, and the
+    shared card object restores before the next game.
+  * **Fidelity boundary** - all five linked variants must exist in `card_db`;
+    incomplete families are marked `unparsed` instead of partially simulating.
+  Regression-checked 139/139 scenarios after the round.
+  **Round 7.11 (July 2026)** first-touched day/night and Mutate end to end:
+  * **Turn-start day/night** - the prior active player's spell count is
+    preserved through cleanup, checked after phasing and before untapping, and
+    applies the correct zero-spell day-to-night / two-spell night-to-day rules.
+  * **Daybound entry and faces** - the first daybound permanent establishes
+    day, permanents entering at night enter nightbound, synchronized transforms
+    refresh types/abilities/layers, and shared DFC identity resets next game.
+  * **Mutating creature spells** - action 426 now casts through the ordinary
+    alternative-cost and stack paths, exposes only owned non-Human creature
+    targets, and remains answerable before resolution.
+  * **Over/under and triggers** - resolution exposes the controller's position
+    choice, tracks ordered physical components, combines the top card's
+    characteristics with every component's abilities, and fires each parsed
+    whenever-this-creature-mutates ability.
+  * **Resolution and separation** - an illegal target makes the mutating spell
+    enter as an ordinary creature; a merged permanent carries counters/status
+    and sends every component to the same destination when it leaves.
+  Regression-checked 142/142 scenarios after the round.
+  **Round 7.12 (July 2026)** audited all eight sample decks and repaired their
+  shared mana-base behavior:
+  * **Sample-deck audit** - `SAMPLE_DECK_SUPPORT_AUDIT.md` inventories all 480
+    deck slots / 110 unique cards, separates confirmed gaps from unverified
+    paths, records affected copy counts, and ranks the next work by stats risk.
+  * **Land entry** - current "enters tapped" wording works alongside the older
+    template, and fast lands count other controlled lands at entry.
+  * **Agent mana choices** - multicolor lands expose their legal outputs in
+    `PHASE_CHOOSE` instead of silently producing the first printed color.
+  * **Pain and Verge lands** - colored pain-land modes deal their printed
+    damage; Verge secondary colors appear only when a required basic land type
+    is controlled. Restricted outputs remain in conditional mana pools.
+  This corrects land behavior across 114 of the 480 sample-deck slots.
+  Regression-checked 146/146 scenarios after the round.
+  **Round 7.13 (July 2026)** implemented stun counters across all untap paths:
+  * **Central replacement** - an untap attempt removes one stun counter and
+    leaves the permanent tapped; multiple counters require multiple attempts,
+    and replaced untaps do not emit `UNTAPPED`.
+  * **Every untap route** - turn-based untapping, resolving untap effects, and
+    untap-symbol costs all use the same replacement-aware permanent API.
+  * **Sequenced target effects** - sentence-separated and conjunction-separated
+    counter clauses retain the target selected by the preceding effect.
+  * **Sample cards** - Kaito's -2 taps and adds two counters; Floodpits Drowner's
+    ETB asks for a target, taps it, and adds one counter. Their unrelated
+    emblem/type-changing and stun-linked shuffle gaps remain explicit.
+  This closes stun semantics for 17 sample-deck slots.
+  Regression-checked 150/150 scenarios after the round.
+  **Round 7.14 (July 2026)** implemented Valiant and the sample decks' Role
+  tokens end to end:
+  * **Target events** - committed spell, activated-ability, triggered-ability,
+    direct-effect, retargeted-copy, and inherited-copy targets emit one shared
+    event. Per-controller turn tracking enforces Valiant's first friendly target
+    and resets when a turn starts or the object leaves the battlefield.
+  * **Sample Valiant cards** - Heartfire Hero receives its +1/+1 counter above
+    the targeting spell, while Emberheart Challenger exiles the library top and
+    grants the printed end-of-turn play permission.
+  * **Monster and Wicked Roles** - colorless Aura Role tokens enter already
+    attached, grant their printed P/T and trample effects, coexist across
+    controllers, and apply the newest-same-controller Role state-based action.
+    A displaced Wicked Role still queues and resolves its life-loss trigger.
+  * **Shared repairs found by the scenarios** - signed positive pump values now
+    parse, targeted combat tricks keep their targets, timed spell layers survive
+    the source card entering the graveyard, and layer hashes accept mixed deck
+    and token ID types.
+  This closes Valiant for 16 sample-deck slots and Role behavior for 9 slots;
+  unrelated Heartfire Hero and The Witch's Vanity gaps remain explicit in the
+  sample-deck audit. Regression-checked 155/155 scenarios after the round.
+  **Round 7.15 (July 2026)** implemented linked temporary exile and Nowhere to
+  Run's targeting exceptions:
+  * **Linked one-shot effects** - `Deep-Cavern Bat` exposes its optional filtered
+    opponent-hand choice, and `Leyline Binding` targets a nonland opposing
+    permanent. The chosen object is linked to its source and returns immediately
+    to hand or battlefield when that source leaves. If the source left before
+    the ability resolved, nothing is exiled.
+  * **Nowhere to Run** - its two static lines are live rules exceptions rather
+    than layer-6 ability removal. Its own ETB can target opposing creatures with
+    hexproof, ward does not trigger while it is present, and resolution-time
+    legality correctly reverts if it leaves.
+  * **Ward timing** - ward obligations are now captured when targets are
+    committed. Removing Nowhere later cannot create a retroactive ward trigger,
+    while ordinary legacy stack entries retain the dynamic compatibility path.
+  * **Shared parser repairs** - `target opponent`, `target nonland permanent`,
+    and player target categorization now reach their intended target classes;
+    targeting consults the current ability handler instead of a stale subsystem
+    reference.
+  This closes the linked-exile behavior for 8 sample slots and Nowhere to Run's
+  protection behavior for 8 slots. Leyline Binding's separate Domain cost
+  reduction remained open until Round 7.16. Regression-checked 162/162 scenarios
+  after the round.
+  **Round 7.16 (July 2026)** implemented the sample decks' outstanding casting
+  costs and conditional reductions:
+  * **Target-priced spells** - `Ride's End` and `This Town Ain't Big Enough`
+    choose targets before affordability or payment. Their `{3}` reduction reads
+    the committed tapped/friendly target, the action mask exposes casts that are
+    affordable only after that reduction, and no mana or zone movement occurs
+    while the target choice is pending. Ride's End also recognizes and exiles a
+    noncreature Vehicle.
+  * **Domain cost** - `Leyline Binding` reduces only generic mana for each
+    distinct Plains, Island, Swamp, Mountain, and Forest type among lands its
+    caster controls. Typed nonbasic lands contribute all their basic land types;
+    duplicate types do not count twice.
+  * **Nonmana casting costs** - `Fear of Isolation` exposes a mandatory
+    non-target permanent choice and returns it to its owner's hand before the
+    spell is stacked. `Analyze the Pollen` exposes sequential graveyard choices,
+    verifies total mana value 8, exiles exactly the selected cards, and may be
+    declined without moving them.
+  * **Evidence-dependent resolution** - Analyze searches only for a basic land
+    when evidence was declined and for a creature or land after evidence was
+    collected. Search movement no longer duplicates a card already moved to
+    hand by the library chooser.
+  * **Shared cost repair** - a precomputed final cost dictionary is paid as-is;
+    modifiers are no longer applied a second time inside `pay_mana_cost`.
+  This closes nonmana additional costs for 10 sample slots and conditional cost
+  reductions for 13 slots. Herd Migration's separate Domain effect value remains
+  open. Regression-checked 168/168 scenarios after the round.
+  **Coverage status:** rounds 1-7.16 have closed ~70
   effect/mechanic classes across
   removal, bounce, counters, tokens, keywords, sacrifice, reanimation,
   control, mana, library manipulation, variable-count effects, prevention,
   animation, levelers, Adventure, and duplicate-ID zone semantics. Miss rate
   fell 6→13→14→9→10→3 across parser samples before the first-touch sweep moved
-  into mechanic subsystems. Remaining gaps are increasingly specialized
-  (dice/planar, complex modal riders, "you choose a card" interactive discard,
-  meld/specialize). Reorder by real manifest counts whenever harvest runs begin.
+  into mechanic subsystems. The sample-deck audit now supersedes speculative
+  subsystem ordering: Map/explore behavior and remaining high-copy card riders
+  are the highest-impact gaps. Reorder by
+  real manifest counts whenever harvest runs begin.
 - ◐ **First-touch coverage sweep**: one scenario for every subsystem that has
   never had one (this practice found four phantom methods and three dead
-  subsystems; assume more remain in untested corners — next candidates:
-  phasing attachments, reflexive triggers, spell-copy retargeting, modal/X
-  choice audits, and remaining special card-frame mechanics).
+  subsystems; assume more remain in untested corners). Next candidates come
+  from `SAMPLE_DECK_SUPPORT_AUDIT.md`, starting with Map tokens and
+  agent-controlled explore, then Floodpits Drowner's stun-linked shuffle.
 
 ## Tier 3 — Training & environment quality
 
-1. ▢ **Choice exposure, remainder**: targeting as an agent choice (the
-   `resolve_targeting` auto-fallback becomes the exception, not the rule);
-   audit modal and X choices for silent auto-resolution; opponent ordering
-   choices route through a policy under self-play.
+1. ◐ **Choice exposure, remainder**: spell, activated-ability,
+   triggered-ability, and direct-effect targets are agent choices. Remaining:
+   independent modal target slots, more than 10 target options, and opponent
+   ordering choices routed through a policy under self-play.
 2. ▢ **Opponent policy**: self-play (or league of checkpoints) as soon as a
    trained model beats the scripted opponent; all harvest stats after that
    point come from policy-vs-policy games.
@@ -239,7 +455,7 @@ Remaining Tier 2 work:
 
 ## Tier 4 — Verification & calibration
 
-1. ✅ Golden scenario harness — 110 scenarios and growing; scenario-first is a
+1. ✅ Golden scenario harness — 168 scenarios and growing; scenario-first is a
    working agreement, not a suggestion.
 2. ▢ **Property tests**: zone-count conservation per action; SBA idempotence;
    the action mask never permits an illegal action (fuzz); mana pools empty
@@ -278,13 +494,20 @@ Remaining Tier 2 work:
 
 ## Known v1 limitations (consolidated)
 
+- Role support currently covers the Monster and Wicked Role definitions used by
+  the sample decks. Cursed, Royal, Sorcerer, Young Hero, and Virtuous Roles still
+  need definitions when a target deck requires them.
+- Heartfire Hero's Valiant counter is supported, but its separate power-based
+  death-damage rider still needs last-known-power effect support.
 - Delayed-trigger pronouns referring to objects created earlier in the same
   resolution mis-bind to the source (token-maker riders) and no-op safely.
 - Specific `remove_ability` is not an existence dependency in layer sorting;
   CR 305.7 (Blood Moon ability loss) not modeled; applicability-set
   dependencies out of scope while `affected_ids` is a static snapshot.
-- Transform/DFC printed-identity re-snapshot not wired (`snapshot_printed`
-  exists; call it on transform).
+- Day/night v1 covers designation establishment from daybound/nightbound
+  permanents, turn-start spell-count transitions, synchronized transforms, and
+  entry faces. Explicit spell/ability instructions that say it becomes day or
+  night still need a dedicated parsed effect.
 - MDFC back-face casting — v1 support added (July 2026): is_mdfc() no longer
   requires "//" in the text (two non-transform faces suffice), Card exposes
   get_face_cost/get_face_text/get_face_type_line per face, and cast_spell uses
@@ -305,19 +528,58 @@ Remaining Tier 2 work:
   targeting are still heuristic.
 - Repeated card IDs still model copies coarsely; last-moved location tracking
   and duplicate-preserving list zones repair the known first-touch failures,
-  but true per-copy object identity remains a deeper future cleanup.
+  but true per-copy object identity remains a deeper future cleanup. Linked
+  exile therefore cannot distinguish which one of two simultaneous same-ID
+  sources owns a particular link.
 - Clones/MCTS copies start with an empty delayed-trigger registry.
 - Opponent auto-orders triggers and blockers (deadlock-safe scope cut until
   self-play).
-- Phasing does not yet preserve attachments; snow payment can double-charge
-  (fidelity-counted); reflexive triggers (603.12) unimplemented;
-  `_evaluate_condition` vocabulary is thin (life totals, card counts,
+- Snow payment can double-charge (fidelity-counted); `_evaluate_condition`
+  vocabulary is thin (life totals, card counts,
   "you control X" only).
+- Reflexive-trigger v1 recognizes exact "When you do" / "When that player
+  does" riders when the prerequisite itself parses. Optional prerequisite
+  choices still use the underlying effect's heuristic until Tier 3 exposure.
+- Spell-copy retargeting can keep the complete inherited target set or replace
+  the complete set. Changing only some targets of a multi-target spell needs a
+  future slot-aware target-choice context; ordinary one-target copies are fully
+  exposed now.
+- X choices are currently capped at 10 by the fixed action range. Modal spells
+  use one shared target set after mode selection; modes requiring independent
+  target slots still need richer targeting context.
+- Discard choices expose only the first 10 hand slots. Simultaneous
+  each-player discards are committed sequentially, and the scripted opponent
+  selects its first available hand slot until policy-vs-policy self-play lands.
+- Target choices expose only the first 10 legal options. Independent target
+  slots for complex modal spells remain future work.
+- Round 7.16 target-conditioned pricing recognizes the sample cards' two exact
+  conditions: a tapped permanent and a permanent you control. Arbitrary Oracle
+  conditions that refer to target characteristics still need dedicated parsers.
+- Domain now drives Leyline Binding's casting cost. Domain effect values such as
+  Herd Migration's token count remain unsupported until an effect can consume
+  the same distinct-basic-land-type count.
+- Meld v1 requires the meld-result card object to be present in `card_db`; the
+  deck loader does not fetch a missing `all_parts` URI. Blink/return handling
+  for both component cards and clone-isolated meld identity remain deeper work.
+- Numeric die v1 supports ordinary result tables and emits die-roll events.
+  Roll modifiers, rerolls/ignored rolls, and tableless "equal to the result"
+  clauses remain future work. The nonnumeric planar die is intentionally out
+  of scope with Planechase.
+- Specialize v1 requires all five `all_parts` variant card objects in `card_db`;
+  missing families are fidelity-marked `unparsed`. Repeated card IDs and the
+  shared `card_db` also make simultaneous copies and lookahead specialization
+  coarser than true per-object perpetual identity.
+- Mutate v1 uses battlefield control as the engine's ownership approximation.
+  Ordered components, top/bottom identity, triggers, illegal-target fallback,
+  and same-destination separation are covered; per-component replacement
+  choices, library ordering, token-on-top status, commander routing, and
+  clone-isolated merged identity remain deeper object-model work.
 - `prevent_damage`/`redirect_damage` in game_state_damage are a dead API
   (no callers) — remove or wire deliberately.
-- Ward target-tax v1 supports parsed mana costs and simple "pay N life" costs
-  by auto-paying when possible. Sacrifice/discard costs and letting the agent
-  deliberately decline payment remain future choice-exposure work.
+- Ward target-tax v1 snapshots obligations when targets are committed and
+  supports parsed mana costs and simple "pay N life" costs by auto-paying when
+  possible. Sacrifice/discard costs and letting the agent deliberately decline
+  payment remain future choice-exposure work.
 
 ---
 

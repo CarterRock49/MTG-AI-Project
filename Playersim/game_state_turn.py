@@ -22,7 +22,145 @@ class GameStateTurnMixin:
         self.day_night_checked_this_turn = False
         logging.debug("Day/night cycle initialized (neither day nor night)")
 
-    def _untap_phase(self, player):
+    def _phasing_player_key(self, player):
+        """Return a clone-safe key for a player object."""
+        if player is self.p1:
+            return "p1"
+        if player is self.p2:
+            return "p2"
+        return None
+
+    def _phasing_player_from_key(self, key):
+        if key == "p1":
+            return self.p1
+        if key == "p2":
+            return self.p2
+        return None
+
+    def _build_phasing_groups(self, player, direct_ids):
+        """Group directly phasing permanents with attached permanents."""
+        reverse_links = {}
+        attached_to = {}
+        for attachment_controller in (self.p1, self.p2):
+            if not attachment_controller:
+                continue
+            battlefield = attachment_controller.get("battlefield", [])
+            for attachment_id, target_id in attachment_controller.get("attachments", {}).items():
+                if attachment_id not in battlefield:
+                    continue
+                reverse_links.setdefault(target_id, []).append((attachment_id, attachment_controller))
+                attached_to[attachment_id] = target_id
+
+        direct_ids = list(dict.fromkeys(direct_ids))
+        direct_set = set(direct_ids)
+        roots = [card_id for card_id in direct_ids if attached_to.get(card_id) not in direct_set]
+        roots.extend(card_id for card_id in direct_ids if card_id not in roots)
+
+        groups = []
+        claimed = set()
+        for root_id in roots:
+            if root_id in claimed:
+                continue
+            members = []
+            pending = [(root_id, player)]
+            while pending:
+                card_id, controller = pending.pop(0)
+                if card_id in claimed:
+                    continue
+                if card_id not in controller.get("battlefield", []):
+                    continue
+                claimed.add(card_id)
+                members.append((card_id, controller))
+                pending.extend(reverse_links.get(card_id, []))
+            if members:
+                groups.append((root_id, members))
+        return groups
+
+    def _phase_out_group(self, root_id, members, phase_player):
+        """Phase out a permanent and everything attached to it as one group."""
+        phase_player.setdefault("phased_out_permanents", set()).add(root_id)
+        for card_id, controller in members:
+            battlefield = controller.get("battlefield", [])
+            if card_id not in battlefield:
+                continue
+            battlefield.remove(card_id)
+            self.phased_out.add(card_id)
+            self.phased_out_state[card_id] = {
+                "controller": self._phasing_player_key(controller),
+                "phase_in_with": root_id,
+                "tapped": card_id in controller.get("tapped_permanents", set()),
+            }
+            controller.get("tapped_permanents", set()).discard(card_id)
+
+            card = self._safe_get_card(card_id)
+            logging.debug(f"Phased out: {getattr(card, 'name', card_id)}")
+            if self.ability_handler:
+                self.ability_handler.unregister_card_abilities(card_id)
+            else:
+                if self.layer_system:
+                    self.layer_system.remove_effects_by_source(card_id)
+                if self.replacement_effects:
+                    self.replacement_effects.remove_effects_by_source(card_id)
+
+        if self.layer_system:
+            self.layer_system.invalidate_cache()
+            self.layer_system.apply_all_effects()
+
+    def _phase_in_group(self, root_id):
+        """Restore a directly phased permanent and its indirect attachments."""
+        member_ids = [
+            card_id for card_id in list(self.phased_out)
+            if self.phased_out_state.get(card_id, {}).get("phase_in_with") == root_id
+        ]
+        restored = []
+        for card_id in member_ids:
+            stored = self.phased_out_state.get(card_id, {})
+            controller = self._phasing_player_from_key(stored.get("controller"))
+            if not controller:
+                controller = self._find_card_owner_fallback(card_id)
+            if not controller:
+                logging.error(f"Cannot phase in {card_id}: controller is unknown.")
+                continue
+
+            if card_id not in controller.get("battlefield", []):
+                controller["battlefield"].append(card_id)
+            self.phased_out.discard(card_id)
+            if stored.get("tapped"):
+                controller.setdefault("tapped_permanents", set()).add(card_id)
+            else:
+                controller.get("tapped_permanents", set()).discard(card_id)
+            if hasattr(self, "_last_card_locations"):
+                self._last_card_locations[card_id] = (controller, "battlefield")
+            restored.append((card_id, controller))
+
+        # All group members must exist again before abilities and attachment
+        # effects are rebuilt, especially for cross-controller Auras.
+        for card_id, controller in restored:
+            if self.ability_handler:
+                self.ability_handler.register_card_abilities(card_id, controller)
+            elif self.replacement_effects:
+                self.replacement_effects.register_card_replacement_effects(card_id, controller)
+
+        restored_ids = {card_id for card_id, _ in restored}
+        for attachment_controller in (self.p1, self.p2):
+            if not attachment_controller:
+                continue
+            for attachment_id, target_id in attachment_controller.get("attachments", {}).items():
+                if attachment_id in restored_ids:
+                    self._register_attachment_effects(attachment_id, target_id)
+
+        if self.layer_system:
+            self.layer_system.invalidate_cache()
+            self.layer_system.apply_all_effects()
+
+        for card_id, controller in restored:
+            self.phased_out_state.pop(card_id, None)
+            card = self._safe_get_card(card_id)
+            logging.debug(f"Phased in: {getattr(card, 'name', card_id)}")
+            self.trigger_ability(card_id, "PHASED_IN", {"controller": controller})
+        return [card_id for card_id, _ in restored]
+
+    def _untap_phase(self, player, previous_turn_spells_cast=None):
         """Reset mana and untap all permanents, handling Phasing."""
         # --- Phasing ---
         # 1. Phase In Permanents that should return
@@ -32,38 +170,8 @@ class GameStateTurnMixin:
             player_phased_out = player.get("phased_out_permanents", set())
             for card_id in list(player_phased_out): # Iterate copy
                  if card_id in self.phased_out: # Confirm it's in global set
-                      # Phase in logic: Remove from phased out, add to battlefield (untapped)
-                      self.phased_out.remove(card_id)
-                      player_phased_out.remove(card_id)
-                      if card_id not in player.get("battlefield", []): # Avoid duplicates if already there somehow
-                           player["battlefield"].append(card_id)
-                           # CR 702.26h (July 2026 fix): a permanent phases in
-                           # with the SAME status it had when it phased out --
-                           # the old code force-untapped it. Restore stored
-                           # status (the untap step may then untap it normally).
-                           stored = getattr(self, 'phased_out_state', {}).pop(card_id, None)
-                           if stored and stored.get('tapped'):
-                                player.setdefault("tapped_permanents", set()).add(card_id)
-                           else:
-                                player.get("tapped_permanents", set()).discard(card_id)
-                           # CR 702.26 (July 2026 fix): phase-out removed the
-                           # permanent's layer/replacement effects but nothing
-                           # ever re-registered them -- a phased-in permanent
-                           # lost its abilities for the rest of the game.
-                           if self.replacement_effects:
-                                try:
-                                     self.replacement_effects.register_card_replacement_effects(card_id, player)
-                                except Exception as _e:
-                                     logging.error(f"Error re-registering replacement effects on phase-in: {_e}")
-                           if hasattr(self, 'ability_handler') and self.ability_handler:
-                                try:
-                                     self.ability_handler.register_card_abilities(card_id, player)
-                                except Exception as _e:
-                                     logging.error(f"Error re-registering abilities on phase-in: {_e}")
-                           card = self._safe_get_card(card_id)
-                           logging.debug(f"Phased in: {getattr(card, 'name', card_id)}")
-                           self.trigger_ability(card_id, "PHASED_IN", {"controller": player})
-                           permanents_phasing_in.append(card_id)
+                      permanents_phasing_in.extend(self._phase_in_group(card_id))
+                 player_phased_out.discard(card_id)
 
         # 2. Check Permanents with Phasing on Battlefield
         # CR 702.26 (July 2026 fix): all phasing events of an untap step are
@@ -82,27 +190,13 @@ class GameStateTurnMixin:
 
         # 3. Phase Out identified permanents
         if permanents_phasing_out:
-            if not hasattr(self, 'phased_out'): self.phased_out = set() # Ensure set exists
-            player_phased_out = player.setdefault("phased_out_permanents", set())
-            for card_id in permanents_phasing_out:
-                if card_id in player["battlefield"]: # Ensure it's still there
-                    player["battlefield"].remove(card_id)
-                    self.phased_out.add(card_id)
-                    player_phased_out.add(card_id)
-                    # CR 702.26h: store status for identical restoration at
-                    # phase-in. Counters live on the card object and persist
-                    # automatically; attachments are a documented v1 gap.
-                    if not hasattr(self, 'phased_out_state'):
-                        self.phased_out_state = {}
-                    self.phased_out_state[card_id] = {
-                        'tapped': card_id in player.get("tapped_permanents", set()),
-                    }
-                    player.get("tapped_permanents", set()).discard(card_id)
-                    card = self._safe_get_card(card_id)
-                    logging.debug(f"Phased out: {getattr(card, 'name', card_id)}")
-                    # Remove effects, etc.
-                    if self.layer_system: self.layer_system.remove_effects_by_source(card_id)
-                    if self.replacement_effects: self.replacement_effects.remove_effects_by_source(card_id)
+            for root_id, members in self._build_phasing_groups(player, permanents_phasing_out):
+                self._phase_out_group(root_id, members, player)
+
+        # CR 727.1a: this turn-based action happens after phasing and before
+        # permanents untap, using the previous turn's active-player spell count.
+        if previous_turn_spells_cast is not None:
+            self.check_day_night_transition(previous_turn_spells_cast)
 
         # --- Standard Untap Actions ---
         # Reset mana pools
@@ -110,18 +204,18 @@ class GameStateTurnMixin:
         player["conditional_mana"] = {}
         player["phase_restricted_mana"] = {}
 
-        # Untap permanents *that did not phase out*
-        untapped_ids = set()
-        tapped_set = player.get("tapped_permanents", set())
+        # Untap permanents *that did not phase out*. Route every attempt
+        # through untap_permanent so stun and other replacements apply.
+        attempted_ids = set()
         for card_id in list(player.get("battlefield", [])): # Iterate copy, only those currently on BF
-            if card_id in tapped_set:
-                 tapped_set.remove(card_id)
-                 untapped_ids.add(card_id)
-                 card = self._safe_get_card(card_id)
-                 logging.debug(f"Untapped: {getattr(card, 'name', card_id)}")
-                 self.trigger_ability(card_id, "UNTAPPED", {"controller": player})
-
-        player["tapped_permanents"] = tapped_set # Update the set
+            # Repeated deck copies currently share definition IDs. Never make
+            # several untap attempts against the same tracked object in one
+            # untap step, which would consume several stun counters at once.
+            if card_id in attempted_ids:
+                 continue
+            attempted_ids.add(card_id)
+            if card_id in player.get("tapped_permanents", set()):
+                 self.untap_permanent(card_id, player)
 
         player["entered_battlefield_this_turn"] = set() # Clear sickness status
         player["land_played"] = False
@@ -227,6 +321,23 @@ class GameStateTurnMixin:
                 - If stack is not empty: Resolve top item. AP gets priority.
                 - If stack is empty: Advance phase. AP gets priority in new phase.
             """
+            if self.finish_optional_copy_targeting():
+                return
+            if self.phase == self.PHASE_CHOOSE and self.choice_context:
+                choice_type = self.choice_context.get("type")
+                if choice_type == "linked_exile" and self.choice_context.get("optional", False):
+                    self.decline_linked_exile_choice()
+                    return
+                if choice_type == "choose_mode":
+                    self.finalize_modal_spell_choice()
+                    return
+                if choice_type == "choose_x" and self.choice_context.get("min_x", 0) <= 0:
+                    self.choose_x_for_pending_spell(0)
+                    return
+                if choice_type == "collect_evidence":
+                    self.finish_collect_evidence_choice()
+                    return
+
             # --- 1. Critical Recovery: If priority is lost (None), reset to Active Player ---
             # This fixes the infinite NO_OP loop bug.
             if self.priority_player is None:
@@ -395,8 +506,10 @@ class GameStateTurnMixin:
                     non_active_p = self._get_non_active_player()
                     
                     # Discard down to hand size, remove damage, etc.
-                    self._cleanup_step_actions(active_p)
-                    self._cleanup_step_actions(non_active_p)
+                    if self._cleanup_step_actions(active_p):
+                        return
+                    if self._cleanup_step_actions(non_active_p, discard_to_max=False):
+                        return
                     
                     # Rule 514.3: Check for State-Based Actions or Triggers
                     sba_happened = self.check_state_based_actions()
@@ -408,6 +521,13 @@ class GameStateTurnMixin:
                         self.priority_pass_count = 0
                         return # Stop advancement, handle priority in Cleanup
 
+                    # Preserve the prior active player's count before the new
+                    # turn resets per-turn casting history.
+                    previous_turn_spell_count = sum(
+                        1 for spell in self.spells_cast_this_turn
+                        if isinstance(spell, tuple) and len(spell) >= 2
+                        and spell[1] == active_p)
+
                     # If clean, proceed to NEXT TURN
                     self.turn += 1
                     logging.info(f"=== ADVANCING TO TURN {self.turn} ===")
@@ -416,7 +536,7 @@ class GameStateTurnMixin:
                     new_active_p = self._get_active_player() # Update active player var
 
                     # UNTAP STEP (Rule 502) - No priority
-                    self._untap_phase(new_active_p)
+                    self._untap_phase(new_active_p, previous_turn_spell_count)
                     self.check_state_based_actions() 
 
                     # Auto-advance to UPKEEP (Rule 503) - Priority starts here
@@ -502,6 +622,7 @@ class GameStateTurnMixin:
                 player["land_played"] = False
                 player["entered_battlefield_this_turn"] = set()
                 player["activated_this_turn"] = set()
+                player["targeted_permanents_this_turn"] = set()
                 player["lost_life_this_turn"] = False
                 player["pw_activations"] = {} # Reset PW activations per turn
         logging.debug(f"Turn {self.turn}: Reset turn tracking variables.")
@@ -586,13 +707,6 @@ class GameStateTurnMixin:
         event_type = phase_event_map.get(self.phase)
 
         if event_type:
-            # Check Day/Night (handle based on phase)
-            if self.phase == self.PHASE_UPKEEP and hasattr(gs, 'check_day_night_transition') and not self.day_night_checked_this_turn:
-                self.check_day_night_transition()
-            elif self.phase == self.PHASE_END_STEP and hasattr(gs, 'check_day_night_transition') and not self.day_night_checked_this_turn:
-                 # Rule 513.2 allows day/night check here too
-                 self.check_day_night_transition()
-
             # Saga Counters (Beginning of Precombat Main - Rule 714.2b) - Should happen AFTER upkeep triggers resolve
             if self.phase == self.PHASE_MAIN_PRECOMBAT and hasattr(gs, 'advance_saga_counters'):
                  self.advance_saga_counters(active_player)
@@ -614,22 +728,20 @@ class GameStateTurnMixin:
              # e.g., DECLARE_ATTACKERS might have its own triggers checked elsewhere
              pass
 
-    def _cleanup_step_actions(self, player):
-        """Handles the Cleanup Step actions for a given player."""
-        if not player: return
+    def _cleanup_step_actions(self, player, discard_to_max=True):
+        """Handle cleanup actions; return True while waiting for a choice."""
+        if not player:
+            return False
 
         # 1. Discard down to maximum hand size
         max_hand = self.max_hand_size # Can be modified by effects
-        if len(player.get("hand", [])) > max_hand:
+        if discard_to_max and len(player.get("hand", [])) > max_hand:
             num_to_discard = len(player["hand"]) - max_hand
             logging.info(f"{player['name']} discarding {num_to_discard} card(s) due to hand size.")
-            # TODO: Implement AI/Player choice for discard
-            # Simple: Discard last N cards drawn/added
-            for _ in range(num_to_discard):
-                if player["hand"]:
-                    card_id = player["hand"].pop(-1) # Discard last card
-                    self.move_card(card_id, player, "hand_implicit", player, "graveyard", cause="cleanup_discard")
-            self.check_state_based_actions() # Check immediately after discard
+            if self.start_discard_choice(
+                    [player], count=num_to_discard, source_id=None,
+                    cause="cleanup_discard"):
+                return bool(self.choice_context)
 
         # 2. Remove damage marked on permanents
         player["damage_counters"] = {}
@@ -654,6 +766,7 @@ class GameStateTurnMixin:
             if removed_count > 0: logging.debug(f"Cleanup: Removed {removed_count} temporary layer effects.")
         # Clear other temporary game state trackers (need specific cleanup logic)
         if hasattr(self, 'haste_until_eot'): self.haste_until_eot.clear()
+        return False
 
     def _get_next_turn_player(self):
         """Determines who the active player will be on the next turn."""
@@ -718,103 +831,96 @@ class GameStateTurnMixin:
         
         return False
 
-    def check_day_night_transition(self):
-        """
-        Check and update the day/night state based on spells cast this turn.
-        This is called during the end step of each turn.
-        """
+    def check_day_night_transition(self, spells_cast=None):
+        """Apply the turn-start day/night action from the prior turn's count."""
         if self.day_night_checked_this_turn:
             return
-            
-        # Count spells cast by active player this turn
-        active_player = self._get_active_player()
-        spells_cast = sum(1 for spell in self.spells_cast_this_turn if isinstance(spell, tuple) 
-                        and len(spell) >= 2 and spell[1] == active_player)
-        
+
+        if spells_cast is None:
+            active_player = self._get_active_player()
+            spells_cast = sum(
+                1 for spell in self.spells_cast_this_turn
+                if isinstance(spell, tuple) and len(spell) >= 2
+                and spell[1] == active_player)
+
         old_state = self.day_night_state
-        
-        # Apply transition rules
-        if self.day_night_state is None:
-            # If neither day nor night, and no spells were cast, it becomes night
-            if spells_cast == 0:
-                self.day_night_state = "night"
-                logging.debug("It becomes night (no spells cast)")
-            elif spells_cast >= 1:
-                self.day_night_state = "day"
-                logging.debug(f"It becomes day (player cast {spells_cast} spells)")
-        elif self.day_night_state == "day":
-            # If day, and at least two spells were cast, it becomes night
-            if spells_cast >= 2:
-                self.day_night_state = "night"
-                logging.debug(f"It becomes night (player cast {spells_cast} spells)")
-        elif self.day_night_state == "night":
-            # If night, and no spells were cast, it becomes day
-            if spells_cast == 0:
-                self.day_night_state = "day"
-                logging.debug("It becomes day (no spells cast)")
-        
-        # If the state changed, transform all daybound/nightbound cards
+
+        if self.day_night_state == "day" and spells_cast == 0:
+            self.day_night_state = "night"
+            logging.debug("It becomes night (the previous active player cast no spells)")
+        elif self.day_night_state == "night" and spells_cast >= 2:
+            self.day_night_state = "day"
+            logging.debug(
+                f"It becomes day (the previous active player cast {spells_cast} spells)")
+
         if self.day_night_state != old_state:
             self.transform_day_night_cards()
-        
+
         self.day_night_checked_this_turn = True
 
-    def transform_day_night_cards(self):
-        """
-        Transform all daybound/nightbound cards when day/night state changes.
-        
-        Returns:
-            list: List of cards that were transformed
-        """
-        if not hasattr(self, 'day_night_state'):
-            logging.warning("Day/night state not initialized")
+    @staticmethod
+    def _day_night_face_indexes(card):
+        faces = getattr(card, "faces", None) or []
+        if len(faces) < 2:
+            return None
+        day_index = night_index = None
+        for index, face in enumerate(faces):
+            text = str(face.get("oracle_text", "")).lower()
+            if "daybound" in text:
+                day_index = index
+            if "nightbound" in text:
+                night_index = index
+        if day_index is None or night_index is None:
+            return None
+        return day_index, night_index
+
+    def prepare_day_night_entry(self, card_id):
+        """Set a daybound/nightbound permanent's entry face without transforming it."""
+        card = self._safe_get_card(card_id)
+        indexes = self._day_night_face_indexes(card) if card else None
+        if not indexes:
+            return False
+
+        day_index, night_index = indexes
+        if self.day_night_state is None:
+            current_index = getattr(card, "current_face", day_index)
+            self.day_night_state = "night" if current_index == night_index else "day"
+            self.transform_day_night_cards(exclude_ids={card_id})
+
+        desired_index = day_index if self.day_night_state == "day" else night_index
+        if getattr(card, "current_face", None) != desired_index:
+            card.set_current_face(desired_index)
+        return True
+
+    def transform_day_night_cards(self, exclude_ids=None):
+        """Synchronize every daybound/nightbound permanent to the designation."""
+        if self.day_night_state not in ("day", "night"):
             return []
-            
+
+        excluded = set(exclude_ids or [])
         transformed_cards = []
-        
-        # Process all permanents in battlefield
         for player in [self.p1, self.p2]:
             for card_id in player["battlefield"]:
+                if card_id in excluded:
+                    continue
                 card = self._safe_get_card(card_id)
-                if not card or not hasattr(card, 'oracle_text'):
+                indexes = self._day_night_face_indexes(card) if card else None
+                if not indexes:
                     continue
-                
-                oracle_text = card.oracle_text.lower()
-                has_daybound = "daybound" in oracle_text
-                has_nightbound = "nightbound" in oracle_text
-                
-                if not has_daybound and not has_nightbound:
-                    continue
-                    
-                # Determine if card should transform
-                should_transform = False
-                if has_daybound and self.day_night_state == "night" and not getattr(card, "is_night_side", False):
-                    should_transform = True
-                elif has_nightbound and self.day_night_state == "day" and getattr(card, "is_night_side", True):
-                    should_transform = True
-                    
-                # Apply transformation
-                if should_transform and hasattr(card, "transform"):
-                    # Transform the card
-                    card.transform()
+                day_index, night_index = indexes
+                desired_index = day_index if self.day_night_state == "day" else night_index
+                old_index = getattr(card, "current_face", None)
+                if old_index != desired_index and self.transform_card(card_id):
                     transformed_cards.append(card_id)
-                    
-                    # Create context for transformation triggers
                     context = {
                         "card": card,
                         "controller": player,
-                        "from_state": "day" if has_daybound else "night",
-                        "to_state": "night" if has_daybound else "day"
+                        "from_state": "day" if old_index == day_index else "night",
+                        "to_state": self.day_night_state,
                     }
-                    
-                    # Trigger transformation ability
-                    self.trigger_ability(card_id, "TRANSFORMED", context)
-                    
-                    # Also trigger day/night change ability
                     self.trigger_ability(card_id, "DAY_NIGHT_CHANGED", context)
-                    
                     logging.debug(f"{card.name} transformed due to day/night change")
-        
+
         return transformed_cards
 
     def check_priority(self, player=None):
@@ -908,4 +1014,4 @@ class GameStateTurnMixin:
                 logging.debug(f"Saga {saga_card.name} completed and sacrificed")
         
         return advanced_sagas
-
+

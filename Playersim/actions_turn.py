@@ -482,6 +482,17 @@ class TurnPhaseHandlersMixin:
 
     def _handle_pass_priority(self, param, **kwargs):
         gs = self.game_state
+        if gs.phase == gs.PHASE_TARGETING and gs.targeting_context:
+            context = gs.targeting_context
+            selected_count = len(context.get("selected_targets", []))
+            keep_original_targets = (
+                context.get("allow_keep_original_targets") and selected_count == 0)
+            min_targets = context.get(
+                "min_targets", context.get("required_count", 1))
+            if not keep_original_targets and selected_count >= min_targets:
+                reward, success = self._finalize_targeting_choice()
+                if success:
+                    return reward, True
         gs._pass_priority() # Let GameState handle the logic
         return 0.0, True # Action execution succeeded
 
@@ -498,4 +509,4 @@ class TurnPhaseHandlersMixin:
         """Handles the dedicated NO_OP action when a search fails."""
         logging.debug("Executed NO_OP_SEARCH_FAIL action.")
         return 0.0, True # Action itself is always successful
-
+

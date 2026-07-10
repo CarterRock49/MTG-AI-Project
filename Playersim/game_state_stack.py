@@ -4,6 +4,7 @@ Extracted from game_state.py. This module defines behavior only (a mixin);
 all state lives on GameState itself, which composes every mixin.
 """
 
+import copy as copy_module
 import logging
 from .ability_utils import EffectFactory
 import re
@@ -19,12 +20,18 @@ class GameStateStackMixin:
     def _get_target_type_from_text(self, text):
          """Simple helper to guess target type."""
          text = text.lower()
-         if "target creature" in text: return "creature"
-         if "target player" in text: return "player"
+         if "target creature or vehicle" in text:
+             return "creature_or_vehicle"
+         if ("target creature" in text
+                 or re.search(r"\btarget(?:\s+[a-z-]+){1,4}\s+creatures?\b", text)):
+             return "creature"
+         if "target player" in text or "target opponent" in text: return "player"
          if "target artifact" in text: return "artifact"
          if "target enchantment" in text: return "enchantment"
          if "target land" in text: return "land"
-         if "target permanent" in text: return "permanent"
+         if ("target permanent" in text
+                 or re.search(r"\btarget(?:\s+[a-z-]+){1,4}\s+permanents?\b", text)):
+             return "permanent"
          if "any target" in text: return "any"
          return "target" # Default
 
@@ -36,6 +43,81 @@ class GameStateStackMixin:
             # exception handling converted into 'error' game endings.
             return self.ability_handler.check_abilities(card_id, event_type, context)
         return []
+
+    def notify_targets_committed(self, source_id, controller, targets, stack_context=None):
+        """Emit target events after a spell or ability's targets are final.
+
+        The per-controller set records every battlefield permanent that player
+        has targeted this turn, even when it has no Valiant ability yet. This
+        keeps first-time checks correct if an object gains Valiant later.
+        """
+        if not controller or not isinstance(targets, dict):
+            return 0
+        targeted_this_turn = controller.setdefault(
+            "targeted_permanents_this_turn", set())
+        target_ids = []
+        for value in targets.values():
+            if isinstance(value, (list, tuple, set)):
+                target_ids.extend(value)
+
+        emitted = 0
+        for target_id in dict.fromkeys(target_ids):
+            target_controller, target_zone = self.find_card_location(target_id)
+            if target_zone != "battlefield":
+                continue
+            first_time = target_id not in targeted_this_turn
+            targeted_this_turn.add(target_id)
+            self.trigger_ability(target_id, "BECOMES_TARGET", {
+                "target_id": target_id,
+                "target_controller": target_controller,
+                "targeting_controller": controller,
+                "targeting_source_id": source_id,
+                "first_time_targeted_by_controller_this_turn": first_time,
+            })
+            emitted += 1
+
+        if stack_context is None and source_id is not None:
+            for item in reversed(self.stack):
+                if not (isinstance(item, tuple) and len(item) >= 4
+                        and item[1] == source_id and item[2] is controller
+                        and isinstance(item[3], dict)):
+                    continue
+                candidate = item[3]
+                if candidate.get("targets") == targets:
+                    stack_context = candidate
+                    break
+        if isinstance(stack_context, dict):
+            stack_context["ward_obligations"] = self._collect_ward_obligations(
+                controller, targets)
+            stack_context["ward_checked_on_targeting"] = True
+        return emitted
+
+    def _collect_ward_obligations(self, controller, targets):
+        """Snapshot ward triggers at the moment targets are committed."""
+        obligations = []
+        for target_id in self._flatten_target_ids(targets):
+            if target_id in ["p1", "p2"]:
+                continue
+            target_card = self._safe_get_card(target_id)
+            target_controller = self.get_card_controller(target_id)
+            if (not target_card or not target_controller
+                    or target_controller is controller
+                    or not self.check_keyword(target_id, "ward")):
+                continue
+            if (self.ability_handler
+                    and hasattr(self.ability_handler, "suppresses_target_protection")
+                    and self.ability_handler.suppresses_target_protection(
+                        controller, target_id, "ward")):
+                continue
+            ward_costs = []
+            if self.ability_handler and hasattr(self.ability_handler, 'get_ward_costs'):
+                ward_costs = self.ability_handler.get_ward_costs(target_id)
+            if not ward_costs:
+                ward_costs = ["ward_generic"]
+            obligations.extend(
+                {"target_id": target_id, "cost": ward_cost}
+                for ward_cost in ward_costs)
+        return obligations
 
     def add_to_stack(self, item_type, source_id, controller, context=None):
             """
@@ -70,6 +152,422 @@ class GameStateStackMixin:
             else:
                 # Still update stack size even if not resetting priority context
                 logging.debug("Added to stack during special choice phase, priority maintained.")
+
+    @staticmethod
+    def _target_count_from_text(effect_text):
+        text = (effect_text or "").lower()
+        word_counts = {"two": 2, "three": 3, "four": 4, "five": 5}
+        counted = re.search(r"\btarget\s+(two|three|four|five)\b", text)
+        if not counted:
+            counted = re.search(r"\b(?:up to\s+)?(two|three|four|five)\s+target\b", text)
+        if counted:
+            return word_counts[counted.group(1)]
+        return max(1, text.count("target "))
+
+    def start_pending_stack_target_choice(self):
+        """Open the next unresolved target choice already waiting on the stack."""
+        if self.targeting_context:
+            return True
+
+        stack_index = 0
+        while stack_index < len(self.stack):
+            item = self.stack[stack_index]
+            if not (isinstance(item, tuple) and len(item) >= 4):
+                stack_index += 1
+                continue
+            item_type, source_id, controller, context = item
+            if not context.get("target_choice_pending"):
+                stack_index += 1
+                continue
+
+            effect_text = context.get("targeting_text") or context.get("effect_text", "")
+            target_type = self._get_target_type_from_text(effect_text)
+            required_count = int(context.get(
+                "required_count", self._target_count_from_text(effect_text)))
+            min_targets = 0 if "up to" in effect_text.lower() else required_count
+            valid_map = self.targeting_system.get_valid_targets(
+                source_id, controller, target_type, effect_text=effect_text)
+            valid_ids = {target_id for ids in valid_map.values() for target_id in ids}
+
+            if len(valid_ids) < min_targets:
+                logging.debug(
+                    f"{item_type} {source_id} was not put on the stack: "
+                    f"{len(valid_ids)}/{min_targets} legal targets available.")
+                self.stack.pop(stack_index)
+                self.last_stack_size = len(self.stack)
+                continue
+
+            instance_id = context.get("target_instance_id")
+            if not instance_id:
+                instance_id = f"{item_type}:{source_id}:{self.turn}:{stack_index}:{id(context)}"
+                context["target_instance_id"] = instance_id
+                self.stack[stack_index] = item[:3] + (context,)
+
+            if self.previous_priority_phase is None and self.phase not in [
+                    self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+                self.previous_priority_phase = self.phase
+            self.phase = self.PHASE_TARGETING
+            self.targeting_context = {
+                "source_id": source_id,
+                "controller": controller,
+                "required_type": target_type,
+                "required_count": required_count,
+                "min_targets": min_targets,
+                "max_targets": required_count,
+                "selected_targets": [],
+                "effect_text": effect_text,
+                "target_instance_id": instance_id,
+            }
+            self.priority_player = controller
+            self.priority_pass_count = 0
+            return True
+
+        if (not self.stack and self.phase == self.PHASE_PRIORITY
+                and self.previous_priority_phase is not None):
+            self.phase = self.previous_priority_phase
+            self.previous_priority_phase = None
+            self.priority_player = self._get_active_player()
+            self.priority_pass_count = 0
+        return False
+
+    def copy_spell_on_stack(self, stack_reference, controller, copied_by=None,
+                            allow_new_targets=False, context_overrides=None):
+        """Create a spell copy while preserving the decisions made for the original."""
+        original_item = None
+        if isinstance(stack_reference, int):
+            if 0 <= stack_reference < len(self.stack):
+                original_item = self.stack[stack_reference]
+        elif isinstance(stack_reference, tuple):
+            original_item = stack_reference
+
+        if not (isinstance(original_item, tuple) and len(original_item) >= 4
+                and original_item[0] == "SPELL"):
+            logging.warning(f"Cannot copy non-spell stack item: {stack_reference}")
+            return None
+
+        _, spell_id, original_controller, original_context = original_item
+        spell = self._safe_get_card(spell_id)
+        if not spell:
+            logging.warning(f"Cannot copy missing spell card {spell_id}.")
+            return None
+
+        new_context = copy_module.deepcopy(original_context or {})
+        existing_copy_ids = {
+            item[3].get("copy_instance_id")
+            for item in self.stack
+            if isinstance(item, tuple) and len(item) > 3 and isinstance(item[3], dict)
+        }
+        base_copy_id = f"copy_{self.turn}_{len(self.stack)}"
+        copy_instance_id = base_copy_id
+        suffix = 2
+        while copy_instance_id in existing_copy_ids:
+            copy_instance_id = f"{base_copy_id}_{suffix}"
+            suffix += 1
+
+        new_context.update({
+            "is_copy": True,
+            "copied_by": copied_by,
+            "original_caster": original_controller,
+            "copy_instance_id": copy_instance_id,
+        })
+        if context_overrides:
+            new_context.update(copy_module.deepcopy(context_overrides))
+
+        original_targets = new_context.get("targets")
+        target_count = 0
+        if isinstance(original_targets, dict):
+            target_count = sum(
+                len(ids) for ids in original_targets.values()
+                if isinstance(ids, (list, tuple, set))
+            )
+        elif isinstance(original_targets, (list, tuple, set)):
+            target_count = len(original_targets)
+
+        requires_target = bool(new_context.get("requires_target", target_count > 0))
+        required_count = int(new_context.get("num_targets", target_count or 1))
+        can_retarget = bool(allow_new_targets and requires_target and required_count > 0)
+        new_context["needs_new_targets"] = can_retarget
+
+        self.add_to_stack("SPELL", spell_id, controller, new_context)
+        logging.debug(
+            f"Created copy {copy_instance_id} of {getattr(spell, 'name', spell_id)} "
+            f"controlled by {controller.get('name', 'unknown')}."
+        )
+
+        if can_retarget:
+            target_type = self._get_target_type_from_text(
+                getattr(spell, "oracle_text", ""))
+            if target_type == "target" and isinstance(original_targets, dict) and len(original_targets) == 1:
+                category = next(iter(original_targets))
+                singular_categories = {
+                    "creatures": "creature", "players": "player",
+                    "permanents": "permanent", "spells": "spell",
+                    "lands": "land", "artifacts": "artifact",
+                    "enchantments": "enchantment",
+                    "planeswalkers": "planeswalker", "cards": "card",
+                    "abilities": "ability",
+                }
+                target_type = singular_categories.get(category)
+            if not target_type:
+                target_type = "target"
+
+            self.previous_priority_phase = self.phase
+            self.phase = self.PHASE_TARGETING
+            self.targeting_context = {
+                "source_id": spell_id,
+                "copy_instance_id": copy_instance_id,
+                "controller": controller,
+                "required_type": target_type,
+                "required_count": required_count,
+                "min_targets": int(new_context.get("min_targets", required_count)),
+                "max_targets": int(new_context.get("max_targets", required_count)),
+                "selected_targets": [],
+                "effect_text": getattr(spell, "oracle_text", ""),
+                "allow_keep_original_targets": True,
+            }
+            self.priority_player = controller
+            self.priority_pass_count = 0
+        elif target_count:
+            self.notify_targets_committed(
+                spell_id, controller,
+                original_targets if isinstance(original_targets, dict) else {},
+                stack_context=new_context)
+
+        return copy_instance_id
+
+    def finish_optional_copy_targeting(self):
+        """Keep a copied spell's inherited targets and leave its targeting choice."""
+        context = self.targeting_context
+        if not (self.phase == self.PHASE_TARGETING and context
+                and context.get("allow_keep_original_targets")
+                and not context.get("selected_targets")):
+            return False
+
+        controller = context.get("controller")
+        source_id = context.get("source_id")
+        copy_instance_id = context.get("copy_instance_id")
+        inherited_targets = {}
+        inherited_context = None
+        for item in reversed(self.stack):
+            if not (isinstance(item, tuple) and len(item) >= 4
+                    and item[0] == "SPELL" and item[1] == source_id):
+                continue
+            item_context = item[3] if isinstance(item[3], dict) else {}
+            if item_context.get("copy_instance_id") == copy_instance_id:
+                inherited_targets = item_context.get("targets", {})
+                inherited_context = item_context
+                break
+        self.notify_targets_committed(
+            source_id, controller,
+            inherited_targets if isinstance(inherited_targets, dict) else {},
+            stack_context=inherited_context)
+        self.targeting_context = None
+        if self.previous_priority_phase is not None:
+            self.phase = self.previous_priority_phase
+            self.previous_priority_phase = None
+        else:
+            self.phase = self.PHASE_PRIORITY
+        self.priority_pass_count = 0
+        self.priority_player = self._get_active_player() or controller
+        logging.debug("Copied spell kept its inherited targets.")
+        return True
+
+    def finalize_modal_spell_choice(self):
+        """Resume a pending cast after its modes have been selected."""
+        choice = self.choice_context
+        if not (self.phase == self.PHASE_CHOOSE and choice
+                and choice.get("type") == "choose_mode"):
+            return False
+
+        selected_modes = list(choice.get("selected_modes", []))
+        min_required = int(choice.get("min_required", 1))
+        max_required = int(choice.get("max_required", 1))
+        if not (min_required <= len(selected_modes) <= max_required):
+            return False
+
+        card_id = choice.get("card_id")
+        controller = choice.get("controller") or choice.get("player")
+        if card_id is None or controller is None:
+            logging.error("Cannot finalize modal spell: missing card or controller.")
+            return False
+
+        cast_context = dict(choice.get("original_cast_context", {}))
+        cast_context["selected_modes"] = selected_modes
+        return_phase = self.previous_priority_phase
+        self.choice_context = None
+        self.previous_priority_phase = None
+        self.phase = return_phase if return_phase is not None else self.PHASE_PRIORITY
+        success = self.cast_spell(card_id, controller, cast_context)
+        if success:
+            logging.debug(f"Finalized modal spell {card_id} with modes {selected_modes}.")
+        return success
+
+    def choose_x_for_pending_spell(self, x_value):
+        """Resume a pending cast after the player chooses the value of X."""
+        choice = self.choice_context
+        if not (self.phase == self.PHASE_CHOOSE and choice
+                and choice.get("type") == "choose_x"):
+            return False
+        min_x = int(choice.get("min_x", 0))
+        max_x = int(choice.get("max_x", 0))
+        if not isinstance(x_value, int) or not min_x <= x_value <= max_x:
+            return False
+
+        card_id = choice.get("card_id") or choice.get("source_id")
+        controller = choice.get("controller") or choice.get("player")
+        cast_context = dict(choice.get("original_cast_context", {}))
+        cast_context["X"] = x_value
+        return_phase = self.previous_priority_phase
+        self.choice_context = None
+        self.previous_priority_phase = None
+        self.phase = return_phase if return_phase is not None else self.PHASE_PRIORITY
+        if card_id is None or controller is None:
+            logging.error("Cannot resume X spell: missing card or controller.")
+            return False
+        return self.cast_spell(card_id, controller, cast_context)
+
+    @staticmethod
+    def _casting_additional_cost(card):
+        """Parse the sample-deck nonmana casting costs handled as choices."""
+        oracle_text = getattr(card, "oracle_text", "").lower() if card else ""
+        if re.search(
+                r"as an additional cost to cast this spell,\s*return a permanent "
+                r"you control to its owner'?s hand", oracle_text):
+            return {"type": "return_permanent"}
+        evidence_match = re.search(
+            r"as an additional cost to cast this spell,\s*you may collect evidence (\d+)",
+            oracle_text)
+        if evidence_match:
+            return {"type": "collect_evidence", "threshold": int(evidence_match.group(1))}
+        return None
+
+    def _begin_casting_choice(self, choice_context):
+        if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+            self.previous_priority_phase = self.phase
+        self.phase = self.PHASE_CHOOSE
+        self.choice_context = choice_context
+        self.priority_player = choice_context.get("player")
+        self.priority_pass_count = 0
+        return True
+
+    def _resume_after_casting_choice(self, choice, cast_context):
+        card_id = choice.get("card_id")
+        controller = choice.get("controller") or choice.get("player")
+        return_phase = self.previous_priority_phase
+        self.choice_context = None
+        self.previous_priority_phase = None
+        self.phase = return_phase if return_phase is not None else self.PHASE_PRIORITY
+        self.priority_player = controller
+        self.priority_pass_count = 0
+        if card_id is None or controller is None:
+            return False
+        return self.cast_spell(card_id, controller, cast_context)
+
+    def choose_casting_additional_return(self, option_index):
+        """Pay a mandatory casting cost by returning one controlled permanent."""
+        choice = self.choice_context
+        if not (self.phase == self.PHASE_CHOOSE and choice
+                and choice.get("type") == "casting_additional_return"):
+            return False
+        options = choice.get("options", [])
+        if not isinstance(option_index, int) or not 0 <= option_index < len(options):
+            return False
+        permanent_id = options[option_index]
+        controller = choice.get("controller") or choice.get("player")
+        if (permanent_id not in controller.get("battlefield", [])
+                or self.get_card_controller(permanent_id) is not controller):
+            return False
+        owner = self._find_card_owner_fallback(permanent_id) or controller
+        if not self.move_card(
+                permanent_id, controller, "battlefield", owner, "hand",
+                cause="additional_cost",
+                context={"source_id": choice.get("card_id"),
+                         "casting_additional_cost": "return_permanent"}):
+            return False
+
+        cast_context = dict(choice.get("original_cast_context", {}))
+        cast_context["sample_nonmana_cost_complete"] = True
+        cast_context["returned_for_additional_cost"] = permanent_id
+        success = self._resume_after_casting_choice(choice, cast_context)
+        if not success and permanent_id in owner.get("hand", []):
+            self.move_card(
+                permanent_id, owner, "hand", controller, "battlefield",
+                cause="additional_cost_rollback")
+        return success
+
+    def choose_collect_evidence_card(self, option_index):
+        """Stage one graveyard card toward a collect-evidence threshold."""
+        choice = self.choice_context
+        if not (self.phase == self.PHASE_CHOOSE and choice
+                and choice.get("type") == "collect_evidence"):
+            return False
+        options = choice.get("options", [])
+        if not isinstance(option_index, int) or not 0 <= option_index < len(options):
+            return False
+        card_id = options[option_index]
+        controller = choice.get("controller") or choice.get("player")
+        if card_id not in controller.get("graveyard", []):
+            return False
+        options.pop(option_index)
+        choice.setdefault("selected_cards", []).append(card_id)
+        card = self._safe_get_card(card_id)
+        try:
+            mana_value = int(getattr(card, "cmc", 0) or 0)
+        except (TypeError, ValueError):
+            mana_value = 0
+        choice["selected_mana_value"] = (
+            int(choice.get("selected_mana_value", 0)) + mana_value)
+        return True
+
+    def finish_collect_evidence_choice(self):
+        """Decline evidence, or exile staged cards and resume the pending cast."""
+        choice = self.choice_context
+        if not (self.phase == self.PHASE_CHOOSE and choice
+                and choice.get("type") == "collect_evidence"):
+            return False
+        controller = choice.get("controller") or choice.get("player")
+        selected = list(choice.get("selected_cards", []))
+        total = int(choice.get("selected_mana_value", 0))
+        threshold = int(choice.get("threshold", 0))
+        if selected and total < threshold:
+            return False
+
+        moved = []
+        if selected:
+            for card_id in selected:
+                if not self.move_card(
+                        card_id, controller, "graveyard", controller, "exile",
+                        cause="collect_evidence",
+                        context={"source_id": choice.get("card_id"),
+                                 "evidence_threshold": threshold}):
+                    for moved_id in reversed(moved):
+                        self.move_card(
+                            moved_id, controller, "exile", controller, "graveyard",
+                            cause="additional_cost_rollback")
+                    return False
+                moved.append(card_id)
+
+        cast_context = dict(choice.get("original_cast_context", {}))
+        cast_context["sample_nonmana_cost_complete"] = True
+        cast_context["evidence_collected"] = bool(selected)
+        cast_context["evidence_cards"] = list(selected)
+        success = self._resume_after_casting_choice(choice, cast_context)
+        if not success:
+            for card_id in reversed(moved):
+                self.move_card(
+                    card_id, controller, "exile", controller, "graveyard",
+                    cause="additional_cost_rollback")
+        return success
+
+    @staticmethod
+    def _effect_targets_from_context(context):
+        """Combine chosen targets with casting choices consumed by effects."""
+        targets = copy_module.deepcopy(context.get("targets") or {})
+        if "X" in context:
+            targets["X"] = context["X"]
+        if "evidence_collected" in context:
+            targets["evidence_collected"] = bool(context["evidence_collected"])
+        return targets
 
     @staticmethod
     def _combine_cost_dicts(cost_dict1, cost_dict2):
@@ -123,6 +621,25 @@ class GameStateStackMixin:
         if self.ability_handler and hasattr(self.ability_handler, '_parse_modal_text'):
              modal_modes, min_modes, max_modes = self.ability_handler._parse_modal_text(getattr(card, 'oracle_text', ''))
              if modal_modes: is_modal_spell = True
+
+        # Modes are chosen before targets and costs are determined (CR 601.2b).
+        if is_modal_spell and 'selected_modes' not in context:
+             if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+                 self.previous_priority_phase = self.phase
+             self.phase = self.PHASE_CHOOSE
+             self.choice_context = {
+                 'type': 'choose_mode', 'player': player, 'controller': player,
+                 'card_id': card_id,
+                 'num_choices': len(modal_modes),
+                 'min_required': min_modes, 'max_required': max_modes,
+                 'available_modes': modal_modes, 'selected_modes': [],
+                 'original_cast_context': dict(context),
+                 'resolved': False,
+             }
+             self.priority_player = player
+             self.priority_pass_count = 0
+             logging.info(f"Waiting for mode choice before casting {card.name}.")
+             return True
 
         # --- 3. Determine Base Cost String ---
         cast_for_impending = context.get('cast_for_impending', False) # Check flag set by handler
@@ -192,11 +709,125 @@ class GameStateStackMixin:
                         # *** FIXED: Use internal helper repeatedly ***
                         final_cost_dict = self._combine_cost_dicts(final_cost_dict, escalate_cost_each_dict)
 
-        # Apply Generic Cost Modifiers LAST
-        final_cost_dict = self.mana_system.apply_cost_modifiers(player, final_cost_dict, card_id, context)
+        # Work out target bounds before the final cost because some sample
+        # spells price themselves from the targets chosen at CR 601.2c.
+        requires_target = False
+        num_targets = 0
+        up_to_N = False
+        targeting_text = context.get('effect_text') or getattr(card, 'oracle_text', '')
+        if is_modal_spell:
+            selected_modes = context.get('selected_modes', [])
+            targeting_text = " ".join(
+                modal_modes[index]
+                for index in selected_modes
+                if 0 <= index < len(modal_modes)
+            )
+        targeting_text_lower = targeting_text.lower()
+        requires_target = "target" in targeting_text_lower
+        num_targets = self._target_count_from_text(targeting_text) if requires_target else 0
+        up_to_N = "up to" in targeting_text_lower
+        min_targets = 0 if up_to_N else num_targets
+        targets_committed = (
+            "targets" in context and isinstance(context.get("targets"), dict))
 
-        # --- Check Affordability & Targets ---
-        # ...(rest of checks and logic remain largely the same, just ensure final_cost_dict is used)...
+        # Apply Generic Cost Modifiers LAST. Preserve the premodifier total so
+        # an affordability probe can recalculate once with a candidate target.
+        cost_before_modifiers = final_cost_dict.copy()
+        final_cost_dict = self.mana_system.apply_cost_modifiers(
+            player, final_cost_dict, card_id, context)
+
+        # X is chosen while casting, before affordability, payment, or zone
+        # movement. Resume the same cast after the agent supplies the value.
+        if final_cost_dict.get('X', 0) > 0 and 'X' not in context:
+            affordable_values = []
+            for x_value in range(0, 11):
+                candidate_context = dict(context)
+                candidate_context['X'] = x_value
+                if self.mana_system.can_pay_mana_cost(
+                        player, final_cost_dict, candidate_context):
+                    affordable_values.append(x_value)
+            if not affordable_values:
+                logging.warning(f"Cannot cast {card.name}: no affordable value of X.")
+                return False
+            if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+                self.previous_priority_phase = self.phase
+            self.phase = self.PHASE_CHOOSE
+            self.choice_context = {
+                'type': 'choose_x', 'player': player, 'controller': player,
+                'card_id': card_id, 'source_id': card_id,
+                'min_x': min(affordable_values), 'max_x': max(affordable_values),
+                'original_cast_context': dict(context),
+            }
+            self.priority_player = player
+            self.priority_pass_count = 0
+            logging.info(f"Waiting for X choice before casting {card.name}.")
+            return True
+
+        # --- Check Targets and target-conditioned affordability ---
+        if requires_target and num_targets > 0:
+            if not self.targeting_system:
+                logging.warning("Cannot check target availability: TargetingSystem missing.")
+                return False
+            target_type = self._get_target_type_from_text(targeting_text)
+            if targets_committed:
+                chosen_targets = context.get("targets", {})
+                chosen_count = len(self._flatten_target_ids(chosen_targets))
+                if not min_targets <= chosen_count <= num_targets:
+                    logging.warning(
+                        f"Cannot cast {card.name}: chose {chosen_count} targets, "
+                        f"expected {min_targets}-{num_targets}.")
+                    return False
+                if not self.targeting_system.validate_targets(
+                        card_id, chosen_targets, player,
+                        effect_text=targeting_text):
+                    logging.warning(f"Cannot cast {card.name}: chosen targets are illegal.")
+                    return False
+            else:
+                valid_targets_map = self.targeting_system.get_valid_targets(
+                    card_id, player, target_type, effect_text=targeting_text)
+                valid_target_ids = {
+                    target_id
+                    for ids in valid_targets_map.values()
+                    for target_id in ids
+                }
+                if len(valid_target_ids) < min_targets:
+                    logging.warning(
+                        f"Cannot cast {card.name}: Not enough valid targets available "
+                        f"({len(valid_target_ids)}/{min_targets} needed).")
+                    return False
+
+                if self.mana_system.has_target_dependent_reduction(card):
+                    can_pay_without_discount = self.mana_system.can_pay_mana_cost(
+                        player, final_cost_dict, context)
+                    can_pay_with_discount = (
+                        self.mana_system.can_pay_with_target_dependent_reduction(
+                            player, cost_before_modifiers, card_id, context))
+                    if not (can_pay_without_discount or can_pay_with_discount):
+                        logging.warning(
+                            f"Cannot cast {card.name}: no legal target selection is affordable.")
+                        return False
+                    if self.phase not in [
+                            self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+                        self.previous_priority_phase = self.phase
+                    self.phase = self.PHASE_TARGETING
+                    self.targeting_context = {
+                        "source_id": card_id, "controller": player,
+                        "required_type": target_type,
+                        "required_count": num_targets,
+                        "min_targets": min_targets,
+                        "max_targets": num_targets,
+                        "selected_targets": [],
+                        "effect_text": targeting_text,
+                        "resume_cast": True,
+                        "original_cast_context": dict(context),
+                    }
+                    self.priority_player = player
+                    self.priority_pass_count = 0
+                    logging.info(
+                        f"Waiting for targets before determining the cost of {card.name}.")
+                    return True
+
+        # --- Check Affordability and nonmana costs ---
         additional_cost_info = context.get('additional_cost_info')
         can_pay_non_mana_add = True
         if context.get('pay_additional') and additional_cost_info:
@@ -207,27 +838,49 @@ class GameStateStackMixin:
 
         # Check final mana affordability
         if not self.mana_system.can_pay_mana_cost(player, final_cost_dict, context):
-            cost_str_log = self._format_mana_cost_for_logging(final_cost_dict, context.get('X', 0))
+            cost_str_log = self.mana_system._format_mana_cost_for_logging(
+                final_cost_dict, context.get('X', 0))
             logging.warning(f"Cannot cast {card.name}: Cannot afford final cost {cost_str_log}.")
             return False
 
-        # Check if required targets exist (only for non-modal before paying cost)
-        requires_target = False; num_targets = 0; up_to_N = False; total_valid_targets = 0
-        if not is_modal_spell:
-            oracle_text = getattr(card, 'oracle_text', '').lower()
-            requires_target = "target" in oracle_text
-            num_targets = getattr(card, 'num_targets', 1) if requires_target else 0
-            up_to_N = "up to" in oracle_text
-            if requires_target and num_targets > 0:
-                 if self.targeting_system:
-                      valid_targets_map = self.targeting_system.get_valid_targets(card_id, player)
-                      total_valid_targets = sum(len(v) for v in valid_targets_map.values())
-                      min_required = 0 if up_to_N else num_targets
-                      if total_valid_targets < min_required:
-                          logging.warning(f"Cannot cast {card.name}: Not enough valid targets available ({total_valid_targets}/{min_required} needed).")
-                          return False
-                 else:
-                      logging.warning("Cannot check target availability: TargetingSystem missing.")
+        sample_additional_cost = self._casting_additional_cost(card)
+        if (sample_additional_cost
+                and not context.get("sample_nonmana_cost_complete", False)):
+            if sample_additional_cost["type"] == "return_permanent":
+                options = list(player.get("battlefield", []))
+                if not options:
+                    logging.warning(
+                        f"Cannot cast {card.name}: no permanent can pay its return cost.")
+                    return False
+                return self._begin_casting_choice({
+                    "type": "casting_additional_return",
+                    "player": player, "controller": player,
+                    "card_id": card_id, "source_id": card_id,
+                    "options": options,
+                    "original_cast_context": dict(context),
+                })
+            if sample_additional_cost["type"] == "collect_evidence":
+                threshold = sample_additional_cost["threshold"]
+                available_value = 0
+                for graveyard_id in player.get("graveyard", []):
+                    graveyard_card = self._safe_get_card(graveyard_id)
+                    try:
+                        available_value += int(getattr(graveyard_card, "cmc", 0) or 0)
+                    except (TypeError, ValueError):
+                        pass
+                if available_value >= threshold:
+                    return self._begin_casting_choice({
+                        "type": "collect_evidence",
+                        "player": player, "controller": player,
+                        "card_id": card_id, "source_id": card_id,
+                        "threshold": threshold,
+                        "options": list(player.get("graveyard", [])),
+                        "selected_cards": [],
+                        "selected_mana_value": 0,
+                        "original_cast_context": dict(context),
+                    })
+                context["sample_nonmana_cost_complete"] = True
+                context["evidence_collected"] = False
 
         # --- Costs Paid Here ---
         # 1. Pay Non-Mana Additional Costs FIRST
@@ -277,44 +930,31 @@ class GameStateStackMixin:
         final_stack_context.pop('additional_cost_info', None)
         final_stack_context.pop('source_idx', None)
 
-        # --- Modal Divergence / Add to Stack / Targeting Phase ---
-        if is_modal_spell:
-             # ...(modal logic remains the same)...
-             logging.debug(f"Entering CHOICE phase for modal spell: {card.name}")
+        self.add_to_stack("SPELL", card_id, player, final_stack_context)
+        if targets_committed:
+             self.notify_targets_committed(
+                 card_id, player, final_stack_context.get("targets", {}),
+                 stack_context=final_stack_context)
+        elif requires_target and num_targets > 0:
+             logging.debug(f"{card.name} requires target(s). Entering TARGETING phase.")
              if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
                  self.previous_priority_phase = self.phase
-             self.phase = self.PHASE_CHOOSE
-             self.choice_context = {
-                 'type': 'choose_mode', 'player': player, 'card_id': card_id,
-                 'num_choices': len(modal_modes), 'min_required': min_modes, 'max_required': max_modes,
-                 'available_modes': modal_modes, 'selected_modes': [],
-                 'original_cast_context': final_stack_context.copy(), # Store state BEFORE mode choice
-                 'resolved': False
-             }
-             self.priority_player = player; self.priority_pass_count = 0
-             logging.info(f"Modal spell {card.name} cast. Waiting for mode choice.")
-        else:
-             self.add_to_stack("SPELL", card_id, player, final_stack_context)
-             if requires_target and num_targets > 0:
-                  # ...(targeting setup remains the same)...
-                  logging.debug(f"{card.name} requires target(s). Entering TARGETING phase.")
-                  if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
-                      self.previous_priority_phase = self.phase
-                  self.phase = self.PHASE_TARGETING
-                  self.targeting_context = {
-                      "source_id": card_id, "controller": player,
-                      "required_type": self._get_target_type_from_text(getattr(card,'oracle_text','')),
-                      "required_count": num_targets, "min_targets": 0 if up_to_N else num_targets,
-                      "max_targets": num_targets, "selected_targets": [],
-                      "effect_text": getattr(card, 'oracle_text', ''),
-                      "stack_info": { # Store info to update the correct stack item later
-                            "item_type": "SPELL", "source_id": card_id, "controller": player,
-                            "context": final_stack_context # The context added to the stack
-                       }
+             self.phase = self.PHASE_TARGETING
+             self.targeting_context = {
+                 "source_id": card_id, "controller": player,
+                 "required_type": self._get_target_type_from_text(targeting_text),
+                 "required_count": num_targets, "min_targets": 0 if up_to_N else num_targets,
+                 "max_targets": num_targets, "selected_targets": [],
+                 "effect_text": targeting_text,
+                 "stack_info": {
+                       "item_type": "SPELL", "source_id": card_id, "controller": player,
+                       "context": final_stack_context,
                   }
-                  self.priority_player = player; self.priority_pass_count = 0
+             }
+             self.priority_player = player
+             self.priority_pass_count = 0
 
-             logging.info(f"Successfully cast spell: {card.name} ({card_id}) from {source_zone}")
+        logging.info(f"Successfully cast spell: {card.name} ({card_id}) from {source_zone}")
 
         # --- Track Cast & Trigger ---
         # ...(tracking/trigger remains the same)...
@@ -452,11 +1092,11 @@ class GameStateStackMixin:
 
                 logging.debug(f"Played land {card_name}")
                 
-                # Check if land enters tapped based on the specific face's text
-                if "enters the battlefield tapped" in oracle_text:
-                    if not hasattr(controller, "tapped_permanents"):
-                        controller["tapped_permanents"] = set()
-                    controller["tapped_permanents"].add(card_id)
+                # move_card applies this centrally; retain the face-aware
+                # check here for logging and MDFC callers without resetting
+                # any other tapped permanents in the player's dictionary.
+                if self._enters_battlefield_tapped(card, controller, card_id, move_context):
+                    controller.setdefault("tapped_permanents", set()).add(card_id)
                     logging.debug(f"Land {card_name} enters tapped")
             else:
                 # If move failed, cleanup the back face registration
@@ -531,31 +1171,23 @@ class GameStateStackMixin:
         if not target_ids:
             return True
 
+        if context.get("ward_checked_on_targeting"):
+            obligations = list(context.get("ward_obligations", []))
+        else:
+            # Backward-compatible fallback for legacy/manually constructed
+            # stack entries that predate target-commit snapshots.
+            obligations = self._collect_ward_obligations(controller, targets)
+
         paid_costs = context.setdefault("ward_costs_paid", [])
-        checked_targets = set()
-        for target_id in target_ids:
-            if target_id in checked_targets or target_id in ["p1", "p2"]:
-                continue
-            checked_targets.add(target_id)
-            target_card = self._safe_get_card(target_id)
-            target_controller = self.get_card_controller(target_id)
-            if not target_card or not target_controller or target_controller == controller:
-                continue
-            if not hasattr(self, 'check_keyword') or not self.check_keyword(target_id, "ward"):
-                continue
-
-            ward_costs = []
-            if self.ability_handler and hasattr(self.ability_handler, 'get_ward_costs'):
-                ward_costs = self.ability_handler.get_ward_costs(target_id)
-            if not ward_costs:
-                ward_costs = ["ward_generic"]
-
-            for ward_cost in ward_costs:
-                if not self._pay_single_ward_cost(controller, ward_cost, source_id, target_id, context):
-                    context["countered_by_ward"] = True
-                    context["unpaid_ward_cost"] = ward_cost
-                    return False
-                paid_costs.append({"target_id": target_id, "cost": ward_cost})
+        for obligation in obligations:
+            target_id = obligation.get("target_id")
+            ward_cost = obligation.get("cost")
+            if not self._pay_single_ward_cost(
+                    controller, ward_cost, source_id, target_id, context):
+                context["countered_by_ward"] = True
+                context["unpaid_ward_cost"] = ward_cost
+                return False
+            paid_costs.append({"target_id": target_id, "cost": ward_cost})
         return True
 
     def _pay_single_ward_cost(self, player, ward_cost, source_id, target_id, context):
@@ -593,6 +1225,8 @@ class GameStateStackMixin:
         """Helper to determine the primary category ('creatures', 'players', etc.) for logging/categorization."""
         # This can reuse the logic from the Environment's helper if preferred,
         # or keep a local version for GameState internal use.
+        if target_id in ["p1", "p2"]:
+            return "players"
         owner, zone = self.find_card_location(target_id)
         if zone == 'player': return 'players'
         if zone == 'stack':
@@ -647,13 +1281,27 @@ class GameStateStackMixin:
                 targets_still_valid = self._validate_targets_on_resolution(item_id, controller, validation_targets, context)
 
                 if not targets_still_valid:
-                    logging.info(f"Stack Item {item_type} {card_name} fizzled: All targets invalid.")
-                    if item_type == "SPELL" and not context.get("is_copy", False) and not context.get("skip_default_movement", False):
+                    if item_type == "SPELL" and context.get("cast_for_mutate", False):
+                        # CR 702.140c: an illegal mutate target makes this resolve
+                        # as an ordinary creature spell instead of being countered.
+                        logging.info(
+                            f"Mutate target for {card_name} became illegal; "
+                            "resolving it as a creature spell.")
+                        fallback_context = dict(context)
+                        fallback_context["cast_for_mutate"] = False
+                        fallback_context["requires_target"] = False
+                        resolution_success = self._resolve_creature_spell(
+                            item_id, controller, fallback_context)
+                    elif item_type == "SPELL" and not context.get("is_copy", False) and not context.get("skip_default_movement", False):
+                        logging.info(f"Stack Item {item_type} {card_name} fizzled: All targets invalid.")
                         # Spell fizzles - move to GY unless it shouldn't move (e.g., rebound, flashback)
                         # Replacement effects can still apply here (e.g., exile instead of GY)
                         self.move_card(item_id, controller, "stack_implicit", controller, "graveyard", cause="spell_fizzle", context=context)
-                    # If ability fizzles, it just leaves the stack.
-                    resolution_success = True # Fizzling counts as resolution finishing
+                        resolution_success = True # Fizzling counts as resolution finishing
+                    else:
+                        logging.info(f"Stack Item {item_type} {card_name} fizzled: All targets invalid.")
+                        # If an ability fizzles, it simply leaves the stack.
+                        resolution_success = True
                 elif not self._pay_ward_costs_for_targets(item_type, item_id, controller, validation_targets, context):
                     logging.info(f"Stack Item {item_type} {card_name} countered by unpaid ward.")
                     if item_type == "SPELL" and not context.get("is_copy", False) and not context.get("skip_default_movement", False):
@@ -828,6 +1476,16 @@ class GameStateStackMixin:
         # Determine spell type and base characteristics post-layers (layers shouldn't affect stack usually)
         card_types = getattr(spell, 'card_types', [])
 
+        if context.get("cast_for_mutate", False):
+            targets = self._flatten_target_ids(context.get("targets", {}))
+            target_id = targets[0] if targets else None
+            if target_id is not None and self._is_valid_mutate_target(controller, target_id):
+                return self.begin_mutate_position_choice(controller, spell_id, target_id)
+            fallback_context = dict(context)
+            fallback_context["cast_for_mutate"] = False
+            fallback_context["requires_target"] = False
+            return self._resolve_creature_spell(spell_id, controller, fallback_context)
+
         # --- MODAL SPELL RESOLUTION ---
         selected_modes_indices = context.get("selected_modes") # Get list of chosen indices
         if selected_modes_indices is not None: # Check specifically for None, empty list is valid (for "up to" maybe)
@@ -847,7 +1505,7 @@ class GameStateStackMixin:
                      # Create and apply effects for THIS mode's text
                      # Pass targets that were selected *for the whole spell* if available
                      # If modes have separate targets, targeting phase needs modification. Assume shared targets for now.
-                     mode_targets = context.get("targets") # Targets selected before spell was put on stack (if any)
+                     mode_targets = self._effect_targets_from_context(context)
                      effects = EffectFactory.create_effects(mode_text, mode_targets, source_name=getattr(spell, 'name', None))
                      for effect_obj in effects:
                          if effect_obj.apply(self, spell_id, controller, mode_targets):
@@ -1146,11 +1804,10 @@ class GameStateStackMixin:
 
         # Apply effects using AbilityHandler or EffectFactory
         if hasattr(self, 'ability_handler'):
-            # --- MODIFIED: Pass full context ---
-            effects = EffectFactory.create_effects(getattr(spell, 'oracle_text', ''), context.get('targets'), source_name=getattr(spell, 'name', None))
+            effect_targets = self._effect_targets_from_context(context)
+            effects = EffectFactory.create_effects(getattr(spell, 'oracle_text', ''), effect_targets, source_name=getattr(spell, 'name', None))
             for effect_obj in effects:
-                effect_obj.apply(self, spell_id, controller, context.get('targets'))
-            # --- END MODIFIED ---
+                effect_obj.apply(self, spell_id, controller, effect_targets)
         else:
             logging.warning("No ability handler found to resolve instant/sorcery effects.")
 
@@ -1497,14 +2154,15 @@ class GameStateStackMixin:
                  logging.warning("Failed to tap creatures for conspire.")
                  return False
 
-            # Create copy
-            new_context = context.copy()
-            new_context["is_copy"] = True
-            new_context["is_conspired"] = True
-            # Conspire copy typically needs new targets
-            # Set flag to re-target the copy on resolution? Or require target choice here?
-            new_context["needs_new_targets"] = True
-            self.add_to_stack(spell_type, spell_id, player, new_context)
+            copy_id = self.copy_spell_on_stack(
+                spell_stack_idx,
+                player,
+                copied_by=spell_id,
+                allow_new_targets=True,
+                context_overrides={"is_conspired": True},
+            )
+            if copy_id is None:
+                return False
             logging.debug(f"Conspired {spell_card.name}")
             return True
         else:
@@ -1518,9 +2176,12 @@ class GameStateStackMixin:
             if item_type == "SPELL":
                 # Prevent "leaves stack" triggers if appropriate? Rules check needed.
                 # Move to graveyard unless specified otherwise (e.g., exile by counter)
-                target_zone = context.get('counter_to_zone', 'graveyard')
-                self.move_card(card_id, controller, "stack_implicit", controller, target_zone)
-                logging.debug(f"Countered spell {self._safe_get_card(card_id).name}, moved to {target_zone}.")
+                if context.get("is_copy", False):
+                    logging.debug(f"Countered copy of {self._safe_get_card(card_id).name}; copy ceased to exist.")
+                else:
+                    target_zone = context.get('counter_to_zone', 'graveyard')
+                    self.move_card(card_id, controller, "stack_implicit", controller, target_zone)
+                    logging.debug(f"Countered spell {self._safe_get_card(card_id).name}, moved to {target_zone}.")
                 self.last_stack_size = len(self.stack) # Update stack size immediately
                 return True
             else: # Not a spell, put it back

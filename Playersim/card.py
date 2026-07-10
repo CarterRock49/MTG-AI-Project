@@ -56,6 +56,20 @@ class Card:
     def __init__(self, card_data):
         # Ensure card_data has all required fields with defaults
         self.name = card_data.get("name", f"Unknown Card {id(self)}")
+        self.layout = card_data.get("layout", "normal")
+        self.all_parts = card_data.get("all_parts", []) or []
+        self.meld_partner_name = card_data.get("meld_partner")
+        self.meld_result_name = card_data.get("meld_result")
+        for related in self.all_parts:
+            if not isinstance(related, dict):
+                continue
+            component = related.get("component")
+            related_name = related.get("name")
+            if component == "meld_result" and related_name:
+                self.meld_result_name = related_name
+            elif (component == "meld_part" and related_name
+                  and related_name.lower() != self.name.lower()):
+                self.meld_partner_name = related_name
         self.mana_cost = card_data.get("mana_cost", "")
         self.type_line = card_data.get("type_line", "unknown").lower()
         self.card_id = None # Initialize as None
@@ -97,6 +111,8 @@ class Card:
         self.is_impending = False
         self.impending_cost = None
         self.impending_n = 0
+        self.is_specialize = False
+        self.specialize_cost = None
 
         # Enhanced keyword/cost parsing within __init__
         self._parse_special_keywords(self.oracle_text) # Parse Offspring/Impending
@@ -215,7 +231,7 @@ class Card:
         return getattr(self, attr, default)
 
     def _parse_special_keywords(self, oracle_text):
-        """Parses Offspring and Impending keywords from oracle text."""
+        """Parse keyword costs that need dedicated engine state."""
         if not oracle_text: return
 
         oracle_lower = oracle_text.lower()
@@ -234,9 +250,21 @@ class Card:
             self.impending_n = int(impending_match.group(1))
             self.impending_cost = impending_match.group(2) # Store cost string "{...}"
             logging.debug(f"Parsed Impending N={self.impending_n}, Cost='{self.impending_cost}' for {self.name}")
+
+        specialize_match = re.search(r"\bspecialize\s*((?:\{[^}]+\})+)", oracle_lower)
+        if specialize_match:
+            self.is_specialize = True
+            self.specialize_cost = specialize_match.group(1)
+            logging.debug(f"Parsed Specialize cost '{self.specialize_cost}' for {self.name}")
             
     def reset_state_on_zone_change(self):
          """Reset temporary states when card leaves battlefield (e.g., flip, morph)."""
+         # Transforming double-faced cards return to their front face in every
+         # zone other than the battlefield or stack. Keep the printed snapshot
+         # in sync so the layer system cannot restore the face that just left.
+         if getattr(self, 'faces', None) and getattr(self, 'current_face', 0) != 0:
+             self.set_current_face(0)
+
          # Reset morph/manifest state
          if hasattr(self, 'face_down') and self.face_down:
              gs = self.game_state # Need access to game state
@@ -1835,23 +1863,19 @@ class Card:
             logging.warning(f"Could not convert power/toughness value '{value}' to int. Returning None.")
             return None
 
-    def transform(self):
-        """
-        Toggle the card's face if it is double-faced.
-        This updates the card's key attributes to reflect the alternate face.
-        """
-        if not self.faces:
-            # This card is not double-faced; nothing to do.
-            return
-        # Toggle face (assumes two faces only)
-        self.current_face = 1 - self.current_face
-        self.is_transformed = (self.current_face == 1)
-        # Get new face data
-        new_face = self.faces[self.current_face]
-        # Update attributes – use defaults to retain any missing info from the current state
+    def set_current_face(self, face_index):
+        """Apply one face's copiable characteristics and make it the base state."""
+        if not self.faces or not isinstance(face_index, int) \
+                or not 0 <= face_index < len(self.faces):
+            return False
+
+        new_face = self.faces[face_index]
+        self.current_face = face_index
+        self.is_transformed = face_index != 0
         self.name = new_face.get("name", self.name)
         self.mana_cost = new_face.get("mana_cost", self.mana_cost)
         self.type_line = new_face.get("type_line", self.type_line).lower()
+        self.card_types, self.subtypes, self.supertypes = self.parse_type_line(self.type_line)
         self.oracle_text = new_face.get("oracle_text", self.oracle_text)
         if "cmc" in new_face:
             self.cmc = new_face["cmc"]
@@ -1859,11 +1883,23 @@ class Card:
             self.power = self._safe_int(new_face["power"])
         if "toughness" in new_face:
             self.toughness = self._safe_int(new_face["toughness"])
-        # Update keywords, colors, and other attributes as needed
-        if "oracle_text" in new_face:
-            self.keywords = self._extract_keywords(new_face["oracle_text"].lower())
+        self.keywords = self._extract_keywords(self.oracle_text.lower())
         if "colors" in new_face:
-            self.colors = new_face["colors"]
+            face_colors = new_face["colors"]
+            self.colors = list(face_colors) \
+                if (len(face_colors) == 5
+                    and all(isinstance(value, (int, bool)) for value in face_colors)) \
+                else self._extract_colors(face_colors)
+        self.compute_subtype_vector()
+        self.snapshot_printed()
+        return True
+
+    def transform(self):
+        """Toggle a transforming double-faced card to its other face."""
+        if not self.faces or len(self.faces) < 2:
+            return False
+        current_face = self.current_face if isinstance(self.current_face, int) else 0
+        return self.set_current_face(1 - current_face)
     
     def get_current_face(self):
         """Get the currently active face for double-faced cards."""

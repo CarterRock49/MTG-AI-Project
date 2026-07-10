@@ -98,6 +98,7 @@ class GameStateDamageMixin:
             # Keep track of multiple legendaries/planeswalkers
             legendary_groups = defaultdict(list)
             world_permanents = []
+            role_groups = defaultdict(list)
 
             for card_id, player in all_permanents:
                 card = self._safe_get_card(card_id)
@@ -161,7 +162,7 @@ class GameStateDamageMixin:
                     # Check if not attached OR if the target is illegal (incl. protection)
                     if attached_to is None or not self._is_legal_attachment(card_id, attached_to):
                         actions_to_take.append((4, "MOVE_TO_GY", card_id, player, {"reason": "aura_illegal_attachment"}))
-                    
+
                 # 704.5k: If an Equipment or Fortification is attached to an illegal permanent or player, it becomes unattached
                 elif 'equipment' in current_subtypes or 'fortification' in current_subtypes:
                     attached_to = player.get("attachments", {}).get(card_id)
@@ -178,6 +179,13 @@ class GameStateDamageMixin:
                 if 'world' in current_supertypes:
                     world_permanents.append((card_id, player))
 
+                # A permanent may have only the newest Role controlled by a
+                # given player. Roles controlled by different players coexist.
+                if 'role' in current_subtypes:
+                    role_target = player.get("attachments", {}).get(card_id)
+                    if role_target is not None:
+                        role_groups[(id(player), role_target)].append((card_id, player))
+
                 # 704.5p/q: +1/+1 vs -1/-1 Annihilation
                 if hasattr(card, 'counters') and card.counters.get('+1/+1', 0) > 0 and card.counters.get('-1/-1', 0) > 0:
                     actions_to_take.append((5, "ANNIHILATE_COUNTERS", card_id, player, {}))
@@ -193,7 +201,7 @@ class GameStateDamageMixin:
                         chapter_pattern = re.compile(r"(^|\n)([IVX]+) —", re.MULTILINE)
                         chapter_matches = chapter_pattern.findall(card.oracle_text)
                         chapter_count = len(chapter_matches)
-                    
+
                     if chapter_count > 0 and player.get("saga_counters", {}).get(card_id, 0) > chapter_count:
                         actions_to_take.append((4, "MOVE_TO_GY", card_id, player, {"reason": "saga_completed"}))
 
@@ -204,6 +212,14 @@ class GameStateDamageMixin:
 
                 # 704.5w: Day/night state check if the permanent has a day/night transformation
                 # This would typically be handled by a separate day/night mechanic function
+
+            # --- Consolidate Role Rule Checks ---
+            for roles in role_groups.values():
+                if len(roles) > 1:
+                    for old_role_id, role_controller in roles[:-1]:
+                        actions_to_take.append((
+                            4, "MOVE_TO_GY", old_role_id, role_controller,
+                            {"reason": "role_rule"}))
 
             # --- Consolidate Legend Rule Checks ---
             # 704.5j: Legend Rule
@@ -236,7 +252,7 @@ class GameStateDamageMixin:
                 for world_id, world_player in world_permanents[:-1]:
                     actions_to_take.append((4, "MOVE_TO_GY", world_id, world_player, {"reason": "world_rule"}))
 
-            # --- 3. Check for * in Power/Toughness without defining ability --- 
+            # --- 3. Check for * in Power/Toughness without defining ability ---
             # 704.5r: If creature has * in power/toughness and no ability defines it, set to 0
             for card_id, player in all_permanents:
                 card = self._safe_get_card(card_id)
@@ -244,7 +260,7 @@ class GameStateDamageMixin:
                     # Check if power or toughness contains * and needs defining ability
                     power_str = str(getattr(card, 'power', '0'))
                     toughness_str = str(getattr(card, 'toughness', '0'))
-                    
+
                     if ('*' in power_str or '*' in toughness_str) and not hasattr(card, '_characteristic_defining_abilities'):
                         # Set undefined * power/toughness to 0
                         if '*' in power_str: card.power = 0
@@ -255,7 +271,7 @@ class GameStateDamageMixin:
             # --- 4. Token existence checks and copy existence checks ---
             # Check for tokens in non-battlefield zones (handled separately for clarity)
             tokens_ceased = self._check_and_remove_invalid_tokens()
-            if tokens_ceased: 
+            if tokens_ceased:
                 current_actions_performed = True
 
             # 704.5e: If a copy of a spell is in a zone other than the stack, it ceases to exist
@@ -287,7 +303,7 @@ class GameStateDamageMixin:
                         logging.info(f"SBA Applied: {player_ref['name']} loses ({details['reason']})")
                         performed_this_action = True
                         current_actions_performed = True
-                        
+
                 elif action_type == "DRAW_GAME":
                     if not (self.p1 and self.p1.get("game_draw",False)) and not (self.p2 and self.p2.get("game_draw",False)):
                         if self.p1: self.p1["game_draw"] = True
@@ -307,14 +323,14 @@ class GameStateDamageMixin:
                         destruction_replaced = True
                         replacement_details = "regenerated"
                         performed_this_action = True
-                        
+
                     # 2. Totem Armor
                     elif not destruction_replaced and hasattr(self, 'apply_totem_armor') and self.apply_totem_armor(target_id, player_ref):
                         logging.info(f"SBA: Totem Armor saved {target_name} from destruction.")
                         destruction_replaced = True
                         replacement_details = "totem_armor"
                         performed_this_action = True
-                        
+
                     # 3. Other "If X would be destroyed" replacements
                     elif not destruction_replaced and self.replacement_effects:
                         destroy_context = {'card_id': target_id, 'player': player_ref, 'cause': 'sba_damage', 'from_zone': 'battlefield'}
@@ -346,7 +362,7 @@ class GameStateDamageMixin:
                     if hasattr(self, 'unequip_permanent') and self.unequip_permanent(player_ref, target_id):
                         logging.info(f"SBA Applied: Unequipped {target_name} ({details['reason']})")
                         performed_this_action = True
-                        
+
                 elif action_type == "PHASE_IN":
                     if hasattr(self, 'phase_in_permanent') and self.phase_in_permanent(target_id, player_ref):
                         logging.info(f"SBA Applied: Phased in {target_name}")
@@ -373,12 +389,12 @@ class GameStateDamageMixin:
                             else:
                                 # Fallback direct modification
                                 target_card.counters['+1/+1'] -= remove_amount
-                                if target_card.counters['+1/+1'] <= 0: 
+                                if target_card.counters['+1/+1'] <= 0:
                                     del target_card.counters['+1/+1']
                                 target_card.counters['-1/-1'] -= remove_amount
-                                if target_card.counters['-1/-1'] <= 0: 
+                                if target_card.counters['-1/-1'] <= 0:
                                     del target_card.counters['-1/-1']
-                            
+
                             logging.info(f"SBA Applied: Annihilated {remove_amount} +/- counters on {target_name}")
                             performed_this_action = True
 
@@ -688,4 +704,4 @@ class GameStateDamageMixin:
              'description': f"Redirect damage from {original_target_key} to {new_target_key}"
         })
         return True
-
+

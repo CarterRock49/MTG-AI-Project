@@ -192,7 +192,7 @@ ACTION_MEANINGS = {
     423: ("EXERT", None), # Choice during attack declaration. Needs context {'creature_idx':X}.
     424: ("EXPLORE", None), # Usually result of effect. Needs context if activated.
     425: ("ADAPT", None), # Activated. Needs context {'creature_idx':X, 'amount':Y}
-    426: ("MUTATE", None), # Casting cost. Needs context {'hand_idx':X, 'target_idx':Y}
+    426: ("MUTATE", None), # Casting cost. Target and position use later choice contexts.
     427: ("CYCLING", None), # Activated from hand. Needs context {'hand_idx':X}
     428: ("GOAD", None), # Usually result of effect. Needs context {'target_creature_identifier':X} if activated.
     429: ("BOAST", None), # Activated after attack. Needs context {'creature_idx':X}.
@@ -1035,4 +1035,3 @@ class ActionHandler(
 
 
 
-    

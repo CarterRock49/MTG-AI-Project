@@ -362,7 +362,9 @@ class ActionSpaceMixin:
                 card_id = player["battlefield"][i]
                 card = gs._safe_get_card(card_id)
                 if card and 'land' in getattr(card, 'type_line', '') and card_id not in player.get("tapped_permanents", set()):
-                    if hasattr(card, 'oracle_text') and "add {" in card.oracle_text.lower():
+                    mana_options = (gs.mana_system._land_mana_options(player, card)
+                                    if gs.mana_system else [])
+                    if mana_options:
                         # Check if it's JUST a mana ability (no targets, no loyalty cost)
                         if ":" not in card.oracle_text.lower() or "{t}: add" in card.oracle_text.lower():
                             action_idx = 68 + i
@@ -545,7 +547,7 @@ class ActionSpaceMixin:
         return True # Assume available if check is simple
 
     def _add_special_choice_actions(self, player, valid_actions, set_valid_action):
-        """Add actions for Scry, Surveil, Dredge, Choose Mode, Choose X, Choose Color."""
+        """Add actions for discard and the other dedicated choice phases."""
         gs = self.game_state
         if gs.phase != gs.PHASE_CHOOSE: # Only generate these during the dedicated CHOICE phase
             return
@@ -560,8 +562,63 @@ class ActionSpaceMixin:
                 set_valid_action(11, "PASS_PRIORITY (Waiting for opponent choice)")
                 return
 
+            # Discard -- fixed action range exposes hand indices 0-9.
+            if choice_type in ["discard", "specialize_discard"]:
+                for hand_index, card_id in enumerate(player.get("hand", [])[:10]):
+                    if (choice_type == "specialize_discard"
+                            and not gs.get_specialize_discard_colors(card_id).intersection(
+                                context.get("available_colors", []))):
+                        continue
+                    card = gs._safe_get_card(card_id)
+                    card_name = getattr(card, "name", card_id)
+                    set_valid_action(
+                        238 + hand_index,
+                        f"DISCARD_CARD {card_name}",
+                        context={"hand_idx": hand_index},
+                    )
+
+            # Non-target choices made while paying a spell's casting cost.
+            elif choice_type == "casting_additional_return":
+                for option_index, card_id in enumerate(context.get("options", [])[:10]):
+                    card = gs._safe_get_card(card_id)
+                    card_name = getattr(card, "name", card_id)
+                    set_valid_action(
+                        353 + option_index,
+                        f"RETURN_FOR_ADDITIONAL_COST {card_name}",
+                        context={"option_index": option_index},
+                    )
+
+            elif choice_type == "collect_evidence":
+                for option_index, card_id in enumerate(context.get("options", [])[:10]):
+                    card = gs._safe_get_card(card_id)
+                    card_name = getattr(card, "name", card_id)
+                    mana_value = getattr(card, "cmc", 0) if card else 0
+                    set_valid_action(
+                        353 + option_index,
+                        f"COLLECT_EVIDENCE {card_name} (MV {mana_value})",
+                        context={"option_index": option_index},
+                    )
+                selected = context.get("selected_cards", [])
+                if (not selected
+                        or context.get("selected_mana_value", 0) >= context.get("threshold", 0)):
+                    label = "FINISH_COLLECT_EVIDENCE" if selected else "DECLINE_COLLECT_EVIDENCE"
+                    set_valid_action(11, label)
+
+            # Optional card selection inside a linked temporary-exile effect.
+            elif choice_type == "linked_exile":
+                for option_index, card_id in enumerate(context.get("options", [])[:10]):
+                    card = gs._safe_get_card(card_id)
+                    card_name = getattr(card, "name", card_id)
+                    set_valid_action(
+                        353 + option_index,
+                        f"EXILE_LINKED_CARD {card_name}",
+                        context={"option_index": option_index},
+                    )
+                if context.get("optional", False):
+                    set_valid_action(11, "DECLINE_LINKED_EXILE")
+
             # Scry / Surveil
-            if choice_type in ["scry", "surveil"] and context.get("cards"):
+            elif choice_type in ["scry", "surveil"] and context.get("cards"):
                 card_id = context["cards"][0] # Process one card at a time
                 card = gs._safe_get_card(card_id)
                 card_name = getattr(card, 'name', card_id)
@@ -608,6 +665,20 @@ class ActionSpaceMixin:
                     name = getattr(card, 'name', getattr(ability, 'card_id', '?'))
                     set_valid_action(353 + i, f"ORDER_TRIGGER {name} onto stack next")
 
+            # A resolving mutating creature spell goes over or under its target.
+            elif choice_type == "mutate_position":
+                set_valid_action(353, "PUT_MUTATE_OVER")
+                set_valid_action(354, "PUT_MUTATE_UNDER")
+
+            # Select one of a land's mana abilities. This range includes
+            # colorless and restricted outputs that CHOOSE_COLOR cannot model.
+            elif choice_type == "land_mana":
+                for i, option in enumerate(context.get("options", [])[:10]):
+                    label = f"CHOOSE_LAND_MANA {option.get('symbol', '?')}"
+                    if option.get("damage"):
+                        label += f" ({option['damage']} damage)"
+                    set_valid_action(353 + i, label)
+
             # Choose Mode
             elif choice_type == "choose_mode":
                 num_choices = context.get("num_choices", 0)
@@ -631,6 +702,8 @@ class ActionSpaceMixin:
             elif choice_type == "choose_x":
                 max_x = context.get("max_x", 0)
                 min_x = context.get("min_x", 0)
+                if min_x <= 0 <= max_x:
+                    set_valid_action(11, "CHOOSE_X_VALUE 0")
                 for i in range(min(max_x, 10)): # X value 1-10
                     x_val = i + 1
                     if x_val >= min_x:
@@ -639,7 +712,10 @@ class ActionSpaceMixin:
 
             # Choose Color
             elif choice_type == "choose_color":
+                available_colors = set(context.get("available_colors", "WUBRG"))
                 for i in range(5): # Color index 0-4 (WUBRG)
+                    if ['W','U','B','R','G'][i] not in available_colors:
+                        continue
                     # FIXED: Use correct index range 373-377 for CHOOSE_COLOR
                     set_valid_action(373 + i, f"CHOOSE_COLOR {['W','U','B','R','G'][i]}")
 
@@ -710,7 +786,9 @@ class ActionSpaceMixin:
             # Get valid targets using TargetingSystem if possible
             valid_targets_map = {}
             if hasattr(gs, 'targeting_system') and gs.targeting_system:
-                valid_targets_map = gs.targeting_system.get_valid_targets(source_id, player, target_type)
+                valid_targets_map = gs.targeting_system.get_valid_targets(
+                    source_id, player, target_type,
+                    effect_text=context.get('effect_text'))
             else:
                 # Fallback: Add basic logic here or assume it's handled by agent
                 logging.warning("Targeting system not available, cannot generate specific targeting actions.")
@@ -720,12 +798,15 @@ class ActionSpaceMixin:
             valid_targets_list = []
             for category, targets in valid_targets_map.items():
                 valid_targets_list.extend(targets)
-                
+            valid_targets_list = sorted(set(valid_targets_list))
+
             # Remove already selected targets to avoid duplicates
             already_selected = context.get('selected_targets', [])
             valid_targets_list = [target for target in valid_targets_list if target not in already_selected]
 
             # Generate SELECT_TARGET actions for available targets
+            if context.get('allow_keep_original_targets') and selected_count == 0:
+                set_valid_action(11, "KEEP_ORIGINAL_TARGETS")
             if selected_count < required_count:
                 for i, target_id in enumerate(valid_targets_list):
                     if i >= 10: break # Limit to action space indices 274-283
@@ -1368,11 +1449,22 @@ class ActionSpaceMixin:
 
         if not cost_str and not context.get('use_alt_cost'): return True # Free spell (unless alt cost used)
 
+        oracle_text = getattr(card_or_data, 'oracle_text', '') \
+            if isinstance(card_or_data, Card) else card_or_data.get('oracle_text', '')
+        if (re.search(
+                r"as an additional cost to cast this spell,\s*return a permanent "
+                r"you control to its owner'?s hand", oracle_text.lower())
+                and not player.get("battlefield")):
+            return False
+
         try:
             parsed_cost = gs.mana_system.parse_mana_cost(cost_str)
             # Apply cost modifiers based on context (Kicker, Additional, Alternative)
             final_cost = gs.mana_system.apply_cost_modifiers(player, parsed_cost, card_id, context)
-            return gs.mana_system.can_pay_mana_cost(player, final_cost, context)
+            if gs.mana_system.can_pay_mana_cost(player, final_cost, context):
+                return True
+            return gs.mana_system.can_pay_with_target_dependent_reduction(
+                player, parsed_cost, card_id, context)
         except Exception as e:
             card_name = getattr(card_or_data, 'name', 'Unknown') if isinstance(card_or_data, Card) else card_or_data.get('name', 'Unknown')
             logging.warning(f"Error checking mana cost for '{card_name}': {e}")
@@ -1454,7 +1546,9 @@ class ActionSpaceMixin:
             card = gs._safe_get_card(card_id)
             if card and 'land' in getattr(card, 'type_line', '') and card_id not in player.get("tapped_permanents", set()):
                 # Check for mana abilities
-                if hasattr(card, 'oracle_text') and "add {" in card.oracle_text.lower():
+                mana_options = (gs.mana_system._land_mana_options(player, card)
+                                if gs.mana_system else [])
+                if mana_options:
                      set_valid_action(68 + i, f"TAP_LAND_FOR_MANA {card.name}")
                 # Check for other tap abilities
                 if hasattr(card, 'oracle_text') and "{t}:" in card.oracle_text.lower() and "add {" not in card.oracle_text.lower():
@@ -1556,6 +1650,25 @@ class ActionSpaceMixin:
     def _add_specific_mechanics_actions(self, player, valid_actions, set_valid_action, is_sorcery_speed):
         """Add actions for specialized MTG mechanics, considering timing."""
         gs = self.game_state
+
+        # --- Specialize (reuses per-permanent Transform actions 160-179) ---
+        if is_sorcery_speed:
+            for battlefield_index, card_id in enumerate(player.get("battlefield", [])[:20]):
+                card = gs._safe_get_card(card_id)
+                if (not card or not getattr(card, "is_specialize", False)
+                        or card_id in getattr(gs, "specialized_cards", {})):
+                    continue
+                variants = gs.get_specialize_variants(card_id)
+                cost = getattr(card, "specialize_cost", None)
+                if (not variants or not cost
+                        or not self._can_afford_cost_string(player, cost)):
+                    continue
+                if any(
+                        gs.get_specialize_discard_colors(hand_id).intersection(variants)
+                        for hand_id in player.get("hand", [])[:10]):
+                    set_valid_action(
+                        160 + battlefield_index,
+                        f"SPECIALIZE {card.name}")
         
         # --- Investigate (Action 418) ---
         # Check for cards with "Investigate" as an activated ability
@@ -1668,7 +1781,9 @@ class ActionSpaceMixin:
                     
                     if has_valid_target:
                         # Extract mutate cost
-                        match = re.search(r"mutate (\{[^\}]+\})", card.oracle_text.lower())
+                        match = re.search(
+                            r"\bmutate\s*((?:\{[^}]+\})+)",
+                            card.oracle_text, re.IGNORECASE)
                         mutate_cost = match.group(1) if match else None
                         
                         if mutate_cost and self._can_afford_cost_string(player, mutate_cost):

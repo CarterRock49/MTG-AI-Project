@@ -6,6 +6,7 @@ all state lives on GameState itself, which composes every mixin.
 
 import random
 import logging
+import copy
 from collections import defaultdict
 
 
@@ -14,6 +15,289 @@ class GameStateZonesMixin:
 
     # Empty slots: preserves GameState's __slots__ semantics (no instance __dict__).
     __slots__ = ()
+
+    def _enters_battlefield_tapped(self, card, controller, card_id=None, context=None):
+        """Return whether a permanent's own text makes it enter tapped.
+
+        Scryfall's current wording uses both "enters tapped" and the older
+        "enters the battlefield tapped" template. Fast lands also need the
+        number of *other* lands after the entering card has been appended.
+        """
+        if not card or not controller:
+            return False
+        context = context or {}
+        oracle_text = getattr(card, "oracle_text", "") or ""
+        if context.get("play_back_face") and getattr(card, "back_face", None):
+            oracle_text = card.back_face.get("oracle_text", oracle_text) or ""
+        normalized = oracle_text.lower().replace("the battlefield ", "")
+
+        fast_land_clause = "enters tapped unless you control two or fewer other lands"
+        if fast_land_clause in normalized:
+            land_count = 0
+            for permanent_id in controller.get("battlefield", []):
+                permanent = self._safe_get_card(permanent_id)
+                if permanent and "land" in (getattr(permanent, "type_line", "") or "").lower():
+                    land_count += 1
+            # move_card calls this after appending the entering land. Subtract
+            # one occurrence, rather than filtering by ID, because deck copies
+            # intentionally share card IDs in the current zone model.
+            other_lands = max(0, land_count - 1)
+            return other_lands > 2
+
+        return "enters tapped" in normalized
+
+    def _discard_player_key(self, player):
+        if player == self.p1:
+            return "p1"
+        if player == self.p2:
+            return "p2"
+        return None
+
+    def _discard_player_from_key(self, player_key):
+        if player_key == "p1":
+            return self.p1
+        if player_key == "p2":
+            return self.p2
+        return None
+
+    def discard_card(self, player, card_id, source_id=None, cause="discard"):
+        """Process one discard event, including replacements and Madness."""
+        if not player or card_id not in player.get("hand", []):
+            return False
+
+        discard_context = {
+            "card_id": card_id,
+            "player": player,
+            "cause": cause,
+            "source_id": source_id,
+            "to_player": player,
+            "to_zone": "graveyard",
+        }
+        modified_context, replaced = self.apply_replacement_effect(
+            "DISCARD", discard_context)
+        if replaced and modified_context.get("prevented", False):
+            return True
+
+        destination_player = modified_context.get("to_player") or player
+        destination_zone = modified_context.get("to_zone", "graveyard")
+        return self.move_card(
+            card_id, player, "hand", destination_player, destination_zone,
+            cause=cause, context={"source_id": source_id})
+
+    def start_discard_choice(self, players, count=1, source_id=None,
+                             is_random=False, cause="discard"):
+        """Resolve random discards or queue affected players' card choices."""
+        if self.choice_context:
+            logging.warning("Cannot start discard choice while another choice is pending.")
+            return False
+
+        entries = []
+        for player in players:
+            if not player:
+                continue
+            hand = player.get("hand", [])
+            discard_count = len(hand) if count == -1 else min(max(int(count), 0), len(hand))
+            if discard_count <= 0:
+                continue
+            if is_random:
+                for card_id in random.sample(list(hand), discard_count):
+                    self.discard_card(player, card_id, source_id=source_id, cause=cause)
+                continue
+            player_key = self._discard_player_key(player)
+            if player_key:
+                entries.append({"player_key": player_key, "count": discard_count})
+
+        if is_random or not entries:
+            return True
+
+        first = entries.pop(0)
+        chooser = self._discard_player_from_key(first["player_key"])
+        if self.phase != self.PHASE_CHOOSE:
+            self.previous_priority_phase = self.phase
+        self.phase = self.PHASE_CHOOSE
+        self.choice_context = {
+            "type": "discard",
+            "player": chooser,
+            "remaining": first["count"],
+            "pending": entries,
+            "source_id": source_id,
+            "cause": cause,
+        }
+        self.priority_player = chooser
+        self.priority_pass_count = 0
+        logging.info(
+            f"Entering discard choice for {chooser.get('name', 'player')} "
+            f"({first['count']} card(s)).")
+        return True
+
+    def _finish_or_advance_discard_choice(self):
+        context = self.choice_context
+        if not context or context.get("type") != "discard":
+            return False
+
+        pending = context.get("pending", [])
+        while pending:
+            entry = pending.pop(0)
+            chooser = self._discard_player_from_key(entry.get("player_key"))
+            remaining = min(entry.get("count", 0), len(chooser.get("hand", []))) \
+                if chooser else 0
+            if chooser and remaining > 0:
+                context["player"] = chooser
+                context["remaining"] = remaining
+                context["pending"] = pending
+                self.priority_player = chooser
+                self.priority_pass_count = 0
+                return True
+
+        return_phase = self.previous_priority_phase
+        self.choice_context = None
+        self.previous_priority_phase = None
+        self.phase = return_phase if return_phase is not None else self.PHASE_PRIORITY
+        if self.phase in (self.PHASE_UNTAP, self.PHASE_CLEANUP):
+            self.priority_player = None
+        else:
+            self.priority_player = self._get_active_player()
+        self.priority_pass_count = 0
+        return True
+
+    def choose_discard_card(self, hand_index):
+        """Apply one hand-index selection from an active discard choice."""
+        context = self.choice_context
+        if not (self.phase == self.PHASE_CHOOSE and context
+                and context.get("type") == "discard"):
+            return False
+        chooser = context.get("player")
+        hand = chooser.get("hand", []) if chooser else []
+        if not isinstance(hand_index, int) or not 0 <= hand_index < len(hand):
+            return False
+
+        card_id = hand[hand_index]
+        if not self.discard_card(
+                chooser, card_id, source_id=context.get("source_id"),
+                cause=context.get("cause", "discard")):
+            return False
+
+        context["remaining"] = max(0, int(context.get("remaining", 1)) - 1)
+        if context["remaining"] > 0 and chooser.get("hand", []):
+            self.priority_player = chooser
+            self.priority_pass_count = 0
+            return True
+        return self._finish_or_advance_discard_choice()
+
+    def exile_until_source_leaves(self, source_id, source_controller, card_id,
+                                  card_owner, from_zone="battlefield",
+                                  return_zone="battlefield"):
+        """Perform and record one linked temporary-exile one-shot effect."""
+        _, source_zone = self.find_card_location(source_id)
+        if source_zone != "battlefield":
+            return False
+        if not card_owner or card_id not in card_owner.get(from_zone, []):
+            return False
+        if not self.move_card(
+                card_id, card_owner, from_zone, card_owner, "exile",
+                cause="linked_exile", context={"source_id": source_id}):
+            return False
+
+        # Tokens cease to exist after moving, and exile replacements may send
+        # the card elsewhere. Only an object actually in exile is linked.
+        if card_id not in card_owner.get("exile", []):
+            return True
+        owner_key = self._discard_player_key(card_owner)
+        if not owner_key:
+            return False
+        source_controller.setdefault("linked_exile", {}).setdefault(
+            source_id, []).append({
+                "card_id": card_id,
+                "owner_key": owner_key,
+                "return_zone": return_zone,
+            })
+        return True
+
+    def _return_linked_exile_cards(self, source_id):
+        """End every temporary-exile duration linked to a leaving source."""
+        entries = []
+        for player in (self.p1, self.p2):
+            if player:
+                entries.extend(player.setdefault("linked_exile", {}).pop(source_id, []))
+        returned = 0
+        for entry in entries:
+            owner = self._discard_player_from_key(entry.get("owner_key"))
+            card_id = entry.get("card_id")
+            return_zone = entry.get("return_zone", "battlefield")
+            if not owner or card_id not in owner.get("exile", []):
+                continue
+            if self.move_card(
+                    card_id, owner, "exile", owner, return_zone,
+                    cause="linked_exile_return", context={"source_id": source_id}):
+                returned += 1
+        return returned
+
+    def begin_linked_exile_choice(self, source_id, controller, target_player,
+                                  options, return_zone="hand", optional=True):
+        """Expose the card choice inside a resolving linked-exile effect."""
+        if self.choice_context:
+            logging.warning("Cannot start linked-exile choice while another choice is pending.")
+            return False
+        _, source_zone = self.find_card_location(source_id)
+        target_key = self._discard_player_key(target_player)
+        options = list(dict.fromkeys(options))
+        if source_zone != "battlefield" or not target_key or not options:
+            return source_zone != "battlefield" or not options
+        if self.phase != self.PHASE_CHOOSE and self.previous_priority_phase is None:
+            self.previous_priority_phase = self.phase
+        self.phase = self.PHASE_CHOOSE
+        self.choice_context = {
+            "type": "linked_exile",
+            "player": controller,
+            "source_id": source_id,
+            "target_player_key": target_key,
+            "options": options,
+            "return_zone": return_zone,
+            "optional": bool(optional),
+        }
+        self.priority_player = controller
+        self.priority_pass_count = 0
+        return True
+
+    def _finish_linked_exile_choice(self):
+        self.choice_context = None
+        if self.stack:
+            self.phase = self.PHASE_PRIORITY
+        elif self.previous_priority_phase is not None:
+            self.phase = self.previous_priority_phase
+            self.previous_priority_phase = None
+        else:
+            self.phase = self.PHASE_PRIORITY
+        self.priority_player = self._get_active_player()
+        self.priority_pass_count = 0
+        return True
+
+    def choose_linked_exile_card(self, option_index):
+        context = self.choice_context
+        if not (self.phase == self.PHASE_CHOOSE and context
+                and context.get("type") == "linked_exile"):
+            return False
+        options = context.get("options", [])
+        if not isinstance(option_index, int) or not 0 <= option_index < len(options):
+            return False
+        target_player = self._discard_player_from_key(context.get("target_player_key"))
+        source_id = context.get("source_id")
+        controller = context.get("player")
+        card_id = options[option_index]
+        success = self.exile_until_source_leaves(
+            source_id, controller, card_id, target_player,
+            from_zone="hand", return_zone=context.get("return_zone", "hand"))
+        if not success:
+            return False
+        return self._finish_linked_exile_choice()
+
+    def decline_linked_exile_choice(self):
+        context = self.choice_context
+        if not (self.phase == self.PHASE_CHOOSE and context
+                and context.get("type") == "linked_exile"
+                and context.get("optional", False)):
+            return False
+        return self._finish_linked_exile_choice()
 
     def move_card(self, card_id, from_player, from_zone, to_player, to_zone, cause=None, context=None):
         """Move a card between zones, applying replacement effects and triggering abilities, handling Madness, Offspring, Impending."""
@@ -70,6 +354,10 @@ class GameStateZonesMixin:
             logging.debug(f"Movement of {card_name} from {actual_from_zone} to {final_destination_zone} prevented.")
             return False # Movement stopped
 
+        if (final_destination_zone == "battlefield" and actual_from_zone != "battlefield"
+                and card and hasattr(self, "prepare_day_night_entry")):
+            self.prepare_day_night_entry(card_id)
+
         # --- Perform Actual Move ---
         # ... (Keep existing removal logic) ...
         removed_successfully = False
@@ -90,12 +378,21 @@ class GameStateZonesMixin:
         else: removed_successfully = True # Implicit removal assumed
 
 
+        meld_partner_id = None
+        mutation_info = None
+
         # --- 2. LTB Cleanup/Triggers (Only if removed from battlefield) ---
         # ... (Keep existing LTB logic) ...
         if actual_from_zone == "battlefield" and from_player:
+            for player in (self.p1, self.p2):
+                if player:
+                    player.get("targeted_permanents_this_turn", set()).discard(card_id)
             ltb_trigger_context = { 'controller': from_player, 'from_zone': actual_from_zone, 'to_zone': final_destination_zone, 'cause': cause, **context }
             self.trigger_ability(card_id, "LEAVE_BATTLEFIELD", ltb_trigger_context)
+            self._return_linked_exile_cards(card_id)
             logging.debug(f"Cleaning up state for {card_name} ({card_id}) leaving battlefield.")
+            if final_destination_zone != "battlefield":
+                mutation_info = getattr(self, "mutated_permanents", {}).pop(card_id, None)
             # Remove tracked statuses
             from_player.get("tapped_permanents", set()).discard(card_id)
             from_player.get("entered_battlefield_this_turn", set()).discard(card_id)
@@ -116,13 +413,35 @@ class GameStateZonesMixin:
             if hasattr(self, 'battle_cards'): self.battle_cards.pop(card_id, None)
             # Clear other statuses
             if hasattr(from_player, 'regeneration_shields'): from_player['regeneration_shields'].discard(card_id)
-            if hasattr(from_player, 'mutation_stacks') and card_id in from_player['mutation_stacks']: del from_player['mutation_stacks'][card_id]
+            from_player.get('mutation_stacks', {}).pop(card_id, None)
             # Unregister effects originating from this card
-            if self.layer_system: self.layer_system.remove_effects_by_source(card_id)
+            if self.layer_system:
+                self.layer_system.remove_effects_by_source(
+                    card_id,
+                    preserve_durations={"end_of_turn", "until_your_next_turn"})
             if self.replacement_effects: self.replacement_effects.remove_effects_by_source(card_id)
             if self.ability_handler: self.ability_handler.unregister_card_abilities(card_id)
+            if mutation_info and card:
+                component_printed = mutation_info.get("component_printed", {})
+                if card_id in component_printed:
+                    card._printed = copy.deepcopy(component_printed[card_id])
+                    card.reset_to_printed()
+
             # Reset card state itself (e.g., face-down)
             if card and hasattr(card, 'reset_state_on_zone_change'): card.reset_state_on_zone_change()
+
+            # A melded permanent is represented by one battlefield ID plus its
+            # partner waiting in exile. It has result characteristics for LTB,
+            # then both physical cards regain their front identities in the
+            # destination zone.
+            if (final_destination_zone != "battlefield"
+                    and card_id in getattr(self, "melded_permanents", {})):
+                meld_info = self.melded_permanents.pop(card_id)
+                meld_partner_id = meld_info.get("partner_id")
+                original_printed = meld_info.get("original_printed")
+                if card and original_printed:
+                    card._printed = original_printed
+                    card.reset_to_printed()
 
 
         # --- 3. Add to destination zone ---
@@ -150,7 +469,9 @@ class GameStateZonesMixin:
         if final_destination_zone == "battlefield":
             # --- Standard ETB Setup ---
             final_destination_player.setdefault("entered_battlefield_this_turn", set()).add(card_id)
-            etb_tapped_from_text = (hasattr(card, 'oracle_text') and "enters the battlefield tapped" in card.oracle_text.lower())
+            etb_tapped_from_text = self._enters_battlefield_tapped(
+                card, final_destination_player, card_id, event_context
+            )
             enters_tapped = event_context.get('enters_tapped', False) or etb_tapped_from_text
             if enters_tapped: final_destination_player.setdefault("tapped_permanents", set()).add(card_id)
             if card and 'saga' in getattr(card,'subtypes',[]): self.add_counter(card_id, "lore", 1)
@@ -274,14 +595,32 @@ class GameStateZonesMixin:
                   del self.card_db[card_id]
                   logging.debug(f"Token {card_name} ({card_id}) ceased to exist after moving to {final_destination_zone}.")
              # Remove from player's token tracking if present
-             if hasattr(final_destination_player, "tokens") and card_id in final_destination_player["tokens"]:
+             if "tokens" in final_destination_player and card_id in final_destination_player["tokens"]:
                   final_destination_player["tokens"].remove(card_id)
+             if self.ability_handler:
+                  self.ability_handler.registered_abilities.pop(card_id, None)
 
         # Clear Madness opportunity if card moved FROM exile via non-Madness means
         if actual_from_zone == "exile" and not context.get("is_madness_cast", False) and \
            getattr(self, 'madness_cast_available', None) and self.madness_cast_available.get('card_id') == card_id:
              logging.debug(f"Clearing Madness opportunity for {card_name} as it moved from exile by other means.")
              self.madness_cast_available = None
+
+        if (meld_partner_id is not None and final_destination_zone != "exile"
+                and meld_partner_id in from_player.get("exile", [])):
+            self.move_card(
+                meld_partner_id, from_player, "exile",
+                final_destination_player, final_destination_zone,
+                cause="meld_separated", context={"meld_primary_id": card_id})
+
+        if mutation_info:
+            for component_id in mutation_info.get("components", []):
+                if component_id == card_id:
+                    continue
+                self.move_card(
+                    component_id, from_player, "stack_implicit",
+                    final_destination_player, final_destination_zone,
+                    cause="mutate_separated", context={"mutate_primary_id": card_id})
 
         # --- Re-check layers if moved TO battlefield and is Impending ---
         # (Already applied earlier in this block)
@@ -541,6 +880,10 @@ class GameStateZonesMixin:
         type_line = getattr(card, 'type_line', '').lower()
         name = getattr(card, 'name', '').lower()
 
+        if isinstance(criteria, str) and " or " in criteria:
+            return any(
+                self._card_matches_criteria(card, part.strip())
+                for part in criteria.split(" or "))
         if criteria == "any": return True
         if criteria == "basic land" and 'basic' in type_line and 'land' in type_line: return True
         if criteria == "land" and 'land' in type_line: return True

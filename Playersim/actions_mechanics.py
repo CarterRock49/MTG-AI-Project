@@ -108,6 +108,11 @@ class MechanicsHandlersMixin:
         if bf_idx >= len(player.get("battlefield", [])): return -0.2, False
 
         card_id = player["battlefield"][bf_idx]; card = gs._safe_get_card(card_id)
+        if card and getattr(card, "is_specialize", False):
+            if gs.start_specialize_choice(card_id, player):
+                return 0.02, True
+            logging.debug(f"SPECIALIZE failed for {getattr(card, 'name', card_id)}.")
+            return -0.1, False
         if card and hasattr(card, 'transform') and hasattr(card, 'can_transform') and card.can_transform(gs): # Check if possible
             card.transform() # Card method handles its state change
             gs.trigger_ability(card_id, "TRANSFORMED", {"controller": player})
@@ -492,52 +497,44 @@ class MechanicsHandlersMixin:
     def _handle_mutate(self, param, context, **kwargs):
         gs = self.game_state
         player = gs._get_active_player() # Player casting mutate spell
+        context = dict(context or {})
+        context.update(kwargs.get('context', {}))
         hand_idx = context.get('hand_idx')
-        target_idx = context.get('target_idx')
 
-        if hand_idx is None or target_idx is None: logging.warning(f"Mutate context missing indices: {context}"); return -0.15, False
-        try: hand_idx, target_idx = int(hand_idx), int(target_idx)
-        except (ValueError, TypeError): logging.warning(f"Mutate context has non-integer indices: {context}"); return -0.15, False
-
-        if hand_idx >= len(player["hand"]) or target_idx >= len(player["battlefield"]):
-            logging.warning(f"Mutate indices out of bounds H:{hand_idx}, T:{target_idx}")
+        if hand_idx is None:
+            logging.warning(f"Mutate context missing hand index: {context}")
+            return -0.15, False
+        try:
+            hand_idx = int(hand_idx)
+        except (ValueError, TypeError):
+            logging.warning(f"Mutate context has non-integer hand index: {context}")
+            return -0.15, False
+        if not 0 <= hand_idx < len(player.get("hand", [])):
+            logging.warning(f"Mutate hand index out of bounds: {hand_idx}")
             return -0.15, False
 
         mutating_card_id = player["hand"][hand_idx]
-        target_id = player["battlefield"][target_idx]
         mutating_card = gs._safe_get_card(mutating_card_id)
         if not mutating_card: return -0.15, False
 
-        mutate_cost_str = None
-        match = re.search(r"mutate (\{[^\}]+\})", getattr(mutating_card, 'oracle_text','').lower())
-        if match: mutate_cost_str = match.group(1)
-        else: # If no explicit cost, cannot mutate via casting
-             logging.warning(f"Cannot mutate {mutating_card.name}: No explicit mutate cost found.")
-             return -0.05, False
-
-        if not self._can_afford_cost_string(player, mutate_cost_str):
-            logging.debug(f"Cannot afford mutate cost {mutate_cost_str} for {mutating_card_id}")
+        match = re.search(
+            r"\bmutate\s*((?:\{[^}]+\})+)",
+            getattr(mutating_card, 'oracle_text', ''), re.IGNORECASE)
+        if not match:
+            logging.warning(f"Cannot mutate {mutating_card.name}: no mutate cost found.")
             return -0.05, False
 
-        if not gs.mana_system.pay_mana_cost(player, mutate_cost_str):
-            logging.warning(f"Failed to pay mutate cost {mutate_cost_str}")
-            return -0.05, False
-
-        # GameState.mutate handles validation (non-human etc.) and merge
-        success = False
-        if hasattr(gs, 'mutate') and gs.mutate(player, mutating_card_id, target_id):
-            # Remove card from hand AFTER successful mutation
-            if mutating_card_id in player["hand"]:
-                player["hand"].remove(mutating_card_id) # This assumes index might have changed, remove by ID
-            else: # Card already moved/gone?
-                 logging.warning(f"Mutating card {mutating_card_id} not in hand after successful mutate call.")
-            success = True
-        else:
-            logging.debug(f"Mutate validation/execution failed for {mutating_card_id} -> {target_id}")
-            # Rollback cost? Assume wasted.
-            success = False
-
-        return (0.6 if success else -0.1), success # Return success flag
+        cast_context = dict(context)
+        cast_context.update({
+            "hand_idx": hand_idx,
+            "source_idx": hand_idx,
+            "source_zone": "hand",
+            "use_alt_cost": "mutate",
+            "cast_for_mutate": True,
+            "effect_text": "Target non-Human creature you own.",
+        })
+        success = gs.cast_spell(mutating_card_id, player, context=cast_context)
+        return (0.25 if success else -0.1), success
 
     def _handle_goad(self, param, context, **kwargs):
         gs = self.game_state
@@ -896,4 +893,4 @@ class MechanicsHandlersMixin:
                 else: logging.warning(f"Manifest index out of bounds: {card_idx}")
             else: logging.warning(f"Manifest context missing 'battlefield_idx'")
             return (-0.15, False)
-
+

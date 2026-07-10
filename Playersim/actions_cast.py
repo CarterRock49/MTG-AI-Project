@@ -232,40 +232,31 @@ class CastingHandlersMixin:
 
     def _handle_discard_card(self, param, **kwargs):
         gs = self.game_state
-        player = gs._get_active_player() # Assume player with priority discards, context could override
+        context = getattr(gs, "choice_context", None)
+        if not (gs.phase == gs.PHASE_CHOOSE and context
+                and context.get("type") in ["discard", "specialize_discard"]):
+             logging.warning("DISCARD_CARD called outside a discard choice.")
+             return -0.2, False
+
+        player = context.get("player")
+        acting_player = gs.p1 if gs.agent_is_p1 else gs.p2
+        if player != acting_player:
+             logging.warning("DISCARD_CARD called by a player without choice authority.")
+             return -0.2, False
+
         hand_idx = param
-        if hand_idx >= len(player.get("hand", [])):
+        if not isinstance(hand_idx, int) or not 0 <= hand_idx < len(player.get("hand", [])):
              logging.warning(f"DISCARD_CARD: Invalid hand index {hand_idx}")
              return -0.2, False
 
-        card_id = player["hand"][hand_idx] # Do NOT pop yet
-        card = gs._safe_get_card(card_id)
-        card_name = getattr(card, 'name', card_id)
+        card_id = player["hand"][hand_idx]
         value = self.card_evaluator.evaluate_card(card_id, "discard") if self.card_evaluator else 0
-
-        has_madness = False
-        madness_cost = None
-        if card and "madness" in getattr(card,'oracle_text','').lower():
-            has_madness = True
-            madness_cost = self._get_madness_cost_str(card)
-
-        target_zone = "exile" if has_madness else "graveyard"
-
-        success_move = gs.move_card(card_id, player, "hand", player, target_zone, cause="discard")
-
-        if success_move and has_madness:
-            # Set up madness trigger/context
-            if madness_cost: # Only if we found a cost
-                gs.madness_cast_available = {'card_id': card_id, 'player': player, 'cost': madness_cost}
-                logging.debug(f"Discarded {card_name} with Madness, moved to exile. Cost: {madness_cost}")
-            else:
-                logging.warning(f"Discarded {card_name} with Madness, but couldn't parse cost. Moving to exile.")
-                # Should it still go to exile? Rules say yes. Opportunity to cast just fails.
-        elif success_move:
-            logging.debug(f"Discarded {card_name} to graveyard.")
-
-        reward = -0.05 - value * 0.2 # Penalty for losing card, worse if high value
-        return reward, success_move # Return success of move
+        if context.get("type") == "specialize_discard":
+             success = gs.choose_specialize_discard(hand_idx)
+        else:
+             success = gs.choose_discard_card(hand_idx)
+        reward = -0.05 - value * 0.2
+        return reward, success
 
     def _get_madness_cost_str(self, card):
         if card and hasattr(card, 'oracle_text'):
@@ -532,19 +523,20 @@ class CastingHandlersMixin:
              logging.warning(f"Target stack item not found or not a spell: {target_identifier}")
              return -0.15, False
 
-        item_type, card_id, original_controller, old_context = target_stack_item
+        _, card_id, _, _ = target_stack_item
         card = gs._safe_get_card(card_id)
         if not card:
             logging.warning(f"Spell card {card_id} not found for copy.")
             return -0.15, False
 
-        import copy
-        new_context = copy.deepcopy(old_context)
-        new_context["is_copy"] = True
-        new_context["needs_new_targets"] = True
-        new_context.pop("targets", None)
-
-        gs.add_to_stack("SPELL", card_id, player, new_context)
+        copy_id = gs.copy_spell_on_stack(
+            target_stack_item,
+            player,
+            copied_by=context.get("source_id"),
+            allow_new_targets=context.get("allow_new_targets", True),
+        )
+        if copy_id is None:
+            return -0.15, False
         logging.debug(f"Successfully copied spell {card.name} onto stack.")
         return 0.4, True # Success
 
@@ -1050,4 +1042,4 @@ class CastingHandlersMixin:
             return True
             
         return False 
-
+

@@ -1287,7 +1287,52 @@ class AlphaZeroMTGEnv(gym.Env):
                  return opponent_mask[11] if opponent_mask[11] else None, {} # Try Pass
 
 
-        # 2. Handle Other Choice Phases (simple pass for now)
+        # 2. Handle target/card selections before the generic choice fallback.
+        if phase_ctx == "TARGETING":
+            for action_idx in range(274, 284):
+                if opponent_mask[action_idx]:
+                    logging.debug(
+                        f"Scripted Opponent: SELECT_TARGET (Index {action_idx - 274})")
+                    return action_idx, {}
+            if opponent_mask[11]:
+                return 11, {}
+            logging.warning("Scripted Opponent: No legal target action available.")
+            return None, {}
+
+        if (phase_ctx == "CHOOSE" and getattr(gs, "choice_context", None)
+                and gs.choice_context.get("type") == "discard"):
+            for action_idx in range(238, 248):
+                if opponent_mask[action_idx]:
+                    logging.debug(
+                        f"Scripted Opponent: DISCARD_CARD (Index {action_idx - 238})")
+                    return action_idx, {}
+            logging.warning("Scripted Opponent: No discard-card action available.")
+            return None, {}
+
+        if phase_ctx == "CHOOSE" and getattr(gs, "choice_context", None):
+            choice_type = gs.choice_context.get("type")
+            if choice_type == "casting_additional_return":
+                for action_idx in range(353, 363):
+                    if opponent_mask[action_idx]:
+                        logging.debug(
+                            "Scripted Opponent: RETURN_FOR_ADDITIONAL_COST "
+                            f"(Index {action_idx - 353})")
+                        return action_idx, {}
+                logging.warning(
+                    "Scripted Opponent: No permanent return-cost action available.")
+                return None, {}
+            if choice_type == "collect_evidence":
+                # The baseline policy conservatively declines this optional
+                # cost. If a future policy has already staged cards, continue
+                # until the threshold is legal, then finish with Pass.
+                if opponent_mask[11]:
+                    return 11, {}
+                for action_idx in range(353, 363):
+                    if opponent_mask[action_idx]:
+                        return action_idx, {}
+                return None, {}
+
+        # 3. Handle Other Choice Phases (simple pass for now)
         if phase_ctx in ["TARGETING", "SACRIFICE", "CHOOSE"]:
             # Simple: Opponent just finishes the choice (Passes)
             if opponent_mask[11]:
@@ -1299,7 +1344,7 @@ class AlphaZeroMTGEnv(gym.Env):
                  return opponent_mask[12] if opponent_mask[12] else None, {}
 
 
-        # 3. Handle Standard Priority
+        # 4. Handle Standard Priority
         if phase_ctx == "priority":
              # Simple Opponent: Always pass priority
             if opponent_mask[11]:
@@ -1310,7 +1355,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 if opponent_mask[224]: return 224, {}
                 return opponent_mask[12] if opponent_mask[12] else None, {}
 
-        # 4. Fallback (If context unknown or logic missed)
+        # 5. Fallback (If context unknown or logic missed)
         logging.warning(f"Scripted Opponent: Unknown phase context '{phase_ctx}', defaulting to PASS.")
         if opponent_mask[11]: return 11, {}
         if opponent_mask[224]: return 224, {}

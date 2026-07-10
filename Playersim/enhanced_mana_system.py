@@ -329,6 +329,58 @@ class EnhancedManaSystem:
         oracle_text = card.oracle_text.lower()
         card_name = getattr(card, 'name', 'Unknown Card')
 
+        # Domain cost reductions count distinct basic land TYPES among lands
+        # controlled, not basic lands and not the number of lands. Nonbasic
+        # duals with basic land types contribute each printed/live subtype.
+        domain_match = re.search(
+            r"this spell costs \{(\d+)\} less to cast for each basic land type "
+            r"among lands you control", oracle_text)
+        if domain_match:
+            basic_land_types = {"plains", "island", "swamp", "mountain", "forest"}
+            controlled_types = set()
+            for permanent_id in player.get("battlefield", []):
+                permanent = self.game_state._safe_get_card(permanent_id)
+                if not permanent or "land" not in getattr(permanent, "card_types", []):
+                    continue
+                controlled_types.update(
+                    basic_land_types.intersection(
+                        str(subtype).lower()
+                        for subtype in getattr(permanent, "subtypes", [])))
+            reduction = int(domain_match.group(1)) * len(controlled_types)
+            if reduction:
+                effects.append({
+                    'type': 'reduction', 'amount': reduction,
+                    'applies_to': 'generic', 'source': f'{card_name} Domain',
+                })
+
+        # These reductions are determined from targets chosen at CR 601.2c.
+        # Casts with these phrases defer payment until that choice is committed,
+        # so context['targets'] is authoritative here.
+        target_ids = self._target_ids_from_cast_context(context)
+        target_discount = re.search(
+            r"this spell costs \{(\d+)\} less to cast if it targets "
+            r"(?:a|an) (tapped permanent|permanent you control)", oracle_text)
+        if target_discount and target_ids:
+            condition = target_discount.group(2)
+            qualifies = False
+            if condition == "permanent you control":
+                qualifies = any(
+                    self.game_state.get_card_controller(target_id) is player
+                    for target_id in target_ids)
+            elif condition == "tapped permanent":
+                for target_id in target_ids:
+                    target_controller = self.game_state.get_card_controller(target_id)
+                    if (target_controller
+                            and target_id in target_controller.get("tapped_permanents", set())):
+                        qualifies = True
+                        break
+            if qualifies:
+                effects.append({
+                    'type': 'reduction', 'amount': int(target_discount.group(1)),
+                    'applies_to': 'generic',
+                    'source': f'{card_name} target condition',
+                })
+
         # Check for affinity
         affinity_match = re.search(r"affinity for (\w+)", oracle_text)
         if affinity_match:
@@ -376,6 +428,56 @@ class EnhancedManaSystem:
                  # Actual tapping happens during payment step based on context.
 
         return effects
+
+    @staticmethod
+    def _target_ids_from_cast_context(context):
+        """Flatten only target collections from a casting context."""
+        if not isinstance(context, dict):
+            return []
+        targets = context.get("targets")
+        if not isinstance(targets, dict):
+            return []
+        target_ids = []
+        for value in targets.values():
+            if isinstance(value, (list, tuple, set)):
+                target_ids.extend(value)
+        return list(dict.fromkeys(target_ids))
+
+    @staticmethod
+    def has_target_dependent_reduction(card):
+        """Whether a spell's own discount depends on its chosen targets."""
+        oracle_text = getattr(card, "oracle_text", "").lower() if card else ""
+        return bool(re.search(
+            r"this spell costs \{\d+\} less to cast if it targets "
+            r"(?:a|an) (?:tapped permanent|permanent you control)",
+            oracle_text))
+
+    def can_pay_with_target_dependent_reduction(self, player, base_cost,
+                                                card_id, context=None):
+        """Return True when some legal target makes a target-priced spell payable.
+
+        This is an affordability probe only. It never commits a target or spends
+        mana; the actual cast recalculates from the player's eventual choices.
+        """
+        card = self.game_state._safe_get_card(card_id)
+        if not self.has_target_dependent_reduction(card):
+            return False
+        target_type = self.game_state._get_target_type_from_text(card.oracle_text)
+        valid_map = self.game_state.targeting_system.get_valid_targets(
+            card_id, player, target_type, effect_text=card.oracle_text)
+        valid_ids = {
+            target_id
+            for category_ids in valid_map.values()
+            for target_id in category_ids
+        }
+        for target_id in valid_ids:
+            candidate_context = dict(context or {})
+            candidate_context["targets"] = {"chosen": [target_id]}
+            candidate_cost = self.apply_cost_modifiers(
+                player, base_cost, card_id, candidate_context)
+            if self.can_pay_mana_cost(player, candidate_cost, candidate_context):
+                return True
+        return False
 
     def _apply_cost_effect(self, cost, effect):
         """
@@ -837,7 +939,7 @@ class EnhancedManaSystem:
         elif alt_cost_type == "mutate":
             # Find mutate cost
             import re
-            match = re.search(r"mutate [^\(]([^\)]+)", oracle_text)
+            match = re.search(r"\bmutate\s*((?:\{[^}]+\})+)", oracle_text)
             if match:
                 mutate_cost = match.group(1)
                 alt_cost = self.parse_mana_cost(mutate_cost)
@@ -1688,7 +1790,7 @@ class EnhancedManaSystem:
             parts.append(f"{payment['life']} life")
         
         return ", ".join(parts)
-    
+
     def pay_mana_cost(self, player, cost, context=None):
         """
         Enhanced method to pay a mana cost from a player's mana pool with all effects,
@@ -1722,7 +1824,10 @@ class EnhancedManaSystem:
                 # Ensure all keys are present
                 default_keys = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0, 'generic': 0, 'X': 0, 'hybrid': [], 'phyrexian': [], 'snow': 0}
                 cost_dict_checked = {**default_keys, **cost}
-                final_cost = self.apply_cost_modifiers(player, cost_dict_checked.copy(), card_id, context)
+                # A dict is the caller's already-calculated final cost. Applying
+                # modifiers here again double-discounts cast_spell's result
+                # (Domain {2}{W} became {W}, for example).
+                final_cost = cost_dict_checked.copy()
             else:
                 logging.error(f"Invalid cost type provided to pay_mana_cost: {type(cost)}")
                 return False
@@ -2091,17 +2196,8 @@ class EnhancedManaSystem:
                 return False # Failed to pay this hybrid cost
         return True # All hybrid costs paid
 
-    def tap_land_for_mana(self, player, card_id):
-        """Tap a land the player controls to add its mana to the pool (CR 605).
-
-        Primitive behind the explicit TAP_LAND_FOR_MANA action. That handler
-        called gs.mana_system.tap_land_for_mana() assuming it existed - it did
-        not, so every explicit land tap silently failed and produced no mana
-        (spells still cast via auto-tap during payment, masking it). Determines
-        the land's output, taps it, and adds the mana via add_mana_to_pool.
-
-        Returns True if mana was produced, False otherwise.
-        """
+    def tap_land_for_mana(self, player, card_id, option_index=None):
+        """Activate a land mana ability, exposing its output choice (CR 605)."""
         gs = self.game_state
         if not player or card_id is None:
             return False
@@ -2117,9 +2213,71 @@ class EnhancedManaSystem:
             logging.debug(f"tap_land_for_mana: {getattr(card, 'name', card_id)} is not a land.")
             return False
 
-        mana_string = self._land_mana_output(card)
-        if not mana_string:
+        options = self._land_mana_options(player, card)
+        if not options:
             logging.debug(f"tap_land_for_mana: could not determine mana output for {getattr(card, 'name', card_id)}.")
+            return False
+
+        if option_index is None and len(options) > 1:
+            agent_player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if player == agent_player:
+                if gs.phase != gs.PHASE_CHOOSE:
+                    gs.previous_priority_phase = gs.phase
+                gs.phase = gs.PHASE_CHOOSE
+                gs.choice_context = {
+                    "type": "land_mana",
+                    "player": player,
+                    "controller": player,
+                    "source_id": card_id,
+                    "card_id": card_id,
+                    "options": options,
+                }
+                gs.priority_player = player
+                gs.priority_pass_count = 0
+                return True
+            # The current scripted opponent has no choice-policy callback.
+            option_index = 0
+
+        if option_index is None:
+            option_index = 0
+        if not isinstance(option_index, int) or not 0 <= option_index < len(options):
+            return False
+        return self._produce_land_mana_option(player, card_id, options[option_index])
+
+    def complete_land_mana_choice(self, option_index):
+        """Resolve one pending agent choice among a land's mana abilities."""
+        gs = self.game_state
+        context = getattr(gs, "choice_context", None)
+        if not (gs.phase == gs.PHASE_CHOOSE and context
+                and context.get("type") == "land_mana"):
+            return False
+        options = context.get("options", [])
+        if not isinstance(option_index, int) or not 0 <= option_index < len(options):
+            return False
+        player = context.get("player")
+        card_id = context.get("card_id")
+        card = gs._safe_get_card(card_id)
+        if (not card or card_id not in player.get("battlefield", [])
+                or card_id in player.get("tapped_permanents", set())):
+            return False
+
+        if not self._produce_land_mana_option(player, card_id, options[option_index]):
+            return False
+        gs.choice_context = None
+        if getattr(gs, "previous_priority_phase", None) is not None:
+            gs.phase = gs.previous_priority_phase
+            gs.previous_priority_phase = None
+        else:
+            gs.phase = gs.PHASE_PRIORITY
+        gs.priority_player = player
+        gs.priority_pass_count = 0
+        return True
+
+    def _produce_land_mana_option(self, player, card_id, option):
+        """Tap the source, add the selected mana, then apply its rider."""
+        gs = self.game_state
+        card = gs._safe_get_card(card_id)
+        if not card or card_id in player.get("tapped_permanents", set()):
             return False
 
         # Tap the land (fall back to the tapped set if tap_permanent is unavailable).
@@ -2127,31 +2285,110 @@ class EnhancedManaSystem:
         if not tapped:
             player.setdefault("tapped_permanents", set()).add(card_id)
 
-        self.add_mana_to_pool(player, "".join(f"{{{c}}}" for c in mana_string),
-                              land_context={"card_id": card_id, "tapped": True})
-        logging.debug(f"tap_land_for_mana: {getattr(card, 'name', card_id)} tapped for {mana_string}.")
+        symbol = option.get("symbol", "")
+        mana_string = f"{{{symbol}}}"
+        restriction = option.get("restriction", "")
+        if restriction:
+            mana_string += f". {restriction}"
+        self.add_mana_to_pool(
+            player,
+            mana_string,
+            land_context={"card_id": card_id, "source_permanent_id": card_id, "tapped": True},
+        )
+        damage = int(option.get("damage", 0) or 0)
+        if damage > 0:
+            gs.damage_player(player, damage, source_id=card_id, is_combat_damage=False)
+        logging.debug(
+            f"tap_land_for_mana: {getattr(card, 'name', card_id)} tapped for {symbol}"
+            f" with {damage} damage."
+        )
         return True
 
-    def _land_mana_output(self, card):
-        """Best-effort determination of the mana a land taps for.
+    def _land_mana_options(self, player, card):
+        """Return legal mana-ability outputs for a land.
 
-        Basic-land subtypes map to their colour; otherwise the first 'Add {..}'
-        symbol in the oracle text is used. Multi-colour lands yield the first
-        colour, since the explicit tap action carries no colour choice.
+        Each option carries the selected symbol plus riders that matter after
+        activation. This covers the sample decks' duals, pain lands, Verge
+        activation conditions, typed lands, and restricted any-color lands.
         """
-        BASIC = {'plains': 'W', 'island': 'U', 'swamp': 'B',
-                 'mountain': 'R', 'forest': 'G', 'wastes': 'C'}
-        subtypes = [str(s).lower() for s in (getattr(card, 'subtypes', []) or [])]
-        for sub, sym in BASIC.items():
-            if sub in subtypes:
-                return sym  # a land with several basic types still taps for one
-        text = getattr(card, 'oracle_text', '') or ''
-        syms = re.findall(r'add\b[^.\n]*?\{([WUBRGCwubrgc])\}', text, re.IGNORECASE)
-        if syms:
-            return syms[0].upper()
-        if re.search(r'add\s+one\s+mana\s+of\s+any\s+colou?r', text, re.IGNORECASE):
-            return 'W'  # deterministic pick; the action carries no colour choice
-        return ""
+        if not card:
+            return []
+        text = getattr(card, "oracle_text", "") or ""
+        options = []
+
+        for line in text.splitlines():
+            match = re.search(r"\{t\}\s*:\s*add\s+([^.\n]+)", line, re.IGNORECASE)
+            if not match:
+                continue
+            lower_line = line.lower()
+            if ("activate only if you control" in lower_line
+                    and not self._land_activation_condition_met(player, lower_line)):
+                continue
+
+            output_text = match.group(1)
+            symbols = [s.upper() for s in re.findall(
+                r"\{([WUBRGC])\}", output_text, re.IGNORECASE
+            )]
+            if re.search(r"one mana of any colou?r", output_text, re.IGNORECASE):
+                symbols = list("WUBRG")
+            if not symbols:
+                continue
+
+            damage_match = re.search(r"deals\s+(\d+)\s+damage to you", line, re.IGNORECASE)
+            damage = int(damage_match.group(1)) if damage_match else 0
+            restriction = ""
+            restriction_match = re.search(r"(spend this mana only[^.]*\.)", line, re.IGNORECASE)
+            if restriction_match:
+                restriction = restriction_match.group(1).strip()
+            for symbol in symbols:
+                options.append({
+                    "symbol": symbol,
+                    "damage": damage,
+                    "restriction": restriction,
+                })
+
+        if not options:
+            basic_symbols = {
+                'plains': 'W', 'island': 'U', 'swamp': 'B',
+                'mountain': 'R', 'forest': 'G', 'wastes': 'C',
+            }
+            subtypes = [str(s).lower() for s in (getattr(card, 'subtypes', []) or [])]
+            for subtype, symbol in basic_symbols.items():
+                if subtype in subtypes:
+                    options.append({"symbol": symbol, "damage": 0, "restriction": ""})
+
+        deduped = []
+        seen = set()
+        for option in options:
+            key = (option["symbol"], option["damage"], option["restriction"].lower())
+            if key not in seen:
+                seen.add(key)
+                deduped.append(option)
+        return deduped
+
+    def _land_activation_condition_met(self, player, line):
+        """Evaluate the basic-land-type condition used by Verge lands."""
+        if not player:
+            return False
+        condition = line.split("activate only if you control", 1)[-1]
+        required_types = re.findall(
+            r"\b(plains|island|swamp|mountain|forest)\b", condition, re.IGNORECASE
+        )
+        if not required_types:
+            return False
+        controlled_types = set()
+        for permanent_id in player.get("battlefield", []):
+            permanent = self.game_state._safe_get_card(permanent_id)
+            if permanent and "land" in (getattr(permanent, "type_line", "") or "").lower():
+                controlled_types.update(
+                    str(subtype).lower() for subtype in (getattr(permanent, "subtypes", []) or [])
+                )
+        return any(required.lower() in controlled_types for required in required_types)
+
+    def _land_mana_output(self, card):
+        """Compatibility helper returning the first mana option's symbol."""
+        options = self._land_mana_options(None, card)
+        return options[0]["symbol"] if options else ""
 
     def add_mana_to_pool(self, player, mana_string, land_context=None, phase_restricted=False):
         """
@@ -2220,11 +2457,11 @@ class EnhancedManaSystem:
                 logging.error(f"Error applying PRODUCE_MANA replacements: {_e}")
         
         # Initialize conditional_mana if not exists
-        if not hasattr(player, "conditional_mana"):
+        if "conditional_mana" not in player:
             player["conditional_mana"] = {}
         
         # Initialize phase-restricted mana if needed
-        if not hasattr(player, "phase_restricted_mana"):
+        if "phase_restricted_mana" not in player:
             player["phase_restricted_mana"] = {}
         
         # Step 1: Separate land conditions from mana text
@@ -3029,4 +3266,3 @@ class EnhancedManaSystem:
             parts.append(f"1 phyrexian {self.color_names[phyrexian_color]}")
         
         return ", ".join(parts)
-    

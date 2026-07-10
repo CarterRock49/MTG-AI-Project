@@ -51,6 +51,8 @@ class GameState(
                  "action_handler", "impending_cards", "_offspring_cost_paid_context",
                  # Special card types
                  "adventure_cards", "saga_counters", "mdfc_cards", "battle_cards", 'battle_attack_targets',
+                 "melded_permanents", "mutated_permanents", "specialized_cards",
+                 "last_die_roll", "die_roll_history",
                  "cards_castable_from_exile", "impulse_until_eot", "cast_as_back_face", 'planeswalker_attack_targets',
                  # Additional slots for various tracking variables
                  "phased_out", 'original_p1_deck',
@@ -224,7 +226,7 @@ class GameState(
         self._init_subsystems(include_agents=False)  # Agent layer is owned/attached by the environment # Centralized subsystem creation
         logging.info("GameState initialized.")
         
-    def _init_subsystems(self, include_agents=True):
+    def _init_subsystems(self, include_agents=True, reset_tracking=True):
         """Initialize game subsystems with error handling and correct dependencies.
 
         Rules-engine subsystems (layers, replacements, targeting, abilities, mana,
@@ -232,7 +234,9 @@ class GameState(
         layer (action handler, card evaluator, strategic planner) is built only when
         include_agents is True — clone() uses that so MCTS simulations get a fully
         self-contained stack, while the primary game state gets its agent layer
-        constructed and attached by the environment (single ownership).
+        constructed and attached by the environment (single ownership). Clones set
+        reset_tracking=False because their copied state must survive subsystem
+        reconstruction.
         """
         logging.debug("Initializing GameState subsystems...")
         self._init_rules_subsystems()
@@ -243,9 +247,10 @@ class GameState(
             self.card_evaluator = None
             self.strategic_planner = None
         logging.info("Finished initializing GameState subsystems.")
-        # Init tracking variables AFTER subsystems that might reference them
-        self._init_tracking_variables()
-        self.initialize_day_night_cycle()
+        # Init tracking variables AFTER subsystems that might reference them.
+        if reset_tracking:
+            self._init_tracking_variables()
+            self.initialize_day_night_cycle()
 
     def _init_rules_subsystems(self):
         """Rules-engine subsystems owned by GameState itself."""
@@ -378,6 +383,25 @@ class GameState(
             # Entries: dicts from register_delayed_trigger, or bare callables
             # (fire at the next state-based check).
             self.delayed_triggers = []
+            self.last_die_roll = {}
+            self.die_roll_history = []
+            for _meld_id, _meld_info in getattr(self, 'melded_permanents', {}).items():
+                _meld_card = self._safe_get_card(_meld_id)
+                if _meld_card and _meld_info.get('original_printed'):
+                    _meld_card._printed = copy.deepcopy(_meld_info['original_printed'])
+                    _meld_card.reset_to_printed()
+            for _mutated_id, _mutated_info in getattr(self, 'mutated_permanents', {}).items():
+                _mutated_card = self._safe_get_card(_mutated_id)
+                _component_printed = _mutated_info.get('component_printed', {})
+                if _mutated_card and _mutated_id in _component_printed:
+                    _mutated_card._printed = copy.deepcopy(_component_printed[_mutated_id])
+                    _mutated_card.reset_to_printed()
+            for _specialized_id, _specialized_info in getattr(self, 'specialized_cards', {}).items():
+                _specialized_card = self._safe_get_card(_specialized_id)
+                if _specialized_card and _specialized_info.get('original_printed'):
+                    _specialized_card._printed = copy.deepcopy(
+                        _specialized_info['original_printed'])
+                    _specialized_card.reset_to_printed()
             # BUGFIX: Card objects are shared via card_db across games, and
             # in-play state written onto them (counters) leaked into later
             # games -- game N+1 started with game N's +1/+1 counters, silently
@@ -387,6 +411,10 @@ class GameState(
                     for _card in self.card_db.values():
                         if getattr(_card, 'counters', None):
                             _card.counters = {}
+                        if (getattr(_card, 'faces', None)
+                                and getattr(_card, 'current_face', 0) != 0
+                                and hasattr(_card, 'set_current_face')):
+                            _card.set_current_face(0)
                         # Same leakage class, wider blast radius: the layer
                         # write-back mutates shared card objects (name, P/T,
                         # keywords, ...). Restore printed characteristics so
@@ -408,6 +436,10 @@ class GameState(
             self.day_night_checked_this_turn = False
             self.split_second_active = False
             self.phased_out = set() # Stores IDs of phased-out permanents
+            self.phased_out_state = {} # Per-card controller/status and phase-in group
+            self.melded_permanents = {} # Primary ID -> component/result identity data
+            self.mutated_permanents = {} # Battlefield ID -> ordered physical components/identities
+            self.specialized_cards = {} # Card ID -> perpetual specialized identity data
             self.suspended_cards = {} # {card_id: {'player': P, 'counters': N, 'cost': STR}}
             self.rebounded_cards = {} # {card_id: {'owner': P, 'turn_exiled': T}}
             self.madness_cast_available = None # {card_id: {'player': P, 'cost': STR}} - holds ONE opportunity
@@ -504,6 +536,7 @@ class GameState(
                     player["land_played"] = False
                     player["entered_battlefield_this_turn"] = set()
                     player["activated_this_turn"] = set()
+                    player["targeted_permanents_this_turn"] = set()
                     player["pw_activations"] = {}
                     player["lost_life_this_turn"] = False
                     player["attempted_draw_from_empty"] = False
@@ -518,6 +551,7 @@ class GameState(
                     # player["saga_counters"] = {} # Moved to game level
                     player["attachments"] = {}
                     player["championed_cards"] = {}
+                    player["linked_exile"] = {}
                     player["ciphered_spells"] = {}
                     player["haunted_by"] = {}
                     player["hideaway_cards"] = {}
@@ -689,6 +723,7 @@ class GameState(
             "deathtouch_damage": {}, # Track damage dealt by deathtouch sources {card_id: True}
             "entered_battlefield_this_turn": set(), # IDs of creatures that entered this turn
             "activated_this_turn": set(),         # IDs of cards whose abilities were activated this turn
+            "targeted_permanents_this_turn": set(), # Battlefield objects targeted by this player this turn
             "pw_activations": {},                 # Track activations per planeswalker {card_id: count}
             "lost_life_this_turn": False,         # Flag if player lost life this turn (for Spectacle etc.)
             "attempted_draw_from_empty": False, # Flag if player tried to draw from empty library
@@ -699,6 +734,7 @@ class GameState(
             "monarch": False, # For Monarch mechanic
             "attachments": {}, # Track Equipment/Aura attachments {attach_id: target_id}
             "championed_cards": {}, # For Champion mechanic {champion_id: exiled_id}
+            "linked_exile": {}, # Source ID -> cards exiled until that source leaves
             "ciphered_spells": {}, # For Cipher mechanic {creature_id: spell_id}
             "haunted_by": {}, # For Haunt mechanic {haunted_id: [haunter_id,...]}
             "hideaway_cards": {}, # For Hideaway mechanic {land_id: exiled_card_id}
@@ -859,7 +895,8 @@ class GameState(
             "temp_control_effects", "abilities_activated_this_turn", "spells_cast_this_turn",
             "cards_played", "damage_dealt_this_turn", "cards_drawn_this_turn",
             "life_gained_this_turn", "damage_this_turn", "cards_to_graveyard_this_turn",
-            "saga_counters", "battle_cards", "suspended_cards", "rebounded_cards",
+            "saga_counters", "battle_cards", "suspended_cards", "rebounded_cards", "phased_out_state",
+            "melded_permanents", "mutated_permanents", "specialized_cards", "last_die_roll", "die_roll_history",
             "foretold_cards", "epic_spells", "morphed_cards", "manifested_cards",
             "planeswalker_attack_targets", "battle_attack_targets", "planeswalker_protectors",
             "mulligan_count", "mulligan_data" # Dicts need deepcopy
@@ -963,7 +1000,7 @@ class GameState(
         # --- IMPORTANT: Re-initialize Subsystems LINKED TO THE CLONE ---
         # Subsystems must be created *after* players and basic state are copied.
         logging.debug("Re-initializing subsystems for the clone...")
-        cloned_state._init_subsystems() # Creates NEW, EMPTY subsystems linked to cloned_state
+        cloned_state._init_subsystems(reset_tracking=False) # Preserve copied game/player state
 
         # --- Copy Subsystem STATE (The most complex part) ---
         logging.debug("Copying subsystem states...")

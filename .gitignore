@@ -71,5 +71,6 @@ sqlite:///
 *~
 *.bak
 
-#other garbage
+#other stuff
 .agents
+Mtg_Cards

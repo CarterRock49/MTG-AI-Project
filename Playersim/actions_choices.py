@@ -307,6 +307,39 @@ class ChoiceHandlersMixin:
         if requires_sorcery and not gs._can_act_at_sorcery_speed(player):
             logging.debug(f"Cannot activate sorcery-speed ability now for {card.name}")
             return -0.05, False
+
+        effect_text = getattr(ability, 'effect', getattr(ability, 'effect_text', 'Unknown Effect'))
+        requires_target = "target" in effect_text.lower()
+        activation_targets = context.get("activation_targets")
+        if requires_target and not activation_targets:
+            target_type = gs._get_target_type_from_text(effect_text)
+            valid_map = gs.targeting_system.get_valid_targets(
+                card_id, player, target_type, effect_text=effect_text)
+            if not any(valid_map.values()):
+                logging.debug(f"Cannot activate {card.name}: no legal targets.")
+                return -0.05, False
+            if gs.phase not in [gs.PHASE_TARGETING, gs.PHASE_SACRIFICE, gs.PHASE_CHOOSE]:
+                gs.previous_priority_phase = gs.phase
+            gs.phase = gs.PHASE_TARGETING
+            gs.targeting_context = {
+                "source_id": card_id,
+                "controller": player,
+                "effect_text": effect_text,
+                "required_type": target_type,
+                "required_count": 1,
+                "min_targets": 1,
+                "max_targets": 1,
+                "selected_targets": [],
+                "resume_activation": True,
+                "activation_context": {
+                    "battlefield_idx": bf_idx,
+                    "ability_idx": ability_idx,
+                },
+            }
+            gs.priority_player = player
+            gs.priority_pass_count = 0
+            logging.debug(f"Waiting for a target before paying {card.name}'s activation cost.")
+            return 0.02, True
         
         # Prepare cost context
         cost_context = {
@@ -346,54 +379,15 @@ class ChoiceHandlersMixin:
                 gs.ability_handler.check_abilities(card_id, "EXHAUST_ABILITY_ACTIVATED", exhaust_context)
                 gs.ability_handler.process_triggered_abilities()
         
-        # Handle targeting if needed
-        effect_text = getattr(ability, 'effect', getattr(ability, 'effect_text', 'Unknown Effect'))
-        requires_target = "target" in effect_text.lower()
-        
-        if requires_target:
-            # Set up targeting phase
-            if gs.phase not in [gs.PHASE_TARGETING, gs.PHASE_SACRIFICE, gs.PHASE_CHOOSE]:
-                gs.previous_priority_phase = gs.phase
-            
-            gs.phase = gs.PHASE_TARGETING
-            gs.targeting_context = {
-                "source_id": card_id,
-                "controller": player,
-                "effect_text": effect_text,
-                "required_type": gs._get_target_type_from_text(effect_text),
-                "required_count": 1,
-                "min_targets": 1,
-                "max_targets": 1,
-                "selected_targets": [],
-                "stack_info": {
-                    "item_type": "ABILITY",
-                    "source_id": card_id,
-                    "controller": player,
-                    "context": {
-                        "ability_index": internal_idx,
-                        "effect_text": effect_text,
-                        "ability": ability,
-                        "is_exhaust": is_exhaust,
-                        "targets": {}
-                    }
-                }
-            }
-            
-            # Set priority to choosing player
-            gs.priority_player = player
-            gs.priority_pass_count = 0
-            logging.debug(f"Set up targeting for ability: {effect_text}")
-        else:
-            # Add directly to stack
-            stack_context = {
-                "ability_index": internal_idx,
-                "effect_text": effect_text,
-                "ability": ability,
-                "is_exhaust": is_exhaust,
-                "targets": {}
-            }
-            gs.add_to_stack("ABILITY", card_id, player, stack_context)
-            logging.debug(f"Added non-targeting ability {internal_idx} for {card.name} to stack")
+        stack_context = {
+            "ability_index": internal_idx,
+            "effect_text": effect_text,
+            "ability": ability,
+            "is_exhaust": is_exhaust,
+            "targets": activation_targets or {}
+        }
+        gs.add_to_stack("ABILITY", card_id, player, stack_context)
+        logging.debug(f"Added ability {internal_idx} for {card.name} to stack")
         
         # Evaluate strategic value of activation
         ability_value = 0
@@ -455,107 +449,193 @@ class ChoiceHandlersMixin:
             return self.game_state.strategic_planner.evaluate_ability_activation(card_id, ability_idx)
         return 0.5, "Default ability value" # Fallback
 
-    def _handle_select_target(self, param, context, **kwargs):
-        """Handles the SELECT_TARGET action. Param is the index (0-9) into the list of currently valid targets."""
+    def _finalize_targeting_choice(self):
+        """Commit the current target selection and resume its pending action."""
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
-        target_choice_index = param # Param is the index chosen by the agent
+        ctx = gs.targeting_context
+        if not ctx or ctx.get("controller") != player:
+            logging.warning("Cannot finalize targeting for this player.")
+            return -0.2, False
 
-        # Validate context
+        selected_targets = list(ctx.get("selected_targets", []))
+        required_count = ctx.get("required_count", 1)
+        min_targets = ctx.get("min_targets", required_count)
+        max_targets = ctx.get("max_targets", required_count)
+        if not min_targets <= len(selected_targets) <= max_targets:
+            logging.warning(
+                f"Cannot finalize {len(selected_targets)} targets; "
+                f"expected between {min_targets} and {max_targets}.")
+            return -0.1, False
+
+        categorized_targets = defaultdict(list)
+        for target_id in selected_targets:
+            categorized_targets[gs._determine_target_category(target_id)].append(target_id)
+        categorized_targets = dict(categorized_targets)
+
+        def restore_phase(priority_player):
+            if gs.previous_priority_phase is not None:
+                gs.phase = gs.previous_priority_phase
+                gs.previous_priority_phase = None
+            else:
+                gs.phase = gs.PHASE_PRIORITY
+            gs.priority_player = priority_player
+            gs.priority_pass_count = 0
+
+        if ctx.get("resume_activation"):
+            activation_context = dict(ctx.get("activation_context", {}))
+            activation_context["activation_targets"] = categorized_targets
+            gs.targeting_context = None
+            restore_phase(player)
+            result = self._handle_activate_ability(None, activation_context)
+            if isinstance(result, tuple) and len(result) > 1 and result[1]:
+                committed_context = None
+                for item in reversed(gs.stack):
+                    if (isinstance(item, tuple) and len(item) >= 4
+                            and item[1] == ctx.get("source_id")
+                            and item[2] is ctx.get("controller")
+                            and isinstance(item[3], dict)):
+                        committed_context = item[3]
+                        break
+                gs.notify_targets_committed(
+                    ctx.get("source_id"), ctx.get("controller"), categorized_targets,
+                    stack_context=committed_context)
+            return result
+
+        if ctx.get("resume_cast"):
+            cast_context = dict(ctx.get("original_cast_context", {}))
+            cast_context["targets"] = categorized_targets
+            card_id = ctx.get("source_id")
+            controller = ctx.get("controller")
+            gs.targeting_context = None
+            restore_phase(controller)
+            success = gs.cast_spell(card_id, controller, cast_context)
+            if not success:
+                logging.warning(
+                    f"Could not finish casting target-priced spell {card_id} "
+                    f"with targets {categorized_targets}.")
+                return -0.1, False
+            return 0.05, True
+
+        pending_effect = ctx.get("resume_effect")
+        if pending_effect is not None:
+            source_id = ctx.get("source_id")
+            controller = ctx.get("controller")
+            gs.targeting_context = None
+            restore_phase(controller)
+            try:
+                gs.notify_targets_committed(source_id, controller, categorized_targets)
+                result = pending_effect._apply_effect(
+                    gs, source_id, controller, categorized_targets)
+            except NotImplementedError:
+                logging.error(
+                    f"Effect application not implemented for: {pending_effect.effect_text}")
+                return -0.15, False
+            except Exception as exc:
+                logging.exception(
+                    f"Error resuming targeted effect '{pending_effect.effect_text}': {exc}")
+                return -0.15, False
+            if result is None:
+                logging.warning(
+                    f"Effect application returned None for: {pending_effect.effect_text}")
+                return -0.15, False
+            return 0.05, bool(result)
+
+        source_id = ctx.get("source_id")
+        copy_instance_id = ctx.get("copy_instance_id")
+        target_instance_id = ctx.get("target_instance_id")
+        found_stack_item = False
+        committed_stack_context = None
+        if source_id is not None:
+            for index in range(len(gs.stack) - 1, -1, -1):
+                item = gs.stack[index]
+                if not isinstance(item, tuple) or len(item) < 3 or item[1] != source_id:
+                    continue
+                stack_context = item[3] if len(item) > 3 and isinstance(item[3], dict) else {}
+                if copy_instance_id and stack_context.get("copy_instance_id") != copy_instance_id:
+                    continue
+                if target_instance_id and stack_context.get("target_instance_id") != target_instance_id:
+                    continue
+
+                stack_context["targets"] = categorized_targets
+                stack_context["target_choice_pending"] = False
+                gs.stack[index] = item[:3] + (stack_context,)
+                committed_stack_context = stack_context
+                found_stack_item = True
+                logging.debug(
+                    f"Updated stack item {index} (Source: {source_id}) "
+                    f"with targets: {categorized_targets}")
+                break
+
+        if not found_stack_item:
+            logging.error(
+                f"Targeting context active (Source: {source_id}) but no matching stack item exists.")
+            gs.targeting_context = None
+            restore_phase(gs._get_active_player())
+            return -0.2, False
+
+        gs.notify_targets_committed(
+            source_id, ctx.get("controller"), categorized_targets,
+            stack_context=committed_stack_context)
+        gs.targeting_context = None
+        if gs.start_pending_stack_target_choice():
+            logging.debug("Targeting complete; another stack target choice is pending.")
+            return 0.05, True
+        restore_phase(gs._get_active_player())
+        logging.debug("Targeting complete, returning to priority phase.")
+        return 0.05, True
+
+    def _handle_select_target(self, param, context, **kwargs):
+        """Handle SELECT_TARGET, whose parameter indexes the valid target list."""
+        gs = self.game_state
+        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        target_choice_index = param
+
         if not gs.targeting_context or gs.targeting_context.get("controller") != player:
             logging.warning("SELECT_TARGET called but not in targeting phase for this player.")
             return -0.2, False
 
         ctx = gs.targeting_context
-        required_count = ctx.get('required_count', 1)
-        selected_targets = ctx.get('selected_targets', [])
-
-        # Regenerate the list of valid targets the agent could have chosen from NOW
-        # This ensures the index maps correctly even if valid targets changed slightly
-        valid_targets_list = []
-        if gs.targeting_system:
-            valid_map = gs.targeting_system.get_valid_targets(ctx["source_id"], player, ctx["required_type"])
-            # Flatten map consistently (e.g., sorted by category then ID)
-            for category in sorted(valid_map.keys()):
-                valid_targets_list.extend(sorted(valid_map[category]))
-            # Ensure list uniqueness if needed (should be handled by get_valid_targets ideally)
-            valid_targets_list = sorted(list(set(valid_targets_list))) # Simple unique sort
-        else:
+        required_count = ctx.get("required_count", 1)
+        selected_targets = ctx.get("selected_targets", [])
+        if not gs.targeting_system:
             logging.error("Targeting system not available during target selection.")
-            return -0.15, False # Cannot select target without system
+            return -0.15, False
 
-        # Validate the chosen index
-        if 0 <= target_choice_index < len(valid_targets_list):
-            target_id = valid_targets_list[target_choice_index] # Get the ID using the agent's chosen index
+        valid_map = gs.targeting_system.get_valid_targets(
+            ctx["source_id"], player, ctx["required_type"],
+            effect_text=ctx.get("effect_text"))
+        valid_targets_list = sorted({
+            target_id
+            for category_targets in valid_map.values()
+            for target_id in category_targets
+        })
 
-            if target_id not in selected_targets: # Avoid duplicates unless context allows
-                selected_targets.append(target_id)
-                ctx["selected_targets"] = selected_targets
-                logging.debug(f"Selected target {len(selected_targets)}/{required_count}: {target_id} (Choice Index {target_choice_index})")
+        if not isinstance(target_choice_index, int) or not 0 <= target_choice_index < len(valid_targets_list):
+            logging.error(
+                f"Invalid SELECT_TARGET action parameter: {target_choice_index}. "
+                f"Valid indices: 0-{len(valid_targets_list) - 1}")
+            return -0.1, False
 
-                # If enough targets are now selected, finalize targeting
-                min_targets = ctx.get('min_targets', required_count) # Use min_targets
-                if len(selected_targets) >= min_targets: # Met minimum requirement
-                    # Max targets check handled here or implicitly by required_count? Check max too.
-                    max_targets = ctx.get('max_targets', required_count)
-                    if len(selected_targets) > max_targets:
-                         logging.error("Selected more targets than allowed!") # Should not happen if mask is correct
-                         return -0.15, False # Error state
+        target_id = valid_targets_list[target_choice_index]
+        if target_id in selected_targets:
+            logging.warning(
+                f"Target {target_id} (Index {target_choice_index}) already selected.")
+            return -0.05, False
 
-                    # Proceed to finalize (put targets into stack item context)
-                    found_stack_item = False
-                    source_id = ctx.get("source_id")
-                    copy_instance_id = ctx.get("copy_instance_id") # Handle copies needing targets
-                    if source_id:
-                        for i in range(len(gs.stack) - 1, -1, -1):
-                            item = gs.stack[i]
-                            # Match by source ID and potentially copy ID if available
-                            item_matches = (isinstance(item, tuple) and item[1] == source_id)
-                            if copy_instance_id: # If targeting a copy, match its specific ID
-                                item_matches &= (item[3].get('copy_instance_id') == copy_instance_id)
+        selected_targets.append(target_id)
+        ctx["selected_targets"] = selected_targets
+        logging.debug(
+            f"Selected target {len(selected_targets)}/{required_count}: "
+            f"{target_id} (Choice Index {target_choice_index})")
 
-                            if item_matches:
-                                new_stack_context = item[3] if len(item) > 3 else {}
-                                # Structure targets (e.g., categorized or flat list)
-                                # Categorization needed if resolution logic depends on type
-                                categorized_targets = defaultdict(list)
-                                for tid in selected_targets:
-                                     # Determine category (simple example)
-                                     cat = gs._determine_target_category(tid) # Need helper method
-                                     categorized_targets[cat].append(tid)
-                                new_stack_context['targets'] = dict(categorized_targets) # Store categorized dict
-                                gs.stack[i] = item[:3] + (new_stack_context,)
-                                found_stack_item = True
-                                logging.debug(f"Updated stack item {i} (Source: {source_id}) with targets: {new_stack_context['targets']}")
-                                break
-                    if not found_stack_item:
-                         # Check if targeting context was for an ability *not* on stack (e.g. ETB choice?)
-                         # This requires a different update mechanism if choice isn't for stack item.
-                         logging.error(f"Targeting context active (Source: {source_id}) but couldn't find matching stack item!")
-                         gs.targeting_context = None # Clear potentially invalid context
-                         gs.phase = gs.PHASE_PRIORITY
-                         return -0.2, False
-
-                    # Clear targeting context and return to previous phase
-                    gs.targeting_context = None
-                    if hasattr(gs, 'previous_priority_phase') and gs.previous_priority_phase is not None:
-                         gs.phase = gs.previous_priority_phase
-                         gs.previous_priority_phase = None
-                    else: gs.phase = gs.PHASE_PRIORITY # Fallback
-                    gs.priority_pass_count = 0
-                    gs.priority_player = gs._get_active_player()
-                    logging.debug("Targeting complete, returning to priority phase.")
-                    return 0.05, True # Success
-                else:
-                    # More targets needed, stay in targeting phase
-                    # Let agent choose next target index.
-                    return 0.02, True # Incremental success
-            else: # Target already selected
-                 logging.warning(f"Target {target_id} (Index {target_choice_index}) already selected.")
-                 return -0.05, False # Redundant selection
-        else: # Invalid index 'param' provided by agent
-             logging.error(f"Invalid SELECT_TARGET action parameter: {target_choice_index}. Valid indices: 0-{len(valid_targets_list)-1}")
-             return -0.1, False # Invalid choice
+        max_targets = ctx.get("max_targets", required_count)
+        if len(selected_targets) > max_targets:
+            logging.error("Selected more targets than allowed.")
+            return -0.15, False
+        if len(selected_targets) == max_targets:
+            return self._finalize_targeting_choice()
+        return 0.02, True
 
     def _handle_sacrifice_permanent(self, param, context, **kwargs):
         """Handles the SACRIFICE_PERMANENT action. Param is the index (0-9) into the list of currently valid sacrifices."""
@@ -753,11 +833,49 @@ class ChoiceHandlersMixin:
     def _handle_choose_mode(self, param, context, **kwargs):
         """Handles the CHOOSE_MODE action. Param is the chosen mode index (0-9). Finalizes choice if criteria met."""
         gs = self.game_state
+        casting_choice = getattr(gs, 'choice_context', None)
+        if casting_choice and casting_choice.get('type') in (
+                'casting_additional_return', 'collect_evidence'):
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if casting_choice.get('player') is not player:
+                logging.warning("Casting-cost choice called for the wrong player.")
+                return -0.2, False
+            if casting_choice.get('type') == 'casting_additional_return':
+                success = gs.choose_casting_additional_return(param)
+            else:
+                success = gs.choose_collect_evidence_card(param)
+            return (0.02 if success else -0.1), success
         # CR 603.3b / 510.1c: ordering choices share the 353-362 index range.
+        if getattr(gs, 'choice_context', None) and gs.choice_context.get('type') == 'linked_exile':
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if gs.choice_context.get('player') is not player:
+                logging.warning("LINKED_EXILE choice called for the wrong player.")
+                return -0.2, False
+            if gs.choose_linked_exile_card(param):
+                return 0.05, True
+            logging.warning(f"Invalid linked-exile option index {param}.")
+            return -0.1, False
         if getattr(gs, 'choice_context', None) and gs.choice_context.get('type') == 'order_triggers':
             return self._handle_order_triggers(param, context)
         if getattr(gs, 'choice_context', None) and gs.choice_context.get('type') == 'order_blockers':
             return self._handle_order_blockers(param, context)
+        if getattr(gs, 'choice_context', None) and gs.choice_context.get('type') == 'land_mana':
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if gs.choice_context.get('player') != player:
+                logging.warning("LAND_MANA choice called for the wrong player.")
+                return -0.2, False
+            if gs.mana_system.complete_land_mana_choice(param):
+                return 0.05, True
+            logging.warning(f"Invalid land mana option index {param}.")
+            return -0.1, False
+        if getattr(gs, 'choice_context', None) and gs.choice_context.get('type') == 'mutate_position':
+            if param not in (0, 1):
+                logging.warning(f"Invalid mutate position choice: {param}")
+                return -0.1, False
+            if gs.complete_mutate_position_choice(mutate_on_top=(param == 0)):
+                return 0.1, True
+            logging.error("Could not complete the pending mutate position choice.")
+            return -0.2, False
         player = gs.p1 if gs.agent_is_p1 else gs.p2
         chosen_mode_idx = param # Agent's choice index from action
 
@@ -802,38 +920,10 @@ class ChoiceHandlersMixin:
             # For now, assume finalize only when max is reached.
 
             if finalize_choice:
-                 # --- Finalizing the Choice ---
-                 card_id = ctx.get("card_id")
-                 cast_controller = ctx.get("controller") # Get original caster
-                 original_cast_context = ctx.get("original_cast_context", {})
-                 final_paid_cost = ctx.get("final_paid_cost", {})
-
-                 if not card_id or not cast_controller:
-                      logging.error("CRITICAL: Choice context missing card_id or controller during finalization.")
-                      # Clear broken context
-                      gs.choice_context = None
-                      gs.phase = gs.PHASE_PRIORITY
-                      return -0.5, False # Indicate major state error
-
-                 # Prepare the final context for the stack item
-                 final_stack_context = original_cast_context.copy() # Start with original cast context
-                 final_stack_context['selected_modes'] = selected_modes # Embed the chosen modes
-                 final_stack_context['final_paid_cost'] = final_paid_cost # Include cost paid for copies etc.
-                 # Clear temporary choice flags from context if any
-                 final_stack_context.pop('available_modes', None)
-                 final_stack_context.pop('min_required', None)
-                 final_stack_context.pop('max_required', None)
-
-                 # Add the spell WITH CHOSEN MODES to the stack
-                 gs.add_to_stack("SPELL", card_id, cast_controller, final_stack_context)
-                 # add_to_stack handles phase transition back to PRIORITY and resets priority
-
-                 logging.debug(f"Finalized mode choice for {card_id}. Spell added to stack.")
-
-                 # Clear choice context AFTER adding to stack
-                 gs.choice_context = None
-
-                 return 0.1, True # Successful choice and finalization
+                 if gs.finalize_modal_spell_choice():
+                      return 0.1, True
+                 logging.error("Failed to finalize completed modal choice.")
+                 return -0.5, False
             else:
                  # More modes can/must be chosen, stay in PHASE_CHOOSE
                  return 0.05, True # Incremental success
@@ -846,73 +936,15 @@ class ChoiceHandlersMixin:
         """Handles CHOOSE_X action. Param is the chosen X value (1-10)."""
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
-        x_value = param # Use agent's chosen value directly
 
-        # Validate context
         if not gs.choice_context or gs.choice_context.get("type") != "choose_x" or gs.choice_context.get("player") != player:
             logging.warning("CHOOSE_X called out of context.")
             return -0.2, False
-
-        ctx = gs.choice_context
-        max_x = ctx.get("max_x", 0) # Get max allowed based on affordability check done earlier
-        min_x = ctx.get("min_x", 0)
-
-        # Validate chosen X value
-        if min_x <= x_value <= max_x:
-            ctx["chosen_x"] = x_value # Store chosen value
-
-            # --- FINALIZING LOGIC (Update Stack, Pay X Cost, Change Phase) ---
-            found_stack_item = False
-            source_id = ctx.get("source_id")
-            copy_instance_id = ctx.get("copy_instance_id")
-            if source_id:
-                for i in range(len(gs.stack) - 1, -1, -1):
-                    item = gs.stack[i]
-                    item_matches = (isinstance(item, tuple) and item[1] == source_id)
-                    if copy_instance_id: item_matches &= (item[3].get('copy_instance_id') == copy_instance_id)
-
-                    if item_matches:
-                        new_stack_context = item[3] if len(item) > 3 else {}
-                        new_stack_context['X'] = x_value # Store chosen X
-                        # Store final cost including X component? Or assume ManaSystem tracks pending?
-                        # Store chosen X is usually enough for resolution logic.
-                        gs.stack[i] = item[:3] + (new_stack_context,)
-                        found_stack_item = True
-                        logging.debug(f"Updated stack item {i} (Source: {source_id}) with X={x_value}")
-                        break
-            if not found_stack_item: logging.error("X choice context active but couldn't find stack item!")
-
-            # Pay the X cost (ManaSystem needed)
-            # NOTE: Cost payment for X was originally planned during cast_spell setup,
-            # but rules state costs paid on resolution *after* choices.
-            # For simplicity, assume cost was checked during CHOOSE_X action generation,
-            # and PAY it now. More accurate would be to require agent PAY_X action, or pay during resolution.
-            # Pay now for simplification.
-            x_cost_paid = False
-            if gs.mana_system:
-                paid_details = gs.mana_system.pay_mana_cost_get_details(player, {'generic': x_value})
-                if paid_details: x_cost_paid = True
-                else: logging.error(f"Failed to pay X={x_value} mana cost!")
-            if not x_cost_paid:
-                logging.error("Aborting CHOOSE_X: Failed to pay the required mana for X.")
-                gs.choice_context = None # Clear invalid state
-                gs.phase = gs.PHASE_PRIORITY # Return to priority
-                # Need to handle stack potentially? Rollback?
-                return -0.2, False # Failed cost payment
-
-            # Clear choice context and return to previous phase
-            gs.choice_context = None
-            if hasattr(gs, 'previous_priority_phase') and gs.previous_priority_phase is not None:
-                 gs.phase = gs.previous_priority_phase
-                 gs.previous_priority_phase = None
-            else: gs.phase = gs.PHASE_PRIORITY
-            gs.priority_player = gs._get_active_player()
-            gs.priority_pass_count = 0
-            logging.debug(f"Chose X={x_value} and paid cost.")
+        if gs.choose_x_for_pending_spell(param):
+            logging.debug(f"Chose X={param} and resumed casting.")
             return 0.05, True
-        else: # Invalid X value
-             logging.error(f"Invalid CHOOSE_X action parameter: {x_value}. Valid range: [{min_x}-{max_x}]")
-             return -0.1, False
+        logging.error(f"Invalid or unaffordable X choice: {param}")
+        return -0.1, False
 
     def _handle_choose_color(self, param, context, **kwargs):
         """Handles CHOOSE_COLOR action. Param is the color index (0-4)."""
@@ -929,7 +961,16 @@ class ChoiceHandlersMixin:
         # Validate chosen color index
         if 0 <= color_idx <= 4:
              chosen_color = ['W','U','B','R','G'][color_idx]
+             if chosen_color not in set(ctx.get("available_colors", "WUBRG")):
+                  logging.warning(f"Color {chosen_color} is not available for this choice.")
+                  return -0.1, False
              ctx["chosen_color"] = chosen_color
+
+             if ctx.get("resume_specialize"):
+                  if gs.complete_specialize_choice(chosen_color):
+                       return 0.05, True
+                  logging.error(f"Could not complete Specialize with color {chosen_color}.")
+                  return -0.15, False
 
              # --- FINALIZING LOGIC (Update Stack, Change Phase) ---
              found_stack_item = False
@@ -1104,4 +1145,4 @@ class ChoiceHandlersMixin:
              card_eval_score = self.card_evaluator.evaluate_card(card_id, "general", context_details={"destination":"graveyard"})
         # Reward higher if putting low-value card in GY
         return 0.05 - card_eval_score * 0.05, True
-
+

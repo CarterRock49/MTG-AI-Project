@@ -4,7 +4,8 @@ from .targeting import TargetingSystem  # noqa: F401  (re-export: kept for backw
 import numpy as np
 # Remove KeywordEffects if not used directly after refactoring
 # from .keyword_effects import KeywordEffects
-from .ability_types import Ability, ActivatedAbility, TriggeredAbility, StaticAbility, ManaAbility, CreateTokenEffect
+from .ability_types import (Ability, ActivatedAbility, TriggeredAbility, StaticAbility,
+                            TargetingOverrideAbility, ManaAbility, CreateTokenEffect)
 import re
 from collections import defaultdict
 from .card import Card
@@ -637,22 +638,23 @@ class AbilityHandler:
                 
     def unregister_card_abilities(self, card_id):
         """
-        Unregister all effects and abilities associated with a card leaving a zone (e.g., battlefield).
+        Remove live effects associated with a card leaving the battlefield.
+
+        Parsed ability definitions remain cached as last-known information so
+        battlefield-to-graveyard triggers can be recognized after the move and
+        abilities that function in other zones remain available. A trigger that
+        has already fired also exists independently of its source, so pending
+        triggers are intentionally preserved here.
         """
         try:
             card_name = getattr(self.game_state._safe_get_card(card_id), 'name', f"Card {card_id}")
             logging.debug(f"Unregistering abilities and effects for {card_name} ({card_id}).")
 
-            # Remove from registered abilities cache
-            if card_id in self.registered_abilities:
-                del self.registered_abilities[card_id]
-
-            # Remove any pending triggers from this source
-            self.active_triggers = [(ab, ctrl) for ab, ctrl in self.active_triggers if ab.card_id != card_id]
-
             # Remove continuous effects from LayerSystem
             if hasattr(self.game_state, 'layer_system'):
-                removed_layer_count = self.game_state.layer_system.remove_effects_by_source(card_id)
+                removed_layer_count = self.game_state.layer_system.remove_effects_by_source(
+                    card_id,
+                    preserve_durations={"end_of_turn", "until_your_next_turn"})
                 if removed_layer_count > 0: logging.debug(f"Removed {removed_layer_count} continuous effects from {card_name}.")
 
             # Remove replacement effects
@@ -783,10 +785,18 @@ class AbilityHandler:
                     potential_clauses = re.split(r'\n{2,}', cleaned_text_block) # Split by blank lines
                     final_clauses = []
                     for clause in potential_clauses:
-                        # Split remaining chunks by single newline if needed
-                        sub_clauses = clause.split('\n')
-                        # Clean up each resulting line/sub-clause
-                        final_clauses.extend(filter(None, [c.strip().rstrip('.').strip() for c in sub_clauses]))
+                        # Numeric die-table rows belong to the ability on the
+                        # preceding line. Preserve that block as one clause.
+                        for sub_clause in clause.split('\n'):
+                            cleaned_sub_clause = sub_clause.strip().rstrip('.').strip()
+                            if not cleaned_sub_clause:
+                                continue
+                            if (re.match(r"^\d+(?:\s*[-\u2013\u2014]\s*\d+)?\s*\|",
+                                         cleaned_sub_clause)
+                                    and final_clauses):
+                                final_clauses[-1] += "\n" + cleaned_sub_clause
+                            else:
+                                final_clauses.append(cleaned_sub_clause)
 
 
                     # Process each resulting clause/line
@@ -935,6 +945,25 @@ class AbilityHandler:
         text_lower = clause_text.lower().strip()
         text_lower_stripped = text_lower.rstrip('.').strip() # Used for certain checks
 
+        # Rules-changing static abilities such as Nowhere to Run are neither
+        # layer-6 ability removal nor ordinary action effects. Keep them as
+        # live battlefield markers for target legality and ward triggering.
+        if ("creatures your opponents control can be the targets" in text_lower_stripped
+                and "as though they didn't have hexproof" in text_lower_stripped):
+            ability = TargetingOverrideAbility(
+                card_id, "hexproof", effect_text=clause_text.strip())
+            setattr(ability, 'source_card', card)
+            abilities_found.append(ability)
+            return abilities_found
+        if "ward abilities of those creatures don't trigger" in text_lower_stripped:
+            full_oracle = getattr(card, "oracle_text", "").lower()
+            if "creatures your opponents control can be the targets" in full_oracle:
+                ability = TargetingOverrideAbility(
+                    card_id, "ward", effect_text=clause_text.strip())
+                setattr(ability, 'source_card', card)
+                abilities_found.append(ability)
+                return abilities_found
+
         # --- 0. Skip likely Replacement Effects / Non-functional clauses ---
         # ... (patterns remain the same) ...
         replacement_or_non_ability_patterns = [
@@ -1043,8 +1072,18 @@ class AbilityHandler:
 
         if is_likely_triggered:
              try:
-                 ability = TriggeredAbility(card_id=card_id, effect_text=clause_text.strip())
+                 trigger_text = clause_text.strip()
+                 ability_word = None
+                 if keyword_trigger_match:
+                     ability_word = keyword_trigger_match.group(1).lower()
+                     trigger_text = re.sub(
+                         rf"^\s*{re.escape(keyword_trigger_match.group(1))}\s*[—\u2014-]?\s*",
+                         "", trigger_text, count=1, flags=re.IGNORECASE)
+                 ability = TriggeredAbility(card_id=card_id, effect_text=trigger_text)
                  if ability.trigger_condition != "Unknown" and ability.effect != "Unknown":
+                     if ability_word:
+                         ability.ability_word = ability_word
+                         ability.oracle_ability_text = clause_text.strip()
                      setattr(ability, 'source_card', card)
                      abilities_found.append(ability)
                      logging.debug(f"Registered TriggeredAbility for {card.name}")
@@ -1672,8 +1711,14 @@ class AbilityHandler:
              # 2. Zone Change Triggers: Check if event involves a zone change relevant to the ability.
              #    Uses LTB rule: Ability triggers based on game state *before* the event.
              elif event_type == "DIES": # Moving from Battlefield to Graveyard
-                 # Dies trigger must originate from Battlefield, even though card is now in GY
-                 if triggering_zone == 'battlefield' and ("dies" in trigger_text or ("put into a graveyard from the battlefield" in trigger_text)):
+                 # Only the object that just died may use last-known battlefield
+                 # information from its new graveyard location. Other battlefield
+                 # watchers already passed the standard zone match above; cards in
+                 # hand/graveyard must not gain a phantom battlefield trigger.
+                 if (card_id == event_origin_card_id and zone_name == 'graveyard'
+                         and triggering_zone == 'battlefield'
+                         and ("dies" in trigger_text
+                              or "put into a graveyard from the battlefield" in trigger_text)):
                      can_trigger_from_current_zone = True
              elif event_type == "LEAVE_BATTLEFIELD": # Moving from Battlefield to somewhere else
                  if triggering_zone == 'battlefield' and ("leaves the battlefield" in trigger_text):
@@ -1743,6 +1788,23 @@ class AbilityHandler:
         """Get all activated abilities for a given card"""
         card_abilities = self.registered_abilities.get(card_id, [])
         return [ability for ability in card_abilities if isinstance(ability, ActivatedAbility)]
+
+    def suppresses_target_protection(self, controller, target_id, protection):
+        """Return whether a live source creates this targeting exception."""
+        gs = self.game_state
+        protection = str(protection).lower()
+        if not gs or protection not in {"hexproof", "ward"} or not controller:
+            return False
+        target_controller, target_zone = gs.find_card_location(target_id)
+        if (target_zone != "battlefield" or not target_controller
+                or target_controller is controller or not gs._is_creature(target_id)):
+            return False
+        for source_id in controller.get("battlefield", []):
+            for ability in self.registered_abilities.get(source_id, []):
+                if (getattr(ability, "targeting_override", None) == protection
+                        and getattr(ability, "scope", None) == "opponent_creatures"):
+                    return True
+        return False
     
     def can_activate_ability(self, card_id, ability_index, controller):
         """Check if a specific activated ability can be activated"""
@@ -1828,6 +1890,9 @@ class AbilityHandler:
 
         # AP batch first; the NAP batch is stacked once AP's ordering is done.
         self._stack_trigger_batch_with_choice(ap_triggers, next_batch=nap_triggers)
+        if not (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'order_triggers'):
+            gs.start_pending_stack_target_choice()
 
     def _push_trigger_to_stack(self, ability, controller, context_at_trigger):
         """Put a single queued trigger onto the stack with its captured context."""
@@ -1842,6 +1907,10 @@ class AbilityHandler:
             context_at_trigger['source_id'] = ability.card_id
         if 'effect_text' not in context_at_trigger:
             context_at_trigger['effect_text'] = getattr(ability, 'effect_text', 'Unknown Effect')
+        targeting_text = getattr(ability, 'effect', context_at_trigger['effect_text'])
+        if "target" in targeting_text.lower() and not context_at_trigger.get('targets'):
+            context_at_trigger['targeting_text'] = targeting_text
+            context_at_trigger['target_choice_pending'] = True
         gs.add_to_stack("TRIGGER", ability.card_id, controller, context_at_trigger)
         return True
 
@@ -1919,6 +1988,9 @@ class AbilityHandler:
             # the game returns there once the stack empties.
             gs.phase = gs.PHASE_PRIORITY
             self._stack_trigger_batch_with_choice(next_batch)
+            if not (getattr(gs, 'choice_context', None)
+                    and gs.choice_context.get('type') == 'order_triggers'):
+                gs.start_pending_stack_target_choice()
         return True
 
     def resolve_ability(self, ability_type, card_id, controller, context=None):

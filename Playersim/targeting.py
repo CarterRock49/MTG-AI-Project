@@ -23,7 +23,7 @@ class TargetingSystem:
          card = self.game_state._safe_get_card(card_id)
          return self._check_keyword_internal(card, keyword)
 
-    def get_valid_targets(self, card_id, controller, target_type=None):
+    def get_valid_targets(self, card_id, controller, target_type=None, effect_text=None):
         """
         Returns a list of valid targets for a card, based on its text and target type,
         using the unified _is_valid_target checker.
@@ -41,12 +41,13 @@ class TargetingSystem:
         if not card or not hasattr(card, 'oracle_text'):
             return {}
 
-        oracle_text = card.oracle_text.lower()
+        oracle_text = (effect_text or card.oracle_text).lower()
         opponent = gs.p2 if controller == gs.p1 else gs.p1
 
         valid_targets = {
             "creature": [], "player": [], "permanent": [], "spell": [],
             "land": [], "artifact": [], "enchantment": [], "planeswalker": [],
+            "creature_or_vehicle": [],
             "card": [], # For graveyard/exile etc.
             "ability": [], # For targeting abilities on stack
             "other": [] # Fallback
@@ -56,8 +57,11 @@ class TargetingSystem:
         # Parse targeting requirements from the oracle text
         target_requirements = self._parse_targeting_requirements(oracle_text)
 
-        # If no requirements found but text has "target", add a generic requirement
-        if not target_requirements and "target" in oracle_text:
+        # An explicit target_type is sufficient for ability contexts whose
+        # effect text is stored on the stack rather than printed on the source.
+        if not target_requirements and target_type:
+            target_requirements.append({"type": target_type})
+        elif not target_requirements and "target" in oracle_text:
             target_requirements.append({"type": "target"}) # Generic target
 
         # Filter requirements if a specific target type is requested
@@ -220,6 +224,8 @@ class TargetingSystem:
         elif target_type == "card" and isinstance(target_obj, Card): valid_type = True # Targeting a card in specific zone
         elif target_type in actual_types: valid_type = True
         elif target_type == "permanent" and any(t in actual_types for t in ["creature", "artifact", "enchantment", "land", "planeswalker"]): valid_type = True
+        elif target_type == "creature_or_vehicle":
+             valid_type = "creature" in actual_types or "vehicle" in actual_types
         elif target_type == "spell" and target_zone == "stack" and isinstance(target_obj, Card): valid_type = True # Targeting spell on stack
 
         if not valid_type: return False
@@ -246,7 +252,16 @@ class TargetingSystem:
                  # Protection
                  if self._has_protection_from(target_obj, source_card, target_owner, caster): return False
                  # Hexproof (if targeted by opponent)
-                 if caster != target_owner and self._check_keyword(target_obj, "hexproof"): return False
+                 live_handler = getattr(gs, "ability_handler", None)
+                 ignores_hexproof = bool(
+                     live_handler
+                     and hasattr(live_handler, "suppresses_target_protection")
+                     and live_handler.suppresses_target_protection(
+                         caster, target_card_id, "hexproof"))
+                 if (caster != target_owner
+                         and self._check_keyword(target_obj, "hexproof")
+                         and not ignores_hexproof):
+                     return False
                  # Shroud (if targeted by anyone)
                  if self._check_keyword(target_obj, "shroud"): return False
                  # Ward (Check handled separately - involves paying cost)
@@ -261,6 +276,13 @@ class TargetingSystem:
             if requirement.get("exclude_land") and 'land' in actual_types: return False
             if requirement.get("exclude_creature") and 'creature' in actual_types: return False
             if requirement.get("exclude_color") and self._has_color(target_obj, requirement["exclude_color"]): return False
+            excluded_subtypes = {
+                str(subtype).lower()
+                for subtype in requirement.get("exclude_subtypes", [])
+            }
+            if excluded_subtypes.intersection(
+                    str(subtype).lower() for subtype in getattr(target_obj, 'subtypes', [])):
+                return False
 
             # Inclusions
             if requirement.get("must_be_artifact") and 'artifact' not in actual_types: return False
@@ -384,8 +406,9 @@ class TargetingSystem:
 
         # 1. Prefer AbilityHandler (should use GameState.check_keyword or layer system)
         # *** MODIFYING: Check if handler itself exists first ***
-        if hasattr(self, 'ability_handler') and self.ability_handler and hasattr(self.ability_handler, 'check_keyword'):
-            return self.ability_handler.check_keyword(card_id, keyword)
+        live_handler = getattr(gs, "ability_handler", None)
+        if live_handler and hasattr(live_handler, 'check_keyword'):
+            return live_handler.check_keyword(card_id, keyword)
 
         # 2. Fallback to GameState's check_keyword directly
         elif hasattr(gs, 'check_keyword') and callable(gs.check_keyword):
@@ -420,6 +443,38 @@ class TargetingSystem:
         requirements = []
         oracle_text = oracle_text.lower()
 
+        # Alternative type wording needs one OR requirement. Treating only the
+        # first noun as authoritative makes noncreature Vehicles invisible.
+        creature_vehicle_pattern = r"target\s+creature\s+or\s+vehicle"
+        if re.search(creature_vehicle_pattern, oracle_text):
+            requirements.append({"type": "creature_or_vehicle"})
+            oracle_text = re.sub(creature_vehicle_pattern, "", oracle_text)
+
+        # Mutate reminder text uses both an adjective before the type and the
+        # ownership wording "you own". The generic target parser otherwise
+        # reads "non" as the target type and silently offers no legal targets.
+        mutate_target_pattern = r"target\s+non-human\s+creature\s+you\s+own"
+        if re.search(mutate_target_pattern, oracle_text):
+            requirements.append({
+                "type": "creature",
+                "controller_is_caster": True,
+                "exclude_subtypes": ["human"],
+            })
+            oracle_text = re.sub(mutate_target_pattern, "", oracle_text)
+
+        # The generic adjective parser historically treated "nonland" as the
+        # target's noun. Pull this common permanent shape out first so cards
+        # such as Leyline Binding retain both type and controller restrictions.
+        nonland_permanent_pattern = (
+            r"target\s+nonland\s+permanent"
+            r"(?:\s+(an opponent controls|you don't control))?")
+        for special_match in list(re.finditer(nonland_permanent_pattern, oracle_text)):
+            requirement = {"type": "permanent", "exclude_land": True}
+            if special_match.group(1):
+                requirement["controller_is_opponent"] = True
+            requirements.append(requirement)
+        oracle_text = re.sub(nonland_permanent_pattern, "", oracle_text)
+
         # Pattern to find "target X" phrases, excluding nested clauses
         # Matches "target [adjectives] type [restrictions]"
         target_pattern = r"target\s+((?:(?:[a-z\-]+)\s+)*?)?([a-z]+)\s*((?:(?:with|of|that)\s+[^,\.;\(]+?|you control|an opponent controls|you don\'t control)*)"
@@ -437,6 +492,10 @@ class TargetingSystem:
                 "spell": "spell", "ability": "ability", "land": "land", "artifact": "artifact",
                 "enchantment": "enchantment", "planeswalker": "planeswalker", "card": "card", # General card (often in GY/Exile)
                 "instant": "spell", "sorcery": "spell", "aura": "enchantment",
+                "creatures": "creature", "players": "player", "opponents": "player", "permanents": "permanent",
+                "spells": "spell", "abilities": "ability", "lands": "land", "artifacts": "artifact",
+                "enchantments": "enchantment", "planeswalkers": "planeswalker", "cards": "card",
+                "instants": "spell", "sorceries": "spell", "auras": "enchantment",
                 # Add more specific types if needed
             }
             req["type"] = type_map.get(req["type"], req["type"]) # Normalize type
@@ -539,8 +598,9 @@ class TargetingSystem:
              # 2. Get specific protection details (Needs reliable source like AbilityHandler/LayerSystem)
              # Attempt to get details via AbilityHandler first
              protection_details = []
-             if self.ability_handler and hasattr(self.ability_handler, 'get_protection_details'):
-                 protection_details = self.ability_handler.get_protection_details(target_card_id) or []
+             live_handler = getattr(self.game_state, "ability_handler", None)
+             if live_handler and hasattr(live_handler, 'get_protection_details'):
+                 protection_details = live_handler.get_protection_details(target_card_id) or []
              # Fallback: Check card's own properties if handler fails (Less reliable)
              elif hasattr(target_card,'_granted_protection_details'): # Check for cached layer results directly?
                   protection_details = target_card._granted_protection_details or []
@@ -683,7 +743,8 @@ class TargetingSystem:
         """
         if not targets: return True # No targets to validate
 
-        valid_targets_now = self.get_valid_targets(card_id, controller)
+        valid_targets_now = self.get_valid_targets(
+            card_id, controller, effect_text=effect_text)
         all_valid_target_ids = set()
         for ids in valid_targets_now.values():
             all_valid_target_ids.update(ids)

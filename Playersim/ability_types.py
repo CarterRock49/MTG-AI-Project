@@ -814,6 +814,24 @@ class TriggeredAbility(Ability):
             "LOSE_LIFE": [
                 r"when(ever)?\s+.*lose(s)? life",
                 r"when(ever)?\s+.*life is lost"
+            ],
+            "DIE_ROLLED": [
+                r"when(ever)?\s+.*rolls?\s+(?:one or more\s+)?dice",
+                r"when(ever)?\s+.*rolls?\s+(?:a|one or more)\s+di(?:e|ce)"
+            ],
+            "SPECIALIZES": [
+                r"when(ever)?\s+.*specializes?"
+            ],
+            "MUTATES": [
+                r"when(ever)?\s+.*mutates?"
+            ],
+            "UNTAPPED": [
+                r"when(ever)?\s+.*becomes? untapped",
+                r"when(ever)?\s+.*untaps?"
+            ],
+            "BECOMES_TARGET": [
+                r"when(ever)?\s+.*becomes?\s+(?:a|the)\s+target",
+                r"when(ever)?\s+.*is\s+targeted"
             ]
         }
         
@@ -829,6 +847,22 @@ class TriggeredAbility(Ability):
         
         # Check if our trigger condition matches any of the patterns
         if matches_any_pattern(self.trigger_condition, event_patterns):
+            if event_type == "BECOMES_TARGET":
+                context = context or {}
+                target_id = context.get("target_id", context.get("event_card_id"))
+                source_card_id = context.get("source_card_id")
+                if (re.search(r"\bthis\s+(?:creature|permanent|card)\b",
+                              self.trigger_condition, re.IGNORECASE)
+                        and source_card_id != target_id):
+                    return False
+                if (re.search(r"target of (?:a|an) spell or ability you control",
+                              self.trigger_condition, re.IGNORECASE)
+                        and context.get("targeting_controller") is not context.get("controller")):
+                    return False
+                if ("first time each turn" in self.trigger_condition
+                        and not context.get("first_time_targeted_by_controller_this_turn", False)):
+                    return False
+
             # Parse for any conditional clause in the trigger text
             condition_clause = getattr(self, 'intervening_if', None) or self._extract_condition_clause(self.effect_text)
             
@@ -1600,6 +1634,20 @@ class StaticAbility(Ability):
         return True
 
 
+class TargetingOverrideAbility(Ability):
+    """A static rules exception that changes targeting or ward triggering.
+
+    These effects do not add or remove an ability in layer 6. Their source is
+    consulted while it remains on the battlefield, which also makes legality
+    rechecks behave correctly if the source leaves before resolution.
+    """
+
+    def __init__(self, card_id, protection, effect_text=""):
+        super().__init__(card_id, effect_text)
+        self.targeting_override = str(protection).lower()
+        self.scope = "opponent_creatures"
+
+
 class ManaAbility(ActivatedAbility):
     """Special case of activated ability that produces mana"""
     def __init__(self, card_id, cost, mana_produced, effect_text=""):
@@ -1672,50 +1720,52 @@ class AbilityEffect:
                  logging.error(f"Offspring effect cannot find source creature {source_id}")
                  return False
              
-        effective_targets = targets if targets is not None else {} # Ensure targets is a dict
+        targets_were_supplied = targets is not None
+        effective_targets = targets if targets_were_supplied else {} # Ensure targets is a dict
 
-        # Resolve targets if required and not provided/empty
-        if self.requires_target and (not effective_targets or not any(v for v in effective_targets.values())): # Check if any target list is non-empty
-            logging.debug(f"Effect '{self.effect_text}' requires target, resolving...")
-            resolved_targets = None
-            # Prefer GameState's targeting system if available
-            if hasattr(game_state, 'targeting_system') and game_state.targeting_system:
-                # Resolve targeting based on the effect text itself
-                # Ensure source_id is valid before attempting to get the card
-                if source_id:
-                    source_card = game_state._safe_get_card(source_id)
-                    if source_card: # Proceed only if source card found
-                        resolved_targets = game_state.targeting_system.resolve_targeting(source_id, controller, self.effect_text)
-                    else:
-                        logging.warning(f"Source card {source_id} not found for targeting.")
-                else:
-                     logging.warning("Source ID missing for targeting.")
-
-            elif hasattr(game_state, 'ability_handler') and hasattr(game_state.ability_handler, 'targeting_system'):
-                 # Ensure source_id exists
-                 if source_id:
-                     resolved_targets = game_state.ability_handler.targeting_system.resolve_targeting_for_ability(source_id, self.effect_text, controller)
-                 else:
-                      logging.warning("Source ID missing for targeting via ability handler.")
-
-            else: # Fallback to simple targeting
-                 if source_id:
-                     resolved_targets = resolve_simple_targeting(game_state, source_id, controller, self.effect_text)
-                 else:
-                      logging.warning("Source ID missing for simple targeting.")
-
-
-            if resolved_targets and any(v for v in resolved_targets.values()):
-                 effective_targets = resolved_targets # Use resolved targets
-                 logging.debug(f"Resolved targets: {effective_targets}")
-            else:
-                logging.warning(f"Targeting failed or yielded no targets for effect: {self.effect_text}")
-                return False # Cannot proceed without required targets
-
-        # Check condition if present
         if self.condition and not self._evaluate_condition(game_state, source_id, controller):
             logging.debug(f"Condition not met for effect: {self.effect_text}")
             return False
+
+        # Expose missing targets as a real action instead of silently choosing
+        # a strategic fallback. The chosen targets resume this same effect from
+        # ActionHandler._finalize_targeting_choice.
+        if self.requires_target and not targets_were_supplied:
+            if not source_id or not getattr(game_state, 'targeting_system', None):
+                logging.warning(f"Cannot expose target choice for effect: {self.effect_text}")
+                return False
+            if game_state.targeting_context:
+                logging.warning("Cannot start a direct-effect target choice while another target choice is pending.")
+                return False
+            target_type = game_state._get_target_type_from_text(self.effect_text)
+            max_targets = game_state._target_count_from_text(self.effect_text)
+            min_targets = 0 if "up to" in self.effect_text.lower() else max_targets
+            valid_map = game_state.targeting_system.get_valid_targets(
+                source_id, controller, target_type, effect_text=self.effect_text)
+            valid_ids = {target_id for ids in valid_map.values() for target_id in ids}
+            if len(valid_ids) < min_targets:
+                logging.warning(f"Targeting failed or yielded too few targets for: {self.effect_text}")
+                return False
+            if (game_state.previous_priority_phase is None
+                    and game_state.phase not in [game_state.PHASE_TARGETING,
+                                                 game_state.PHASE_SACRIFICE,
+                                                 game_state.PHASE_CHOOSE]):
+                game_state.previous_priority_phase = game_state.phase
+            game_state.phase = game_state.PHASE_TARGETING
+            game_state.targeting_context = {
+                "source_id": source_id,
+                "controller": controller,
+                "effect_text": self.effect_text,
+                "required_type": target_type,
+                "required_count": max_targets,
+                "min_targets": min_targets,
+                "max_targets": max_targets,
+                "selected_targets": [],
+                "resume_effect": self,
+            }
+            game_state.priority_player = controller
+            game_state.priority_pass_count = 0
+            return True
 
         # Call the implementation-specific effect application
         try:
@@ -1771,6 +1821,63 @@ class AbilityEffect:
          return True
 
 
+class RollDieEffect(AbilityEffect):
+    """Roll a numeric die and execute the matching oracle result row."""
+
+    def __init__(self, sides, outcomes, pre_result_text=None, full_text=None):
+        self.sides = max(1, int(sides))
+        self.outcomes = list(outcomes)
+        self.pre_result_text = (pre_result_text or "").strip(" .\n")
+        effect_text = full_text or f"Roll a d{self.sides}"
+        super().__init__(effect_text)
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        result = random.randint(1, self.sides)
+        roller = "p1" if controller is game_state.p1 else "p2"
+        roll_record = {
+            "source_id": source_id,
+            "roller": roller,
+            "sides": self.sides,
+            "result": result,
+            "turn": game_state.turn,
+        }
+        game_state.last_die_roll = dict(roll_record)
+        game_state.die_roll_history.append(dict(roll_record))
+        game_state.trigger_ability(source_id, "DIE_ROLLED", {
+            "controller": controller,
+            "roller": controller,
+            "sides": self.sides,
+            "result": result,
+        })
+
+        selected_text = None
+        for minimum, maximum, outcome_text in self.outcomes:
+            if minimum <= result <= maximum:
+                selected_text = outcome_text
+                break
+        if selected_text is None:
+            logging.warning(
+                f"No d{self.sides} result row covers roll {result}: {self.effect_text}")
+            return False
+
+        result_targets = dict(targets or {})
+        result_targets["X"] = result
+        texts_to_apply = [text for text in (self.pre_result_text, selected_text) if text]
+        applied_any = False
+        all_succeeded = True
+        for outcome_text in texts_to_apply:
+            nested_effects = EffectFactory.create_effects(outcome_text, result_targets)
+            if not nested_effects:
+                logging.warning(f"Could not parse die-roll result text: {outcome_text}")
+                all_succeeded = False
+                continue
+            for effect in nested_effects:
+                applied = effect.apply(game_state, source_id, controller, result_targets)
+                applied_any = bool(applied) or applied_any
+                all_succeeded = bool(applied) and all_succeeded
+        return applied_any and all_succeeded
+
+
 
 class DrawCardEffect(AbilityEffect):
     """Effect that causes players to draw cards."""
@@ -1789,11 +1896,12 @@ class DrawCardEffect(AbilityEffect):
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         # --- X Cost Handling ---
-        x_value = targets.get('X', 0) if isinstance(targets, dict) else 0
+        has_chosen_x = isinstance(targets, dict) and 'X' in targets
+        x_value = targets.get('X', 0) if has_chosen_x else 0
         if self.count_expr:
             effective_count = game_state.count_dynamic_quantity(self.count_expr, controller)
             logging.debug(f"DrawCardEffect: dynamic count '{self.count_expr}' = {effective_count}.")
-        elif x_value > 0:
+        elif self.base_count == 'x' and has_chosen_x:
             effective_count = x_value
             logging.debug(f"DrawCardEffect: Using X={x_value} for draw count.")
         else:
@@ -1848,11 +1956,12 @@ class GainLifeEffect(AbilityEffect):
     def _apply_effect(self, game_state, source_id, controller, targets):
         # --- X Cost Handling ---
         # Use X from context if available, otherwise use the base amount (converted)
-        x_value = targets.get('X', 0) if isinstance(targets, dict) else 0 # Get X value from resolved context
+        has_chosen_x = isinstance(targets, dict) and 'X' in targets
+        x_value = targets.get('X', 0) if has_chosen_x else 0
         if getattr(self, 'count_expr', None):
             effective_amount = game_state.count_dynamic_quantity(self.count_expr, controller)
             logging.debug(f"GainLifeEffect: dynamic count '{self.count_expr}' = {effective_amount}.")
-        elif x_value > 0:
+        elif self.base_amount == 'x' and has_chosen_x:
             effective_amount = x_value
             logging.debug(f"GainLifeEffect: Using X={x_value} for life gain amount.")
         else:
@@ -2012,8 +2121,9 @@ class LoseLifeEffect(AbilityEffect):
         self.requires_target = target == "target_player"
 
     def _apply_effect(self, game_state, source_id, controller, targets):
-        x_value = targets.get('X', 0) if isinstance(targets, dict) else 0
-        amount = x_value if x_value > 0 else text_to_number(self.base_amount)
+        has_chosen_x = isinstance(targets, dict) and 'X' in targets
+        x_value = targets.get('X', 0) if has_chosen_x else 0
+        amount = x_value if self.base_amount == 'x' and has_chosen_x else text_to_number(self.base_amount)
         if amount <= 0:
             return True
         target_players = []
@@ -2098,8 +2208,9 @@ class DamageEffect(AbilityEffect):
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         # --- X Cost Handling ---
-        x_value = targets.get('X', 0) if isinstance(targets, dict) else 0
-        if x_value > 0:
+        has_chosen_x = isinstance(targets, dict) and 'X' in targets
+        x_value = targets.get('X', 0) if has_chosen_x else 0
+        if self.base_amount == 'x' and has_chosen_x:
             effective_amount = x_value
             logging.debug(f"DamageEffect: Using X={x_value} for damage amount.")
         else:
@@ -2210,12 +2321,13 @@ class AddCountersEffect(AbilityEffect):
         # Store original count which might be 'x' or a number
         self.base_count = count
         self.target_type = target_type.lower() # Normalize
-        self.requires_target = "target" in target_type or "each" not in target_type # Check if it targets specifically
+        self.requires_target = "target" in self.target_type
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         # --- X Cost Handling ---
-        x_value = targets.get('X', 0) if isinstance(targets, dict) else 0
-        if x_value > 0:
+        has_chosen_x = isinstance(targets, dict) and 'X' in targets
+        x_value = targets.get('X', 0) if has_chosen_x else 0
+        if self.base_count == 'x' and has_chosen_x:
             effective_count = x_value
             logging.debug(f"AddCountersEffect: Using X={x_value} for counter count.")
         else:
@@ -2439,6 +2551,82 @@ class CreateTokenEffect(AbilityEffect):
 
         return len(created_token_ids) > 0
 
+
+class CreateRoleEffect(AbilityEffect):
+    """Create and attach one of the Role tokens used by the sample decks."""
+    ROLE_TEXT = {
+        "monster": (
+            "Enchant creature\n"
+            "Enchanted creature gets +1/+1 and has trample."
+        ),
+        "wicked": (
+            "Enchant creature\n"
+            "Enchanted creature gets +1/+1.\n"
+            "When this Aura is put into a graveyard from the battlefield, "
+            "each opponent loses 1 life."
+        ),
+    }
+
+    def __init__(self, role_name, attachment_text="target creature", condition=None):
+        normalized = str(role_name).strip().lower()
+        if normalized not in self.ROLE_TEXT:
+            raise ValueError(f"Unsupported Role token: {role_name}")
+        self.role_name = normalized
+        self.attachment_text = str(attachment_text).strip().lower()
+        super().__init__(
+            f"Create a {normalized.title()} Role token attached to {self.attachment_text}",
+            condition)
+        self.requires_target = "target" in self.attachment_text
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        candidates = []
+        if isinstance(targets, dict):
+            candidates.extend(targets.get("creatures", []))
+            candidates.extend(targets.get("permanents", []))
+
+        target_id = None
+        for candidate in dict.fromkeys(candidates):
+            target_controller, target_zone = game_state.find_card_location(candidate)
+            target = game_state._safe_get_card(candidate)
+            if (target_zone != "battlefield" or not target
+                    or "creature" not in getattr(target, "card_types", [])):
+                continue
+            if "you control" in self.attachment_text and target_controller is not controller:
+                continue
+            target_id = candidate
+            break
+        if target_id is None:
+            logging.debug(f"CreateRoleEffect: no legal creature in {targets}.")
+            return False
+
+        role_title = self.role_name.title()
+        token_data = {
+            "name": f"{role_title} Role",
+            "type_line": "Enchantment - Aura Role",
+            "card_types": ["enchantment"],
+            "subtypes": ["aura", "role"],
+            "oracle_text": self.ROLE_TEXT[self.role_name],
+            "color_identity": [],
+            "power": 0,
+            "toughness": 0,
+            "is_token": True,
+        }
+        role_id = game_state.create_token(
+            controller, token_data, attach_to_target=target_id)
+        if role_id is None:
+            return False
+        if controller.get("attachments", {}).get(role_id) == target_id:
+            return True
+        if not game_state._is_legal_attachment(role_id, target_id):
+            logging.warning(
+                f"CreateRoleEffect: {role_title} Role cannot attach to {target_id}.")
+            game_state.move_card(
+                role_id, controller, "battlefield", controller, "graveyard",
+                cause="illegal_role_attachment")
+            return False
+        return game_state.attach_aura(controller, role_id, target_id)
+
+
 class ReturnToHandEffect(AbilityEffect):
     """Effect that returns cards to their owner's hand."""
     def __init__(self, target_type="permanent", zone="battlefield", condition=None, scope="target"):
@@ -2597,8 +2785,9 @@ class DiscardEffect(AbilityEffect):
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         # --- X Cost Handling ---
-        x_value = targets.get('X', 0) if isinstance(targets, dict) else 0
-        if x_value > 0:
+        has_chosen_x = isinstance(targets, dict) and 'X' in targets
+        x_value = targets.get('X', 0) if has_chosen_x else 0
+        if self.base_count == 'x' and has_chosen_x:
             effective_count = x_value
             logging.debug(f"DiscardEffect: Using X={x_value} for discard count.")
         else:
@@ -2616,52 +2805,13 @@ class DiscardEffect(AbilityEffect):
         elif self.target == "each_player": target_players.extend([p for p in [game_state.p1, game_state.p2] if p])
 
         if not target_players: return False
-
-        overall_success = False
-        for p in target_players:
-            player_hand = p.get("hand", [])
-            if not player_hand: continue
-
-            # Use effective_count
-            discard_count_needed = len(player_hand) if effective_count == -1 else min(effective_count, len(player_hand))
-            if discard_count_needed <= 0: continue
-
-            cards_to_discard = []
-            # Discard logic (random or choice)... (remains the same)
-            if self.is_random:
-                  cards_to_discard = random.sample(player_hand, discard_count_needed)
-            else: # Player chooses
-                  sorted_hand = sorted([(cid, getattr(game_state._safe_get_card(cid), 'cmc', 0)) for cid in player_hand], key=lambda x: -x[1])
-                  cards_to_discard = [cid for cid, cmc in sorted_hand[:discard_count_needed]]
-
-            num_discarded_this_player = 0
-            for card_id in cards_to_discard:
-                 # Discard movement logic... (remains the same, including Madness checks)
-                 if card_id in p.get("hand",[]):
-                    discard_context = {'card_id': card_id, 'player': p, 'cause': 'discard'}
-                    modified_context, replaced = game_state.apply_replacement_effect("DISCARD", discard_context)
-                    if replaced and modified_context.get('prevented', False): continue
-                    final_dest_zone = modified_context.get('to_zone', 'graveyard')
-                    madness_cost = None
-                    if final_dest_zone == 'exile':
-                        card_obj = game_state._safe_get_card(card_id)
-                        if card_obj and "madness" in getattr(card_obj,'oracle_text','').lower():
-                             madness_cost = game_state._get_madness_cost_str_gs(card_obj)
-
-                    if game_state.move_card(card_id, p, "hand", p, final_dest_zone, cause="discard", context={"source_id": source_id}):
-                        num_discarded_this_player += 1
-                        if madness_cost:
-                             if not hasattr(game_state, 'madness_cast_available'): game_state.madness_cast_available = None # Use None instead of madness_trigger
-                             game_state.madness_cast_available = {'card_id': card_id, 'player': p, 'cost': madness_cost}
-                             logging.debug(f"Card {card_id} discarded with Madness, moved to exile. Player can cast for {madness_cost}.")
-                    else: logging.warning(f"Failed to move {card_id} from hand to {final_dest_zone} during discard.")
-
-
-            if num_discarded_this_player > 0:
-                 # Tracking logic... (remains the same)
-                 overall_success = True
-
-        return overall_success
+        return game_state.start_discard_choice(
+            target_players,
+            count=effective_count,
+            source_id=source_id,
+            is_random=self.is_random,
+            cause="discard",
+        )
 
 class ImpulseDrawEffect(AbilityEffect):
     """Exile the top N cards; the controller may play them for a duration.
@@ -2720,8 +2870,9 @@ class MillEffect(AbilityEffect):
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         # --- X Cost Handling ---
-        x_value = targets.get('X', 0) if isinstance(targets, dict) else 0
-        if x_value > 0:
+        has_chosen_x = isinstance(targets, dict) and 'X' in targets
+        x_value = targets.get('X', 0) if has_chosen_x else 0
+        if self.base_count == 'x' and has_chosen_x:
             effective_count = x_value
             logging.debug(f"MillEffect: Using X={x_value} for mill count.")
         else:
@@ -2772,7 +2923,9 @@ class MillEffect(AbilityEffect):
 
 class SearchLibraryEffect(AbilityEffect):
     """Effect that allows searching a library for cards."""
-    def __init__(self, search_type="any", destination="hand", count=1, condition=None, shuffle_required=True, enters_tapped=False):
+    def __init__(self, search_type="any", destination="hand", count=1,
+                 condition=None, shuffle_required=True, enters_tapped=False,
+                 evidence_search_type=None):
         target_desc = "your library" # Assuming most searches target controller's library
         dest_desc = f"into {destination}" if destination != 'library' else "on top of your library" # Basic phrasing
         super().__init__(f"Search {target_desc} for {count} {search_type} card(s) and put {dest_desc}", condition)
@@ -2781,6 +2934,7 @@ class SearchLibraryEffect(AbilityEffect):
         self.count = count
         self.shuffle_required = shuffle_required # Usually true unless effect says otherwise
         self.enters_tapped = enters_tapped  # "...onto the battlefield tapped"
+        self.evidence_search_type = evidence_search_type
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         # Search usually targets controller's library unless specified otherwise
@@ -2789,6 +2943,12 @@ class SearchLibraryEffect(AbilityEffect):
             player_id = targets["players"][0]
             player_to_search = game_state.p1 if player_id == "p1" else game_state.p2
         # Add logic here if effect text specifies searching opponent's library
+
+        active_search_type = self.search_type
+        if (self.evidence_search_type
+                and isinstance(targets, dict)
+                and targets.get("evidence_collected", False)):
+            active_search_type = self.evidence_search_type
 
         found_card_ids = []
         num_to_find = self.count
@@ -2799,9 +2959,11 @@ class SearchLibraryEffect(AbilityEffect):
             search_attempts += 1
             # Use GameState method which should incorporate AI choice/player interaction
             if hasattr(game_state, 'search_library_and_choose'):
-                 ai_context = {"goal": self.search_type, "count_needed": num_to_find}
+                 ai_context = {"goal": active_search_type, "count_needed": num_to_find}
                  # Provide list of already found cards to avoid duplicates
-                 found_id = game_state.search_library_and_choose(player_to_search, self.search_type, ai_choice_context=ai_context, exclude_ids=found_card_ids)
+                 found_id = game_state.search_library_and_choose(
+                     player_to_search, active_search_type,
+                     ai_choice_context=ai_context, exclude_ids=found_card_ids)
                  if found_id:
                       found_card_ids.append(found_id)
                       num_to_find -= 1
@@ -2817,12 +2979,22 @@ class SearchLibraryEffect(AbilityEffect):
              for card_id in found_card_ids:
                   card = game_state._safe_get_card(card_id)
                   card_name = card.name if card else card_id
-                  # Card is implicitly removed by search_library_and_choose, use library_implicit source
-                  if game_state.move_card(card_id, player_to_search, "library_implicit", player_to_search, self.destination, cause="search_effect"):
+                  # search_library_and_choose currently places its selection in
+                  # hand. Count that as the completed move for hand searches;
+                  # for other destinations, move onward from hand exactly once.
+                  already_in_destination = (
+                      self.destination == "hand"
+                      and card_id in player_to_search.get("hand", []))
+                  source_zone = "hand" if card_id in player_to_search.get("hand", []) \
+                      else "library_implicit"
+                  moved = already_in_destination or game_state.move_card(
+                      card_id, player_to_search, source_zone,
+                      player_to_search, self.destination, cause="search_effect")
+                  if moved:
                       success_moves += 1
                       if self.enters_tapped and self.destination == "battlefield":
                           player_to_search.setdefault("tapped_permanents", set()).add(card_id)
-                      logging.debug(f"Search found '{card_name}' matching '{self.search_type}', moved to {self.destination}"
+                      logging.debug(f"Search found '{card_name}' matching '{active_search_type}', moved to {self.destination}"
                                     f"{' tapped' if self.enters_tapped and self.destination == 'battlefield' else ''}.")
                   else:
                       logging.warning(f"Search found '{card_name}', but failed to move to {self.destination}.")
@@ -2833,7 +3005,7 @@ class SearchLibraryEffect(AbilityEffect):
              if self.shuffle_required and search_attempts > 1 : # Avoid shuffle if only peeked at top and took it
                  game_state.shuffle_library(player_to_search)
         else: # Nothing found
-            logging.debug(f"Search failed for '{self.search_type}' in {player_to_search['name']}'s library.")
+            logging.debug(f"Search failed for '{active_search_type}' in {player_to_search['name']}'s library.")
             # Shuffle library even if search fails, if it was inspected
             if self.shuffle_required: game_state.shuffle_library(player_to_search)
 
@@ -3389,101 +3561,70 @@ class CopySpellEffect(AbilityEffect):
 
         # Find the original spell on the stack
         original_stack_item = None
-        original_stack_idx = -1
-        for i, item in enumerate(game_state.stack):
+        for item in reversed(game_state.stack):
             if isinstance(item, tuple) and item[0] == "SPELL" and item[1] == original_spell_id:
                  original_stack_item = item
-                 original_stack_idx = i
                  break
 
         if not original_stack_item:
              logging.warning(f"CopySpellEffect: Target spell {original_spell_id} not found on stack.")
              return False
 
-        spell_type, spell_id, original_controller, original_context = original_stack_item
+        _, spell_id, _, _ = original_stack_item
 
         # Check target type restriction if specified
         spell_card = game_state._safe_get_card(spell_id)
         if not spell_card: return False # Card vanished?
-        if self.target_type == "instant" and 'instant' not in getattr(spell_card, 'card_types', []): return False
-        if self.target_type == "sorcery" and 'sorcery' not in getattr(spell_card, 'card_types', []): return False
+        spell_types = {str(card_type).lower()
+                       for card_type in getattr(spell_card, 'card_types', [])}
+        restriction = str(self.target_type).lower()
+        if "instant or sorcery" in restriction and not ({"instant", "sorcery"} & spell_types):
+            return False
+        if restriction in {"instant", "instant spell"} and "instant" not in spell_types:
+            return False
+        if restriction in {"sorcery", "sorcery spell"} and "sorcery" not in spell_types:
+            return False
+        if restriction in {"creature", "creature spell"} and "creature" not in spell_types:
+            return False
 
-        # --- Create Copy Context ---
-        import copy
-        new_context = copy.deepcopy(original_context)
-        new_context["is_copy"] = True
-        new_context["copied_by"] = source_id
-        new_context["original_caster"] = original_controller # Track original caster if needed
-        new_context["needs_new_targets"] = self.new_targets
-        # Reset choices/payments made for the original spell
-        new_context.pop("selected_modes", None)
-        new_context.pop("X", None) # Ensure X is re-chosen for copy if applicable
-        new_context.pop("chosen_color", None)
-        new_context.pop("targets", None) # Clear previous targets
-        new_context.pop("paid_kicker", None) # Don't inherit kicker payment status
-        new_context.pop("kicked", None) # Clear kicker flag
-        # Remove any cost payment details
-        new_context.pop("final_paid_cost", None)
-        # Add a unique ID for this copy instance
-        copy_instance_id = f"copy_{game_state.turn}_{len(game_state.stack)}_{random.randint(1000,9999)}"
-        new_context['copy_instance_id'] = copy_instance_id
+        return game_state.copy_spell_on_stack(
+            original_stack_item,
+            controller,
+            copied_by=source_id,
+            allow_new_targets=self.new_targets,
+        ) is not None
 
-        # Add copy to stack (controlled by effect's controller)
-        game_state.add_to_stack("SPELL", spell_id, controller, new_context)
-        logging.debug(f"Created copy ({copy_instance_id}) of spell {spell_id} on stack, controlled by {controller['name']}.")
+class MeldEffect(AbilityEffect):
+    """Exile a named meld pair and return the combined result."""
+    def __init__(self, result_name=None, condition=None):
+        self.result_name = result_name.strip() if result_name else None
+        super().__init__(
+            f"Meld them into {self.result_name or 'their meld result'}", condition)
+        self.requires_target = False
 
-        # --- Handle Target Selection for the Copy ---
-        original_requires_target = original_context.get("requires_target", False)
-        original_num_targets = original_context.get("num_targets", 1)
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        source = game_state._safe_get_card(source_id)
+        if not source or source_id not in controller.get("battlefield", []):
+            return False
+        partner_name = getattr(source, "meld_partner_name", None)
+        result_name = self.result_name or getattr(source, "meld_result_name", None)
+        if not partner_name or not result_name:
+            return False
 
-        if self.new_targets and original_requires_target and original_num_targets > 0:
-            # Set up targeting phase specifically for the *copy*
-            logging.debug(f"Copy {copy_instance_id} needs new targets. Entering TARGETING phase.")
-            game_state.previous_priority_phase = game_state.phase # Store current phase
-            game_state.phase = game_state.PHASE_TARGETING
-            game_state.targeting_context = {
-                 "source_id": spell_id, # Refers to the spell card being copied
-                 "copy_instance_id": copy_instance_id, # Identify the specific copy
-                 "controller": controller, # Controller of the copy
-                 "required_type": getattr(spell_card, 'target_type', 'target'), # Guess from original if possible
-                 "required_count": original_num_targets,
-                 "min_targets": 0 if "up to" in getattr(spell_card, 'oracle_text','').lower() else original_num_targets,
-                 "max_targets": original_num_targets,
-                 "selected_targets": [],
-                 "effect_text": getattr(spell_card, 'oracle_text', '')
-             }
-            # Ensure priority is set correctly for the choice
-            game_state.priority_player = controller
-            game_state.priority_pass_count = 0
-        else:
-            # Copy uses original targets (if still valid) or resolves without targets
-            resolved_targets = {} # Default empty targets
-            if not self.new_targets and "targets" in original_context:
-                 # Check validity of original targets for the copy (controller = current player)
-                 if game_state._validate_targets_on_resolution(spell_id, controller, original_context["targets"]):
-                     resolved_targets = original_context["targets"] # Copy targets
-                     logging.debug(f"Copy {copy_instance_id} using original targets.")
-                 else:
-                     logging.debug(f"Original targets invalid for copy {copy_instance_id}, copy might fizzle.")
-                     # Mark as no valid targets
-            else:
-                logging.debug(f"Copy {copy_instance_id} either doesn't require targets or uses no targets.")
+        partner_id = next((
+            card_id for card_id in controller.get("battlefield", [])
+            if card_id != source_id
+            and getattr(game_state._safe_get_card(card_id), "name", "").lower()
+            == partner_name.lower()
+        ), None)
+        result_id = next((
+            card_id for card_id, card in game_state.card_db.items()
+            if getattr(card, "name", "").lower() == result_name.lower()
+        ), None)
+        if partner_id is None or result_id is None:
+            return False
+        return game_state.meld_cards(source_id, partner_id, result_id, controller)
 
-            # Update the stack item with resolved targets context immediately
-            stack_idx_to_update = -1
-            for i, item in enumerate(reversed(game_state.stack)):
-                if isinstance(item, tuple) and item[3].get('copy_instance_id') == copy_instance_id:
-                     stack_idx_to_update = len(game_state.stack) - 1 - i
-                     break
-            if stack_idx_to_update != -1:
-                new_context_with_targets = game_state.stack[stack_idx_to_update][3]
-                new_context_with_targets["targets"] = resolved_targets
-                game_state.stack[stack_idx_to_update] = game_state.stack[stack_idx_to_update][:3] + (new_context_with_targets,)
-                logging.debug(f"Updated stack item {stack_idx_to_update} (Copy) with targets: {resolved_targets}")
-            else:
-                 logging.warning("Could not find newly added copy on stack to update targets!")
-
-        return True
 
 class TransformEffect(AbilityEffect):
     def __init__(self, condition=None):
@@ -3739,7 +3880,7 @@ class DestroyEffect(AbilityEffect):
     def __init__(self, target_type="permanent", condition=None):
         super().__init__(f"Destroy target {target_type}", condition)
         self.target_type = target_type.lower() # e.g., "creature", "artifact", "nonland permanent", "all creatures"
-        self.requires_target = "target" in target_type
+        self.requires_target = "all " not in self.target_type
 
 
     def _apply_effect(self, game_state, source_id, controller, targets):
@@ -3841,6 +3982,7 @@ class ExileEffect(AbilityEffect):
         cats = []
         if self.target_type == "creature": cats = ["creatures"]
         elif self.target_type == "artifact": cats = ["artifacts"]
+        elif self.target_type == "creature_or_vehicle": cats = ["creatures", "artifacts"]
         # Add more specific types
         elif self.target_type == "permanent": cats = ["creatures", "artifacts", "enchantments", "lands", "planeswalkers", "battles", "permanents"]
         elif self.target_type == "card": cats = ["cards"] # GY/Exile/Hand/Lib targets
@@ -3872,6 +4014,145 @@ class ExileEffect(AbilityEffect):
                   # Logging handled by move_card
 
         return exiled_count > 0
+
+
+class LinkedExileEffect(AbilityEffect):
+    """Exile an object until this effect's source leaves the battlefield.
+
+    The duration is represented by a link in the zone system rather than a
+    delayed trigger. That distinction is important: the card returns
+    immediately, and nothing is exiled if the source has already left when
+    this effect resolves.
+    """
+
+    def __init__(self, target_type="nonland permanent", from_zone="battlefield",
+                 return_zone="battlefield", optional=False,
+                 choose_from_target_opponent_hand=False, effect_text=None):
+        self.target_type = target_type.lower()
+        self.from_zone = from_zone.lower()
+        self.return_zone = return_zone.lower()
+        self.optional = bool(optional)
+        self.choose_from_target_opponent_hand = bool(choose_from_target_opponent_hand)
+        text = effect_text or f"Exile target {target_type} until this source leaves the battlefield"
+        super().__init__(text)
+        self.requires_target = True
+
+    @staticmethod
+    def _player_from_target_id(game_state, target_id):
+        if target_id == "p1":
+            return game_state.p1
+        if target_id == "p2":
+            return game_state.p2
+        return None
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        _, source_zone = game_state.find_card_location(source_id)
+        if source_zone != "battlefield":
+            logging.debug(
+                f"Linked exile from {source_id} did nothing because its source already left.")
+            return True
+
+        if self.choose_from_target_opponent_hand:
+            player_ids = targets.get("players", []) if isinstance(targets, dict) else []
+            target_player = self._player_from_target_id(
+                game_state, player_ids[0] if player_ids else None)
+            if not target_player or target_player is controller:
+                return False
+            legal_cards = []
+            for card_id in target_player.get("hand", []):
+                card = game_state._safe_get_card(card_id)
+                if card and "land" not in [
+                        str(card_type).lower()
+                        for card_type in getattr(card, "card_types", [])]:
+                    legal_cards.append(card_id)
+            if not legal_cards:
+                return True
+            return game_state.begin_linked_exile_choice(
+                source_id, controller, target_player, legal_cards,
+                return_zone=self.return_zone, optional=self.optional)
+
+        target_ids = []
+        if isinstance(targets, dict):
+            for category in (
+                    "creatures", "artifacts", "enchantments", "planeswalkers",
+                    "battles", "permanents", "lands", "cards"):
+                target_ids.extend(targets.get(category, []))
+        for target_id in dict.fromkeys(target_ids):
+            target_owner, target_zone = game_state.find_card_location(target_id)
+            if not target_owner or target_zone != self.from_zone:
+                continue
+            card = game_state._safe_get_card(target_id)
+            if ("nonland" in self.target_type and card
+                    and "land" in [str(card_type).lower()
+                                   for card_type in getattr(card, "card_types", [])]):
+                continue
+            return game_state.exile_until_source_leaves(
+                source_id, controller, target_id, target_owner,
+                from_zone=self.from_zone, return_zone=self.return_zone)
+        return False
+
+class ReflexiveTriggerEffect(AbilityEffect):
+    """Create a reflexive triggered ability after an instruction succeeds.
+
+    CR 603.12 reflexive triggers use wording such as "When you do". The
+    prerequisite resolves as part of the parent spell or ability; only after
+    it succeeds is the reflexive ability queued for the normal trigger stack.
+    """
+    def __init__(self, prerequisite_text, trigger_effect_text,
+                 trigger_condition="when you do"):
+        self.prerequisite_text = prerequisite_text.strip()
+        self.trigger_effect_text = trigger_effect_text.strip()
+        self.trigger_condition = trigger_condition.strip().lower()
+        super().__init__(
+            f"{self.prerequisite_text}. {self.trigger_condition.capitalize()}, "
+            f"{self.trigger_effect_text}.")
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        prerequisite_effects = EffectFactory.create_effects(self.prerequisite_text, targets)
+        if not prerequisite_effects:
+            logging.warning(
+                f"Reflexive trigger prerequisite could not be parsed: {self.prerequisite_text}")
+            self._report_support_issue(
+                game_state, source_id,
+                f"unparsed reflexive prerequisite: {self.prerequisite_text[:80]}",
+                "unparsed")
+            return True
+
+        completed = True
+        for effect in prerequisite_effects:
+            if not effect.apply(game_state, source_id, controller, targets):
+                completed = False
+        if not completed:
+            logging.debug(
+                f"Reflexive trigger not created; prerequisite did not happen: "
+                f"{self.prerequisite_text}")
+            return True
+
+        trigger = TriggeredAbility(
+            source_id,
+            trigger_condition=self.trigger_condition,
+            effect=self.trigger_effect_text,
+            effect_text=f"{self.trigger_condition.capitalize()}, {self.trigger_effect_text}.")
+        trigger._is_reflexive_trigger = True
+        trigger_context = {
+            "ability": trigger,
+            "source_id": source_id,
+            "effect_text": self.trigger_effect_text,
+            "is_reflexive_trigger": True,
+            "reflexive_prerequisite": self.prerequisite_text,
+        }
+
+        handler = getattr(game_state, "ability_handler", None)
+        if handler is not None:
+            handler.active_triggers.append((trigger, controller, trigger_context))
+        else:
+            game_state.add_to_stack("TRIGGER", source_id, controller, trigger_context)
+        logging.debug(
+            f"Queued reflexive trigger after '{self.prerequisite_text}': "
+            f"{self.trigger_effect_text}")
+        return True
+
 
 class DelayedTriggerEffect(AbilityEffect):
     """One-shot delayed triggered ability created from oracle text (CR 603.7).

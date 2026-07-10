@@ -342,7 +342,7 @@ class GameStatePermanentsMixin:
         return True
 
     def untap_permanent(self, card_id, player):
-        """Untap a permanent, triggering any appropriate abilities."""
+        """Attempt to untap a permanent, applying stun replacement (CR 122.1d)."""
         if card_id not in player.get("battlefield", []):
              # Check phased out zone?
              if card_id in getattr(self, 'phased_out', set()):
@@ -354,8 +354,20 @@ class GameStatePermanentsMixin:
         if card_id not in tapped_set:
              logging.debug(f"Permanent {card_id} is already untapped.")
              return True # Already untapped is not a failure
-        tapped_set.remove(card_id)
         card = self._safe_get_card(card_id)
+        stun_count = int(getattr(card, "counters", {}).get("stun", 0) or 0) if card else 0
+        if stun_count > 0:
+             # This is a replacement, not an untap. The attempt still succeeds
+             # for effects and untap costs, but the permanent stays tapped and
+             # no UNTAPPED event is emitted.
+             removed = self.add_counter(card_id, "stun", -1)
+             if removed:
+                  logging.debug(
+                      f"Stun replaced untapping {getattr(card, 'name', card_id)}; "
+                      f"{stun_count - 1} stun counter(s) remain."
+                  )
+             return bool(removed)
+        tapped_set.remove(card_id)
         logging.debug(f"Untapped {getattr(card, 'name', card_id)}")
         self.trigger_ability(card_id, "UNTAPPED", {"controller": player})
         return True
@@ -364,7 +376,7 @@ class GameStatePermanentsMixin:
         """Create a token copy of a card, handles details like base P/T."""
         if not original_card: return None
         # Create token tracking if it doesn't exist
-        if not hasattr(controller, "tokens"): controller["tokens"] = []
+        if "tokens" not in controller: controller["tokens"] = []
 
         token_id = f"TOKEN_COPY_{len(controller['tokens'])}_{original_card.name[:10].replace(' ','')}"
 
@@ -632,7 +644,7 @@ class GameStatePermanentsMixin:
         if not hasattr(self, 'haste_until_eot'): self.haste_until_eot = set()
         self.haste_until_eot.add(card_id)
 
-    def create_token(self, controller, token_data):
+    def create_token(self, controller, token_data, attach_to_target=None):
         """
         Create a token and add it to the battlefield.
         
@@ -645,12 +657,23 @@ class GameStatePermanentsMixin:
         """
         try:
             # Create token tracking if it doesn't exist
-            if not hasattr(controller, "tokens"):
+            if "tokens" not in controller:
                 controller["tokens"] = []
-                
+
             # Generate token ID
             token_count = len(controller["tokens"])
             token_id = f"TOKEN_{token_count}_{token_data.get('name', 'Generic').replace(' ', '_')}"
+            reserved_ids = set(self.card_db)
+            if self.ability_handler:
+                reserved_ids.update(
+                    getattr(ability, "card_id", None)
+                    for ability, *_ in self.ability_handler.active_triggers)
+            reserved_ids.update(
+                item[1] for item in self.stack
+                if isinstance(item, tuple) and len(item) > 1)
+            while token_id in reserved_ids:
+                token_count += 1
+                token_id = f"TOKEN_{token_count}_{token_data.get('name', 'Generic').replace(' ', '_')}"
             
             # Set default values if not provided
             if "power" not in token_data:
@@ -670,20 +693,19 @@ class GameStatePermanentsMixin:
             
             # Create token Card object
             token = Card(token_data)
-            
+            token.is_token = True
+            token.card_id = token_id
+
             # Add token to the card database
             self.card_db[token_id] = token
-            
-            # Add token to battlefield
-            controller["battlefield"].append(token_id)
+            move_context = ({"attach_to_target": attach_to_target}
+                            if attach_to_target is not None else {})
+            if not self.move_card(
+                    token_id, controller, "nonexistent_zone", controller,
+                    "battlefield", cause="token_creation", context=move_context):
+                del self.card_db[token_id]
+                return None
             controller["tokens"].append(token_id)
-            
-            # Mark as entering this turn (summoning sickness)
-            if 'creature' in token_data["card_types"]:
-                controller["entered_battlefield_this_turn"].add(token_id)
-            
-            # Trigger enters-the-battlefield abilities
-            self.trigger_ability(token_id, "ENTERS_BATTLEFIELD")
             
             logging.debug(f"Created token: {token_data.get('name', 'Generic Token')}")
             return token_id
@@ -1015,58 +1037,117 @@ class GameStatePermanentsMixin:
         if proliferated_something: self.check_state_based_actions()
         return proliferated_something
 
-    def mutate(self, player, mutating_card_id, target_id):
-        """Handle the mutate mechanic."""
+    def _is_valid_mutate_target(self, player, target_id):
+        target_card = self._safe_get_card(target_id)
+        if not player or not target_card or target_id not in player.get("battlefield", []):
+            return False
+        subtypes = {str(subtype).lower() for subtype in getattr(target_card, 'subtypes', [])}
+        return ('creature' in getattr(target_card, 'card_types', [])
+                and 'human' not in subtypes)
+
+    def begin_mutate_position_choice(self, player, mutating_card_id, target_id):
+        """Pause a resolving mutating spell for its over/under choice."""
+        if (not self._safe_get_card(mutating_card_id)
+                or not self._is_valid_mutate_target(player, target_id)):
+            return False
+        if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+            self.previous_priority_phase = self.phase
+        self.phase = self.PHASE_CHOOSE
+        self.choice_context = {
+            "type": "mutate_position",
+            "player": player,
+            "controller": player,
+            "mutating_card_id": mutating_card_id,
+            "target_id": target_id,
+            "available_modes": ["over", "under"],
+        }
+        self.priority_player = player
+        self.priority_pass_count = 0
+        return True
+
+    def complete_mutate_position_choice(self, mutate_on_top):
+        """Apply the pending merge after the controller chooses over or under."""
+        context = self.choice_context
+        if not context or context.get("type") != "mutate_position":
+            return False
+        player = context.get("player")
+        mutating_card_id = context.get("mutating_card_id")
+        target_id = context.get("target_id")
+        return_phase = self.previous_priority_phase
+        self.choice_context = None
+        self.previous_priority_phase = None
+        self.phase = return_phase if return_phase is not None else self.PHASE_PRIORITY
+        self.priority_player = self._get_active_player()
+        self.priority_pass_count = 0
+        return self.mutate(player, mutating_card_id, target_id, bool(mutate_on_top))
+
+    def mutate(self, player, mutating_card_id, target_id, mutate_on_top=True):
+        """Merge a resolving mutating creature spell with its legal target."""
         target_card = self._safe_get_card(target_id)
         mutating_card = self._safe_get_card(mutating_card_id)
-        if not target_card or not mutating_card: return False
+        if (not target_card or not mutating_card
+                or not self._is_valid_mutate_target(player, target_id)):
+            logging.warning(f"Mutate failed for {mutating_card_id} onto {target_id}.")
+            return False
 
-        # Validation (non-human creature target)
-        if 'creature' not in getattr(target_card, 'card_types', []) or 'Human' in getattr(target_card, 'subtypes', []):
-             logging.warning(f"Mutate failed: Target {target_card.name} is not a non-Human creature.")
-             return False
-
-        # Decide top/bottom (AI choice, default: new card on top)
-        mutate_on_top = True
-
-        # Apply mutation based on top/bottom choice
-        merged_card = None
-        current_mutation_stack = getattr(player,"mutation_stacks", {}).get(target_id, [target_id])
-
+        existing = self.mutated_permanents.get(target_id)
+        if existing:
+            components = list(existing.get("components", [target_id]))
+            component_printed = copy.deepcopy(existing.get("component_printed", {}))
+        else:
+            components = [target_id]
+            component_printed = {
+                target_id: copy.deepcopy(getattr(target_card, "_printed", {})),
+            }
+        if mutating_card_id in components:
+            return False
+        component_printed[mutating_card_id] = copy.deepcopy(
+            getattr(mutating_card, "_printed", {}))
         if mutate_on_top:
-            merged_card = mutating_card # Top card defines name, types, P/T
-            # Combine abilities/text (simplistic append)
-            merged_card.oracle_text = getattr(target_card, 'oracle_text','') + "\n" + getattr(mutating_card, 'oracle_text','')
-            # Keep counters, auras, equipment from target_card
-            merged_card.counters = target_card.counters.copy() if hasattr(target_card, 'counters') else {}
-            # Update the representation in card_db? Or just modify the live object? Modify live for now.
-            target_card.name = merged_card.name
-            target_card.power = merged_card.power
-            target_card.toughness = merged_card.toughness
-            target_card.card_types = merged_card.card_types
-            target_card.subtypes = merged_card.subtypes
-            target_card.oracle_text = merged_card.oracle_text
-            # Keep target_card.counters
-            current_mutation_stack.insert(0, mutating_card_id) # New card on top of stack list
-        else: # Mutate under
-            merged_card = target_card # Target defines name, types, P/T
-            merged_card.oracle_text = getattr(target_card, 'oracle_text','') + "\n" + getattr(mutating_card, 'oracle_text','')
-            # Keep target_card.counters
-            current_mutation_stack.append(mutating_card_id) # New card at bottom of stack list
+            components.insert(0, mutating_card_id)
+        else:
+            components.append(mutating_card_id)
 
-        # Track the mutation stack
-        if not hasattr(player, "mutation_stacks"): player["mutation_stacks"] = {}
-        player["mutation_stacks"][target_id] = current_mutation_stack
+        top_printed = copy.deepcopy(component_printed[components[0]])
+        ability_texts = [
+            str(component_printed[component_id].get("oracle_text", "")).strip()
+            for component_id in components
+            if component_printed.get(component_id, {}).get("oracle_text")
+        ]
+        top_printed["oracle_text"] = "\n".join(ability_texts)
+        top_printed["keywords"] = target_card._extract_keywords(
+            top_printed["oracle_text"].lower())
 
-        # Mutating card leaves original zone (usually hand) implicitly handled by cast_spell
-        # If cast from elsewhere, that needs handling too.
+        if self.ability_handler:
+            self.ability_handler.unregister_card_abilities(target_id)
+        target_card._printed = top_printed
+        target_card.reset_to_printed()
+        target_card.compute_subtype_vector()
+        self.mutated_permanents[target_id] = {
+            "components": components,
+            "component_printed": component_printed,
+            "top_card_id": components[0],
+            "mutation_count": int(existing.get("mutation_count", 0)) + 1 if existing else 1,
+        }
+        player.setdefault("mutation_stacks", {})[target_id] = list(components)
+        if hasattr(self, "_last_card_locations"):
+            self._last_card_locations[mutating_card_id] = (player, "merged")
+        if self.ability_handler:
+            self.ability_handler.register_card_abilities(target_id, player)
+        if self.layer_system:
+            self.layer_system.invalidate_cache()
+            self.layer_system.apply_all_effects()
 
-        # Trigger mutate ability (triggers for EACH card in the stack now)
-        for card_in_stack_id in current_mutation_stack:
-            self.trigger_ability(card_in_stack_id, "MUTATES", {"target_id": target_id, "top_card_id": current_mutation_stack[0]})
-
-        logging.debug(f"{mutating_card.name} mutated {'onto' if mutate_on_top else 'under'} {target_card.name}. Result is now {merged_card.name}.")
-        if self.layer_system: self.layer_system.apply_all_effects() # Re-apply layers
+        self.trigger_ability(target_id, "MUTATES", {
+            "controller": player,
+            "target_id": target_id,
+            "mutating_card_id": mutating_card_id,
+            "top_card_id": components[0],
+            "mutation_count": self.mutated_permanents[target_id]["mutation_count"],
+        })
+        logging.debug(
+            f"{mutating_card.name} mutated {'over' if mutate_on_top else 'under'} "
+            f"{target_id}; merged top is {target_card.name}.")
         return True
 
     def reanimate(self, player, gy_index):
@@ -1089,6 +1170,262 @@ class GameStatePermanentsMixin:
                 if self.layer_system: self.layer_system.apply_all_effects()
                 return True
         return False
+
+    def meld_cards(self, primary_id, partner_id, result_id, controller):
+        """Exile two meld parts and return one combined permanent (CR 713)."""
+        if not controller or primary_id == partner_id:
+            return False
+        battlefield = controller.get("battlefield", [])
+        if primary_id not in battlefield or partner_id not in battlefield:
+            return False
+
+        primary = self._safe_get_card(primary_id)
+        partner = self._safe_get_card(partner_id)
+        result = self._safe_get_card(result_id)
+        if not primary or not partner or not result:
+            return False
+
+        expected_partner = getattr(primary, "meld_partner_name", None)
+        expected_result = getattr(primary, "meld_result_name", None)
+        if expected_partner and partner.name.lower() != expected_partner.lower():
+            return False
+        if expected_result and result.name.lower() != expected_result.lower():
+            return False
+
+        original_printed = copy.deepcopy(getattr(primary, "_printed", {}))
+        if not self.move_card(
+                primary_id, controller, "battlefield", controller, "exile",
+                cause="meld_component"):
+            return False
+        if not self.move_card(
+                partner_id, controller, "battlefield", controller, "exile",
+                cause="meld_component"):
+            self.move_card(primary_id, controller, "exile", controller, "battlefield",
+                           cause="meld_rollback")
+            return False
+
+        primary._printed = copy.deepcopy(getattr(result, "_printed", {}))
+        primary.reset_to_printed()
+        self.melded_permanents[primary_id] = {
+            "partner_id": partner_id,
+            "result_id": result_id,
+            "original_printed": original_printed,
+        }
+        if not self.move_card(
+                primary_id, controller, "exile", controller, "battlefield",
+                cause="meld_result"):
+            self.melded_permanents.pop(primary_id, None)
+            primary._printed = original_printed
+            primary.reset_to_printed()
+            self.move_card(primary_id, controller, "exile", controller, "battlefield",
+                           cause="meld_rollback")
+            self.move_card(partner_id, controller, "exile", controller, "battlefield",
+                           cause="meld_rollback")
+            return False
+
+        if self.layer_system:
+            self.layer_system.invalidate_cache()
+            self.layer_system.apply_all_effects()
+        logging.debug(
+            f"Melded {primary.name} from components {primary_id} and {partner_id}.")
+        return True
+
+    @staticmethod
+    def _specialize_color_letters(card):
+        color_order = "WUBRG"
+        colors = getattr(card, "colors", []) or []
+        letters = {
+            color for index, color in enumerate(color_order)
+            if index < len(colors) and colors[index]
+        }
+        subtype_colors = {
+            "plains": "W", "island": "U", "swamp": "B",
+            "mountain": "R", "forest": "G",
+        }
+        for subtype in getattr(card, "subtypes", []) or []:
+            color = subtype_colors.get(str(subtype).lower())
+            if color:
+                letters.add(color)
+        return letters
+
+    def get_specialize_variants(self, source_id):
+        """Map WUBRG to linked specialization card IDs available in card_db."""
+        source = self._safe_get_card(source_id)
+        if not source or not getattr(source, "is_specialize", False):
+            return {}
+        related_names = {
+            part.get("name")
+            for part in getattr(source, "all_parts", [])
+            if isinstance(part, dict) and part.get("component") == "combo_piece"
+        }
+        if not related_names:
+            return {}
+
+        source_colors = self._specialize_color_letters(source)
+        variants = {}
+        for variant_id, variant in self.card_db.items():
+            if variant_id == source_id or getattr(variant, "name", None) not in related_names:
+                continue
+            variant_colors = self._specialize_color_letters(variant)
+            added_colors = variant_colors - source_colors
+            color = None
+            if len(added_colors) == 1:
+                color = next(iter(added_colors))
+            elif variant_colors == source_colors and len(source_colors) == 1:
+                color = next(iter(source_colors))
+            if color:
+                variants[color] = variant_id
+        if len(variants) == 5:
+            return variants
+
+        log_key = ("missing_specialize_variants", source_id)
+        logged_errors = getattr(self, "_logged_errors", set())
+        if log_key not in logged_errors:
+            logged_errors.add(log_key)
+            logging.warning(
+                f"Specialize source {source.name} has {len(variants)}/5 linked variants in card_db.")
+            counters = getattr(self, "fidelity_counters", None)
+            if counters is not None:
+                counters["unparsed_effects"] += 1
+                counters.setdefault("unparsed_cards", set()).add(source.name)
+            try:
+                from .card_support import report_unsupported
+                report_unsupported(
+                    source.name,
+                    f"specialize linked variants missing ({len(variants)}/5 loaded)",
+                    severity="unparsed")
+            except Exception:
+                pass
+        return {}
+
+    def get_specialize_discard_colors(self, card_id):
+        card = self._safe_get_card(card_id)
+        return self._specialize_color_letters(card) if card else set()
+
+    def start_specialize_choice(self, source_id, controller):
+        """Begin Specialize without paying either activation cost yet."""
+        source = self._safe_get_card(source_id)
+        if (not source or source_id not in controller.get("battlefield", [])
+                or not getattr(source, "is_specialize", False)
+                or source_id in self.specialized_cards
+                or not self._can_act_at_sorcery_speed(controller)
+                or self.priority_player != controller
+                or self.choice_context):
+            return False
+
+        variants = self.get_specialize_variants(source_id)
+        cost = getattr(source, "specialize_cost", None)
+        if not variants or not cost or not self.mana_system.can_pay_mana_cost(
+                controller, cost, {"card_id": source_id, "is_ability": True}):
+            return False
+        eligible = [
+            card_id for card_id in controller.get("hand", [])
+            if self.get_specialize_discard_colors(card_id).intersection(variants)
+        ]
+        if not eligible:
+            return False
+
+        self.previous_priority_phase = self.phase
+        self.phase = self.PHASE_CHOOSE
+        self.choice_context = {
+            "type": "specialize_discard",
+            "player": controller,
+            "controller": controller,
+            "source_id": source_id,
+            "cost": cost,
+            "available_colors": sorted(variants),
+        }
+        self.priority_player = controller
+        self.priority_pass_count = 0
+        return True
+
+    def choose_specialize_discard(self, hand_index):
+        context = self.choice_context
+        if not (self.phase == self.PHASE_CHOOSE and context
+                and context.get("type") == "specialize_discard"):
+            return False
+        controller = context.get("controller") or context.get("player")
+        hand = controller.get("hand", []) if controller else []
+        if not isinstance(hand_index, int) or not 0 <= hand_index < len(hand):
+            return False
+
+        discard_id = hand[hand_index]
+        variants = self.get_specialize_variants(context.get("source_id"))
+        colors = sorted(self.get_specialize_discard_colors(discard_id).intersection(variants))
+        if not colors:
+            return False
+        context["discard_card_id"] = discard_id
+        context["available_colors"] = colors
+        if len(colors) > 1:
+            context["type"] = "choose_color"
+            context["resume_specialize"] = True
+            return True
+        return self.complete_specialize_choice(colors[0])
+
+    def complete_specialize_choice(self, color):
+        context = self.choice_context
+        if not (self.phase == self.PHASE_CHOOSE and context
+                and context.get("resume_specialize", context.get("type") == "specialize_discard")):
+            return False
+        controller = context.get("controller") or context.get("player")
+        source_id = context.get("source_id")
+        discard_id = context.get("discard_card_id")
+        available_colors = set(context.get("available_colors", []))
+        variants = self.get_specialize_variants(source_id)
+        variant_id = variants.get(color)
+        source = self._safe_get_card(source_id)
+        variant = self._safe_get_card(variant_id)
+        cost = context.get("cost")
+        if (color not in available_colors or not controller or not source or not variant
+                or source_id not in controller.get("battlefield", [])
+                or discard_id not in controller.get("hand", [])
+                or color not in self.get_specialize_discard_colors(discard_id)
+                or not self.mana_system.can_pay_mana_cost(
+                    controller, cost, {"card_id": source_id, "is_ability": True})):
+            return False
+
+        payment_context = {
+            "card_id": source_id,
+            "is_ability": True,
+            "cause": "specialize",
+        }
+        if not self.mana_system.pay_mana_cost(controller, cost, payment_context):
+            return False
+        if not self.discard_card(
+                controller, discard_id, source_id=source_id, cause="specialize_cost"):
+            logging.error("Specialize paid mana but could not discard its validated card.")
+            return False
+
+        original_name = source.name
+        original_printed = copy.deepcopy(getattr(source, "_printed", {}))
+        if self.ability_handler:
+            self.ability_handler.unregister_card_abilities(source_id)
+        source._printed = copy.deepcopy(getattr(variant, "_printed", {}))
+        source.reset_to_printed()
+        self.specialized_cards[source_id] = {
+            "color": color,
+            "variant_id": variant_id,
+            "discarded_card_id": discard_id,
+            "original_printed": original_printed,
+        }
+        if self.ability_handler:
+            self.ability_handler.register_card_abilities(source_id, controller)
+
+        return_phase = self.previous_priority_phase
+        self.choice_context = None
+        self.previous_priority_phase = None
+        self.phase = return_phase if return_phase is not None else self.PHASE_PRIORITY
+        self.priority_player = controller
+        self.priority_pass_count = 0
+        self.trigger_ability(source_id, "SPECIALIZES", {
+            "controller": controller,
+            "color": color,
+            "discarded_card_id": discard_id,
+            "from_name": original_name,
+            "to_name": source.name,
+        })
+        logging.debug(f"Specialized {original_name} into {source.name} ({color}).")
+        return True
 
     def transform_card(self, card_id):
         """Transform a double-faced permanent to its other face (CR 712).
@@ -1118,10 +1455,17 @@ class GameStatePermanentsMixin:
             return False
 
         prev_face = getattr(card, 'current_face', 0)
+        if self.ability_handler and player:
+            self.ability_handler.unregister_card_abilities(card_id)
         card.transform()
         if getattr(card, 'current_face', prev_face) == prev_face:
+            if self.ability_handler and player:
+                self.ability_handler.register_card_abilities(card_id, player)
             logging.debug(f"transform_card: {getattr(card, 'name', card_id)} did not change face.")
             return False
+
+        if self.ability_handler and player:
+            self.ability_handler.register_card_abilities(card_id, player)
 
         # New face => different P/T, types, keywords: force a full recompute.
         if self.layer_system:
@@ -1234,7 +1578,7 @@ class GameStatePermanentsMixin:
         return False # Wasn't attached
 
     def attach_aura(self, player, aura_id, target_id):
-        """Attach an aura. Assumes validation (legal target) happened before."""
+        """Attach an Aura to a legal battlefield object."""
         if "attachments" not in player: player["attachments"] = {}
         aura_card = self._safe_get_card(aura_id)
         target_card = self._safe_get_card(target_id)
@@ -1246,7 +1590,9 @@ class GameStatePermanentsMixin:
         if target_zone != "battlefield":
              logging.warning(f"Cannot attach {aura_name}: Target {target_name} not on battlefield.")
              return False
-        # TODO: Add "enchant <type>" validation and protection checks from TargetingSystem here if not done externally.
+        if not self._is_legal_attachment(aura_id, target_id):
+             logging.warning(f"Cannot attach {aura_name}: {target_name} is not a legal enchanted object.")
+             return False
 
         if aura_id in player["attachments"]:
             logging.debug(f"Re-attaching {aura_name} from {player['attachments'][aura_id]} to {target_name}")
@@ -1556,4 +1902,4 @@ class GameStatePermanentsMixin:
              match = re.search(r"reconfigure\s*(\d+)", card.oracle_text.lower())
              if match: return f"{{{match.group(1)}}}"
         return None
-
+

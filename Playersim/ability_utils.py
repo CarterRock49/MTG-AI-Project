@@ -210,7 +210,7 @@ def safe_int(value, default=0):
     if isinstance(value, int): return value
     if isinstance(value, float): return int(value) # Allow floats
     if isinstance(value, str):
-        if value.isdigit() or (value.startswith('-') and value[1:].isdigit()):
+        if value.isdigit() or (value[:1] in ('+', '-') and value[1:].isdigit()):
             return int(value)
     # Return default for non-convertible types or values like '*'
     return default
@@ -258,6 +258,30 @@ class EffectFactory:
         elif re.search(r"(creatures?|permanents?) you control", effect_text): return "permanents you control" # Group targets
         return None # No target description found
 
+
+    # --- Reflexive trigger extraction (CR 603.12) ---------------------------
+    _REFLEXIVE_TRIGGER = re.compile(
+        r"^\s*(.+?)\s*(?:[.;]\s*|\s+)(when\s+(?:you\s+do|that player\s+does))\s*,\s*(.+?)\s*$",
+        re.IGNORECASE | re.DOTALL)
+
+    @staticmethod
+    def _extract_reflexive_trigger(effect_text):
+        """Return one gated reflexive-trigger effect, or None.
+
+        A reflexive trigger is created only after the preceding instruction
+        succeeds. Keeping both halves in one effect prevents ordinary clause
+        splitting from resolving the "when you do" rider unconditionally.
+        """
+        match = EffectFactory._REFLEXIVE_TRIGGER.match(effect_text.strip())
+        if not match:
+            return None
+        from .ability_types import ReflexiveTriggerEffect
+        prerequisite = match.group(1).strip(". ;")
+        condition = match.group(2).strip()
+        trigger_effect = match.group(3).strip(". ")
+        if not prerequisite or not trigger_effect:
+            return None
+        return ReflexiveTriggerEffect(prerequisite, trigger_effect, condition)
 
     # --- Delayed trigger extraction (CR 603.7) ------------------------------
     # Only the "next <phase>" wording is a one-shot delayed trigger created by
@@ -318,6 +342,44 @@ class EffectFactory:
 
         effects = []
 
+        # Numeric die tables are one effect. Keep their result rows together
+        # before generic dash/clause splitting can turn each row into an
+        # unrelated ability.
+        die_match = re.search(r"\broll(?:s)?\s+(?:a\s+)?d(\d+)\b", effect_text, re.IGNORECASE)
+        outcome_pattern = re.compile(
+            r"(?m)^\s*(\d+)(?:\s*[-\u2013\u2014]\s*(\d+))?\s*\|\s*(.+?)\s*$")
+        outcome_matches = list(outcome_pattern.finditer(effect_text))
+        if die_match and outcome_matches:
+            from .ability_types import RollDieEffect
+            prefix = effect_text[:die_match.start()].strip(" .,\n")
+            prefix = re.sub(r"\bthen\s*$", "", prefix, flags=re.IGNORECASE).strip(" .,\n")
+            if prefix:
+                effects.extend(EffectFactory.create_effects(prefix, targets, source_name))
+            common_text = effect_text[die_match.end():outcome_matches[0].start()].strip(" .\n")
+            outcomes = []
+            for match in outcome_matches:
+                minimum = int(match.group(1))
+                maximum = int(match.group(2) or minimum)
+                outcomes.append((minimum, maximum, match.group(3).strip()))
+            effects.append(RollDieEffect(
+                int(die_match.group(1)), outcomes,
+                pre_result_text=common_text, full_text=effect_text))
+            return effects
+
+        # CR 603.12: preserve the prerequisite and its "when you do" rider as
+        # one gated effect before generic sentence/clause splitting.
+        reflexive_effect = EffectFactory._extract_reflexive_trigger(effect_text)
+        if reflexive_effect:
+            return [reflexive_effect]
+
+        # Meld's "exile them, then meld them" is one indivisible action. If
+        # generic clause splitting handles the exile first, the pair is gone
+        # before the meld instruction can identify it.
+        meld_match = re.search(r"\bmeld them into\s+([^.;]+)", effect_text, re.IGNORECASE)
+        if meld_match:
+            from .ability_types import MeldEffect
+            return [MeldEffect(result_name=meld_match.group(1).strip())]
+
         # CR 603.7: pull out "at the beginning of the next <phase>" sentences
         # as DelayedTriggerEffect BEFORE clause splitting (see helper docstring).
         delayed_effects, effect_text = EffectFactory._extract_delayed_triggers(effect_text)
@@ -325,18 +387,86 @@ class EffectFactory:
         if not effect_text.strip(". "):
             return effects
 
+        # Analyze the Pollen's optional casting cost changes the search
+        # instruction that resolves. Preserve both branches as one effect so
+        # the paid-cost flag from the stack context can select the right one.
+        if (re.search(r"\bcollect evidence\s+\d+\b", effect_text, re.IGNORECASE)
+                and re.search(
+                    r"if evidence was collected,\s*instead search your library "
+                    r"for a creature or land card", effect_text, re.IGNORECASE)
+                and re.search(
+                    r"search your library for a basic land card",
+                    effect_text, re.IGNORECASE)):
+            from .ability_types import SearchLibraryEffect
+            effects.append(SearchLibraryEffect(
+                search_type="basic land", destination="hand", count=1,
+                evidence_search_type="creature or land"))
+            return effects
+
+        # Impulse draw is one instruction even when its permission sentence has
+        # an internal comma ("Until end of turn, you may play that card").
+        # Preserve it before the generic comma splitter can sever the grant.
+        impulse_match = re.match(
+            r"^\s*exile the top\s+(?:(\w+|\d+)\s+)?cards?\s+of\s+(?:your|their)\s+library\b",
+            effect_text, re.IGNORECASE)
+        if impulse_match and re.search(r"\bmay (?:play|cast)\b", effect_text, re.IGNORECASE):
+            from .ability_types import ImpulseDrawEffect
+            raw_count = impulse_match.group(1)
+            count = 1
+            if raw_count:
+                count = int(raw_count) if raw_count.isdigit() else text_to_number(raw_count)
+            if not isinstance(count, int) or count <= 0:
+                count = 1
+            effects.append(ImpulseDrawEffect(count=count))
+            return effects
+
+        # "Exile ... until [this source] leaves" is one linked effect, not an
+        # ordinary exile followed by a delayed trigger. Preserve the whole
+        # instruction before generic sentence and conjunction splitting.
+        bat_link = (
+            re.search(r"look at target opponent(?:'|\u2019)s hand", effect_text, re.IGNORECASE)
+            and re.search(
+                r"you may exile a nonland card from it until .+? leaves the battlefield",
+                effect_text, re.IGNORECASE))
+        if bat_link:
+            from .ability_types import LinkedExileEffect
+            effects.append(LinkedExileEffect(
+                target_type="nonland card", from_zone="hand", return_zone="hand",
+                optional=True, choose_from_target_opponent_hand=True,
+                effect_text=effect_text))
+            return effects
+
+        linked_target = re.search(
+            r"\bexile target\s+(nonland permanent|creature|artifact|enchantment|permanent)\b"
+            r"[^.]*?\buntil\b[^.]*?\bleaves the battlefield",
+            effect_text, re.IGNORECASE)
+        if linked_target:
+            from .ability_types import LinkedExileEffect
+            target_type = linked_target.group(1).lower()
+            effects.append(LinkedExileEffect(
+                target_type=target_type, from_zone="battlefield",
+                return_zone="battlefield", effect_text=effect_text))
+            return effects
+
         processed_clauses = []
-        # Basic clause splitting (commas, 'and', 'then', em dash) - needs improvement for complex sentences
-        # Added splitting on sentence endings like ". Then" or "; then" and em dash used as separator
-        split_pattern = r'\s*,\s*(?:and\s+)?(?:then\s+)?|\s+and\s+(?:then\s+)?|\s+then\s+|(?<=[.;])\s+then\s+|\s*—\s*|\s*\u2014\s*' # Added em dash split
-        parts = re.split(split_pattern, effect_text.strip('. '))
+        # Basic clause splitting. Most multi-sentence effects are parsed as one
+        # semantic unit (copy, impulse, dig), so only split a plain sentence
+        # boundary when the next sentence puts counters on the prior target.
+        split_pattern = (r'\s*,\s*(?:and\s+)?(?:then\s+)?|'
+                         r'\s+and\s+(?:then\s+)?|\s+then\s+|'
+                         r'(?<=[.;])\s+then\s+|'
+                         r'(?<=\.)\s+(?=(?i:put\b.*\bcounters?\s+on\s+(?:it|that\b)))|'
+                         r'(?<=\.)\s+(?=(?i:create\s+(?:a|an|one)\s+(?:monster|wicked)\s+role token\b))|'
+                         r'\s*—\s*|\s*\u2014\s*')
+        split_text = re.sub(r'\s*\([^()]*\)\s*', ' ', effect_text).strip('. ')
+        parts = re.split(split_pattern, split_text)
         processed_clauses.extend(p.strip() for p in parts if p.strip())
         if not processed_clauses: processed_clauses = [effect_text] # Use full text if split fails
 
         # Assuming these are imported at the module level of ability_utils.py:
         # (Relative import assumed)
         from .ability_types import (AbilityEffect, DrawCardEffect, GainLifeEffect, DamageEffect,
-            CounterSpellEffect, CreateTokenEffect, DestroyEffect, ExileEffect,
+            CounterSpellEffect, CreateTokenEffect, CreateRoleEffect, DestroyEffect, ExileEffect,
             DiscardEffect, MillEffect, TapEffect, UntapEffect, BuffEffect,
             SearchLibraryEffect, AddCountersEffect, ReturnToHandEffect,
             ScryEffect, SurveilEffect, CopySpellEffect, TransformEffect, FightEffect,
@@ -484,7 +614,9 @@ class EffectFactory:
                  target_type = "permanent"
                  norm_target_desc = target_desc.replace('-',' ')
                  # Add specific type checks similar to Destroy
-                 if "creature" in norm_target_desc: target_type = "creature"
+                 if "target creature or vehicle" in clause_lower:
+                     target_type = "creature_or_vehicle"
+                 elif "creature" in norm_target_desc: target_type = "creature"
                  elif "artifact" in norm_target_desc: target_type = "artifact"
                  elif "enchantment" in norm_target_desc: target_type = "enchantment"
                  elif "land" in norm_target_desc: target_type = "land"
@@ -497,6 +629,17 @@ class EffectFactory:
                  zone_match = re.search(r"from (?:the |a |your |an opponent's )?(\w+)", clause_lower)
                  zone = zone_match.group(1) if zone_match else "battlefield"
                  created_effect = ExileEffect(target_type=target_type, zone=zone)
+
+            # Role tokens are Aura enchantments created already attached to a
+            # creature, not generic 1/1 creature tokens.
+            elif re.search(
+                    r"\bcreate(?:s)?\s+(?:a|an|one)\s+(monster|wicked)\s+role token\s+attached to\s+(.+)$",
+                    clause_lower):
+                 role_match = re.search(
+                     r"\bcreate(?:s)?\s+(?:a|an|one)\s+(monster|wicked)\s+role token\s+attached to\s+(.+)$",
+                     clause_lower)
+                 created_effect = CreateRoleEffect(
+                     role_match.group(1), attachment_text=role_match.group(2).strip(". "))
 
             # Create Token
             elif re.search(r"\b(create(?:s)?)\b", clause_lower) and "token" in clause_lower:
@@ -677,7 +820,9 @@ class EffectFactory:
                     target_desc = EffectFactory._extract_target_description(clause_lower) or "creatures you control"
                     target_type = "creature" # Default
                     # Refine target_type based on target_desc
-                    if "target creature" in target_desc: target_type = "target creature"
+                    if ("target creature" in target_desc
+                            or ("target" in clause_lower and "creature" in target_desc)):
+                        target_type = "target creature"
                     elif "creatures you control" in target_desc: target_type = "creatures you control"
                     elif "each creature" in target_desc and "target" not in clause_lower: target_type = "each creature" # Target all
                     elif "creatures opponent controls" in target_desc: target_type = "creatures opponent controls"
@@ -795,6 +940,14 @@ class EffectFactory:
                  elif re.search(r"\b(each|all)\s+creatures?\b", clause_lower): target_type = "each creature"
                  elif re.search(r"\b(each|all)\s+opponents?\b", clause_lower): target_type = "each opponent"
                  elif re.search(r"\b(each|all)\s+players?\b", clause_lower): target_type = "each player"
+                 # A later clause can refer to the target selected by an
+                 # earlier clause. Reuse the stack's target set rather than
+                 # treating "it" as the source permanent.
+                 elif re.search(r"\bon\s+(?:it|that\s+(?:creature|permanent)|each of those creatures)\b", clause_lower):
+                      has_prior_targets = (isinstance(targets, dict)
+                                           and any(isinstance(value, (list, tuple, set)) and value
+                                                   for value in targets.values()))
+                      target_type = "target permanent" if has_prior_targets else "self"
 
                  created_effect = AddCountersEffect(counter_type, count, target_type=target_type) # Pass 'x' or number
 
@@ -857,7 +1010,7 @@ class EffectFactory:
 
             # Mass bounce: "return all <type> to their owners' hands" / "...you
             # control...". Must precede the single-target bounce branch.
-            elif re.search(r"return\s+all\s+(\w+)", clause_lower) and re.search(r"to (?:its|their) owner'?s?'? hands?|to your hand", clause_lower):
+            elif re.search(r"return\s+all\s+(\w+)", clause_lower) and re.search(r"to (?:its|their) owner(?:'s|s'|s)? hands?|to your hand", clause_lower):
                 tt = "permanent"
                 if "creature" in clause_lower: tt = "creature"
                 elif "artifact" in clause_lower: tt = "artifact"
@@ -899,7 +1052,7 @@ class EffectFactory:
             # check, so it literally searched for "to (?:its|their) owner's
             # hand" and never matched -- standard bounce phrasing fell through
             # to the no-op fallback. Use a real regex.
-            elif re.search(r"\breturn(?:s)?\b", clause_lower) and re.search(r"to (?:its|their) owner'?s hand|to your hand", clause_lower):
+            elif re.search(r"\breturn(?:s)?\b", clause_lower) and re.search(r"to (?:its|their) owner(?:'s|s'|s)? hands?|to your hand", clause_lower):
                 target_desc = EffectFactory._extract_target_description(clause_lower) or "permanent"
                 target_type = "permanent"
                 zone = "battlefield" # Default zone
