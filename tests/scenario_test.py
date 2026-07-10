@@ -7083,6 +7083,144 @@ def s_fear_of_missing_out_needs_delirium():
         "an additional combat phase appeared without the trigger resolving"
 
 
+@scenario("508.1 (attack watchers)", "'a creature you control attacks' watchers fire only for their controller's matching attackers")
+def s_attack_watchers_scope_controller_and_type():
+    gs = fresh()
+    from Playersim.combat_integration import integrate_combat_actions
+    combat = integrate_combat_actions(gs)
+    controller, opponent = gs.p1, gs.p2
+    gs.turn = 1
+    gs.agent_is_p1 = True
+    attacker = inject_into_zone(gs, controller, {
+        "name": "Watched Bear", "mana_cost": "{1}{G}", "cmc": 2,
+        "type_line": "Creature - Bear", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    friendly_watcher = inject_into_zone(gs, controller, {
+        "name": "Friendly Attack Watcher", "mana_cost": "{1}{W}", "cmc": 2,
+        "type_line": "Creature - Human", "oracle_text":
+            "Whenever a creature you control attacks, you gain 1 life.",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    inject_into_zone(gs, opponent, {
+        "name": "Enemy Attack Watcher", "mana_cost": "{1}{B}", "cmc": 2,
+        "type_line": "Creature - Human", "oracle_text":
+            "Whenever a creature you control attacks, you gain 1 life.",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    inject_into_zone(gs, controller, {
+        "name": "Tribal Attack Watcher", "mana_cost": "{1}{W}", "cmc": 2,
+        "type_line": "Creature - Human", "oracle_text":
+            "Whenever a Knight you control attacks, you gain 1 life.",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    gs.ability_handler.active_triggers = []
+    controller["entered_battlefield_this_turn"] = set()
+    controller_life, opponent_life = controller["life"], opponent["life"]
+    gs.phase = gs.PHASE_DECLARE_ATTACKERS
+    gs.current_attackers = [attacker]
+    gs.current_block_assignments = {}
+    assert combat.handle_declare_attackers_done(), "declare-attackers did not finish"
+    queued_sources = [ctx.get("source_card_id")
+                      for _, _, ctx in gs.ability_handler.active_triggers]
+    assert queued_sources == [friendly_watcher], \
+        (f"expected only the friendly same-controller watcher to trigger, got "
+         f"{[getattr(gs._safe_get_card(cid), 'name', cid) for cid in queued_sources]}")
+    gs.ability_handler.process_triggered_abilities()
+    while gs.stack:
+        assert gs.resolve_top_of_stack(), "the attack watcher trigger did not resolve"
+    assert controller["life"] == controller_life + 1, \
+        "the friendly watcher did not gain its controller 1 life"
+    assert opponent["life"] == opponent_life, \
+        "the opponent's 'you control' watcher gained life off the wrong player's attack"
+
+
+@scenario("508.1 (attack watchers)", "'another creature you control attacks' does not fire for the watcher's own attack")
+def s_attack_watcher_another_excludes_self():
+    gs = fresh()
+    from Playersim.combat_integration import integrate_combat_actions
+    combat = integrate_combat_actions(gs)
+    controller = gs.p1
+    gs.turn = 1
+    gs.agent_is_p1 = True
+    watcher = inject_into_zone(gs, controller, {
+        "name": "Self-Excluding Watcher", "mana_cost": "{1}{W}", "cmc": 2,
+        "type_line": "Creature - Human", "oracle_text":
+            "Whenever another creature you control attacks, you gain 1 life.",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    ally = inject_into_zone(gs, controller, {
+        "name": "Watched Ally", "mana_cost": "{1}{G}", "cmc": 2,
+        "type_line": "Creature - Bear", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    gs.ability_handler.active_triggers = []
+    controller["entered_battlefield_this_turn"] = set()
+    gs.phase = gs.PHASE_DECLARE_ATTACKERS
+    gs.current_attackers = [watcher]
+    gs.current_block_assignments = {}
+    assert combat.handle_declare_attackers_done(), "declare-attackers did not finish"
+    assert not gs.ability_handler.active_triggers, \
+        "'another creature you control' triggered for the watcher's own attack"
+    gs.phase = gs.PHASE_DECLARE_ATTACKERS
+    gs.current_attackers = [ally]
+    gs.current_block_assignments = {}
+    assert combat.handle_declare_attackers_done(), "second declare-attackers did not finish"
+    queued_sources = [ctx.get("source_card_id")
+                      for _, _, ctx in gs.ability_handler.active_triggers]
+    assert queued_sources == [watcher], \
+        "'another creature you control' did not trigger for a different attacker"
+
+
+@scenario("508.1 (attack watchers)", "'a creature attacks you' watchers fire for the defending player only")
+def s_attack_watcher_defender_side():
+    gs = fresh()
+    from Playersim.combat_integration import integrate_combat_actions
+    combat = integrate_combat_actions(gs)
+    controller, opponent = gs.p1, gs.p2
+    gs.turn = 1
+    gs.agent_is_p1 = True
+    attacker = inject_into_zone(gs, controller, {
+        "name": "Charging Bear", "mana_cost": "{1}{G}", "cmc": 2,
+        "type_line": "Creature - Bear", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    defender_watcher = inject_into_zone(gs, opponent, {
+        "name": "Defensive Watcher", "mana_cost": "{1}{W}", "cmc": 2,
+        "type_line": "Creature - Human", "oracle_text":
+            "Whenever a creature attacks you or a planeswalker you control, "
+            "you gain 1 life.",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    inject_into_zone(gs, controller, {
+        "name": "Misplaced Defensive Watcher", "mana_cost": "{1}{W}", "cmc": 2,
+        "type_line": "Creature - Human", "oracle_text":
+            "Whenever a creature attacks you or a planeswalker you control, "
+            "you gain 1 life.",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    gs.ability_handler.active_triggers = []
+    controller["entered_battlefield_this_turn"] = set()
+    defender_life = opponent["life"]
+    attacker_side_life = controller["life"]
+    gs.phase = gs.PHASE_DECLARE_ATTACKERS
+    gs.current_attackers = [attacker]
+    gs.current_block_assignments = {}
+    assert combat.handle_declare_attackers_done(), "declare-attackers did not finish"
+    queued_sources = [ctx.get("source_card_id")
+                      for _, _, ctx in gs.ability_handler.active_triggers]
+    assert queued_sources == [defender_watcher], \
+        (f"expected only the defending player's watcher to trigger, got "
+         f"{[getattr(gs._safe_get_card(cid), 'name', cid) for cid in queued_sources]}")
+    gs.ability_handler.process_triggered_abilities()
+    while gs.stack:
+        assert gs.resolve_top_of_stack(), "the defender watcher trigger did not resolve"
+    assert opponent["life"] == defender_life + 1, \
+        "the defending player's watcher did not gain 1 life"
+    assert controller["life"] == attacker_side_life, \
+        "the attacking player's 'attacks you' watcher fired for its own attack"
+
+
 @scenario("103.6c (Leyline of Resonance)", "an opening-hand Leyline may begin the game on the battlefield before turn 1")
 def s_leyline_opening_hand_choice():
     gs = fresh()

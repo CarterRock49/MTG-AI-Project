@@ -2352,19 +2352,12 @@ class AbilityHandler:
         if extra_context:
             context.update(extra_context)
 
-        # 1. Abilities on the attacker itself ("When this creature attacks...")
-        self.check_abilities(attacker_id, "ATTACKS", context) # Event originates from the attacker
-
-        # 2. Abilities on other permanents controlled by the attacker ("Whenever a creature you control attacks...")
-        for permanent_id in controller.get("battlefield", []):
-            if permanent_id != attacker_id: # Check other permanents
-                 # Pass the attacker context, but the event origin is the other permanent
-                 self.check_abilities(permanent_id, "CREATURE_ATTACKS", context)
-
-        # 3. Abilities triggered by an opponent's creature attacking
-        opponent = gs._get_non_active_player() if controller == gs._get_active_player() else gs._get_active_player()
-        for permanent_id in opponent.get("battlefield", []):
-             # Pass the attacker context, event origin is opponent's permanent
-             self.check_abilities(permanent_id, "CREATURE_ATTACKS_OPPONENT", context) # More specific event name
+        # One ATTACKS dispatch reaches every registered ability on both
+        # players' permanents (check_abilities scans all zones), so attacker
+        # self-triggers, same-controller watchers, and defender-side watchers
+        # are all scoped inside TriggeredAbility.can_trigger. The old
+        # per-permanent CREATURE_ATTACKS / CREATURE_ATTACKS_OPPONENT loops had
+        # no can_trigger mapping and queued nothing.
+        self.check_abilities(attacker_id, "ATTACKS", context)
 
         # Let GameState/Environment loop handle processing self.active_triggers

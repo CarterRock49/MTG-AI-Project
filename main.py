@@ -17,7 +17,7 @@ from stable_baselines3.common.callbacks import (
     ProgressBarCallback,
     BaseCallback
 )
-from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecMonitor
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.utils import set_random_seed
@@ -1489,7 +1489,16 @@ def main():
         return _init
 
     env_fns = [make_env_factory(i) for i in range(num_envs)]
-    vec_env = DummyVecEnv(env_fns)
+    # The engine is pure Python, so rollout collection dominates wall-clock
+    # time. SubprocVecEnv steps each env in its own process; DummyVecEnv would
+    # serialize all of them onto one core. A single env stays in-process.
+    if num_envs > 1:
+        vec_env = SubprocVecEnv(env_fns)
+        # Env stepping now happens in the worker processes; cap the learner's
+        # intra-op threads so workers and learner share the machine.
+        torch.set_num_threads(max(2, detected_cpus - num_envs))
+    else:
+        vec_env = DummyVecEnv(env_fns)
     vec_env = VecMonitor(vec_env)
     # Stamp recorded games with this training run so the downstream deck-builder
     # can weight or filter stats by the agent that generated them.

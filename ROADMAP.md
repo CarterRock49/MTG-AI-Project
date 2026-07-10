@@ -16,7 +16,7 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 10/10, and 228/228, plus 10/10 fixture-
+   every delivery (currently 9/9, 10/10, and 231/231, plus 10/10 fixture-
    harvest tests, 5/5 production-protocol tests, 6/6 fuzz/replay tests, and
    the deterministic 8-seed / 8,000-action default fuzz profile, and the
    strict 32-seed / 320,000-action long profile).
@@ -45,7 +45,7 @@ The project is complete when all of the following hold:
 - Tier 0 (stats plumbing): ✅ complete.
 - Tier 1 (rules correctness): ✅ complete — all seven items plus the P1
   placeholder triage delivered; see appendix for the bug catalog.
-- Test gates: smoke 9/9, training 10/10, scenarios 228/228 (grown from 12),
+- Test gates: smoke 9/9, training 10/10, scenarios 231/231 (grown from 12),
   fixture harvest 10/10, production Harvest protocol 5/5, fuzz/replay
   configuration 6/6, deterministic default fuzz 8 seeds x 1,000 valid
   actions, and strict long fuzz 32 seeds x 10,000 valid actions.
@@ -678,6 +678,25 @@ tests. The default 8,000-action fuzz profile is green.
 The final post-audit long profile is also green at 320,000/320,000 actions
 across all 32 checked-in seeds, with no failure artifact.
 
+**Round 7.27 (July 2026):** scoped attack-watcher triggers and made training
+use the host machine. A probe showed the roadmap's "CREATURE_ATTACKS watchers
+never fire" claim was stale in the worse direction: because check_abilities
+scans every registered ability, watcher triggers fired through the single
+ATTACKS dispatch with NO gating — the opponent's "whenever a creature you
+control attacks" gained life off the wrong player's attacks, and "whenever a
+Knight you control attacks" fired for a Bear. can_trigger's ATTACKS block now
+scopes "a/another <type> [you control] attacks" watchers by attacker
+controller, printed type/subtype/supertype, and self-exclusion for "another",
+and routes "attacks you" wordings to the defending player only. The dead
+per-permanent CREATURE_ATTACKS / CREATURE_ATTACKS_OPPONENT dispatch loops
+were removed. Three guard scenarios. Regression-checked 231/231 scenarios,
+9/9 smoke, 10/10 training, 10/10 + 5/5 harvest, 6/6 fuzz config, default fuzz
+profile green. The same round replaced the CPU-only torch wheel with
+2.12.1+cu130 (RTX 5060 / sm_120 verified with a live GPU op) and switched
+multi-env training from DummyVecEnv to SubprocVecEnv with a learner
+intra-op thread cap, so rollout collection parallelizes across cores instead
+of serializing on one.
+
 ## Tier 4 — Verification & calibration
 
 1. ✅ Golden scenario harness — 228 scenarios and growing; scenario-first is a
@@ -854,10 +873,14 @@ across all 32 checked-in seeds, with no failure artifact.
   supports parsed mana costs and simple "pay N life" costs by auto-paying when
   possible. Sacrifice/discard costs and letting the agent deliberately decline
   payment remain future choice-exposure work.
-- Attack triggers v1 fire only the attacker's own "when(ever) this/... attacks"
-  abilities at declare-attackers-done. "Whenever a creature you control
-  attacks" watchers on OTHER permanents dispatch a CREATURE_ATTACKS event that
-  has no can_trigger mapping yet, so they still never fire.
+- Attack triggers fire at declare-attackers-done through one ATTACKS dispatch:
+  the attacker's own abilities plus "whenever a/another <type> [you control]
+  attacks" and "attacks you" watchers on other permanents, scoped by controller
+  and printed type (July 2026). Scope adjectives outside the card's
+  type/subtype/supertype vocabulary (e.g. "nontoken") conservatively suppress
+  the watcher; "equipped/enchanted creature attacks" wordings still fire
+  ungated for ANY attacker (pre-existing over-fire, now documented); and
+  defender-side gating assumes two-player "attacks you".
 - Additional combat v1 inserts combat phases only. Wordings that add "an
   additional main phase" after the combat (Aggravated Assault style) get the
   combat but not the extra main phase.
@@ -885,8 +908,7 @@ across all 32 checked-in seeds, with no failure artifact.
   mana production, and the CR 605 no-stack path.
 - Restless-land animation registers end-of-turn layer effects; reversion
   rides on the existing duration cleanup rather than a per-land scenario
-  assertion. The "attacks" riders fire only for the attacker's own trigger
-  (CREATURE_ATTACKS watchers on other permanents still never fire).
+  assertion.
 
 ---
 

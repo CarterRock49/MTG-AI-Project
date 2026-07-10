@@ -1257,6 +1257,41 @@ class TriggeredAbility(Ability):
                 if ("first time each turn" in self.trigger_condition
                         and not context.get("first_attack_this_turn", False)):
                     return False
+                gs = context.get("game_state")
+                attacker_card = (gs._safe_get_card(attacker_id)
+                                 if gs and attacker_id is not None else None)
+                # Watcher wordings ("whenever a/another <what> [you control]
+                # attacks") fire only when the attacker matches the printed
+                # scope. Before July 2026 every watcher fired on every attack,
+                # wrong-controller and wrong-type watchers included.
+                watcher = re.search(
+                    r"when(?:ever)?\s+(a|an|another|one or more)\s+(.+?)\s+attacks?\b",
+                    self.trigger_condition, re.IGNORECASE)
+                if watcher and attacker_card:
+                    scope = watcher.group(2).strip().lower()
+                    if scope.endswith("you control"):
+                        scope = scope[: -len("you control")].strip()
+                        if gs.get_card_controller(attacker_id) is not context.get("controller"):
+                            return False
+                    if (watcher.group(1).lower() == "another"
+                            and context.get("source_card_id") == attacker_id):
+                        return False
+                    vocabulary = {"permanent"}
+                    for group in ("card_types", "subtypes", "supertypes"):
+                        vocabulary.update(
+                            str(t).lower()
+                            for t in getattr(attacker_card, group, None) or [])
+                    for word in re.split(r"[\s,]+", scope):
+                        if (word and word not in vocabulary
+                                and not (word.endswith("s") and word[:-1] in vocabulary)):
+                            return False
+                # Defender-side wordings ("attacks you or a planeswalker you
+                # control") belong to the player being attacked, never the
+                # attacker's own controller.
+                if (re.search(r"\battacks?\s+you\b", self.trigger_condition, re.IGNORECASE)
+                        and gs and attacker_id is not None
+                        and gs.get_card_controller(attacker_id) is context.get("controller")):
+                    return False
             if event_type == "DAMAGED":
                 context = context or {}
                 # "this creature is dealt damage" belongs to the damaged object.
