@@ -6,7 +6,7 @@ import numpy as np
 from collections import defaultdict
 from .card import Card
 from .enhanced_combat import ExtendedCombatResolver
-from .combat_integration import integrate_combat_actions, apply_combat_action
+from .combat_integration import integrate_combat_actions
 from .debug import debug_log_valid_actions 
 from .enhanced_card_evaluator import EnhancedCardEvaluator
 
@@ -328,16 +328,16 @@ class ActionHandler(
                 "ATTACK": self._handle_attack,
                 "BLOCK": self._handle_block,
                 # Delegated Combat Actions (Remapped indices based on review)
-                "DECLARE_ATTACKERS_DONE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "DECLARE_ATTACKERS_DONE", p, context=context), # Index 438
-                "DECLARE_BLOCKERS_DONE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "DECLARE_BLOCKERS_DONE", p, context=context), # Index 439 
-                "ATTACK_PLANESWALKER": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ATTACK_PLANESWALKER", p, context=context), # Indices 378-382
-                "ASSIGN_MULTIPLE_BLOCKERS": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ASSIGN_MULTIPLE_BLOCKERS", p, context=context), # Indices 383-392
-                "FIRST_STRIKE_ORDER": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "FIRST_STRIKE_ORDER", p, context=context), # Index 435
-                "ASSIGN_COMBAT_DAMAGE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ASSIGN_COMBAT_DAMAGE", p, context=context), # Index 436
-                "PROTECT_PLANESWALKER": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "PROTECT_PLANESWALKER", p, context=context), # Index 444
-                "ATTACK_BATTLE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "ATTACK_BATTLE", p, context=context), # Indices 462-466
-                "DEFEND_BATTLE": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "DEFEND_BATTLE", p, context=context), # Index 204
-                "NINJUTSU": lambda p=None, context=None, **k: apply_combat_action(self.game_state, "NINJUTSU", p, context=context), # Index 437
+                "DECLARE_ATTACKERS_DONE": self._handle_declare_attackers_done, # Index 438
+                "DECLARE_BLOCKERS_DONE": self._handle_declare_blockers_done, # Index 439
+                "ATTACK_PLANESWALKER": self._handle_attack_planeswalker, # Indices 378-382
+                "ASSIGN_MULTIPLE_BLOCKERS": self._handle_assign_multiple_blockers, # Indices 383-392
+                "FIRST_STRIKE_ORDER": self._handle_first_strike_order, # Index 435
+                "ASSIGN_COMBAT_DAMAGE": self._handle_assign_combat_damage, # Index 436
+                "PROTECT_PLANESWALKER": self._handle_protect_planeswalker, # Index 444
+                "ATTACK_BATTLE": self._handle_attack_battle, # Indices 462-466
+                "DEFEND_BATTLE": self._handle_defend_battle, # Index 204
+                "NINJUTSU": self._handle_ninjutsu, # Index 437
                 # Abilities & Mana
                 "TAP_LAND_FOR_MANA": self._handle_tap_land_for_mana,
                 "TAP_LAND_FOR_EFFECT": self._handle_tap_land_for_effect,
@@ -519,6 +519,8 @@ class ActionHandler(
                          gs._advance_phase()
                     else:
                          # Fallback manual advance
+                         if hasattr(gs, '_empty_mana_pools'):
+                              gs._empty_mana_pools()
                          gs.phase = gs.phase + 1 if gs.phase < gs.PHASE_CLEANUP else gs.PHASE_UNTAP
                          gs.priority_player = gs._get_active_player()
                          gs.priority_pass_count = 0

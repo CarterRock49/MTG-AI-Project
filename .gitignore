@@ -41,6 +41,8 @@ tests/test_artifacts/
 *.pt
 *.pth
 checkpoint/
+harvest_fixture_output/
+harvest_runs/
 
 # Model weights and binary files
 *.bin

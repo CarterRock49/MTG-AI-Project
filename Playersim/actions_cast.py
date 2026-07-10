@@ -169,7 +169,7 @@ class CastingHandlersMixin:
 
     def _handle_play_mdfc_back(self, param, **kwargs):
         context = kwargs.get('context', {})
-        context['cast_back_face'] = True # Ensure flag is set
+        context['cast_as_back_face'] = True # Ensure flag matches cast_spell
         # Use standard play_spell handler with modified context
         return self._handle_play_spell(param, context=context) # Returns (reward, success)
 

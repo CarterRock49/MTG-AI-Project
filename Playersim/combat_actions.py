@@ -172,7 +172,16 @@ class CombatActionHandler:
                     # Allow Ninjutsu action for each possible swap
                     for atk_bf_idx, attacker_id in unblocked_attackers:
                         # Corrected from 432 to 437 to match ACTION_MEANINGS for NINJUTSU
-                        set_valid_action(437, f"NINJUTSU with {card.name} (H:{hand_idx}) for {gs._safe_get_card(attacker_id).name} (B:{atk_bf_idx}) Cost:{ninjutsu_cost_str}")
+                        context = {
+                            'ninja_identifier': hand_idx,
+                            'attacker_identifier': atk_bf_idx,
+                        }
+                        set_valid_action(
+                            437,
+                            f"NINJUTSU with {card.name} (H:{hand_idx}) for "
+                            f"{gs._safe_get_card(attacker_id).name} (B:{atk_bf_idx}) "
+                            f"Cost:{ninjutsu_cost_str}",
+                            context=context)
         
     def _add_multiple_blocker_actions(self, player, valid_actions, set_valid_action):
         """Add actions for assigning multiple blockers."""
@@ -445,6 +454,7 @@ class CombatActionHandler:
 
         if success:
              # Move to next phase (End of Combat) if damage resolution succeeded
+             gs._empty_mana_pools()
              gs.phase = gs.PHASE_END_OF_COMBAT
              gs.priority_player = gs._get_active_player()
              gs.priority_pass_count = 0
@@ -534,6 +544,7 @@ class CombatActionHandler:
         if prev is not None:
             gs.phase = prev
         _ = gs.combat_resolver.resolve_combat()
+        gs._empty_mana_pools()
         gs.phase = gs.PHASE_END_OF_COMBAT
         gs.priority_player = gs._get_active_player()
         gs.priority_pass_count = 0
@@ -766,6 +777,7 @@ class CombatActionHandler:
                 gs.ability_handler.handle_attack_triggers(
                     attacker_id, extra_context={"first_attack_this_turn": first_attack})
 
+        gs._empty_mana_pools()
         gs.phase = gs.PHASE_DECLARE_BLOCKERS
         gs.priority_player = gs._get_non_active_player() # Priority to blocker
         gs.priority_pass_count = 0
@@ -795,9 +807,11 @@ class CombatActionHandler:
                   needs_first_strike_step = True; break
 
         if needs_first_strike_step:
+             gs._empty_mana_pools()
              gs.phase = gs.PHASE_FIRST_STRIKE_DAMAGE
              logging.debug("Ended Declare Blockers. Moving to First Strike Damage.")
         else:
+             gs._empty_mana_pools()
              gs.phase = gs.PHASE_COMBAT_DAMAGE
              logging.debug("Ended Declare Blockers. Moving to Combat Damage (no first strike).")
 
@@ -833,22 +847,22 @@ class CombatActionHandler:
     def handle_assign_multiple_blockers(self, param, context, **kwargs):
         """Handle assigning multiple blockers. Attacker index from PARAM, blocker identifiers from CONTEXT."""
         gs = self.game_state
-        if gs.phase != gs.PHASE_DECLARE_BLOCKERS: return False, False # Ensure correct phase
+        if gs.phase != gs.PHASE_DECLARE_BLOCKERS: return False # Ensure correct phase
         if context is None: context = {}
 
         attacker_idx = param # Param is the attacker index (0-9)
         if attacker_idx is None or not isinstance(attacker_idx, int) or not (0 <= attacker_idx < len(gs.current_attackers)):
             logging.error(f"Invalid or missing attacker index for multi-block: {attacker_idx}")
-            return -0.15, False
+            return False
         attacker_id = gs.current_attackers[attacker_idx]
         attacker_card = gs._safe_get_card(attacker_id)
-        if not attacker_card: return -0.15, False
+        if not attacker_card: return False
 
         # --- Get Blocker Identifiers from Context ---
         blocker_identifiers = context.get('blocker_identifiers') # List of indices or IDs
         if not blocker_identifiers or not isinstance(blocker_identifiers, list):
             logging.error("Missing or invalid 'blocker_identifiers' list in context for multi-block.")
-            return -0.15, False
+            return False
 
         # --- Validate Blockers ---
         player = gs._get_non_active_player() # Player controlling blockers
@@ -858,23 +872,23 @@ class CombatActionHandler:
             blocker_id = self._find_permanent_id(player, identifier)
             if not blocker_id:
                  logging.warning(f"Invalid blocker identifier {identifier} for multi-block.")
-                 return -0.1, False
+                 return False
             blocker_card = gs._safe_get_card(blocker_id)
-            if not blocker_card: return -0.1, False
+            if not blocker_card: return False
 
             if not self._can_block(blocker_id, attacker_id):
                  logging.warning(f"Blocker {blocker_card.name} cannot block {attacker_card.name}")
-                 return -0.1, False
+                 return False
             valid_blocker_ids.append(blocker_id)
 
         if len(valid_blocker_ids) < 2:
             logging.warning("Must assign at least 2 valid blockers for ASSIGN_MULTIPLE_BLOCKERS action.")
-            return -0.1, False
+            return False
 
         # Check Menace explicitly if needed (though _can_block might implicitly handle)
         if self._has_keyword(attacker_card, "menace") and len(valid_blocker_ids) < 2:
              logging.warning(f"Menace requires at least 2 blockers, only {len(valid_blocker_ids)} valid blockers assigned.")
-             return -0.1, False
+             return False
 
         # --- Assign Block ---
         if not hasattr(gs, 'current_block_assignments'): gs.current_block_assignments = {}
@@ -883,7 +897,7 @@ class CombatActionHandler:
 
         blocker_names = [getattr(gs._safe_get_card(bid), 'name', bid) for bid in valid_blocker_ids]
         logging.info(f"Assigned multiple blockers ({', '.join(blocker_names)}) to {attacker_card.name}")
-        return 0.15, True # Higher reward for complex block
+        return True
     
 
     def handle_defend_battle(self, param=None, context=None, **kwargs):

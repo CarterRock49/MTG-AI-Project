@@ -9,6 +9,7 @@ All files are written relative to the training process's working directory.
 deck_stats/
   game_log.jsonl          # authoritative per-game records (this contract's core)
   fidelity_report.json    # cumulative simulation-fidelity summary
+  harvest_run.json        # fixture-harvest-only success marker and seeded schedule
   decks/*.gz              # DeckStatsTracker aggregates, one gzip-JSON per deck
   cards/*.gz              # DeckStatsTracker aggregates, one gzip-JSON per card
   meta/*.gz               # tracker metadata (archetype fingerprints, mappings)
@@ -36,7 +37,9 @@ The primary join table. Append-only; each line:
 
 Games with no adjudicated result (aborted simulations, opponent-loop truncations)
 are deliberately **not** recorded — absence of a line means the game produced no
-trustworthy signal.
+trustworthy signal. `harvest_fixtures.py` is stricter: any reset fallback,
+mask-valid execution failure, error, repeated wait state, or step-cap abort
+fails the run and therefore never writes its `harvest_run.json` success marker.
 
 ### fidelity object
 
@@ -110,3 +113,18 @@ engine update (compare `last_seen` against the engine/agent version of the
 current harvest run).
 
 Loader: `Playersim.card_support.CardSupportManifest.load(directory)`.
+
+## Fixture harvest protocol
+
+`harvest_fixtures.py` is the reproducible plumbing/support check for the audited
+sample decks. It requires an empty output directory, sorts deck files before ID
+assignment, rotates all eight decks through a seeded schedule, stamps one agent
+version, accepts only completed `win`/`loss`/`draw`/`draw_both_loss` records, and
+cross-checks the game log, cumulative fidelity totals, tracker aggregates, card
+memory, support manifest, and scheduled deck labels. `harvest_run.json` is
+written only after those checks pass.
+
+The fixture policy is random-valid against the scripted opponent. These records
+prove execution and telemetry coverage; they are not suitable for card/deck
+strength estimates. Statistical harvest begins only after a trained checkpoint
+beats scripted play and the schedule is promoted to checkpoint/self-play.

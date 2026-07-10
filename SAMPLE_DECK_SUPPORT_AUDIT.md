@@ -299,7 +299,15 @@ branches, but these cards no longer rely on wholly unproved routing.
 
 ## Recommended Order
 
-1. Run harvest fixtures and rank any new manifest entries by observed count.
-2. Train and benchmark a checkpoint against scripted play before promoting
-   harvest runs to policy-vs-policy.
-3. Begin Tier 4 property tests and long-game invariant fuzzing.
+1. ✅ Run harvest fixtures and rank any new manifest entries by observed count.
+   `harvest_fixtures.py` now performs a strict seeded rotation across all eight
+   decks, rejects incomplete/error games, and writes a success-only run manifest.
+   The seed-20260710 baseline completed 8/8 games with zero fidelity counters
+   and no support-manifest entries.
+2. ✅ Begin Tier 4 property tests and invariant fuzzing. The deterministic
+   harness is green at 3 seeds x 100 mask-valid actions and guards card
+   conservation, action execution, SBA/layer fixed points, finite observations,
+   and phase-boundary mana clearing.
+3. **Next:** train and benchmark a checkpoint against scripted play before
+   promoting harvest runs to policy-vs-policy. Treat the random-valid fixture
+   results as plumbing/support evidence only, never as card-strength statistics.

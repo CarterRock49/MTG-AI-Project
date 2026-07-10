@@ -1,5 +1,6 @@
 Playersim/actions_cast.py -text whitespace=trailing-space,cr-at-eol
 Playersim/actions_choices.py -text whitespace=trailing-space,cr-at-eol
+Playersim/actions_combat.py -text whitespace=trailing-space,cr-at-eol
 Playersim/actions_mechanics.py -text whitespace=trailing-space,cr-at-eol
 Playersim/actions_turn.py -text whitespace=trailing-space,cr-at-eol
 Playersim/game_state_permanents.py -text whitespace=trailing-space,cr-at-eol

@@ -583,22 +583,26 @@ class AlphaZeroMTGEnv(gym.Env):
         if self.has_card_memory and self.card_memory:
             try:
                  # --- Use the same robust determination as above ---
-                 if is_draw:
+                if is_draw:
                     p1_deck_list_mem = getattr(self, 'original_p1_deck', [])
                     p2_deck_list_mem = getattr(self, 'original_p2_deck', [])
                     p1_name_mem = self.current_deck_name_p1
                     p2_name_mem = self.current_deck_name_p2
                     self._record_cards_to_memory(p1_deck_list_mem, p2_deck_list_mem, getattr(gs, 'cards_played', {0: [], 1: []}), gs.turn,
-                                           p1_name_mem, p2_name_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), is_draw=True, player_idx=0) # P1 perspective
+                                           p1_name_mem, p2_name_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), is_draw=True, is_win=False, player_idx=0) # P1 perspective
                     self._record_cards_to_memory(p2_deck_list_mem, p1_deck_list_mem, getattr(gs, 'cards_played', {0: [], 1: []}), gs.turn,
-                                           p2_name_mem, p1_name_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), is_draw=True, player_idx=1) # P2 perspective
-                 else:
+                                           p2_name_mem, p1_name_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), is_draw=True, is_win=False, player_idx=1) # P2 perspective
+                else:
                     winner_deck_list_mem = original_p1_deck if is_p1_winner else original_p2_deck
                     loser_deck_list_mem = original_p2_deck if is_p1_winner else original_p1_deck
                     winner_archetype_mem = p1_name if is_p1_winner else p2_name
                     loser_archetype_mem = p2_name if is_p1_winner else p1_name
+                    winner_idx = 0 if is_p1_winner else 1
+                    loser_idx = 1 - winner_idx
                     self._record_cards_to_memory(winner_deck_list_mem, loser_deck_list_mem, getattr(gs, 'cards_played', {0: [], 1: []}), gs.turn,
-                                               winner_archetype_mem, loser_archetype_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), is_draw=False, player_idx=(0 if is_p1_winner else 1))
+                                               winner_archetype_mem, loser_archetype_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), is_draw=False, player_idx=winner_idx)
+                    self._record_cards_to_memory(loser_deck_list_mem, winner_deck_list_mem, getattr(gs, 'cards_played', {0: [], 1: []}), gs.turn,
+                                               loser_archetype_mem, winner_archetype_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), is_draw=False, is_win=False, player_idx=loser_idx)
             except Exception as mem_e:
                  logging.error(f"Error recording cards to memory: {mem_e}", exc_info=True)
 
@@ -852,7 +856,8 @@ class AlphaZeroMTGEnv(gym.Env):
         return cards_mapped, history_mapped
 
     def _record_cards_to_memory(self, player_deck, opponent_deck, cards_played_data, turn_count,
-                            player_archetype, opponent_archetype, opening_hands_data, draw_history_data, is_draw=False, player_idx=0):
+                            player_archetype, opponent_archetype, opening_hands_data, draw_history_data,
+                            is_draw=False, is_win=True, player_idx=0):
         """Record detailed card performance data to the card memory system, handles draw."""
         try:
             # Check if CardMemory system exists AND if the flag is set
@@ -875,8 +880,14 @@ class AlphaZeroMTGEnv(gym.Env):
                 card = self.game_state._safe_get_card(card_id)
                 if not card or not hasattr(card, 'name'): continue
 
+                # Registration must precede the first performance update;
+                # otherwise CardMemory drops the card's first observed game.
+                self.card_memory.register_card(card_id, card.name, {
+                     'cmc': getattr(card, 'cmc', 0),
+                     'types': getattr(card, 'card_types', []),
+                     'colors': getattr(card, 'colors', []) })
                 perf_data = {
-                    'is_win': not is_draw,
+                    'is_win': bool(is_win) and not is_draw,
                     'is_draw': is_draw,
                     'was_played': card_id in player_played,
                     'was_drawn': any(card_id in cards for turn, cards in player_draws.items()),
@@ -888,10 +899,6 @@ class AlphaZeroMTGEnv(gym.Env):
                     'synergy_partners': [cid for cid in player_played if cid != card_id]
                 }
                 self.card_memory.update_card_performance(card_id, perf_data)
-                self.card_memory.register_card(card_id, card.name, {
-                     'cmc': getattr(card, 'cmc', 0),
-                     'types': getattr(card, 'card_types', []),
-                     'colors': getattr(card, 'colors', []) })
 
             for card_id in set(opponent_deck):
                  card = self.game_state._safe_get_card(card_id)
@@ -945,6 +952,7 @@ class AlphaZeroMTGEnv(gym.Env):
             
             # Next turn
             gs.turn += 1
+            gs._empty_mana_pools()
             gs.phase = gs.PHASE_UNTAP
             
             logging.info(f"Forced turn advancement to Turn {gs.turn}, Phase UNTAP")
@@ -953,6 +961,7 @@ class AlphaZeroMTGEnv(gym.Env):
         # Regular phase transition
         if current_phase in phase_transitions:
             new_phase = phase_transitions[current_phase]
+            gs._empty_mana_pools()
             gs.phase = new_phase
             
             # Execute any special phase entry logic
@@ -964,6 +973,7 @@ class AlphaZeroMTGEnv(gym.Env):
             return new_phase
         
         # Fallback - just advance to MAIN_POSTCOMBAT as a safe option
+        gs._empty_mana_pools()
         gs.phase = gs.PHASE_MAIN_POSTCOMBAT
         logging.warning(f"Unknown phase {current_phase} in force_phase_transition, defaulting to MAIN_POSTCOMBAT")
         return gs.PHASE_MAIN_POSTCOMBAT
@@ -1110,6 +1120,19 @@ class AlphaZeroMTGEnv(gym.Env):
                     done=True; truncated=True # Force end on opponent error
                     gs.agent_is_p1 = initial_agent_is_p1 # Restore perspective before breaking
                     break # Exit opponent loop on critical error
+                if opp_handler_info.get("execution_failed"):
+                    # A scripted action came from the generated legal mask, so
+                    # rejection is an engine-contract failure. Surface it to
+                    # strict callers (fixture harvests/fuzzers) instead of
+                    # silently continuing from a potentially partial mutation.
+                    env_info["execution_failed"] = True
+                    env_info["opponent_execution_failed"] = True
+                    env_info["error_message"] = opp_handler_info.get(
+                        "error_message",
+                        f"Mask-valid opponent action {opponent_action_idx} failed")
+                    logging.error(env_info["error_message"])
+                    gs.agent_is_p1 = initial_agent_is_p1
+                    break
 
                 # Restore perspective AFTER applying opponent action successfully
                 gs.agent_is_p1 = initial_agent_is_p1
@@ -1324,7 +1347,9 @@ class AlphaZeroMTGEnv(gym.Env):
 
         if phase_ctx == "CHOOSE" and getattr(gs, "choice_context", None):
             choice_type = gs.choice_context.get("type")
-            if choice_type in ("sacrifice_effect", "distribute_counters", "dig_select"):
+            if choice_type in (
+                    "sacrifice_effect", "activation_sacrifice_cost",
+                    "distribute_counters", "dig_select"):
                 for action_idx in range(353, 363):
                     if opponent_mask[action_idx]:
                         return action_idx, {}
@@ -2412,6 +2437,7 @@ class AlphaZeroMTGEnv(gym.Env):
                         'dig_select': 1, 'sacrifice_effect': 2,
                         'distribute_counters': 3, 'manifest_dread': 4,
                         'hand_selection': 5, 'scry': 6, 'surveil': 7,
+                        'activation_sacrifice_cost': 9,
                     }
                     obs['choice_kind'] = np.array(
                         [choice_kinds.get(choice.get('type'), 8)], dtype=np.int32)

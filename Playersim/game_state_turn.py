@@ -363,6 +363,7 @@ class GameStateTurnMixin:
                 # However, if we are 'stuck' here with no actions happening, we force advance.
                 if self.phase == self.PHASE_UNTAP:
                     logging.warning("Stuck in UNTAP with no priority. Forcing advance to UPKEEP.")
+                    self._empty_mana_pools()
                     self.phase = self.PHASE_UPKEEP
                     self.priority_player = self._get_active_player()
                     self.priority_pass_count = 0
@@ -467,6 +468,16 @@ class GameStateTurnMixin:
                         
                         self.priority_player = chooser if chooser else active_p
 
+    def _empty_mana_pools(self):
+            """CR 500.4: empty every mana pool when a step or phase ends."""
+            empty_pool = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
+            for player in (self.p1, self.p2):
+                if not player:
+                    continue
+                player["mana_pool"] = dict(empty_pool)
+                player["conditional_mana"] = {}
+                player["phase_restricted_mana"] = {}
+
     def _advance_phase(self):
             """
             Advance to the next phase in the turn sequence.
@@ -568,6 +579,10 @@ class GameStateTurnMixin:
                         self.priority_pass_count = 0
                         return # Stop advancement, handle priority in Cleanup
 
+                    # A cleanup loop can grant mana while players receive
+                    # priority. Empty it before the next turn begins.
+                    self._empty_mana_pools()
+
                     # Preserve the prior active player's count before the new
                     # turn resets per-turn casting history.
                     previous_turn_spell_count = sum(
@@ -619,6 +634,7 @@ class GameStateTurnMixin:
                     continue # Loop to next
 
                 # --- 3. Enter Next Phase ---
+                self._empty_mana_pools()
                 self.phase = next_phase_in_sequence
                 self._phase_action_count = 0
                 active_p = self._get_active_player()
@@ -639,6 +655,7 @@ class GameStateTurnMixin:
 
             # Fallback if loop limit hit
             logging.error("Phase advancement loop limit reached. Defaulting to Main Phase.")
+            self._empty_mana_pools()
             self.phase = self.PHASE_MAIN_PRECOMBAT
             self.priority_player = self._get_active_player()
             self.priority_pass_count = 0
@@ -882,6 +899,7 @@ class GameStateTurnMixin:
             logging.warning(f"Detected potential phase stagnation in phase {self._phase_history[0]}")
             # Force advance to next turn as an escape mechanism
             if self.phase in [self.PHASE_PRIORITY, self.PHASE_END_STEP, self.PHASE_CLEANUP]:
+                self._empty_mana_pools()
                 self.phase = self.PHASE_UNTAP
                 self.turn += 1
                 self._phase_history = []  # Reset history after forced progress

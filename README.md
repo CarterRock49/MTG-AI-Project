@@ -23,22 +23,12 @@ graph TD
 
 - DeckStat_Viewer is from a far earlier version and doesn't work
 
-## TODO
+## Current Status
 
-- Current state: Doesn't work, working on version 3.00
-
-- Add support for coin flips and dice rolls
-- Add support for {2/B} style mana
-- Bug fix deck_stat_tracker.py (inconsistent stats?)
-- Add a better MD5 hash to saving decks, one that includes card count in deck_stat_tracker.py
-- Add support for "Start your engines"
-- Overhaul DeckStats_Viewer to work with the current versions of the deck_stat_tracker and card_memory.py
-- General Bug fixing needs to be done, need to integrate other stuff
-- Add support for Delirium
-- Add support for Domain
-- Add support for Valiant
-- Add support for Plot
-- Add support for Eerie
+The engine, stats pipeline, and training smoke path are operational. Rules and
+card coverage are still expanding; [ROADMAP.md](ROADMAP.md) is the authoritative
+status and next-work list. `DeckStats_Viewer` remains a legacy component and is
+not part of the current verification gates.
 
 
 ### Key Features
@@ -78,6 +68,35 @@ The model uses a custom architecture designed specifically for the structure of 
 
 
 ## Usage
+
+### Verification
+
+Run these from the repository root before training or changing engine rules:
+
+```bash
+python tests/smoke_test.py
+python tests/scenario_test.py
+python tests/train_smoke_test.py
+python tests/harvest_fixtures_test.py
+python tests/invariant_fuzz_test.py
+```
+
+On Windows, the checked-out virtual environment can be used explicitly with
+`.\MTGenv\Scripts\python.exe` in place of `python`.
+
+### Sample-Deck Support Harvest
+
+The fixture harvester rotates through all eight audited decks by default and
+requires a fresh output directory. It rejects reset fallbacks, aborted games,
+mask-valid execution failures, corrupt compressed data, and cross-file count
+mismatches, then writes `harvest_run.json` as its success marker.
+
+```bash
+python harvest_fixtures.py --seed 20260710 --output harvest_runs/seed_20260710
+```
+
+This random-valid-vs-scripted run is for plumbing and support-manifest coverage;
+its win rates are not card- or deck-strength evidence.
 
 ### Training an Agent
 

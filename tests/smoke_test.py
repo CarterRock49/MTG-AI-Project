@@ -403,6 +403,32 @@ def check_stats_pipeline(decks, card_db):
             report = json.load(f)
         assert report.get("games_recorded", 0) >= 1
         assert "unparsed_cards" in report
+
+        # Every deck aggregate must reconcile exactly with its appearances in
+        # the append-only game log. This guards against feeding an already
+        # accumulated snapshot back through the tracker's additive update API.
+        import collections
+        import glob
+        import gzip
+        expected_games = collections.Counter()
+        expected_turns = collections.Counter()
+        for record in records:
+            for deck_name in (record["p1_deck"], record["p2_deck"]):
+                expected_games[deck_name] += 1
+                expected_turns[deck_name] += record["turn_count"]
+        aggregate_by_name = {}
+        deck_pattern = os.path.join(paths["deck_stats_path"], "decks", "*.json.gz")
+        for deck_path in glob.glob(deck_pattern):
+            with gzip.open(deck_path, "rt", encoding="utf-8") as deck_file:
+                payload = json.load(deck_file)
+            aggregate_by_name[payload["name"]] = payload
+        for deck_name, game_count in expected_games.items():
+            payload = aggregate_by_name.get(deck_name)
+            assert payload is not None, f"missing aggregate for {deck_name}"
+            assert payload.get("games") == game_count, \
+                f"{deck_name} aggregate games inflated: {payload.get('games')} != {game_count}"
+            assert payload.get("total_turns") == expected_turns[deck_name], \
+                f"{deck_name} aggregate turns inflated: {payload.get('total_turns')} != {expected_turns[deck_name]}"
     finally:
         if env is not None:
             env.close()

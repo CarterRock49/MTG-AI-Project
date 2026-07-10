@@ -2035,6 +2035,13 @@ class Card:
         Check if this card is a Modal Double-Faced Card.
         MDFCs differ from transforming DFCs in that they don't transform after entering the battlefield.
         """
+        # Adventure, split, and other multi-face layouts are not modal DFCs;
+        # they use their own casting rules even though Scryfall also supplies
+        # multiple card_faces for them.
+        if getattr(self, "layout", "normal") in {
+                "adventure", "split", "aftermath", "flip", "meld",
+                "transform", "reversible_card"}:
+            return False
         if not self.faces:
             return False
             
@@ -2254,7 +2261,9 @@ def load_decks_and_card_db(decks_folder, format_name=None, banned_names=None,
         decks = []
         load_errors = []
        
-        for deck_file in os.listdir(decks_folder):
+        # Stable traversal keeps card IDs and seeded shuffles reproducible
+        # across filesystems and operating systems.
+        for deck_file in sorted(os.listdir(decks_folder), key=str.casefold):
             if not deck_file.endswith('.json'):
                 continue
                

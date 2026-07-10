@@ -190,6 +190,7 @@ class ActionSpaceMixin:
                     # If stack is empty and we're in a phase that should auto-progress, do it
                     if not gs.stack and gs.phase == gs.PHASE_UPKEEP:
                         logging.info("Auto-progressing from UPKEEP to DRAW phase after priority fix")
+                        gs._empty_mana_pools()
                         gs.phase = gs.PHASE_DRAW
 
                 # --- Check Priority Match ---
@@ -242,6 +243,12 @@ class ActionSpaceMixin:
                                 self.combat_handler._add_attack_declaration_actions(perspective_player, non_active_p_gs, valid_actions, set_valid_action)
                             elif gs.phase == gs.PHASE_DECLARE_BLOCKERS and perspective_player == non_active_p_gs and getattr(gs, 'current_attackers', []):
                                 self.combat_handler._add_block_declaration_actions(perspective_player, valid_actions, set_valid_action)
+
+                            # Ninjutsu is activated after blockers are declared by the
+                            # attacking player, so it must be exposed independently of
+                            # the defending player's block-declaration actions above.
+                            self.combat_handler._add_ninjutsu_actions(
+                                perspective_player, valid_actions, set_valid_action)
 
                         # Stack Interactions
                         self._add_x_cost_actions(perspective_player, valid_actions, set_valid_action)
@@ -339,7 +346,7 @@ class ActionSpaceMixin:
                 card = gs._safe_get_card(card_id)
                 if not card: continue
 
-                abilities = gs.ability_handler.registered_abilities.get(card_id, [])
+                abilities = gs.ability_handler.get_activated_abilities(card_id)
                 for j, ability in enumerate(abilities):
                     if j >= 3: break # Limit abilities per card
 
@@ -355,7 +362,14 @@ class ActionSpaceMixin:
                             # Map (battlefield_idx, ability_idx) to action index
                             action_idx = 100 + (i * 3) + j
                             if action_idx < 160: # Ensure it's within ACTIVATE_ABILITY range
-                                set_valid_action(action_idx, f"MANA_ABILITY {card.name} ability {j}")
+                                set_valid_action(
+                                    action_idx,
+                                    f"MANA_ABILITY {card.name} ability {j}",
+                                    context={
+                                        "battlefield_idx": i,
+                                        "ability_idx": j,
+                                        "controller_id": "p1" if player is gs.p1 else "p2",
+                                    })
 
             # Add tapping basic lands for mana (simplification)
             for i in range(min(len(player["battlefield"]), 20)):
@@ -431,14 +445,19 @@ class ActionSpaceMixin:
                     # --- Other alternative/related actions (MDFC back, Adventure) ---
                     # Offer MDFC Spell Back (Sorcery) - Hand index 0-7 -> Actions 188-195
                     back_face_data = getattr(card, 'back_face', None)
-                    if hasattr(card, 'is_mdfc') and card.is_mdfc() and back_face_data:
+                    if (hasattr(card, 'is_mdfc') and card.is_mdfc()
+                            and getattr(card, 'layout', '') != 'adventure'
+                            and back_face_data):
                         back_type_line = back_face_data.get('type_line','').lower()
                         back_types = back_face_data.get('card_types', [])
                         back_has_flash = self._has_flash_text(back_face_data.get('oracle_text',''))
                         if 'land' not in back_type_line and not ('instant' in back_types or back_has_flash):
                             if self._can_afford_card(player, back_face_data, is_back_face=True, context={}):
                                  if self._targets_available_from_data(back_face_data, player, opponent):
-                                     mdfc_back_context = {'hand_idx': i, 'play_back_face': True}
+                                     mdfc_back_context = {
+                                         'hand_idx': i,
+                                         'cast_as_back_face': True,
+                                     }
                                      set_valid_action(188 + i, f"PLAY_MDFC_BACK {back_face_data.get('name', 'Unknown')}", context=mdfc_back_context)
 
                     # Offer Adventure (Sorcery) - Hand index 0-7 -> Actions 196-203
@@ -635,6 +654,29 @@ class ActionSpaceMixin:
                 for option_index, color in enumerate(context.get('options', [])[:5]):
                     set_valid_action(353 + option_index, f"ADD {color} MANA",
                                      context={"option_index": option_index})
+
+            elif choice_type == "activation_sacrifice_cost":
+                selected = set(context.get('selected', []))
+                candidates = [
+                    card_id for card_id in context.get('options', [])
+                    if card_id in player.get('battlefield', [])
+                    and card_id not in selected
+                ]
+                context['options'] = candidates
+                page_count = max(1, (len(candidates) + 9) // 10)
+                page = int(context.get('choice_page', 0)) % page_count
+                context['choice_page'] = page
+                for option_index, card_id in enumerate(
+                        candidates[page * 10:(page + 1) * 10]):
+                    card = gs._safe_get_card(card_id)
+                    set_valid_action(
+                        353 + option_index,
+                        f"SACRIFICE_COST {getattr(card, 'name', card_id)}",
+                        context={"option_index": option_index})
+                if page_count > 1:
+                    set_valid_action(
+                        479,
+                        f"SACRIFICE_COST_PAGE_NEXT ({page + 1}/{page_count})")
 
             elif choice_type == "sacrifice_effect":
                 permanent_type = str(context.get('permanent_type', 'permanent')).rstrip('s')
@@ -1729,7 +1771,14 @@ class ActionSpaceMixin:
                     activation_count = sum(1 for act_id, act_idx in getattr(gs, 'abilities_activated_this_turn', [])
                                             if act_id == card_id and act_idx == j)
                     if activation_count < 3: # Limit activation
-                       set_valid_action(100 + (i * 3) + j, f"ACTIVATE {card.name} ability {j}")
+                       set_valid_action(
+                           100 + (i * 3) + j,
+                           f"ACTIVATE {card.name} ability {j}",
+                           context={
+                               "battlefield_idx": i,
+                               "ability_idx": j,
+                               "controller_id": "p1" if player is gs.p1 else "p2",
+                           })
 
     def _add_land_tapping_actions(self, player, valid_actions, set_valid_action):
         """Add actions for tapping lands for mana or effects."""

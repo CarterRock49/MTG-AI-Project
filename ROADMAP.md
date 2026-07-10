@@ -16,7 +16,8 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 8/8, 6/6, 217/217).
+   every delivery (currently 8/8, 6/6, 225/225, plus 10/10 harvest CLI tests
+   and 3 seeded invariant-fuzz runs).
 2. **Zero known stats-corrupting bugs.** The silent-bug catalog (appendix)
    is closed; every fixed bug has a permanent guard scenario.
 3. **Quantified card coverage.** For each target format's card pool, the
@@ -43,7 +44,8 @@ The project is complete when all of the following hold:
 - Tier 1 (rules correctness): ✅ complete — all seven items plus the P1
   placeholder triage delivered; see appendix for the bug catalog.
 - Test gates: smoke 8/8 (fixture decks now exercise triggers every episode),
-  training 6/6, scenarios 217/217 (grown from 12).
+  training 6/6, scenarios 225/225 (grown from 12), harvest CLI 10/10, and
+  deterministic invariant fuzz 3/3 seeds x 100 valid actions.
 - **Stats collected before July 2026 are unusable** (wrong player, wrong
   winner, fictional play turns, cosmetic first strike, compounding P/T,
   dead replacement system). Wipe and re-harvest after the current engine
@@ -77,7 +79,7 @@ severity sticks per card.
 Remaining Tier 2 work:
 - ✅ **Crash-severity wiring**: per-card resolution exceptions now attribute
   `crash` entries to the support manifest instead of only logging.
-- ▢ **Per-card override registry**: card name → hand-written effect callable,
+- ✅ **Per-card override registry**: card name → hand-written effect callable,
   consulted before the text parser, for cards regex can't express.
 - ✅ **Coverage report**: script joins a format's card pool against the
   manifest to print "N of M cards fully supported" — the format milestone.
@@ -588,12 +590,14 @@ Remaining Tier 2 work:
 
 ## Tier 3 — Training & environment quality
 
-1. ◐ **Choice exposure, remainder**: spell, activated-ability,
+1. ✅ **Choice exposure audit**: spell, activated-ability,
    triggered-ability, and direct-effect targets are agent choices. Independent
    modal target slots, paged target lists, opponent trigger ordering,
-   multi-target counter allocation, generic SacrificeEffect selection, and Dig
-   selection are complete. Remaining audit target: non-self sacrifice costs on
-   generic activated abilities still use the cost subsystem's heuristic.
+   multi-target counter allocation, generic SacrificeEffect selection, Dig
+   selection, and generic activated-ability sacrifice costs are complete.
+   Non-self activation costs stage explicit, paginated permanent IDs before the
+   shared cost transaction commits; self-sacrificing mana/token abilities keep
+   their deterministic fast path.
 2. ◐ **Opponent policy**: checkpoint/self-play policies install through
    `set_opponent_policy()`, receive their own observation and legal mask, and
    fall back safely when predicting an illegal action. Remaining: train a
@@ -620,15 +624,36 @@ kind, remaining-pick, and staged-allocation observations, paginate beyond ten,
 and pause compound effect resolution until each decision finishes.
 Regression-checked 217/217 scenarios.
 
+**Round 7.25 (July 2026):** closed the last Tier 3 choice-audit item and opened
+the verification/harvest layer. Generic activated abilities now expose non-self
+sacrifice costs to both policies, preserve target-before-cost ordering, preflight
+composite costs without mutation, and route public action-mask activations and
+legacy programmatic activations through the same payment implementation. The
+new `harvest_fixtures.py` runs the audited eight-deck rotation only into a fresh
+directory, rejects reset fallbacks/aborts, validates the stats contract, and
+writes `harvest_run.json` only after gzip/JSON deck, card, meta, CardMemory,
+game-log, and fidelity totals reconcile exactly. The strict run also exposed and
+closed compounding deck aggregates, first-game/loser CardMemory omissions,
+stale meta rates, transient-priority land actions, single-block dispatch, and
+Adventure/MDFC mask confusion. Seed 20260710 completed 8/8 games with zero
+fidelity counters and a clean support manifest (a plumbing/support baseline,
+not a strength study). `tests/invariant_fuzz_test.py` checks 3 deterministic seeds
+x 100 mask-valid actions for observation/mask validity, exact physical-card
+conservation, SBA/layer idempotence, and mana-boundary clearing. It exposed and
+closed phase-boundary mana retention and mask-valid combat-done dispatch bugs.
+Regression-checked 225/225 scenarios, 10/10 harvest tests, and 3/3 fuzz seeds.
+
 ## Tier 4 — Verification & calibration
 
-1. ✅ Golden scenario harness — 217 scenarios and growing; scenario-first is a
+1. ✅ Golden scenario harness — 225 scenarios and growing; scenario-first is a
    working agreement, not a suggestion.
-2. ▢ **Property tests**: zone-count conservation per action; SBA idempotence;
-   the action mask never permits an illegal action (fuzz); mana pools empty
-   at phase boundaries; layer recalculation idempotence under repetition
-   (one such scenario exists; generalize).
-3. ▢ **Long-game fuzzing** across many seeds with invariant checks.
+2. ✅ **Property/invariant harness**: exact non-token zone/stack conservation,
+   SBA fixed points, mask-valid action execution, finite observations/rewards,
+   phase-boundary mana clearing, and repeated layer idempotence run under fixed
+   seeds in `tests/invariant_fuzz_test.py`.
+3. ◐ **Long-game fuzzing**: the deterministic seeded runner exists and is green
+   at 3 x 100 actions. Remaining: raise seed/step budgets in scheduled CI and
+   retain minimal replay artifacts for any future failing seed.
 4. ▢ **Calibration study**: 3–5 deck pairs with well-known matchup winrates;
    run at harvest scale; compare. This is the acceptance test for the whole
    pipeline and gates "harvest at scale."
@@ -638,8 +663,10 @@ Regression-checked 217/217 scenarios.
 1. ▢ **Throughput**: profile games/hour; parallel envs; identify the hot
    paths (layer recalcs and text parsing are the likely suspects — consider
    caching parsed abilities per card name).
-2. ▢ **Harvest protocol**: versioned runs (agent version stamping exists),
-   wipe-and-reharvest procedure documented, per-run manifests.
+2. ◐ **Harvest protocol**: `harvest_fixtures.py` provides fresh-directory runs,
+   seeded eight-deck matchup rotation, agent-version stamping, strict completed-
+   game/artifact validation, and a success-only per-run manifest. Remaining:
+   throughput/parallel operation and checkpoint-vs-checkpoint promotion.
 3. ▢ **Deck-builder contract**: `STATS_SCHEMA.md` + support manifest are the
    full interface; the builder's exclusion logic and confidence weighting
    consume them directly.
@@ -717,14 +744,17 @@ Regression-checked 217/217 scenarios.
   the complete set. Changing only some targets of a multi-target spell needs a
   future slot-aware target-choice context; ordinary one-target copies are fully
   exposed now.
-- X choices are currently capped at 10 by the fixed action range. Modal spells
-  use one shared target set after mode selection; modes requiring independent
-  target slots still need richer targeting context.
+- X choices are currently capped at 10 by the fixed action range.
 - Discard choices expose only the first 10 hand slots. Simultaneous
   each-player discards are committed sequentially, and the scripted opponent
   selects its first available hand slot until policy-vs-policy self-play lands.
-- Target choices expose only the first 10 legal options. Independent target
-  slots for complex modal spells remain future work.
+- Target, Dig, counter-distribution, SacrificeEffect, and activated-cost
+  sacrifice choices paginate beyond ten. Direct programmatic ability callers
+  that omit explicit non-self sacrifice IDs retain a deterministic fallback;
+  policy-facing actions never use it. Sacrifice requirements involving Oracle
+  characteristics beyond the supported type/subtype, token/nontoken, nonland,
+  tapped/untapped, `another`, and type-disjunction vocabulary still need a
+  dedicated cost parser before those cards are harvest-eligible.
 - Round 7.16 target-conditioned pricing recognizes the sample cards' two exact
   conditions: a tapped permanent and a permanent you control. Arbitrary Oracle
   conditions that refer to target characteristics still need dedicated parsers.

@@ -272,17 +272,25 @@ class CombatHandlersMixin:
              # Store mapping for combat handler
              gs._battle_attack_creatures = getattr(gs, '_battle_attack_creatures', {})
              gs._battle_attack_creatures[param] = attacker_idx # Map battle_idx to creature_idx
-             return 0.1 if apply_combat_action(gs, "ATTACK_BATTLE", param) else -0.1
-         return -0.15 # No valid attacker or battle index
+             success = apply_combat_action(gs, "ATTACK_BATTLE", param)
+             return (0.1 if success else -0.1), success
+         return -0.15, False # No valid attacker or battle index
 
     def _handle_defend_battle(self, param, **kwargs):
-         return 0.1 if apply_combat_action(self.game_state, "DEFEND_BATTLE", param) else -0.1
+         success = apply_combat_action(self.game_state, "DEFEND_BATTLE", param)
+         return (0.1 if success else -0.1), success
 
-    def _handle_ninjutsu(self, param, **kwargs):
-         # Param needs (ninja_hand_idx, attacker_idx)
-         # Simple version: assume first ninja, first unblocked attacker
+    def _handle_ninjutsu(self, param, context=None, **kwargs):
+         # Prefer the exact hand/battlefield indices stored with the generated
+         # action.  Keep a deterministic fallback for older direct callers.
+         if context and context.get("ninja_identifier") is not None and \
+                 context.get("attacker_identifier") is not None:
+              success = apply_combat_action(
+                  self.game_state, "NINJUTSU", context=context)
+              return (0.3 if success else -0.1), success
+
          ninja_idx = -1
-         attacker_id = None
+         attacker_idx = -1
          # Find ninja
          gs = self.game_state
          player = gs.p1 if gs.agent_is_p1 else gs.p2
@@ -292,17 +300,34 @@ class CombatHandlersMixin:
                    ninja_idx = idx
                    break
          # Find unblocked attacker
-         unblocked = [aid for aid in gs.current_attackers if aid not in gs.current_block_assignments or not gs.current_block_assignments[aid]]
-         if unblocked: attacker_id = unblocked[0]
+         unblocked = [
+             aid for aid in gs.current_attackers
+             if (aid not in gs.current_block_assignments
+                 or not gs.current_block_assignments[aid])
+             and aid in player["battlefield"]
+         ]
+         if unblocked:
+              attacker_idx = player["battlefield"].index(unblocked[0])
 
-         if ninja_idx != -1 and attacker_id is not None:
-             return 0.3 if apply_combat_action(gs, "NINJUTSU", ninja_idx, attacker_id) else -0.1 # Pass both params
-         return -0.15
+         if ninja_idx != -1 and attacker_idx != -1:
+              success = apply_combat_action(
+                  gs, "NINJUTSU",
+                  context={
+                      "ninja_identifier": ninja_idx,
+                      "attacker_identifier": attacker_idx,
+                  })
+              return (0.3 if success else -0.1), success # Pass both params
+         return -0.15, False
 
     # --- Helper method to check blocking capability ---
     def _can_block(self, blocker_id, attacker_id):
-         """Check if blocker_id can legally block attacker_id."""
-         return ExtendedCombatResolver._check_block_restrictions(self, blocker_id, attacker_id)
+         """Check blocking legality through the integrated combat handler."""
+         combat_handler = getattr(self, "combat_handler", None)
+         if combat_handler is None:
+              combat_handler = integrate_combat_actions(self.game_state)
+         return bool(
+             combat_handler
+             and combat_handler._can_block(blocker_id, attacker_id))
 
     def _has_haste(self, card_id):
         """Centralized haste check using AbilityHandler."""
@@ -312,4 +337,4 @@ class CombatHandlersMixin:
         if hasattr(gs, 'ability_handler') and gs.ability_handler:
              return gs.ability_handler.check_keyword(card_id, "haste")
         return 'haste' in getattr(card,'oracle_text','').lower() # Fallback
-
+

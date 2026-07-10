@@ -284,13 +284,272 @@ class ActivatedAbility(Ability):
         return self._resolve_ability_implementation(game_state, controller, targets)
 
 
-    def pay_cost(self, game_state, controller):
+    @staticmethod
+    def _word_to_number(value):
+        """Convert the number words used in costs to a positive count."""
+        normalized = str(value or "").lower().strip()
+        if normalized in {"a", "an", "another"}:
+            return 1
+        return max(1, text_to_number(normalized))
+
+    @staticmethod
+    def _is_self_sacrifice_requirement(requirement):
+        req_lower = str(requirement or "").lower().strip(" .,;")
+        return (
+            req_lower in {"it", "this", "this permanent", "this creature",
+                          "this artifact", "this enchantment", "this land"}
+            or req_lower.startswith("this ")
+        )
+
+    def get_sacrifice_cost_spec(self):
+        """Return the parsed sacrifice component of this activation cost.
+
+        The result is intentionally reusable by the action layer: it can expose
+        a non-self permanent choice before ``pay_cost`` commits the transaction.
+        """
+        cost_lower = str(self.cost or "").lower()
+        match = re.search(
+            r"\bsacrifice\s+(.+?)(?=,\s*(?:\{|discard\b|pay\b|remove\b|tap\b|untap\b)|$)",
+            cost_lower)
+        if not match:
+            return None
+        requirement = match.group(1).strip(" .,;")
+        count_match = re.match(
+            r"^(a|an|another|one|two|three|four|five|six|seven|eight|nine|ten|\d+)\b",
+            requirement)
+        count = self._word_to_number(count_match.group(1)) if count_match else 1
+        return {
+            "count": count,
+            "requirement": requirement,
+            "self_sacrifice": self._is_self_sacrifice_requirement(requirement),
+        }
+
+    @staticmethod
+    def _as_sacrifice_occurrence(value):
+        """Normalize a staged ``(card_id, battlefield_slot)`` selection."""
+        if (isinstance(value, (tuple, list)) and len(value) == 2
+                and isinstance(value[1], int)):
+            return (value[0], value[1])
+        return None
+
+    def get_sacrifice_cost_candidates(self, game_state, controller,
+                                       requirement=None, excluded=None,
+                                       source_occurrence=None,
+                                       return_occurrences=False):
+        """Return live permanents that can pay a parsed sacrifice cost.
+
+        Battlefield lists may contain the same card id more than once.  The
+        optional occurrence form preserves those physical slots so selecting
+        one copy does not accidentally exclude every repeated-id copy.
+        """
+        spec = self.get_sacrifice_cost_spec()
+        if requirement is None:
+            if not spec:
+                return []
+            requirement = spec["requirement"]
+        req_lower = str(requirement or "").lower().strip(" .,;")
+        self_sacrifice = self._is_self_sacrifice_requirement(req_lower)
+        excluded_occurrences = set()
+        excluded_ids = set()
+        for value in excluded or []:
+            occurrence = self._as_sacrifice_occurrence(value)
+            if occurrence is not None:
+                excluded_occurrences.add(occurrence)
+            else:
+                excluded_ids.add(value)
+        source_occurrence = self._as_sacrifice_occurrence(source_occurrence)
+        battlefield = controller.get("battlefield", [])
+        if (source_occurrence is None
+                or not 0 <= source_occurrence[1] < len(battlefield)
+                or battlefield[source_occurrence[1]] != self.card_id):
+            source_slot = next(
+                (slot for slot, card_id in enumerate(battlefield)
+                 if card_id == self.card_id), None)
+            source_occurrence = ((self.card_id, source_slot)
+                                 if source_slot is not None else None)
+        required_types = {
+            card_type for card_type in
+            ("creature", "artifact", "enchantment", "land", "planeswalker")
+            if re.search(rf"\b{card_type}s?\b", req_lower)
+        }
+        words = set(re.findall(r"[a-z]+", req_lower))
+        generic_words = {
+            "a", "an", "another", "one", "two", "three", "four", "five",
+            "six", "seven", "eight", "nine", "ten", "or", "other", "this",
+            "it", "permanent", "permanents", "token", "tokens", "nontoken",
+            "nonland", "tapped", "untapped", "you", "control", "controls",
+        }
+        subtype_terms = words - generic_words - required_types
+        require_token = bool(re.search(r"\btoken\b", req_lower))
+        forbid_token = "nontoken" in words
+        forbid_land = "nonland" in words
+        require_tapped = "tapped" in words and "untapped" not in words
+        require_untapped = "untapped" in words
+        candidates = []
+        for slot, candidate_id in enumerate(battlefield):
+            occurrence = (candidate_id, slot)
+            if occurrence in excluded_occurrences or candidate_id in excluded_ids:
+                continue
+            if "another" in req_lower and occurrence == source_occurrence:
+                continue
+            if self_sacrifice and occurrence != source_occurrence:
+                continue
+            candidate = game_state._safe_get_card(candidate_id)
+            candidate_types = {
+                str(card_type).lower()
+                for card_type in getattr(candidate, "card_types", [])
+            } if candidate else set()
+            candidate_subtypes = {
+                str(subtype).lower()
+                for subtype in getattr(candidate, "subtypes", [])
+            } if candidate else set()
+            if required_types:
+                if " or " in req_lower:
+                    if not required_types.intersection(candidate_types):
+                        continue
+                elif not required_types.issubset(candidate_types):
+                    continue
+            if (not required_types and "permanent" not in words
+                    and not self_sacrifice and subtype_terms
+                    and not subtype_terms.intersection(candidate_subtypes)):
+                continue
+            is_token = bool(getattr(candidate, "is_token", False))
+            if require_token and not is_token:
+                continue
+            if forbid_token and is_token:
+                continue
+            if forbid_land and "land" in candidate_types:
+                continue
+            is_tapped = candidate_id in controller.get("tapped_permanents", set())
+            if require_tapped and not is_tapped:
+                continue
+            if require_untapped and is_tapped:
+                continue
+            candidates.append(occurrence if return_occurrences else candidate_id)
+        return candidates
+
+    def _normalize_sacrifice_selections(self, game_state, controller,
+                                        selections, requirement,
+                                        source_occurrence=None):
+        """Map legacy id selections and new occurrence selections to slots."""
+        candidates = self.get_sacrifice_cost_candidates(
+            game_state, controller, requirement,
+            source_occurrence=source_occurrence, return_occurrences=True)
+        available = list(candidates)
+        normalized = []
+        for value in selections or []:
+            occurrence = self._as_sacrifice_occurrence(value)
+            if occurrence is None:
+                occurrence = next(
+                    (candidate for candidate in available
+                     if candidate[0] == value), None)
+            if occurrence is None or occurrence not in available:
+                return None, candidates
+            normalized.append(occurrence)
+            available.remove(occurrence)
+        return normalized, candidates
+
+    def can_pay_cost(self, game_state, controller, context=None):
+        """Preflight every supported activation-cost component without mutation."""
+        context = context or {}
+        cost_text = str(self.cost or "")
+        cost_lower = cost_text.lower()
+
+        if self.is_exhaust:
+            activation_idx = getattr(self, 'activation_index', -1)
+            if activation_idx == -1 or game_state.check_exhaust_used(
+                    self.card_id, activation_idx):
+                return False
+
+        if "{t}" in cost_lower or re.search(r"\btap\b", cost_lower):
+            if self.card_id in controller.get("tapped_permanents", set()):
+                return False
+            card = game_state._safe_get_card(self.card_id)
+            is_creature = card and "creature" in getattr(card, "card_types", [])
+            if (is_creature
+                    and self.card_id in controller.get("entered_battlefield_this_turn", set())
+                    and not game_state.check_keyword(self.card_id, "haste")):
+                return False
+
+        if ("{q}" in cost_lower or re.search(r"\buntap\b", cost_lower)) \
+                and self.card_id not in controller.get("tapped_permanents", set()):
+            return False
+
+        sacrifice_spec = self.get_sacrifice_cost_spec()
+        if sacrifice_spec:
+            source_occurrence = context.get("activation_source_occurrence")
+            selected_values = context.get("activation_sacrifice_occurrences")
+            selection_key_present = "activation_sacrifice_occurrences" in context
+            if selected_values is None:
+                selected_values = context.get("activation_sacrifice_ids", [])
+                selection_key_present = "activation_sacrifice_ids" in context
+            selected, candidates = self._normalize_sacrifice_selections(
+                game_state, controller, selected_values,
+                sacrifice_spec["requirement"], source_occurrence)
+            if len(candidates) < sacrifice_spec["count"]:
+                return False
+            if selected is None or len(selected) > sacrifice_spec["count"]:
+                return False
+            if (selection_key_present
+                    and not sacrifice_spec["self_sacrifice"]
+                    and len(selected) != sacrifice_spec["count"]):
+                return False
+
+        discard_match = re.search(
+            r"discard\s+((?:a|an|one|two|three|\d+)\s+)?"
+            r"(?:\w+\s+)?cards?", cost_lower)
+        if discard_match:
+            count_word = (discard_match.group(1) or "one").strip()
+            if len(controller.get("hand", [])) < self._word_to_number(count_word):
+                return False
+
+        life_match = re.search(r"pay\s+(\d+)\s+life", cost_lower)
+        if life_match and controller.get("life", 0) < int(life_match.group(1)):
+            return False
+
+        counter_match = re.search(
+            r"remove\s+(?:(a|an|one|two|three|\d+)\s+)?"
+            r"(\w+|[+\-]\d+/[+\-]\d+)\s+counters?", cost_lower)
+        if counter_match:
+            count = self._word_to_number(counter_match.group(1) or "one")
+            counter_type = counter_match.group(2)
+            if "/" not in counter_type:
+                counter_type = counter_type.upper()
+            card = game_state._safe_get_card(self.card_id)
+            if int(getattr(card, "counters", {}).get(counter_type, 0)) < count:
+                return False
+
+        mana_symbols = re.findall(r'\{([WUBRGCXSPMTQA0-9\/\.]+)\}', cost_text)
+        if mana_symbols:
+            if not getattr(game_state, "mana_system", None):
+                return False
+            mana_cost = "".join(f"{{{symbol}}}" for symbol in mana_symbols)
+            parsed_cost = game_state.mana_system.parse_mana_cost(mana_cost)
+            return game_state.mana_system.can_pay_mana_cost(
+                controller, parsed_cost, context)
+        return True
+
+    def pay_cost(self, game_state, controller, sacrifice_choices=None,
+                 source_occurrence=None):
         """Pay the activation cost of this ability with comprehensive cost handling."""
+        preflight_context = {}
+        if sacrifice_choices is not None:
+            choices = list(sacrifice_choices)
+            if all(self._as_sacrifice_occurrence(choice) is not None
+                   for choice in choices):
+                preflight_context["activation_sacrifice_occurrences"] = choices
+            else:
+                preflight_context["activation_sacrifice_ids"] = choices
+        if source_occurrence is not None:
+            preflight_context["activation_source_occurrence"] = source_occurrence
+        if not self.can_pay_cost(game_state, controller, preflight_context):
+            return False
         # Use self.cost (which has Exhaust prefix removed if applicable by __init__)
         cost_text = self.cost
         cost_lower = cost_text.lower() if cost_text else ""
         all_costs_paid = True
         rollback_steps = []
+        paid_sacrifice_ids = []
 
         # --- Handle is_exhaust flag (set during init) ---
         if self.is_exhaust:
@@ -344,17 +603,29 @@ class ActivatedAbility(Ability):
              logging.debug(f"Paid untap cost for {card_name}")
 
         # Sacrifice Cost - Use cost_lower for regex
-        sac_match = re.search(r"sacrifice\s+((?:a|an|another|one|two|three|\d+)\s+)?(.*?)(?:$|,?\s*\{)", cost_lower)
-        if sac_match:
-             sac_req = sac_match.group(0).replace("sacrifice ", "").strip()
-             count_str = sac_match.group(1)
-             count = 1
-             if count_str: count = self._word_to_number(count_str.strip())
+        sacrifice_spec = self.get_sacrifice_cost_spec()
+        if sacrifice_spec:
+             sac_req = sacrifice_spec["requirement"]
+             count = sacrifice_spec["count"]
+             if (sacrifice_choices is not None
+                     and not sacrifice_spec["self_sacrifice"]
+                     and len(sacrifice_choices) != count):
+                  return False
+             chosen_ids = iter(list(sacrifice_choices or []))
              for i in range(count):
-                  sacrifice_paid, _ = self._pay_sacrifice_cost_with_rollback(game_state, controller, sac_req, self.card_id, rollback_steps)
+                  preferred_choice = next(chosen_ids, None)
+                  preferred_occurrence = self._as_sacrifice_occurrence(
+                      preferred_choice)
+                  preferred_id = (preferred_occurrence[0]
+                                  if preferred_occurrence is not None
+                                  else preferred_choice)
+                  sacrifice_paid, sacrificed_id = self._pay_sacrifice_cost_with_rollback(
+                      game_state, controller, sac_req, self.card_id,
+                      rollback_steps, preferred_id=preferred_id)
                   if not sacrifice_paid:
                       logging.debug(f"Failed sacrifice cost: Required {count}, attempt {i+1} failed for '{sac_req}'.")
                       self._perform_rollback(game_state, controller, rollback_steps); return False
+                  paid_sacrifice_ids.append(sacrificed_id)
              logging.debug(f"Paid sacrifice cost ({count}x '{sac_req}').")
 
         # Discard Cost - Use cost_lower for regex
@@ -466,6 +737,10 @@ class ActivatedAbility(Ability):
 
         # --- Final Check ---
         if all_costs_paid and mana_cost_paid:
+             for sacrificed_id in paid_sacrifice_ids:
+                  game_state.trigger_ability(
+                      sacrificed_id, "SACRIFICED",
+                      {"controller": controller, "cause": "ability_cost"})
              card_name = getattr(game_state._safe_get_card(self.card_id), 'name', self.card_id)
              logging.debug(f"Successfully paid cost '{self.effect_text}' for {card_name}")
              return True
@@ -477,53 +752,40 @@ class ActivatedAbility(Ability):
          
     def _pay_sacrifice_cost_with_rollback(self, game_state, controller,
                                            sacrifice_req, ability_source_id,
-                                           rollback_steps):
+                                           rollback_steps, preferred_id=None):
         """Pay one sacrifice cost after all choices and mana were preflighted."""
         req_lower = str(sacrifice_req or "").lower().strip(" .,;")
         if not req_lower:
             return False, None
 
-        self_sacrifice = (
-            req_lower in {"it", "this", "this permanent", "this creature",
-                          "this artifact", "this enchantment", "this land"}
-            or req_lower.startswith("this ")
-        )
-        required_type = next(
-            (card_type for card_type in
-             ("creature", "artifact", "enchantment", "land", "planeswalker", "permanent")
-             if card_type in req_lower),
-            None)
-        candidates = []
-        for candidate_id in controller.get("battlefield", []):
-            if "another" in req_lower and candidate_id == ability_source_id:
-                continue
-            if self_sacrifice and candidate_id != ability_source_id:
-                continue
-            candidate = game_state._safe_get_card(candidate_id)
-            candidate_types = getattr(candidate, "card_types", []) if candidate else []
-            if (required_type and required_type != "permanent"
-                    and required_type not in candidate_types):
-                continue
-            candidates.append(candidate_id)
+        self_sacrifice = self._is_self_sacrifice_requirement(req_lower)
+        candidates = self.get_sacrifice_cost_candidates(
+            game_state, controller, requirement=req_lower)
 
         if not candidates:
             return False, None
-        sacrifice_id = ability_source_id if self_sacrifice else min(
-            candidates,
-            key=lambda cid: (
-                not bool(getattr(game_state._safe_get_card(cid), "is_token", False)),
-                getattr(game_state._safe_get_card(cid), "cmc", 0) or 0,
-            ))
+        if preferred_id is not None:
+            if preferred_id not in candidates:
+                return False, None
+            sacrifice_id = preferred_id
+        else:
+            sacrifice_id = ability_source_id if self_sacrifice else min(
+                candidates,
+                key=lambda cid: (
+                    not bool(getattr(game_state._safe_get_card(cid), "is_token", False)),
+                    getattr(game_state._safe_get_card(cid), "cmc", 0) or 0,
+                ))
         sacrificed_card = game_state._safe_get_card(sacrifice_id)
         was_token = bool(getattr(sacrificed_card, "is_token", False))
+        owner = game_state._find_card_owner_fallback(sacrifice_id) or controller
         if not game_state.move_card(
-                sacrifice_id, controller, "battlefield", controller, "graveyard",
+                sacrifice_id, controller, "battlefield", owner, "graveyard",
                 cause="ability_cost"):
             return False, None
         # A token ceases to exist and cannot be rolled back. The caller
         # preflights mana and tap legality before committing this cost.
         if not was_token:
-            rollback_steps.append(("return_from_graveyard", sacrifice_id))
+            rollback_steps.append(("return_sacrificed_permanent", sacrifice_id, owner))
         return True, sacrifice_id
 
     def _pay_discard_cost_with_rollback(self, game_state, controller, count, rollback_steps):
@@ -570,7 +832,7 @@ class ActivatedAbility(Ability):
             try:
                 if action == "untap": game_state.untap_permanent(step[1], controller)
                 elif action == "tap": game_state.tap_permanent(step[1], controller)
-                elif action == "return_from_graveyard": game_state.move_card(step[1], controller, "graveyard", controller, "battlefield")
+                elif action == "return_sacrificed_permanent": game_state.move_card(step[1], step[2], "graveyard", controller, "battlefield")
                 elif action == "return_from_graveyard_to_hand": game_state.move_card(step[1], controller, "graveyard", controller, "hand")
                 elif action == "gain_life": controller["life"] += step[1]
                 elif action == "add_counter": game_state.add_counter(step[1], step[2], step[3])

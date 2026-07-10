@@ -958,6 +958,8 @@ def s_cast_and_resolve():
     assert len(gs.stack) == stack_before + 1, "spell did not go onto the stack"
     gs.resolve_top_of_stack()
     assert cid in owner["battlefield"], "resolved creature did not enter the battlefield"
+    assert gs.phase == gs.PHASE_MAIN_PRECOMBAT, \
+        "empty-stack resolution did not restore the underlying main phase"
 
 
 @scenario("500", "phase progression advances through the turn without error")
@@ -971,6 +973,70 @@ def s_phase_progression():
             break
     assert gs.PHASE_END_STEP in seen, f"turn never reached the end step (path: {seen})"
     assert len(set(seen)) >= 5, f"phase progression looks stuck (path: {seen})"
+
+
+@scenario("500.4", "mana pools empty at every step and phase boundary")
+def s_mana_empties_between_phases():
+    gs = fresh()
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+
+    def add_boundary_mana():
+        for player in (gs.p1, gs.p2):
+            player["mana_pool"] = {'W': 1, 'U': 2, 'B': 0, 'R': 0, 'G': 0, 'C': 3}
+            player["conditional_mana"] = {"creatures": {'G': 1}}
+            player["phase_restricted_mana"] = {'R': 1}
+
+    def assert_empty():
+        for player in (gs.p1, gs.p2):
+            assert sum(player["mana_pool"].values()) == 0, \
+                "ordinary mana carried across a phase boundary"
+            assert not player["conditional_mana"], \
+                "conditional mana carried across a phase boundary"
+            assert not player["phase_restricted_mana"], \
+                "phase-restricted mana carried across a phase boundary"
+
+    add_boundary_mana()
+    gs._advance_phase()
+    assert gs.phase == gs.PHASE_BEGIN_COMBAT
+    assert_empty()
+
+    # Exercise the public action paths too; these historically assigned the
+    # next phase directly and bypassed _advance_phase's CR 500.4 cleanup.
+    handler = get_env().action_handler
+    gs.agent_is_p1 = True
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = gs.p1
+    add_boundary_mana()
+    assert handler.generate_valid_actions()[3], "MAIN_PHASE_END absent from its legal mask"
+    _, _, _, info = handler.apply_action(3)
+    assert not info.get("execution_failed"), f"MAIN_PHASE_END failed: {info}"
+    assert_empty()
+
+    gs.phase = gs.PHASE_DECLARE_ATTACKERS
+    gs.priority_player = gs.p1
+    attacker = inject_into_zone(gs, gs.p1, {
+        "name": "Boundary Attacker", "mana_cost": "{1}{G}", "cmc": 2,
+        "type_line": "Creature - Beast", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    gs.current_attackers = [attacker]
+    add_boundary_mana()
+    assert handler.generate_valid_actions()[438], \
+        "DECLARE_ATTACKERS_DONE absent from its legal mask"
+    _, _, _, info = handler.apply_action(438)
+    assert not info.get("execution_failed"), f"DECLARE_ATTACKERS_DONE failed: {info}"
+    assert gs.phase == gs.PHASE_DECLARE_BLOCKERS
+    assert_empty()
+
+    gs.agent_is_p1 = False
+    gs.priority_player = gs.p2
+    add_boundary_mana()
+    assert handler.generate_valid_actions()[439], \
+        "DECLARE_BLOCKERS_DONE absent from its legal mask"
+    _, _, _, info = handler.apply_action(439)
+    assert not info.get("execution_failed"), f"DECLARE_BLOCKERS_DONE failed: {info}"
+    assert_empty()
 
 
 @scenario("603.7", "a delayed trigger fires at the beginning of the next end step")
@@ -2085,6 +2151,84 @@ def s_trample_excess_to_player():
     assert _zone_of(gs, blk) == "graveyard", "blocker did not die to lethal assignment"
     assert defender["life"] == life_before - 2, \
         f"expected 2 trample damage, defender life went {life_before} -> {defender['life']}"
+
+
+@scenario("702.49", "a mask-valid Ninjutsu action uses the public combat dispatcher")
+def s_ninjutsu_public_action_dispatch():
+    gs = fresh()
+    controller = gs.p1
+    gs.agent_is_p1 = True
+    gs.turn = 1
+    gs.phase = gs.PHASE_DECLARE_BLOCKERS
+    gs.priority_player = controller
+    attacker = inject_into_zone(gs, controller, {
+        "name": "Returning Attacker", "mana_cost": "{1}{U}", "cmc": 2,
+        "type_line": "Creature - Rogue", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    ninja = inject_into_zone(gs, controller, {
+        "name": "Scenario Shinobi", "mana_cost": "{2}{U}", "cmc": 3,
+        "type_line": "Creature - Human Ninja",
+        "oracle_text": "Ninjutsu {1}{U}", "power": 3, "toughness": 2,
+    }, "hand")
+    gs.current_attackers = [attacker]
+    gs.current_block_assignments = {}
+    controller["mana_pool"] = {'W': 0, 'U': 1, 'B': 0, 'R': 0, 'G': 0, 'C': 1}
+    handler = get_env().action_handler
+    mask = handler.generate_valid_actions()
+    assert mask[437], "the legal Ninjutsu action was absent from the mask"
+    _, done, truncated, info = handler.apply_action(437)
+    assert not done and not truncated and not info.get("execution_failed"), \
+        f"mask-valid Ninjutsu was rejected by dispatch: {info}"
+    assert attacker in controller["hand"] and ninja in controller["battlefield"], \
+        "Ninjutsu did not exchange the unblocked attacker for the Ninja"
+    assert ninja in gs.current_attackers, "the Ninja did not enter attacking"
+
+
+@scenario("509.1h", "a mask-valid multi-block action returns the public handler contract")
+def s_multiple_blockers_public_action_dispatch():
+    gs = fresh()
+    gs.agent_is_p1 = False
+    gs.turn = 1
+    gs.phase = gs.PHASE_DECLARE_BLOCKERS
+    gs.priority_player = gs.p2
+    attacker = inject_into_zone(gs, gs.p1, {
+        "name": "Wide Attacker", "mana_cost": "{2}{R}", "cmc": 3,
+        "type_line": "Creature - Giant", "oracle_text": "",
+        "power": 4, "toughness": 4,
+    }, "battlefield")
+    blocker_a = inject_into_zone(gs, gs.p2, {
+        "name": "First Blocker", "mana_cost": "{W}", "cmc": 1,
+        "type_line": "Creature - Soldier", "oracle_text": "",
+        "power": 1, "toughness": 2,
+    }, "battlefield")
+    blocker_b = inject_into_zone(gs, gs.p2, {
+        "name": "Second Blocker", "mana_cost": "{1}{W}", "cmc": 2,
+        "type_line": "Creature - Soldier", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    gs.current_attackers = [attacker]
+    gs.current_block_assignments = {}
+    handler = get_env().action_handler
+    mask = handler.generate_valid_actions()
+    assert mask[48], "ordinary BLOCK absent from its legal mask"
+    _, done, truncated, info = handler.apply_action(48)
+    assert not done and not truncated and not info.get("execution_failed"), \
+        f"mask-valid ordinary block was rejected: {info}"
+    assert gs.current_block_assignments.get(attacker) == [blocker_a]
+    # Toggle it off again so the multi-block assertion starts from a clean map.
+    assert handler.generate_valid_actions()[48]
+    _, _, _, info = handler.apply_action(48)
+    assert not info.get("execution_failed") and not gs.current_block_assignments
+
+    assert handler.generate_valid_actions()[383], \
+        "ASSIGN_MULTIPLE_BLOCKERS absent from its legal mask"
+    _, done, truncated, info = handler.apply_action(
+        383, context={"blocker_identifiers": [0, 1]})
+    assert not done and not truncated and not info.get("execution_failed"), \
+        f"mask-valid multi-block was rejected after mutation: {info}"
+    assert gs.current_block_assignments.get(attacker) == [blocker_a, blocker_b], \
+        "the selected blockers were not assigned to the attacker"
 
 
 @scenario("702.2 + 702.19", "deathtouch makes 1 damage lethal for trample assignment and for the SBA")
@@ -3481,6 +3625,18 @@ def s_graveyard_recursion():
 def s_adventure_exiles_to_recast():
     gs = fresh()
     player = gs.p1
+    from Playersim.card import Card
+    real_layout = Card({
+        "name": "Sell-Sword // Burn Together", "layout": "adventure",
+        "card_faces": [
+            {"name": "Sell-Sword", "mana_cost": "{1}{B}",
+             "type_line": "Creature - Human Soldier", "oracle_text": ""},
+            {"name": "Burn Together", "mana_cost": "{R}",
+             "type_line": "Sorcery - Adventure", "oracle_text": "Deal damage."},
+        ],
+    })
+    assert not real_layout.is_mdfc(), \
+        "an Adventure layout was misclassified as a generic MDFC"
     spell = inject_card(gs, {
         "name": "Giant's Errand", "mana_cost": "{1}{G}",
         "type_line": "Creature — Giant",
@@ -3988,6 +4144,29 @@ def s_mdfc_back_face_cast():
     assert back_cost == "", f"back face (land) cost wrong: {back_cost!r}"
     assert "enters the battlefield tapped" in card.get_face_text(1).lower(), \
         "back face text not retrievable for casting/playing the back face"
+
+    # The public MDFC spell handler must pass cast_spell's exact flag and use
+    # the chosen back face's cost rather than the expensive front face.
+    spell_mdfc = inject_into_zone(gs, player, {
+        "name": "Rootguard // Sudden Spark", "layout": "modal_dfc",
+        "mana_cost": "{5}{G}", "type_line": "Creature - Treefolk",
+        "oracle_text": "", "power": 5, "toughness": 5,
+        "faces": [
+            {"name": "Rootguard", "mana_cost": "{5}{G}",
+             "type_line": "Creature - Treefolk", "oracle_text": ""},
+            {"name": "Sudden Spark", "mana_cost": "{R}",
+             "type_line": "Sorcery", "oracle_text": "Draw a card."},
+        ],
+    }, "hand")
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    player["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 1, 'G': 0, 'C': 0}
+    hand_idx = player["hand"].index(spell_mdfc)
+    _, ok = get_env().action_handler._handle_play_mdfc_back(hand_idx, context={})
+    assert ok, "MDFC back-face handler did not use the affordable back cost"
+    assert gs.stack and gs.stack[-1][1] == spell_mdfc \
+        and gs.stack[-1][3].get("cast_as_back_face"), \
+        "MDFC back-face choice was not retained on the stack"
 
 
 @scenario("712 (transform)", "a 'transform' effect flips a double-faced permanent to its other face")
@@ -6022,6 +6201,370 @@ def s_food_token_activation():
         "Food's ability did not survive its token source ceasing to exist"
     assert gs.resolve_top_of_stack() and controller["life"] == life_before + 3, \
         "Food's ability did not gain exactly 3 life"
+
+
+@scenario("602.2b / 601.2h", "non-self activated-ability sacrifice costs are policy-selected")
+def s_activated_ability_sacrifice_cost_choice():
+    gs = fresh()
+    controller = gs.p1
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    source = inject_into_zone(gs, controller, {
+        "name": "Choice Altar", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Artifact", "oracle_text": (
+            "Sacrifice two creatures: Draw a card."
+        ),
+    }, "battlefield")
+    creatures = [
+        inject_into_zone(gs, controller, {
+            "name": f"Altar Offering {index}", "mana_cost": "{1}", "cmc": 1,
+            "type_line": "Creature - Test", "oracle_text": "",
+            "power": 1, "toughness": 1,
+        }, "battlefield")
+        for index in range(3)
+    ]
+    abilities = gs.ability_handler.get_activated_abilities(source)
+    assert len(abilities) == 1, "the synthetic Altar ability was not parsed"
+
+    handler = get_env().action_handler
+    battlefield_idx = controller["battlefield"].index(source)
+    action_idx = 100 + battlefield_idx * 3
+    action_mask = handler.generate_valid_actions()
+    assert action_mask[action_idx], "the public action mask hid the Altar activation"
+    generated_context = handler.action_reasons_with_context[action_idx]["context"]
+    assert generated_context == {
+        "battlefield_idx": battlefield_idx,
+        "ability_idx": 0,
+        "controller_id": "p1",
+    }, f"the activation action lost its executable context: {generated_context}"
+    reward, done, truncated, info = handler.apply_action(action_idx)
+    assert not done and not truncated and not info.get("critical_error"), \
+        f"the public activation action failed: reward={reward}, info={info}"
+    assert gs.phase == gs.PHASE_CHOOSE and gs.choice_context, \
+        "the non-self sacrifice cost was paid heuristically"
+    assert gs.choice_context.get("type") == "activation_sacrifice_cost"
+    assert gs.choice_context.get("remaining") == 2
+    assert set(gs.choice_context.get("options", [])) == set(creatures), \
+        "the sacrifice-cost choice exposed the wrong permanents"
+    assert all(cid in controller["battlefield"] for cid in creatures) and not gs.stack, \
+        "a sacrifice was committed before all cost choices were staged"
+    clone = gs.clone()
+    cloned_occurrence = clone.choice_context["option_occurrences"][0]
+    clone.choice_context["selected"].append(cloned_occurrence)
+    clone.choice_context["options"].pop(0)
+    clone.choice_context["option_occurrences"].pop(0)
+    assert cloned_occurrence not in gs.choice_context["selected"] \
+        and creatures[0] in gs.choice_context["options"], \
+        "a cloned pending activation choice shared mutable state with the live game"
+
+    first_choice = creatures[1]
+    first_index = gs.choice_context["options"].index(first_choice)
+    _, ok = handler._handle_choose_mode(first_index, {})
+    assert ok and gs.choice_context.get("remaining") == 1
+    assert first_choice in controller["battlefield"] and not gs.stack, \
+        "the first staged choice paid part of the cost early"
+
+    second_choice = creatures[2]
+    second_index = gs.choice_context["options"].index(second_choice)
+    reward, ok = handler._handle_choose_mode(second_index, {})
+    assert ok, f"the final sacrifice-cost choice did not resume activation: {reward}"
+    assert gs.choice_context is None
+    assert first_choice in controller["graveyard"] and second_choice in controller["graveyard"]
+    assert creatures[0] in controller["battlefield"] and source in controller["battlefield"], \
+        "the cost subsystem sacrificed a permanent the policy did not choose"
+    assert gs.stack and gs.stack[-1][1] == source, \
+        "the activated ability did not reach the stack after paying its choices"
+
+    # The same public path must use the non-active policy's battlefield rather
+    # than interpreting its index against the active player's permanents.
+    gs2 = fresh(seed=SEED + 37)
+    nonactive = gs2.p2
+    gs2.turn = 1
+    gs2.phase = gs2.PHASE_MAIN_PRECOMBAT
+    gs2.agent_is_p1 = False
+    gs2.priority_player = nonactive
+    source2 = inject_into_zone(gs2, nonactive, {
+        "name": "Nonactive Choice Altar", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Artifact",
+        "oracle_text": "Sacrifice a creature: Draw a card.",
+    }, "battlefield")
+    offering2 = inject_into_zone(gs2, nonactive, {
+        "name": "Nonactive Offering", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    handler2 = get_env().action_handler
+    action2 = 100 + nonactive["battlefield"].index(source2) * 3
+    mask2 = handler2.generate_valid_actions()
+    assert mask2[action2]
+    _, done2, truncated2, info2 = handler2.apply_action(action2)
+    assert not done2 and not truncated2 and not info2.get("critical_error")
+    assert gs2.choice_context and gs2.choice_context.get("player") is nonactive
+    assert gs2.choice_context.get("options") == [offering2], \
+        "the non-active policy's activation choice used the active player's board"
+
+
+@scenario("602.2b / 400.7", "activated sacrifice choices distinguish repeated-id battlefield occurrences")
+def s_activated_sacrifice_duplicate_occurrences():
+    gs = fresh(seed=SEED + 38)
+    controller = gs.p1
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    source = inject_into_zone(gs, controller, {
+        "name": "Occurrence Altar", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Artifact",
+        "oracle_text": "Sacrifice two creatures: Draw a card.",
+    }, "battlefield")
+    repeated = inject_into_zone(gs, controller, {
+        "name": "Repeated Offering", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    controller["battlefield"].append(repeated)
+    source_slot = controller["battlefield"].index(source)
+    repeated_slots = [
+        slot for slot, card_id in enumerate(controller["battlefield"])
+        if card_id == repeated
+    ]
+
+    handler = get_env().action_handler
+    reward, ok = handler._handle_activate_ability(None, {
+        "battlefield_idx": source_slot, "ability_idx": 0,
+    })
+    assert ok, f"the repeated-id sacrifice activation did not start: {reward}"
+    ctx = gs.choice_context
+    expected_occurrences = [(repeated, slot) for slot in repeated_slots]
+    assert ctx.get("options") == [repeated, repeated], \
+        f"the repeated copies collapsed in the policy options: {ctx.get('options')}"
+    assert ctx.get("option_occurrences") == expected_occurrences, \
+        f"physical sacrifice slots were not retained: {ctx.get('option_occurrences')}"
+    mask = handler.generate_valid_actions()
+    assert mask[353] and mask[354], \
+        "the two repeated-id occurrences did not expose two policy actions"
+
+    _, ok = handler._handle_choose_mode(0, {})
+    assert ok and gs.choice_context.get("remaining") == 1
+    assert gs.choice_context.get("selected") == [expected_occurrences[0]]
+    assert gs.choice_context.get("options") == [repeated], \
+        "selecting one occurrence removed every copy sharing its id"
+    reward, ok = handler._handle_choose_mode(0, {})
+    assert ok, f"the second identical occurrence could not pay the cost: {reward}"
+    assert controller["battlefield"].count(repeated) == 0
+    assert controller["graveyard"].count(repeated) == 2, \
+        "sacrifice two creatures did not move both repeated-id occurrences"
+    assert gs.stack and gs.stack[-1][1] == source
+
+    # "Another" excludes the activated source slot, not every battlefield
+    # occurrence sharing that source's coarse card id.
+    gs2 = fresh(seed=SEED + 39)
+    controller2 = gs2.p1
+    gs2.turn = 1
+    gs2.phase = gs2.PHASE_MAIN_PRECOMBAT
+    gs2.agent_is_p1 = True
+    gs2.priority_player = controller2
+    repeated_source = inject_into_zone(gs2, controller2, {
+        "name": "Twin Offering Adept", "mana_cost": "{1}{B}", "cmc": 2,
+        "type_line": "Creature - Human Test",
+        "oracle_text": "Sacrifice another creature: Draw a card.",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    controller2["battlefield"].append(repeated_source)
+    activated_slot = 1
+    handler2 = get_env().action_handler
+    reward, ok = handler2._handle_activate_ability(None, {
+        "battlefield_idx": activated_slot, "ability_idx": 0,
+    })
+    assert ok, f"the duplicate-source 'another' activation failed: {reward}"
+    assert gs2.choice_context.get("option_occurrences") == [(repeated_source, 0)], \
+        "'another' excluded every same-id copy instead of only the source occurrence"
+    reward, ok = handler2._handle_choose_mode(0, {})
+    assert ok, f"the other same-id occurrence could not be sacrificed: {reward}"
+    assert controller2["battlefield"].count(repeated_source) == 1 \
+        and controller2["graveyard"].count(repeated_source) == 1
+    assert gs2.stack and gs2.stack[-1][1] == repeated_source, \
+        "the activated source occurrence did not leave an ability on the stack"
+
+
+@scenario("601.2c / 601.2h / 702.21", "target commitment waits for a staged sacrifice cost to finish")
+def s_targeted_activation_sacrifice_commit_order_and_ward_snapshot():
+    gs = fresh(seed=SEED + 40)
+    controller, opponent = gs.p1, gs.p2
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    source = inject_into_zone(gs, controller, {
+        "name": "Targeting Altar", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Artifact",
+        "oracle_text": (
+            "{1}, Sacrifice a creature: Put a +1/+1 counter on target creature."
+        ),
+    }, "battlefield")
+    offering = inject_into_zone(gs, controller, {
+        "name": "Targeting Offering", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    warded = inject_into_zone(gs, opponent, {
+        "name": "Activation Ward Probe", "mana_cost": "{1}{W}", "cmc": 2,
+        "type_line": "Creature - Human Soldier", "oracle_text": "Ward {2}",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    gs.ability_handler._parse_and_register_abilities(warded, gs._safe_get_card(warded))
+    gs.layer_system.invalidate_cache()
+    gs.layer_system.apply_all_effects()
+    assert gs.check_keyword(warded, "ward"), "setup: ward was not active"
+
+    handler = get_env().action_handler
+    activation_context = {
+        "battlefield_idx": controller["battlefield"].index(source),
+        "ability_idx": 0,
+    }
+
+    def choose_warded_target():
+        target_ctx = gs.targeting_context
+        valid_map = gs.targeting_system.get_valid_targets(
+            source, controller, target_ctx["required_type"],
+            effect_text=target_ctx["effect_text"])
+        valid_targets = sorted({
+            target_id for target_ids in valid_map.values()
+            for target_id in target_ids
+        })
+        assert warded in valid_targets, "the warded creature was not a legal target"
+        return handler._handle_select_target(valid_targets.index(warded), {})
+
+    controller["mana_pool"] = {
+        'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 1,
+    }
+    reward, ok = handler._handle_activate_ability(None, activation_context)
+    assert ok and gs.targeting_context, f"target selection did not start: {reward}"
+    reward, ok = choose_warded_target()
+    assert ok and gs.choice_context, f"sacrifice selection did not follow targeting: {reward}"
+    assert gs.choice_context.get("type") == "activation_sacrifice_cost"
+    assert warded not in controller.get("targeted_permanents_this_turn", set()) \
+        and not gs.stack, \
+        "target events or a ward snapshot leaked before the sacrifice cost finished"
+
+    # Invalidate the final payment after the permanent has been staged. The
+    # activation must rewind without targeting events, ward state, or costs.
+    controller["mana_pool"]["C"] = 0
+    reward, ok = handler._handle_choose_mode(0, {})
+    assert not ok, "the activation succeeded after its final mana payment vanished"
+    assert offering in controller["battlefield"] and not gs.stack
+    assert warded not in controller.get("targeted_permanents_this_turn", set()), \
+        "failed final payment leaked target commitment"
+
+    # Repeat successfully. Notification and the ward snapshot are committed
+    # only after payment and attach to the resumed ability's stack context.
+    controller["mana_pool"]["C"] = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = controller
+    reward, ok = handler._handle_activate_ability(None, activation_context)
+    assert ok and gs.targeting_context, f"the second activation did not target: {reward}"
+    reward, ok = choose_warded_target()
+    assert ok and gs.choice_context, f"the second sacrifice choice did not open: {reward}"
+    assert warded not in controller.get("targeted_permanents_this_turn", set())
+    reward, ok = handler._handle_choose_mode(0, {})
+    assert ok, f"the paid targeted activation did not resume: {reward}"
+    assert offering in controller["graveyard"] and gs.stack
+    stack_context = gs.stack[-1][3]
+    assert warded in controller.get("targeted_permanents_this_turn", set()), \
+        "successful final payment did not commit the target event"
+    assert stack_context.get("ward_checked_on_targeting") is True
+    assert stack_context.get("ward_obligations") == [
+        {"target_id": warded, "cost": "{2}"}
+    ], f"the resumed activation lost its ward snapshot: {stack_context}"
+
+
+@scenario("601.2h", "failed composite activation costs leave tokens and triggers untouched")
+def s_activated_sacrifice_composite_cost_preflight():
+    from Playersim.ability_types import ActivatedAbility
+
+    gs = fresh()
+    controller = gs.p1
+    source = inject_into_zone(gs, controller, {
+        "name": "Atomicity Altar", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Artifact", "oracle_text": "",
+    }, "battlefield")
+    for card_id in list(controller.get("hand", [])):
+        assert gs.move_card(card_id, controller, "hand", controller, "library")
+    token_id = gs.create_token(controller, {
+        "name": "Atomicity Test Token", "card_types": ["creature"],
+        "subtypes": ["Test"], "power": 1, "toughness": 1,
+        "oracle_text": "",
+    })
+    assert token_id in controller["battlefield"] and gs._safe_get_card(token_id).is_token
+    ability = ActivatedAbility(
+        source, cost="Sacrifice a creature, discard a card",
+        effect="Draw a card.")
+    gs.ability_handler.active_triggers = []
+    graveyard_before = list(controller["graveyard"])
+    assert not ability.pay_cost(gs, controller, sacrifice_choices=[token_id]), \
+        "an impossible composite cost was accepted"
+    assert token_id in controller["battlefield"] and token_id in gs.card_db, \
+        "failed composite-cost preflight permanently deleted its token"
+    assert controller["graveyard"] == graveyard_before, \
+        "failed composite-cost preflight moved a card"
+    assert not gs.ability_handler.active_triggers, \
+        "failed composite-cost preflight leaked a leave/dies trigger"
+
+
+@scenario("602.2b", "activated sacrifice-cost eligibility honors qualifiers and conjunctions")
+def s_activated_sacrifice_candidate_grammar():
+    from Playersim.ability_types import ActivatedAbility
+
+    gs = fresh()
+    controller = gs.p1
+    source = inject_into_zone(gs, controller, {
+        "name": "Qualifier Altar", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Artifact", "oracle_text": "",
+    }, "battlefield")
+    food = inject_into_zone(gs, controller, {
+        "name": "Food", "type_line": "Token Artifact - Food",
+        "oracle_text": "",
+    }, "battlefield")
+    clue = inject_into_zone(gs, controller, {
+        "name": "Clue", "type_line": "Token Artifact - Clue",
+        "oracle_text": "",
+    }, "battlefield")
+    for token_id in (food, clue):
+        gs._safe_get_card(token_id).is_token = True
+        controller.setdefault("tokens", []).append(token_id)
+    creature = inject_into_zone(gs, controller, {
+        "name": "Qualifier Creature", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    artifact_creature = inject_into_zone(gs, controller, {
+        "name": "Qualifier Construct", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Artifact Creature - Construct", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    land = inject_into_zone(gs, controller, {
+        "name": "Qualifier Land", "mana_cost": "", "cmc": 0,
+        "type_line": "Land", "oracle_text": "",
+    }, "battlefield")
+
+    def candidates(cost):
+        ability = ActivatedAbility(source, cost=cost, effect="Draw a card.")
+        return set(ability.get_sacrifice_cost_candidates(gs, controller))
+
+    food_candidates = candidates("Sacrifice a Food")
+    assert food_candidates == {food}, \
+        f"Food sacrifice candidates were {food_candidates}; expected only {food}; " \
+        f"token subtypes={getattr(gs._safe_get_card(food), 'subtypes', None)}"
+    assert candidates("Sacrifice a token") == {food, clue}
+    assert candidates("Sacrifice a nontoken creature") == {creature, artifact_creature}
+    assert land not in candidates("Sacrifice a nonland permanent")
+    assert candidates("Sacrifice an artifact creature") == {artifact_creature}
+    assert candidates("Sacrifice another artifact") == {food, clue, artifact_creature}
+    assert candidates("Sacrifice an artifact or creature") == {
+        source, food, clue, creature, artifact_creature,
+    }
 
 
 @scenario("702.170", "Plot exiles at sorcery speed and permits a free cast only on a later turn")

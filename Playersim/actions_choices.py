@@ -6,7 +6,7 @@ all state lives on ActionHandler, which composes every mixin.
 
 import logging
 from collections import defaultdict
-from .ability_types import ManaAbility
+from .ability_types import ActivatedAbility, ManaAbility
 
 
 class ChoiceHandlersMixin:
@@ -23,7 +23,9 @@ class ChoiceHandlersMixin:
             return 0.0, True
         choice = getattr(gs, 'choice_context', None)
         if (choice and choice.get('player') is player
-                and choice.get('type') in ('sacrifice_effect', 'dig_select', 'distribute_counters')):
+                and choice.get('type') in (
+                    'sacrifice_effect', 'activation_sacrifice_cost',
+                    'dig_select', 'distribute_counters')):
             choice['choice_page'] = int(choice.get('choice_page', 0)) + 1
             return 0.0, True
         return -0.1, False
@@ -319,7 +321,20 @@ class ChoiceHandlersMixin:
             tuple: (reward, success_flag)
         """
         gs = self.game_state
-        player = gs._get_active_player()
+        controller_id = context.get('controller_id')
+        if controller_id == 'p1':
+            player = gs.p1
+        elif controller_id == 'p2':
+            player = gs.p2
+        else:
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+
+        # Ordinary activated abilities belong to the player whose policy is
+        # acting, including the non-active player. A mismatched priority owner
+        # is never allowed to activate through a stale action context.
+        if gs.priority_player is not None and gs.priority_player is not player:
+            logging.warning("ACTIVATE_ABILITY called by a player without priority.")
+            return -0.15, False
         
         # Get indices from context
         bf_idx = context.get('battlefield_idx')
@@ -336,13 +351,23 @@ class ChoiceHandlersMixin:
             return -0.15, False
         
         # Validate battlefield index
-        if bf_idx >= len(player.get("battlefield", [])):
+        if bf_idx < 0 or bf_idx >= len(player.get("battlefield", [])):
             logging.warning(f"ACTIVATE_ABILITY: Invalid battlefield index {bf_idx}")
             return -0.2, False
         
         # Get card and validate
         card_id = player["battlefield"][bf_idx]
         card = gs._safe_get_card(card_id)
+        ability_source_occurrence = (card_id, bf_idx)
+        staged_source_occurrence = context.get('activation_source_occurrence')
+        if staged_source_occurrence is not None:
+            normalized_source = ActivatedAbility._as_sacrifice_occurrence(
+                staged_source_occurrence)
+            if (normalized_source is None
+                    or normalized_source != ability_source_occurrence):
+                logging.warning("ACTIVATE_ABILITY source occurrence changed while staged.")
+                return -0.15, False
+            ability_source_occurrence = normalized_source
         
         if not card:
             logging.warning(f"ACTIVATE_ABILITY: Card not found for ID {card_id}")
@@ -416,6 +441,8 @@ class ChoiceHandlersMixin:
                 "activation_context": {
                     "battlefield_idx": bf_idx,
                     "ability_idx": ability_idx,
+                    "controller_id": "p1" if player is gs.p1 else "p2",
+                    "activation_source_occurrence": ability_source_occurrence,
                 },
             }
             gs.priority_player = player
@@ -429,7 +456,8 @@ class ChoiceHandlersMixin:
             "card": card,
             "ability": ability,
             "is_ability": True,
-            "cause": "ability_activation"
+            "cause": "ability_activation",
+            "activation_source_occurrence": ability_source_occurrence,
         }
         cost_context.update(context)
         
@@ -439,7 +467,7 @@ class ChoiceHandlersMixin:
             logging.error(f"Ability for {card.name} missing 'cost' attribute")
             return -0.15, False
         
-        can_pay = gs.mana_system.can_pay_mana_cost(player, cost_str, cost_context) if gs.mana_system else True
+        can_pay = ability.can_pay_cost(gs, player, cost_context)
         
         if not can_pay:
             logging.debug(f"Cannot afford cost {cost_str} for {card.name} ability {ability_idx}")
@@ -450,10 +478,70 @@ class ChoiceHandlersMixin:
                 and card_id not in player.get("battlefield", [])):
             return -0.05, False
 
+        # Non-self sacrifice costs are choices, not evaluator heuristics. Stage
+        # every selected permanent first; ``pay_cost`` then commits all cost
+        # components together after the final choice.
+        sacrifice_spec = ability.get_sacrifice_cost_spec()
+        chosen_occurrences = list(
+            context.get("activation_sacrifice_occurrences", []))
+        chosen_sacrifices = list(context.get("activation_sacrifice_ids", []))
+        staged_choices = chosen_occurrences or chosen_sacrifices
+        if (sacrifice_spec and not sacrifice_spec["self_sacrifice"]
+                and len(staged_choices) < sacrifice_spec["count"]):
+            normalized_selected, _ = ability._normalize_sacrifice_selections(
+                gs, player, staged_choices, sacrifice_spec["requirement"],
+                ability_source_occurrence)
+            if normalized_selected is None:
+                return -0.05, False
+            remaining = sacrifice_spec["count"] - len(normalized_selected)
+            candidate_occurrences = ability.get_sacrifice_cost_candidates(
+                gs, player, sacrifice_spec["requirement"],
+                excluded=normalized_selected,
+                source_occurrence=ability_source_occurrence,
+                return_occurrences=True)
+            if len(candidate_occurrences) < remaining:
+                logging.debug(
+                    f"Cannot activate {card.name}: sacrifice cost needs "
+                    f"{remaining} more matching permanents.")
+                return -0.05, False
+            activation_context = dict(context)
+            activation_context.update({
+                "battlefield_idx": bf_idx,
+                "ability_idx": ability_idx,
+                "controller_id": "p1" if player is gs.p1 else "p2",
+                "activation_source_occurrence": ability_source_occurrence,
+                "activation_sacrifice_occurrences": normalized_selected,
+                "activation_sacrifice_ids": [
+                    occurrence[0] for occurrence in normalized_selected],
+            })
+            gs.choice_context = {
+                "type": "activation_sacrifice_cost",
+                "player": player,
+                "source_id": card_id,
+                "options": [occurrence[0]
+                            for occurrence in candidate_occurrences],
+                "option_occurrences": candidate_occurrences,
+                "selected": normalized_selected,
+                "remaining": remaining,
+                "requirement": sacrifice_spec["requirement"],
+                "activation_context": activation_context,
+                "resume_phase": gs.phase,
+                "choice_page": 0,
+            }
+            gs.phase = gs.PHASE_CHOOSE
+            gs.priority_player = player
+            gs.priority_pass_count = 0
+            logging.debug(
+                f"Waiting for {remaining} sacrifice-cost choice(s) before "
+                f"activating {card.name}.")
+            return 0.02, True
+
         # ActivatedAbility owns the full cost transaction. This preserves the
         # target-before-cost order while actually committing tap, sacrifice,
         # life, counter, and mana components together.
-        costs_paid = ability.pay_cost(gs, player)
+        costs_paid = ability.pay_cost(
+            gs, player, sacrifice_choices=staged_choices,
+            source_occurrence=ability_source_occurrence)
         
         if not costs_paid:
             logging.warning(f"Failed to pay cost for {card.name} ability {ability_idx}")
@@ -494,6 +582,10 @@ class ChoiceHandlersMixin:
             "targets": activation_targets or {}
         }
         gs.add_to_stack("ABILITY", card_id, player, stack_context)
+        if context.get("commit_activation_targets"):
+            gs.notify_targets_committed(
+                card_id, player, activation_targets or {},
+                stack_context=stack_context)
         logging.debug(f"Added ability {internal_idx} for {card.name} to stack")
         
         # Evaluate strategic value of activation
@@ -623,24 +715,12 @@ class ChoiceHandlersMixin:
         if ctx.get("resume_activation"):
             activation_context = dict(ctx.get("activation_context", {}))
             activation_context["activation_targets"] = categorized_targets
+            activation_context["commit_activation_targets"] = True
             if targets_by_slot:
                 activation_context["targets_by_slot"] = targets_by_slot
             gs.targeting_context = None
             restore_phase(player)
-            result = self._handle_activate_ability(None, activation_context)
-            if isinstance(result, tuple) and len(result) > 1 and result[1]:
-                committed_context = None
-                for item in reversed(gs.stack):
-                    if (isinstance(item, tuple) and len(item) >= 4
-                            and item[1] == ctx.get("source_id")
-                            and item[2] is ctx.get("controller")
-                            and isinstance(item[3], dict)):
-                        committed_context = item[3]
-                        break
-                gs.notify_targets_committed(
-                    ctx.get("source_id"), ctx.get("controller"), categorized_targets,
-                    stack_context=committed_context)
-            return result
+            return self._handle_activate_ability(None, activation_context)
 
         if ctx.get("resume_cast"):
             cast_context = dict(ctx.get("original_cast_context", {}))
@@ -1066,6 +1146,50 @@ class ChoiceHandlersMixin:
             gs.priority_player = gs._get_active_player()
             gs.priority_pass_count = 0
             return 0.05, True
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'activation_sacrifice_cost'):
+            ctx = gs.choice_context
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            options = ctx.get('options', [])
+            option_occurrences = ctx.get('option_occurrences', [])
+            absolute_param = int(ctx.get('choice_page', 0)) * 10 + param
+            if (ctx.get('player') is not player
+                    or not (0 <= absolute_param < len(options))
+                    or len(option_occurrences) != len(options)):
+                return -0.1, False
+            card_id = options[absolute_param]
+            occurrence = ActivatedAbility._as_sacrifice_occurrence(
+                option_occurrences[absolute_param])
+            selected = ctx.setdefault('selected', [])
+            battlefield = player.get('battlefield', [])
+            if (occurrence is None or occurrence in selected
+                    or not 0 <= occurrence[1] < len(battlefield)
+                    or battlefield[occurrence[1]] != card_id):
+                return -0.1, False
+            selected.append(occurrence)
+            ctx['remaining'] = max(0, int(ctx.get('remaining', 1)) - 1)
+            if ctx['remaining'] > 0:
+                # Remove the exact physical slot, not every option sharing its
+                # card id.  The action/observation layers continue to see ids.
+                options.pop(absolute_param)
+                option_occurrences.pop(absolute_param)
+                ctx['options'] = options
+                ctx['option_occurrences'] = option_occurrences
+                ctx['choice_page'] = 0
+                if len(ctx['options']) < ctx['remaining']:
+                    return -0.1, False
+                return 0.02, True
+
+            activation_context = dict(ctx.get('activation_context', {}))
+            activation_context['activation_sacrifice_occurrences'] = list(selected)
+            activation_context['activation_sacrifice_ids'] = [
+                selected_occurrence[0] for selected_occurrence in selected]
+            resume_phase = ctx.get('resume_phase', gs.PHASE_PRIORITY)
+            gs.choice_context = None
+            gs.phase = resume_phase
+            gs.priority_player = player
+            gs.priority_pass_count = 0
+            return self._handle_activate_ability(None, activation_context)
         if (getattr(gs, 'choice_context', None)
                 and gs.choice_context.get('type') == 'sacrifice_effect'):
             ctx = gs.choice_context

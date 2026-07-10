@@ -154,6 +154,7 @@ class TurnPhaseHandlersMixin:
     def _handle_end_turn(self, param, **kwargs):
         gs = self.game_state
         if gs.phase < gs.PHASE_END_STEP:
+            gs._empty_mana_pools()
             gs.phase = gs.PHASE_END_STEP
             gs.priority_pass_count = 0 # Reset priority for end step
             gs.priority_player = gs._get_active_player()
@@ -164,6 +165,7 @@ class TurnPhaseHandlersMixin:
 
     def _handle_untap_next(self, param, **kwargs):
         gs = self.game_state
+        gs._empty_mana_pools()
         gs._untap_phase(gs._get_active_player())
         gs.phase = gs.PHASE_UPKEEP
         gs.priority_player = gs._get_active_player()
@@ -229,10 +231,12 @@ class TurnPhaseHandlersMixin:
             if not has_creatures:
                 logging.debug("Skipping attack phase as there are no creatures to attack with")
                 # Skip directly to end of combat
+                gs._empty_mana_pools()
                 gs.phase = gs.PHASE_END_OF_COMBAT
                 return 0.01, True
-        
+
         # Perform the transition
+        gs._empty_mana_pools()
         gs.phase = target_phase
         gs.priority_player = gs._get_active_player()
         gs.priority_pass_count = 0

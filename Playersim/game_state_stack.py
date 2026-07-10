@@ -1859,6 +1859,18 @@ class GameStateStackMixin:
                         self.split_second_active = False
                         logging.info("Split Second is now INACTIVE.")
 
+            # PHASE_PRIORITY is a transient wrapper around the real turn
+            # phase. Once the last stack item finishes (and resolution did not
+            # open another choice), restore that underlying phase before
+            # exposing sorcery-speed actions. Otherwise the action mask can
+            # legitimately offer lands/spells that their handlers reject for
+            # seeing PHASE_PRIORITY.
+            if (not new_special_phase_entered and not self.stack
+                    and self.phase == self.PHASE_PRIORITY
+                    and self.previous_priority_phase is not None):
+                self.phase = self.previous_priority_phase
+                self.previous_priority_phase = None
+
             # --- Reset Priority ---
             # Only reset priority if a *new* special phase wasn't entered AND
             # if the stack is now empty or the active player should get priority back.

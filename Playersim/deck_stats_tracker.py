@@ -1357,9 +1357,10 @@ class DeckStatsTracker:
             if card_id in loser_deck:
                 card_data["games"] += 1
                 if is_draw:
-                    # If the card appears in both decks, don't double-count the draw
-                    if card_id not in winner_deck:
-                        card_data["draws"] += 1
+                    # Card results are counted per deck-seat appearance. If the
+                    # same card is in both decks, a draw contributes two games
+                    # and therefore two draws.
+                    card_data["draws"] += 1
                 else:
                     card_data["losses"] += 1
                 
@@ -1372,8 +1373,13 @@ class DeckStatsTracker:
             if card_data["games"] > 0:
                 card_data["win_rate"] = (card_data["wins"] + 0.5 * card_data["draws"]) / card_data["games"]
                 
-            # Update play rate
-            card_data["play_rate"] = card_data["games"] / meta_data["total_games"]
+        # The denominator changes every game, including for cards absent from
+        # the latest matchup. Refresh all rates so old entries do not retain a
+        # stale play-rate denominator.
+        for card_data in meta_data["cards"].values():
+            card_data["play_rate"] = (
+                card_data["games"] / meta_data["total_games"]
+                if meta_data["total_games"] else 0)
         
         # Save updated meta data
         return self.save("meta/meta_data.json", meta_data)
@@ -1965,6 +1971,23 @@ class DeckStatsTracker:
                 self.deck_id_to_name[current_stats["deck_id"]] = current_stats["name"]
             
             return True
+
+    def _replace_deck_stats(self, deck_key: str, stats: Dict) -> bool:
+        """Store a fully accumulated deck snapshot without treating it as a delta.
+
+        ``update_deck_stats`` is intentionally an additive public API. Internal
+        game-recording paths already mutate a complete cached snapshot, so
+        sending that snapshot back through the additive API doubles every
+        cumulative counter (and compounds on each game).
+        """
+        with self.batch_lock:
+            stats = self._validate_stats_types(stats)
+            self.cache_set(f"deck:{deck_key}", stats)
+            self.batch_updates[deck_key] = stats
+            if "name" in stats and "deck_id" in stats:
+                self.deck_name_to_id[stats["name"]] = stats["deck_id"]
+                self.deck_id_to_name[stats["deck_id"]] = stats["name"]
+            return True
         
     def get_win_rate_confidence_interval(self, deck_key: str, confidence: float = 0.95) -> Tuple[float, float]:
         """Calculate win rate confidence interval using Wilson score interval"""
@@ -2532,7 +2555,7 @@ class DeckStatsTracker:
             self.deck_id_to_name[deck_id] = stats["name"]
 
 
-        return self.update_deck_stats(deck_id, stats)
+        return self._replace_deck_stats(deck_id, stats)
 
     def _update_card_stats(self, winner_deck_id: str, loser_deck_id: str, 
                         cards_played: Dict[int, List[int]],
@@ -3388,10 +3411,10 @@ class DeckStatsTracker:
             })
         
         # Save updated stats
-        if not self.update_deck_stats(winner_deck_id, winner_stats):
+        if not self._replace_deck_stats(winner_deck_id, winner_stats):
             success = False
                 
-        if not self.update_deck_stats(loser_deck_id, loser_stats):
+        if not self._replace_deck_stats(loser_deck_id, loser_stats):
             success = False
                 
         return success

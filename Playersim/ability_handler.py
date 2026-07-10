@@ -1844,55 +1844,32 @@ class AbilityHandler:
         activated_abilities = self.get_activated_abilities(card_id)
         if 0 <= ability_index < len(activated_abilities):
             ability = activated_abilities[ability_index]
-            
-            if hasattr(self.game_state, 'mana_system') and self.game_state.mana_system:
-                # Use enhanced mana system if available
-                cost = ability.cost
-                parsed_cost = self.game_state.mana_system.parse_mana_cost(cost)
-                return self.game_state.mana_system.can_pay_mana_cost(controller, parsed_cost)
-            else:
-                # Fallback to basic check
-                return ability.can_activate(self.game_state, controller)
+            return ability.can_pay_cost(self.game_state, controller)
                 
         return False
 
-    def activate_ability(self, card_id, ability_index, controller):
+    def activate_ability(self, card_id, ability_index, controller,
+                         sacrifice_choices=None):
         """Activate a specific activated ability"""
         activated_abilities = self.get_activated_abilities(card_id)
         if 0 <= ability_index < len(activated_abilities):
             ability = activated_abilities[ability_index]
-            
-            if hasattr(self.game_state, 'mana_system') and self.game_state.mana_system:
-                # Use enhanced mana system if available
-                cost = ability.cost
-                parsed_cost = self.game_state.mana_system.parse_mana_cost(cost)
-                can_pay = self.game_state.mana_system.can_pay_mana_cost(controller, parsed_cost)
-                
-                if can_pay:
-                    # Pay cost
-                    paid = self.game_state.mana_system.pay_mana_cost(controller, parsed_cost)
-                    if paid:
-                        # Add to stack WITH the ability object: resolution needs
-                        # it (an empty context made every generic activation
-                        # resolve to nothing -- found by Restless-land animation).
-                        self.game_state.add_to_stack("ABILITY", card_id, controller, {
-                            "ability": ability,
-                            "effect_text": getattr(ability, 'effect', '') or getattr(ability, 'effect_text', ''),
-                        })
-                        logging.debug(f"Activated ability {ability_index} for {self.game_state._safe_get_card(card_id).name}")
-                        return True
-            else:
-                # Fallback to basic activation
-                if ability.can_activate(self.game_state, controller):
-                    cost_paid = ability.pay_cost(self.game_state, controller)
-                    if cost_paid:
-                        # Add to stack (same context contract as above).
-                        self.game_state.add_to_stack("ABILITY", card_id, controller, {
-                            "ability": ability,
-                            "effect_text": getattr(ability, 'effect', '') or getattr(ability, 'effect_text', ''),
-                        })
-                        logging.debug(f"Activated ability {ability_index} for {self.game_state._safe_get_card(card_id).name}")
-                        return True
+            if not ability.can_pay_cost(self.game_state, controller):
+                return False
+            if ability.pay_cost(
+                    self.game_state, controller,
+                    sacrifice_choices=sacrifice_choices):
+                # Add to stack WITH the ability object: resolution needs it (an
+                # empty context made every generic activation resolve to nothing).
+                self.game_state.add_to_stack("ABILITY", card_id, controller, {
+                    "ability": ability,
+                    "effect_text": getattr(ability, 'effect', '') or getattr(ability, 'effect_text', ''),
+                })
+                card = self.game_state._safe_get_card(card_id)
+                logging.debug(
+                    f"Activated ability {ability_index} for "
+                    f"{getattr(card, 'name', card_id)}")
+                return True
                         
         return False
     
