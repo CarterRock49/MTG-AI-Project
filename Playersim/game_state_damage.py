@@ -537,6 +537,10 @@ class GameStateDamageMixin:
     def handle_lifelink_gain(self, source_id, player_gaining_life, damage_dealt):
         """Handles life gain specifically from lifelink, applying replacements."""
         if damage_dealt <= 0 or not player_gaining_life: return
+        if player_gaining_life.get('cant_gain_life'):
+            logging.debug(f"Lifelink gain prevented: {player_gaining_life.get('name', '?')} "
+                          f"can't gain life for the rest of the game.")
+            return
 
         gain_context = {'player': player_gaining_life, 'life_amount': damage_dealt, 'source_id': source_id, 'source_type': 'lifelink'}
         final_life_gain = damage_dealt
@@ -571,6 +575,10 @@ class GameStateDamageMixin:
         Returns the amount of life actually gained.
         """
         if not player or amount is None or amount <= 0:
+            return 0
+        if player.get('cant_gain_life'):
+            logging.debug(f"gain_life: {player.get('name', '?')} can't gain life "
+                          f"for the rest of the game (Screaming Nemesis-style effect).")
             return 0
         gain_context = {'player': player, 'life_amount': amount, 'source_id': source_id}
         final_gain = amount

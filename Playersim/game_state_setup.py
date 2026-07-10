@@ -591,6 +591,85 @@ class GameStateSetupMixin:
                     p.pop('_needs_to_bottom_next', None)
                     p.pop('_bottoming_complete', None)
 
+            # CR 103.6c: cards like Leylines may begin the game on the
+            # battlefield from the opening hand. Starting player decides
+            # first. If any such choice exists, the first turn is deferred
+            # until every begin-game decision resolves.
+            starting_player = self.p1  # Turn 1 belongs to p1 (_get_active_player).
+            other_player = self.p2
+            self._opening_hand_players = [
+                p for p in (starting_player, other_player)
+                if p and self._collect_opening_hand_cards(p)]
+            if self._opening_hand_players:
+                self._begin_opening_hand_choice(self._opening_hand_players.pop(0))
+                return
+
+            self._begin_first_turn()
+
+    def _collect_opening_hand_cards(self, player):
+        """Hand cards with a 'begin the game on the battlefield' permission."""
+        found = []
+        for cid in player.get("hand", []):
+            card = self._safe_get_card(cid)
+            text = (getattr(card, 'oracle_text', '') or '').lower()
+            if "you may begin the game with it on the battlefield" in text:
+                found.append(cid)
+        return found
+
+    def _begin_opening_hand_choice(self, player):
+        """Open the begin-game battlefield choice for one player (CR 103.6c)."""
+        options = self._collect_opening_hand_cards(player)
+        self.phase = self.PHASE_CHOOSE
+        self.choice_context = {
+            "type": "opening_hand",
+            "player": player,
+            "options": options,
+            "source_id": options[0] if options else None,
+        }
+        self.priority_player = player
+        self.priority_pass_count = 0
+        logging.debug(f"{player['name']} may begin the game with "
+                      f"{len(options)} card(s) on the battlefield.")
+
+    def complete_opening_hand_choice(self, option_index):
+        """Apply one begin-game decision. option_index None declines the
+        player's remaining begin-game cards; an int puts that option onto the
+        battlefield. When a player's choice closes, the next player's choice
+        opens, and after the last one the deferred first turn begins."""
+        ctx = getattr(self, 'choice_context', None)
+        if not ctx or ctx.get("type") != "opening_hand":
+            logging.warning("complete_opening_hand_choice called without an opening_hand context.")
+            return False
+        player = ctx.get("player")
+        remaining = []
+        if option_index is not None:
+            options = ctx.get("options", [])
+            if not isinstance(option_index, int) or not (0 <= option_index < len(options)):
+                logging.warning(f"Invalid opening-hand option index {option_index}.")
+                return False
+            card_id = options[option_index]
+            if card_id not in player.get("hand", []):
+                logging.warning(f"Opening-hand card {card_id} is no longer in hand.")
+                return False
+            if not self.move_card(card_id, player, "hand", player, "battlefield",
+                                  cause="opening_hand"):
+                logging.warning(f"Could not put opening-hand card {card_id} onto the battlefield.")
+                return False
+            remaining = self._collect_opening_hand_cards(player)
+        if remaining:
+            ctx["options"] = remaining
+            ctx["source_id"] = remaining[0]
+            return True
+        self.choice_context = None
+        queue = getattr(self, '_opening_hand_players', []) or []
+        if queue:
+            self._begin_opening_hand_choice(queue.pop(0))
+            return True
+        self._begin_first_turn()
+        return True
+
+    def _begin_first_turn(self):
+            """Start Turn 1 after mulligans (and any begin-game choices)."""
             # --- Set State for Start of Game ---
             self.turn = 1 # Officially Turn 1
             self.phase = self.PHASE_UNTAP # Start with Untap

@@ -179,23 +179,96 @@ characteristics, and a creature card can turn face up for its mana cost without
 entering again. Turn Inside Out creates a one-shot, same-turn death trigger for
 only its chosen creature.
 
+## Closed In Round 7.19
+
+The five recommended items are implemented and scenario-guarded:
+
+Herd Migration (1) counts distinct basic land types for its token effect
+through the shared dynamic-quantity counter; duals contribute each printed
+type. The same scenario forced a general repair: printed activated-ability
+lines no longer execute during spell resolution.
+
+Fear of Missing Out (4) fires its attack trigger on the first attack each
+turn, evaluates Delirium as distinct card types in its controller's
+graveyard, pauses for its untap target, and inserts one additional combat
+phase that the phase machinery consumes instead of the postcombat main. This
+round also brought attack triggers to life engine-wide: they previously had
+no caller, and per-turn attacker tracking was never written.
+
+Leyline of Resonance (4) exposes a begin-game battlefield choice to each
+player after mulligan decisions, starting player first; declining keeps the
+card in hand, and the first turn is deferred until every placement resolves.
+Its separate copy-trigger condition was completed in Round 7.21.
+
+Screaming Nemesis (4) reflects exactly the damage it was dealt to any other
+target (the source is excluded from legal choices), and a player damaged this
+way can't gain life for the rest of the game through either the general
+life-gain entry or lifelink.
+
+Anoint with Affliction (4) targets any creature and checks its exile
+condition at resolution: mana value 3 or less, or any mana value when the
+target's controller has three or more poison counters.
+
+## Closed In Round 7.20
+
+Phyrexian Obliterator (4): a dealt-damage trigger class now exists for "a
+source deals damage to this creature", and the damage source's controller
+chooses each of the sacrificed permanents through a mandatory forced-sacrifice
+choice, one immediate sacrifice per pick.
+
+Restless Anchorage (2), Cottage (4), Reef (7), Ridgeline (3): the printed
+self-animation activated abilities produce end-of-turn creature type, subtype,
+colors, keywords, and P/T through the layer system; the animated land is a
+legal attacker; and each land's "whenever this land attacks" rider is
+scenario-verified (Map, Food plus optional graveyard exile, targeted mill,
+pump-and-untap of another target attacking creature).
+
+Sunfall (2): "Exile all creatures. Incubate X" exiles every creature
+atomically and creates a transforming Incubator token with that many +1/+1
+counters; paying {2} transforms it into the 0/0 Phyrexian artifact creature
+that keeps the counters.
+
+Cavern of Souls (3): entering opens a mandatory creature-type choice drawn
+from the controller's own creature subtypes, the restricted "any color" output
+is spendable only on creature spells of the chosen type, and a spell paid with
+it is uncounterable at resolution.
+
+Beza, the Bounding Spring (1): all four opponent comparisons (lands, life,
+creatures, cards in hand) are evaluated independently at resolution, producing
+exactly the Treasure, 4 life, two blue 1/1 Fish, and one draw that apply.
+
 ## Confirmed Gaps
 
 These should make affected card statistics ineligible for harvest until the
 listed behavior is implemented and guarded by scenarios.
 
-| Mechanic or rule object | Copies | Affected cards | Missing behavior |
-| --- | ---: | --- | --- |
-| Domain effect value | 1 | Herd Migration (1) | Use the distinct basic-land-type count for its token effect |
-| Additional combat | 4 | Fear of Missing Out (4) | Untap chosen creature and insert one additional combat phase |
-| Opening-hand replacement | 4 | Leyline of Resonance (4) | Begin-game battlefield choice before normal turn play |
-| Rest-of-game life restriction | 4 | Screaming Nemesis (4) | Persistent player effect preventing future life gain |
-| Corrupted | 4 | Anoint with Affliction (4) | Opponent poison threshold and conditional exile targeting |
-| Forced permanent sacrifice count | 4 | Phyrexian Obliterator (4) | Damage-source controller chooses and sacrifices N permanents |
-| Incubate | 2 | Sunfall (2) | Incubator token, X counters, and paid transform ability |
-| Saddle | 1 | Caustic Bronco (1) | Creature-tapping cost, saddled state, and attack rider |
-| Multi-condition ETB | 1 | Beza, the Bounding Spring (1) | Four independent comparisons and conditional effects |
-| Chosen creature type mana | 3 | Cavern of Souls (3) | As-enters type choice, type-restricted spend, uncounterable rider |
+None in the current eight-deck sample after Round 7.21.
+
+## Closed In Round 7.21
+
+The remaining seven-part Tier 2 batch is implemented and guarded.
+
+- Caustic Bronco exposes Saddle at sorcery speed, lets the policy select any
+  number of other untapped creatures, requires total power 3, taps the chosen
+  creatures together, and clears the saddled designation during cleanup.
+- Duress exposes only noncreature, nonland cards from the targeted opponent's
+  revealed hand. Oildeep Gearhulk exposes every card, permits declining, and
+  performs the chosen discard followed by the replacement draw.
+- Cacophony Scamp exposes its sacrifice as an optional policy decision and
+  proliferates only after the sacrifice succeeds.
+- Leyline of Resonance recognizes CAST_SPELL events only for an instant or
+  sorcery with exactly one target, where that target is a creature controlled
+  by the caster. Optimistic Scavenger now recognizes both friendly enchantment
+  entry and ROOM_FULLY_UNLOCKED events.
+- Patchwork Beastie's Delirium restriction is enforced by attack and block
+  legality using distinct graveyard card types.
+- The real-card path sweep covers Kaito's full Ninjutsu cost, both Exhaust
+  cards, both Impending Overlords, both Offspring cards, Burst Lightning's
+  Kicker, Pest Control's Cycling, Three Steps Ahead's Spree modes, and
+  Bushwhack's Fight route. It found and fixed truncated multi-symbol Ninjutsu
+  costs and impossible Offspring/Impending cost regex boundaries.
+- `EffectFactory.register_card_override()` provides the exact-name,
+  hand-written-effect escape hatch before generic parsing.
 
 ## High-Risk Partial Support
 
@@ -205,36 +278,19 @@ trusted.
 
 | Mechanic or behavior | Copies | Cards or concern |
 | --- | ---: | --- |
-| Delirium | 8 | Patchwork Beastie (4), Fear of Missing Out (4): four-card-type threshold and conditional effects |
-| Eerie | 4 | Optimistic Scavenger (4): enchantment entry and fully-unlocked Room event |
-| Damage reflexive/optional branches | 8 | Screaming Nemesis (4), Cacophony Scamp (4) |
-| Hand-information choices | 8 | Duress (4), Oildeep Gearhulk (4): chooser, visibility, and legal-card filtering |
-| Restless-land animation and attack riders | 16 | Anchorage (2), Cottage (4), Reef (7), Ridgeline (3) |
+| Treasure sacrifice-for-mana activation | 1 | Beza's Treasure token carries its printed text but spending it is unverified |
 
 ## Implemented Paths To Verify With Real Cards
 
 The engine has dedicated paths, and some have generic scenario coverage, but
 each sample card's complete text still needs a card-specific scenario:
 
-- Ninjutsu: Kaito, Bane of Nightmares (9)
-- Exhaust: Afterburner Expert (4), Draconautics Engineer (4)
-- Impending: Overlord of the Hauntwoods (4), Overlord of the Mistmoors (3)
-- Offspring: Manifold Mouse (4), Pawpatch Recruit (2)
-- Kicker: Burst Lightning (4)
-- Proliferate: Cacophony Scamp (4)
-- Cycling: Pest Control (2)
-- Spree: Three Steps Ahead (1)
-- Fight: Bushwhack (4)
+Round 7.21 added an exact-name mechanic-entry contract for every card formerly
+listed here. Future deeper scenarios should continue to expand resolution
+branches, but these cards no longer rely on wholly unproved routing.
 
 ## Recommended Order
 
-1. Herd Migration's Domain effect value, because the shared distinct-basic-land-
-   type counter already exists and only its token effect still needs to consume it.
-2. Fear of Missing Out's additional combat, because all 4 copies need both the
-   chosen-creature untap and a real inserted combat phase.
-3. Leyline of Resonance's opening-hand replacement, because all 4 copies need a
-   pre-turn battlefield choice rather than being evaluated as ordinary casts.
-4. Screaming Nemesis's rest-of-game life restriction, because all 4 copies can
-   otherwise produce seriously misleading damage and recovery statistics.
-5. Anoint with Affliction's Corrupted branch, because all 4 copies need the
-   opponent-poison threshold and its broader conditional exile targeting.
+1. Verify Beza's Treasure sacrifice-for-mana activation end to end.
+2. Run harvest fixtures and rank any new manifest entries by observed count.
+3. Begin the Tier 3 hidden-information and self-play audits.

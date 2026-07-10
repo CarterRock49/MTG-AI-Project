@@ -993,7 +993,7 @@ class AbilityHandler:
         # --- 0. Skip likely Replacement Effects / Non-functional clauses ---
         # ... (patterns remain the same) ...
         replacement_or_non_ability_patterns = [
-            r"^as\s+.*\s+enters\sthe\sbattlefield",
+            r"^as\s+.*\s+enters\b",
             r"^if.*?would.*?instead",
             r"^if\s+a\s+source\s+would\s+deal\s+damage\s+to.*?prevent",
             r"^\s*domain\b", r"^\s*as an additional cost", r"^\s*collect evidence\s+\d+",
@@ -1090,7 +1090,7 @@ class AbilityHandler:
         is_likely_triggered = False
         trigger_match = re.match(r'^\s*(When|Whenever|At\sthe\sbeginning\sof)\b', clause_text.strip(), re.IGNORECASE)
         etb_match = re.match(r"^\s*(?:(?:this|that)\s+(?:permanent|creature)\s+)?enters?\s+the\s+battlefield\b", text_lower_stripped, re.IGNORECASE)
-        triggering_keywords_at_start = ['Valiant', 'Eerie', 'Prowess', 'Riot']
+        triggering_keywords_at_start = ['Valiant', 'Eerie', 'Prowess', 'Riot', 'Delirium']
         keyword_trigger_match = re.match(rf"^\s*({'|'.join(triggering_keywords_at_start)})\s*[—\u2014-]?\s*(?:When|Whenever|At)\b", clause_text.strip(), re.IGNORECASE)
 
         if trigger_match or etb_match or keyword_trigger_match:
@@ -1692,6 +1692,7 @@ class AbilityHandler:
         # Add game state and event type to context for condition checks
         context['game_state'] = gs
         context['event_type'] = event_type
+        context.setdefault('event_controller', context.get('controller'))
 
         event_card = gs._safe_get_card(event_origin_card_id)
         context['event_card_id'] = event_origin_card_id
@@ -1865,8 +1866,13 @@ class AbilityHandler:
                     # Pay cost
                     paid = self.game_state.mana_system.pay_mana_cost(controller, parsed_cost)
                     if paid:
-                        # Add to stack
-                        self.game_state.add_to_stack("ABILITY", card_id, controller)
+                        # Add to stack WITH the ability object: resolution needs
+                        # it (an empty context made every generic activation
+                        # resolve to nothing -- found by Restless-land animation).
+                        self.game_state.add_to_stack("ABILITY", card_id, controller, {
+                            "ability": ability,
+                            "effect_text": getattr(ability, 'effect', '') or getattr(ability, 'effect_text', ''),
+                        })
                         logging.debug(f"Activated ability {ability_index} for {self.game_state._safe_get_card(card_id).name}")
                         return True
             else:
@@ -1874,8 +1880,11 @@ class AbilityHandler:
                 if ability.can_activate(self.game_state, controller):
                     cost_paid = ability.pay_cost(self.game_state, controller)
                     if cost_paid:
-                        # Add to stack
-                        self.game_state.add_to_stack("ABILITY", card_id, controller)
+                        # Add to stack (same context contract as above).
+                        self.game_state.add_to_stack("ABILITY", card_id, controller, {
+                            "ability": ability,
+                            "effect_text": getattr(ability, 'effect', '') or getattr(ability, 'effect_text', ''),
+                        })
                         logging.debug(f"Activated ability {ability_index} for {self.game_state._safe_get_card(card_id).name}")
                         return True
                         
@@ -2349,7 +2358,7 @@ class AbilityHandler:
             costs.append(f"{{{cost}}}" if cost.isdigit() else cost)
         return costs
             
-    def handle_attack_triggers(self, attacker_id):
+    def handle_attack_triggers(self, attacker_id, extra_context=None):
         """Handle abilities triggering when a specific creature attacks."""
         gs = self.game_state
         card = gs._safe_get_card(attacker_id)
@@ -2360,6 +2369,8 @@ class AbilityHandler:
 
         # Prepare base context
         context = {"attacker_id": attacker_id, "controller": controller}
+        if extra_context:
+            context.update(extra_context)
 
         # 1. Abilities on the attacker itself ("When this creature attacks...")
         self.check_abilities(attacker_id, "ATTACKS", context) # Event originates from the attacker

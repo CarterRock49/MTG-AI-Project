@@ -330,6 +330,13 @@ class CombatActionHandler:
         if not card or not player or card_id not in player.get("battlefield", []): return False
         if 'creature' not in getattr(card, 'card_types', []): return False
 
+        if "can't attack or block unless there are four or more card types" in getattr(card, 'oracle_text', '').lower():
+            types_found = {str(card_type).lower() for grave_id in player.get('graveyard', [])
+                           for card_type in getattr(gs._safe_get_card(grave_id), 'card_types', [])}
+            types_found.difference_update({'token', 'unknown'})
+            if len(types_found) < 4:
+                return False
+
         # Tapped check
         if card_id in player.get("tapped_permanents", set()): return False
 
@@ -745,6 +752,20 @@ class CombatActionHandler:
         if gs.phase != gs.PHASE_DECLARE_ATTACKERS:
              logging.warning(f"Tried to end Declare Attackers in phase {gs.phase}")
              return False
+
+        # CR 508.1: locking in attackers is when attack triggers fire. This
+        # also populates gs.attackers_this_turn, which was initialized and
+        # read (Boast legality, dead-creature observations) but never written
+        # before July 2026 -- attack triggers themselves had no caller either.
+        if not hasattr(gs, 'attackers_this_turn') or gs.attackers_this_turn is None:
+            gs.attackers_this_turn = set()
+        for attacker_id in list(getattr(gs, 'current_attackers', [])):
+            first_attack = attacker_id not in gs.attackers_this_turn
+            gs.attackers_this_turn.add(attacker_id)
+            if hasattr(gs, 'ability_handler') and gs.ability_handler:
+                gs.ability_handler.handle_attack_triggers(
+                    attacker_id, extra_context={"first_attack_this_turn": first_attack})
+
         gs.phase = gs.PHASE_DECLARE_BLOCKERS
         gs.priority_player = gs._get_non_active_player() # Priority to blocker
         gs.priority_pass_count = 0
@@ -1147,7 +1168,7 @@ class CombatActionHandler:
 
     def _get_ninjutsu_cost_str(self, card):
         if card and hasattr(card, 'oracle_text'):
-             match = re.search(r"ninjutsu\s*(?:-|—)?\s*(\{.*?\})", card.oracle_text.lower())
+             match = re.search(r"ninjutsu\s*(?:-|—)?\s*((?:\{[^}]+\})+)", card.oracle_text.lower())
              if match: return match.group(1)
              # Ninjutsu usually requires mana cost, less likely just digits
         return None
@@ -1171,6 +1192,15 @@ class CombatActionHandler:
     def _can_block(self, blocker_id, attacker_id):
         """Check if blocker_id can legally block attacker_id. Uses TargetingSystem."""
         gs = self.game_state
+        blocker = gs._safe_get_card(blocker_id)
+        blocker_controller = gs.get_card_controller(blocker_id)
+        if (blocker and blocker_controller
+                and "can't attack or block unless there are four or more card types" in getattr(blocker, 'oracle_text', '').lower()):
+            types_found = {str(card_type).lower() for grave_id in blocker_controller.get('graveyard', [])
+                           for card_type in getattr(gs._safe_get_card(grave_id), 'card_types', [])}
+            types_found.difference_update({'token', 'unknown'})
+            if len(types_found) < 4:
+                return False
         # --- Check Phasing Status ---
         if hasattr(gs, 'phased_out'):
             if blocker_id in gs.phased_out:

@@ -585,6 +585,68 @@ class ActionSpaceMixin:
                         context={"hand_idx": hand_index},
                     )
 
+            # CR 103.6c: begin-game battlefield placements from the opening
+            # hand (Leylines). PASS declines the player's remaining cards.
+            elif choice_type == "opening_hand":
+                for option_index, card_id in enumerate(context.get("options", [])[:10]):
+                    card = gs._safe_get_card(card_id)
+                    card_name = getattr(card, "name", card_id)
+                    set_valid_action(
+                        353 + option_index,
+                        f"BEGIN_GAME_ON_BATTLEFIELD {card_name}",
+                        context={"option_index": option_index},
+                    )
+                set_valid_action(11, "DECLINE_OPENING_HAND_PLACEMENT")
+
+            # Forced sacrifice (Phyrexian Obliterator): the player picks each
+            # of their own permanents to sacrifice; the choice is mandatory.
+            elif choice_type == "forced_sacrifice":
+                for option_index, card_id in enumerate(player.get("battlefield", [])[:10]):
+                    card = gs._safe_get_card(card_id)
+                    card_name = getattr(card, "name", card_id)
+                    set_valid_action(
+                        353 + option_index,
+                        f"FORCED_SACRIFICE {card_name}",
+                        context={"option_index": option_index},
+                    )
+
+            elif choice_type == "saddle":
+                selected = set(context.get("selected", []))
+                for option_index, card_id in enumerate(context.get("options", [])[:10]):
+                    if card_id in selected:
+                        continue
+                    card = gs._safe_get_card(card_id)
+                    set_valid_action(353 + option_index,
+                                     f"SADDLE_TAP {getattr(card, 'name', card_id)}",
+                                     context={"option_index": option_index})
+                if context.get("selected_power", 0) >= context.get("required_power", 0):
+                    set_valid_action(11, "FINISH_SADDLE")
+
+            elif choice_type == "hand_selection":
+                for option_index, card_id in enumerate(context.get("options", [])[:10]):
+                    card = gs._safe_get_card(card_id)
+                    set_valid_action(353 + option_index,
+                                     f"CHOOSE_HAND_CARD {getattr(card, 'name', card_id)}",
+                                     context={"option_index": option_index})
+                if context.get('optional'):
+                    set_valid_action(11, "DECLINE_HAND_CARD")
+
+            elif choice_type == "optional_sacrifice_proliferate":
+                source_id = context.get('source_id')
+                if source_id in player.get('battlefield', []):
+                    set_valid_action(353, "SACRIFICE_AND_PROLIFERATE",
+                                     context={"option_index": 0})
+                set_valid_action(11, "DECLINE_SACRIFICE")
+
+            # "As enters, choose a creature type" (Cavern of Souls); mandatory.
+            elif choice_type == "as_enters_creature_type":
+                for option_index, type_name in enumerate(context.get("options", [])[:10]):
+                    set_valid_action(
+                        353 + option_index,
+                        f"CHOOSE_CREATURE_TYPE {type_name}",
+                        context={"option_index": option_index},
+                    )
+
             # Non-target choices made while paying a spell's casting cost.
             elif choice_type == "mockingbird_copy":
                 for option_index, card_id in enumerate(context.get("options", [])[:10]):
@@ -1720,6 +1782,24 @@ class ActionSpaceMixin:
     def _add_specific_mechanics_actions(self, player, valid_actions, set_valid_action, is_sorcery_speed):
         """Add actions for specialized MTG mechanics, considering timing."""
         gs = self.game_state
+
+        if is_sorcery_speed:
+            for battlefield_index, card_id in enumerate(player.get("battlefield", [])[:20]):
+                card = gs._safe_get_card(card_id)
+                match = re.search(r"\bsaddle\s+(\d+)", getattr(card, "oracle_text", ""), re.IGNORECASE) if card else None
+                if not match:
+                    continue
+                candidates = [other_id for other_id in player.get("battlefield", [])[:10]
+                              if other_id != card_id and other_id not in player.get("tapped_permanents", set())
+                              and gs._is_creature(other_id)]
+                def saddle_power(cid):
+                    try:
+                        return max(0, int(getattr(gs._safe_get_card(cid), "power", 0) or 0))
+                    except (TypeError, ValueError):
+                        return 0
+                if sum(saddle_power(cid) for cid in candidates) >= int(match.group(1)):
+                    set_valid_action(478, f"SADDLE {card.name}", context={"battlefield_idx": battlefield_index})
+                    break
 
         # --- Specialize (reuses per-permanent Transform actions 160-179) ---
         if is_sorcery_speed:

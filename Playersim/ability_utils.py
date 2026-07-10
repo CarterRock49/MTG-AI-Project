@@ -239,6 +239,25 @@ class EffectFactory:
     NOTE: This parser is basic and covers common cases. Many MTG effects have
     complex conditions, targets, and variations not captured here.
     """
+    _CARD_OVERRIDES = {}
+
+    @classmethod
+    def register_card_override(cls, card_name, factory):
+        """Register a hand-written effect factory for one exact card name.
+
+        ``factory`` receives ``(effect_text, targets, source_name)`` and must
+        return an iterable of AbilityEffect objects.  Overrides are consulted
+        before generic parsing, which makes this the explicit escape hatch for
+        cards whose linked or conditional instructions cannot be represented
+        safely by regexes.
+        """
+        if not card_name or not callable(factory):
+            raise ValueError("card override requires an exact name and callable")
+        cls._CARD_OVERRIDES[str(card_name).strip().casefold()] = factory
+
+    @classmethod
+    def unregister_card_override(cls, card_name):
+        return cls._CARD_OVERRIDES.pop(str(card_name).strip().casefold(), None)
     @staticmethod
     def _extract_target_description(effect_text):
         """Helper to find the most specific target description."""
@@ -340,7 +359,47 @@ class EffectFactory:
         """
         if not effect_text: return []
 
+        override = EffectFactory._CARD_OVERRIDES.get(
+            str(source_name or "").strip().casefold())
+        if override is not None:
+            result = override(effect_text, targets, source_name)
+            return list(result or [])
+
+        source_key = str(source_name or "").strip().casefold()
+        if source_key == "duress":
+            from .ability_types import HandSelectionEffect
+            return [HandSelectionEffect(noncreature_nonland=True)]
+        if source_key == "oildeep gearhulk" and "look at target player's hand" in effect_text.lower():
+            from .ability_types import HandSelectionEffect
+            return [HandSelectionEffect(optional=True, rummage=True)]
+        if source_key == "cacophony scamp" and "may sacrifice" in effect_text.lower():
+            from .ability_types import OptionalSacrificeProliferateEffect
+            return [OptionalSacrificeProliferateEffect()]
+
         effects = []
+
+        # CR 608.2: resolving a spell performs only its spell instructions.
+        # Printed activated abilities ("<costs>: <effect>") function from the
+        # battlefield or other zones, never during resolution, so drop those
+        # lines before clause splitting (July 2026, found by Herd Migration:
+        # its "{1}{G}, Discard this card: Search..." line resolved alongside
+        # the Domain token effect, discarding and gaining life on cast).
+        if "\n" in effect_text and ":" in effect_text:
+            kept_lines = []
+            for line in effect_text.split("\n"):
+                cleaned = re.sub(r'\([^()]*\)', ' ', line)
+                cleaned = re.sub(r'"[^"]*"', ' ', cleaned)
+                colon_idx = cleaned.find(':')
+                if colon_idx != -1:
+                    prefix = cleaned[:colon_idx]
+                    if '.' not in prefix and re.search(
+                            r"\{[^}]+\}|\bdiscard this card\b|\bsacrifice\b|\bpay \d+ life\b",
+                            prefix, re.IGNORECASE):
+                        continue
+                kept_lines.append(line)
+            effect_text = "\n".join(kept_lines)
+            if not effect_text.strip(". \n"):
+                return []
 
         # Sample-card compound instructions whose parts share information or
         # must remain atomic at resolution.
@@ -356,6 +415,89 @@ class EffectFactory:
                                   effect_text, re.IGNORECASE))):
             from .ability_types import TurnInsideOutEffect
             return [TurnInsideOutEffect()]
+
+        # "Exile target creature if it has mana value N or less", optionally
+        # with the Corrupted override sentence (Anoint with Affliction). The
+        # sentences share one target and one resolution decision, so they must
+        # not be split into independent clauses.
+        anoint_match = re.search(
+            r"exile target creature if it has mana value (\d+) or less",
+            effect_text, re.IGNORECASE)
+        if anoint_match:
+            from .ability_types import ConditionalExileEffect
+            corrupted_match = re.search(
+                r"corrupted\s*[–—-]?\s*exile that creature instead if its "
+                r"controller has (\w+) or more poison counters",
+                effect_text, re.IGNORECASE)
+            threshold = None
+            if corrupted_match:
+                threshold = text_to_number(corrupted_match.group(1))
+                if not isinstance(threshold, int) or threshold <= 0:
+                    threshold = 3
+            return [ConditionalExileEffect(
+                max_mana_value=int(anoint_match.group(1)),
+                corrupted_poison_threshold=threshold)]
+
+        # "...deals that much damage to any other target" with Screaming
+        # Nemesis's life-gain shutoff rider. The rider modifies the damage
+        # sentence, so both stay one atomic effect.
+        if re.search(r"deals that much damage to any other target",
+                     effect_text, re.IGNORECASE):
+            from .ability_types import ReflectDamageEffect
+            rider = bool(re.search(r"can't gain life for the rest of the game",
+                                   effect_text, re.IGNORECASE))
+            return [ReflectDamageEffect(no_life_gain_rider=rider)]
+
+        # "that source's controller sacrifices that many permanents"
+        # (Phyrexian Obliterator): the count and paying player come from the
+        # triggering damage event.
+        if re.search(r"that source's controller sacrifices that many permanents",
+                     effect_text, re.IGNORECASE):
+            from .ability_types import SacrificeThatManyEffect
+            return [SacrificeThatManyEffect()]
+
+        # "Exile all creatures. Incubate X, where X is the number of creatures
+        # exiled this way." (Sunfall): the incubated counter count depends on
+        # the exile result, so both sentences are one atomic effect.
+        if (re.search(r"exile all creatures", effect_text, re.IGNORECASE)
+                and re.search(r"\bincubate x\b", effect_text, re.IGNORECASE)):
+            from .ability_types import MassExileIncubateEffect
+            return [MassExileIncubateEffect()]
+
+        # Beza, the Bounding Spring: four independent opponent-comparison
+        # branches evaluated at one resolution.
+        if (re.search(r"create a treasure token if an opponent controls more lands than you",
+                      effect_text, re.IGNORECASE)
+                and re.search(r"gain 4 life if an opponent has more life than you",
+                              effect_text, re.IGNORECASE)):
+            from .ability_types import BezaEffect
+            return [BezaEffect()]
+
+        # Restless-land style self animation: "(Until end of turn, )this land
+        # becomes a N/N <colors> <Subtype> creature (with <keywords>)(until end
+        # of turn). It's still a land." Commas inside would be mangled by the
+        # generic splitter, so parse the whole sentence here.
+        self_animate = re.search(
+            r"this land becomes a (\d+)/(\d+)\s+([^.]*?)\bcreature(?:s)?\b([^.]*)",
+            effect_text, re.IGNORECASE)
+        if self_animate:
+            power, toughness = int(self_animate.group(1)), int(self_animate.group(2))
+            descriptor = self_animate.group(3).strip().lower()
+            trailer = self_animate.group(4).strip().lower()
+            known_colors = ["white", "blue", "black", "red", "green"]
+            colors = [c for c in known_colors if re.search(rf"\b{c}\b", descriptor)]
+            subtype_words = [
+                w for w in re.split(r"[\s,]+", descriptor)
+                if w and w not in known_colors and w != "and"]
+            kw_match = re.search(r"with ([\w\s,]+?)(?:\s+until end of turn)?$", trailer)
+            keywords = []
+            if kw_match:
+                keywords = [k.strip() for k in kw_match.group(1).split(",") if k.strip()]
+            from .ability_types import AnimateLandEffect
+            return [AnimateLandEffect(
+                power=power, toughness=toughness, duration="end_of_turn",
+                colors=colors, subtypes=subtype_words, keywords=keywords,
+                self_target=True)]
 
         if ((source_name or "").lower() == "torch the tower"
                 or (re.search(r"torch the tower deals 2 damage", effect_text,
@@ -513,6 +655,7 @@ class EffectFactory:
                          r'\s+and\s+(?:then\s+)?|\s+then\s+|'
                          r'(?<=[.;])\s+then\s+|'
                          r'(?<=\.)\s+(?=(?i:put\b.*\bcounters?\s+on\s+(?:it|that\b)))|'
+                         r'(?<=\.)\s+(?=(?i:untap\s+(?:it|that)\b))|'
                          r'(?<=\.)\s+(?=(?i:create\s+(?:a|an|one)\s+(?:monster|wicked)\s+role token\b))|'
                          r'\s*—\s*|\s*\u2014\s*')
         split_text = re.sub(r'\s*\([^()]*\)\s*', ' ', effect_text).strip('. ')
@@ -667,8 +810,8 @@ class EffectFactory:
                  elif re.search(r"\b(all|each)\s+planeswalkers?\b", clause_lower): target_type = "all planeswalkers"
                  created_effect = DestroyEffect(target_type=target_type)
 
-            # Exile
-            elif re.search(r"\b(exile(?:s)?)\b\s+(target|all|each)", clause_lower):
+            # Exile ("exile target X", "exile up to one target X", "exile all X")
+            elif re.search(r"\b(exile(?:s)?)\b\s+(?:up to (?:one|two|three|\d+)\s+)?(target|all|each)", clause_lower):
                  target_desc = EffectFactory._extract_target_description(clause_lower) or "permanent"
                  target_type = "permanent"
                  norm_target_desc = target_desc.replace('-',' ')
@@ -727,6 +870,14 @@ class EffectFactory:
                  from .ability_types import ExploreEffect
                  created_effect = ExploreEffect()
 
+            # Additional combat phase (CR 505.5a): "After this phase, there is
+            # an additional combat phase." The comma splitter usually severs
+            # the sentence, so match the surviving core phrase.
+            elif re.search(r"\ban additional combat phase\b", clause_lower) or \
+                    re.search(r"\bthere is an additional combat\b", clause_lower):
+                from .ability_types import AdditionalCombatPhaseEffect
+                created_effect = AdditionalCombatPhaseEffect()
+
             # Create Token
             elif re.search(r"\b(create(?:s)?)\b", clause_lower) and "token" in clause_lower:
                  count_match = re.search(r"create(?:s)?\s+(a|an|one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+", clause_lower)
@@ -777,9 +928,15 @@ class EffectFactory:
 
                  # Determine final type line components
                  is_legendary = "legendary" in clause_lower
+                 # "for each X" scales the token count at resolution (Domain
+                 # counts, permanents you control, etc.).
+                 count_expr = None
+                 for_each_match = re.search(r"tokens?\s+for each\s+(.+?)(?:\.|,|$)", clause_lower)
+                 if for_each_match:
+                     count_expr = for_each_match.group(1).strip()
                  # ... construct full token_data dict for the game state ...
                  # Using simplified CreateTokenEffect for now
-                 created_effect = CreateTokenEffect(power, toughness, token_name_type, count, keywords, colors=colors, is_legendary=is_legendary)
+                 created_effect = CreateTokenEffect(power, toughness, token_name_type, count, keywords, colors=colors, is_legendary=is_legendary, count_expr=count_expr)
 
 
             # Reanimation: "return ... from (your/a) graveyard to the battlefield".
@@ -905,9 +1062,12 @@ class EffectFactory:
                     duration = "end_of_turn" if "until end of turn" in clause_lower else "permanent"
                     target_desc = EffectFactory._extract_target_description(clause_lower) or "creatures you control"
                     target_type = "creature" # Default
-                    # Refine target_type based on target_desc
+                    # Refine target_type based on target_desc (also check the
+                    # clause itself: adjectives like "attacking" make the
+                    # extracted description drop the "creature" noun).
                     if ("target creature" in target_desc
-                            or ("target" in clause_lower and "creature" in target_desc)):
+                            or ("target" in clause_lower and "creature" in target_desc)
+                            or re.search(r"\btarget\s+(?:[\w-]+\s+){0,3}creature\b", clause_lower)):
                         target_type = "target creature"
                     elif "creatures you control" in target_desc: target_type = "creatures you control"
                     elif "each creature" in target_desc and "target" not in clause_lower: target_type = "each creature" # Target all
@@ -980,7 +1140,7 @@ class EffectFactory:
                 created_effect = UntapEffect(target_type=tt, scope="all_yours")
 
             # Untap
-            elif re.search(r"\b(untap(?:s)?)\b\s+target", clause_lower):
+            elif re.search(r"\b(untap(?:s)?)\b\s+(?:target|that|it\b)", clause_lower):
                  target_desc = EffectFactory._extract_target_description(clause_lower) or "permanent"
                  target_type = "permanent" # Refine based on desc
                  if "creature" in target_desc: target_type = "creature"

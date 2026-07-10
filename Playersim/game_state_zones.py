@@ -7,6 +7,7 @@ all state lives on GameState itself, which composes every mixin.
 import random
 import logging
 import copy
+import re
 from collections import defaultdict
 
 
@@ -603,6 +604,18 @@ class GameStateZonesMixin:
                 logging.debug(f"Recorded offspring cost payment context for {card_name} ({card_id}) entering battlefield.")
             # --- End Offspring Recording ---
 
+            # "As this land enters, choose a creature type" (Cavern of Souls).
+            # Detected directly: the replacement-effect scanner only registers
+            # at battlefield entry, AFTER the ENTER replacements already ran,
+            # so a first entry could never see the choice -- and current
+            # Scryfall wording drops "the battlefield" entirely.
+            if (card and not event_context.get('as_enters_choice_needed')
+                    and re.search(
+                        r"as this (?:land|permanent|creature) enters(?: the battlefield)?, choose a creature type",
+                        (getattr(card, 'oracle_text', '') or '').lower())):
+                event_context['as_enters_choice_needed'] = 'creature_type'
+                event_context['as_enters_source_id'] = card_id
+
             # Handle "As enters" choice setup (must happen BEFORE ETB triggers)
             if event_context.get('as_enters_choice_needed'):
                  logging.debug(f"Entering CHOICE phase for 'As {card_name} enters...'")
@@ -615,6 +628,9 @@ class GameStateZonesMixin:
                      'source_id': event_context.get('as_enters_source_id', card_id),
                      'resolved': False
                  }
+                 if event_context['as_enters_choice_needed'] == 'creature_type':
+                     self.choice_context['options'] = \
+                         self._creature_type_choice_options(final_destination_player)
                  self.priority_player = final_destination_player
                  self.priority_pass_count = 0
                  logging.info(f"'As enters' choice required for {card_name}. Waiting.")

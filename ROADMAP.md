@@ -16,7 +16,7 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 8/8, 6/6, 187/187).
+   every delivery (currently 8/8, 6/6, 211/211).
 2. **Zero known stats-corrupting bugs.** The silent-bug catalog (appendix)
    is closed; every fixed bug has a permanent guard scenario.
 3. **Quantified card coverage.** For each target format's card pool, the
@@ -43,7 +43,7 @@ The project is complete when all of the following hold:
 - Tier 1 (rules correctness): ✅ complete — all seven items plus the P1
   placeholder triage delivered; see appendix for the bug catalog.
 - Test gates: smoke 8/8 (fixture decks now exercise triggers every episode),
-  training 6/6, scenarios 187/187 (grown from 12).
+  training 6/6, scenarios 211/211 (grown from 12).
 - **Stats collected before July 2026 are unusable** (wrong player, wrong
   winner, fictional play turns, cosmetic first strike, compounding P/T,
   dead replacement system). Wipe and re-harvest after the current engine
@@ -472,22 +472,113 @@ Remaining Tier 2 work:
   handlers, constrain named self-ETB triggers to their own object, and let
   replacement conditions inspect live zone events without deep-copying thread
   locks. Regression-checked 187/187 scenarios after the round.
-  **Coverage status:** rounds 1-7.18 have closed ~80
+  **Round 7.19 (July 2026)** completed the audit's five recommended items in
+  one scenario-first pass:
+  * **Herd Migration's Domain value** - "for each basic land type among lands
+    you control" resolves through a shared count_dynamic_quantity branch that
+    counts DISTINCT basic land types (duals contribute each printed type), and
+    CreateTokenEffect gained the same count_expr path variable draw/life/pump
+    already use. The scenario also exposed that resolving any spell executed
+    its printed activated-ability lines: Herd Migration's "{1}{G}, Discard
+    this card: Search..." line discarded a card and gained 3 life on cast.
+    Activated-ability lines are now stripped from spell resolution (CR 608.2).
+  * **Fear of Missing Out's additional combat** - attack triggers now actually
+    fire: handle_attack_triggers existed but had NO callers, and
+    gs.attackers_this_turn was initialized and read (Boast legality, the
+    dead-attacker observations) but never written. Declaring attackers done
+    now fires each attacker's triggers with a first-attack-this-turn flag,
+    "this creature attacks" gates to the attacker itself, "for the first time
+    each turn" gates on the flag, and the Delirium intervening-if counts
+    distinct card types in the graveyard. "After this phase, there is an
+    additional combat phase" registers an extra combat that _advance_phase
+    consumes instead of the postcombat main (CR 505.5a).
+  * **Leyline of Resonance's opening hand** - after the last mulligan
+    decision, each player with a "begin the game with it on the battlefield"
+    card gets a real begin-game choice (starting player first, CR 103.6c),
+    exposed through PHASE_CHOOSE actions 353-362 with PASS declining; the
+    first turn is deferred until every placement resolves. The scripted
+    opponent places its cards (first-legal-action policy).
+  * **Screaming Nemesis's life restriction** - a DAMAGED trigger event class
+    now exists ("is dealt damage" text never matched any event before, so
+    enrage-style triggers were dead). The reflected damage reads "that much"
+    from the trigger context, "any other target" excludes the source from
+    legal targets, and a player dealt damage this way gets a rest-of-game
+    cant_gain_life flag enforced by both gain_life and lifelink.
+  * **Anoint with Affliction's Corrupted branch** - a ConditionalExileEffect
+    checks "mana value 3 or less" at RESOLUTION (any creature is targetable),
+    overridden when the target's controller has three or more poison
+    counters. Both sentences stay one atomic effect.
+  Shared repairs found by these scenarios: token subtypes outside the loaded
+  pool's feature vocabulary were silently dropped (a "Beast token" had no
+  Beast subtype unless some loaded card was a Beast), and mixed
+  player/permanent target sets crashed SELECT_TARGET's plain sorted() with
+  int-vs-str TypeError (latent for every "any target" burn spell).
+  Regression-checked 194/194 scenarios after the round.
+  **Round 7.20 (July 2026)** completed the next five support-audit items:
+  * **Phyrexian Obliterator** - a "a source deals damage to this creature"
+    trigger class routes through DAMAGED events (gated to the damaged object,
+    excluded from source-side DEALS_DAMAGE matching), and the damage source's
+    controller picks each sacrificed permanent through a new mandatory
+    forced_sacrifice choice (actions 353-362, immediate per-pick sacrifice).
+    The old PHASE_SACRIFICE staging machinery remains producer-less.
+  * **Restless lands** - "this land becomes a N/N ... creature" self-animation
+    parses as one atomic effect (P/T, colors, creature subtype, granted
+    keywords, end-of-turn duration, still-a-land) through layers 4/5/6/7b, and
+    all four sample riders work: Map token (Anchorage), Food plus up-to-one
+    graveyard exile (Cottage), targeted four-card mill (Reef), and pump plus
+    untap of another target attacking creature (Ridgeline).
+  * **Sunfall / Incubate** - "Exile all creatures. Incubate X" is one atomic
+    effect: every creature is exiled, and an Incubator token (a transforming
+    DFC) enters with that many +1/+1 counters. Paying {2} transforms it into
+    the 0/0 Phyrexian artifact creature whose counters carry over.
+  * **Cavern of Souls** - "As this land enters, choose a creature type" opens
+    a mandatory agent choice (options: the controller's own creature subtypes
+    by frequency), the chosen type is substituted into the restricted mana's
+    conditional-pool key so only creature spells of that type can spend it,
+    and a cast paid with that mana is marked uncounterable on its stack item,
+    which CounterSpellEffect now respects.
+  * **Beza, the Bounding Spring** - its four independent opponent-comparison
+    branches (lands/Treasure, life/4 life, creatures/two Fish, hand/draw)
+    evaluate individually at resolution; named self-entry gating now also
+    recognizes legendary short names ("When Beza enters" on the full card
+    name), so the trigger no longer fires for every other creature entering.
+  Silent bugs found by these scenarios, each now guarded: generic activated
+  abilities were stacked with an EMPTY context, so every
+  ability_handler.activate_ability resolution did nothing (Boast was doubly
+  dead); generic creature tokens had NO card type unless their parsed name
+  contained the word "creature" (Beast/Fish/Soldier tokens could never
+  attack, block, or be creatures) and colored tokens were always colorless
+  (Card reads WUBRG letters from "color_identity", not the "colors" vector);
+  cast_spell's affordability/payment context omitted the card, so
+  conditional "spend this mana only..." pools were unusable for every cast;
+  and the targeting parser captured state adjectives as the target TYPE
+  ("target attacking creature" parsed as type "attacking" with zero legal
+  targets). Regression-checked 202/202 scenarios after the round.
+  **Coverage status:** rounds 1-7.20 have closed ~90
   effect/mechanic classes across
   removal, bounce, counters, tokens, keywords, sacrifice, reanimation,
   control, mana, library manipulation, variable-count effects, prevention,
   animation, levelers, Adventure, and duplicate-ID zone semantics. Miss rate
   fell 6→13→14→9→10→3 across parser samples before the first-touch sweep moved
   into mechanic subsystems. The sample-deck audit now supersedes speculative
-  subsystem ordering: Domain effect value, additional combat, opening-hand
-  replacement, rest-of-game life restriction, and Corrupted are the next
-  confirmed gaps. Reorder by
-  real manifest counts whenever harvest runs begin.
+  subsystem ordering: after Rounds 7.19-7.20 the last confirmed gap in the
+  audit table is Saddle (Caustic Bronco); the remaining work is the
+  sample-deck High-Risk Partial list and the card-exact mechanic-entry sweep.
+  Beza's Treasure mana activation remains an explicit verification item;
+  otherwise reorder new support work by real manifest counts when harvest
+  runs begin.
 - ◐ **First-touch coverage sweep**: one scenario for every subsystem that has
   never had one (this practice found four phantom methods and three dead
   subsystems; assume more remain in untested corners). Next candidates come
-  from `SAMPLE_DECK_SUPPORT_AUDIT.md`, starting with Herd Migration's Domain
-  effect value and Fear of Missing Out's additional combat.
+  from real manifest counts; the sample-deck audit's only remaining high-risk
+  verification is Beza's Treasure mana activation.
+  **Round 7.21 (July 2026)** closed the requested seven-part sample-deck batch:
+  Saddle, Duress/Oildeep hand choices, Cacophony Scamp's optional sacrifice,
+  Leyline's single-friendly-target cast condition, Patchwork Beastie Delirium,
+  Optimistic Scavenger Eerie events, the remaining real-card mechanic-entry
+  sweep, and the exact-name per-card override registry. The sweep also fixed
+  multi-symbol Ninjutsu cost truncation and unreachable Impending/Offspring
+  cost parsing. Regression-checked 211/211 scenarios.
 
 ## Tier 3 — Training & environment quality
 
@@ -634,6 +725,39 @@ Remaining Tier 2 work:
   supports parsed mana costs and simple "pay N life" costs by auto-paying when
   possible. Sacrifice/discard costs and letting the agent deliberately decline
   payment remain future choice-exposure work.
+- Attack triggers v1 fire only the attacker's own "when(ever) this/... attacks"
+  abilities at declare-attackers-done. "Whenever a creature you control
+  attacks" watchers on OTHER permanents dispatch a CREATURE_ATTACKS event that
+  has no can_trigger mapping yet, so they still never fire.
+- Additional combat v1 inserts combat phases only. Wordings that add "an
+  additional main phase" after the combat (Aggravated Assault style) get the
+  combat but not the extra main phase.
+- Opening-hand placement v1: PASS declines ALL of that player's remaining
+  begin-game cards at once rather than per card, and the scripted opponent
+  always places every eligible card. Leyline of Resonance's second line (the
+  copy trigger on single-friendly-target spells) is NOT yet verified; only the
+  begin-game line is covered by scenarios.
+- Screaming Nemesis v1: the reflected damage picks the first committed target,
+  and the rest-of-game restriction is a player flag consulted by gain_life and
+  lifelink. Effects that add life directly without those entry points would
+  bypass it (the same pre-existing caveat as all life-gain replacements).
+- ConditionalExileEffect (Anoint) is single-target v1 and reads the corrupted
+  threshold from the target controller's poison_counters at resolution.
+- Forced sacrifice (Obliterator) exposes only the first 10 battlefield slots
+  per pick, and when the damage source left play before resolution the payer
+  falls back to the opponent of the trigger's controller.
+- Cavern of Souls v1 stores the chosen type per card ID per player (repeated
+  deck IDs share one choice), offers the top-10 creature subtypes from the
+  controller's own cards as options, and applies the uncounterable rider when
+  any of its restricted mana was spent on the cast. Counterspells can still
+  TARGET the spell; they fizzle at resolution.
+- Treasure tokens carry their printed sacrifice-for-mana text, but that
+  activation is not yet scenario-verified (Beza's Treasure is counted for
+  board state; spending it awaits the mana-ability activation sweep).
+- Restless-land animation registers end-of-turn layer effects; reversion
+  rides on the existing duration cleanup rather than a per-land scenario
+  assertion. The "attacks" riders fire only for the attacker's own trigger
+  (CREATURE_ATTACKS watchers on other permanents still never fire).
 
 ---
 
@@ -653,7 +777,28 @@ separator mangled every condition — no parsed trigger ever fired);
 replacement effects (two latent crashes, exceptions swallowed); mana
 doubling (listened for an event nothing fired); dies-copy tokens (set a flag
 nothing read); phasing (permanents oscillated out of existence, lost their
-abilities permanently, force-untapped).
+abilities permanently, force-untapped); attack triggers
+(handle_attack_triggers had no callers and attackers_this_turn was never
+written — Boast could never activate and the agent's attacked-this-turn
+observations were always zero); dealt-damage triggers ("is dealt damage"
+matched no event class — every enrage-style trigger was dead).
+
+Stats-corrupting, found in Round 7.19: resolving a spell executed its printed
+activated-ability lines (Herd Migration discarded and gained 3 life on cast);
+token subtypes outside the loaded pool's feature vocabulary were dropped
+(tokens missed tribal/anthem interactions); "any target" spells crashed
+target selection when players and permanents shared the valid set
+(int-vs-str sort).
+
+Found in Round 7.20: generic activated abilities stacked with an empty
+context resolved to nothing (every ability_handler.activate_ability call was
+a no-op — Boast was dead twice over); generic creature tokens had no card
+type unless the parsed name contained the literal word "creature", and
+colored tokens were always colorless (Card reads "color_identity" letters,
+not the "colors" vector); cast_spell's context omitted the card, making all
+conditional "spend only" mana unusable for casts; the targeting parser
+captured state adjectives as the target type ("target attacking creature"
+had zero legal targets).
 
 Stats-corrupting: layer base fed back on itself (+1/+1 compounded every
 phase); layer write-back leaked across games via shared card_db objects;

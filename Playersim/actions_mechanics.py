@@ -13,6 +13,33 @@ class MechanicsHandlersMixin:
 
     __slots__ = ()
 
+    def _handle_saddle(self, param, context, **kwargs):
+        gs = self.game_state
+        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        battlefield_idx = (context or {}).get("battlefield_idx")
+        if battlefield_idx is None or not (0 <= battlefield_idx < len(player.get("battlefield", []))):
+            return -0.1, False
+        source_id = player["battlefield"][battlefield_idx]
+        card = gs._safe_get_card(source_id)
+        match = re.search(r"\bsaddle\s+(\d+)", getattr(card, "oracle_text", ""), re.IGNORECASE)
+        if not match or not gs._can_act_at_sorcery_speed(player):
+            return -0.1, False
+        options = [cid for cid in player.get("battlefield", [])[:10]
+                   if cid != source_id and cid not in player.get("tapped_permanents", set())
+                   and gs._is_creature(cid)]
+        def saddle_power(cid):
+            try:
+                return max(0, int(getattr(gs._safe_get_card(cid), "power", 0) or 0))
+            except (TypeError, ValueError):
+                return 0
+        if sum(saddle_power(cid) for cid in options) < int(match.group(1)):
+            return -0.1, False
+        gs.choice_context = {"type": "saddle", "player": player, "source_id": source_id,
+                             "options": options, "selected": [], "selected_power": 0,
+                             "required_power": int(match.group(1)), "resume_phase": gs.phase}
+        gs.phase = gs.PHASE_CHOOSE
+        return 0.0, True
+
     def _handle_level_up_class(self, param, context, **kwargs):
         """Handle leveling up a class card."""
         gs = self.game_state

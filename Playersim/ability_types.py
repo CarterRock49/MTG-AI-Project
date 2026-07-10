@@ -841,6 +841,9 @@ class TriggeredAbility(Ability):
                 r"when(ever)?\s+.*casts?",
                 r"when(ever)?\s+.*play"
             ],
+            "CAST_SPELL": [
+                r"when(ever)?\s+.*cast",
+            ],
             "BEGINNING_OF_UPKEEP": [
                 r"at the beginning of (your|each) upkeep",
                 r"at the beginning of the upkeep",
@@ -860,6 +863,9 @@ class TriggeredAbility(Ability):
                 r"when(ever)?\s+.*unlock",
                 r"when(ever)?\s+.*unlocks?",
                 r"when(ever)?\s+.*becomes? unlocked"
+            ],
+            "ROOM_FULLY_UNLOCKED": [
+                r"when(ever)?\s+.*fully unlock.*room",
             ],
             "GAIN_LIFE": [
                 r"when(ever)?\s+.*gain(s)? life",
@@ -886,6 +892,10 @@ class TriggeredAbility(Ability):
             "BECOMES_TARGET": [
                 r"when(ever)?\s+.*becomes?\s+(?:a|the)\s+target",
                 r"when(ever)?\s+.*is\s+targeted"
+            ],
+            "DAMAGED": [
+                r"when(ever)?\s+.*is dealt damage",
+                r"when(ever)?\s+a source deals damage to"
             ]
         }
         
@@ -898,7 +908,15 @@ class TriggeredAbility(Ability):
         
         # Get condition patterns for this event
         event_patterns = trigger_conditions.get(event_type, [])
-        
+
+        # "a source deals damage to this creature" is a DAMAGED-class trigger
+        # on the damaged object, not a source-side DEALS_DAMAGE trigger, even
+        # though it matches the loose "deals damage" pattern.
+        if (event_type == "DEALS_DAMAGE"
+                and re.search(r"deals damage to this\s+(?:creature|permanent)",
+                              self.trigger_condition, re.IGNORECASE)):
+            return False
+
         # Check if our trigger condition matches any of the patterns
         if matches_any_pattern(self.trigger_condition, event_patterns):
             if event_type == "ENTERS_BATTLEFIELD":
@@ -906,15 +924,43 @@ class TriggeredAbility(Ability):
                 source_card_id = context.get("source_card_id")
                 event_card_id = context.get("event_card_id")
                 source_card = context.get("source_card")
-                source_name = re.escape(
-                    str(getattr(source_card, "name", "") or "").lower())
+                full_name = str(getattr(source_card, "name", "") or "").lower()
+                source_name = re.escape(full_name)
+                # Oracle text refers to legendaries by their short name
+                # ("When Beza enters" on Beza, the Bounding Spring).
+                short_name = re.escape(full_name.split(",")[0].strip())
                 self_entry = bool(
                     re.search(r"\bthis\s+(?:creature|permanent|card)\b.*\benters\b",
                               self.trigger_condition, re.IGNORECASE)
                     or (source_name and re.search(
                         rf"^\s*when(?:ever)?\s+{source_name}\s+enters\b",
+                        self.trigger_condition, re.IGNORECASE))
+                    or (short_name and re.search(
+                        rf"^\s*when(?:ever)?\s+{short_name}\s+enters\b",
                         self.trigger_condition, re.IGNORECASE)))
                 if self_entry and source_card_id != event_card_id:
+                    return False
+                if "an enchantment you control enters" in self.trigger_condition:
+                    event_types = {str(t).lower() for t in getattr(context.get('event_card'), 'card_types', [])}
+                    if ('enchantment' not in event_types
+                            or context.get('event_controller', context.get('controller')) is not context.get('controller')):
+                        return False
+            if event_type == "CAST_SPELL" and "targets only a single creature you control" in self.trigger_condition:
+                context = context or {}
+                if context.get('controller') is not context.get('casting_player', context.get('controller')):
+                    return False
+                target_ids = []
+                for values in (context.get('targets') or {}).values():
+                    if isinstance(values, list):
+                        target_ids.extend(values)
+                target_ids = list(dict.fromkeys(target_ids))
+                if len(target_ids) != 1:
+                    return False
+                target = target_ids[0]
+                if not isinstance(target, int) or context.get('game_state').get_card_controller(target) is not context.get('controller'):
+                    return False
+                cast_card = context.get('game_state')._safe_get_card(context.get('cast_card_id'))
+                if not cast_card or not ({'instant', 'sorcery'} & {str(t).lower() for t in getattr(cast_card, 'card_types', [])}):
                     return False
             if event_type == "BECOMES_TARGET":
                 context = context or {}
@@ -930,6 +976,25 @@ class TriggeredAbility(Ability):
                     return False
                 if ("first time each turn" in self.trigger_condition
                         and not context.get("first_time_targeted_by_controller_this_turn", False)):
+                    return False
+            if event_type == "ATTACKS":
+                context = context or {}
+                attacker_id = context.get("attacker_id", context.get("event_card_id"))
+                # "this creature/land attacks" only triggers for the attacker
+                # itself, never for other permanents that merely hear the event.
+                if (re.search(r"\bthis\s+(?:creature|permanent|land)\b.*\battacks\b",
+                              self.trigger_condition, re.IGNORECASE)
+                        and context.get("source_card_id") != attacker_id):
+                    return False
+                if ("first time each turn" in self.trigger_condition
+                        and not context.get("first_attack_this_turn", False)):
+                    return False
+            if event_type == "DAMAGED":
+                context = context or {}
+                # "this creature is dealt damage" belongs to the damaged object.
+                if (re.search(r"\bthis\s+(?:creature|permanent)\b",
+                              self.trigger_condition, re.IGNORECASE)
+                        and context.get("source_card_id") != context.get("event_card_id")):
                     return False
 
             # Parse for any conditional clause in the trigger text
@@ -988,6 +1053,25 @@ class TriggeredAbility(Ability):
         last_known = context.get("last_known") or {}
         if normalized_condition in {"if it was a creature", "it was a creature"}:
             return bool(last_known.get("was_creature", False))
+
+        # Delirium: "if there are four or more card types among cards in your
+        # graveyard" counts DISTINCT card types, not cards.
+        delirium_match = re.search(
+            r"(\w+) or more card types among cards in your graveyard",
+            normalized_condition)
+        if delirium_match:
+            needed = text_to_number(delirium_match.group(1))
+            if not isinstance(needed, int) or needed <= 0:
+                needed = 4
+            types_found = set()
+            for cid in controller.get("graveyard", []):
+                card = gs._safe_get_card(cid)
+                if card:
+                    types_found.update(
+                        t.lower() for t in getattr(card, 'card_types', []))
+            types_found.discard("token")
+            types_found.discard("unknown")
+            return len(types_found) >= needed
 
         # Use the card evaluator for condition checking if available
         if hasattr(gs, 'card_evaluator') and gs.card_evaluator and hasattr(gs.card_evaluator, 'evaluate_condition'):
@@ -2567,9 +2651,12 @@ class AddCountersEffect(AbilityEffect):
 class CreateTokenEffect(AbilityEffect):
     """Effect that creates token creatures. Can handle copies with modified P/T."""
     # ADDED: is_copy flag and source_card_for_copy attribute
-    def __init__(self, power, toughness, creature_type="Creature", count=1, keywords=None, colors=None, is_legendary=False, controller_gets=True, condition=None, is_copy=False, source_card_for_copy=None):
+    def __init__(self, power, toughness, creature_type="Creature", count=1, keywords=None, colors=None, is_legendary=False, controller_gets=True, condition=None, is_copy=False, source_card_for_copy=None, count_expr=None):
         self.is_copy = is_copy
         self.source_card_for_copy = source_card_for_copy # Should be the Card object
+        # "for each X" token counts are resolved against the controller at
+        # resolution time via GameState.count_dynamic_quantity (Domain etc.).
+        self.count_expr = count_expr
 
         if is_copy and source_card_for_copy and isinstance(source_card_for_copy, Card):
              # Use getattr for safer access to name
@@ -2598,6 +2685,13 @@ class CreateTokenEffect(AbilityEffect):
         target_player = controller
         if not self.controller_gets:
             target_player = game_state.p2 if controller == game_state.p1 else game_state.p1
+
+        effective_count = self.count
+        if self.count_expr:
+            effective_count = game_state.count_dynamic_quantity(self.count_expr, controller)
+            logging.debug(f"CreateTokenEffect: dynamic count '{self.count_expr}' = {effective_count}.")
+            if effective_count <= 0:
+                return True  # Zero tokens is a successful resolution.
 
         created_token_ids = []
 
@@ -2638,7 +2732,7 @@ class CreateTokenEffect(AbilityEffect):
                 return False
 
             # Create the specified number of token copies
-            for _ in range(self.count):
+            for _ in range(effective_count):
                  if token_data: # Ensure data was prepared
                      # Use GameState.create_token method
                      token_id = game_state.create_token(target_player, token_data.copy()) # Pass copy
@@ -2658,17 +2752,32 @@ class CreateTokenEffect(AbilityEffect):
             card_types_list = ["token"] # Always a token
             subtypes_list = []
             base_type = "Creature" # Default unless specified
+            # Known noncreature artifact token types.
+            ARTIFACT_TOKEN_TYPES = {"treasure", "food", "clue", "map", "blood",
+                                    "gold", "powerstone", "junk", "incubator"}
             if isinstance(self.creature_type, str):
                 ct_lower = self.creature_type.lower()
                 if "artifact" in ct_lower: card_types_list.append("artifact")
                 if "creature" in ct_lower: card_types_list.append("creature")
                 if "enchantment" in ct_lower: card_types_list.append("enchantment")
+                # "Beast", "Fish", "Soldier"... name a creature subtype, not a
+                # card type. Without this the token had NO card type at all --
+                # it could never attack, block, or be targeted as a creature.
+                if len(card_types_list) == 1:
+                    if ct_lower.strip() in ARTIFACT_TOKEN_TYPES:
+                        card_types_list.append("artifact")
+                    else:
+                        card_types_list.append("creature")
 
                 parts = self.creature_type.split()
                 # Improved heuristic for base type and subtypes
                 # Check Card static lists for accuracy
                 non_type_parts = [p.capitalize() for p in parts if p.lower() not in Card.ALL_CARD_TYPES]
-                valid_subtypes = [s for s in non_type_parts if s in Card.SUBTYPE_VOCAB]
+                # SUBTYPE_VOCAB is model-feature metadata built from the loaded
+                # pool; a printed token subtype (e.g. Beast) is real rules data
+                # even when no loaded card shares it, so fall back to the
+                # parsed words instead of silently dropping the subtype.
+                valid_subtypes = [s for s in non_type_parts if s in Card.SUBTYPE_VOCAB] or non_type_parts
                 subtypes_list.extend(valid_subtypes)
                 if valid_subtypes: base_type = valid_subtypes[-1] # Guess base type from last subtype
                 elif parts: base_type = parts[-1].capitalize() # Fallback
@@ -2693,7 +2802,12 @@ class CreateTokenEffect(AbilityEffect):
                 "toughness": self.toughness,
                 "oracle_text": " ".join(self.keywords) if self.keywords else "",
                 "keywords": [0] * len(Card.ALL_KEYWORDS), # Initialize keyword array
+                # Card.__init__ derives its colors from "color_identity" as
+                # WUBRG letters; a bare "colors" vector was silently ignored,
+                # so every colored token came out colorless.
                 "colors": color_list,
+                "color_identity": [letter for letter, present
+                                   in zip("WUBRG", color_list) if present],
                 "is_token": True,
             }
             # Ensure correct keyword array size before mapping
@@ -2706,7 +2820,7 @@ class CreateTokenEffect(AbilityEffect):
                 if kw_lower in kw_indices:
                     token_data["keywords"][kw_indices[kw_lower]] = 1
 
-            for _ in range(self.count):
+            for _ in range(effective_count):
                 # Use GameState.create_token
                 token_id = game_state.create_token(target_player, token_data.copy()) # Pass copy
                 if token_id: created_token_ids.append(token_id)
@@ -3177,6 +3291,10 @@ class CounterSpellEffect(AbilityEffect):
                  can_be_countered = not game_state.check_rule('cant_be_countered', {'card_id': spell_id})
             elif hasattr(spell, 'oracle_text'): # Fallback
                  can_be_countered = "can't be countered" not in spell.oracle_text.lower()
+            # A cast can be uncounterable through how it was paid (Cavern of
+            # Souls' restricted mana), recorded on the stack item context.
+            if spell_context.get('cant_be_countered'):
+                 can_be_countered = False
 
             if not can_be_countered:
                 logging.debug(f"Cannot counter {spell.name} - it can't be countered")
@@ -4164,33 +4282,71 @@ class AnimateLandEffect(AbilityEffect):
     expansion: "target land becomes a 3/3 creature until end of turn" hit the
     no-op fallback. Registers layer-4 add_type (creature) and layer-7b set_pt.
     """
-    def __init__(self, power=0, toughness=0, duration="end_of_turn", keep_types=True, condition=None):
+    def __init__(self, power=0, toughness=0, duration="end_of_turn", keep_types=True, condition=None,
+                 colors=None, subtypes=None, keywords=None, self_target=False):
         self.power = power
         self.toughness = toughness
         self.duration = duration
         self.keep_types = keep_types  # "it's still a land"
-        super().__init__(f"Target land becomes a {power}/{toughness} creature", condition)
-        self.requires_target = True
+        # Restless-land style self animation carries colors, a creature
+        # subtype, and granted keywords ("becomes a 2/3 white and blue Bird
+        # creature with flying").
+        self.colors = colors or []
+        self.subtypes = subtypes or []
+        self.keywords = keywords or []
+        self.self_target = self_target
+        target_desc = "This land" if self_target else "Target land"
+        super().__init__(f"{target_desc} becomes a {power}/{toughness} creature", condition)
+        self.requires_target = not self_target
 
     def apply(self, game_state, source_id, controller, targets=None, context=None):
         self.resolution_context = context or {}
         if not getattr(game_state, 'layer_system', None):
             return False
-        ids = []
-        if isinstance(targets, dict):
-            for cat in ("lands", "permanents", "creatures"):
-                ids.extend(targets.get(cat, []))
+        if self.self_target:
+            ids = [source_id] if source_id is not None else []
+        else:
+            ids = []
+            if isinstance(targets, dict):
+                for cat in ("lands", "permanents", "creatures"):
+                    ids.extend(targets.get(cat, []))
         if not ids:
             logging.warning(f"AnimateLandEffect: no target land in {targets}")
             return False
         applied = False
         for cid in set(ids):
-            # Layer 4: add the creature type.
+            # Layer 4: add the creature type (and any printed subtype).
             game_state.layer_system.register_effect({
                 'source_id': source_id, 'layer': 4, 'affected_ids': [cid],
                 'effect_type': 'add_type', 'effect_value': 'creature',
                 'duration': self.duration, 'description': f"animate: {cid} becomes creature",
             })
+            if self.subtypes:
+                game_state.layer_system.register_effect({
+                    'source_id': source_id, 'layer': 4, 'affected_ids': [cid],
+                    'effect_type': 'add_subtype', 'effect_value': [s.lower() for s in self.subtypes],
+                    'duration': self.duration, 'description': f"animate: {cid} subtypes {self.subtypes}",
+                })
+            # Layer 5: set the animated colors.
+            if self.colors:
+                color_map = {'white': 0, 'blue': 1, 'black': 2, 'red': 3, 'green': 4}
+                color_vec = [0, 0, 0, 0, 0]
+                for color_name in self.colors:
+                    idx = color_map.get(str(color_name).lower())
+                    if idx is not None:
+                        color_vec[idx] = 1
+                game_state.layer_system.register_effect({
+                    'source_id': source_id, 'layer': 5, 'affected_ids': [cid],
+                    'effect_type': 'set_color', 'effect_value': color_vec,
+                    'duration': self.duration, 'description': f"animate: {cid} colors {self.colors}",
+                })
+            # Layer 6: granted keywords ("with flying").
+            for kw in self.keywords:
+                game_state.layer_system.register_effect({
+                    'source_id': source_id, 'layer': 6, 'affected_ids': [cid],
+                    'effect_type': 'add_ability', 'effect_value': kw,
+                    'duration': self.duration, 'description': f"animate: {cid} gains {kw}",
+                })
             # Layer 7b: set its P/T.
             game_state.layer_system.register_effect({
                 'source_id': source_id, 'layer': 7, 'sublayer': 'b', 'affected_ids': [cid],
@@ -4198,6 +4354,8 @@ class AnimateLandEffect(AbilityEffect):
                 'duration': self.duration, 'description': f"animate: {cid} P/T {self.power}/{self.toughness}",
             })
             applied = True
+        if applied:
+            game_state.layer_system.apply_all_effects()
         return applied
 
     def _apply_effect(self, game_state, source_id, controller, targets):
@@ -4232,6 +4390,59 @@ class RevealHandEffect(AbilityEffect):
             game_state.trigger_ability(source_id, "HAND_REVEALED",
                                        {"player": p, "controller": controller})
             logging.debug(f"{p.get('name','player')} reveals their hand ({len(p.get('hand', []))} cards).")
+        return True
+
+
+class HandSelectionEffect(AbilityEffect):
+    """Expose a target hand's legal cards to the choosing policy."""
+    def __init__(self, noncreature_nonland=False, optional=False, rummage=False):
+        super().__init__("Choose a card from target player's hand")
+        self.noncreature_nonland = noncreature_nonland
+        self.optional = optional
+        self.rummage = rummage
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        pids = targets.get('players', []) if isinstance(targets, dict) else []
+        target_player = game_state.p1 if pids and pids[0] == 'p1' else game_state.p2 if pids else None
+        if not target_player:
+            return False
+        target_player['hand_revealed'] = True
+        legal = []
+        for card_id in target_player.get('hand', []):
+            card = game_state._safe_get_card(card_id)
+            types = {str(t).lower() for t in getattr(card, 'card_types', [])} if card else set()
+            if self.noncreature_nonland and ({'creature', 'land'} & types):
+                continue
+            legal.append(card_id)
+        if not legal:
+            return True
+        game_state.choice_context = {
+            'type': 'hand_selection', 'player': controller, 'target_player': target_player,
+            'source_id': source_id, 'options': legal[:10], 'optional': self.optional,
+            'rummage': self.rummage, 'resume_phase': game_state.phase,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = controller
+        return True
+
+
+class OptionalSacrificeProliferateEffect(AbilityEffect):
+    """Cacophony Scamp's optional sacrifice followed by its gated rider."""
+    def __init__(self):
+        super().__init__("You may sacrifice this creature. If you do, proliferate")
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        if source_id not in controller.get('battlefield', []):
+            return True
+        game_state.choice_context = {
+            'type': 'optional_sacrifice_proliferate', 'player': controller,
+            'source_id': source_id, 'options': [source_id],
+            'resume_phase': game_state.phase,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = controller
         return True
 
 
@@ -4492,6 +4703,257 @@ class ExileEffect(AbilityEffect):
                   # Logging handled by move_card
 
         return exiled_count > 0
+
+
+class ConditionalExileEffect(AbilityEffect):
+    """'Exile target creature if it has mana value N or less' (CR 608.2b:
+    the condition is checked at resolution, not when targeting), optionally
+    overridden by Corrupted: exile regardless of mana value when the
+    creature's controller has the poison-counter threshold or more."""
+    def __init__(self, max_mana_value, corrupted_poison_threshold=None, condition=None):
+        super().__init__(
+            f"Exile target creature if it has mana value {max_mana_value} or less",
+            condition)
+        self.max_mana_value = max_mana_value
+        self.corrupted_poison_threshold = corrupted_poison_threshold
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        target_ids = []
+        if isinstance(targets, dict):
+            for ids in targets.values():
+                target_ids.extend(ids if isinstance(ids, list) else [ids])
+        target_ids = [t for t in target_ids if t not in ("p1", "p2")]
+        if not target_ids:
+            return False
+        target_id = target_ids[0]
+        target_owner, target_zone = game_state.find_card_location(target_id)
+        if not target_owner or target_zone != "battlefield":
+            return False
+        card = game_state._safe_get_card(target_id)
+        corrupted = (self.corrupted_poison_threshold is not None
+                     and target_owner.get("poison_counters", 0)
+                     >= self.corrupted_poison_threshold)
+        if not corrupted and getattr(card, 'cmc', 0) > self.max_mana_value:
+            logging.debug(
+                f"ConditionalExileEffect: target {target_id} has mana value "
+                f"{getattr(card, 'cmc', 0)} > {self.max_mana_value} and no "
+                f"corrupted override; the spell resolves doing nothing.")
+            return True
+        return game_state.move_card(
+            target_id, target_owner, "battlefield", target_owner, "exile",
+            cause="exile_effect", context={"source_id": source_id})
+
+
+class ReflectDamageEffect(AbilityEffect):
+    """'...it deals that much damage to any other target', reading the amount
+    from the triggering DAMAGED event. With the rider, a player dealt damage
+    this way can't gain life for the rest of the game (Screaming Nemesis)."""
+    def __init__(self, no_life_gain_rider=False, condition=None):
+        super().__init__("It deals that much damage to any other target", condition)
+        self.no_life_gain_rider = no_life_gain_rider
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        amount = 0
+        resolution_context = getattr(self, 'resolution_context', None) or {}
+        amount = resolution_context.get('amount', 0)
+        if not isinstance(amount, int) or amount <= 0:
+            logging.debug("ReflectDamageEffect: no damage amount to reflect.")
+            return True
+        target_ids = []
+        if isinstance(targets, dict):
+            for ids in targets.values():
+                target_ids.extend(ids if isinstance(ids, list) else [ids])
+        target_ids = [t for t in target_ids if t != source_id]
+        if not target_ids:
+            return False
+        target_id = target_ids[0]
+        if target_id in ("p1", "p2"):
+            player = game_state.p1 if target_id == "p1" else game_state.p2
+            dealt = game_state.damage_player(player, amount, source_id)
+            if dealt > 0 and self.no_life_gain_rider:
+                # CR 614-style continuous restriction with no duration: it
+                # survives every turn-boundary reset for the rest of the game.
+                player["cant_gain_life"] = True
+                logging.debug(
+                    f"ReflectDamageEffect: {player.get('name', '?')} can't "
+                    f"gain life for the rest of the game.")
+            return True
+        card = game_state._safe_get_card(target_id)
+        if card and 'planeswalker' in getattr(card, 'card_types', []):
+            game_state.damage_planeswalker(target_id, amount, source_id)
+            return True
+        game_state.apply_damage_to_permanent(target_id, amount, source_id)
+        game_state.check_state_based_actions()
+        return True
+
+
+class AdditionalCombatPhaseEffect(AbilityEffect):
+    """'After this phase, there is an additional combat phase.' (CR 505.5a)
+    Registers one extra combat phase; _advance_phase consumes it instead of
+    entering the postcombat main phase."""
+    def __init__(self, condition=None):
+        super().__init__("After this phase, there is an additional combat phase", condition)
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        game_state.extra_combat_phases = getattr(game_state, 'extra_combat_phases', 0) + 1
+        logging.debug(
+            f"AdditionalCombatPhaseEffect: {game_state.extra_combat_phases} "
+            f"additional combat phase(s) pending this turn.")
+        return True
+
+
+class SacrificeThatManyEffect(AbilityEffect):
+    """'That source's controller sacrifices that many permanents of their
+    choice' (Phyrexian Obliterator). The damage amount and source come from
+    the triggering DAMAGED event; the sacrificing player picks each permanent
+    through a forced_sacrifice choice."""
+    def __init__(self, condition=None):
+        super().__init__(
+            "That source's controller sacrifices that many permanents of their choice",
+            condition)
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        resolution_context = getattr(self, 'resolution_context', None) or {}
+        amount = resolution_context.get('amount', 0)
+        if not isinstance(amount, int) or amount <= 0:
+            return True
+        damage_source = resolution_context.get('source_id')
+        payer = None
+        if damage_source is not None and damage_source != source_id:
+            payer = game_state.get_card_controller(damage_source)
+        if payer is None:
+            # v1: if the source left play before resolution, fall back to the
+            # opponent of the trigger's controller (the common combat case).
+            payer = game_state.p2 if controller == game_state.p1 else game_state.p1
+        count = min(amount, len(payer.get("battlefield", [])))
+        if count <= 0:
+            return True
+        game_state.begin_forced_sacrifice(payer, count, source_id)
+        return True
+
+
+class MassExileIncubateEffect(AbilityEffect):
+    """'Exile all creatures. Incubate X, where X is the number of creatures
+    exiled this way.' (Sunfall). One atomic effect: the incubated counter
+    count depends on the exile result. The Incubator token is a transforming
+    DFC whose back face is the 0/0 Phyrexian artifact creature."""
+    def __init__(self, condition=None):
+        super().__init__("Exile all creatures and incubate that many", condition)
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        exiled = 0
+        for player in (game_state.p1, game_state.p2):
+            if not player:
+                continue
+            for cid in list(player.get("battlefield", [])):
+                if not game_state._is_creature(cid):
+                    continue
+                if game_state.move_card(cid, player, "battlefield", player, "exile",
+                                        cause="exile_effect", context={"source_id": source_id}):
+                    exiled += 1
+        token_data = {
+            "name": "Incubator",
+            "type_line": "Token Artifact — Incubator",
+            "card_types": ["artifact"],
+            "subtypes": ["incubator"],
+            "supertypes": ["token"],
+            "oracle_text": "{2}: Transform this token.",
+            "power": 0, "toughness": 0,
+            "keywords": [0] * len(Card.ALL_KEYWORDS),
+            "colors": [0, 0, 0, 0, 0],
+            "is_token": True,
+            "layout": "transform",
+            "faces": [
+                {
+                    "name": "Incubator", "mana_cost": "",
+                    "type_line": "Token Artifact — Incubator",
+                    "oracle_text": "{2}: Transform this token.",
+                },
+                {
+                    "name": "Phyrexian Token", "mana_cost": "",
+                    "type_line": "Token Artifact Creature — Phyrexian",
+                    "power": "0", "toughness": "0",
+                    "oracle_text": "",
+                },
+            ],
+        }
+        token_id = game_state.create_token(controller, token_data)
+        if token_id and exiled > 0:
+            game_state.add_counter(token_id, "+1/+1", exiled)
+        return token_id is not None
+
+
+class CreateTreasureEffect(AbilityEffect):
+    """Create the predefined colorless Treasure artifact token."""
+
+    TREASURE_ORACLE_TEXT = "{T}, Sacrifice this token: Add one mana of any color."
+
+    def __init__(self, count=1, condition=None):
+        self.count = max(1, int(count))
+        super().__init__(f"Create {self.count} Treasure token(s)", condition)
+        self.requires_target = False
+
+    @classmethod
+    def create_for(cls, game_state, player, count):
+        created = []
+        token_data = {
+            "name": "Treasure",
+            "type_line": "Token Artifact - Treasure",
+            "card_types": ["artifact"],
+            "subtypes": ["treasure"],
+            "supertypes": [],
+            "oracle_text": cls.TREASURE_ORACLE_TEXT,
+            "power": 0,
+            "toughness": 0,
+            "keywords": [0] * len(Card.ALL_KEYWORDS),
+            "colors": [0, 0, 0, 0, 0],
+            "is_token": True,
+        }
+        for _ in range(max(0, int(count))):
+            token_id = game_state.create_token(player, token_data.copy())
+            if token_id:
+                created.append(token_id)
+        return created
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        return bool(self.create_for(game_state, controller, self.count))
+
+
+class BezaEffect(AbilityEffect):
+    """Beza, the Bounding Spring's ETB: four independent opponent-comparison
+    branches sharing one resolution (CR 603.4-adjacent 'if' riders checked at
+    resolution, not intervening-if at trigger time)."""
+    def __init__(self, condition=None):
+        super().__init__("Beza's four conditional catch-up effects", condition)
+
+    @staticmethod
+    def _count_type(game_state, player, card_type):
+        return sum(
+            1 for cid in player.get("battlefield", [])
+            if card_type in [t.lower() for t in getattr(
+                game_state._safe_get_card(cid), 'card_types', [])])
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        opponent = game_state.p2 if controller == game_state.p1 else game_state.p1
+        if not opponent:
+            return True
+        if (self._count_type(game_state, opponent, 'land')
+                > self._count_type(game_state, controller, 'land')):
+            CreateTreasureEffect.create_for(game_state, controller, 1)
+        if opponent.get("life", 0) > controller.get("life", 0):
+            game_state.gain_life(controller, 4, source_id)
+        if (self._count_type(game_state, opponent, 'creature')
+                > self._count_type(game_state, controller, 'creature')):
+            CreateTokenEffect(1, 1, "Fish", 2, colors=["blue"])._apply_effect(
+                game_state, source_id, controller, {})
+        if len(opponent.get("hand", [])) > len(controller.get("hand", [])):
+            if hasattr(game_state, '_draw_card'):
+                game_state._draw_card(controller)
+            elif controller.get("library"):
+                controller["hand"].append(controller["library"].pop(0))
+        return True
 
 
 class LinkedExileEffect(AbilityEffect):

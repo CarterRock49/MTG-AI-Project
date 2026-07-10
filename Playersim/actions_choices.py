@@ -631,11 +631,14 @@ class ChoiceHandlersMixin:
         valid_map = gs.targeting_system.get_valid_targets(
             ctx["source_id"], player, ctx["required_type"],
             effect_text=ctx.get("effect_text"))
+        # Numeric card ids sort ahead of player ids ("p1"/"p2") so a mixed
+        # "any target" set stays sortable (plain sorted() raises TypeError on
+        # int-vs-str) while all-numeric sets keep their existing order.
         valid_targets_list = sorted({
             target_id
             for category_targets in valid_map.values()
             for target_id in category_targets
-        })
+        }, key=lambda t: (isinstance(t, str), t))
 
         if not isinstance(target_choice_index, int) or not 0 <= target_choice_index < len(valid_targets_list):
             logging.error(
@@ -859,6 +862,80 @@ class ChoiceHandlersMixin:
     def _handle_choose_mode(self, param, context, **kwargs):
         """Handles the CHOOSE_MODE action. Param is the chosen mode index (0-9). Finalizes choice if criteria met."""
         gs = self.game_state
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'opening_hand'):
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if gs.choice_context.get('player') is not player:
+                logging.warning("Opening-hand choice called for the wrong player.")
+                return -0.2, False
+            success = gs.complete_opening_hand_choice(param)
+            return (0.05 if success else -0.1), success
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'forced_sacrifice'):
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if gs.choice_context.get('player') is not player:
+                logging.warning("Forced-sacrifice choice called for the wrong player.")
+                return -0.2, False
+            success = gs.complete_forced_sacrifice_choice(param)
+            return (0.0 if success else -0.1), success
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'saddle'):
+            ctx = gs.choice_context
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if ctx.get('player') is not player:
+                return -0.2, False
+            options = ctx.get('options', [])
+            if not (0 <= param < len(options)):
+                return -0.1, False
+            card_id = options[param]
+            if card_id in ctx.get('selected', []) or card_id in player.get('tapped_permanents', set()):
+                return -0.1, False
+            ctx.setdefault('selected', []).append(card_id)
+            try:
+                power = max(0, int(getattr(gs._safe_get_card(card_id), 'power', 0) or 0))
+            except (TypeError, ValueError):
+                power = 0
+            ctx['selected_power'] = ctx.get('selected_power', 0) + power
+            return 0.0, True
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'hand_selection'):
+            ctx = gs.choice_context
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            options = ctx.get('options', [])
+            if ctx.get('player') is not player or not (0 <= param < len(options)):
+                return -0.1, False
+            card_id = options[param]
+            target_player = ctx['target_player']
+            if card_id not in target_player.get('hand', []):
+                return -0.1, False
+            if not gs.move_card(card_id, target_player, 'hand', target_player, 'graveyard', cause='discard'):
+                return -0.1, False
+            if ctx.get('rummage'):
+                gs._draw_phase(target_player)
+            gs.phase = ctx.get('resume_phase', gs.PHASE_MAIN_PRECOMBAT)
+            gs.choice_context = None
+            return 0.05, True
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'optional_sacrifice_proliferate'):
+            ctx = gs.choice_context
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            source_id = ctx.get('source_id')
+            if ctx.get('player') is not player or param != 0 or source_id not in player.get('battlefield', []):
+                return -0.1, False
+            if not gs.move_card(source_id, player, 'battlefield', player, 'graveyard', cause='sacrifice'):
+                return -0.1, False
+            gs.proliferate(player, targets='all')
+            gs.phase = ctx.get('resume_phase', gs.PHASE_MAIN_PRECOMBAT)
+            gs.choice_context = None
+            return 0.05, True
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'as_enters_creature_type'):
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if gs.choice_context.get('player') is not player:
+                logging.warning("Creature-type choice called for the wrong player.")
+                return -0.2, False
+            success = gs.complete_as_enters_creature_type(param)
+            return (0.05 if success else -0.1), success
         if (getattr(gs, 'choice_context', None)
                 and gs.choice_context.get('type') == 'mockingbird_copy'):
             player = gs.p1 if gs.agent_is_p1 else gs.p2

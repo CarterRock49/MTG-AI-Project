@@ -33,13 +33,14 @@ class GameStateStackMixin:
                  or re.search(r"\btarget(?:\s+[a-z-]+){1,4}\s+creatures?\b", text)):
              return "creature"
          if "target player" in text or "target opponent" in text: return "player"
+         if "target card" in text: return "card"
          if "target artifact" in text: return "artifact"
          if "target enchantment" in text: return "enchantment"
          if "target land" in text: return "land"
          if ("target permanent" in text
                  or re.search(r"\btarget(?:\s+[a-z-]+){1,4}\s+permanents?\b", text)):
              return "permanent"
-         if "any target" in text: return "any"
+         if "any target" in text or "any other target" in text: return "any"
          return "target" # Default
 
     def trigger_ability(self, card_id, event_type, context=None):
@@ -845,6 +846,12 @@ class GameStateStackMixin:
         if not card:
              logging.error(f"Cannot cast spell: Invalid card_id {card_id}")
              return False
+        # The mana system's conditional-pool checks ("spend this mana only to
+        # cast...") identify the spell from context['card']; without it every
+        # cast ignored conditional mana during affordability/payment. Only the
+        # card OBJECT is set: adding 'card_id' would make can_pay/pay re-apply
+        # cost modifiers to the precomputed final cost (the Round 7.16 bug).
+        context.setdefault('card', card)
 
         # --- 1. Validate Source Zone and Timing ---
         source_zone = context.get("source_zone", "hand") # Default source
@@ -1286,7 +1293,9 @@ class GameStateStackMixin:
         if not hasattr(self, 'spells_cast_this_turn'): self.spells_cast_this_turn = []
         self.spells_cast_this_turn.append((card_id, player, final_stack_context)) # Include context
 
-        cast_trigger_context = {'cast_card_id': card_id, 'card_id': card_id, 'controller': player, **final_stack_context}
+        cast_trigger_context = {'cast_card_id': card_id, 'card_id': card_id,
+                                'controller': player, 'casting_player': player,
+                                **final_stack_context}
         self.trigger_ability(None, "CAST_SPELL", cast_trigger_context)
         if 'creature' in getattr(card, 'card_types',[]): self.trigger_ability(None, "CAST_CREATURE_SPELL", cast_trigger_context)
         elif 'instant' in getattr(card, 'card_types',[]) or 'sorcery' in getattr(card, 'card_types',[]): self.trigger_ability(None, "CAST_NONCREATURE_SPELL", cast_trigger_context)
@@ -2811,4 +2820,3 @@ class GameStateStackMixin:
         if hasattr(spell, 'card_types') and ('instant' in spell.card_types or 'sorcery' in spell.card_types):
             if not context.get("is_copy", False) and not context.get("skip_default_movement", False):
                 controller["graveyard"].append(spell_id)
-

@@ -333,6 +333,10 @@ class GameStateTurnMixin:
                 return
             if self.phase == self.PHASE_CHOOSE and self.choice_context:
                 choice_type = self.choice_context.get("type")
+                if choice_type == "opening_hand":
+                    # Declines the player's remaining begin-game placements.
+                    self.complete_opening_hand_choice(None)
+                    return
                 if choice_type == "linked_exile" and self.choice_context.get("optional", False):
                     self.decline_linked_exile_choice()
                     return
@@ -513,6 +517,22 @@ class GameStateTurnMixin:
                 next_idx = (current_idx + 1) % len(phase_sequence)
                 next_phase_in_sequence = phase_sequence[next_idx]
 
+                # CR 505.5a: a registered additional combat phase is entered
+                # instead of the postcombat main phase, once per registration.
+                if (current_phase_for_check == self.PHASE_END_OF_COMBAT
+                        and next_phase_in_sequence == self.PHASE_MAIN_POSTCOMBAT
+                        and getattr(self, 'extra_combat_phases', 0) > 0):
+                    self.extra_combat_phases -= 1
+                    self.current_attackers = []
+                    self.current_block_assignments = {}
+                    self.combat_damage_dealt = False
+                    if hasattr(self, 'exerted_this_combat'):
+                        self.exerted_this_combat = set()
+                    next_phase_in_sequence = self.PHASE_BEGIN_COMBAT
+                    logging.debug(
+                        f"Entering an additional combat phase "
+                        f"({self.extra_combat_phases} more pending).")
+
                 # --- 1. Handle Turn Transition (Cleanup -> Untap) ---
                 if current_phase_for_check == self.PHASE_CLEANUP and next_phase_in_sequence == self.PHASE_UNTAP:
                     # Perform Cleanup Actions (Rule 514)
@@ -616,6 +636,7 @@ class GameStateTurnMixin:
         self.day_night_checked_this_turn = False
         self.spells_cast_this_turn = []
         self.attackers_this_turn = set()
+        self.extra_combat_phases = 0
         self.damage_dealt_this_turn = {}
         self.cards_drawn_this_turn = {'p1': 0, 'p2': 0} # Reset draw counts
         self.cards_milled_this_turn = {'p1': 0, 'p2': 0} # Reset mill counts
@@ -786,6 +807,8 @@ class GameStateTurnMixin:
                     f"Cleanup: Removed {removed_replacements} replacement effects.")
         # Clear other temporary game state trackers (need specific cleanup logic)
         if hasattr(self, 'haste_until_eot'): self.haste_until_eot.clear()
+        for _player in (self.p1, self.p2):
+            _player.pop('saddled_permanents', None)
         self.delayed_event_triggers = [
             entry for entry in getattr(self, "delayed_event_triggers", [])
             if entry.get("expires_turn", self.turn) > self.turn

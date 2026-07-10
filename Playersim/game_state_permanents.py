@@ -1501,6 +1501,103 @@ class GameStatePermanentsMixin:
             return f"{main} — {' '.join(str(s) for s in subtypes)}".strip()
         return main or "Creature"
 
+    def begin_forced_sacrifice(self, player, count, source_id):
+        """Open a forced-sacrifice choice: player must pick count of their own
+        permanents to sacrifice, one action per pick (Phyrexian Obliterator)."""
+        if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+            self.previous_priority_phase = self.phase
+        self.phase = self.PHASE_CHOOSE
+        self.choice_context = {
+            "type": "forced_sacrifice",
+            "player": player,
+            "remaining": count,
+            "source_id": source_id,
+        }
+        self.priority_player = player
+        self.priority_pass_count = 0
+        logging.debug(f"{player['name']} must sacrifice {count} permanent(s) of their choice.")
+
+    def complete_forced_sacrifice_choice(self, option_index):
+        """Sacrifice the picked battlefield permanent (index into the first 10
+        battlefield slots). Closes the choice when the count is met or the
+        battlefield empties."""
+        ctx = getattr(self, 'choice_context', None)
+        if not ctx or ctx.get("type") != "forced_sacrifice":
+            logging.warning("complete_forced_sacrifice_choice called without context.")
+            return False
+        player = ctx.get("player")
+        options = player.get("battlefield", [])[:10]
+        if not isinstance(option_index, int) or not (0 <= option_index < len(options)):
+            logging.warning(f"Invalid forced-sacrifice option index {option_index}.")
+            return False
+        card_id = options[option_index]
+        if not self.move_card(card_id, player, "battlefield", player, "graveyard",
+                              cause="sacrifice"):
+            logging.warning(f"Forced sacrifice could not move {card_id} to the graveyard.")
+            return False
+        self.trigger_ability(card_id, "SACRIFICED", {"controller": player})
+        ctx["remaining"] = ctx.get("remaining", 1) - 1
+        if ctx["remaining"] > 0 and player.get("battlefield"):
+            return True
+        self.choice_context = None
+        if getattr(self, 'previous_priority_phase', None) is not None:
+            self.phase = self.previous_priority_phase
+            self.previous_priority_phase = None
+        else:
+            self.phase = self.PHASE_PRIORITY
+        self.priority_player = self._get_active_player()
+        self.priority_pass_count = 0
+        return True
+
+    def _creature_type_choice_options(self, player):
+        """Creature subtypes among the player's own cards, most frequent first
+        (the 10-option action range bounds an as-enters creature-type choice)."""
+        counts = {}
+        for zone in ("battlefield", "hand", "library", "graveyard"):
+            for cid in player.get(zone, []):
+                card = self._safe_get_card(cid)
+                if not card or 'creature' not in [t.lower() for t in getattr(card, 'card_types', [])]:
+                    continue
+                for subtype in getattr(card, 'subtypes', []):
+                    key = str(subtype).lower()
+                    counts[key] = counts.get(key, 0) + 1
+        ranked = sorted(counts, key=lambda s: (-counts[s], s))
+        return ranked[:10]
+
+    def complete_as_enters_creature_type(self, option_index):
+        """Record the chosen creature type for the entering permanent, close
+        the choice, and fire the battlefield-entry triggers that were deferred
+        while the 'as enters' choice was pending."""
+        ctx = getattr(self, 'choice_context', None)
+        if not ctx or ctx.get("type") != "as_enters_creature_type":
+            logging.warning("complete_as_enters_creature_type called without context.")
+            return False
+        options = ctx.get("options", [])
+        if not isinstance(option_index, int) or not (0 <= option_index < len(options)):
+            logging.warning(f"Invalid creature-type option index {option_index}.")
+            return False
+        player = ctx.get("player")
+        card_id = ctx.get("card_id")
+        chosen = options[option_index]
+        player.setdefault("chosen_creature_types", {})[card_id] = chosen
+        card = self._safe_get_card(card_id)
+        logging.debug(f"{getattr(card, 'name', card_id)}: chose creature type '{chosen}'.")
+        self.choice_context = None
+        if getattr(self, 'previous_priority_phase', None) is not None:
+            self.phase = self.previous_priority_phase
+            self.previous_priority_phase = None
+        else:
+            self.phase = self.PHASE_PRIORITY
+        self.priority_player = player
+        self.priority_pass_count = 0
+        # Fire the ETB triggers move_card deferred for the pending choice.
+        enter_context = {'controller': player, 'to_zone': 'battlefield', 'card_id': card_id}
+        self.trigger_ability(card_id, "ENTERS_BATTLEFIELD", enter_context)
+        if card and 'land' in getattr(card, 'card_types', []):
+            self.trigger_ability(None, "LANDFALL", enter_context)
+            self.trigger_ability(card_id, "LANDFALL_SELF", enter_context)
+        return True
+
     def _register_attachment_effects(self, attach_id, target_id):
         """Register an attachment's static P/T and keyword grants on its target.
 

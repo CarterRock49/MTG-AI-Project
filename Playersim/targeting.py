@@ -154,6 +154,16 @@ class TargetingSystem:
 
         # Convert sets back to lists for the final dictionary
         final_valid_targets = {cat: list(ids) for cat, ids in processed_valid.items() if ids}
+
+        # "any OTHER target" / "another target": the source object is never a
+        # legal choice for its own effect (Screaming Nemesis's reflected
+        # damage, Restless Ridgeline's pump).
+        if "any other target" in oracle_text or "another target" in oracle_text:
+            final_valid_targets = {
+                cat: [t for t in ids if t != card_id]
+                for cat, ids in final_valid_targets.items()}
+            final_valid_targets = {cat: ids for cat, ids in final_valid_targets.items() if ids}
+
         return final_valid_targets
 
     def resolve_targeting_for_ability(self, card_id, ability_text, controller):
@@ -535,6 +545,16 @@ class TargetingSystem:
             }
             req["type"] = type_map.get(req["type"], req["type"]) # Normalize type
 
+            # The lazy adjective group can leave a state adjective captured as
+            # the noun ("target attacking creature" -> type "attacking").
+            # Recover the real noun that follows and demote the adjective.
+            if req["type"] in ("attacking", "blocking", "tapped", "untapped"):
+                trailing = oracle_text[match.end(2):]
+                noun_match = re.match(r"\s+([a-z]+)", trailing)
+                adjectives.append(req["type"])
+                if noun_match:
+                    req["type"] = type_map.get(noun_match.group(1), noun_match.group(1))
+
             # ---- Process Adjectives & Restrictions ----
             # Owner/Controller
             if "you control" in restrictions: req["controller_is_caster"] = True
@@ -607,7 +627,7 @@ class TargetingSystem:
             requirements.append(req)
 
         # Special cases not matching the main pattern
-        if "any target" in oracle_text:
+        if "any target" in oracle_text or "any other target" in oracle_text:
              requirements.append({"type": "any"}) # Any target includes creatures, players, planeswalkers
 
         if not requirements and "target" in oracle_text:

@@ -1311,6 +1311,17 @@ class AlphaZeroMTGEnv(gym.Env):
 
         if phase_ctx == "CHOOSE" and getattr(gs, "choice_context", None):
             choice_type = gs.choice_context.get("type")
+            if choice_type in ("opening_hand", "forced_sacrifice", "as_enters_creature_type"):
+                # First-legal-action policy for mandatory or begin-game picks.
+                for action_idx in range(353, 363):
+                    if opponent_mask[action_idx]:
+                        logging.debug(
+                            f"Scripted Opponent: {choice_type.upper()} "
+                            f"(Index {action_idx - 353})")
+                        return action_idx, {}
+                if opponent_mask[11]:
+                    return 11, {}
+                return None, {}
             if choice_type == "casting_additional_return":
                 for action_idx in range(353, 363):
                     if opponent_mask[action_idx]:

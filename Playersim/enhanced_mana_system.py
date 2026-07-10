@@ -1072,9 +1072,17 @@ class EnhancedManaSystem:
             
             if restriction_key.startswith("cast_only:"):
                 target_type = restriction_key[10:]  # Extract the target type
-                
+
+                # Chosen-type restriction (Cavern of Souls): require the
+                # recorded creature type, not just any creature.
+                chosen_type_match = re.search(r"chosen type \((\w+)\)", target_type.lower())
+                if chosen_type_match:
+                    required_subtype = chosen_type_match.group(1).lower()
+                    if ('creature' in getattr(card, 'card_types', [])
+                            and required_subtype in [str(s).lower() for s in getattr(card, 'subtypes', [])]):
+                        can_use = True
                 # Check if card matches the restriction
-                if "creature" in target_type and hasattr(card, 'card_types') and 'creature' in card.card_types:
+                elif "creature" in target_type and hasattr(card, 'card_types') and 'creature' in card.card_types:
                     can_use = True
                 elif "dragon" in target_type and hasattr(card, 'subtypes') and 'dragon' in card.subtypes:
                     can_use = True
@@ -1605,7 +1613,16 @@ class EnhancedManaSystem:
         # Basic restrictions
         if restriction_key.startswith("cast_only:"):
             target_type = restriction_key[10:].lower()  # Extract the target type and normalize
-            
+
+            # Chosen-type restriction (Cavern of Souls): the card must be a
+            # creature OF the recorded type; the generic creature check below
+            # must not accept it.
+            chosen_type_match = re.search(r"chosen type \((\w+)\)", target_type)
+            if chosen_type_match:
+                required_subtype = chosen_type_match.group(1).lower()
+                return ('creature' in getattr(card, 'card_types', [])
+                        and required_subtype in [str(s).lower() for s in getattr(card, 'subtypes', [])])
+
             # Card type restrictions
             if "creature" in target_type and (hasattr(card, 'card_types') and 'creature' in card.card_types):
                 return True
@@ -2059,6 +2076,14 @@ class EnhancedManaSystem:
             logging.debug(f"Paid cost {cost_str} for {card_name_log} with {payment_str}")
             self._cleanup_empty_conditional_mana(player)
             self._last_payment = payment  # exposed via pay_mana_cost_get_details
+            # Cavern of Souls rider: spending its restricted mana on the cast
+            # makes the spell uncounterable. Recorded on the cast context so
+            # the stack item carries it to CounterSpellEffect.
+            if context is not None and any(
+                    "can't be countered" in str(key).lower()
+                    and any(colors.values())
+                    for key, colors in payment.get('conditional', {}).items()):
+                context['cant_be_countered'] = True
             return True
         else:
              # This path might be reached if non-mana costs failed. Rollback handled there.
@@ -2340,6 +2365,20 @@ class EnhancedManaSystem:
             restriction_match = re.search(r"(spend this mana only[^.]*\.)", line, re.IGNORECASE)
             if restriction_match:
                 restriction = restriction_match.group(1).strip()
+                # Cavern of Souls: resolve "the chosen type" to this land's
+                # recorded as-enters choice so the pooled restriction stays
+                # checkable after the mana leaves the land. No choice yet =>
+                # this ability produces nothing usable; skip it.
+                if re.search(r"the chosen type", restriction, re.IGNORECASE):
+                    chosen = None
+                    if player:
+                        chosen = player.get("chosen_creature_types", {}).get(
+                            getattr(card, 'card_id', None))
+                    if not chosen:
+                        continue
+                    restriction = re.sub(
+                        r"the chosen type", f"the chosen type ({chosen})",
+                        restriction, flags=re.IGNORECASE)
             for symbol in symbols:
                 options.append({
                     "symbol": symbol,

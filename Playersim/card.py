@@ -240,14 +240,14 @@ class Card:
         oracle_lower = oracle_text.lower()
 
         # Offspring: "Offspring {COST}"
-        offspring_match = re.search(r"\boffspring\s*(\{.+?\})\b", oracle_lower)
+        offspring_match = re.search(r"\boffspring\s*((?:\{[^}]+\})+)", oracle_lower)
         if offspring_match:
             self.is_offspring = True
             self.offspring_cost = offspring_match.group(1) # Store cost string "{...}"
             logging.debug(f"Parsed Offspring cost '{self.offspring_cost}' for {self.name}")
 
         # Impending: "Impending N—{COST}" (Dash can be em dash or hyphen)
-        impending_match = re.search(r"\bimpending\s*(\d+)\s*(?:-|—|–)\s*(\{.+?\})\b", oracle_lower)
+        impending_match = re.search(r"\bimpending\s*(\d+)\s*[^\d{]*\s*((?:\{[^}]+\})+)", oracle_lower)
         if impending_match:
             self.is_impending = True
             self.impending_n = int(impending_match.group(1))

@@ -482,6 +482,31 @@ class TurnPhaseHandlersMixin:
 
     def _handle_pass_priority(self, param, **kwargs):
         gs = self.game_state
+        if (gs.phase == gs.PHASE_CHOOSE and getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'saddle'):
+            ctx = gs.choice_context
+            if ctx.get('selected_power', 0) < ctx.get('required_power', 0):
+                return -0.1, False
+            player = ctx['player']
+            for card_id in ctx.get('selected', []):
+                player.setdefault('tapped_permanents', set()).add(card_id)
+            player.setdefault('saddled_permanents', set()).add(ctx['source_id'])
+            gs.phase = ctx.get('resume_phase', gs.PHASE_MAIN_PRECOMBAT)
+            gs.choice_context = None
+            return 0.05, True
+        if (gs.phase == gs.PHASE_CHOOSE and getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'hand_selection'
+                and gs.choice_context.get('optional')):
+            ctx = gs.choice_context
+            gs.phase = ctx.get('resume_phase', gs.PHASE_MAIN_PRECOMBAT)
+            gs.choice_context = None
+            return 0.0, True
+        if (gs.phase == gs.PHASE_CHOOSE and getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'optional_sacrifice_proliferate'):
+            ctx = gs.choice_context
+            gs.phase = ctx.get('resume_phase', gs.PHASE_MAIN_PRECOMBAT)
+            gs.choice_context = None
+            return 0.0, True
         if gs.phase == gs.PHASE_TARGETING and gs.targeting_context:
             context = gs.targeting_context
             selected_count = len(context.get("selected_targets", []))

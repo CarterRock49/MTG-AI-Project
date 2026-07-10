@@ -78,6 +78,7 @@ class GameState(
                  "targeting_context", "sacrifice_context", "choice_context",
                  "mulligan_in_progress", "mulligan_player", "mulligan_count",
                  "bottoming_in_progress", "bottoming_player", "cards_to_bottom", "bottoming_count",
+                 "_opening_hand_players", "extra_combat_phases",
                  "spree_context", 'combat_action_handler', '_handle_level_up_class',
                  "dredge_pending",
                  "madness_trigger",
@@ -1182,6 +1183,23 @@ class GameState(
         expr = (expr or "").lower().strip()
         p = controller
         opp = self.p2 if controller == self.p1 else self.p1
+
+        # Domain: "for each basic land type among lands you control" counts
+        # DISTINCT basic land types, not lands. Nonbasic duals contribute each
+        # printed basic land type. Must be checked before the generic "land"
+        # branch below, which would count lands instead. Mirrors the counting
+        # the mana system already uses for Domain cost reductions.
+        if "basic land type" in expr:
+            basic_types = {"plains", "island", "swamp", "mountain", "forest"}
+            controlled_types = set()
+            for cid in p.get("battlefield", []):
+                c = self._safe_get_card(cid)
+                if not c or 'land' not in [t.lower() for t in getattr(c, 'card_types', [])]:
+                    continue
+                controlled_types.update(
+                    basic_types.intersection(
+                        str(s).lower() for s in getattr(c, 'subtypes', [])))
+            return len(controlled_types)
 
         def _types(cid):
             c = self._safe_get_card(cid)
