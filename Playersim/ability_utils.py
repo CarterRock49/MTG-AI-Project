@@ -968,7 +968,9 @@ class EffectFactory:
                     who = "target_player"
                 else:
                     who = "controller"
-                created_effect = SacrificeEffect(permanent_type=ptype, who=who, count=cnt)
+                created_effect = SacrificeEffect(
+                    permanent_type=ptype, who=who, count=cnt,
+                    optional=bool(re.search(r"\bmay\s+sacrifice", clause_lower)))
 
             # Life loss: "target player loses N life" / "each opponent loses N life"
             elif re.search(r"loses?\s+(\d+|x)\s+life", clause_lower):
@@ -986,15 +988,20 @@ class EffectFactory:
                 created_effect = LoseLifeEffect(amt, target=lt)
 
             # Distribute +1/+1 counters among target creatures.
-            elif re.search(r"distribute\s+(\w+|\d+)?\s*\+1/\+1 counters", clause_lower):
+            elif re.search(r"distribute\s+(\w+|\d+)?\s*\+1/\+1 counters?", clause_lower):
                 num_m = re.search(r"distribute\s+(\w+|\d+)", clause_lower)
                 n = 1
                 if num_m and num_m.group(1):
                     n = int(num_m.group(1)) if num_m.group(1).isdigit() else text_to_number(num_m.group(1))
                 if not isinstance(n, int) or n <= 0: n = 1
-                # v1: with a single chosen target all counters land there; the
-                # multi-target split is an agent-choice item (Tier 3).
-                created_effect = AddCountersEffect("+1/+1", count=n, target_type="target creature")
+                from .ability_types import DistributeCountersEffect
+                distribution_text = re.search(
+                    r"distribute\s+[^.]*?\btarget creatures?",
+                    effect_text, re.IGNORECASE)
+                created_effect = DistributeCountersEffect(
+                    "+1/+1", count=n,
+                    targeting_text=(distribution_text.group(0).strip()
+                                    if distribution_text else clause.strip()))
 
             # Combat restrictions: "can't attack/block". Modeled as granted
             # 'cant_attack'/'cant_block' abilities on the target (same layer-6

@@ -1,6 +1,7 @@
 import logging
 import re
 import random
+import copy
 from .card import Card
 from .ability_utils import text_to_number, safe_int, resolve_simple_targeting, EffectFactory
 
@@ -134,11 +135,16 @@ class Ability:
             return False
 
         success = True
+        if hasattr(game_state, '_run_effect_sequence'):
+            success, _ = game_state._run_effect_sequence(
+                effects, self.card_id, controller, targets,
+                context=resolution_context)
+            return success
         for effect_obj in effects:
             if not effect_obj.apply(
                     game_state, self.card_id, controller, targets,
                     context=resolution_context):
-                 success = False # Mark failure if any effect fails, but try others
+                success = False
         return success
 
 
@@ -1869,6 +1875,22 @@ class AbilityEffect:
         Returns:
             bool: Whether the effect was successfully applied
         """
+        # Legacy effect loops that have not yet moved to the shared sequence
+        # runner must not execute through an outstanding resolution choice.
+        # Queue this effect behind that choice instead of overwriting it.
+        active_choice = getattr(game_state, 'choice_context', None)
+        async_types = getattr(game_state, '_ASYNC_EFFECT_CHOICE_TYPES', ())
+        if active_choice and active_choice.get('type') in async_types:
+            continuation = active_choice.setdefault('effect_continuation', {
+                'effects': [], 'source_id': source_id,
+                'controller_id': ('p1' if controller is game_state.p1 else 'p2'),
+                'targets': copy.deepcopy(targets),
+                'resolution_context': copy.deepcopy(context or {}),
+                'finalizer': None, 'success': True,
+            })
+            continuation.setdefault('effects', []).append(self)
+            return True
+
         if getattr(self, '_is_offspring_token_effect', False):
             # Assume `source_id` is the creature that entered the battlefield.
             source_creature = game_state._safe_get_card(source_id)
@@ -1905,8 +1927,7 @@ class AbilityEffect:
                 logging.warning("Cannot start a direct-effect target choice while another target choice is pending.")
                 return False
             target_type = game_state._get_target_type_from_text(self.effect_text)
-            max_targets = game_state._target_count_from_text(self.effect_text)
-            min_targets = 0 if "up to" in self.effect_text.lower() else max_targets
+            min_targets, max_targets = game_state._target_bounds_from_text(self.effect_text)
             valid_map = game_state.targeting_system.get_valid_targets(
                 source_id, controller, target_type, effect_text=self.effect_text)
             valid_ids = {target_id for ids in valid_map.values() for target_id in ids}
@@ -2178,14 +2199,14 @@ class SacrificeEffect(AbilityEffect):
     """A player sacrifices permanent(s) (CR 701.17). "Sacrifice a creature" =
     controller sacrifices; "target player sacrifices..." = that player does
     (edict). Previously hit the generic no-op fallback (July 2026 parser
-    expansion). v1 picks the sacrifice via a simple heuristic (lowest-value
-    for the controller's own, per opponent for edicts); the player-choice
-    version is a Tier 3 agent-choice item.
+    expansion). The affected player chooses each permanent through PHASE_CHOOSE.
     """
-    def __init__(self, permanent_type="creature", who="controller", count=1, condition=None):
+    def __init__(self, permanent_type="creature", who="controller", count=1,
+                 condition=None, optional=False):
         self.permanent_type = permanent_type.lower()
         self.who = who  # 'controller' | 'target_player' | 'each_player' | 'each_opponent'
         self.count = count
+        self.optional = bool(optional)
         super().__init__(f"{who} sacrifices {count} {self.permanent_type}", condition)
         self.requires_target = who == "target_player"
 
@@ -2215,25 +2236,67 @@ class SacrificeEffect(AbilityEffect):
                 return False
         if not players:
             return False
-        any_sacked = False
-        for p in players:
-            candidates = [c for c in list(p.get("battlefield", [])) if self._type_matches(game_state, c)]
-            if not candidates:
-                continue
-            # v1 heuristic: sacrifice the lowest-toughness matching permanent.
-            def _tough(cid):
-                c = game_state._safe_get_card(cid)
-                return getattr(c, 'toughness', 0) or 0
-            candidates.sort(key=_tough)
-            for cid in candidates[:self.count]:
-                # The engine represents deck copies as repeated card IDs, not
-                # per-copy objects. For v1, put sacrificed permanents into the
-                # sacrificing player's graveyard; owner reconstruction is
-                # ambiguous in mirror/fixture games.
-                if game_state.move_card(cid, p, "battlefield", p, "graveyard", cause="sacrifice"):
-                    any_sacked = True
-                    game_state.trigger_ability(cid, "SACRIFICED", {"controller": p})
-        return any_sacked
+        pending = []
+        for player in players:
+            candidates = [cid for cid in player.get("battlefield", [])
+                          if self._type_matches(game_state, cid)]
+            if candidates:
+                pending.append({
+                    "player_id": "p1" if player is game_state.p1 else "p2",
+                    "remaining": min(self.count, len(candidates)),
+                    "options": candidates,
+                    "optional": self.optional,
+                })
+        if not pending:
+            return True
+        current = pending.pop(0)
+        current_player = game_state.p1 if current["player_id"] == "p1" else game_state.p2
+        game_state.choice_context = {
+            "type": "sacrifice_effect", "player": current_player,
+            "pending_players": pending, "remaining": current["remaining"],
+            "options": current["options"],
+            "optional": self.optional, "sacrifice_performed": False,
+            "permanent_type": self.permanent_type, "source_id": source_id,
+            "resume_phase": game_state.phase,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = current_player
+        return True
+
+
+class DistributeCountersEffect(AbilityEffect):
+    """Let the policy assign counters one at a time among committed targets."""
+    def __init__(self, counter_type="+1/+1", count=1, condition=None,
+                 targeting_text=None):
+        self.counter_type = counter_type
+        self.count = int(count)
+        effect_text = targeting_text or (
+            f"Distribute {count} {counter_type} counters among any number of target creatures")
+        super().__init__(effect_text, condition)
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        options = []
+        for category in ("creatures", "permanents"):
+            options.extend((targets or {}).get(category, []))
+        options = list(dict.fromkeys(options))
+        if not options:
+            return True
+        if len(options) > self.count:
+            logging.warning(
+                f"Cannot distribute {self.count} counters among "
+                f"{len(options)} targets while giving each target a counter.")
+            return False
+        game_state.choice_context = {
+            "type": "distribute_counters", "player": controller,
+            "options": options, "remaining": self.count,
+            "allocations": {},
+            "counter_type": self.counter_type, "source_id": source_id,
+            "resume_phase": game_state.phase,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = controller
+        return True
 
 
 class ReanimateEffect(AbilityEffect):
@@ -3758,8 +3821,7 @@ class DigEffect(AbilityEffect):
     """Look at the top N cards; put one (or more) into your hand, the rest on
     the bottom (or top). July 2026 parser expansion: impulsive-dig selection
     ("look at the top three, put one into your hand and the rest on the
-    bottom") hit the no-op fallback. v1 keeps the highest-value card (a simple
-    deterministic pick); the choice is a Tier 3 agent-choice item.
+    bottom") hit the no-op fallback. The controller chooses the card(s).
     """
     def __init__(self, look=3, take=1, rest="bottom", condition=None):
         self.look = look
@@ -3775,24 +3837,17 @@ class DigEffect(AbilityEffect):
         n = min(self.look, len(lib))
         looked = lib[:n]
         del lib[:n]
-        # v1 heuristic: take the highest-CMC card(s) (usually the payoff).
-        def _cmc(cid):
-            c = game_state._safe_get_card(cid)
-            return getattr(c, 'cmc', 0) or 0
-        looked_sorted = sorted(looked, key=_cmc, reverse=True)
-        taken = looked_sorted[:self.take]
-        rest = [c for c in looked if c not in taken]
-        for cid in taken:
-            game_state.move_card(cid, controller, "library_implicit", controller, "hand", cause="dig")
-        if self.rest == "bottom":
-            controller["library"].extend(rest)
-        elif self.rest == "top":
-            for cid in reversed(rest):
-                controller["library"].insert(0, cid)
-        elif self.rest == "graveyard":
-            for cid in rest:
-                game_state.move_card(cid, controller, "library_implicit", controller, "graveyard", cause="dig_discard")
-        logging.debug(f"Dig: looked {n}, took {taken} to hand, {len(rest)} to {self.rest}.")
+        take = min(self.take, len(looked))
+        if take <= 0:
+            controller["library"].extend(looked)
+            return True
+        game_state.choice_context = {
+            "type": "dig_select", "player": controller, "options": looked,
+            "remaining": take, "selected": [], "rest_destination": self.rest,
+            "source_id": source_id, "resume_phase": game_state.phase,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = controller
         return True
 
 
@@ -5062,6 +5117,20 @@ class ReflexiveTriggerEffect(AbilityEffect):
         completed = True
         for effect in prerequisite_effects:
             if not effect.apply(game_state, source_id, controller, targets):
+                completed = False
+            if isinstance(effect, SacrificeEffect):
+                choice = getattr(game_state, 'choice_context', None)
+                if choice and choice.get('type') == 'sacrifice_effect':
+                    choice['reflexive_followup'] = {
+                        'source_id': source_id,
+                        'controller_id': 'p1' if controller is game_state.p1 else 'p2',
+                        'trigger_condition': self.trigger_condition,
+                        'trigger_effect_text': self.trigger_effect_text,
+                        'prerequisite_text': self.prerequisite_text,
+                    }
+                    return True
+                # Sacrificing nothing does not satisfy "when you do" even
+                # though the parent instruction itself resolves normally.
                 completed = False
         if not completed:
             logging.debug(

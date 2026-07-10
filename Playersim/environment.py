@@ -223,6 +223,11 @@ class AlphaZeroMTGEnv(gym.Env):
             "sacrificeable_permanents": spaces.Box(low=-1, high=self.max_battlefield, shape=(self.max_battlefield,), dtype=np.int32),
             "selectable_modes": spaces.Box(low=-1, high=10, shape=(10,), dtype=np.int32),
             "selectable_colors": spaces.Box(low=-1, high=4, shape=(5,), dtype=np.int32),
+            "choice_cards": spaces.Box(low=-1, high=50, shape=(10, self._feature_dim), dtype=np.float32),
+            "choice_card_mask": spaces.Box(low=0, high=1, shape=(10,), dtype=bool),
+            "choice_kind": spaces.Box(low=0, high=16, shape=(1,), dtype=np.int32),
+            "choice_remaining": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
+            "choice_allocation_counts": spaces.Box(low=0, high=100, shape=(10,), dtype=np.int32),
             "valid_x_range": spaces.Box(low=0, high=100, shape=(2,), dtype=np.int32),
             "bottomable_cards": spaces.Box(low=0, high=1, shape=(self.max_hand_size,), dtype=bool),
             "dredgeable_cards_in_gy": spaces.Box(low=-1, high=100, shape=(6,), dtype=np.int32),
@@ -1319,6 +1324,13 @@ class AlphaZeroMTGEnv(gym.Env):
 
         if phase_ctx == "CHOOSE" and getattr(gs, "choice_context", None):
             choice_type = gs.choice_context.get("type")
+            if choice_type in ("sacrifice_effect", "distribute_counters", "dig_select"):
+                for action_idx in range(353, 363):
+                    if opponent_mask[action_idx]:
+                        return action_idx, {}
+                if opponent_mask[479]:
+                    return 479, {}
+                return None, {}
             if choice_type == "order_triggers":
                 for action_idx in range(353, 363):
                     if opponent_mask[action_idx]:
@@ -2383,6 +2395,26 @@ class AlphaZeroMTGEnv(gym.Env):
                 obs["targetable_players"] = self._get_potential_targets_vector('player')
                 obs["targetable_spells_on_stack"] = self._get_potential_targets_vector('spell')
                 obs["targetable_cards_in_graveyards"] = self._get_potential_targets_vector('graveyard_card')
+                choice = getattr(gs, 'choice_context', None)
+                if choice and choice.get('player') is agent_player_obj:
+                    all_choice_ids = choice.get('options', choice.get('cards', []))
+                    choice_page = int(choice.get('choice_page', 0))
+                    choice_ids = all_choice_ids[choice_page * 10:(choice_page + 1) * 10]
+                    obs['choice_cards'] = self._get_zone_features(choice_ids, 10)
+                    obs['choice_card_mask'][:len(choice_ids)] = True
+                    obs['choice_remaining'] = np.array(
+                        [max(0, int(choice.get('remaining', 0)))], dtype=np.int32)
+                    allocations = choice.get('allocations', {})
+                    for option_index, card_id in enumerate(choice_ids):
+                        obs['choice_allocation_counts'][option_index] = max(
+                            0, int(allocations.get(card_id, 0)))
+                    choice_kinds = {
+                        'dig_select': 1, 'sacrifice_effect': 2,
+                        'distribute_counters': 3, 'manifest_dread': 4,
+                        'hand_selection': 5, 'scry': 6, 'surveil': 7,
+                    }
+                    obs['choice_kind'] = np.array(
+                        [choice_kinds.get(choice.get('type'), 8)], dtype=np.int32)
                 obs["sacrificeable_permanents"] = self._get_potential_sacrifices()
                 obs["selectable_modes"] = self._get_available_choice_options('mode')
                 obs["selectable_colors"] = self._get_available_choice_options('color')

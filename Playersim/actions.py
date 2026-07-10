@@ -711,6 +711,16 @@ class ActionHandler(
             while resolution_attempts < max_resolution_attempts:
                 resolution_attempts += 1
 
+                # A spell/ability can pause mid-resolution for a policy
+                # decision. Do not run SBAs, stack triggers, or resolve lower
+                # stack items until that decision (and its continuation) ends.
+                if (getattr(gs, 'targeting_context', None)
+                        or getattr(gs, 'sacrifice_context', None)
+                        or getattr(gs, 'choice_context', None)):
+                    logging.debug(
+                        "Game loop paused for an outstanding target/sacrifice/choice context.")
+                    break
+
                 # a. Check State-Based Actions
                 sba_performed = False
                 if hasattr(gs, 'check_state_based_actions'):

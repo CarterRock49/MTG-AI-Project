@@ -502,6 +502,15 @@ class TurnPhaseHandlersMixin:
             gs.choice_context = None
             return 0.0, True
         if (gs.phase == gs.PHASE_CHOOSE and getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'sacrifice_effect'
+                and gs.choice_context.get('optional')):
+            ctx = gs.choice_context
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if ctx.get('player') is not player:
+                return -0.1, False
+            self._advance_or_finish_sacrifice_effect(ctx, performed=False)
+            return 0.0, True
+        if (gs.phase == gs.PHASE_CHOOSE and getattr(gs, 'choice_context', None)
                 and gs.choice_context.get('type') == 'optional_sacrifice_proliferate'):
             ctx = gs.choice_context
             gs.phase = ctx.get('resume_phase', gs.PHASE_MAIN_PRECOMBAT)

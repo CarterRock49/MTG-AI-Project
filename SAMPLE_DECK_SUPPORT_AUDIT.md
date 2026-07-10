@@ -302,4 +302,4 @@ branches, but these cards no longer rely on wholly unproved routing.
 1. Run harvest fixtures and rank any new manifest entries by observed count.
 2. Train and benchmark a checkpoint against scripted play before promoting
    harvest runs to policy-vs-policy.
-3. Continue the remaining heuristic-choice exposure work tracked in Tier 3.
+3. Begin Tier 4 property tests and long-game invariant fuzzing.

@@ -18,10 +18,63 @@ class ChoiceHandlersMixin:
         gs = self.game_state
         ctx = getattr(gs, 'targeting_context', None)
         player = gs.p1 if gs.agent_is_p1 else gs.p2
-        if not ctx or ctx.get('controller') is not player:
-            return -0.1, False
-        ctx['target_page'] = int(ctx.get('target_page', 0)) + 1
-        return 0.0, True
+        if ctx and ctx.get('controller') is player:
+            ctx['target_page'] = int(ctx.get('target_page', 0)) + 1
+            return 0.0, True
+        choice = getattr(gs, 'choice_context', None)
+        if (choice and choice.get('player') is player
+                and choice.get('type') in ('sacrifice_effect', 'dig_select', 'distribute_counters')):
+            choice['choice_page'] = int(choice.get('choice_page', 0)) + 1
+            return 0.0, True
+        return -0.1, False
+
+    def _advance_or_finish_sacrifice_effect(self, ctx, performed):
+        """Advance an affected-player sacrifice choice or resume resolution."""
+        gs = self.game_state
+        ctx['sacrifice_performed'] = bool(
+            ctx.get('sacrifice_performed', False) or performed)
+        permanent_type = str(ctx.get('permanent_type', 'permanent')).rstrip('s')
+        pending = ctx.get('pending_players', [])
+        if pending:
+            next_choice = pending.pop(0)
+            next_player = gs.p1 if next_choice['player_id'] == 'p1' else gs.p2
+            ctx['player'] = next_player
+            ctx['remaining'] = next_choice['remaining']
+            ctx['optional'] = bool(next_choice.get('optional', False))
+            ctx['choice_page'] = 0
+            ctx['options'] = [
+                cid for cid in next_player.get('battlefield', [])
+                if permanent_type == 'permanent'
+                or permanent_type in {
+                    str(t).lower()
+                    for t in getattr(gs._safe_get_card(cid), 'card_types', [])
+                }
+            ]
+            gs.priority_player = next_player
+            return True
+
+        followup = ctx.get('reflexive_followup')
+        if followup and ctx.get('sacrifice_performed'):
+            from .ability_types import TriggeredAbility
+            trigger = TriggeredAbility(
+                followup['source_id'],
+                trigger_condition=followup['trigger_condition'],
+                effect=followup['trigger_effect_text'],
+                effect_text=(f"{followup['trigger_condition'].capitalize()}, "
+                             f"{followup['trigger_effect_text']}."))
+            trigger._is_reflexive_trigger = True
+            trigger_context = {
+                'ability': trigger, 'source_id': followup['source_id'],
+                'effect_text': followup['trigger_effect_text'],
+                'is_reflexive_trigger': True,
+                'reflexive_prerequisite': followup['prerequisite_text'],
+            }
+            followup_controller = (
+                gs.p1 if followup['controller_id'] == 'p1' else gs.p2)
+            gs.ability_handler.active_triggers.append(
+                (trigger, followup_controller, trigger_context))
+        gs._resume_effect_continuation(ctx)
+        return False
 
     def recommend_ability_activation(self, card_id, ability_idx):
         """
@@ -339,6 +392,7 @@ class ChoiceHandlersMixin:
         activation_targets = context.get("activation_targets")
         if requires_target and not activation_targets:
             target_type = gs._get_target_type_from_text(effect_text)
+            min_targets, max_targets = gs._target_bounds_from_text(effect_text)
             valid_map = gs.targeting_system.get_valid_targets(
                 card_id, player, target_type, effect_text=effect_text)
             if not any(valid_map.values()):
@@ -354,9 +408,9 @@ class ChoiceHandlersMixin:
                 "controller": player,
                 "effect_text": effect_text,
                 "required_type": target_type,
-                "required_count": 1,
-                "min_targets": 1,
-                "max_targets": 1,
+                "required_count": max_targets,
+                "min_targets": min_targets,
+                "max_targets": max_targets,
                 "selected_targets": [],
                 "resume_activation": True,
                 "activation_context": {
@@ -522,8 +576,38 @@ class ChoiceHandlersMixin:
                 f"expected between {min_targets} and {max_targets}.")
             return -0.1, False
 
+        target_slots = ctx.get('target_slots') or []
+        target_slot_index = int(ctx.get('target_slot_index', 0))
+        if target_slots and target_slot_index + 1 < len(target_slots):
+            ctx.setdefault('targets_by_slot', []).append(selected_targets)
+            target_slot_index += 1
+            next_slot = target_slots[target_slot_index]
+            ctx['target_slot_index'] = target_slot_index
+            ctx['selected_targets'] = []
+            ctx['required_type'] = next_slot.get('required_type', 'target')
+            ctx['effect_text'] = next_slot.get('effect_text', '')
+            ctx['required_count'] = int(next_slot.get('required_count', 1))
+            ctx['min_targets'] = int(
+                next_slot.get('min_targets', ctx['required_count']))
+            ctx['max_targets'] = int(
+                next_slot.get('max_targets', ctx['required_count']))
+            ctx['target_page'] = 0
+            return 0.02, True
+
+        if target_slots:
+            targets_by_slot = list(ctx.get('targets_by_slot', [])) + [selected_targets]
+            ctx['targets_by_slot'] = targets_by_slot
+            committed_targets = [
+                target_id
+                for slot_targets in targets_by_slot
+                for target_id in slot_targets
+            ]
+        else:
+            targets_by_slot = []
+            committed_targets = selected_targets
+
         categorized_targets = defaultdict(list)
-        for target_id in selected_targets:
+        for target_id in committed_targets:
             categorized_targets[gs._determine_target_category(target_id)].append(target_id)
         categorized_targets = dict(categorized_targets)
 
@@ -539,6 +623,8 @@ class ChoiceHandlersMixin:
         if ctx.get("resume_activation"):
             activation_context = dict(ctx.get("activation_context", {}))
             activation_context["activation_targets"] = categorized_targets
+            if targets_by_slot:
+                activation_context["targets_by_slot"] = targets_by_slot
             gs.targeting_context = None
             restore_phase(player)
             result = self._handle_activate_ability(None, activation_context)
@@ -559,6 +645,8 @@ class ChoiceHandlersMixin:
         if ctx.get("resume_cast"):
             cast_context = dict(ctx.get("original_cast_context", {}))
             cast_context["targets"] = categorized_targets
+            if targets_by_slot:
+                cast_context["targets_by_slot"] = targets_by_slot
             card_id = ctx.get("source_id")
             controller = ctx.get("controller")
             gs.targeting_context = None
@@ -575,6 +663,7 @@ class ChoiceHandlersMixin:
         if pending_effect is not None:
             source_id = ctx.get("source_id")
             controller = ctx.get("controller")
+            continuation = ctx.get('effect_continuation')
             gs.targeting_context = None
             restore_phase(controller)
             try:
@@ -593,6 +682,24 @@ class ChoiceHandlersMixin:
                 logging.warning(
                     f"Effect application returned None for: {pending_effect.effect_text}")
                 return -0.15, False
+            if continuation:
+                continuation['success'] = bool(result) and bool(
+                    continuation.get('success', True))
+                next_choice = getattr(gs, 'choice_context', None)
+                if (next_choice
+                        and next_choice.get('type') in gs._ASYNC_EFFECT_CHOICE_TYPES):
+                    next_choice['effect_continuation'] = continuation
+                    return 0.05, True
+                gs._run_effect_sequence(
+                    continuation.get('effects', []),
+                    continuation.get('source_id'),
+                    gs._effect_controller_from_id(
+                        continuation.get('controller_id')),
+                    continuation.get('targets'),
+                    continuation.get('resolution_context', {}),
+                    finalizer=continuation.get('finalizer'),
+                    initial_success=continuation.get('success', True))
+                return 0.05, True
             return 0.05, bool(result)
 
         source_id = ctx.get("source_id")
@@ -612,6 +719,8 @@ class ChoiceHandlersMixin:
                     continue
 
                 stack_context["targets"] = categorized_targets
+                if targets_by_slot:
+                    stack_context["targets_by_slot"] = targets_by_slot
                 stack_context["target_choice_pending"] = False
                 gs.stack[index] = item[:3] + (stack_context,)
                 committed_stack_context = stack_context
@@ -667,6 +776,10 @@ class ChoiceHandlersMixin:
             for category_targets in valid_map.values()
             for target_id in category_targets
         }, key=lambda t: (isinstance(t, str), t))
+        valid_targets_list = [
+            target_id for target_id in valid_targets_list
+            if target_id not in selected_targets
+        ]
 
         absolute_index = int(ctx.get('target_page', 0)) * 10 + target_choice_index
         if not isinstance(target_choice_index, int) or not 0 <= absolute_index < len(valid_targets_list):
@@ -677,11 +790,6 @@ class ChoiceHandlersMixin:
 
         target_id = valid_targets_list[absolute_index]
         ctx['target_page'] = 0
-        if target_id in selected_targets:
-            logging.warning(
-                f"Target {target_id} (Index {target_choice_index}) already selected.")
-            return -0.05, False
-
         selected_targets.append(target_id)
         ctx["selected_targets"] = selected_targets
         logging.debug(
@@ -693,22 +801,6 @@ class ChoiceHandlersMixin:
             logging.error("Selected more targets than allowed.")
             return -0.15, False
         if len(selected_targets) == max_targets:
-            slots = ctx.get('target_slots') or []
-            slot_index = int(ctx.get('target_slot_index', 0))
-            if slots and slot_index + 1 < len(slots):
-                ctx.setdefault('targets_by_slot', []).append(list(selected_targets))
-                slot_index += 1
-                slot = slots[slot_index]
-                ctx['target_slot_index'] = slot_index
-                ctx['selected_targets'] = []
-                ctx['required_type'] = slot.get('required_type', 'target')
-                ctx['effect_text'] = slot.get('effect_text', '')
-                ctx['required_count'] = int(slot.get('required_count', 1))
-                ctx['min_targets'] = int(slot.get('min_targets', ctx['required_count']))
-                ctx['max_targets'] = int(slot.get('max_targets', ctx['required_count']))
-                return 0.02, True
-            if slots:
-                ctx.setdefault('targets_by_slot', []).append(list(selected_targets))
             return self._finalize_targeting_choice()
         return 0.02, True
 
@@ -971,6 +1063,90 @@ class ChoiceHandlersMixin:
             gs.mana_system.add_mana(player, {options[param]: int(ctx.get('amount', 1))})
             gs.phase = ctx.get('resume_phase', gs.PHASE_PRIORITY)
             gs.choice_context = None
+            gs.priority_player = gs._get_active_player()
+            gs.priority_pass_count = 0
+            return 0.05, True
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'sacrifice_effect'):
+            ctx = gs.choice_context
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            options = ctx.get('options', [])
+            absolute_param = int(ctx.get('choice_page', 0)) * 10 + param
+            if ctx.get('player') is not player or not (0 <= absolute_param < len(options)):
+                return -0.1, False
+            card_id = options[absolute_param]
+            ctx['choice_page'] = 0
+            card = gs._safe_get_card(card_id)
+            permanent_type = str(ctx.get('permanent_type', 'permanent')).rstrip('s')
+            types = {str(t).lower() for t in getattr(card, 'card_types', [])} if card else set()
+            if (card_id not in player.get('battlefield', [])
+                    or (permanent_type != 'permanent' and permanent_type not in types)):
+                return -0.1, False
+            owner = gs._find_card_owner_fallback(card_id) or player
+            if not gs.move_card(
+                    card_id, player, 'battlefield', owner, 'graveyard',
+                    cause='sacrifice'):
+                return -0.1, False
+            gs.trigger_ability(card_id, 'SACRIFICED', {'controller': player})
+            ctx['optional'] = False
+            ctx['remaining'] = max(0, int(ctx.get('remaining', 1)) - 1)
+            remaining_candidates = [cid for cid in player.get('battlefield', [])
+                                    if permanent_type == 'permanent'
+                                    or permanent_type in {str(t).lower() for t in getattr(gs._safe_get_card(cid), 'card_types', [])}]
+            if ctx['remaining'] > 0 and remaining_candidates:
+                ctx['options'] = remaining_candidates
+                return 0.02, True
+            self._advance_or_finish_sacrifice_effect(ctx, performed=True)
+            return 0.05, True
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'distribute_counters'):
+            ctx = gs.choice_context
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            options = ctx.get('options', [])
+            absolute_param = int(ctx.get('choice_page', 0)) * 10 + param
+            if ctx.get('player') is not player or not (0 <= absolute_param < len(options)):
+                return -0.1, False
+            card_id = options[absolute_param]
+            allocations = ctx.setdefault('allocations', {})
+            allocations[card_id] = int(allocations.get(card_id, 0)) + 1
+            ctx['remaining'] = max(0, int(ctx.get('remaining', 1)) - 1)
+            if ctx['remaining'] > 0:
+                return 0.02, True
+            if any(int(allocations.get(target_id, 0)) <= 0 for target_id in options):
+                logging.error("Counter distribution completed without assigning every target.")
+                return -0.1, False
+            for target_id, count in allocations.items():
+                if not gs.add_counter(target_id, ctx.get('counter_type', '+1/+1'), count):
+                    return -0.1, False
+            gs._resume_effect_continuation(ctx)
+            return 0.05, True
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'dig_select'):
+            ctx = gs.choice_context
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            options = ctx.get('options', [])
+            absolute_param = int(ctx.get('choice_page', 0)) * 10 + param
+            if ctx.get('player') is not player or not (0 <= absolute_param < len(options)):
+                return -0.1, False
+            card_id = options[absolute_param]
+            if not gs.move_card(card_id, player, 'library_implicit', player, 'hand', cause='dig'):
+                return -0.1, False
+            options.pop(absolute_param)
+            ctx['choice_page'] = 0
+            ctx.setdefault('selected', []).append(card_id)
+            ctx['remaining'] = max(0, int(ctx.get('remaining', 1)) - 1)
+            if ctx['remaining'] > 0 and options:
+                return 0.02, True
+            destination = ctx.get('rest_destination', 'bottom')
+            rest = list(options)
+            if destination == 'bottom':
+                player['library'].extend(rest)
+            elif destination == 'top':
+                player['library'][:0] = rest
+            elif destination == 'graveyard':
+                for rest_id in rest:
+                    gs.move_card(rest_id, player, 'library_implicit', player, 'graveyard', cause='dig_discard')
+            gs._resume_effect_continuation(ctx)
             return 0.05, True
         if (getattr(gs, 'choice_context', None)
                 and gs.choice_context.get('type') == 'optional_sacrifice_proliferate'):

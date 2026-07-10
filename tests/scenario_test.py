@@ -1104,6 +1104,13 @@ def s_reflexive_trigger_after_successful_action():
     })
 
     assert gs.resolve_top_of_stack(), "parent ability did not finish resolving"
+    assert gs.choice_context and gs.choice_context.get('type') == 'sacrifice_effect', \
+        "reflexive prerequisite did not expose the sacrifice choice"
+    gs.agent_is_p1 = player is gs.p1
+    get_env().action_handler.generate_valid_actions()
+    _, ok = get_env().action_handler._handle_choose_mode(
+        gs.choice_context['options'].index(fodder), {})
+    assert ok
     assert fodder in player["graveyard"], "prerequisite sacrifice did not happen"
     assert len(player["hand"]) == hand_before, \
         "reflexive draw resolved immediately instead of using the stack"
@@ -1775,8 +1782,9 @@ def s_this_town_target_discount():
     assert get_env().action_handler._handle_select_target(
         valid_ids.index(own_target), {})[1], "could not select the friendly discount target"
     assert gs.targeting_context, "up-to-two targeting finalized after only one target"
+    remaining_valid_ids = [cid for cid in valid_ids if cid != own_target]
     assert get_env().action_handler._handle_select_target(
-        valid_ids.index(opposing_target), {})[1], "could not select the opposing target"
+        remaining_valid_ids.index(opposing_target), {})[1], "could not select the opposing target"
 
     paid_cost = gs.stack[-1][3].get("final_paid_cost", {})
     assert paid_cost.get("generic") == 1 and paid_cost.get("U") == 1, \
@@ -3622,7 +3630,7 @@ def s_parser_keyword_grant():
         "target creature did not gain flying (keyword grant is a no-op)"
 
 
-@scenario("parser: distribute counters", "'distribute N +1/+1 counters' places the counters")
+@scenario("parser: distribute counters", "the policy distributes counters one at a time among committed targets")
 def s_parser_distribute_counters():
     gs = fresh()
     from Playersim.ability_utils import EffectFactory
@@ -3630,20 +3638,108 @@ def s_parser_distribute_counters():
     src_id = card_id_by_name(gs, "Thicket Brute")
     to_battlefield(gs, src_id)
     a = card_id_by_name(gs, "Vine Stalker"); to_battlefield(gs, a)
+    b = inject_into_zone(gs, player, {"name": "Counter Choice B", "mana_cost": "", "cmc": 0,
+        "type_line": "Creature", "power": 1, "toughness": 1, "oracle_text": ""}, "battlefield")
     effs = EffectFactory.create_effects(
         "Distribute three +1/+1 counters among any number of target creatures.",
         source_name="Test Distribute")
-    assert effs and any(type(e).__name__ == "AddCountersEffect" for e in effs), \
+    assert effs and any(type(e).__name__ == "DistributeCountersEffect" for e in effs), \
         f"distribute counters did not parse: {[type(e).__name__ for e in effs]}"
-    # With one target creature, all 3 counters land on it.
-    for e in effs:
-        e.apply(gs, src_id, player, {"creatures": [a]})
-    card = gs._safe_get_card(a)
-    assert card.counters.get("+1/+1", 0) == 3, \
-        f"distribute placed {card.counters.get('+1/+1', 0)} counters, expected 3 on the sole target"
+    assert gs._target_bounds_from_text(
+        "Distribute three +1/+1 counters among any number of target creatures.") == (0, 3)
+    assert gs._target_bounds_from_text(
+        "Distribute three +1/+1 counters among one or two target creatures.") == (1, 2)
+    assert gs._target_bounds_from_text(
+        "Destroy target artifact and up to one target enchantment.") == (1, 2)
+    comma_bounded = EffectFactory.create_effects(
+        "Distribute three +1/+1 counters among one, two, or three target creatures.",
+        source_name="Test Bounded Distribute")
+    comma_effect = next(e for e in comma_bounded if type(e).__name__ == "DistributeCountersEffect")
+    assert gs._target_bounds_from_text(comma_effect.effect_text) == (1, 3), \
+        f"comma-separated target bounds were lost: {comma_effect.effect_text!r}"
+
+    effect = next(e for e in effs if type(e).__name__ == "DistributeCountersEffect")
+    gs.agent_is_p1 = player is gs.p1
+    handler = get_env().action_handler
+    assert effect.apply(gs, src_id, player), "distribution did not open target selection"
+    assert gs.targeting_context and (
+        gs.targeting_context['min_targets'], gs.targeting_context['max_targets']) == (0, 3)
+    mask = handler.generate_valid_actions()
+    assert mask[11] and mask[274:284].any(), \
+        "any-number targeting did not expose both finish and select actions at zero"
+
+    def select_target(target_id):
+        ctx = gs.targeting_context
+        valid_map = gs.targeting_system.get_valid_targets(
+            src_id, player, ctx['required_type'], effect_text=ctx['effect_text'])
+        valid_targets = sorted(
+            {cid for ids in valid_map.values() for cid in ids},
+            key=lambda cid: (isinstance(cid, str), cid))
+        valid_targets = [cid for cid in valid_targets
+                         if cid not in ctx.get('selected_targets', [])]
+        return handler._handle_select_target(valid_targets.index(target_id), {})
+
+    _, ok = select_target(a)
+    assert ok and handler.generate_valid_actions()[11], \
+        "distribution could not finish at an intermediate legal target count"
+    _, ok = select_target(b)
+    assert ok
+    _, ok = handler._handle_pass_priority(None)
+    assert ok, "Pass did not commit the selected distribution targets"
+    assert gs.choice_context and gs.choice_context.get('type') == 'distribute_counters'
+    _, ok = handler._handle_choose_mode(gs.choice_context['options'].index(b), {})
+    assert ok
+    _, ok = handler._handle_choose_mode(gs.choice_context['options'].index(b), {})
+    assert ok
+    assert gs._safe_get_card(a).counters.get('+1/+1', 0) == 0 \
+        and gs._safe_get_card(b).counters.get('+1/+1', 0) == 0, \
+        "counter allocation mutated the board before all assignments finished"
+    mask = handler.generate_valid_actions()
+    a_index = gs.choice_context['options'].index(a)
+    b_index = gs.choice_context['options'].index(b)
+    allocation_obs = get_env().observation_for(player)
+    assert allocation_obs['choice_remaining'][0] == 1 \
+        and allocation_obs['choice_allocation_counts'][b_index] == 2, \
+        "staged counter allocations were not explicit in the chooser observation"
+    assert mask[353 + a_index] and not mask[353 + b_index], \
+        "the final counter was not forced onto the still-unassigned target"
+    _, ok = handler._handle_choose_mode(a_index, {})
+    assert ok
+    assert gs._safe_get_card(a).counters.get('+1/+1', 0) == 1
+    assert gs._safe_get_card(b).counters.get('+1/+1', 0) == 2
+
+    life_before = player['life']
+    sequenced = EffectFactory.create_effects(
+        "Distribute two +1/+1 counters among one or two target creatures, "
+        "then gain 2 life.", source_name="Sequenced Distribute")
+    _, pending = gs._run_effect_sequence(
+        sequenced, src_id, player, {"creatures": [a, b]})
+    assert pending and gs.choice_context.get('type') == 'distribute_counters'
+    assert player['life'] == life_before, "a later effect ran before counter allocation"
+    _, ok = handler._handle_choose_mode(gs.choice_context['options'].index(a), {})
+    assert ok and player['life'] == life_before
+    _, ok = handler._handle_choose_mode(gs.choice_context['options'].index(b), {})
+    assert ok and player['life'] == life_before + 2, \
+        "counter allocation did not resume the remaining effect sequence"
+
+    life_before = player['life']
+    targeted_sequence = EffectFactory.create_effects(
+        "Distribute one +1/+1 counter among any number of target creatures, "
+        "then gain 1 life.", source_name="Targeted Sequence")
+    _, pending = gs._run_effect_sequence(
+        targeted_sequence, src_id, player, targets=None)
+    assert pending and gs.targeting_context and player['life'] == life_before, \
+        "later effects ran while the first effect was still choosing targets"
+    _, ok = select_target(a)
+    assert ok and gs.choice_context \
+        and gs.choice_context.get('type') == 'distribute_counters'
+    assert player['life'] == life_before
+    _, ok = handler._handle_choose_mode(gs.choice_context['options'].index(a), {})
+    assert ok and player['life'] == life_before + 1, \
+        "target selection did not preserve the remaining effect continuation"
 
 
-@scenario("parser: sacrifice", "'sacrifice a creature' moves one of your creatures to the graveyard")
+@scenario("parser: sacrifice", "the affected player chooses which creature to sacrifice")
 def s_parser_sacrifice():
     gs = fresh()
     from Playersim.ability_utils import EffectFactory
@@ -3659,26 +3755,76 @@ def s_parser_sacrifice():
     bf_before = len([c for c in player["battlefield"] if "creature" in getattr(gs._safe_get_card(c),"card_types",[])])
     for e in effs:
         e.apply(gs, src_id, player, {})
+    assert gs.choice_context and gs.choice_context.get('type') == 'sacrifice_effect'
+    gs.agent_is_p1 = player is gs.p1
+    # Action generation refreshes the dynamic options list.
+    get_env().action_handler.generate_valid_actions()
+    chosen_index = gs.choice_context['options'].index(victim)
+    _, ok = get_env().action_handler._handle_choose_mode(chosen_index, {})
+    assert ok
     bf_after = len([c for c in player["battlefield"] if "creature" in getattr(gs._safe_get_card(c),"card_types",[])])
     assert bf_after == bf_before - 1 and len(player["graveyard"]) == gy_before + 1, \
         "no creature was sacrificed to the graveyard"
 
+    optional_fodder = inject_into_zone(gs, player, {
+        "name": "Optional Sacrifice Fodder", "mana_cost": "",
+        "type_line": "Creature", "power": 1, "toughness": 1,
+        "oracle_text": ""}, "battlefield")
+    hand_before = len(player['hand'])
+    optional_sequence = EffectFactory.create_effects(
+        "You may sacrifice a creature, then draw a card.",
+        source_name="Optional Sacrifice")
+    _, pending = gs._run_effect_sequence(
+        optional_sequence, src_id, player, {})
+    assert pending and gs.choice_context.get('optional')
+    mask = get_env().action_handler.generate_valid_actions()
+    assert mask[11], "optional generic sacrifice did not expose decline"
+    _, ok = get_env().action_handler._handle_pass_priority(None)
+    assert ok and optional_fodder in player['battlefield']
+    assert len(player['hand']) == hand_before + 1, \
+        "declining an optional sacrifice did not resume later effects"
 
-@scenario("parser: edict", "'target player sacrifices a creature' hits the opponent")
+    chained_fodder = inject_into_zone(gs, player, {
+        "name": "Chained Sacrifice Fodder", "mana_cost": "",
+        "type_line": "Creature", "power": 1, "toughness": 1,
+        "oracle_text": ""}, "battlefield")
+    chained = EffectFactory.create_effects(
+        "Sacrifice a creature, then look at the top three cards of your library. "
+        "Put one into your hand and the rest on the bottom.",
+        source_name="Chained Choices")
+    _, pending = gs._run_effect_sequence(chained, src_id, player, {})
+    assert pending and gs.choice_context.get('type') == 'sacrifice_effect'
+    get_env().action_handler.generate_valid_actions()
+    _, ok = get_env().action_handler._handle_choose_mode(
+        gs.choice_context['options'].index(chained_fodder), {})
+    assert ok and gs.choice_context and gs.choice_context.get('type') == 'dig_select', \
+        "the later Dig choice did not replace the completed sacrifice choice"
+    _, ok = get_env().action_handler._handle_choose_mode(0, {})
+    assert ok and gs.choice_context is None
+
+
+@scenario("parser: edict", "an edict lets the targeted player choose the sacrificed creature")
 def s_parser_edict():
     gs = fresh()
     from Playersim.ability_utils import EffectFactory
     player, opp = gs.p1, gs.p2
     src_id = card_id_by_name(gs, "Thicket Brute"); to_battlefield(gs, src_id)
     theirs = card_id_by_name(gs, "Vine Stalker")
-    assert gs.move_card(theirs, owner_of(gs, theirs), "library", opp, "battlefield")
+    theirs_owner = owner_of(gs, theirs)
+    assert gs.move_card(theirs, theirs_owner, "library", opp, "battlefield")
     effs = EffectFactory.create_effects("Target player sacrifices a creature.", source_name="Edict")
     assert effs and type(effs[0]).__name__ == "SacrificeEffect", \
         f"edict did not parse to a sacrifice effect: {[type(e).__name__ for e in effs]}"
-    gy_before = len(opp["graveyard"])
+    gy_before = len(theirs_owner["graveyard"])
     for e in effs:
         e.apply(gs, src_id, player, {"players": ["p2"]})
-    assert len(opp["graveyard"]) == gy_before + 1, "edict did not make the target player sacrifice"
+    assert gs.choice_context and gs.choice_context.get('player') is opp
+    gs.agent_is_p1 = opp is gs.p1
+    get_env().action_handler.generate_valid_actions()
+    _, ok = get_env().action_handler._handle_choose_mode(gs.choice_context['options'].index(theirs), {})
+    assert ok
+    assert len(theirs_owner["graveyard"]) == gy_before + 1, \
+        "edict did not put the sacrificed permanent into its owner's graveyard"
 
 
 @scenario("parser: reanimation", "'return target creature card from your graveyard to the battlefield' revives it")
@@ -4219,7 +4365,7 @@ def s_parser_untap_all():
         "'untap all lands you control' did not untap the caster's land"
 
 
-@scenario("parser: dig", "'look at the top three, put one into your hand' draws one and reorders the rest")
+@scenario("parser: dig", "the policy chooses which looked-at card goes to hand")
 def s_parser_dig():
     gs = fresh()
     from Playersim.ability_utils import EffectFactory
@@ -4234,6 +4380,17 @@ def s_parser_dig():
         f"dig did not parse: {[type(e).__name__ for e in effs]}"
     for e in effs:
         e.apply(gs, src_id, player, {})
+    assert gs.choice_context and gs.choice_context.get('type') == 'dig_select'
+    chooser_obs = get_env().observation_for(player)
+    other = gs.p2 if player is gs.p1 else gs.p1
+    other_obs = get_env().observation_for(other)
+    assert chooser_obs['choice_kind'][0] == 1 and chooser_obs['choice_card_mask'].sum() == 3
+    assert chooser_obs['choice_remaining'][0] == 1
+    assert not other_obs['choice_card_mask'].any(), "Dig identities leaked to the non-choosing player"
+    chosen = top3[-1]
+    gs.agent_is_p1 = player is gs.p1
+    _, ok = get_env().action_handler._handle_choose_mode(gs.choice_context['options'].index(chosen), {})
+    assert ok and chosen in player['hand']
     assert len(player["hand"]) == hand_before + 1, "dig did not put a card into hand"
     assert len(player["library"]) == lib_before - 1, "dig changed library size incorrectly"
     # Exactly one card left the top region into hand; the other two are now on
@@ -4242,6 +4399,38 @@ def s_parser_dig():
     moved_to_bottom = player["library"][-2:]
     assert all(c in top3 for c in moved_to_bottom), \
         "the unchosen looked-at cards are not on the bottom of the library"
+
+    compound_spell = inject_into_zone(gs, player, {
+        "name": "Deferred Dig Probe", "mana_cost": "{U}", "type_line": "Instant",
+        "oracle_text": (
+            "Look at the top three cards of your library. Put one into your hand "
+            "and the rest on the bottom. You gain 2 life.")}, "hand")
+    gs.turn = 1 if player is gs.p1 else 2
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.previous_priority_phase = None
+    gs.priority_player = player
+    player['mana_pool'] = {'W': 0, 'U': 1, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
+    life_before = player['life']
+    assert gs.cast_spell(compound_spell, player)
+    assert gs.resolve_top_of_stack()
+    assert gs.choice_context and gs.choice_context.get('type') == 'dig_select'
+    assert player['life'] == life_before and compound_spell not in player['graveyard'], \
+        "Dig continuation finalized the spell or a later effect before the choice"
+    cloned = gs.clone()
+    cloned_player = cloned.p1 if player is gs.p1 else cloned.p2
+    cloned.agent_is_p1 = cloned_player is cloned.p1
+    cloned.action_handler.generate_valid_actions()
+    _, clone_ok = cloned.action_handler._handle_choose_mode(0, {})
+    assert clone_ok and cloned_player['life'] == life_before + 2 \
+        and compound_spell in cloned_player['graveyard'], \
+        "a cloned resolution choice could not finish its continuation"
+    assert gs.choice_context and player['life'] == life_before \
+        and compound_spell not in player['graveyard'], \
+        "finishing a cloned continuation mutated the original game"
+    _, ok = get_env().action_handler._handle_choose_mode(0, {})
+    assert ok and player['life'] == life_before + 2
+    assert player['graveyard'].count(compound_spell) == 1, \
+        "the compound Dig spell did not finalize exactly once"
 
 
 @scenario("parser: put on top", "'put target creature on top of its owner's library' removes it from the battlefield")
@@ -7294,18 +7483,35 @@ def scenario_independent_modal_target_slots():
     source = inject_into_zone(gs, player, {"name": "Modal Source", "mana_cost": "", "type_line": "Artifact", "oracle_text": ""}, "battlefield")
     creature = inject_into_zone(gs, player, {"name": "Modal Creature", "mana_cost": "", "type_line": "Creature", "power": 1, "toughness": 1, "oracle_text": ""}, "battlefield")
     land = inject_into_zone(gs, player, {"name": "Modal Land", "mana_cost": "", "type_line": "Land", "oracle_text": ""}, "battlefield")
+    captured = {}
+    class CaptureTargets:
+        effect_text = "capture modal targets"
+        def _apply_effect(self, game_state, source_id, controller, targets):
+            captured.update(targets)
+            return True
+    capture_effect = CaptureTargets()
     gs.phase = gs.PHASE_TARGETING
     gs.targeting_context = {"source_id": source, "controller": player,
         "required_type": "creature", "effect_text": "target creature you control",
-        "required_count": 1, "min_targets": 1, "max_targets": 1, "selected_targets": [],
+        "required_count": 2, "min_targets": 1, "max_targets": 2, "selected_targets": [],
         "target_slots": [
-            {"required_type": "creature", "effect_text": "target creature you control", "required_count": 1},
+            {"required_type": "creature", "effect_text": "up to two target creatures you control",
+             "required_count": 2, "min_targets": 1, "max_targets": 2},
             {"required_type": "land", "effect_text": "target land you control", "required_count": 1}],
-        "target_slot_index": 0}
+        "target_slot_index": 0, "resume_effect": capture_effect}
     creature_targets = sorted({cid for ids in gs.targeting_system.get_valid_targets(source, player, "creature", effect_text="target creature you control").values() for cid in ids})
     _, ok = env.action_handler._handle_select_target(creature_targets.index(creature), {})
+    assert ok and gs.targeting_context['required_type'] == 'creature'
+    mask = env.action_handler.generate_valid_actions()
+    assert mask[11], "variable modal target slot could not finish at its minimum"
+    _, ok = env.action_handler._handle_pass_priority(None)
     assert ok and gs.targeting_context['required_type'] == 'land'
     assert gs.targeting_context['targets_by_slot'] == [[creature]]
+    land_targets = sorted({cid for ids in gs.targeting_system.get_valid_targets(source, player, "land", effect_text="target land you control").values() for cid in ids})
+    _, ok = env.action_handler._handle_select_target(land_targets.index(land), {})
+    assert ok and gs.targeting_context is None
+    assert captured.get('creatures') == [creature] and captured.get('lands') == [land], \
+        f"modal finalization dropped a prior target slot: {captured}"
 
 
 @scenario("603.3b / self-play", "opponent trigger ordering is routed through the installed policy")

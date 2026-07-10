@@ -636,6 +636,61 @@ class ActionSpaceMixin:
                     set_valid_action(353 + option_index, f"ADD {color} MANA",
                                      context={"option_index": option_index})
 
+            elif choice_type == "sacrifice_effect":
+                permanent_type = str(context.get('permanent_type', 'permanent')).rstrip('s')
+                candidates = []
+                for card_id in player.get('battlefield', []):
+                    card = gs._safe_get_card(card_id)
+                    types = {str(t).lower() for t in getattr(card, 'card_types', [])} if card else set()
+                    if permanent_type == 'permanent' or permanent_type in types:
+                        candidates.append(card_id)
+                context['options'] = candidates
+                page_count = max(1, (len(candidates) + 9) // 10)
+                page = int(context.get('choice_page', 0)) % page_count
+                context['choice_page'] = page
+                for option_index, card_id in enumerate(candidates[page * 10:(page + 1) * 10]):
+                    card = gs._safe_get_card(card_id)
+                    set_valid_action(353 + option_index,
+                                     f"SACRIFICE_EFFECT {getattr(card, 'name', card_id)}",
+                                     context={"option_index": option_index})
+                if page_count > 1:
+                    set_valid_action(479, f"SACRIFICE_PAGE_NEXT ({page + 1}/{page_count})")
+                if context.get('optional'):
+                    set_valid_action(11, "DECLINE_SACRIFICE_EFFECT")
+
+            elif choice_type == "distribute_counters":
+                all_options = context.get('options', [])
+                allocations = context.get('allocations', {})
+                unassigned = [card_id for card_id in all_options if not allocations.get(card_id)]
+                legal_options = (unassigned if int(context.get('remaining', 0)) <= len(unassigned)
+                                 else all_options)
+                page_count = max(1, (len(all_options) + 9) // 10)
+                page = int(context.get('choice_page', 0)) % page_count
+                context['choice_page'] = page
+                page_options = all_options[page * 10:(page + 1) * 10]
+                for option_index, card_id in enumerate(page_options):
+                    if card_id not in legal_options:
+                        continue
+                    card = gs._safe_get_card(card_id)
+                    set_valid_action(353 + option_index,
+                                     f"PUT_{context.get('counter_type', '+1/+1')}_COUNTER {getattr(card, 'name', card_id)}",
+                                     context={"option_index": option_index})
+                if page_count > 1:
+                    set_valid_action(479, f"COUNTER_PAGE_NEXT ({page + 1}/{page_count})")
+
+            elif choice_type == "dig_select":
+                options = context.get('options', [])
+                page_count = max(1, (len(options) + 9) // 10)
+                page = int(context.get('choice_page', 0)) % page_count
+                context['choice_page'] = page
+                for option_index, card_id in enumerate(options[page * 10:(page + 1) * 10]):
+                    card = gs._safe_get_card(card_id)
+                    set_valid_action(353 + option_index,
+                                     f"DIG_TAKE {getattr(card, 'name', card_id)}",
+                                     context={"option_index": option_index})
+                if page_count > 1:
+                    set_valid_action(479, f"DIG_PAGE_NEXT ({page + 1}/{page_count})")
+
             elif choice_type == "optional_sacrifice_proliferate":
                 source_id = context.get('source_id')
                 if source_id in player.get('battlefield', []):
@@ -888,6 +943,8 @@ class ActionSpaceMixin:
             source_name = source_card.name if source_card and hasattr(source_card, 'name') else source_id
             target_type = context.get('required_type', 'target') # e.g., 'creature', 'player'
             required_count = context.get('required_count', 1)
+            min_targets = context.get('min_targets', required_count)
+            max_targets = context.get('max_targets', required_count)
             selected_count = len(context.get('selected_targets', []))
 
             # Get valid targets using TargetingSystem if possible
@@ -905,7 +962,9 @@ class ActionSpaceMixin:
             valid_targets_list = []
             for category, targets in valid_targets_map.items():
                 valid_targets_list.extend(targets)
-            valid_targets_list = sorted(set(valid_targets_list))
+            valid_targets_list = sorted(
+                set(valid_targets_list),
+                key=lambda target_id: (isinstance(target_id, str), target_id))
 
             # Remove already selected targets to avoid duplicates
             already_selected = context.get('selected_targets', [])
@@ -914,7 +973,9 @@ class ActionSpaceMixin:
             # Generate SELECT_TARGET actions for available targets
             if context.get('allow_keep_original_targets') and selected_count == 0:
                 set_valid_action(11, "KEEP_ORIGINAL_TARGETS")
-            if selected_count < required_count:
+            elif selected_count >= min_targets:
+                set_valid_action(11, "FINISH_TARGET_SELECTION")
+            if selected_count < max_targets:
                 page = int(context.get('target_page', 0))
                 page_count = max(1, (len(valid_targets_list) + 9) // 10)
                 if page >= page_count:
@@ -929,9 +990,6 @@ class ActionSpaceMixin:
                     set_valid_action(274 + i, f"SELECT_TARGET ({i}): {target_name} for {source_name}")
                 if page_count > 1:
                     set_valid_action(479, f"TARGET_PAGE_NEXT ({page + 1}/{page_count})")
-            else:
-                # If enough targets are selected, allow passing priority
-                set_valid_action(11, "PASS_PRIORITY (Targets selected)")
 
     def _add_level_up_actions(self, player, valid_actions, set_valid_action):
         """Add actions for leveling up Class cards and leveler creatures."""
@@ -1334,6 +1392,9 @@ class ActionSpaceMixin:
             bool: Whether valid targets exist for the card
         """
         gs = self.game_state
+        oracle_text = getattr(card, 'oracle_text', '')
+        if gs._target_bounds_from_text(oracle_text)[0] == 0:
+            return True
         
         # Use TargetingSystem if available
         if hasattr(gs, 'ability_handler') and hasattr(gs.ability_handler, 'targeting_system'):
@@ -1631,6 +1692,8 @@ class ActionSpaceMixin:
         card_id = getattr(card, 'card_id', None)
         if not card_id or not hasattr(card, 'oracle_text') or 'target' not in card.oracle_text.lower():
             return True # No target needed or cannot check
+        if gs._target_bounds_from_text(card.oracle_text)[0] == 0:
+            return True
 
         if hasattr(gs, 'targeting_system') and gs.targeting_system:
             try:

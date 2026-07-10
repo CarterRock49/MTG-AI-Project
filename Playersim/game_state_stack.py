@@ -18,6 +18,134 @@ class GameStateStackMixin:
     # Empty slots: preserves GameState's __slots__ semantics (no instance __dict__).
     __slots__ = ()
 
+    _ASYNC_EFFECT_CHOICE_TYPES = frozenset({
+        "sacrifice_effect", "distribute_counters", "dig_select",
+    })
+
+    def _effect_controller_id(self, controller):
+        return "p1" if controller is self.p1 else "p2"
+
+    def _effect_controller_from_id(self, controller_id):
+        return self.p1 if controller_id == "p1" else self.p2
+
+    def _run_effect_sequence(self, effects, source_id, controller, targets=None,
+                             context=None, finalizer=None,
+                             initial_success=True):
+        """Apply parsed effects in order, pausing on policy choices.
+
+        The stack item has already been popped when resolution reaches here.
+        Remaining effect objects and a declarative finalizer therefore live on
+        the choice itself until the chooser finishes; the spell/ability is not
+        reparsed or put back on the stack.
+        """
+        effects = list(effects or [])
+        success = bool(initial_success)
+        for effect_index, effect in enumerate(effects):
+            previous_choice = getattr(self, 'choice_context', None)
+            previous_targeting = getattr(self, 'targeting_context', None)
+            try:
+                applied = effect.apply(
+                    self, source_id, controller, targets, context=context)
+                success = bool(applied) and success
+            except Exception:
+                logging.exception(
+                    "Error applying sequenced effect %r from source %r",
+                    getattr(effect, 'effect_text', effect), source_id)
+                success = False
+
+            choice = getattr(self, 'choice_context', None)
+            if (choice is not None and choice is not previous_choice
+                    and choice.get('type') in self._ASYNC_EFFECT_CHOICE_TYPES):
+                choice['effect_continuation'] = {
+                    'effects': effects[effect_index + 1:],
+                    'source_id': source_id,
+                    'controller_id': self._effect_controller_id(controller),
+                    'targets': copy_module.deepcopy(targets),
+                    'resolution_context': copy_module.deepcopy(context or {}),
+                    'finalizer': copy_module.deepcopy(finalizer),
+                    'success': success,
+                }
+                return success, True
+
+            targeting = getattr(self, 'targeting_context', None)
+            if targeting is not None and targeting is not previous_targeting:
+                targeting['effect_continuation'] = {
+                    'effects': effects[effect_index + 1:],
+                    'source_id': source_id,
+                    'controller_id': self._effect_controller_id(controller),
+                    'targets': copy_module.deepcopy(targets),
+                    'resolution_context': copy_module.deepcopy(context or {}),
+                    'finalizer': copy_module.deepcopy(finalizer),
+                    'success': success,
+                }
+                return success, True
+
+        if finalizer:
+            success = bool(self._complete_effect_finalizer(finalizer, success))
+        return success, False
+
+    def _complete_effect_finalizer(self, finalizer, success=True):
+        """Finish a stack object whose effects paused for a policy choice."""
+        kind = (finalizer or {}).get('kind')
+        controller = self._effect_controller_from_id(
+            (finalizer or {}).get('controller_id'))
+        source_id = (finalizer or {}).get('source_id')
+        context = copy_module.deepcopy((finalizer or {}).get('context', {}))
+        if kind == 'instant_sorcery':
+            return self._finish_instant_sorcery_resolution(
+                source_id, controller, context)
+        if kind == 'modal_spell':
+            return self._finish_modal_spell_resolution(
+                source_id, controller, context, success)
+        if kind == 'ability':
+            ability_type = (finalizer or {}).get('ability_type', 'ABILITY')
+            if success:
+                self.trigger_ability(
+                    source_id, f"{ability_type}_RESOLVED", context)
+            self.check_state_based_actions()
+            return success
+        return success
+
+    def _resume_effect_continuation(self, completed_choice):
+        """Resume the parsed effect sequence after an async choice completes."""
+        continuation = (completed_choice or {}).get('effect_continuation')
+        resume_phase = (completed_choice or {}).get(
+            'resume_phase', self.PHASE_PRIORITY)
+        self.choice_context = None
+        self.phase = resume_phase
+
+        if not continuation:
+            self.priority_player = self._get_active_player()
+            self.priority_pass_count = 0
+            return True
+
+        controller = self._effect_controller_from_id(
+            continuation.get('controller_id'))
+        success, pending = self._run_effect_sequence(
+            continuation.get('effects', []),
+            continuation.get('source_id'), controller,
+            continuation.get('targets'),
+            continuation.get('resolution_context', {}),
+            finalizer=continuation.get('finalizer'),
+            initial_success=continuation.get('success', True))
+
+        release_split_second = continuation.get('release_split_second', False)
+        if pending and release_split_second and self.choice_context:
+            self.choice_context.setdefault('effect_continuation', {})[
+                'release_split_second'] = True
+        elif release_split_second:
+            any_other_split_second = any(
+                isinstance(item, tuple) and len(item) > 3
+                and item[3].get('is_split_second')
+                for item in self.stack)
+            if not any_other_split_second:
+                self.split_second_active = False
+
+        if not pending:
+            self.priority_player = self._get_active_player()
+            self.priority_pass_count = 0
+        return success
+
     def _get_target_type_from_text(self, text):
          """Simple helper to guess target type."""
          text = text.lower()
@@ -196,15 +324,40 @@ class GameStateStackMixin:
                 logging.debug("Added to stack during special choice phase, priority maintained.")
 
     @staticmethod
-    def _target_count_from_text(effect_text):
+    def _target_bounds_from_text(effect_text):
         text = (effect_text or "").lower()
         word_counts = {"two": 2, "three": 3, "four": 4, "five": 5}
+        if "any number of target" in text:
+            distribute = re.search(r"distribute\s+(one|two|three|four|five|\d+)", text)
+            maximum = 20
+            if distribute:
+                token = distribute.group(1)
+                maximum = int(token) if token.isdigit() else {"one": 1, **word_counts}.get(token, 1)
+            return 0, maximum
+        listed = re.search(
+            r"among\s+one(?:\s+or\s+two|,\s*two(?:,?\s+or\s+three)?)?\s+target", text)
+        if listed:
+            maximum = 3 if "three" in listed.group(0) else 2 if "two" in listed.group(0) else 1
+            return 1, maximum
         counted = re.search(r"\btarget\s+(two|three|four|five)\b", text)
         if not counted:
             counted = re.search(r"\b(?:up to\s+)?(two|three|four|five)\s+target\b", text)
         if counted:
-            return word_counts[counted.group(1)]
-        return max(1, text.count("target "))
+            maximum = word_counts[counted.group(1)]
+        else:
+            maximum = max(1, text.count("target "))
+        if "up to" in text:
+            mandatory_text = re.sub(
+                r"\bup to\s+(?:one|two|three|four|five|\d+)\s+target\b",
+                "", text)
+            minimum = mandatory_text.count("target ")
+        else:
+            minimum = maximum
+        return minimum, maximum
+
+    @staticmethod
+    def _target_count_from_text(effect_text):
+        return GameStateStackMixin._target_bounds_from_text(effect_text)[1]
 
     def start_pending_stack_target_choice(self):
         """Open the next unresolved target choice already waiting on the stack."""
@@ -224,9 +377,9 @@ class GameStateStackMixin:
 
             effect_text = context.get("targeting_text") or context.get("effect_text", "")
             target_type = self._get_target_type_from_text(effect_text)
-            required_count = int(context.get(
-                "required_count", self._target_count_from_text(effect_text)))
-            min_targets = 0 if "up to" in effect_text.lower() else required_count
+            parsed_min, parsed_max = self._target_bounds_from_text(effect_text)
+            required_count = int(context.get("required_count", parsed_max))
+            min_targets = int(context.get("min_targets", parsed_min))
             valid_map = self.targeting_system.get_valid_targets(
                 source_id, controller, target_type, effect_text=effect_text)
             valid_ids = {target_id for ids in valid_map.values() for target_id in ids}
@@ -1003,9 +1156,10 @@ class GameStateStackMixin:
             )
         targeting_text_lower = targeting_text.lower()
         requires_target = "target" in targeting_text_lower
-        num_targets = self._target_count_from_text(targeting_text) if requires_target else 0
-        up_to_N = "up to" in targeting_text_lower
-        min_targets = 0 if up_to_N else num_targets
+        parsed_min, parsed_max = self._target_bounds_from_text(targeting_text) if requires_target else (0, 0)
+        num_targets = parsed_max
+        up_to_N = parsed_min == 0
+        min_targets = parsed_min
         targets_committed = (
             "targets" in context and isinstance(context.get("targets"), dict))
 
@@ -1256,6 +1410,8 @@ class GameStateStackMixin:
         final_stack_context["final_paid_details"] = paid_mana_details
         final_stack_context["requires_target"] = requires_target
         final_stack_context["num_targets"] = num_targets
+        final_stack_context["min_targets"] = min_targets
+        final_stack_context["max_targets"] = num_targets
         final_stack_context.pop('pay_offspring', None) # Clear intent flag
         final_stack_context.pop('kicker_cost_to_pay', None)
         final_stack_context.pop('additional_cost_info', None)
@@ -1274,7 +1430,7 @@ class GameStateStackMixin:
              self.targeting_context = {
                  "source_id": card_id, "controller": player,
                  "required_type": self._get_target_type_from_text(targeting_text),
-                 "required_count": num_targets, "min_targets": 0 if up_to_N else num_targets,
+                 "required_count": num_targets, "min_targets": min_targets,
                  "max_targets": num_targets, "selected_targets": [],
                  "effect_text": targeting_text,
                  "stack_info": {
@@ -1690,10 +1846,18 @@ class GameStateStackMixin:
             # --- Post-Resolution Cleanup ---
             # Clear split second flag *after* resolution if it was the last one
             if resolved_item_had_split_second:
-                any_other_ss_on_stack = any(isinstance(i,tuple) and len(i)>3 and i[3].get('is_split_second') for i in self.stack)
-                if not any_other_ss_on_stack:
-                    self.split_second_active = False
-                    logging.info("Split Second is now INACTIVE.")
+                continuation = (
+                    self.choice_context.get('effect_continuation')
+                    if self.choice_context else None)
+                if continuation is not None:
+                    continuation['release_split_second'] = True
+                else:
+                    any_other_ss_on_stack = any(
+                        isinstance(i, tuple) and len(i) > 3
+                        and i[3].get('is_split_second') for i in self.stack)
+                    if not any_other_ss_on_stack:
+                        self.split_second_active = False
+                        logging.info("Split Second is now INACTIVE.")
 
             # --- Reset Priority ---
             # Only reset priority if a *new* special phase wasn't entered AND
@@ -1842,7 +2006,8 @@ class GameStateStackMixin:
                  # Move to GY if non-permanent?
                  return False
 
-            resolution_effects_applied = False
+            modal_effects = []
+            mode_targets = self._effect_targets_from_context(context)
             for mode_idx in selected_modes_indices:
                 if 0 <= mode_idx < len(all_modes_text):
                      mode_text = all_modes_text[mode_idx]
@@ -1850,21 +2015,21 @@ class GameStateStackMixin:
                      # Create and apply effects for THIS mode's text
                      # Pass targets that were selected *for the whole spell* if available
                      # If modes have separate targets, targeting phase needs modification. Assume shared targets for now.
-                     mode_targets = self._effect_targets_from_context(context)
                      effects = EffectFactory.create_effects(mode_text, mode_targets, source_name=getattr(spell, 'name', None))
-                     for effect_obj in effects:
-                         if effect_obj.apply(self, spell_id, controller, mode_targets):
-                              resolution_effects_applied = True
+                     modal_effects.extend(effects)
                 else:
                      logging.warning(f"Invalid mode index {mode_idx} found in context for {spell_name}")
 
-            # Move non-permanent modal spells to graveyard after applying effects
-            if not any(t in card_types for t in ['creature', 'artifact', 'enchantment', 'planeswalker', 'land', 'battle']):
-                if not context.get("is_copy", False) and not context.get("skip_default_movement", False):
-                    self.move_card(spell_id, controller, "stack_implicit", controller, "graveyard")
-
-            self.trigger_ability(spell_id, "SPELL_RESOLVED", {"controller": controller, **context})
-            return resolution_effects_applied
+            finalizer = {
+                'kind': 'modal_spell', 'source_id': spell_id,
+                'controller_id': self._effect_controller_id(controller),
+                'context': copy_module.deepcopy(context),
+            }
+            success, pending = self._run_effect_sequence(
+                modal_effects, spell_id, controller, mode_targets,
+                context=context, finalizer=finalizer,
+                initial_success=bool(modal_effects))
+            return True if pending else success
 
         # --- NON-MODAL SPELL RESOLUTION ---
         else:
@@ -1887,6 +2052,25 @@ class GameStateStackMixin:
 
             # Post-resolution SBAs are handled by the main loop
             return success
+
+    def _finish_modal_spell_resolution(self, spell_id, controller, context,
+                                       effects_succeeded=True):
+        """Move and announce a modal spell after all choices finish."""
+        spell = self._safe_get_card(spell_id)
+        if not spell:
+            return False
+        card_types = getattr(spell, 'card_types', [])
+        if not any(t in card_types for t in [
+                'creature', 'artifact', 'enchantment', 'planeswalker',
+                'land', 'battle']):
+            if (not context.get("is_copy", False)
+                    and not context.get("skip_default_movement", False)):
+                self.move_card(
+                    spell_id, controller, "stack_implicit", controller,
+                    "graveyard", cause="spell_resolution", context=context)
+        self.trigger_ability(
+            spell_id, "SPELL_RESOLVED", {"controller": controller, **context})
+        return bool(effects_succeeded)
 
     def _resolve_modal_spell(self, spell_id, controller, mode, context=None):
         """
@@ -2176,15 +2360,33 @@ class GameStateStackMixin:
         logging.debug(f"Resolving Instant/Sorcery: {spell_name}")
 
         # Apply effects using AbilityHandler or EffectFactory
+        effects = []
+        effect_targets = self._effect_targets_from_context(context)
         if hasattr(self, 'ability_handler'):
-            effect_targets = self._effect_targets_from_context(context)
             effects = EffectFactory.create_effects(getattr(spell, 'oracle_text', ''), effect_targets, source_name=getattr(spell, 'name', None))
-            for effect_obj in effects:
-                effect_obj.apply(
-                    self, spell_id, controller, effect_targets,
-                    context=context)
         else:
             logging.warning("No ability handler found to resolve instant/sorcery effects.")
+
+        finalizer = {
+            'kind': 'instant_sorcery', 'source_id': spell_id,
+            'controller_id': self._effect_controller_id(controller),
+            'context': copy_module.deepcopy(context),
+        }
+        success, pending = self._run_effect_sequence(
+            effects, spell_id, controller, effect_targets,
+            context=context, finalizer=finalizer)
+        return True if pending else success
+
+    def _finish_instant_sorcery_resolution(self, spell_id, controller, context=None):
+        """Move and announce an instant/sorcery after all choices finish."""
+        if context is None:
+            context = {}
+        spell = self._safe_get_card(spell_id)
+        if not spell:
+            logging.warning(
+                f"Cannot finish instant/sorcery resolution for missing card {spell_id}.")
+            return False
+        spell_name = getattr(spell, 'name', f"Spell {spell_id}")
 
         # Determine final destination zone based on context (Flashback, Rebound etc.)
         final_zone = "graveyard"

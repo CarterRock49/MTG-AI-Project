@@ -93,15 +93,16 @@ Remaining Tier 2 work:
   * **"gains <keyword> until end of turn"** — the most common combat trick —
     → added GainKeywordEffect (layer-6 add_ability, end-of-turn). Also fixes
     the trample half of "gets +1/+1 and gains trample", previously dropped.
-  * **"distribute N +1/+1 counters"** parsed (single-target v1; the
-    multi-target split is a Tier 3 agent-choice item).
+  * **"distribute N +1/+1 counters"** parsed. The original single-target v1
+    was replaced by policy-selected multi-target allocation in Round 7.24.
   Regression-checked: previously-working clauses still route correctly. Four
   scenarios guard the new coverage.
   **Round 2 (July 2026)** closed 7 more gaps (13/20 no-op in the next sample,
   now 0/20 for the targeted clauses):
   * **Sacrifice / edict** — "sacrifice a <type>", "target player sacrifices",
     "each player/opponent sacrifices" all hit the no-op fallback. Added
-    SacrificeEffect (v1 heuristic pick; player-choice is a Tier 3 item).
+    SacrificeEffect; its original heuristic pick was replaced by the affected
+    player's sequential policy choice in Round 7.24.
   * **Reanimation** — "return ... from graveyard to the battlefield" was only
     handled for the "to hand" phrasing; the battlefield destination no-opped.
     Added ReanimateEffect (enters under controller's control), disambiguated
@@ -134,8 +135,8 @@ Remaining Tier 2 work:
   * **Untap-all** — "untap all lands you control" (ramp/combo staple) → added
     an 'all_yours' scope to UntapEffect.
   * **Dig** — "look at the top N, put one into your hand, rest on bottom/top"
-    → added DigEffect (v1 keeps the highest-CMC card; the pick is a Tier 3
-    agent-choice item).
+    → added DigEffect. Round 7.24 replaced its highest-CMC heuristic with a
+    chooser-only, card-visible policy decision.
   * **Tuck / put-on-library** — "put target creature on top of its owner's
     library" (tempo removal) → added PutOnLibraryEffect.
   Regression-checked 0/17 including single-target vs mass bounce/untap.
@@ -589,9 +590,10 @@ Remaining Tier 2 work:
 
 1. ◐ **Choice exposure, remainder**: spell, activated-ability,
    triggered-ability, and direct-effect targets are agent choices. Independent
-   modal target slots, paged target lists beyond ten, and opponent trigger
-   ordering through policy are complete. Remaining heuristic choices include
-   multi-target counter distribution, generic sacrifice selection, and Dig.
+   modal target slots, paged target lists, opponent trigger ordering,
+   multi-target counter allocation, generic SacrificeEffect selection, and Dig
+   selection are complete. Remaining audit target: non-self sacrifice costs on
+   generic activated abilities still use the cost subsystem's heuristic.
 2. ◐ **Opponent policy**: checkpoint/self-play policies install through
    `set_opponent_policy()`, receive their own observation and legal mask, and
    fall back safely when predicting an illegal action. Remaining: train a
@@ -607,6 +609,15 @@ Remaining Tier 2 work:
    strict deck loading raises validation failures.
 
 **Round 7.23 (July 2026):** delivered the requested Tier 3 items 3-7 batch.
+Regression-checked 217/217 scenarios.
+
+**Round 7.24 (July 2026):** closed the three named heuristic effect choices.
+Counter distributions collect a legal allocation before committing counters;
+SacrificeEffect routes each affected player's picks in sequence, supports
+optional decline, and preserves reflexive-trigger gating; Dig exposes looked-at
+identities only to its chooser. The three choices expose aligned card identity,
+kind, remaining-pick, and staged-allocation observations, paginate beyond ten,
+and pause compound effect resolution until each decision finishes.
 Regression-checked 217/217 scenarios.
 
 ## Tier 4 — Verification & calibration
@@ -690,14 +701,18 @@ Regression-checked 217/217 scenarios.
   exile therefore cannot distinguish which one of two simultaneous same-ID
   sources owns a particular link.
 - Clones/MCTS copies start with an empty delayed-trigger registry.
-- Opponent auto-orders triggers and blockers (deadlock-safe scope cut until
-  self-play).
+- Opponent trigger ordering routes through the installed policy; blocker damage
+  ordering still uses the scripted/automatic path pending the next choice audit.
 - Snow payment can double-charge (fidelity-counted); `_evaluate_condition`
   vocabulary is thin (life totals, card counts,
   "you control X" only).
 - Reflexive-trigger v1 recognizes exact "When you do" / "When that player
-  does" riders when the prerequisite itself parses. Optional prerequisite
-  choices still use the underlying effect's heuristic until Tier 3 exposure.
+  does" riders when the prerequisite itself parses; generic optional sacrifice
+  now exposes both the permanent choice and decline path.
+- Counter divisions are policy-selected when the effect resolves. Full CR
+  601.2d fidelity would announce and lock those divisions during casting or
+  activation. Dig selects the kept card explicitly, but any permitted ordering
+  of multiple remainder cards still follows deterministic library order.
 - Spell-copy retargeting can keep the complete inherited target set or replace
   the complete set. Changing only some targets of a multi-target spell needs a
   future slot-aware target-choice context; ordinary one-target copies are fully

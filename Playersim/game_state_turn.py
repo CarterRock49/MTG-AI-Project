@@ -406,10 +406,16 @@ class GameStateTurnMixin:
 
                     if split_second_item:
                         logging.debug("Split Second active: Resolving split second spell/ability.")
-                        self.resolve_top_of_stack() 
-                        # Split second active check happens in resolve_top_of_stack logic usually
-                        self.priority_player = active_p # AP gets priority after resolution
-                        return 
+                        self.resolve_top_of_stack()
+                        # A mid-resolution choice retains priority with its
+                        # chooser; otherwise AP gets priority after resolution.
+                        if self.choice_context:
+                            self.priority_player = self.choice_context.get('player')
+                        elif self.targeting_context:
+                            self.priority_player = self.targeting_context.get('controller')
+                        else:
+                            self.priority_player = active_p
+                        return
                     else:
                         # Split second flag was true but no item found; clean up state
                         self.split_second_active = False
@@ -433,10 +439,17 @@ class GameStateTurnMixin:
 
                     # No new triggers, resolve the top item
                     # logging.debug("Both passed, resolving stack...")
-                    self.resolve_top_of_stack() 
-                    
+                    self.resolve_top_of_stack()
+
                     # Rule 117.3b: Active player receives priority after a spell/ability resolves.
-                    self.priority_player = active_p
+                    if self.targeting_context:
+                        self.priority_player = self.targeting_context.get('controller')
+                    elif self.sacrifice_context:
+                        self.priority_player = self.sacrifice_context.get('controller')
+                    elif self.choice_context:
+                        self.priority_player = self.choice_context.get('player')
+                    else:
+                        self.priority_player = active_p
                     self.last_stack_size = len(self.stack)
                     return
 

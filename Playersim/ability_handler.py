@@ -2174,13 +2174,9 @@ class AbilityHandler:
                         effect_text_to_use = getattr(ability, 'effect', ability_effect_text)
                         effects = ability._create_ability_effects(effect_text_to_use, targets_on_stack)
                         if effects:
-                            temp_success = True
-                            for effect_obj in effects:
-                                 if not effect_obj.apply(
-                                         gs, card_id, controller, targets_on_stack,
-                                         context=context):
-                                     temp_success = False
-                            resolution_success = temp_success
+                            resolution_success, _ = gs._run_effect_sequence(
+                                effects, card_id, controller, targets_on_stack,
+                                context=context)
                         else:
                              logging.error(f"Internal effect creation failed for {type(ability).__name__} on {source_name}.")
                              resolution_success = False
@@ -2215,23 +2211,26 @@ class AbilityHandler:
                      logging.error(f"Cannot resolve {ability_type} from {source_name}: EffectFactory failed for text '{effect_text_from_context}'.")
                      return False # Failure: couldn't parse effects
 
-                 # Apply created effects
-                 temp_success = True
-                 for effect_obj in effects:
-                      try:
-                          target_arg = targets_on_stack if isinstance(targets_on_stack, dict) else None
-                          if not effect_obj.apply(
-                                  gs, card_id, controller, target_arg,
-                                  context=context):
-                               temp_success = False # Track failure
-                      except Exception as e:
-                          logging.error(f"Error applying fallback effect '{effect_obj.effect_text}': {e}", exc_info=True)
-                          temp_success = False # Mark as failed on error
-                 resolution_success = temp_success
+                 target_arg = targets_on_stack if isinstance(targets_on_stack, dict) else None
+                 resolution_success, _ = gs._run_effect_sequence(
+                     effects, card_id, controller, target_arg, context=context)
                  logging.debug(f"Resolved fallback {ability_type} for {source_name} using effect text. Overall success: {resolution_success}")
              else:
                  logging.error(f"Cannot resolve {ability_type} from {source_name}: Missing ability object and effect text in context.")
                  resolution_success = False # Failure: no info to resolve
+
+        pending_choice = getattr(gs, 'choice_context', None)
+        if (pending_choice
+                and pending_choice.get('type') in gs._ASYNC_EFFECT_CHOICE_TYPES
+                and pending_choice.get('effect_continuation') is not None):
+            event_context = dict(context)
+            event_context.pop('ability', None)
+            pending_choice['effect_continuation']['finalizer'] = {
+                'kind': 'ability', 'source_id': card_id,
+                'controller_id': gs._effect_controller_id(controller),
+                'ability_type': ability_type, 'context': event_context,
+            }
+            return True
 
         # --- Post-Resolution Cleanup & SBA Check ---
         if resolution_success:
