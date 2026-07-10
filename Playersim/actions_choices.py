@@ -6,12 +6,22 @@ all state lives on ActionHandler, which composes every mixin.
 
 import logging
 from collections import defaultdict
+from .ability_types import ManaAbility
 
 
 class ChoiceHandlersMixin:
     """Handlers for ability activation, targeting, and player choices."""
 
     __slots__ = ()
+
+    def _handle_target_page_next(self, param=None, context=None, **kwargs):
+        gs = self.game_state
+        ctx = getattr(gs, 'targeting_context', None)
+        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        if not ctx or ctx.get('controller') is not player:
+            return -0.1, False
+        ctx['target_page'] = int(ctx.get('target_page', 0)) + 1
+        return 0.0, True
 
     def recommend_ability_activation(self, card_id, ability_idx):
         """
@@ -394,6 +404,24 @@ class ChoiceHandlersMixin:
         if not costs_paid:
             logging.warning(f"Failed to pay cost for {card.name} ability {ability_idx}")
             return -0.05, False
+
+        # CR 605.3: mana abilities resolve immediately and never use the
+        # stack.  Variable-color production is still a player decision.
+        if isinstance(ability, ManaAbility):
+            produced = dict(getattr(ability, 'mana_produced', {}) or {})
+            any_amount = int(produced.pop('any', 0) or 0)
+            any_amount += int(produced.pop('choice', 0) or 0)
+            if produced:
+                gs.mana_system.add_mana(player, produced)
+            if any_amount:
+                gs.choice_context = {
+                    'type': 'mana_ability_color', 'player': player,
+                    'amount': any_amount, 'options': ['W', 'U', 'B', 'R', 'G'],
+                    'resume_phase': gs.phase,
+                }
+                gs.phase = gs.PHASE_CHOOSE
+                gs.priority_player = player
+            return 0.1, True
         
         # Mark exhaust used (if applicable)
         if is_exhaust:
@@ -640,13 +668,15 @@ class ChoiceHandlersMixin:
             for target_id in category_targets
         }, key=lambda t: (isinstance(t, str), t))
 
-        if not isinstance(target_choice_index, int) or not 0 <= target_choice_index < len(valid_targets_list):
+        absolute_index = int(ctx.get('target_page', 0)) * 10 + target_choice_index
+        if not isinstance(target_choice_index, int) or not 0 <= absolute_index < len(valid_targets_list):
             logging.error(
                 f"Invalid SELECT_TARGET action parameter: {target_choice_index}. "
                 f"Valid indices: 0-{len(valid_targets_list) - 1}")
             return -0.1, False
 
-        target_id = valid_targets_list[target_choice_index]
+        target_id = valid_targets_list[absolute_index]
+        ctx['target_page'] = 0
         if target_id in selected_targets:
             logging.warning(
                 f"Target {target_id} (Index {target_choice_index}) already selected.")
@@ -663,6 +693,22 @@ class ChoiceHandlersMixin:
             logging.error("Selected more targets than allowed.")
             return -0.15, False
         if len(selected_targets) == max_targets:
+            slots = ctx.get('target_slots') or []
+            slot_index = int(ctx.get('target_slot_index', 0))
+            if slots and slot_index + 1 < len(slots):
+                ctx.setdefault('targets_by_slot', []).append(list(selected_targets))
+                slot_index += 1
+                slot = slots[slot_index]
+                ctx['target_slot_index'] = slot_index
+                ctx['selected_targets'] = []
+                ctx['required_type'] = slot.get('required_type', 'target')
+                ctx['effect_text'] = slot.get('effect_text', '')
+                ctx['required_count'] = int(slot.get('required_count', 1))
+                ctx['min_targets'] = int(slot.get('min_targets', ctx['required_count']))
+                ctx['max_targets'] = int(slot.get('max_targets', ctx['required_count']))
+                return 0.02, True
+            if slots:
+                ctx.setdefault('targets_by_slot', []).append(list(selected_targets))
             return self._finalize_targeting_choice()
         return 0.02, True
 
@@ -913,6 +959,17 @@ class ChoiceHandlersMixin:
             if ctx.get('rummage'):
                 gs._draw_phase(target_player)
             gs.phase = ctx.get('resume_phase', gs.PHASE_MAIN_PRECOMBAT)
+            gs.choice_context = None
+            return 0.05, True
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'mana_ability_color'):
+            ctx = gs.choice_context
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            options = ctx.get('options', [])
+            if ctx.get('player') is not player or not (0 <= param < len(options)):
+                return -0.1, False
+            gs.mana_system.add_mana(player, {options[param]: int(ctx.get('amount', 1))})
+            gs.phase = ctx.get('resume_phase', gs.PHASE_PRIORITY)
             gs.choice_context = None
             return 0.05, True
         if (getattr(gs, 'choice_context', None)

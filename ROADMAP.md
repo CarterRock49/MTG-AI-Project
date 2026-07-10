@@ -16,7 +16,7 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 8/8, 6/6, 211/211).
+   every delivery (currently 8/8, 6/6, 217/217).
 2. **Zero known stats-corrupting bugs.** The silent-bug catalog (appendix)
    is closed; every fixed bug has a permanent guard scenario.
 3. **Quantified card coverage.** For each target format's card pool, the
@@ -43,7 +43,7 @@ The project is complete when all of the following hold:
 - Tier 1 (rules correctness): ✅ complete — all seven items plus the P1
   placeholder triage delivered; see appendix for the bug catalog.
 - Test gates: smoke 8/8 (fixture decks now exercise triggers every episode),
-  training 6/6, scenarios 211/211 (grown from 12).
+  training 6/6, scenarios 217/217 (grown from 12).
 - **Stats collected before July 2026 are unusable** (wrong player, wrong
   winner, fictional play turns, cosmetic first strike, compounding P/T,
   dead replacement system). Wipe and re-harvest after the current engine
@@ -564,9 +564,9 @@ Remaining Tier 2 work:
   subsystem ordering: after Rounds 7.19-7.20 the last confirmed gap in the
   audit table is Saddle (Caustic Bronco); the remaining work is the
   sample-deck High-Risk Partial list and the card-exact mechanic-entry sweep.
-  Beza's Treasure mana activation remains an explicit verification item;
-  otherwise reorder new support work by real manifest counts when harvest
-  runs begin.
+  Round 7.22 closed Beza's Treasure, leaving no known high-risk partial in the
+  current eight-deck sample. Reorder new support work by real manifest counts
+  when harvest runs begin.
 - ◐ **First-touch coverage sweep**: one scenario for every subsystem that has
   never had one (this practice found four phantom methods and three dead
   subsystems; assume more remain in untested corners). Next candidates come
@@ -579,26 +579,39 @@ Remaining Tier 2 work:
   sweep, and the exact-name per-card override registry. The sweep also fixed
   multi-symbol Ninjutsu cost truncation and unreachable Impending/Offspring
   cost parsing. Regression-checked 211/211 scenarios.
+  **Round 7.22 (July 2026)** verified Beza's Treasure end to end and repaired
+  the shared permanent mana-ability path: mana-producing activated text is
+  promoted to ManaAbility, tap/sacrifice costs are paid atomically, variable
+  color is policy-selected, and mana abilities resolve without the stack.
+  Regression-checked 211/211 scenarios.
 
 ## Tier 3 — Training & environment quality
 
 1. ◐ **Choice exposure, remainder**: spell, activated-ability,
-   triggered-ability, and direct-effect targets are agent choices. Remaining:
-   independent modal target slots, more than 10 target options, and opponent
-   ordering choices routed through a policy under self-play.
-2. ▢ **Opponent policy**: self-play (or league of checkpoints) as soon as a
-   trained model beats the scripted opponent; all harvest stats after that
-   point come from policy-vs-policy games.
-3. ▢ **Hidden-information audit**: observations must not leak opponent hand,
-   library order, or face-down identities.
-4. ▢ **Replay logs**: full action-log replays from seeded resets so any stat
-   anomaly is reproducible.
-5. ▢ **Deck legality validation** at load per target format (copy limits,
-   banlists) so the deck builder searches only legal space.
+   triggered-ability, and direct-effect targets are agent choices. Independent
+   modal target slots, paged target lists beyond ten, and opponent trigger
+   ordering through policy are complete. Remaining heuristic choices include
+   multi-target counter distribution, generic sacrifice selection, and Dig.
+2. ◐ **Opponent policy**: checkpoint/self-play policies install through
+   `set_opponent_policy()`, receive their own observation and legal mask, and
+   fall back safely when predicting an illegal action. Remaining: train a
+   checkpoint that beats scripted play, then promote harvest to policy-vs-policy.
+3. ✅ **Hidden-information audit**: `observation_for()` enforces a player
+   perspective; changing unseen opponent hand identities and library order
+   leaves every observation field unchanged. Face-down masking is also guarded.
+4. ✅ **Replay logs**: seeded resets record actions, contexts, and deck names;
+   `export_replay()` writes JSON and `replay()` verifies the selected decks
+   before reproducing the episode.
+5. ✅ **Deck legality validation**: `Playersim/deck_legality.py` validates
+   minimum size, copy/basic-land rules, bans, restrictions, and format status;
+   strict deck loading raises validation failures.
+
+**Round 7.23 (July 2026):** delivered the requested Tier 3 items 3-7 batch.
+Regression-checked 217/217 scenarios.
 
 ## Tier 4 — Verification & calibration
 
-1. ✅ Golden scenario harness — 187 scenarios and growing; scenario-first is a
+1. ✅ Golden scenario harness — 217 scenarios and growing; scenario-first is a
    working agreement, not a suggestion.
 2. ▢ **Property tests**: zone-count conservation per action; SBA idempotence;
    the action mask never permits an illegal action (fuzz); mana pools empty
@@ -751,9 +764,9 @@ Remaining Tier 2 work:
   controller's own cards as options, and applies the uncounterable rider when
   any of its restricted mana was spent on the cast. Counterspells can still
   TARGET the spell; they fizzle at resolution.
-- Treasure tokens carry their printed sacrifice-for-mana text, but that
-  activation is not yet scenario-verified (Beza's Treasure is counted for
-  board state; spending it awaits the mana-ability activation sweep).
+- Treasure tokens carry their printed sacrifice-for-mana text; Beza's token is
+  scenario-verified through registration, activation costs, color choice,
+  mana production, and the CR 605 no-stack path.
 - Restless-land animation registers end-of-turn layer effects; reversion
   rides on the existing duration cleanup rather than a per-land scenario
   assertion. The "attacks" riders fire only for the attacker's own trigger

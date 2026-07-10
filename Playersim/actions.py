@@ -247,7 +247,7 @@ ACTION_MEANINGS = {
     # Wrenn emblem: play/cast graveyard permanent by relative index 0-5.
     **{472 + i: ("PLAY_FROM_GRAVEYARD", i) for i in range(6)}, # 472-477
     478: ("SADDLE", None), # Context={'battlefield_idx': X}
-    479: ("NO_OP", None)
+    479: ("TARGET_PAGE_NEXT", None)
 }
 # Ensure size is correct after updates
 if len(ACTION_MEANINGS) != 480:
@@ -417,6 +417,7 @@ class ActionHandler(
                 "CONSPIRE": self._handle_conspire, # Index 458
                 "GRANDEUR": self._handle_grandeur, # Index 460
                 "SADDLE": self._handle_saddle, # Index 478
+                "TARGET_PAGE_NEXT": self._handle_target_page_next, # Index 479
                 # Room/Class
                 "UNLOCK_DOOR": self._handle_unlock_door, # Indices 248-252
                 "LEVEL_UP_CLASS": self._handle_level_up_class, # Indices 253-257

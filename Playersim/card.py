@@ -56,6 +56,8 @@ class Card:
     def __init__(self, card_data):
         # Ensure card_data has all required fields with defaults
         self.name = card_data.get("name", f"Unknown Card {id(self)}")
+        self.legalities = {str(k).lower(): str(v).lower()
+                          for k, v in (card_data.get("legalities", {}) or {}).items()}
         self.layout = card_data.get("layout", "normal")
         self.all_parts = card_data.get("all_parts", []) or []
         self.meld_partner_name = card_data.get("meld_partner")
@@ -2243,12 +2245,14 @@ class Card:
         return np.array(base_vector + cost_vector + self.keywords + self.colors + self.subtype_vector + mdfc_vector, dtype=np.float32)
 
 # Deck loading function
-def load_decks_and_card_db(decks_folder):
+def load_decks_and_card_db(decks_folder, format_name=None, banned_names=None,
+                           restricted_names=None, strict_legality=False):
     """Load decks from folder and build card database."""
     try:
         card_db = {}  # Change from list to dictionary
         card_name_to_id = {}
         decks = []
+        load_errors = []
        
         for deck_file in os.listdir(decks_folder):
             if not deck_file.endswith('.json'):
@@ -2300,14 +2304,25 @@ def load_decks_and_card_db(decks_folder):
                     if len(current_deck["cards"]) < 60:
                         raise ValueError(f"Deck {deck_file} has only {len(current_deck['cards'])} cards")
                        
+                    if strict_legality or format_name or banned_names or restricted_names:
+                        from .deck_legality import validate_deck_legality
+                        legality_errors = validate_deck_legality(
+                            current_deck, card_db, format_name=format_name,
+                            banned_names=banned_names,
+                            restricted_names=restricted_names)
+                        if legality_errors:
+                            raise ValueError("; ".join(legality_errors))
                     decks.append(current_deck)
                    
             except Exception as e:
+                load_errors.append(f"{deck_file}: {e}")
                 logging.error(f"Error loading deck {deck_file}: {str(e)}")
                 import traceback
                 logging.error(traceback.format_exc())
                 continue
        
+        if strict_legality and load_errors:
+            raise ValueError("Deck validation failed: " + " | ".join(load_errors))
         if not card_db:
             raise ValueError("No cards loaded! Check deck files and folder path.")
         
@@ -2332,6 +2347,8 @@ def load_decks_and_card_db(decks_folder):
         import traceback
         logging.error(traceback.format_exc())
        
+        if strict_legality:
+            raise
         # Return minimal valid data
         default_deck = {
             "name": "Backup Deck",

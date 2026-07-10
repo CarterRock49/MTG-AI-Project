@@ -28,6 +28,18 @@ class EnhancedManaSystem:
         self.lowercase_symbols = {'w', 'u', 'b', 'r', 'g', 'c', 't'} 
         # Add tap symbol to a separate set of special symbols
         self.special_symbols = {'t'}  # The tap symbol needs special handling
+
+    def add_mana(self, player, mana):
+        """Add resolved mana production to a player's pool."""
+        pool = player.setdefault(
+            "mana_pool", {symbol: 0 for symbol in self.mana_symbols})
+        for symbol, amount in dict(mana or {}).items():
+            normalized = str(symbol).upper()
+            if normalized not in self.mana_symbols:
+                logging.warning(f"Ignoring unsupported mana-pool key: {symbol}")
+                continue
+            pool[normalized] = pool.get(normalized, 0) + max(0, int(amount or 0))
+        return True
         
     def track_snow_sources(self, player):
         """

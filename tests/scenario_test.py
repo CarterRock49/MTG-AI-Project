@@ -17,6 +17,7 @@ report as XPASS, reminding you to flip the flag.
 """
 
 import logging
+import numpy as np
 import os
 import random
 import shutil
@@ -6846,8 +6847,9 @@ def s_sunfall_incubates_exiled_count():
         f"the transformed 0/0 with 3 counters should be 3/3, got {token.power}/{token.toughness}"
 
 
-@scenario("Beza, the Bounding Spring / 603", "Beza's four ETB comparisons each apply exactly when an opponent is ahead")
+@scenario("Beza / Treasure / 603 / 605.3", "Beza's comparisons resolve and its Treasure sacrifices for chosen mana without using the stack")
 def s_beza_multi_condition_etb():
+    from Playersim.ability_types import ManaAbility
     gs = fresh()
     controller, opponent = gs.p1, gs.p2
     gs.turn = 1
@@ -6901,6 +6903,28 @@ def s_beza_multi_condition_etb():
         "the Fish tokens are not blue 1/1s"
     assert len(controller["hand"]) == hand_before, \
         "Beza draw check failed (hand should be -1 Beza +1 drawn)"
+
+    # The Treasure's printed mana ability pays tap+sacrifice atomically,
+    # resolves without the stack, and leaves the output color to the policy.
+    treasure_id = treasures[0]
+    activated = gs.ability_handler.get_activated_abilities(treasure_id)
+    assert len(activated) == 1 and isinstance(activated[0], ManaAbility), \
+        f"Beza's Treasure did not register its printed mana ability: {[(type(a).__name__, getattr(a, 'cost', None), getattr(a, 'effect', None)) for a in activated]}"
+    stack_before = list(gs.stack)
+    bf_idx = controller["battlefield"].index(treasure_id)
+    _, ok = get_env().action_handler._handle_activate_ability(
+        None, {"battlefield_idx": bf_idx, "ability_idx": 0})
+    assert ok, "Beza's Treasure mana ability could not be activated"
+    assert treasure_id not in controller["battlefield"], \
+        "Treasure was not sacrificed as an activation cost"
+    assert gs.stack == stack_before, "a mana ability incorrectly used the stack"
+    assert gs.choice_context and gs.choice_context.get("type") == "mana_ability_color", \
+        "Treasure did not expose its output color to the policy"
+    green_index = gs.choice_context["options"].index("G")
+    green_before = controller["mana_pool"].get("G", 0)
+    _, ok = get_env().action_handler._handle_choose_mode(green_index, {})
+    assert ok and controller["mana_pool"].get("G", 0) == green_before + 1, \
+        "choosing green did not add exactly one green mana"
 
     # Second game: opponent behind on every axis -> nothing happens.
     gs2 = fresh(seed=SEED + 3)
@@ -7205,6 +7229,117 @@ def scenario_sample_card_exact_path_sweep():
 
     effects = EffectFactory.create_effects("Target creature you control fights target creature you don't control.", source_name="Bushwhack")
     assert any(isinstance(effect, FightEffect) for effect in effects)
+
+
+@scenario("training / hidden information", "opponent hand identities and library order do not change the agent observation")
+def scenario_hidden_information_observation_boundary():
+    import numpy as np
+    gs = fresh(); env = get_env()
+    agent = gs.p1 if gs.agent_is_p1 else gs.p2
+    opponent = gs.p2 if agent is gs.p1 else gs.p1
+    if len(opponent['hand']) < 2 or len(opponent['library']) < 2:
+        raise AssertionError("fixture lacks cards for hidden-information audit")
+    random.seed(99); np.random.seed(99)
+    before = env.observation_for(agent)
+    opponent['hand'][0], opponent['library'][0] = opponent['library'][0], opponent['hand'][0]
+    opponent['library'][0], opponent['library'][1] = opponent['library'][1], opponent['library'][0]
+    random.seed(99); np.random.seed(99)
+    after = env.observation_for(agent)
+    for key in before:
+        assert np.array_equal(before[key], after[key]), f"hidden identity leaked through observation key {key}"
+
+
+@scenario("engine / deterministic replay", "a seeded action log replays to the same public state")
+def scenario_seeded_action_replay():
+    env = get_env()
+    obs, _ = env.reset(seed=4242)
+    mask = env.action_mask()
+    valid = np.flatnonzero(mask)
+    action = int(225 if mask[225] else valid[0])
+    first = env.step(action)
+    payload = env.export_replay()
+    snapshot = (env.game_state.turn, env.game_state.phase,
+                env.game_state.p1['life'], env.game_state.p2['life'])
+    replayed = env.replay(payload)
+    assert (env.game_state.turn, env.game_state.phase,
+            env.game_state.p1['life'], env.game_state.p2['life']) == snapshot
+    assert bool(first[2]) == bool(replayed[2]) and bool(first[3]) == bool(replayed[3])
+
+
+@scenario("601.2c / pagination", "target choices beyond the first ten remain policy-accessible")
+def scenario_target_choice_pagination():
+    gs = fresh(); env = get_env()
+    player = gs.p1 if gs.agent_is_p1 else gs.p2
+    source = inject_into_zone(gs, player, {"name": "Paged Source", "mana_cost": "", "type_line": "Artifact", "oracle_text": ""}, "battlefield")
+    for i in range(12):
+        inject_into_zone(gs, player, {"name": f"Paged Creature {i}", "mana_cost": "", "type_line": "Creature",
+            "power": 1, "toughness": 1, "oracle_text": ""}, "battlefield")
+    gs.phase = gs.PHASE_TARGETING
+    gs.targeting_context = {"source_id": source, "controller": player,
+        "required_type": "creature", "effect_text": "target creature", "required_count": 2,
+        "min_targets": 2, "max_targets": 2, "selected_targets": []}
+    mask = env.action_handler.generate_valid_actions()
+    assert mask[479], "more than ten targets did not expose the next-page action"
+    _, ok = env.action_handler._handle_target_page_next()
+    assert ok
+    valid_map = gs.targeting_system.get_valid_targets(source, player, "creature", effect_text="target creature")
+    ordered = sorted({cid for ids in valid_map.values() for cid in ids}, key=lambda t: (isinstance(t, str), t))
+    _, ok = env.action_handler._handle_select_target(0, {})
+    assert ok and gs.targeting_context['selected_targets'] == [ordered[10]]
+
+
+@scenario("700.2 / modal targets", "independent modal target slots advance without merging restrictions")
+def scenario_independent_modal_target_slots():
+    gs = fresh(); env = get_env(); player = gs.p1 if gs.agent_is_p1 else gs.p2
+    source = inject_into_zone(gs, player, {"name": "Modal Source", "mana_cost": "", "type_line": "Artifact", "oracle_text": ""}, "battlefield")
+    creature = inject_into_zone(gs, player, {"name": "Modal Creature", "mana_cost": "", "type_line": "Creature", "power": 1, "toughness": 1, "oracle_text": ""}, "battlefield")
+    land = inject_into_zone(gs, player, {"name": "Modal Land", "mana_cost": "", "type_line": "Land", "oracle_text": ""}, "battlefield")
+    gs.phase = gs.PHASE_TARGETING
+    gs.targeting_context = {"source_id": source, "controller": player,
+        "required_type": "creature", "effect_text": "target creature you control",
+        "required_count": 1, "min_targets": 1, "max_targets": 1, "selected_targets": [],
+        "target_slots": [
+            {"required_type": "creature", "effect_text": "target creature you control", "required_count": 1},
+            {"required_type": "land", "effect_text": "target land you control", "required_count": 1}],
+        "target_slot_index": 0}
+    creature_targets = sorted({cid for ids in gs.targeting_system.get_valid_targets(source, player, "creature", effect_text="target creature you control").values() for cid in ids})
+    _, ok = env.action_handler._handle_select_target(creature_targets.index(creature), {})
+    assert ok and gs.targeting_context['required_type'] == 'land'
+    assert gs.targeting_context['targets_by_slot'] == [[creature]]
+
+
+@scenario("603.3b / self-play", "opponent trigger ordering is routed through the installed policy")
+def scenario_policy_opponent_trigger_ordering():
+    from Playersim.ability_types import TriggeredAbility
+    gs = fresh(); env = get_env(); opponent = gs.p2 if gs.agent_is_p1 else gs.p1
+    class FirstLegalPolicy:
+        def predict(self, obs, action_masks=None, deterministic=True):
+            return int(np.flatnonzero(action_masks)[0]), None
+    env.set_opponent_policy(FirstLegalPolicy())
+    abilities = [TriggeredAbility(i, trigger_condition="at the beginning of your upkeep", effect="you gain 1 life") for i in (9001, 9002)]
+    batch = [(ability, opponent, {"ability": ability, "effect_text": ability.effect_text}) for ability in abilities]
+    gs.ability_handler._stack_trigger_batch_with_choice(batch)
+    assert gs.choice_context and gs.choice_context['player'] is opponent
+    gs.agent_is_p1 = opponent is gs.p1
+    mask = env.action_handler.generate_valid_actions()
+    action, _ = env._get_opponent_policy_action(opponent, mask, {"phase_context": "CHOOSE"})
+    assert action == 353
+    env.set_opponent_policy(None)
+
+
+@scenario("deck legality", "format status, copy limits, bans, restrictions, basics, and minimum size are validated")
+def scenario_deck_legality_validation():
+    from Playersim.card import Card
+    from Playersim.deck_legality import validate_deck_legality
+    basic = Card({"name": "Plains", "type_line": "Basic Land - Plains", "legalities": {"standard": "legal"}}); basic.card_id = 0
+    spell = Card({"name": "Legal Spell", "type_line": "Sorcery", "legalities": {"standard": "legal"}}); spell.card_id = 1
+    banned = Card({"name": "Banned Spell", "type_line": "Instant", "legalities": {"standard": "banned"}}); banned.card_id = 2
+    db = {0: basic, 1: spell, 2: banned}
+    legal = {"cards": [0] * 56 + [1] * 4}
+    assert not validate_deck_legality(legal, db, format_name="standard")
+    illegal = {"cards": [0] * 54 + [1] * 5 + [2]}
+    errors = validate_deck_legality(illegal, db, format_name="standard", banned_names=["Banned Spell"])
+    assert any("maximum 4" in error for error in errors) and any("banned" in error for error in errors)
 
 
 # ---------------------------------------------------------------------------

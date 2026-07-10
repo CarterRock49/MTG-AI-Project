@@ -1072,6 +1072,12 @@ class AbilityHandler:
                 activation_index=current_activated_index # Pass index during init
             )
             if getattr(ability, 'cost', None) is not None and getattr(ability, 'effect', None) is not None and getattr(ability, 'cost', None) != "":
+                mana_produced = self._parse_mana_produced(ability.effect)
+                if mana_produced and any(mana_produced.values()):
+                    ability = ManaAbility(
+                        card_id=card_id, cost=ability.cost,
+                        mana_produced=mana_produced,
+                        effect_text=text_to_parse_activated)
                 if current_activated_index is not None and getattr(ability, 'activation_index', None) is None:
                      setattr(ability, 'activation_index', current_activated_index)
                 setattr(ability, 'source_card', card)
@@ -1958,10 +1964,8 @@ class AbilityHandler:
         """
         gs = self.game_state
         batch = [e for e in (batch or []) if e[0] is not None and hasattr(e[0], 'card_id')]
-        agent_player = gs.p1 if getattr(gs, 'agent_is_p1', True) else gs.p2
         controller = batch[0][1] if batch else None
         interactive = (len(batch) >= 2
-                       and controller is agent_player
                        and not getattr(gs, 'choice_context', None))
 
         if not interactive:

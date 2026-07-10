@@ -631,6 +631,11 @@ class ActionSpaceMixin:
                 if context.get('optional'):
                     set_valid_action(11, "DECLINE_HAND_CARD")
 
+            elif choice_type == "mana_ability_color":
+                for option_index, color in enumerate(context.get('options', [])[:5]):
+                    set_valid_action(353 + option_index, f"ADD {color} MANA",
+                                     context={"option_index": option_index})
+
             elif choice_type == "optional_sacrifice_proliferate":
                 source_id = context.get('source_id')
                 if source_id in player.get('battlefield', []):
@@ -910,13 +915,20 @@ class ActionSpaceMixin:
             if context.get('allow_keep_original_targets') and selected_count == 0:
                 set_valid_action(11, "KEEP_ORIGINAL_TARGETS")
             if selected_count < required_count:
-                for i, target_id in enumerate(valid_targets_list):
-                    if i >= 10: break # Limit to action space indices 274-283
+                page = int(context.get('target_page', 0))
+                page_count = max(1, (len(valid_targets_list) + 9) // 10)
+                if page >= page_count:
+                    page = 0
+                    context['target_page'] = 0
+                page_targets = valid_targets_list[page * 10:(page + 1) * 10]
+                for i, target_id in enumerate(page_targets):
                     target_card = gs._safe_get_card(target_id)
                     target_name = target_card.name if target_card and hasattr(target_card, 'name') else target_id
                     if isinstance(target_id, str) and target_id in ["p1", "p2"]: # Handle player targets
                         target_name = "Player 1" if target_id == "p1" else "Player 2"
                     set_valid_action(274 + i, f"SELECT_TARGET ({i}): {target_name} for {source_name}")
+                if page_count > 1:
+                    set_valid_action(479, f"TARGET_PAGE_NEXT ({page + 1}/{page_count})")
             else:
                 # If enough targets are selected, allow passing priority
                 set_valid_action(11, "PASS_PRIORITY (Targets selected)")

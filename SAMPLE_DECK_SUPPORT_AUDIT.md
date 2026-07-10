@@ -276,9 +276,17 @@ These cards reach generic parser paths, but at least one value-changing part
 is likely incomplete. They need focused scenarios before their statistics are
 trusted.
 
-| Mechanic or behavior | Copies | Cards or concern |
-| --- | ---: | --- |
-| Treasure sacrifice-for-mana activation | 1 | Beza's Treasure token carries its printed text but spending it is unverified |
+None in the current eight-deck sample after Round 7.22.
+
+## Closed In Round 7.22
+
+Beza's Treasure is verified end to end. Its printed ability registers as a
+mana ability, pays tap and self-sacrifice costs atomically, exposes W/U/B/R/G
+to the policy, adds exactly one mana of the selected color, and resolves
+without using the stack. The scenario uncovered two shared defects: the early
+activated-ability parser did not promote mana-producing text to ManaAbility,
+and EnhancedManaSystem lacked the `add_mana` entry point already used by
+ManaAbility. Both are repaired for all parsed permanent mana abilities.
 
 ## Implemented Paths To Verify With Real Cards
 
@@ -291,6 +299,7 @@ branches, but these cards no longer rely on wholly unproved routing.
 
 ## Recommended Order
 
-1. Verify Beza's Treasure sacrifice-for-mana activation end to end.
-2. Run harvest fixtures and rank any new manifest entries by observed count.
-3. Begin the Tier 3 hidden-information and self-play audits.
+1. Run harvest fixtures and rank any new manifest entries by observed count.
+2. Train and benchmark a checkpoint against scripted play before promoting
+   harvest runs to policy-vs-policy.
+3. Continue the remaining heuristic-choice exposure work tracked in Tier 3.

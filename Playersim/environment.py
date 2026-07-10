@@ -1,5 +1,6 @@
 
 import os
+import json
 import random
 import logging
 import re
@@ -71,6 +72,9 @@ class AlphaZeroMTGEnv(gym.Env):
         self.max_battlefield = max_battlefield
         self.strategy_memory = StrategyMemory()
         self.current_episode_actions = []
+        self.replay_actions = []
+        self.reset_seed = None
+        self.opponent_policy = None
         self.current_analysis = None
         self._feature_dim = FEATURE_DIM if 'FEATURE_DIM' in globals() else 223  # Store determined feature dim with fallback
         logging.info(f"Using feature dimension: {self._feature_dim}")
@@ -306,6 +310,7 @@ class AlphaZeroMTGEnv(gym.Env):
             if seed is not None:
                 random.seed(seed)
                 np.random.seed(seed % (2**32))
+            self.reset_seed = seed
             """
             Reset the environment and return initial observation and info.
             Aligns with GameState starting in the Mulligan phase.
@@ -331,6 +336,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 self.episode_rewards = []
                 self.episode_invalid_actions = 0
                 self.current_episode_actions = []
+                self.replay_actions = []
                 self._game_result_recorded = False
                 self._game_logged = False
                 self._logged_card_ids = set()
@@ -1070,7 +1076,8 @@ class AlphaZeroMTGEnv(gym.Env):
                 # --- PERSPECTIVE RESTORED LATER ---
 
                 # --- c. Choose Scripted Opponent Action ---
-                opponent_action_idx, opponent_action_context = self._get_scripted_opponent_action(opponent_player, opponent_mask, opponent_context)
+                opponent_action_idx, opponent_action_context = self._get_opponent_policy_action(
+                    opponent_player, opponent_mask, opponent_context)
                 if opponent_action_idx is None:
                      logging.warning(f"Scripted opponent couldn't choose valid action. Breaking opponent loop.")
                      gs.agent_is_p1 = initial_agent_is_p1 # Restore perspective before breaking
@@ -1165,6 +1172,7 @@ class AlphaZeroMTGEnv(gym.Env):
             if hasattr(self, 'last_n_actions'): self.last_n_actions = np.roll(self.last_n_actions, 1); self.last_n_actions[0] = action_idx
             if hasattr(self, 'last_n_rewards'): self.last_n_rewards = np.roll(self.last_n_rewards, 1); self.last_n_rewards[0] = step_reward
             if hasattr(self, 'current_episode_actions'): self.current_episode_actions.append(action_idx)
+            self.replay_actions.append({"action": int(action_idx), "context": dict(action_context)})
             if hasattr(self, 'episode_rewards'): self.episode_rewards.append(step_reward)
 
             # Record game result if ended
@@ -1311,6 +1319,11 @@ class AlphaZeroMTGEnv(gym.Env):
 
         if phase_ctx == "CHOOSE" and getattr(gs, "choice_context", None):
             choice_type = gs.choice_context.get("type")
+            if choice_type == "order_triggers":
+                for action_idx in range(353, 363):
+                    if opponent_mask[action_idx]:
+                        return action_idx, {}
+                return None, {}
             if choice_type in ("opening_hand", "forced_sacrifice", "as_enters_creature_type"):
                 # First-legal-action policy for mandatory or begin-game picks.
                 for action_idx in range(353, 363):
@@ -1371,6 +1384,58 @@ class AlphaZeroMTGEnv(gym.Env):
         if opponent_mask[11]: return 11, {}
         if opponent_mask[224]: return 224, {}
         return opponent_mask[12] if opponent_mask[12] else None, {} # Concede last resort
+
+    def set_opponent_policy(self, policy):
+        """Install a checkpoint/self-play policy exposing ``predict``."""
+        self.opponent_policy = policy
+
+    def _get_opponent_policy_action(self, opponent_player, opponent_mask, opponent_context):
+        policy = getattr(self, 'opponent_policy', None)
+        if policy is None:
+            return self._get_scripted_opponent_action(
+                opponent_player, opponent_mask, opponent_context)
+        obs = self._get_obs()
+        try:
+            result = policy.predict(obs, action_masks=opponent_mask, deterministic=True)
+        except TypeError:
+            result = policy.predict(obs, deterministic=True)
+        action = result[0] if isinstance(result, tuple) else result
+        action = int(np.asarray(action).reshape(-1)[0])
+        if 0 <= action < self.ACTION_SPACE_SIZE and opponent_mask[action]:
+            return action, self.action_handler.action_reasons_with_context.get(
+                action, {}).get('context', {})
+        logging.warning(f"Opponent policy returned illegal action {action}; using scripted fallback.")
+        return self._get_scripted_opponent_action(
+            opponent_player, opponent_mask, opponent_context)
+
+    def export_replay(self, path=None):
+        """Return (and optionally persist) a deterministic episode replay."""
+        payload = {
+            "version": 1, "seed": self.reset_seed,
+            "p1_deck": getattr(self, 'current_deck_name_p1', None),
+            "p2_deck": getattr(self, 'current_deck_name_p2', None),
+            "actions": list(self.replay_actions),
+        }
+        if path:
+            with open(path, 'w', encoding='utf-8') as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+        return payload
+
+    def replay(self, payload):
+        """Reset to a recorded seed and replay its agent action sequence."""
+        if isinstance(payload, (str, os.PathLike)):
+            with open(payload, 'r', encoding='utf-8') as handle:
+                payload = json.load(handle)
+        obs, info = self.reset(seed=payload.get('seed'))
+        if (payload.get('p1_deck') != self.current_deck_name_p1
+                or payload.get('p2_deck') != self.current_deck_name_p2):
+            raise ValueError("Replay deck selection does not match the recorded seed")
+        result = (obs, 0.0, False, False, info)
+        for entry in payload.get('actions', []):
+            result = self.step(int(entry['action']), context=entry.get('context') or {})
+            if result[2] or result[3]:
+                break
+        return result
         
     def _get_obs_safe(self):
         """Return a minimal, safe observation dictionary in case of errors. (Reinforced)"""
@@ -2453,6 +2518,16 @@ class AlphaZeroMTGEnv(gym.Env):
             logging.critical(f"CRITICAL error during _get_obs execution: {str(e)}", exc_info=True)
             # Attempt to return safe observation
             return self._get_obs_safe()
+
+    def observation_for(self, player):
+        """Build an observation from one player's information boundary."""
+        gs = self.game_state
+        original = gs.agent_is_p1
+        try:
+            gs.agent_is_p1 = player is gs.p1
+            return self._get_obs()
+        finally:
+            gs.agent_is_p1 = original
 
     def _get_tapped_mask(self, battlefield_ids, tapped_set, max_size):
         """Helper to get a boolean mask for tapped permanents."""
