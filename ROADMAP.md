@@ -45,6 +45,16 @@ The project is complete when all of the following hold:
 - Tier 0 (stats plumbing): ✅ complete.
 - Tier 1 (rules correctness): ✅ complete — all seven items plus the P1
   placeholder triage delivered; see appendix for the bug catalog.
+- Tier 2 (card coverage): ◐ the audited eight-deck sample has no known
+  high-risk partials; format-wide quantified coverage remains manifest-driven.
+- Tier 3 (training/environment): ◐ policy plumbing and audit work are complete;
+  a trained checkpoint still needs to beat scripted play before Harvest is
+  promoted to policy-vs-policy.
+- Tier 4 (verification/calibration): ◐ invariant and long-fuzz gates are green;
+  the matchup calibration study remains open.
+- Tier 5 (operations/integration): ◐ Harvest orchestration is complete; strength
+  qualification, production throughput profiling, and deck-builder integration
+  remain open.
 - Test gates: smoke 9/9, training 11/11, scenarios 249/249 (grown from 12),
   fixture harvest 10/10, production Harvest protocol 5/5, fuzz/replay
   configuration 6/6, deterministic default fuzz 8 seeds x 1,000 valid
@@ -560,24 +570,22 @@ Remaining Tier 2 work:
   and the targeting parser captured state adjectives as the target TYPE
   ("target attacking creature" parsed as type "attacking" with zero legal
   targets). Regression-checked 202/202 scenarios after the round.
-  **Coverage status:** rounds 1-7.20 have closed ~90
-  effect/mechanic classes across
+  **Coverage status:** rounds 1-7.20 closed ~90 effect/mechanic classes across
   removal, bounce, counters, tokens, keywords, sacrifice, reanimation,
   control, mana, library manipulation, variable-count effects, prevention,
   animation, levelers, Adventure, and duplicate-ID zone semantics. Miss rate
   fell 6→13→14→9→10→3 across parser samples before the first-touch sweep moved
-  into mechanic subsystems. The sample-deck audit now supersedes speculative
-  subsystem ordering: after Rounds 7.19-7.20 the last confirmed gap in the
-  audit table is Saddle (Caustic Bronco); the remaining work is the
-  sample-deck High-Risk Partial list and the card-exact mechanic-entry sweep.
-  Round 7.22 closed Beza's Treasure, leaving no known high-risk partial in the
-  current eight-deck sample. Reorder new support work by real manifest counts
-  when harvest runs begin.
+  into mechanic subsystems. Rounds 7.21-7.31 then closed the audited sample's
+  remaining high-risk partials and used real-card warning probes to revive dead
+  trigger, replacement, choice, and mechanic-entry paths. The current
+  eight-deck sample has no known high-risk partial. New support work is ordered
+  by real manifest counts and format-pool coverage, not speculative subsystem
+  ordering.
 - ◐ **First-touch coverage sweep**: one scenario for every subsystem that has
-  never had one (this practice found four phantom methods and three dead
-  subsystems; assume more remain in untested corners). Next candidates come
-  from real manifest counts; the sample-deck audit's only remaining high-risk
-  verification is Beza's Treasure mana activation.
+  never had one. This practice has repeatedly found phantom methods and dead or
+  overfiring subsystems, so untested corners remain suspect. Next candidates
+  come from real manifest counts, format-pool coverage, and the consolidated v1
+  limitations below; there is no remaining sample-deck high-risk verification.
   **Round 7.21 (July 2026)** closed the requested seven-part sample-deck batch:
   Saddle, Duress/Oildeep hand choices, Cacophony Scamp's optional sacrifice,
   Leyline's single-friendly-target cast condition, Patchwork Beastie Delirium,
@@ -848,7 +856,7 @@ harvest, 6/6 fuzz config, and the full default fuzz profile.
 
 ## Tier 4 — Verification & calibration
 
-1. ✅ Golden scenario harness — 241 scenarios and growing; scenario-first is a
+1. ✅ Golden scenario harness — 249 scenarios and growing; scenario-first is a
    working agreement, not a suggestion.
 2. ✅ **Property/invariant harness**: exact non-token zone/stack conservation,
    SBA fixed points, mask-valid action execution/handler coverage, declared
@@ -887,6 +895,12 @@ harvest, 6/6 fuzz config, and the full default fuzz profile.
 4. ▢ **Feedback loop**: builder-proposed decks auto-enter the harvest queue;
    their novel cards populate the manifest; support work is prioritized by
    what the builder actually wants to play.
+
+**Current execution order:** freeze a reproducible engine/baseline snapshot;
+train a longer strength candidate; run paired-seat promotion; complete the
+3–5-pair calibration study; profile production-size Harvest throughput; then
+implement the deck-builder contract and automatic feedback loop. New fidelity
+failures discovered along that path pre-empt strength and integration work.
 
 ---
 
