@@ -248,6 +248,84 @@ None currently confirmed in the audited eight-deck sample. Rounds 7.30–7.35
 closed the remaining classification groups and the first strength-run warning
 and error signatures with exact scenarios.
 
+## Closed In Round 7.40
+
+- Pawpatch Recruit now triggers only when one of its controller's creatures is
+  targeted by an opponent-controlled spell or ability. Its own friendly
+  targeted trigger cannot recursively trigger itself, and “other than that
+  creature” excludes the original event target from the policy choice.
+- Bushwhack's basic-land mode resolves as one search/reveal/hand/shuffle unit
+  instead of leaving an unimplemented `put it into your hand` fragment.
+- Parameterized Ward's internal static form registers cleanly in layer 6.
+  Decking is ordinary game telemetry rather than a warning.
+
+Run `ALPHA_ZERO_MTG_V3.00_20260711_120752` found the Recruit loop after its
+stack reached 1,345 entries. Diagnostics now log an observation-bound failure
+once and cap serialized stack detail at 32 entries. CUDA canary
+`ALPHA_ZERO_MTG_V3.00_20260711_123455` completed 8,192 transitions and final
+checkpoint validation without a new warning/error file. Gates: 269/269
+scenarios, 9/9 smoke, 12/12 training, 10/10 + 5/5 Harvest, 6/6 fuzz
+configuration, and 8,000/8,000 default-fuzz actions.
+
+## Closed In Round 7.39
+
+- Fear of Isolation's mandatory return cost now distinguishes Player 2's
+  physical permanent in a mirror match even when Player 1 has the same numeric
+  card ID on their battlefield. The choosing controller's zone occurrence is
+  authoritative, and ambiguous mirror ownership returns it to that controller.
+- Deferred casting choices preserve the complete timing window. Mockingbird can
+  choose X from transient priority over a main phase and resume the same legal
+  creature cast without losing its sorcery-speed provenance.
+- Trigger resolution now passes the source card name through to exact-card
+  effect overrides. Caustic Bronco therefore uses its atomic reveal/hand/life
+  implementation during real games rather than splitting into generic no-ops.
+
+These were discovered by continuation run
+`ALPHA_ZERO_MTG_V3.00_20260711_113539`. Its exact 121-action mirror replay now
+completes the failed action. CUDA canary
+`ALPHA_ZERO_MTG_V3.00_20260711_115902` added 8,192 transitions, passed final
+checkpoint validation, and created no warning/error file. Gates: 267/267
+scenarios, 9/9 smoke, 12/12 training, 10/10 + 5/5 Harvest, 6/6 fuzz
+configuration, and 8,000/8,000 default-fuzz actions.
+
+## Closed In Round 7.38
+
+- Bushwhack's fight mode is no longer mask-valid unless its two mandatory
+  creature targets exist. The original 270-action training replay reaches the
+  same board and now masks the impossible choice.
+- Caustic Bronco's attack trigger now moves the revealed top card to hand and
+  applies its printed unsaddled/saddled mana-value life loss. Its former generic
+  no-op fragments are gone.
+- Bare spell instructions such as Three Steps Ahead's `discard a card` bind to
+  their controller rather than looking for an unselected target player.
+
+These were discovered by strength run `ALPHA_ZERO_MTG_V3.00_20260711_110933`
+after 32,768 learner transitions and are guarded by three exact scenarios.
+The exact best-checkpoint CUDA resume completed another 8,192 transitions and
+final validation with no warning/error file. Gates: 265/265 scenarios, 9/9
+smoke, 12/12 training, 10/10 + 5/5 Harvest, 6/6 fuzz configuration, and
+8,000/8,000 default-fuzz actions.
+
+## Closed In Round 7.37
+
+- Opening hands, draw turns, and actual play turns now reach both CardMemory and
+  deck aggregates. The six-worker production canary populated all three paths;
+  pre-7.37 draw/opening/turn-derived statistics remain ineligible for harvest.
+- Reward is potential-difference based and terminal rewards are centralized.
+  Turn-limit outcomes are deliberately worth less than natural game endings.
+- The scripted baseline plays lands, casts affordable spells, and participates
+  in combat. TensorBoard now separates reward components, terminal causes,
+  rollout/learner time, process-tree CPU/RAM, and physical GPU utilization.
+- Persistence is batched instead of rewriting the complete CardMemory after
+  every game. Generic Ward layer parsing no longer emits false warnings.
+
+The CUDA canary completed 6,144 transitions and final checkpoint validation
+with no errors. Its 18 games all hit the turn limit, so it is diagnostic rather
+than harvest-quality; the next fresh strength run must improve natural-terminal
+rate before paired-seat promotion. Gates: 262/262 scenarios, 9/9 smoke, 12/12
+training, 10/10 + 5/5 Harvest, 6/6 fuzz configuration, and 8,000/8,000 default
+fuzz actions.
+
 ## Closed In Round 7.35
 
 - Hopeless Nightmare's mask-valid action 21 failure was another transient

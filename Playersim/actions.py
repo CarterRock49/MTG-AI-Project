@@ -799,42 +799,35 @@ class ActionHandler(
             # --- END GAME LOOP ---
 
 
-            # --- 7. Calculate State Change Reward (remains the same) ---
-            if not done and me and opp:
-                current_state = {
-                    "my_life": me.get("life", 0), "opp_life": opp.get("life", 0),
-                    "my_hand": len(me.get("hand", [])), "opp_hand": len(opp.get("hand", [])),
-                    "my_board": len(me.get("battlefield", [])), "opp_board": len(opp.get("battlefield", [])),
-                    "my_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) or 0 for cid in me.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
-                    "opp_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) or 0 for cid in opp.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
-                }
-                if hasattr(self, '_add_state_change_rewards') and callable(self._add_state_change_rewards):
-                    state_change_reward = self._add_state_change_rewards(0.0, prev_state, current_state)
-                    reward += state_change_reward
-                    info["state_change_reward"] = state_change_reward
+            # Environment.step owns agent-perspective shaping after both the
+            # learned and scripted policies have acted. Applying deltas here
+            # as well counted the learned action twice and ignored opponent
+            # changes. This layer returns only the direct handler reward.
 
-            # --- 8. Check Game End Conditions (remains the same) ---
+            # --- 8. Check Game End Conditions ---
             if not done:
                 if opp and opp.get("lost_game"):
-                    done = True; reward += 10.0 + max(0, gs.max_turns - gs.turn) * 0.1; info["game_result"] = "win"
+                    done = True; info["game_result"] = "win"
                 elif me and me.get("lost_game"):
-                    done = True; reward -= 10.0; info["game_result"] = "loss"
+                    done = True; info["game_result"] = "loss"
                 elif (me and me.get("game_draw")) or (opp and opp.get("game_draw")):
-                    done = True; reward += 0.0; info["game_result"] = "draw"
+                    done = True; info["game_result"] = "draw"
                 elif gs.turn > gs.max_turns:
                     if not getattr(gs, '_turn_limit_checked', False):
-                        done, truncated = True, True
-                        life_diff_reward = 0
-                        if me and opp: life_diff_reward = (me.get("life",0) - opp.get("life",0)) * 0.1
-                        reward += life_diff_reward
+                        done, truncated = True, False
                         if me and opp: info["game_result"] = "win" if (me.get("life",0) > opp.get("life",0)) else "loss" if (me.get("life",0) < opp.get("life",0)) else "draw"
                         else: info["game_result"] = "draw"
                         gs._turn_limit_checked = True
+                        gs.terminal_reason = "turn_limit"
                         logging.info(f"Turn limit ({gs.max_turns}) reached. Result: {info['game_result']}")
 
             # Record results if game ended
             if done and hasattr(gs.action_handler, 'ensure_game_result_recorded') and callable(gs.action_handler.ensure_game_result_recorded):
-                 gs.action_handler.ensure_game_result_recorded() # Ensure called
+                 # Preserve the caller's canonical adjudication (especially
+                 # turn-limit draws) instead of re-inferring a private label
+                 # from state flags before Environment.step can record it.
+                 gs.action_handler.ensure_game_result_recorded(
+                     forced_result=info.get("game_result"))
 
             # --- 9. Finalize Step ---
             # Generate observation using Env's method AFTER state is fully updated

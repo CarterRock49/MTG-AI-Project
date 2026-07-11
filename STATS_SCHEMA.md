@@ -29,6 +29,7 @@ The primary join table. Append-only; each line:
 | `schema_version`| int    | currently `1`; reject records with a higher version |
 | `ts`            | float  | unix timestamp at record time |
 | `result`        | str    | **agent-relative**: `win`, `loss`, `draw`, `draw_both_loss`, `error`, `invalid_limit` |
+| `terminal_reason` | str  | stable cause category such as `life_total`, `decking`, `poison`, `concession`, `turn_limit`, or `alternate_win` |
 | `turn_count`    | int    | final turn number |
 | `p1_deck` / `p2_deck` | str | deck names as loaded from the deck JSONs |
 | `agent_is_p1`   | bool   | which seat the learning agent occupied |
@@ -70,6 +71,13 @@ Validated fields per deck record: `name`, `card_list`, `archetype`, `games`,
 `avg_game_length`, plus per-stage breakdowns. Card records carry `games`,
 `wins`, `losses`, `draws`, `win_rate`, `usage_count`. Deck identity is a
 fingerprint of the card list; name mappings live under `meta/`.
+
+Draw/opening/play telemetry is sourced directly from GameState as of Round
+7.37: `games_drawn` and `draw_performance_by_turn` use completed draws,
+`games_in_opening_hand` uses the final post-mulligan hand, and play-turn maps
+use the turn on which the card was actually played. Outputs produced before
+Round 7.37 have zero or inferred values in these fields and must not be mixed
+with current card-performance aggregates.
 
 ## Caveats the deck-builder MUST respect
 

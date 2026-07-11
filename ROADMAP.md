@@ -16,7 +16,7 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 12/12, and 256/256, plus 10/10 fixture-
+   every delivery (currently 9/9, 12/12, and 269/269, plus 10/10 fixture-
    harvest tests, 5/5 production-protocol tests, 6/6 fuzz/replay tests, and
    the deterministic 8-seed / 8,000-action default fuzz profile, and the
    strict 32-seed / 320,000-action long profile).
@@ -42,7 +42,9 @@ The project is complete when all of the following hold:
 
 ## Status snapshot (July 2026)
 
-- Tier 0 (stats plumbing): ✅ complete.
+- Tier 0 (stats plumbing): ✅ complete; Round 7.37 production-tested opening
+  hands, canonical draw history, real play turns, and terminal-cause telemetry
+  across all six training workers.
 - Tier 1 (rules correctness): ✅ complete — all seven items plus the P1
   placeholder triage delivered; see appendix for the bug catalog.
 - Tier 2 (card coverage): ◐ the audited eight-deck sample has no known
@@ -55,7 +57,7 @@ The project is complete when all of the following hold:
 - Tier 5 (operations/integration): ◐ Harvest orchestration is complete; strength
   qualification, production throughput profiling, and deck-builder integration
   remain open.
-- Test gates: smoke 9/9, training 12/12, scenarios 256/256 (grown from 12),
+- Test gates: smoke 9/9, training 12/12, scenarios 269/269 (grown from 12),
   fixture harvest 10/10, production Harvest protocol 5/5, fuzz/replay
   configuration 6/6, deterministic default fuzz 8 seeds x 1,000 valid
   actions, and strict long fuzz 32 seeds x 10,000 valid actions.
@@ -963,9 +965,164 @@ and final validation passed, and the run created no warning or error records.
 Gates: 256/256 scenarios, 9/9 smoke, 12/12 training, 10/10 + 5/5 Harvest,
 6/6 fuzz/replay configuration, and 8,000/8,000 default-fuzz actions.
 
+**Round 7.36 (July 2026):** analyzed the first strength run to reach three
+periodic evaluations, `ALPHA_ZERO_MTG_V3.00_20260711_033606`. It completed
+86,016 learner transitions, 332 training games, 12 evaluation games, and three
+checkpoints before environment 2 stopped in a mandatory scripted-opponent scry
+choice. The mask correctly exposed `PUT_ON_TOP`/`PUT_ON_BOTTOM`, but the
+scripted CHOOSE fallback only attempted Pass, which is not legal during scry.
+The baseline now conservatively keeps scry/surveil/explore cards on top (with
+legal destination fallbacks). The exact learned-P2/scripted-P1 scry ownership
+case is scenario-guarded.
+
+The run is useful diagnostic data, not harvest-quality strength data. Of 332
+training games, 331 reached the turn-21 cap; only 47 were wins, 116 losses, and
+169 draws/draw flags. Periodic mean reward fell from +20.22 at 24,996 steps to
+-34.38 at 49,992 and -46.95 at 74,988, even while rollout reward improved from
+-52.26 to -31.01 and explained variance rose from -1.97 to 0.856. The learner
+therefore fit the shaped training return without demonstrating stronger
+evaluation play. Seat exposure was exactly balanced (166 games each), and all
+recorded fidelity counters were zero.
+
+The persisted data also reopened Tier 0. Across all seven train/evaluation
+scopes, 1,057 deck-card rows report zero drawn/opening-hand observations, and
+all 770 CardMemory rows have zero `times_drawn` and `in_opening_hand`; 363 rows
+record plays while every `turn_played` map remains empty. The environment reads
+`GameState.opening_hands` and `draw_history`, but those histories are never
+populated; CardMemory also attempts to infer play turn from draw history instead
+of using the already-recorded play history. Do not use drawn-vs-not-drawn,
+opening-hand, turn-played, or derived card-effectiveness fields until this
+telemetry is implemented and production-artifact tested. The authoritative
+per-game outcomes, deck identities, clean fidelity counters, and existing play
+histories remain useful for diagnostics.
+
+Gates after the scry repair: 257/257 scenarios, 9/9 smoke, and 12/12 training
+smoke. Next: repair and fixture-test draw/opening telemetry, then resume the
+best checkpoint rather than the degraded failed checkpoint.
+
+**Round 7.37 (July 2026):** closed the Tier 0 telemetry regression and rebuilt
+the training signal exposed by Round 7.36. GameState now captures the exact
+post-mulligan opening hands, routes every normal draw through one replacement-
+aware draw method, records draw turns without double-counting Miracle, and
+persists the already-authoritative play history rather than inventing play
+turns from draws. Terminal cause is explicit in every game record. The real
+six-worker CUDA canary `ALPHA_ZERO_MTG_V3.00_20260711_042819` persisted 206
+opening-hand observations, 289 CardMemory draws, 414 deck-stat draw
+observations, and 158 plays spanning turns 1–20 across 18 completed games.
+
+Training reward is now a change in bounded strategic potential plus one
+perspective-correct terminal reward; the old absolute board reward and duplicate
+terminal/state-change additions no longer reward the same board repeatedly.
+Turn-limit outcomes receive smaller rewards than natural wins/losses and draws
+are mildly negative. The scripted opponent now plays lands, casts affordable
+spells, and attacks/blocks instead of normally passing every priority. Reward
+components and terminal reasons are exported to TensorBoard.
+
+The resource monitor samples in a background thread through PPO learner bursts
+and exports process-tree CPU/RAM, GPU utilization/memory/temperature, and CUDA
+allocation. Per-game full-memory rewrites were removed or batched. The canary
+completed 6,144 transitions plus the 256-step reload/mask/progress/cycle check
+with no errors at 111 rollout FPS; GPU use reached 28% and CUDA reservation
+reached 0.83 GiB. All 18 short-run games still reached the turn limit, so this
+checkpoint remains diagnostic only: natural-terminal rate is the first strength
+metric for the next run. Generic Ward's internal layer form and canonical draw
+labels were cleaned up after this canary so they no longer create warning or
+non-schema result categories.
+
+Post-cleanup micro-canary `ALPHA_ZERO_MTG_V3.00_20260711_043821` completed 128
+CUDA transitions and final validation with no warning/error file. The corrected
+spawned-worker sampler reported 37.9% mean and 83.2% peak child-process CPU,
+confirming that the previous all-zero worker chart was instrumentation failure,
+not idle workers.
+
+Gates: 262/262 scenarios, 9/9 smoke, 12/12 training, 10/10 + 5/5 Harvest,
+6/6 fuzz/replay configuration, and 8,000/8,000 default-fuzz actions. Because
+the reward function and baseline policy changed materially, start the next
+strength candidate fresh rather than resuming a pre-7.37 checkpoint.
+
+**Round 7.38 (July 2026):** the first eight-worker strength run on the new
+reward, `ALPHA_ZERO_MTG_V3.00_20260711_110933`, completed 32,768 learner
+transitions, 134 training games, and its first 16-game evaluation before strict
+fidelity stopped an impossible Bushwhack choice. Mode masks exposed both
+printed modes even though the fight mode required two differently controlled
+creatures and only one legal target existed. Modal choices now validate the
+combined selected-mode target text both while generating the mask and again at
+execution. The exact 270-action failure replay now reaches the same state and
+classifies action 354 as mask-invalid instead of failing execution.
+
+The same run surfaced two value-changing warning paths. Caustic Bronco's attack
+trigger had split into generic no-op fragments; it now moves the revealed top
+card to hand and makes the correct player lose that card's mana value depending
+on whether Bronco is saddled. Subjectless spell instructions such as Three
+Steps Ahead's `discard a card` now bind to the spell controller instead of
+requesting a nonexistent target-player ID. All three repairs have exact-card
+scenarios. The run remained diagnostic—133/134 training games and all 16
+evaluation games reached the turn limit—though it produced the first natural
+life-total ending under the new baseline.
+
+The eight-worker CUDA resume canary `ALPHA_ZERO_MTG_V3.00_20260711_112859`
+loaded that exact best checkpoint, advanced it from 32,768 to 40,960 total
+timesteps in one 8,192-transition rollout at 123 FPS, and passed the 256-step
+checkpoint reload/mask/reward/progress/cycle validation. It recorded 25 games
+(24 turn-limit, one natural life-total ending) and created no warning or error
+file. Gates: 265/265 scenarios, 9/9 smoke, 12/12 training, 10/10 + 5/5 Harvest,
+6/6 fuzz/replay configuration, and 8,000/8,000 default-fuzz actions.
+
+**Round 7.39 (July 2026):** strength continuation
+`ALPHA_ZERO_MTG_V3.00_20260711_113539` found one strict failure and two warning
+paths. In an EsperSelf mirror, both physical permanents shared numeric ID 57;
+Fear of Isolation's mask correctly offered Player 2's occurrence, but execution
+used a global Player-1-first controller lookup and rejected it. Mandatory return
+costs now treat membership in the choosing controller's battlefield as the
+authoritative occurrence and route an ambiguous mirror-owned object back to
+that controller. The exact 121-action replay now casts Fear successfully and
+records no mask-valid execution failure.
+
+Deferred casting choices now preserve both the transient `PRIORITY` phase and
+its underlying main phase. This prevents Mockingbird from passing its initial
+sorcery-speed timing check and then failing that same check after choosing X.
+Real triggered-ability resolution now also supplies the source card name to the
+effect factory, so exact-card overrides such as Caustic Bronco's linked attack
+effect are used in matches, not merely in direct parser tests.
+
+CUDA canary `ALPHA_ZERO_MTG_V3.00_20260711_115902` resumed the failed run's
+best checkpoint and completed 8,192 transitions at 130 rollout FPS, including
+one natural life-total ending. Checkpoint reload and the 256-step
+mask/reward/progress/cycle validation passed, and the run created no warning or
+error file. Gates: 267/267 scenarios, 9/9 smoke, 12/12 training, 10/10 + 5/5
+Harvest, 6/6 fuzz/replay configuration, the exact failure replay, and
+8,000/8,000 default-fuzz actions.
+
+**Round 7.40 (July 2026):** strength run
+`ALPHA_ZERO_MTG_V3.00_20260711_120752` exposed a recursive Pawpatch Recruit
+target trigger. The engine enforced neither side of its controller relationship,
+so the friendly target selected for Recruit's own trigger was incorrectly
+treated as a new opponent-controlled targeting event. This accumulated 1,345
+triggers, overflowed the public `stack_count` observation, and eventually hit
+the strict period-1 cycle guard. Target events now require the watched creature
+to belong to Recruit's controller and the targeting object to belong to an
+opponent. The trigger also excludes the original targeted creature from its
+own mandatory target choice.
+
+The warning sweep closed three adjacent paths. Bushwhack's search mode is now
+one atomic search rather than a valid search plus an unimplemented `put it into
+your hand` fragment. Parameterized Ward's internal `ward <cost>` form registers
+as a layer-6 keyword without a parser warning. Drawing from an empty library is
+logged as the ordinary rules-defined decking result rather than an engine
+warning. Observation-bound warnings are emitted once per episode, and failure
+diagnostics cap stack detail at 32 entries while retaining the true stack size,
+preventing a runaway state from producing another multi-megabyte traceback.
+
+CUDA canary `ALPHA_ZERO_MTG_V3.00_20260711_123455` resumed the failed run's
+best checkpoint and completed 8,192 transitions at 154 rollout FPS. Checkpoint
+reload and the 256-step mask/reward/progress/cycle validation passed, with no
+new warning or error file. Gates: 269/269 scenarios, 9/9 smoke, 12/12 training,
+10/10 + 5/5 Harvest, 6/6 fuzz/replay configuration, and 8,000/8,000
+default-fuzz actions.
+
 ## Tier 4 — Verification & calibration
 
-1. ✅ Golden scenario harness — 256 scenarios and growing; scenario-first is a
+1. ✅ Golden scenario harness — 269 scenarios and growing; scenario-first is a
    working agreement, not a suggestion.
 2. ✅ **Property/invariant harness**: exact non-token zone/stack conservation,
    SBA fixed points, mask-valid action execution/handler coverage, declared

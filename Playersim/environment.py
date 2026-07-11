@@ -564,10 +564,12 @@ class AlphaZeroMTGEnv(gym.Env):
             logging.info("Game ended due to error.")
             is_draw = True # Treat errors as draws? Or a separate category? Draw is safer for stats.
             self._game_result = "error" # Store specific result string
+            gs.terminal_reason = "error"
         elif forced_result == "invalid_limit":
              logging.info("Game ended due to invalid action limit.")
              is_draw = True
              self._game_result = "invalid_limit"
+             gs.terminal_reason = "invalid_action_limit"
         elif forced_result in ("win", "loss", "draw"):
             # Result already adjudicated by the caller (e.g., turn-limit life
             # comparison in _check_game_end_conditions). Trust it: the flag-based
@@ -599,7 +601,7 @@ class AlphaZeroMTGEnv(gym.Env):
             elif opp.get("won_game", False):
                  is_p1_winner = not gs.agent_is_p1; winner_life = opp.get("life", 0); self._game_result = "loss"
             elif me.get("game_draw", False) or opp.get("game_draw", False):
-                is_draw = True; winner_life = me.get("life", 0); self._game_result = "draw_flag"
+                is_draw = True; winner_life = me.get("life", 0); self._game_result = "draw"
             elif gs.turn > gs.max_turns:
                 my_final_life = me.get("life", 0); opp_final_life = opp.get("life", 0)
                 if my_final_life > opp_final_life:
@@ -611,6 +613,10 @@ class AlphaZeroMTGEnv(gym.Env):
                 # No definitive end condition met - DO NOT RECORD yet.
                 logging.debug("ensure_game_result_recorded called but no definitive game end condition met. Waiting.")
                 return # Do not proceed with recording
+
+        if not getattr(gs, 'terminal_reason', None):
+            gs.terminal_reason = self._terminal_reason(
+                {"game_result": self._game_result})
 
         # --- Record the game result ---
         if self.has_stats_tracker and self.stats_tracker:
@@ -639,6 +645,9 @@ class AlphaZeroMTGEnv(gym.Env):
 
                 _cards_mapped, _history_mapped = self._stats_result_mapped(
                     gs, True if is_draw else is_p1_winner)
+                _opening_mapped, _draws_mapped, _mulligans_mapped = (
+                    self._stats_telemetry_mapped(
+                        gs, True if is_draw else is_p1_winner))
                 self.stats_tracker.record_game(
                     winner_deck=winner_deck_list,
                     loser_deck=loser_deck_list,
@@ -649,6 +658,9 @@ class AlphaZeroMTGEnv(gym.Env):
                     loser_deck_name=loser_name,
                     cards_played=_cards_mapped,
                     play_history=_history_mapped,
+                    opening_hands=_opening_mapped,
+                    draw_history=_draws_mapped,
+                    mulligan_data=_mulligans_mapped,
                     is_draw=is_draw
                 )
                 self._game_result_recorded = True
@@ -665,9 +677,9 @@ class AlphaZeroMTGEnv(gym.Env):
                     p1_name_mem = self.current_deck_name_p1
                     p2_name_mem = self.current_deck_name_p2
                     self._record_cards_to_memory(p1_deck_list_mem, p2_deck_list_mem, getattr(gs, 'cards_played', {0: [], 1: []}), gs.turn,
-                                           p1_name_mem, p2_name_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), is_draw=True, is_win=False, player_idx=0) # P1 perspective
+                                           p1_name_mem, p2_name_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), getattr(gs, 'play_history', {}), is_draw=True, is_win=False, player_idx=0) # P1 perspective
                     self._record_cards_to_memory(p2_deck_list_mem, p1_deck_list_mem, getattr(gs, 'cards_played', {0: [], 1: []}), gs.turn,
-                                           p2_name_mem, p1_name_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), is_draw=True, is_win=False, player_idx=1) # P2 perspective
+                                           p2_name_mem, p1_name_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), getattr(gs, 'play_history', {}), is_draw=True, is_win=False, player_idx=1) # P2 perspective
                 else:
                     winner_deck_list_mem = original_p1_deck if is_p1_winner else original_p2_deck
                     loser_deck_list_mem = original_p2_deck if is_p1_winner else original_p1_deck
@@ -676,9 +688,9 @@ class AlphaZeroMTGEnv(gym.Env):
                     winner_idx = 0 if is_p1_winner else 1
                     loser_idx = 1 - winner_idx
                     self._record_cards_to_memory(winner_deck_list_mem, loser_deck_list_mem, getattr(gs, 'cards_played', {0: [], 1: []}), gs.turn,
-                                               winner_archetype_mem, loser_archetype_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), is_draw=False, player_idx=winner_idx)
+                                               winner_archetype_mem, loser_archetype_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), getattr(gs, 'play_history', {}), is_draw=False, player_idx=winner_idx)
                     self._record_cards_to_memory(loser_deck_list_mem, winner_deck_list_mem, getattr(gs, 'cards_played', {0: [], 1: []}), gs.turn,
-                                               loser_archetype_mem, winner_archetype_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), is_draw=False, is_win=False, player_idx=loser_idx)
+                                               loser_archetype_mem, winner_archetype_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), getattr(gs, 'play_history', {}), is_draw=False, is_win=False, player_idx=loser_idx)
             except Exception as mem_e:
                  logging.error(f"Error recording cards to memory: {mem_e}", exc_info=True)
 
@@ -691,15 +703,16 @@ class AlphaZeroMTGEnv(gym.Env):
                 except Exception as log_e:
                     logging.error(f"Error writing game log/fidelity report: {log_e}")
             try:
-                if getattr(self, 'stats_tracker', None) and hasattr(self.stats_tracker, 'save_updates_sync'):
-                    self.stats_tracker.save_updates_sync()
+                if getattr(self, 'stats_tracker', None):
+                    # record_game() already flushes the tracker's pending deck
+                    # batch. Avoid a second event-loop/save pass per episode.
                     try:
                         from .card_support import get_manifest
                         get_manifest().persist(getattr(self.stats_tracker, 'base_path', './deck_stats'))
                     except Exception as _mf_e:
                         logging.error(f"Error persisting card support manifest: {_mf_e}")
-                if getattr(self, 'card_memory', None) and hasattr(self.card_memory, 'save_all_card_data'):
-                    self.card_memory.save_all_card_data()
+                # CardMemory batches internally and close() performs the final
+                # synchronous flush; do not rewrite its full gzip every game.
             except Exception as save_e:
                 logging.error(f"Error persisting stats after game record: {save_e}")
                  
@@ -768,6 +781,8 @@ class AlphaZeroMTGEnv(gym.Env):
             "schema_version": 1,
             "ts": _time.time(),
             "result": getattr(self, '_game_result', None),
+            "terminal_reason": self._terminal_reason(
+                {"game_result": getattr(self, '_game_result', None)}),
             "turn_count": getattr(gs, 'turn', None),
             "p1_deck": getattr(self, 'current_deck_name_p1', "Unknown_P1"),
             "p2_deck": getattr(self, 'current_deck_name_p2', "Unknown_P2"),
@@ -935,8 +950,37 @@ class AlphaZeroMTGEnv(gym.Env):
         history_mapped = {"winner": dict(raw_hist.get(w, {})), "loser": dict(raw_hist.get(l, {}))}
         return cards_mapped, history_mapped
 
+    def _stats_telemetry_mapped(self, gs, is_p1_winner):
+        """Map opening, draw, and mulligan telemetry into winner/loser order."""
+        w, l = (0, 1) if is_p1_winner else (1, 0)
+        winner_key, loser_key = f'p{w + 1}', f'p{l + 1}'
+        openings = getattr(gs, 'opening_hands', {}) or {}
+        draws = getattr(gs, 'draw_history', {}) or {}
+        mulligans = getattr(gs, 'mulligan_data', {}) or {}
+        return (
+            {
+                'winner': list(openings.get(winner_key, [])),
+                'loser': list(openings.get(loser_key, [])),
+            },
+            {
+                'winner': {
+                    int(turn): list(cards)
+                    for turn, cards in draws.get(winner_key, {}).items()
+                },
+                'loser': {
+                    int(turn): list(cards)
+                    for turn, cards in draws.get(loser_key, {}).items()
+                },
+            },
+            {
+                'winner': int(mulligans.get(winner_key, 0)),
+                'loser': int(mulligans.get(loser_key, 0)),
+            },
+        )
+
     def _record_cards_to_memory(self, player_deck, opponent_deck, cards_played_data, turn_count,
-                            player_archetype, opponent_archetype, opening_hands_data, draw_history_data,
+                            player_archetype, opponent_archetype, opening_hands_data,
+                            draw_history_data, play_history_data,
                             is_draw=False, is_win=True, player_idx=0):
         """Record detailed card performance data to the card memory system, handles draw."""
         try:
@@ -949,12 +993,12 @@ class AlphaZeroMTGEnv(gym.Env):
             player_played = cards_played_data.get(player_key, [])
             player_opening = opening_hands_data.get(f'p{player_key+1}', [])
             player_draws = draw_history_data.get(f'p{player_key+1}', {})
+            player_plays = play_history_data.get(player_key, {})
 
             player_turn_played = {}
-            for card_id in player_played:
-                 for turn, cards in player_draws.items():
-                     if card_id in cards:
-                         player_turn_played[card_id] = int(turn) + 1; break
+            for turn, cards in player_plays.items():
+                for card_id in cards:
+                    player_turn_played.setdefault(card_id, int(turn))
 
             for card_id in set(player_deck):
                 card = self.game_state._safe_get_card(card_id)
@@ -987,9 +1031,6 @@ class AlphaZeroMTGEnv(gym.Env):
                           'cmc': getattr(card, 'cmc', 0),
                           'types': getattr(card, 'card_types', []),
                           'colors': getattr(card, 'colors', []) })
-
-            if hasattr(self.card_memory, 'save_memory_async'):
-                 self.card_memory.save_memory_async()
 
         except Exception as e:
             logging.error(f"Error recording cards to memory: {str(e)}")
@@ -1137,7 +1178,15 @@ class AlphaZeroMTGEnv(gym.Env):
                 "selection_candidates": list(candidates),
             }
             stack_summary = []
-            for stack_index, item in enumerate(getattr(gs, "stack", ()) or ()):
+            live_stack = list(getattr(gs, "stack", ()) or ())
+            if len(live_stack) > 32:
+                stack_indices = list(range(8)) + list(
+                    range(len(live_stack) - 24, len(live_stack)))
+                diagnostic["stack_summary_omitted"] = len(live_stack) - 32
+            else:
+                stack_indices = list(range(len(live_stack)))
+            for stack_index in stack_indices:
+                item = live_stack[stack_index]
                 if not (isinstance(item, tuple) and len(item) >= 3):
                     stack_summary.append({
                         "index": stack_index,
@@ -1203,6 +1252,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 "my_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) or 0 for cid in agent_player_obj.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
                 "opp_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) or 0 for cid in opp_player_obj.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
             }
+        previous_board_potential = self._calculate_board_state_reward()
 
         # --- Initialize Info Dict ---
         env_info = {
@@ -1411,16 +1461,41 @@ class AlphaZeroMTGEnv(gym.Env):
                  step_reward += state_change_reward
                  env_info["state_change_reward"] = state_change_reward
 
-            # Add board state reward component based on the final board state
-            if hasattr(self, '_calculate_board_state_reward'):
-                 board_reward = self._calculate_board_state_reward()
-                 step_reward += board_reward
-                 env_info["board_state_reward"] = board_reward
+            # Potential-based shaping pays only for improving the position.
+            # Re-awarding the absolute board score every action let a policy
+            # farm reward by preserving a board and passing indefinitely.
+            current_board_potential = self._calculate_board_state_reward()
+            board_reward = current_board_potential - previous_board_potential
+            step_reward += board_reward
+            env_info["board_state_reward"] = board_reward
+            env_info["board_state_potential"] = current_board_potential
 
             # --- 6. Check Final Game End Conditions ---
             if not done:
                  game_ended_by_check = self._check_game_end_conditions(env_info)
                  done = done or game_ended_by_check
+
+            terminal_reward = 0.0
+            if done:
+                terminal_reason = self._terminal_reason(env_info)
+                env_info["terminal_reason"] = terminal_reason
+                result = env_info.get("game_result", "draw")
+                if terminal_reason == "turn_limit":
+                    terminal_reward = {
+                        "win": 5.0, "loss": -5.0, "draw": -1.0,
+                    }.get(result, -1.0)
+                else:
+                    terminal_reward = {
+                        "win": 10.0, "loss": -10.0, "draw": -0.25,
+                    }.get(result, -0.25)
+                step_reward += terminal_reward
+
+            env_info["reward_components"] = {
+                "action": float(reward),
+                "state_change": float(env_info.get("state_change_reward", 0.0)),
+                "board_potential": float(board_reward),
+                "terminal": float(terminal_reward),
+            }
 
             # --- 7. Get Final Observation and Mask for the AGENT ---
             # *** Ensure perspective is set to agent BEFORE getting obs and mask ***
@@ -1566,6 +1641,11 @@ class AlphaZeroMTGEnv(gym.Env):
         gs = self.game_state
         phase_ctx = opponent_context.get("phase_context")
 
+        def choose(action_idx):
+            generated = self.action_handler.action_reasons_with_context.get(
+                action_idx, {}) if self.action_handler else {}
+            return action_idx, dict(generated.get('context', {}) or {})
+
         # 1. Handle Mulligan/Bottoming First
         if phase_ctx == "mulligan_decision":
             # Always Keep (simplest strategy for opponent simulation)
@@ -1614,6 +1694,21 @@ class AlphaZeroMTGEnv(gym.Env):
 
         if phase_ctx == "CHOOSE" and getattr(gs, "choice_context", None):
             choice_type = gs.choice_context.get("type")
+            if choice_type in ("scry", "surveil", "explore"):
+                # The baseline policy is deliberately conservative: keep the
+                # looked-at card on top. These choices do not expose Pass, so
+                # falling through to the generic CHOOSE branch deadlocks the
+                # opponent loop until strict cycle detection stops training.
+                for action_idx in (306, 307, 305):
+                    if opponent_mask[action_idx]:
+                        logging.debug(
+                            "Scripted Opponent: %s (action %s)",
+                            choice_type.upper(), action_idx)
+                        return action_idx, {}
+                logging.warning(
+                    "Scripted Opponent: No legal %s destination available.",
+                    choice_type)
+                return None, {}
             if choice_type in (
                     "sacrifice_effect", "activation_sacrifice_cost",
                     "distribute_counters", "dig_select"):
@@ -1674,14 +1769,42 @@ class AlphaZeroMTGEnv(gym.Env):
 
         # 4. Handle Standard Priority
         if phase_ctx == "priority":
-             # Simple Opponent: Always pass priority
+            # Complete combat declarations before ordinary priority choices.
+            if gs.phase == gs.PHASE_DECLARE_ATTACKERS:
+                for action_idx in range(28, 48):
+                    if opponent_mask[action_idx]:
+                        return choose(action_idx)
+                if opponent_mask[438]:
+                    return choose(438)
+            if gs.phase == gs.PHASE_DECLARE_BLOCKERS:
+                for action_idx in range(48, 68):
+                    if opponent_mask[action_idx]:
+                        return choose(action_idx)
+                if opponent_mask[439]:
+                    return choose(439)
+
+            # Develop mana first, then cast the first affordable legal spell.
+            # This remains intentionally simple, but is a real baseline rather
+            # than an opponent that passes every game action.
+            land_actions = list(range(13, 20)) + list(range(180, 188)) \
+                + list(range(393, 396))
+            for action_idx in land_actions:
+                if opponent_mask[action_idx]:
+                    return choose(action_idx)
+
+            spell_actions = list(range(20, 28)) + list(range(188, 204)) \
+                + list(range(396, 405)) + [445, 446, 447, 448]
+            for action_idx in spell_actions:
+                if opponent_mask[action_idx]:
+                    return choose(action_idx)
+
             if opponent_mask[11]:
                 logging.debug("Scripted Opponent: PASS_PRIORITY")
-                return 11, {}
-            else: # No pass available? Extremely rare. Try NO_OP or Concede.
-                logging.warning("Scripted Opponent: No PASS_PRIORITY available?")
-                if opponent_mask[224]: return 224, {}
-                return opponent_mask[12] if opponent_mask[12] else None, {}
+                return choose(11)
+            logging.warning("Scripted Opponent: No PASS_PRIORITY available?")
+            if opponent_mask[224]:
+                return choose(224)
+            return choose(12) if opponent_mask[12] else (None, {})
 
         # 5. Fallback (If context unknown or logic missed)
         logging.warning(f"Scripted Opponent: Unknown phase context '{phase_ctx}', defaulting to PASS.")
@@ -1811,6 +1934,8 @@ class AlphaZeroMTGEnv(gym.Env):
             current_traceback = traceback.format_exc()
             if not current_traceback.startswith("NoneType: None"):
                 self.last_observation_traceback = current_traceback
+            return True
+        return False
 
     def _coerce_observation(self, obs):
         """Return an observation that strictly conforms to ``observation_space``.
@@ -1839,12 +1964,13 @@ class AlphaZeroMTGEnv(gym.Env):
                 # (but false) value that clipping can no longer repair.
                 bounded = np.clip(array, space.low, space.high)
                 if not np.array_equal(array, bounded):
-                    self._record_observation_error(
+                    first_bound_error = self._record_observation_error(
                         f"feature {key}",
                         ValueError("value exceeded declared observation bounds"))
-                    logging.warning(
-                        "Observation feature '%s' exceeded its declared bounds; "
-                        "the public value was clipped.", key)
+                    if first_bound_error:
+                        logging.warning(
+                            "Observation feature '%s' exceeded its declared bounds; "
+                            "the public value was clipped.", key)
                 normalized[key] = bounded.astype(space.dtype, copy=False)
             except Exception as exc:
                 self._record_observation_error(f"feature {key}", exc)
@@ -2017,6 +2143,28 @@ class AlphaZeroMTGEnv(gym.Env):
                 obs["action_mask"][12] = True
         return self._coerce_observation(obs)
 
+    def _terminal_reason(self, info=None):
+            """Return a stable terminal category for logs and reward policy."""
+            gs = self.game_state
+            if getattr(gs, 'terminal_reason', None):
+                return gs.terminal_reason
+            players = [gs.p1, gs.p2]
+            if any(p and p.get('attempted_draw_from_empty') for p in players):
+                return "decking"
+            if any(p and p.get('poison_counters', 0) >= 10 for p in players):
+                return "poison"
+            if gs.turn > gs.max_turns:
+                return "turn_limit"
+            if any(p and p.get('game_draw') for p in players):
+                return "draw_effect"
+            if any(p and p.get('won_game') for p in players):
+                return "alternate_win"
+            if any(p and p.get('life', 20) <= 0 for p in players):
+                return "life_total"
+            if (info or {}).get('game_result') in ('win', 'loss', 'draw'):
+                return "state_based_result"
+            return "unknown"
+
     def _check_game_end_conditions(self, info):
             """Helper to check standard game end conditions and update info dict."""
             gs = self.game_state
@@ -2038,6 +2186,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 done = True
                 # Determine result based on life
                 info["game_result"] = "win" if (me["life"] > opp["life"]) else "loss" if (me["life"] < opp["life"]) else "draw"
+                gs.terminal_reason = "turn_limit"
                 logging.info(f"Turn limit ({gs.max_turns}) reached. Result: {info['game_result']}")
 
             # Explicit Win Flags (Alternative win conditions etc.)
@@ -2085,6 +2234,43 @@ class AlphaZeroMTGEnv(gym.Env):
             return None
 
     def _calculate_board_state_reward(self):
+        """Bounded strategic potential used only through state differences."""
+        gs = self.game_state
+        me = gs.p1 if gs.agent_is_p1 else gs.p2
+        opp = gs.p2 if gs.agent_is_p1 else gs.p1
+        if not me or not opp:
+            return 0.0
+
+        def battlefield_value(player):
+            value = 0.0
+            for card_id in player.get('battlefield', []):
+                card = gs._safe_get_card(card_id)
+                if not card:
+                    continue
+                types = getattr(card, 'card_types', []) or []
+                if 'creature' in types:
+                    value += 1.0
+                    value += 0.12 * float(getattr(card, 'power', 0) or 0)
+                    value += 0.08 * float(getattr(card, 'toughness', 0) or 0)
+                elif 'land' in types:
+                    value += 0.35
+                else:
+                    value += 0.6
+            return value
+
+        life_component = 0.50 * (
+            (me.get('life', 0) - opp.get('life', 0)) / 20.0)
+        board_component = 0.25 * np.tanh(
+            (battlefield_value(me) - battlefield_value(opp)) / 6.0)
+        card_component = 0.15 * np.tanh(
+            (len(me.get('hand', [])) - len(opp.get('hand', []))) / 4.0)
+        damage_progress = 0.10 * np.clip(
+            (20.0 - float(opp.get('life', 20))) / 20.0, -1.0, 1.0)
+        return float(np.clip(
+            life_component + board_component + card_component + damage_progress,
+            -2.0, 2.0))
+
+    def _legacy_absolute_board_state_reward(self):
         """Calculate a sophisticated MTG-specific board state reward with emphasis on early wins"""
         gs = self.game_state
         me = gs.p1 if gs.agent_is_p1 else gs.p2
@@ -2539,6 +2725,8 @@ class AlphaZeroMTGEnv(gym.Env):
                 
                 # Draw: slot order arbitrary; map p1 to the winner slot
                 game_cards_played, game_play_history = self._stats_result_mapped(gs, True)
+                opening_hands, draw_history, mulligan_data = \
+                    self._stats_telemetry_mapped(gs, True)
                 
                 # Determine game stage based on turn count
                 game_stage = "early"
@@ -2558,13 +2746,12 @@ class AlphaZeroMTGEnv(gym.Env):
                     loser_deck_name=deck2_name,
                     cards_played=game_cards_played,
                     play_history=game_play_history,
+                    opening_hands=opening_hands,
+                    draw_history=draw_history,
+                    mulligan_data=mulligan_data,
                     game_stage=game_stage,
                     is_draw=True
                 )
-                
-                # Force an immediate save
-                if hasattr(self.stats_tracker, 'save_updates_sync'):
-                    self.stats_tracker.save_updates_sync()
                 
                 logging.info(f"Game recorded: Draw between {deck1_name} and {deck2_name} in {turn_count} turns with equal life totals ({winner_life})")
             else:
@@ -2576,6 +2763,8 @@ class AlphaZeroMTGEnv(gym.Env):
                 
                 # Map play data into winner/loser order (see _stats_result_mapped)
                 game_cards_played, game_play_history = self._stats_result_mapped(gs, winner_is_p1)
+                opening_hands, draw_history, mulligan_data = \
+                    self._stats_telemetry_mapped(gs, winner_is_p1)
                 
                 # Determine game stage based on turn count
                 game_stage = "early"
@@ -2595,13 +2784,12 @@ class AlphaZeroMTGEnv(gym.Env):
                     loser_deck_name=loser_name,
                     cards_played=game_cards_played,
                     play_history=game_play_history,
+                    opening_hands=opening_hands,
+                    draw_history=draw_history,
+                    mulligan_data=mulligan_data,
                     game_stage=game_stage,
                     is_draw=False
                 )
-                
-                # Force an immediate save
-                if hasattr(self.stats_tracker, 'save_updates_sync'):
-                    self.stats_tracker.save_updates_sync()
                 
                 logging.info(f"Game recorded: {winner_name} defeated {loser_name} in {turn_count} turns with {winner_life} life remaining")
         except Exception as e:

@@ -96,6 +96,7 @@ def _write_valid_artifact_fixture(output: Path, version: str) -> dict:
         "schema_version": 1,
         "ts": 1.0,
         "result": "win",
+        "terminal_reason": "life_total",
         "turn_count": 4,
         "p1_deck": "DimirMidrange",
         "p2_deck": "DimirSelf",

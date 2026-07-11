@@ -129,7 +129,15 @@ class Ability:
                 return False # Token creation failed
 
         # Default: Use EffectFactory for other triggers
-        effects = self._create_ability_effects(effect_text_to_use, targets)
+        # Exact-card effect overrides need the source name at real resolution,
+        # not only when callers invoke EffectFactory directly.  Omitting it
+        # made linked effects such as Caustic Bronco fragment into generic
+        # partial no-ops during matches while their parser tests still passed.
+        source_card = (getattr(self, "source_card", None)
+                       or game_state._safe_get_card(self.card_id))
+        source_name = getattr(source_card, "name", None)
+        effects = self._create_ability_effects(
+            effect_text_to_use, targets, source_name=source_name)
         if not effects:
             logging.warning(f"No effects created for triggered ability: {effect_text_to_use}")
             return False
@@ -148,9 +156,11 @@ class Ability:
         return success
 
 
-    def _create_ability_effects(self, effect_text, targets=None):
+    def _create_ability_effects(self, effect_text, targets=None,
+                                source_name=None):
         """Create appropriate AbilityEffect objects based on the effect text"""
-        return EffectFactory.create_effects(effect_text, targets)
+        return EffectFactory.create_effects(
+            effect_text, targets, source_name=source_name)
 
     def _resolve_simple_targeting(self, game_state, controller, effect_text):
         """Simplified targeting resolution when targeting system isn't available"""
@@ -1283,6 +1293,22 @@ class TriggeredAbility(Ability):
                               self.trigger_condition, re.IGNORECASE)
                         and context.get("targeting_controller") is not context.get("controller")):
                     return False
+                # Watchers such as Pawpatch Recruit distinguish both sides of
+                # the event: the targeted permanent must be controlled by the
+                # watcher, and the targeting object must be controlled by an
+                # opponent.  Without these gates, choosing the target of the
+                # Recruit trigger itself recursively created another trigger.
+                if (re.search(r"(?:a|another) creature you control becomes "
+                              r"the target", self.trigger_condition,
+                              re.IGNORECASE)
+                        and context.get("target_controller") is not
+                        context.get("controller")):
+                    return False
+                if (re.search(r"spell or ability an opponent controls",
+                              self.trigger_condition, re.IGNORECASE)
+                        and context.get("targeting_controller") is
+                        context.get("controller")):
+                    return False
                 if ("first time each turn" in self.trigger_condition
                         and not context.get("first_time_targeted_by_controller_this_turn", False)):
                     return False
@@ -1831,6 +1857,14 @@ class StaticAbility(Ability):
         if "lose all abilities" in effect_lower_clean:
             return {'effect_type': 'remove_all_abilities', 'effect_value': True}
 
+        # Keyword registration stores parameterized Ward internally as
+        # ``ward <cost>`` (including ``ward ward_generic``).  Its human-facing
+        # effect text says "This permanent has ward", but parsing uses the
+        # internal title.  Preserve the base keyword here; the registered
+        # ability retains the actual payment detail separately.
+        if re.fullmatch(r"ward(?:\s+.+)?", effect_lower_clean):
+            return {'effect_type': 'add_ability', 'effect_value': 'Ward'}
+
         # Simple "loses X" check - uses cleaned text
         lose_match = re.search(r"loses ([\w\s\-]+?)(?: and |,|$)", effect_lower_clean) # Removed check for trailing punctuation as it should be stripped
         if lose_match:
@@ -2043,6 +2077,14 @@ class StaticAbility(Ability):
         # Layer 6: Ability adding/removing effects
         # Use word boundaries for most keywords
         # Need to handle multi-word keywords and parametrized keywords like protection
+        # Parsed keyword abilities can arrive as internal forms such as
+        # ``ward ward_generic`` without a leading "has" or "gains" phrase.
+        # They are still ability-layer effects.
+        if any(
+                cleaned_effect == keyword.lower()
+                or cleaned_effect.startswith(f"{keyword.lower()} ")
+                for keyword in Card.ALL_KEYWORDS):
+            return 6
         for kw in Card.ALL_KEYWORDS:
             kw_lower = kw.lower()
             # Use word boundaries for single-word keywords, simple substring for multi-word
@@ -5122,6 +5164,31 @@ class OptionalSacrificeProliferateEffect(AbilityEffect):
         game_state.phase = game_state.PHASE_CHOOSE
         game_state.priority_player = controller
         return True
+
+
+class CausticBroncoAttackEffect(AbilityEffect):
+    """Resolve Caustic Bronco's linked reveal, hand move, and life rider."""
+
+    def __init__(self):
+        super().__init__(
+            "Reveal the top card of your library and put it into your hand; "
+            "apply Caustic Bronco's saddled life rider")
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        if not controller or not controller.get("library"):
+            return True
+        card_id = controller["library"][0]
+        card = game_state._safe_get_card(card_id)
+        mana_value = max(0, int(getattr(card, "cmc", 0) or 0))
+        if not game_state.move_card(
+                card_id, controller, "library", controller, "hand",
+                cause="caustic_bronco_reveal"):
+            return False
+        saddled = source_id in controller.get("saddled_permanents", set())
+        life_target = "opponent" if saddled else "controller"
+        return LoseLifeEffect(mana_value, target=life_target).apply(
+            game_state, source_id, controller, targets={})
 
 
 class BuffEffect(AbilityEffect):

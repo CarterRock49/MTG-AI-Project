@@ -30,11 +30,13 @@ class ChoiceHandlersMixin:
             context.get("required_type", "target"),
             effect_text=context.get("effect_text"))
         selected_targets = list(context.get("selected_targets", []))
+        excluded_targets = set(context.get("excluded_target_ids", []))
         candidates = sorted({
             target_id
             for category_targets in valid_map.values()
             for target_id in category_targets
-            if target_id not in selected_targets
+            if (target_id not in selected_targets
+                and target_id not in excluded_targets)
         }, key=lambda target_id: (isinstance(target_id, str), target_id))
 
         # Selecting the last available slot auto-finalizes in
@@ -64,7 +66,8 @@ class ChoiceHandlersMixin:
                 candidates = sorted(
                     {target for targets in valid_map.values()
                      for target in targets
-                     if target not in ctx.get('selected_targets', [])},
+                     if (target not in ctx.get('selected_targets', [])
+                         and target not in ctx.get('excluded_target_ids', []))},
                     key=lambda target_id: (
                         isinstance(target_id, str), target_id))
                 page_count = max(1, (len(candidates) + 9) // 10)
@@ -1500,6 +1503,12 @@ class ChoiceHandlersMixin:
                 logging.warning(f"Mode index {chosen_mode_idx} already selected for {ctx.get('card_id')}.")
                 return -0.05, False # Penalty for redundant choice
 
+            if not gs.modal_mode_is_selectable(ctx, chosen_mode_idx):
+                logging.warning(
+                    "Mode %s for card %s has no legal mandatory targets.",
+                    chosen_mode_idx, ctx.get('card_id'))
+                return -0.1, False
+
             # --- Valid Choice Made ---
             selected_modes.append(chosen_mode_idx)
             ctx["selected_modes"] = selected_modes # Update context immediately
@@ -1742,4 +1751,3 @@ class ChoiceHandlersMixin:
              card_eval_score = self.card_evaluator.evaluate_card(card_id, "general", context_details={"destination":"graveyard"})
         # Reward higher if putting low-value card in GY
         return 0.05 - card_eval_score * 0.05, True
-

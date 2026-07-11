@@ -455,6 +455,40 @@ class GameStateStackMixin:
     def _target_count_from_text(effect_text):
         return GameStateStackMixin._target_bounds_from_text(effect_text)[1]
 
+    def modal_mode_is_selectable(self, choice, mode_index):
+        """Return whether a pending mode can complete a legal cast.
+
+        Modes are chosen before targets (CR 601.2b/c), but a mode whose
+        mandatory targets do not exist cannot be chosen.  The old mask exposed
+        every printed mode, so Bushwhack's fight mode could be mask-valid with
+        only one of its two required creatures on the battlefield.
+        """
+        if not isinstance(choice, dict) or choice.get("type") != "choose_mode":
+            return False
+        modes = list(choice.get("available_modes", []))
+        selected = list(choice.get("selected_modes", []))
+        if (not isinstance(mode_index, int)
+                or not 0 <= mode_index < len(modes)
+                or mode_index in selected):
+            return False
+        controller = choice.get("controller") or choice.get("player")
+        card_id = choice.get("card_id")
+        if controller is None or card_id is None:
+            return False
+
+        candidate_modes = selected + [mode_index]
+        targeting_text = " ".join(modes[index] for index in candidate_modes)
+        if "target" not in targeting_text.lower():
+            return True
+        target_type = self._get_target_type_from_text(targeting_text)
+        minimum, _ = self._target_bounds_from_text(targeting_text)
+        valid_map = self.targeting_system.get_valid_targets(
+            card_id, controller, target_type, effect_text=targeting_text)
+        valid_ids = {
+            target_id for ids in valid_map.values() for target_id in ids
+        }
+        return len(valid_ids) >= minimum
+
     def start_pending_stack_target_choice(self):
         """Open the next unresolved target choice already waiting on the stack."""
         if self.targeting_context:
@@ -479,6 +513,12 @@ class GameStateStackMixin:
             valid_map = self.targeting_system.get_valid_targets(
                 source_id, controller, target_type, effect_text=effect_text)
             valid_ids = {target_id for ids in valid_map.values() for target_id in ids}
+            excluded_target_ids = set()
+            if "other than that creature" in effect_text.lower():
+                prior_target = context.get("target_id")
+                if prior_target is not None:
+                    excluded_target_ids.add(prior_target)
+            valid_ids.difference_update(excluded_target_ids)
 
             if len(valid_ids) < min_targets:
                 logging.debug(
@@ -508,6 +548,7 @@ class GameStateStackMixin:
                 "selected_targets": [],
                 "effect_text": effect_text,
                 "target_instance_id": instance_id,
+                "excluded_target_ids": list(excluded_target_ids),
             }
             self.priority_player = controller
             self.priority_pass_count = 0
@@ -684,10 +725,8 @@ class GameStateStackMixin:
 
         cast_context = dict(choice.get("original_cast_context", {}))
         cast_context["selected_modes"] = selected_modes
-        return_phase = self.previous_priority_phase
         self.choice_context = None
-        self.previous_priority_phase = None
-        self.phase = return_phase if return_phase is not None else self.PHASE_PRIORITY
+        self._restore_casting_return(choice)
         success = self.cast_spell(card_id, controller, cast_context)
         if success:
             logging.debug(f"Finalized modal spell {card_id} with modes {selected_modes}.")
@@ -708,10 +747,8 @@ class GameStateStackMixin:
         controller = choice.get("controller") or choice.get("player")
         cast_context = dict(choice.get("original_cast_context", {}))
         cast_context["X"] = x_value
-        return_phase = self.previous_priority_phase
         self.choice_context = None
-        self.previous_priority_phase = None
-        self.phase = return_phase if return_phase is not None else self.PHASE_PRIORITY
+        self._restore_casting_return(choice)
         if card_id is None or controller is None:
             logging.error("Cannot resume X spell: missing card or controller.")
             return False
@@ -733,21 +770,39 @@ class GameStateStackMixin:
         return None
 
     def _begin_casting_choice(self, choice_context):
-        if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
-            self.previous_priority_phase = self.phase
+        # A deferred casting choice must preserve both layers of timing state.
+        # In particular, PHASE_PRIORITY can wrap a main phase in
+        # previous_priority_phase.  Saving only PHASE_PRIORITY loses the main
+        # phase and makes a sorcery-speed spell fail timing when the choice
+        # resumes (observed with Mockingbird's X choice).
+        choice_context.setdefault("casting_return_phase", self.phase)
+        choice_context.setdefault(
+            "casting_return_previous_priority_phase",
+            self.previous_priority_phase)
         self.phase = self.PHASE_CHOOSE
         self.choice_context = choice_context
         self.priority_player = choice_context.get("player")
         self.priority_pass_count = 0
         return True
 
+    def _restore_casting_return(self, choice):
+        """Restore the exact timing state captured before a casting choice."""
+        if "casting_return_phase" in choice:
+            self.phase = choice.get("casting_return_phase")
+            self.previous_priority_phase = choice.get(
+                "casting_return_previous_priority_phase")
+            return
+        # Compatibility for any older in-memory choice context.
+        return_phase = self.previous_priority_phase
+        self.previous_priority_phase = None
+        self.phase = (return_phase if return_phase is not None
+                      else self.PHASE_PRIORITY)
+
     def _resume_after_casting_choice(self, choice, cast_context):
         card_id = choice.get("card_id")
         controller = choice.get("controller") or choice.get("player")
-        return_phase = self.previous_priority_phase
         self.choice_context = None
-        self.previous_priority_phase = None
-        self.phase = return_phase if return_phase is not None else self.PHASE_PRIORITY
+        self._restore_casting_return(choice)
         self.priority_player = controller
         self.priority_pass_count = 0
         if card_id is None or controller is None:
@@ -910,10 +965,16 @@ class GameStateStackMixin:
             return False
         permanent_id = options[option_index]
         controller = choice.get("controller") or choice.get("player")
-        if (permanent_id not in controller.get("battlefield", [])
-                or self.get_card_controller(permanent_id) is not controller):
+        if permanent_id not in controller.get("battlefield", []):
             return False
-        owner = self._find_card_owner_fallback(permanent_id) or controller
+        in_p1_deck = permanent_id in getattr(self, "original_p1_deck", [])
+        in_p2_deck = permanent_id in getattr(self, "original_p2_deck", [])
+        # Mirror decks reuse numeric card IDs for two physical occurrences.
+        # This choice was built from controller's battlefield, so that zone
+        # membership is authoritative.  A global P1-first controller lookup
+        # cannot distinguish P2's occurrence of the same ID.
+        owner = (controller if in_p1_deck and in_p2_deck
+                 else self._find_card_owner_fallback(permanent_id) or controller)
         if not self.move_card(
                 permanent_id, controller, "battlefield", owner, "hand",
                 cause="additional_cost",
@@ -1157,10 +1218,7 @@ class GameStateStackMixin:
 
         # Modes are chosen before targets and costs are determined (CR 601.2b).
         if is_modal_spell and 'selected_modes' not in context:
-             if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
-                 self.previous_priority_phase = self.phase
-             self.phase = self.PHASE_CHOOSE
-             self.choice_context = {
+             choice_context = {
                  'type': 'choose_mode', 'player': player, 'controller': player,
                  'card_id': card_id,
                  'num_choices': len(modal_modes),
@@ -1169,8 +1227,7 @@ class GameStateStackMixin:
                  'original_cast_context': dict(context),
                  'resolved': False,
              }
-             self.priority_player = player
-             self.priority_pass_count = 0
+             self._begin_casting_choice(choice_context)
              logging.info(f"Waiting for mode choice before casting {card.name}.")
              return True
 
@@ -1298,17 +1355,13 @@ class GameStateStackMixin:
             if not affordable_values:
                 logging.warning(f"Cannot cast {card.name}: no affordable value of X.")
                 return False
-            if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
-                self.previous_priority_phase = self.phase
-            self.phase = self.PHASE_CHOOSE
-            self.choice_context = {
+            choice_context = {
                 'type': 'choose_x', 'player': player, 'controller': player,
                 'card_id': card_id, 'source_id': card_id,
                 'min_x': min(affordable_values), 'max_x': max(affordable_values),
                 'original_cast_context': dict(context),
             }
-            self.priority_player = player
-            self.priority_pass_count = 0
+            self._begin_casting_choice(choice_context)
             logging.info(f"Waiting for X choice before casting {card.name}.")
             return True
 

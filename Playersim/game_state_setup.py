@@ -58,7 +58,7 @@ class GameStateSetupMixin:
         gs.attackers_this_turn = set()
         gs.creatures_died_this_turn = {}
         gs.damage_dealt_this_turn = {}
-        gs.cards_drawn_this_turn = {gs.p1: 0, gs.p2: 0}
+        gs.cards_drawn_this_turn = {'p1': 0, 'p2': 0}
         
         # Reset any "until end of turn" effects tracking
         gs.until_end_of_turn_effects = {}
@@ -592,6 +592,12 @@ class GameStateSetupMixin:
             # battlefield from the opening hand. Starting player decides
             # first. If any such choice exists, the first turn is deferred
             # until every begin-game decision resolves.
+            # Capture the kept, post-bottoming hands before those permissions
+            # move Leylines or similar cards onto the battlefield.
+            self.opening_hands = {
+                'p1': list(self.p1.get('hand', [])) if self.p1 else [],
+                'p2': list(self.p2.get('hand', [])) if self.p2 else [],
+            }
             starting_player = self.p1  # Turn 1 belongs to p1 (_get_active_player).
             other_player = self.p2
             self._opening_hand_players = [

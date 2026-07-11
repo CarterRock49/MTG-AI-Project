@@ -41,7 +41,7 @@ FIDELITY_COUNTERS = (
 )
 REQUIRED_GAME_FIELDS = {
     "schema_version", "ts", "result", "turn_count", "p1_deck", "p2_deck",
-    "agent_is_p1", "agent_version", "fidelity",
+    "agent_is_p1", "agent_version", "terminal_reason", "fidelity",
 }
 
 EXPECTED_SAMPLE_DECKS = (
@@ -696,6 +696,10 @@ def _validate_artifacts(
             raise RuntimeError(
                 f"Game record {record_index} is not a completed result: "
                 f"{record.get('result')!r}")
+        if not isinstance(record.get("terminal_reason"), str) \
+                or not record.get("terminal_reason"):
+            raise RuntimeError(
+                f"Game record {record_index} has an invalid terminal_reason")
         if record.get("p1_deck") not in EXPECTED_SAMPLE_DECKS \
                 or record.get("p2_deck") not in EXPECTED_SAMPLE_DECKS:
             raise RuntimeError(f"Game record {record_index} has an unknown deck label")

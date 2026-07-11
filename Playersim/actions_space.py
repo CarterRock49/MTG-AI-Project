@@ -942,7 +942,8 @@ class ActionSpaceMixin:
                 if selected_count < max_modes:
                     for i in range(min(num_choices, 10)): # Mode index 0-9
                         # Prevent selecting the same mode twice unless allowed
-                        if i not in context.get("selected_modes", []):
+                        if (i not in context.get("selected_modes", [])
+                                and gs.modal_mode_is_selectable(context, i)):
                             # FIXED: Use correct index range 353-362 for CHOOSE_MODE
                             set_valid_action(353 + i, f"CHOOSE_MODE {i+1}")
 

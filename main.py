@@ -4,6 +4,7 @@ import hashlib
 import platform
 import subprocess
 import multiprocessing
+import threading
 import torch
 import time
 import random
@@ -576,6 +577,9 @@ class ResourceMonitorCallback(BaseCallback):
         self.writer = None
         self.psutil_available = False
         self.gputil_available = False
+        self._monitor_stop = threading.Event()
+        self._monitor_thread = None
+        self._sample_index = 0
         
         # Check for optional dependencies
         try:
@@ -586,6 +590,7 @@ class ResourceMonitorCallback(BaseCallback):
             
         try:
             import GPUtil
+            self.GPUtil = GPUtil
             self.gputil_available = True
         except ImportError:
             logging.warning("GPUtil not available. GPU monitoring disabled.")
@@ -617,6 +622,87 @@ class ResourceMonitorCallback(BaseCallback):
                 self.writer.add_text(f"system/gpu{i}_info", f"Name: {gpu_name}")
         
         logging.info("Resource monitoring initialized")
+        self._monitor_stop.clear()
+        self._monitor_thread = threading.Thread(
+            target=self._monitor_loop,
+            name="playersim-resource-monitor",
+            daemon=True)
+        self._monitor_thread.start()
+
+    def _monitor_loop(self):
+        """Sample independently so PPO learning bursts are not missed."""
+        process = None
+        psutil_module = None
+        child_processes = {}
+        if self.psutil_available:
+            import psutil as psutil_module
+            process = psutil_module.Process()
+            process.cpu_percent(None)
+        while not self._monitor_stop.wait(1.0):
+            try:
+                self._sample_index += 1
+                step = self._sample_index
+                self.writer.add_scalar(
+                    "system/training_timesteps",
+                    int(getattr(self, 'num_timesteps', 0)), step)
+                if process is not None:
+                    children = process.children(recursive=True)
+                    process_cpu = process.cpu_percent(None)
+                    child_cpu = 0.0
+                    child_rss = 0
+                    for child in children:
+                        try:
+                            # psutil stores the previous CPU sample on the Process
+                            # object. Keep one object per PID instead of recreating
+                            # it every second, which always reports an initial 0%.
+                            tracked_child = child_processes.get(child.pid)
+                            if tracked_child is None:
+                                tracked_child = child
+                                child_processes[child.pid] = tracked_child
+                                tracked_child.cpu_percent(None)
+                            else:
+                                child_cpu += tracked_child.cpu_percent(None)
+                            child_rss += child.memory_info().rss
+                        except (psutil_module.NoSuchProcess,
+                                psutil_module.AccessDenied):
+                            continue
+                    live_pids = {child.pid for child in children}
+                    child_processes = {
+                        pid: child for pid, child in child_processes.items()
+                        if pid in live_pids
+                    }
+                    self.writer.add_scalar(
+                        "system/process_cpu_percent", process_cpu, step)
+                    self.writer.add_scalar(
+                        "system/worker_cpu_percent", child_cpu, step)
+                    self.writer.add_scalar(
+                        "system/process_tree_ram_gb",
+                        (process.memory_info().rss + child_rss) / (1024 ** 3),
+                        step)
+                if self.gputil_available:
+                    for gpu in self.GPUtil.getGPUs():
+                        self.writer.add_scalar(
+                            f"system/gpu{gpu.id}_utilization_percent",
+                            float(gpu.load) * 100.0, step)
+                        self.writer.add_scalar(
+                            f"system/gpu{gpu.id}_memory_utilization_percent",
+                            float(gpu.memoryUtil) * 100.0, step)
+                        self.writer.add_scalar(
+                            f"system/gpu{gpu.id}_temperature_c",
+                            float(gpu.temperature), step)
+                if torch.cuda.is_available():
+                    for index in range(torch.cuda.device_count()):
+                        self.writer.add_scalar(
+                            f"system/cuda{index}_allocated_gb",
+                            torch.cuda.memory_allocated(index) / (1024 ** 3),
+                            step)
+                        self.writer.add_scalar(
+                            f"system/cuda{index}_reserved_gb",
+                            torch.cuda.memory_reserved(index) / (1024 ** 3),
+                            step)
+            except Exception as monitor_error:
+                logging.debug(
+                    "Background resource sample failed: %s", monitor_error)
     
     def _on_step(self):
         if self.n_calls % self.monitor_freq == 0:
@@ -668,6 +754,9 @@ class ResourceMonitorCallback(BaseCallback):
         return True
     
     def _on_training_end(self):
+        self._monitor_stop.set()
+        if self._monitor_thread is not None:
+            self._monitor_thread.join(timeout=2.0)
         if self.writer is not None:
             self.writer.close()
             
@@ -1743,6 +1832,50 @@ class StrictTrainingFidelityCallback(BaseCallback):
         return True
 
 
+class RewardComponentsCallback(BaseCallback):
+    """Expose environment reward composition in the normal PPO TensorBoard."""
+
+    def _on_step(self):
+        for info in self.locals.get("infos", ()) or ():
+            for name, value in (info.get("reward_components") or {}).items():
+                if np.isfinite(value):
+                    self.logger.record_mean(f"reward/{name}", float(value))
+            reason = info.get("terminal_reason")
+            if reason:
+                safe_reason = str(reason).replace(" ", "_").replace("/", "_")
+                self.logger.record_mean(
+                    f"terminal/{safe_reason}", 1.0)
+        return True
+
+
+class PhaseTimingCallback(BaseCallback):
+    """Separate rollout wall time from the learner/callback gap."""
+
+    def __init__(self):
+        super().__init__(verbose=0)
+        self.rollout_started_at = None
+        self.previous_rollout_ended_at = None
+
+    def _on_step(self):
+        return True
+
+    def _on_rollout_start(self):
+        now = time.perf_counter()
+        if self.previous_rollout_ended_at is not None:
+            self.logger.record(
+                "performance/learner_and_callbacks_seconds",
+                now - self.previous_rollout_ended_at)
+        self.rollout_started_at = now
+
+    def _on_rollout_end(self):
+        now = time.perf_counter()
+        if self.rollout_started_at is not None:
+            self.logger.record(
+                "performance/rollout_seconds",
+                now - self.rollout_started_at)
+        self.previous_rollout_ended_at = now
+
+
 def create_callbacks(eval_env, run_id, args, num_train_envs=1):
     """Create a comprehensive set of callbacks"""
     # BaseCallback.n_calls counts VecEnv steps, not individual transitions.
@@ -1793,6 +1926,8 @@ def create_callbacks(eval_env, run_id, args, num_train_envs=1):
             record_freq=callback_frequency(args.record_freq)
         ))
     callbacks.append(resource_callback)
+    callbacks.append(RewardComponentsCallback())
+    callbacks.append(PhaseTimingCallback())
     callbacks.append(StrictTrainingFidelityCallback())
     return callbacks
 

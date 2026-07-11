@@ -224,45 +224,59 @@ class GameStateTurnMixin:
 
     def _draw_phase(self, player):
         """Draw a card from the library with replacement effect handling."""
-        if player["library"]:
-            # Create event context
-            draw_context = {
-                "player": player,
-                "draw_count": 1,
-                "card_id": player["library"][0] if player["library"] else None
-            }
-            
-            # Apply replacement effects
-            modified_context, was_replaced = self.apply_replacement_effect("DRAW", draw_context)
-            
-            if was_replaced:
-                # Use the modified context
-                # The replacement effect handler already performed the action
-                pass
-            else:
-                # Normal draw
-                card_id = player["library"].pop(0)
-                player["hand"].append(card_id)
-                
-                # Get the card object properly using _safe_get_card
-                card = self._safe_get_card(card_id)
-                
-                # Attempt to handle miracle if applicable
-                miracle_handled = False
-                if hasattr(self, 'handle_miracle_draw'):
-                    miracle_handled = self.handle_miracle_draw(card_id, player)
-                
-                # Only attempt to log the card name if we got a valid card object
-                if card:
-                    logging.debug(f"Draw Phase: Drew {card.name}{' and cast for miracle cost' if miracle_handled else ''}")
-                else:
-                    logging.debug(f"Draw Phase: Drew card ID {card_id}")
-        else:
-            # Track attempted draw from empty
-            player["attempted_draw_from_empty"] = True
-            logging.warning("Draw Phase: No cards left in library. Player loses the game!")
-            player["life"] = 0  # Losing condition: drawing from an empty library
+        self._draw_card(player)
+
+    def _draw_card(self, player):
+        """Draw one card through the canonical replacement/telemetry path."""
+        if not player or not player.get("library"):
+            if player:
+                player["attempted_draw_from_empty"] = True
+                player["life"] = 0
+            self.terminal_reason = "decking"
+            # Drawing from an empty library is an ordinary rules-defined loss,
+            # not an engine degradation.  Keep it visible without polluting
+            # warning triage for successful long games.
+            logging.info("Draw Phase: No cards left in library. Player loses the game!")
             self.check_state_based_actions()
+            return None
+
+        player_key = 'p1' if player is self.p1 else 'p2'
+        draw_context = {
+            "player": player,
+            "draw_count": 1,
+            "card_id": player["library"][0],
+        }
+        modified_context, was_replaced = self.apply_replacement_effect(
+            "DRAW", draw_context)
+        if was_replaced:
+            # Replacement implementations perform their own zone movement.
+            # Effects such as dredge are not draws and intentionally record
+            # nothing unless the replacement exposes an actual drawn card.
+            drawn_card_id = (modified_context or {}).get("drawn_card_id")
+            if drawn_card_id is not None:
+                self._record_card_draw(player_key, drawn_card_id)
+            return drawn_card_id
+
+        card_id = player["library"].pop(0)
+        was_first_draw = self.cards_drawn_this_turn.get(player_key, 0) == 0
+        player["hand"].append(card_id)
+        self._record_card_draw(player_key, card_id)
+
+        miracle_handled = self.handle_miracle_draw(
+            card_id, player, is_first_draw=was_first_draw)
+        card = self._safe_get_card(card_id)
+        logging.debug(
+            "Draw Phase: Drew %s%s",
+            getattr(card, 'name', card_id),
+            " and opened a miracle window" if miracle_handled else "")
+        return card_id
+
+    def _record_card_draw(self, player_key, card_id):
+        """Record a completed draw without conflating it with opening hands."""
+        self.cards_drawn_this_turn[player_key] = (
+            self.cards_drawn_this_turn.get(player_key, 0) + 1)
+        self.draw_history.setdefault(player_key, {}).setdefault(
+            int(self.turn), []).append(card_id)
 
     def _end_phase(self, player):
         """Cleanup at end phase."""

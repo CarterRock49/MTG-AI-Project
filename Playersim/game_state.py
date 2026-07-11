@@ -38,7 +38,8 @@ class GameState(
                  "current_attackers", "current_block_assignments", 'mulligan_data',
                  "current_spell_requires_target", "current_spell_card_id", "exhaust_ability_used",
                  "_last_card_locations", "_ceased_token_cards",
-                 "optimal_attackers", "attack_suggestion_used", 'cards_played', 'play_history', 'phased_out_state',
+                 "optimal_attackers", "attack_suggestion_used", 'cards_played', 'play_history',
+                 'opening_hands', 'draw_history', 'terminal_reason', 'phased_out_state',
                  "p1", "p2", "ability_handler", "damage_dealt_this_turn",
                  "previous_priority_phase", "layer_system", "until_end_of_turn_effects",
                  "mana_system", "replacement_effects", "cards_drawn_this_turn", "cards_milled_this_turn",
@@ -634,6 +635,9 @@ class GameState(
             self.attack_suggestion_used = False
             self.cards_played = {0: [], 1: []} # Explicit reset
             self.play_history = {0: {}, 1: {}} # {player_idx: {turn: [card_ids]}} — real play turns for stats
+            self.opening_hands = {'p1': [], 'p2': []}
+            self.draw_history = {'p1': {}, 'p2': {}}
+            self.terminal_reason = None
             self.exhaust_ability_used = {} # Reset exhaust tracking
             self._last_card_locations = {}
             self._ceased_token_cards = {}
@@ -909,7 +913,8 @@ class GameState(
             "previous_priority_phase", "mulligan_in_progress", "bottoming_in_progress",
             "cards_to_bottom", "bottoming_count", "split_second_active", "gravestorm_count",
             "miracle_active", "miracle_card_id", "miracle_cost",
-            "progress_was_forced", "_turn_limit_checked", "_phase_action_count"
+            "progress_was_forced", "_turn_limit_checked", "_phase_action_count",
+            "terminal_reason"
         ]
         # Delayed triggers hold closures over THIS state; firing them from a
         # clone would mutate the original game. Clones start with none (v1
@@ -941,7 +946,8 @@ class GameState(
             "_ceased_token_cards",
             "impending_cards", "_offspring_cost_paid_context", "until_end_of_turn_effects",
             "temp_control_effects", "abilities_activated_this_turn", "spells_cast_this_turn",
-            "cards_played", "damage_dealt_this_turn", "cards_drawn_this_turn",
+            "cards_played", "play_history", "opening_hands", "draw_history",
+            "damage_dealt_this_turn", "cards_drawn_this_turn",
             "life_gained_this_turn", "damage_this_turn", "cards_to_graveyard_this_turn",
             "saga_counters", "battle_cards", "suspended_cards", "rebounded_cards", "phased_out_state",
             "melded_permanents", "mutated_permanents", "specialized_cards", "last_die_roll", "die_roll_history",

@@ -544,8 +544,9 @@ class TurnPhaseHandlersMixin:
         gs = self.game_state
         me = gs.p1 if gs.agent_is_p1 else gs.p2
         if me: me['lost_game'] = True
+        gs.terminal_reason = "concession"
         logging.info("Player conceded.")
-        return -10.0, True # Large penalty, action succeeded
+        return 0.0, True # Environment applies the perspective-correct terminal reward.
 
     def _handle_no_op_search_fail(self, param, **kwargs):
         """Handles the dedicated NO_OP action when a search fails."""

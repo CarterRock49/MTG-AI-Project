@@ -469,6 +469,52 @@ def s_valiant_first_friendly_target_each_turn():
     assert gs._safe_get_card(hero).counters.get("+1/+1", 0) == 2
 
 
+@scenario("603.2 / Pawpatch Recruit", "an opponent target creates one Recruit trigger without recursively targeting itself")
+def s_pawpatch_recruit_target_trigger_is_not_recursive():
+    gs = fresh(); handler = get_env().action_handler
+    controller, opponent = gs.p1, gs.p2
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    recruit = inject_into_zone(gs, controller, {
+        "name": "Pawpatch Recruit", "mana_cost": "{G}", "cmc": 1,
+        "type_line": "Creature - Rabbit Warrior", "power": 2,
+        "toughness": 1,
+        "oracle_text": (
+            "Whenever a creature you control becomes the target of a spell "
+            "or ability an opponent controls, put a +1/+1 counter on target "
+            "creature you control other than that creature."),
+    }, "battlefield")
+    original_target = inject_into_zone(gs, controller, {
+        "name": "Recruit Target Probe", "mana_cost": "{1}{G}",
+        "type_line": "Creature", "oracle_text": "", "power": 2,
+        "toughness": 2,
+    }, "battlefield")
+    hostile_source = inject_into_zone(gs, opponent, {
+        "name": "Hostile Target Probe", "mana_cost": "{B}",
+        "type_line": "Creature", "oracle_text": "", "power": 1,
+        "toughness": 1,
+    }, "battlefield")
+    gs.ability_handler.active_triggers = []
+
+    gs.notify_targets_committed(
+        hostile_source, opponent, {"creatures": [original_target]})
+    assert len(gs.ability_handler.active_triggers) == 1, \
+        "the hostile target did not create exactly one Recruit trigger"
+    gs.ability_handler.process_triggered_abilities()
+    assert gs.phase == gs.PHASE_TARGETING and len(gs.stack) == 1
+    candidates = handler._get_target_selection_candidates(
+        controller, gs.targeting_context)
+    assert candidates == [recruit], \
+        f"'other than that creature' exposed {candidates} instead of only Recruit"
+
+    reward, ok = handler._handle_select_target(0, {})
+    assert ok, f"Recruit trigger target selection failed with reward {reward}"
+    assert len(gs.stack) == 1 and not gs.ability_handler.active_triggers, \
+        "the friendly target of Recruit's own trigger recursively triggered it"
+    assert gs.resolve_top_of_stack(), "Recruit's finite trigger did not resolve"
+    assert gs._safe_get_card(recruit).counters.get("+1/+1", 0) == 1
+
+
 @scenario("603.2 (Valiant)", "Emberheart Challenger's Valiant trigger grants its printed impulse-draw permission")
 def s_emberheart_challenger_valiant_impulse_draw():
     gs = fresh()
@@ -2093,6 +2139,47 @@ def s_fear_of_isolation_additional_cost():
     assert fear in controller["battlefield"], "Fear of Isolation did not enter the battlefield"
 
 
+@scenario("601.2h / mirror identity", "Fear returns Player 2's selected occurrence when both decks share its numeric ID")
+def s_fear_of_isolation_mirror_occurrence():
+    gs = fresh()
+    controller, opponent = gs.p2, gs.p1
+    gs.turn = 2
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = controller
+    gs.priority_pass_count = 0
+    shared = inject_into_zone(gs, controller, {
+        "name": "Mirror Return Probe", "mana_cost": "{1}",
+        "type_line": "Artifact", "oracle_text": "",
+    }, "battlefield")
+    # Mirror deck construction represents both physical cards with this same
+    # database ID.  Put one occurrence on each battlefield, matching the
+    # failing EsperSelf-vs-EsperSelf replay.
+    opponent["battlefield"].append(shared)
+    gs.original_p1_deck.append(shared)
+    gs.original_p2_deck.append(shared)
+    fear = inject_into_zone(gs, controller, {
+        "name": "Fear of Isolation", "mana_cost": "{1}{U}", "cmc": 2,
+        "type_line": "Enchantment Creature - Nightmare",
+        "oracle_text": (
+            "As an additional cost to cast this spell, return a permanent you "
+            "control to its owner's hand.\nFlying"),
+        "power": 2, "toughness": 3,
+    }, "hand")
+    controller["mana_pool"] = {
+        'W': 0, 'U': 1, 'B': 0, 'R': 0, 'G': 0, 'C': 1}
+
+    assert gs.cast_spell(fear, controller), "mirror Fear cast did not begin"
+    option = gs.choice_context["options"].index(shared)
+    assert gs.choose_casting_additional_return(option), \
+        "Player 2's mask-valid mirror occurrence was rejected"
+    assert shared in controller["hand"] and shared not in controller["battlefield"], \
+        "Player 2's occurrence did not return to Player 2's hand"
+    assert shared in opponent["battlefield"], \
+        "returning Player 2's occurrence consumed Player 1's mirror copy"
+    assert gs.stack and gs.stack[-1][1] == fear, \
+        "Fear did not finish casting after the mirror return cost"
+
+
 @scenario("601.2h / collect evidence", "Analyze the Pollen exiles mana value 8 and broadens its search")
 def s_analyze_the_pollen_collect_evidence():
     gs = fresh()
@@ -2677,6 +2764,18 @@ def s_ward_keyword_cost_parses():
     assert gs.check_keyword(warded, "ward"), "registered ward keyword was not visible through keyword checks"
 
 
+@scenario("702.21 / 613.1f", "generic Ward's internal form is recognized as a layer-6 ability")
+def s_generic_ward_internal_form_is_layer_six():
+    from Playersim.ability_types import StaticAbility
+
+    ability = StaticAbility(0, "ward ward_generic")
+    assert ability._determine_layer_for_effect(ability.effect) == 6, \
+        "the generic Ward form fell through layer determination"
+    assert ability._parse_layer6_effect(ability.effect) == {
+        "effect_type": "add_ability", "effect_value": "Ward"}, \
+        "the internal generic Ward form could not register its layer effect"
+
+
 @scenario("702.21", "ward counters an opposing targeted spell when its tax cannot be paid")
 def s_ward_counters_spell_when_tax_unpaid():
     gs = fresh()
@@ -2912,6 +3011,133 @@ def s_stats_winner_mapping():
         f"winner/loser play-history mapping wrong: {mapped_history}"
     mapped_cards, mapped_history = env._stats_result_mapped(gs, is_p1_winner=True)
     assert mapped_cards == {0: [101], 1: [202]} and mapped_history["winner"] == {2: [101]}
+
+
+@scenario("stats telemetry", "opening hands, draws, and actual play turns reach CardMemory")
+def s_stats_draw_opening_and_play_telemetry():
+    gs = fresh(); env = get_env()
+    opening_id = replace_hand(gs, gs.p1, [{
+        "name": "Opening Telemetry Probe", "mana_cost": "{1}",
+        "type_line": "Creature", "oracle_text": "", "power": 1,
+        "toughness": 1,
+    }])[0]
+    replace_hand(gs, gs.p2, [{
+        "name": "Opponent Opening Probe", "mana_cost": "{1}",
+        "type_line": "Creature", "oracle_text": "", "power": 1,
+        "toughness": 1,
+    }])
+    gs.mulligan_in_progress = True
+    gs.bottoming_in_progress = False
+    gs._end_mulligan_phase()
+    assert gs.opening_hands['p1'] == [opening_id], \
+        f"final kept hand was not captured: {gs.opening_hands}"
+
+    gs.turn = 4
+    gs._reset_turn_tracking_variables()
+    drawn_id = gs.p1['library'][0]
+    assert gs._draw_card(gs.p1) == drawn_id
+    assert gs.draw_history['p1'][4] == [drawn_id]
+    gs.track_card_played(drawn_id, 0)
+
+    before_drawn = env.card_memory.card_data.get(
+        str(drawn_id), {}).get('times_drawn', 0)
+    before_played_turn = env.card_memory.card_data.get(
+        str(drawn_id), {}).get('turn_played', {}).get('4', 0)
+    before_opening = env.card_memory.card_data.get(
+        str(opening_id), {}).get('in_opening_hand', 0)
+    env._record_cards_to_memory(
+        [opening_id, drawn_id], [], gs.cards_played, gs.turn,
+        "TelemetryDeck", "OpponentDeck", gs.opening_hands,
+        gs.draw_history, gs.play_history, is_win=True, player_idx=0)
+    drawn_stats = env.card_memory.card_data[str(drawn_id)]
+    opening_stats = env.card_memory.card_data[str(opening_id)]
+    assert drawn_stats['times_drawn'] == before_drawn + 1
+    assert drawn_stats['turn_played']['4'] == before_played_turn + 1
+    assert opening_stats['in_opening_hand'] == before_opening + 1
+
+    openings, draws, mulligans = env._stats_telemetry_mapped(
+        gs, is_p1_winner=True)
+    assert openings['winner'] == [opening_id]
+    assert draws['winner'][4] == [drawn_id]
+    assert mulligans == {'winner': 0, 'loser': 0}
+
+
+@scenario("stats result schema", "state-flag draws persist under the canonical draw result")
+def s_stats_draw_result_is_canonical():
+    gs = fresh(); env = get_env()
+    gs.p1['game_draw'] = True
+    gs.p2['game_draw'] = True
+    gs.terminal_reason = 'simultaneous_loss'
+    env.ensure_game_result_recorded()
+    assert env._game_result == 'draw', \
+        f"non-schema draw result persisted: {env._game_result}"
+
+
+@scenario("training reward", "position shaping is potential-based and terminal rewards are centralized")
+def s_training_reward_contract():
+    gs = fresh(); env = get_env()
+    baseline = env._calculate_board_state_reward()
+    assert env._calculate_board_state_reward() == baseline, \
+        "unchanged state produced a changing board potential"
+    gs.p2['life'] -= 1
+    assert env._calculate_board_state_reward() > baseline, \
+        "damaging the opponent did not improve strategic potential"
+
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.previous_priority_phase = None
+    gs.priority_player = gs.p1
+    gs.agent_is_p1 = True
+    gs.p1['life'] = 0
+    gs.p1['lost_game'] = True
+    gs.terminal_reason = 'life_total'
+    _, reward, done, truncated, info = env.step(11)
+    assert done and not truncated and reward <= -10.0, \
+        f"terminal result reward={reward}, done={done}, truncated={truncated}, info={info}"
+    assert info.get('terminal_reason') == 'life_total'
+    assert info.get('reward_components', {}).get('terminal') == -10.0
+
+
+@scenario("scripted baseline", "the opponent develops mana, casts spells, and declares attacks")
+def s_scripted_baseline_plays_magic():
+    gs = fresh(); env = get_env()
+    opponent = gs.p1
+    land_id, spell_id = replace_hand(gs, opponent, [
+        {"name": "Baseline Land", "type_line": "Basic Land — Forest",
+         "oracle_text": "{T}: Add {G}."},
+        {"name": "Baseline Creature", "mana_cost": "{1}", "cmc": 1,
+         "type_line": "Creature", "oracle_text": "", "power": 2,
+         "toughness": 2},
+    ])
+    gs.agent_is_p1 = True
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = opponent
+    gs.priority_pass_count = 0
+    mask = env.action_mask().astype(bool)
+    action, context = env._get_scripted_opponent_action(
+        opponent, mask, {"phase_context": "priority"})
+    assert action == 13 and context.get('card_id') == land_id
+    _, _, _, handler_info = env.action_handler.apply_action(
+        action, context=context)
+    assert not handler_info.get('execution_failed')
+
+    opponent['mana_pool']['G'] = 2
+    mask = env.action_mask().astype(bool)
+    action, context = env._get_scripted_opponent_action(
+        opponent, mask, {"phase_context": "priority"})
+    assert action == 20 and context.get('card_id') == spell_id
+
+    # Combat policy declares every legal attacker before finishing attackers.
+    opponent['hand'].remove(spell_id)
+    opponent['battlefield'].append(spell_id)
+    opponent['entered_battlefield_this_turn'].discard(spell_id)
+    gs.phase = gs.PHASE_DECLARE_ATTACKERS
+    gs.priority_player = opponent
+    mask = env.action_mask().astype(bool)
+    action, context = env._get_scripted_opponent_action(
+        opponent, mask, {"phase_context": "priority"})
+    assert action == 29, \
+        f"scripted attack action={action}, context={context}, valid={np.flatnonzero(mask).tolist()}"
 
 
 @scenario("614 (mana doubling)", "a registered mana-doubling replacement actually doubles produced mana")
@@ -3412,6 +3638,39 @@ def s_scry_to_bottom():
         "the card sent to the bottom is not on the bottom after scry"
 
 
+@scenario("701.17 / self-play", "the scripted opponent completes its mandatory scry choice")
+def s_scripted_opponent_completes_scry():
+    gs = fresh(); env = get_env()
+    from Playersim.ability_types import ScryEffect
+    learned_player, opponent = gs.p2, gs.p1
+    gs.agent_is_p1 = False
+    top_before = opponent["library"][0]
+    library_size = len(opponent["library"])
+    assert ScryEffect(1)._apply_effect(gs, None, opponent, {}), \
+        "opponent scry did not initiate"
+    acting_player, phase_context = env._opponent_needs_to_act()
+    assert acting_player is opponent and phase_context == {"phase_context": "CHOOSE"}, \
+        "the scripted opponent was not assigned its scry choice"
+
+    # Match the opponent loop: temporarily generate and execute from P1's
+    # perspective while the learned policy owns P2.
+    gs.agent_is_p1 = True
+    opponent_mask = env.action_mask().astype(bool)
+    action, action_context = env._get_scripted_opponent_action(
+        opponent, opponent_mask, phase_context)
+    assert action == 306, \
+        f"scripted opponent did not keep its scry card on top: {action}"
+    _, _, _, handler_info = env.action_handler.apply_action(
+        action, context=action_context)
+    assert not handler_info.get("execution_failed"), handler_info
+    assert gs.choice_context is None and gs.phase != gs.PHASE_CHOOSE, \
+        "scripted opponent left the scry choice unresolved"
+    assert len(opponent["library"]) == library_size \
+        and opponent["library"][0] == top_before, \
+        "scripted scry changed the library while keeping its card on top"
+    assert learned_player is gs.p2  # Keep the failed-run seat relationship explicit.
+
+
 @scenario("701.42 (surveil)", "surveil to graveyard removes a chosen card from the library top")
 def s_surveil_to_graveyard():
     gs = fresh()
@@ -3592,6 +3851,56 @@ def s_targeted_modal_mode_enters_targeting_after_choice():
     assert victim in opponent["graveyard"], "chosen destroy mode did not destroy its target"
 
 
+@scenario("601.2b/c / Bushwhack", "a modal fight mode is masked when either required creature is unavailable")
+def s_bushwhack_impossible_fight_mode_is_masked():
+    from Playersim.ability_types import SearchLibraryEffect
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(); handler = get_env().action_handler
+    player = gs.p1 if gs.agent_is_p1 else gs.p2
+    opponent = gs.p2 if player is gs.p1 else gs.p1
+    for battlefield_player in (player, opponent):
+        for card_id in list(battlefield_player["battlefield"]):
+            assert gs.move_card(
+                card_id, battlefield_player, "battlefield",
+                battlefield_player, "library")
+    inject_into_zone(gs, opponent, {
+        "name": "Only Fight Creature", "mana_cost": "{2}",
+        "type_line": "Creature", "oracle_text": "", "power": 2,
+        "toughness": 2,
+    }, "battlefield")
+    bushwhack = inject_into_zone(gs, player, {
+        "name": "Bushwhack", "mana_cost": "{G}", "type_line": "Sorcery",
+        "oracle_text": (
+            "Choose one —\n"
+            "• Search your library for a basic land card, reveal it, put it "
+            "into your hand, then shuffle.\n"
+            "• Target creature you control fights target creature you don't control."),
+    }, "hand")
+    gs.turn = 1 if player is gs.p1 else 2
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    player["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 1, 'C': 0}
+
+    assert gs.cast_spell(bushwhack, player)
+    mask = handler.generate_valid_actions()
+    assert mask[353] and not mask[354], \
+        f"Bushwhack exposed impossible modes: {np.flatnonzero(mask).tolist()}"
+    reward, ok = handler._handle_choose_mode(1, {})
+    assert not ok and gs.choice_context.get("selected_modes") == [], \
+        f"direct impossible mode mutated the choice: reward={reward}"
+    reward, ok = handler._handle_choose_mode(0, {})
+    assert ok and gs.stack and gs.stack[-1][1] == bushwhack, \
+        f"Bushwhack's legal search mode failed: reward={reward}"
+    search_text = (
+        "Search your library for a basic land card, reveal it, put it into "
+        "your hand, then shuffle.")
+    search_effects = EffectFactory.create_effects(
+        search_text, source_name="Bushwhack")
+    assert (len(search_effects) == 1
+            and isinstance(search_effects[0], SearchLibraryEffect)), \
+        f"Bushwhack search still fragmented: {search_effects}"
+
+
 @scenario("601.2b / 700.2", "Pass finishes an optional multi-mode choice after its minimum")
 def s_optional_modal_choice_finishes_on_pass():
     gs = fresh()
@@ -3699,6 +4008,39 @@ def s_x_zero_and_fixed_number_resolution():
     assert gs.resolve_top_of_stack(), "fixed-number X spell did not resolve"
     assert player["life"] == life_before + 1, \
         "the chosen X overwrote an unrelated fixed life-gain amount"
+
+
+@scenario("117.1 / 601.2b", "an X choice preserves the main phase beneath transient priority")
+def s_x_choice_preserves_priority_timing():
+    gs = fresh()
+    player = gs.p1 if gs.agent_is_p1 else gs.p2
+    gs.turn = 1 if player is gs.p1 else 2
+    gs.phase = gs.PHASE_PRIORITY
+    gs.previous_priority_phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    gs.priority_pass_count = 0
+    mockingbird = inject_into_zone(gs, player, {
+        "name": "Mockingbird", "mana_cost": "{X}{U}", "cmc": 1,
+        "type_line": "Creature - Bird Bard", "power": 1, "toughness": 1,
+        "oracle_text": (
+            "Flying\nYou may have this creature enter as a copy of any "
+            "creature on the battlefield with mana value less than or equal "
+            "to the amount of mana spent to cast this creature, except it's "
+            "a Bird in addition to its other types and it has flying."),
+    }, "hand")
+    player["mana_pool"] = {
+        'W': 0, 'U': 1, 'B': 0, 'R': 0, 'G': 0, 'C': 2}
+
+    assert gs.cast_spell(mockingbird, player), \
+        "Mockingbird could not begin its X choice from transient priority"
+    assert gs.choice_context.get("type") == "choose_x"
+    assert gs.choose_x_for_pending_spell(1), \
+        "Mockingbird failed timing when its X choice resumed"
+    assert gs.stack and gs.stack[-1][1] == mockingbird, \
+        "Mockingbird did not reach the stack after choosing X"
+    assert (gs.phase == gs.PHASE_PRIORITY
+            and gs.previous_priority_phase == gs.PHASE_MAIN_PRECOMBAT), \
+        "the X choice did not restore transient priority over the main phase"
 
 
 @scenario("702.85 (cascade)", "cascade puts the rest of the revealed cards on the bottom, keeping the library sound")
@@ -8763,6 +9105,74 @@ def scenario_caustic_bronco_saddle():
     assert bronco not in player.get("saddled_permanents", set())
 
 
+@scenario("508.3 / Caustic Bronco", "Bronco moves the revealed card and applies the correct saddled life rider")
+def scenario_caustic_bronco_attack_trigger():
+    from Playersim.ability_types import CausticBroncoAttackEffect, TriggeredAbility
+    from Playersim.ability_utils import EffectFactory
+
+    gs = fresh(); player = gs.p1 if gs.agent_is_p1 else gs.p2
+    opponent = gs.p2 if player is gs.p1 else gs.p1
+    bronco = inject_into_zone(gs, player, {
+        "name": "Caustic Bronco", "mana_cost": "{1}{B}", "cmc": 2,
+        "type_line": "Creature - Snake Horse Mount", "power": 2,
+        "toughness": 2, "oracle_text": "Saddle 3",
+    }, "battlefield")
+    trigger_text = (
+        "Reveal the top card of your library and put it into your hand. "
+        "You lose life equal to that card's mana value if this creature isn't "
+        "saddled. Otherwise, each opponent loses that much life.")
+    effects = EffectFactory.create_effects(
+        trigger_text, source_name="Caustic Bronco")
+    assert len(effects) == 1 and isinstance(effects[0], CausticBroncoAttackEffect), \
+        f"Bronco still parsed to partial effects: {effects}"
+
+    first = inject_card(gs, {
+        "name": "Bronco Reveal Four", "mana_cost": "{4}", "cmc": 4,
+        "type_line": "Sorcery", "oracle_text": "",
+    })
+    player["library"].insert(0, first)
+    gs._last_card_locations[first] = (player, "library")
+    player_life = player["life"]
+    ability = TriggeredAbility(
+        bronco, trigger_condition="whenever this creature attacks",
+        effect=trigger_text, effect_text=(
+            "Whenever this creature attacks, " + trigger_text))
+    assert ability.resolve(gs, player, context={}), \
+        "real trigger resolution bypassed Bronco's exact-card override"
+    assert first in player["hand"] and player["life"] == player_life - 4
+
+    second = inject_card(gs, {
+        "name": "Bronco Reveal Three", "mana_cost": "{3}", "cmc": 3,
+        "type_line": "Instant", "oracle_text": "",
+    })
+    player["library"].insert(0, second)
+    gs._last_card_locations[second] = (player, "library")
+    player.setdefault("saddled_permanents", set()).add(bronco)
+    opponent_life = opponent["life"]
+    assert ability.resolve(gs, player, context={})
+    assert second in player["hand"] and opponent["life"] == opponent_life - 3
+
+
+@scenario("701.8 / Three Steps Ahead", "an imperative discard clause applies to the spell's controller")
+def scenario_subjectless_discard_uses_controller():
+    from Playersim.ability_types import DiscardEffect
+    from Playersim.ability_utils import EffectFactory
+
+    gs = fresh(); player = gs.p1 if gs.agent_is_p1 else gs.p2
+    effects = EffectFactory.create_effects(
+        "Draw two cards, then discard a card.",
+        source_name="Three Steps Ahead")
+    discard = next(
+        (effect for effect in effects if isinstance(effect, DiscardEffect)),
+        None)
+    assert discard is not None and discard.target == "controller", \
+        f"subjectless discard parsed as {getattr(discard, 'target', None)}"
+    for effect in effects:
+        assert effect.apply(gs, None, player, {})
+    assert gs.choice_context and gs.choice_context.get("player") is player, \
+        "the controller was not offered their discard choice"
+
+
 @scenario("engine (per-card override)", "an exact-name effect override runs before the generic parser")
 def scenario_per_card_override_registry():
     from Playersim.ability_types import GainLifeEffect
@@ -8965,6 +9375,47 @@ def scenario_exhaust_single_owner_bookkeeping():
     assert not retry_ok and player["life"] == retry_life \
         and len(gs.stack) == stack_size, \
         "a direct Exhaust retry paid a cost or created another stack entry"
+
+
+@scenario("training diagnostics", "observation errors log once and oversized stack summaries stay compact")
+def scenario_training_diagnostics_are_bounded():
+    gs = fresh(); env = get_env()
+    env.last_observation_error = None
+    env.last_observation_traceback = None
+    assert env._record_observation_error(
+        "feature probe", ValueError("first")) is True
+    assert env._record_observation_error(
+        "feature probe", ValueError("repeat")) is False
+    assert "first" in env.last_observation_error
+
+    controller = gs.p1
+    source_id = (controller["battlefield"][0]
+                 if controller["battlefield"] else inject_into_zone(
+                     gs, controller, {
+                         "name": "Diagnostic Source", "mana_cost": "{1}",
+                         "type_line": "Creature", "oracle_text": "",
+                         "power": 1, "toughness": 1,
+                     }, "battlefield"))
+    gs.stack = [
+        ("TRIGGER", source_id, controller, {
+            "effect_text": "Put a +1/+1 counter on target creature.",
+            "targeting_text": "Put a +1/+1 counter on target creature.",
+            "target_choice_pending": index == 39,
+        })
+        for index in range(40)
+    ]
+    gs.targeting_context = {
+        "source_id": source_id, "controller": controller,
+        "required_type": "creature", "required_count": 1,
+        "min_targets": 1, "max_targets": 1,
+        "selected_targets": [],
+        "effect_text": "Put a +1/+1 counter on target creature.",
+    }
+    diagnostic = env._policy_state_diagnostic()
+    assert diagnostic["stack_size"] == 40
+    assert diagnostic["stack_summary_omitted"] == 8
+    assert len(diagnostic["stack"]) == 32, \
+        "oversized stack diagnostics were not capped"
 
 
 @scenario("training / hidden information", "opponent hand identities and library order do not change the agent observation")

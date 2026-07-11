@@ -859,7 +859,7 @@ class GameStateZonesMixin:
             self.bottoming_player = player # <<<<<<<<<< ENSURE player is set to act again
             return True # Incremental bottoming action was successful
 
-    def handle_miracle_draw(self, card_id, player):
+    def handle_miracle_draw(self, card_id, player, is_first_draw=None):
         """
         Handle drawing a card with miracle, giving the player a chance to cast it for its miracle cost.
         
@@ -888,20 +888,10 @@ class GameStateZonesMixin:
         self.miracle_cost = miracle_cost
         self.miracle_player = player
         
-        # Track that this is the first card drawn this turn (to meet miracle conditions)
-        if not hasattr(self, 'cards_drawn_this_turn'):
-            self.cards_drawn_this_turn = {}
-            
         player_key = "p1" if player == self.p1 else "p2"
-        turn_key = self.turn
-        if turn_key not in self.cards_drawn_this_turn:
-            self.cards_drawn_this_turn[turn_key] = {}
-        if player_key not in self.cards_drawn_this_turn[turn_key]:
-            self.cards_drawn_this_turn[turn_key][player_key] = []
-            
-        # Check if this is the first card drawn this turn
-        is_first_draw = len(self.cards_drawn_this_turn[turn_key].get(player_key, [])) == 0
-        self.cards_drawn_this_turn[turn_key][player_key].append(card_id)
+        if is_first_draw is None:
+            # Canonical draws increment the count before miracle is checked.
+            is_first_draw = self.cards_drawn_this_turn.get(player_key, 0) <= 1
         
         # Only offer miracle if this is the first draw and player can afford
         if is_first_draw and hasattr(self, 'mana_system'):

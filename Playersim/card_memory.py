@@ -32,7 +32,10 @@ class CardMemory:
         self.cache_ttl = 300  # Cache TTL in seconds
         self.last_cache_cleanup = time.time()
         self.updates_since_save = 0
-        self.save_frequency = 50  # Save after every 50 updates by default
+        # CardMemory updates every distinct card in both decks after a game.
+        # Fifty updates caused several full gzip rewrites per episode; 500 is
+        # roughly a 10-game batch, while environment.close() still flushes.
+        self.save_frequency = 500
         # Create storage directory if it doesn't exist
         os.makedirs(self.storage_path, exist_ok=True)
 

@@ -375,6 +375,19 @@ class EffectFactory:
         if source_key == "cacophony scamp" and "may sacrifice" in effect_text.lower():
             from .ability_types import OptionalSacrificeProliferateEffect
             return [OptionalSacrificeProliferateEffect()]
+        if (source_key == "caustic bronco"
+                and "reveal the top card of your library" in effect_text.lower()):
+            from .ability_types import CausticBroncoAttackEffect
+            return [CausticBroncoAttackEffect()]
+        if (source_key == "bushwhack"
+                and re.search(r"search your library for a basic land card",
+                              effect_text, re.IGNORECASE)):
+            # The reveal/move/shuffle wording is one search instruction.  The
+            # generic comma splitter previously emitted an extra no-op
+            # ``put it into your hand`` fragment after the real search.
+            from .ability_types import SearchLibraryEffect
+            return [SearchLibraryEffect(
+                search_type="basic land", destination="hand", count=1)]
 
         effects = []
 
@@ -1327,7 +1340,9 @@ class EffectFactory:
 
                  target_desc = EffectFactory._extract_target_description(clause_lower) or "target_player" # Default target
                  target_specifier = "target_player"
-                 if "you discard" in clause_lower: target_specifier = "controller"
+                 if ("you discard" in clause_lower
+                         or re.match(r"^discard\b", clause_lower)):
+                     target_specifier = "controller"
                  elif "opponent discards" in clause_lower or "each opponent discards" in clause_lower: target_specifier = "opponent"
                  elif "each player discards" in clause_lower: target_specifier = "each_player"
                  created_effect = DiscardEffect(count, target=target_specifier, is_random=is_random) # Pass 'x', -1, or number

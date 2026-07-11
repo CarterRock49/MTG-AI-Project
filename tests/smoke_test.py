@@ -430,6 +430,19 @@ def check_stats_pipeline(decks, card_db):
         env = AlphaZeroMTGEnv(decks, card_db, **paths)
         env.set_agent_version("smoke-test")
         env.reset(seed=SEED)
+        gs = env.game_state
+        gs.opening_hands = {
+            "p1": list(gs.p1["hand"]),
+            "p2": list(gs.p2["hand"]),
+        }
+        agent = gs.p1 if gs.agent_is_p1 else gs.p2
+        agent_key = "p1" if gs.agent_is_p1 else "p2"
+        opening_probe = gs.opening_hands[agent_key][0]
+        gs.turn = 2
+        gs._reset_turn_tracking_variables()
+        drawn_probe = gs._draw_card(agent)
+        assert drawn_probe is not None, "telemetry probe could not draw"
+        gs.track_card_played(drawn_probe, 0 if gs.agent_is_p1 else 1)
         # Drive a deterministic normal terminal through env.step. Random play is
         # intentionally covered above, but is not guaranteed to finish within a
         # small smoke budget and therefore made persistence coverage flaky.
@@ -453,7 +466,7 @@ def check_stats_pipeline(decks, card_db):
         records = [json.loads(l) for l in open(log_path, encoding="utf-8")]
         assert records, "game log is empty"
         for r in records:
-            for field in ("schema_version", "ts", "result", "turn_count",
+            for field in ("schema_version", "ts", "result", "terminal_reason", "turn_count",
                           "p1_deck", "p2_deck", "agent_is_p1",
                           "agent_version", "fidelity"):
                 assert field in r, f"game log record missing '{field}'"
@@ -509,6 +522,23 @@ def check_stats_pipeline(decks, card_db):
             assert payload.get("avg_game_length") == expected_average, \
                 (f"{deck_name} average game length is stale: "
                  f"{payload.get('avg_game_length')} != {expected_average}")
+
+        memory_path = os.path.join(
+            paths["card_memory_path"], "all_cards.json.gz")
+        with gzip.open(memory_path, "rt", encoding="utf-8") as memory_file:
+            memory = json.load(memory_file)["cards"]
+        drawn_stats = memory[str(drawn_probe)]
+        opening_stats = memory[str(opening_probe)]
+        assert drawn_stats.get("times_drawn", 0) >= 1, \
+            "persisted CardMemory lost draw telemetry"
+        assert drawn_stats.get("turn_played", {}).get("2", 0) >= 1, \
+            "persisted CardMemory lost actual play turn"
+        assert opening_stats.get("in_opening_hand", 0) >= 1, \
+            "persisted CardMemory lost opening-hand telemetry"
+        assert any(
+            deck.get("draw_history_stats") and deck.get("opening_hand_stats")
+            for deck in aggregate_by_name.values()), \
+            "deck aggregates did not persist draw/opening telemetry"
     finally:
         if env is not None:
             env.close()
