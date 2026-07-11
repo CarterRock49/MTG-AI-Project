@@ -79,6 +79,27 @@ class GameStateZonesMixin:
             return self.p2
         return None
 
+    def _discard_puts_onto_battlefield(self, card_id, player, source_id):
+        """'If a spell or ability an opponent controls causes you to discard
+        this card, put it onto the battlefield instead' (Obstinate Baloth)."""
+        card = self._safe_get_card(card_id)
+        text = (getattr(card, 'oracle_text', '') or '')
+        if not re.search(
+                r"if a spell or ability an opponent controls causes you to "
+                r"discard this card, put it onto the battlefield",
+                text, re.IGNORECASE):
+            return False
+        if source_id is None:
+            return False
+        # The causing spell/ability is usually still on the stack; fall back
+        # to the source's current zone controller. An undeterminable
+        # controller conservatively keeps the ordinary graveyard destination.
+        for item in self.stack:
+            if isinstance(item, tuple) and len(item) >= 3 and item[1] == source_id:
+                return item[2] is not player
+        source_controller, _ = self.find_card_location(source_id)
+        return source_controller is not None and source_controller is not player
+
     def discard_card(self, player, card_id, source_id=None, cause="discard"):
         """Process one discard event, including replacements and Madness."""
         if not player or card_id not in player.get("hand", []):
@@ -99,6 +120,11 @@ class GameStateZonesMixin:
 
         destination_player = modified_context.get("to_player") or player
         destination_zone = modified_context.get("to_zone", "graveyard")
+        # Obstinate Baloth style self-replacement: an opponent-caused discard
+        # puts the card onto the battlefield instead of the graveyard.
+        if (destination_zone == "graveyard"
+                and self._discard_puts_onto_battlefield(card_id, player, source_id)):
+            destination_zone = "battlefield"
         return self.move_card(
             card_id, player, "hand", destination_player, destination_zone,
             cause=cause, context={"source_id": source_id})
@@ -395,7 +421,13 @@ class GameStateZonesMixin:
                           final_destination_player = modified_enter_ctx.get('to_player'); final_destination_zone = modified_enter_ctx.get('to_zone'); prevented = modified_enter_ctx.get('prevented', False)
                           # Carry over ETB modifiers like 'tapped' or 'counters'
                           if 'enters_tapped' in modified_enter_ctx: event_context['enters_tapped'] = modified_enter_ctx['enters_tapped']
-                          if 'enter_counters' in modified_enter_ctx: event_context.setdefault('enter_counters', []).extend(modified_enter_ctx['enter_counters'])
+                          if 'enter_counters' in modified_enter_ctx:
+                              # update() above may have installed the SAME list
+                              # object; extending it with itself doubled every
+                              # ETB counter entry.
+                              existing_counters = event_context.setdefault('enter_counters', [])
+                              if existing_counters is not modified_enter_ctx['enter_counters']:
+                                  existing_counters.extend(modified_enter_ctx['enter_counters'])
                           if 'as_enters_choice_needed' in modified_enter_ctx: event_context['as_enters_choice_needed'] = modified_enter_ctx['as_enters_choice_needed']
                           logging.debug(f"Enter replacement applied for {card_name}: Final Dest: {final_destination_zone}, Prevented: {prevented}")
 
@@ -613,8 +645,9 @@ class GameStateZonesMixin:
                 self.impending_cards[card_id] = {'initial_n': n_value}
                 # 3. Apply Static "Isn't a Creature" Effects via Layer System
                 if self.layer_system:
-                     # Layer 4: Remove Creature Type
-                     self._register_impending_static_effect(card_id, final_destination_player, layer=4, effect_type='remove_type', effect_value=['Creature'])
+                     # Layer 4: Remove Creature Type (card_types are stored
+                     # lowercase; 'Creature' never matched anything).
+                     self._register_impending_static_effect(card_id, final_destination_player, layer=4, effect_type='remove_type', effect_value=['creature'])
                      # Layer 7b: Set P/T to 0/0 (Implicit by rule 208.3 for non-creatures, but can enforce)
                      self._register_impending_static_effect(card_id, final_destination_player, layer=7, sublayer='b', effect_type='set_pt', effect_value=(0, 0))
                      # Re-apply layers immediately after registering these effects
@@ -710,6 +743,15 @@ class GameStateZonesMixin:
                          dies_context["last_known"] = last_known
                      self.trigger_ability(card_id, "DIES", dies_context)
                      self.gravestorm_count = getattr(self, 'gravestorm_count', 0) + 1
+                     # Per-player died-this-turn tracking ("for each creature
+                     # that died under your control this turn").
+                     if card and "creature" in getattr(card, "card_types", []):
+                         died_key = self._discard_player_key(from_player)
+                         if died_key:
+                             if not hasattr(self, 'creatures_died_this_turn') or self.creatures_died_this_turn is None:
+                                 self.creatures_died_this_turn = {}
+                             self.creatures_died_this_turn[died_key] = \
+                                 self.creatures_died_this_turn.get(died_key, 0) + 1
             # --- END UPDATE ---
 
 

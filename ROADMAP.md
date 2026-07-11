@@ -16,7 +16,7 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 11/11, and 241/241, plus 10/10 fixture-
+   every delivery (currently 9/9, 11/11, and 249/249, plus 10/10 fixture-
    harvest tests, 5/5 production-protocol tests, 6/6 fuzz/replay tests, and
    the deterministic 8-seed / 8,000-action default fuzz profile, and the
    strict 32-seed / 320,000-action long profile).
@@ -45,7 +45,7 @@ The project is complete when all of the following hold:
 - Tier 0 (stats plumbing): ✅ complete.
 - Tier 1 (rules correctness): ✅ complete — all seven items plus the P1
   placeholder triage delivered; see appendix for the bug catalog.
-- Test gates: smoke 9/9, training 11/11, scenarios 241/241 (grown from 12),
+- Test gates: smoke 9/9, training 11/11, scenarios 249/249 (grown from 12),
   fixture harvest 10/10, production Harvest protocol 5/5, fuzz/replay
   configuration 6/6, deterministic default fuzz 8 seeds x 1,000 valid
   actions, and strict long fuzz 32 seeds x 10,000 valid actions.
@@ -769,6 +769,83 @@ repeated sample-card classification clauses remain the next fidelity audit.
 Regression gates: 241/241 scenarios, 9/9 smoke, 11/11 training, and all 8,000
 default-profile mask-valid fuzz actions.
 
+**Round 7.30 (July 2026):** closed all six remaining sample-card
+classification clauses; a warning-enabled eight-deck reset now emits zero
+"could not classify" warnings. The shared root cause for four of them
+(Overlord of the Mistmoors, Overlord of the Hauntwoods, Emberheart
+Challenger, Manifold Mouse) was reminder-text stripping that consumed the
+following newline, welding keyword-cost lines onto the next ability line;
+stripping is now newline-preserving and Impending/Offspring cost lines are
+recognized as handled. Guard scenarios exercise the REAL loaded cards (full
+oracle text, faces, reminder text) rather than cleaned synthetic text.
+
+Dead subsystems found live while wiring the remaining behavior, each of the
+silent-bug-catalog pattern:
+* **BEGINNING_OF_COMBAT had no can_trigger mapping** — dispatched every
+  combat, never fired. Mapped, with "on your turn" gated to the ability
+  controller's turns. **Every phase-beginning event was also dispatched
+  twice**, queuing exact duplicates of each matching trigger; single
+  dispatch now.
+* **"target <subtype> you control" parsed as target type "target"** — zero
+  legal targets, so such triggers silently vanished at stack time. Subtypes
+  now pass through to the targeting system.
+* **ETB-counter replacements were registered under ENTERS_BATTLEFIELD**, an
+  event name move_card never applies — every "enters with ... counter"
+  replacement was dead, and the modern wording (without "the battlefield")
+  did not parse at all. Now registered under the live ENTER_BATTLEFIELD
+  event with modern/symbolic counter parsing and a "for each <expr>"
+  dynamic count. Making them live exposed two more latent bugs, both fixed:
+  per-entry re-registration stacked duplicate effects (counter registration
+  is now idempotent per source), and move_card extended the enter_counters
+  list with itself, doubling every entry.
+
+Card behavior delivered: Manifold Mouse's begin-combat trigger targets a
+Mouse and pauses in PHASE_CHOOSE for the printed double strike/trample pick
+(new `keyword_grant` choice, actions 353+); Obstinate Baloth's
+opponent-caused discard puts it onto the battlefield through the shared
+discard pipeline while self-caused and cleanup discards stay discards;
+Callous Sell-Sword reads new per-player creatures-died-this-turn tracking
+(turn-reset, setup-initialized) through count_dynamic_quantity, with face
+text reachable for split/aftermath replacement scanning. Regression gates:
+246/246 scenarios, 9/9 smoke, 11/11 training, 10/10 + 5/5 harvest, 6/6 fuzz
+config, and the full default fuzz profile.
+
+**Round 7.31 (July 2026):** the dead-subsystem sweep plus a strategic
+planner/memory health check. Five more dead-or-overfiring paths, each of the
+silent-bug-catalog pattern, now fixed and scenario-guarded:
+* **Phase-trigger ownership** — "at the beginning of YOUR upkeep" fired on
+  BOTH players' upkeeps (probe-confirmed, 2x rate inflation). Owner gating
+  now covers your-upkeep/end-step/draw/precombat-main and routes
+  "an opponent's upkeep" wordings to opponents' turns only.
+* **End-step phase triggers never fired at all** — their patterns lived
+  under END_OF_TURN, an event name nothing dispatches; the dispatcher's
+  actual BEGINNING_OF_END_STEP event had no mapping.
+* **The ENTERS_BATTLEFIELD registration alias was entirely dead** ("as
+  enters" effects, printed ETB-tapped replacements). apply_replacements now
+  merges the alias into the live ENTER_BATTLEFIELD application, and
+  text-derived registration is idempotent per card per game — cleared again
+  by remove_effects_by_source so phase-in rebuilds (the pre-existing 702.26
+  phasing scenario caught exactly this interaction).
+* **Impending was triple-broken**: the layer-4 "isn't a creature" effect
+  removed 'Creature' from lowercase card_types (case-mismatch no-op); the
+  end-step tick exists only in stripped reminder text on the Overlords (a
+  synthesized trigger now registers for is_impending cards); and callable
+  additional_condition functions CRASHED can_trigger, where the per-ability
+  exception handler silently dropped the trigger — the same path Offspring's
+  cost-paid condition rides. An impending-cast Overlord now enters as a
+  4-time-counter non-creature, ticks only on its controller's end steps, and
+  becomes a creature at zero.
+* **strategy_memory.pkl was a hidden global input** — written to the process
+  CWD by every game (tests included), loaded by every env construction, not
+  gitignored, and feeding the rec/mem observation features: a silent
+  reproducibility leak across seeded runs and a SubprocVecEnv file race. The
+  memory file is now scoped under each env's storage directory; the stray
+  root file is deleted and gitignored. The planner/memory functional probe
+  (extract/update/suggest/save/load/analysis) passes; the construction-time
+  "players not ready" warning is downgraded to expected-init debug noise.
+Regression gates: 249/249 scenarios, 9/9 smoke, 11/11 training, 10/10 + 5/5
+harvest, 6/6 fuzz config, and the full default fuzz profile.
+
 ## Tier 4 — Verification & calibration
 
 1. ✅ Golden scenario harness — 241 scenarios and growing; scenario-first is a
@@ -983,6 +1060,32 @@ default-profile mask-valid fuzz actions.
 - Restless-land animation registers end-of-turn layer effects; reversion
   rides on the existing duration cleanup rather than a per-land scenario
   assertion.
+- Phase-beginning trigger owner gating (July 2026) covers "on your turn"
+  (combat), your-upkeep/end-step/draw/precombat-main, and "an opponent's
+  upkeep/end step" wordings. Rarer phase scopes ("each player's upkeep on
+  their turn", named-player phases) still pass ungated.
+- Obstinate Baloth v1 identifies an opponent-caused discard by finding the
+  causing source on the stack (falling back to the source's current zone
+  controller); an undeterminable cause conservatively keeps the graveyard
+  destination.
+- The keyword_grant choice v1 supports exactly two printed options and is
+  made by the effect's controller. Subtype target pass-through applies only
+  to "target <subtype> you control" wordings.
+- creatures_died_this_turn attributes a death to the player whose
+  battlefield the creature left (control at death approximated by zone).
+- ENTERS_BATTLEFIELD-registered replacements are now applied through the
+  ENTER_BATTLEFIELD alias merge (July 2026). The revived generic "as enters"
+  path sets `as_enters_choice_needed` context flags whose downstream
+  consumers are not yet scenario-verified; Cavern of Souls keeps its
+  dedicated Round 7.20 implementation.
+- Text-derived replacement registration is idempotent per card per game and
+  cleared by remove_effects_by_source (phasing rebuild); a pure CONTROL
+  change without unregistration does not re-register, keeping the original
+  registration's controller_id.
+- strategy_memory persistence is per-env (under the env's storage
+  directory). Cross-env sharing within one training run no longer happens
+  implicitly; save_memory also has a 20% random "enhancement" pass, so
+  memory file contents are not bit-deterministic (game RNG unaffected).
 
 ---
 

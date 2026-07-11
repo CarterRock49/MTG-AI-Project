@@ -139,6 +139,33 @@ def inject_into_zone(gs, player, data, zone):
     return cid
 
 
+_REAL_DB = None
+
+
+def inject_real_card(gs, player, card_name, zone):
+    """Inject a copy of a real sample-deck card (full oracle text, faces and
+    reminder text intact) so scenarios exercise the production parsing path."""
+    global _REAL_DB
+    if _REAL_DB is None:
+        from Playersim.card import load_decks_and_card_db
+        _, _REAL_DB = load_decks_and_card_db(os.path.join(REPO_ROOT, "Decks"))
+    import copy as _copy
+    source = next((c for c in _REAL_DB.values()
+                   if getattr(c, 'name', '') == card_name), None)
+    assert source is not None, f"real card not found in Decks pool: {card_name}"
+    card = _copy.deepcopy(source)
+    numeric_ids = [int(k) for k in gs.card_db.keys() if str(k).isdigit()]
+    new_id = max(numeric_ids, default=-1) + 1
+    gs.card_db[new_id] = card
+    if hasattr(card, 'card_id'):
+        card.card_id = new_id
+    player["library"].append(new_id)
+    gs._last_card_locations[new_id] = (player, "library")
+    assert gs.move_card(new_id, player, "library", player, zone), \
+        f"move_card refused library->{zone} for real card {card_name}"
+    return new_id
+
+
 def replace_hand(gs, player, card_specs):
     """Move the current hand away and replace it with synthetic test cards."""
     for cid in list(player.get("hand", [])):
@@ -7722,6 +7749,273 @@ def s_attack_watcher_defender_side():
         "the defending player's watcher did not gain 1 life"
     assert controller["life"] == attacker_side_life, \
         "the attacking player's 'attacks you' watcher fired for its own attack"
+
+
+@scenario("503.1 (phase-trigger ownership)", "'your upkeep' triggers fire only on their controller's upkeep; 'each upkeep' fires on both")
+def s_upkeep_trigger_owner_gating():
+    gs = fresh()
+    controller, opponent = gs.p1, gs.p2
+    inject_into_zone(gs, controller, {
+        "name": "My Upkeep Watcher", "mana_cost": "{1}{W}", "cmc": 2,
+        "type_line": "Enchantment", "oracle_text":
+            "At the beginning of your upkeep, you gain 1 life.",
+    }, "battlefield")
+    inject_into_zone(gs, opponent, {
+        "name": "Each Upkeep Watcher", "mana_cost": "{1}{B}", "cmc": 2,
+        "type_line": "Enchantment", "oracle_text":
+            "At the beginning of each upkeep, you gain 1 life.",
+    }, "battlefield")
+    inject_into_zone(gs, controller, {
+        "name": "My End Step Watcher", "mana_cost": "{1}{U}", "cmc": 2,
+        "type_line": "Enchantment", "oracle_text":
+            "At the beginning of your end step, you gain 1 life.",
+    }, "battlefield")
+
+    def stacked_names(turn, phase):
+        gs.turn = turn
+        gs.phase = phase
+        gs.ability_handler.active_triggers = []
+        gs.stack.clear()
+        gs._handle_beginning_of_phase_triggers()
+        names = sorted(getattr(gs._safe_get_card(item[1]), 'name', '?')
+                       for item in gs.stack
+                       if isinstance(item, tuple) and len(item) >= 2)
+        gs.stack.clear()
+        return names
+
+    assert stacked_names(1, gs.PHASE_UPKEEP) == \
+        ["Each Upkeep Watcher", "My Upkeep Watcher"], \
+        "the controller's upkeep should fire both the 'your' and 'each' watchers"
+    assert stacked_names(2, gs.PHASE_UPKEEP) == ["Each Upkeep Watcher"], \
+        "'your upkeep' fired on the opponent's upkeep"
+    assert stacked_names(1, gs.PHASE_END_STEP) == ["My End Step Watcher"], \
+        "the controller's end step should fire their own end-step watcher"
+    assert stacked_names(2, gs.PHASE_END_STEP) == [], \
+        "'your end step' fired on the opponent's end step"
+
+
+@scenario("Impending (Overlord of the Mistmoors)", "the real card's enters-or-attacks trigger creates two Insect tokens each time")
+def s_overlord_mistmoors_enter_attack_tokens():
+    gs = fresh()
+    from Playersim.combat_integration import integrate_combat_actions
+    combat = integrate_combat_actions(gs)
+    controller = gs.p1
+    gs.turn = 1
+    gs.agent_is_p1 = True
+
+    def insect_count():
+        return sum(1 for cid in controller["battlefield"]
+                   if "insect" in {str(s).lower() for s in
+                                   getattr(gs._safe_get_card(cid), 'subtypes', [])})
+
+    overlord = inject_real_card(gs, controller, "Overlord of the Mistmoors",
+                                "battlefield")
+    gs.ability_handler.process_triggered_abilities()
+    while gs.stack:
+        assert gs.resolve_top_of_stack(), "the Overlord ETB trigger did not resolve"
+    assert insect_count() == 2, \
+        f"entering should create two Insect tokens, found {insect_count()}"
+    controller["entered_battlefield_this_turn"] = set()
+    gs.phase = gs.PHASE_DECLARE_ATTACKERS
+    gs.current_attackers = [overlord]
+    gs.current_block_assignments = {}
+    assert combat.handle_declare_attackers_done(), "declare-attackers did not finish"
+    gs.ability_handler.process_triggered_abilities()
+    while gs.stack:
+        assert gs.resolve_top_of_stack(), "the Overlord attack trigger did not resolve"
+    assert insect_count() == 4, \
+        f"attacking should create two more Insect tokens, found {insect_count()}"
+
+
+@scenario("702.187 (Impending)", "an impending-cast Overlord ticks down on its controller's end steps only, then becomes a creature")
+def s_overlord_impending_time_ticks():
+    gs = fresh()
+    controller = gs.p1
+    gs.agent_is_p1 = True
+    ov = inject_real_card(gs, controller, "Overlord of the Mistmoors", "hand")
+    assert gs.move_card(ov, controller, "hand", controller, "battlefield",
+                        context={"cast_for_impending": True})
+    gs.ability_handler.active_triggers = []
+    gs.stack.clear()
+    card = gs._safe_get_card(ov)
+
+    def time_counters():
+        return (getattr(card, 'counters', {}) or {}).get('time', 0)
+
+    assert time_counters() == 4, \
+        f"an impending cast should enter with four time counters, got {time_counters()}"
+    assert not gs._is_creature(ov), \
+        "an impending permanent should not be a creature while time counters remain"
+
+    def run_end_step(turn):
+        gs.turn = turn
+        gs.phase = gs.PHASE_END_STEP
+        gs.ability_handler.active_triggers = []
+        gs.stack.clear()
+        gs._handle_beginning_of_phase_triggers()
+        while gs.stack:
+            assert gs.resolve_top_of_stack(), "an end-step trigger did not resolve"
+
+    run_end_step(turn=2)  # opponent's end step
+    assert time_counters() == 4, "the opponent's end step removed a time counter"
+    for _ in range(4):
+        run_end_step(turn=1)
+    assert time_counters() == 0, \
+        f"four of the controller's end steps should exhaust the counters, got {time_counters()}"
+    assert gs._is_creature(ov), \
+        "removing the last time counter should make the Overlord a creature"
+    run_end_step(turn=1)
+    assert time_counters() == 0, "the tick kept firing after impending completed"
+
+
+@scenario("Valiant (Emberheart Challenger)", "the real card text registers its Valiant trigger separately from the Prowess keyword line")
+def s_emberheart_real_text_registration():
+    gs = fresh()
+    from Playersim.ability_types import TriggeredAbility
+    controller = gs.p1
+    ember = inject_real_card(gs, controller, "Emberheart Challenger", "battlefield")
+    abilities = gs.ability_handler.registered_abilities.get(ember, [])
+    triggered = [a for a in abilities if isinstance(a, TriggeredAbility)]
+    assert len(triggered) == 1, \
+        f"expected exactly one Valiant trigger, got {len(triggered)}"
+    condition = (triggered[0].trigger_condition or "").lower()
+    assert "becomes the target" in condition, \
+        f"the Valiant trigger parsed the wrong condition: {condition!r}"
+    assert not condition.startswith("prowess"), \
+        "the Prowess keyword line is still glued to the Valiant trigger"
+
+
+@scenario("Offspring (Manifold Mouse)", "the begin-combat trigger fires on its controller's turn only and exposes the double strike/trample choice")
+def s_manifold_mouse_combat_choice():
+    gs = fresh()
+    from Playersim.combat_integration import integrate_combat_actions
+    combat = integrate_combat_actions(gs)
+    controller = gs.p1
+    gs.agent_is_p1 = True
+    mouse = inject_real_card(gs, controller, "Manifold Mouse", "battlefield")
+    gs.ability_handler.active_triggers = []
+    # Opponent's combat: "on your turn" keeps the trigger silent.
+    gs.turn = 2
+    gs.phase = gs.PHASE_BEGIN_COMBAT
+    gs._handle_beginning_of_phase_triggers()
+    assert not gs.stack and not gs.ability_handler.active_triggers, \
+        "the begin-combat trigger fired on the opponent's turn"
+    # Controller's combat: exactly one trigger, targeting a Mouse.
+    gs.turn = 1
+    gs.phase = gs.PHASE_BEGIN_COMBAT
+    gs._handle_beginning_of_phase_triggers()
+    if not gs.stack and gs.phase != gs.PHASE_TARGETING:
+        raise AssertionError("the begin-combat trigger did not fire on its controller's turn")
+    assert gs.phase == gs.PHASE_TARGETING and gs.targeting_context, \
+        "the targeted trigger did not pause for its Mouse target"
+    valid_map = gs.targeting_system.get_valid_targets(
+        mouse, controller, gs.targeting_context["required_type"],
+        effect_text=gs.targeting_context["effect_text"])
+    valid = sorted({t for ids in valid_map.values() for t in ids},
+                   key=lambda t: (isinstance(t, str), t))
+    assert mouse in valid, "the Mouse itself is not a legal 'target Mouse you control'"
+    _, ok = get_env().action_handler._handle_select_target(valid.index(mouse), {})
+    assert ok, "selecting the Mouse target failed"
+    while gs.stack and gs.phase != gs.PHASE_CHOOSE:
+        assert gs.resolve_top_of_stack(), "the Mouse trigger did not resolve"
+    assert gs.phase == gs.PHASE_CHOOSE and gs.choice_context \
+        and gs.choice_context.get("type") == "keyword_grant", \
+        "resolution did not pause for the keyword choice"
+    options = gs.choice_context.get("options", [])
+    assert options == ["double strike", "trample"], \
+        f"unexpected keyword options: {options}"
+    resume_phase = gs.choice_context.get("resume_phase")
+    _, ok = get_env().action_handler._handle_choose_mode(0, {})
+    assert ok, "choosing double strike failed"
+    assert combat._has_keyword(gs._safe_get_card(mouse), "double strike"), \
+        "the chosen keyword was not granted to the Mouse"
+    assert gs.phase == resume_phase and gs.choice_context is None, \
+        "the keyword choice did not restore the paused phase"
+
+
+@scenario("Discard replacement (Obstinate Baloth)", "an opponent-caused discard puts Baloth onto the battlefield; other discards stay in the graveyard")
+def s_obstinate_baloth_discard_replacement():
+    gs = fresh()
+    controller, opponent = gs.p1, gs.p2
+    baloth = inject_real_card(gs, controller, "Obstinate Baloth", "hand")
+    coercion = inject_into_zone(gs, opponent, {
+        "name": "Test Coercion", "mana_cost": "{2}{B}", "cmc": 3,
+        "type_line": "Sorcery", "oracle_text": "Target player discards a card.",
+    }, "hand")
+    gs.stack.append(("SPELL", coercion, opponent, {}))
+    assert gs.discard_card(controller, baloth, source_id=coercion), \
+        "the opponent-caused discard did not process"
+    assert baloth in controller["battlefield"], \
+        "Baloth went to the graveyard instead of the battlefield"
+    gs.stack.clear()
+    gs.ability_handler.active_triggers = []
+    # A discard caused by the controller's own spell stays a discard.
+    baloth_two = inject_real_card(gs, controller, "Obstinate Baloth", "hand")
+    own_spell = inject_into_zone(gs, controller, {
+        "name": "Own Looting", "mana_cost": "{R}", "cmc": 1,
+        "type_line": "Sorcery", "oracle_text": "Discard a card, then draw a card.",
+    }, "hand")
+    gs.stack.append(("SPELL", own_spell, controller, {}))
+    assert gs.discard_card(controller, baloth_two, source_id=own_spell)
+    assert baloth_two in controller["graveyard"], \
+        "a self-caused discard should not put Baloth onto the battlefield"
+    gs.stack.clear()
+    # A cleanup-style discard with no causing source also stays a discard.
+    baloth_three = inject_real_card(gs, controller, "Obstinate Baloth", "hand")
+    assert gs.discard_card(controller, baloth_three, cause="cleanup")
+    assert baloth_three in controller["graveyard"], \
+        "a sourceless cleanup discard should not put Baloth onto the battlefield"
+
+
+@scenario("614.1c (ETB replacements)", "a creature printed 'enters the battlefield tapped' actually enters tapped through the replacement path")
+def s_creature_etb_tapped_replacement():
+    gs = fresh()
+    controller = gs.p1
+    sleeper = inject_into_zone(gs, controller, {
+        "name": "Sleepy Beast", "mana_cost": "{2}{G}", "cmc": 3,
+        "type_line": "Creature - Beast", "oracle_text":
+            "This creature enters the battlefield tapped.",
+        "power": 3, "toughness": 3,
+    }, "hand")
+    gs.replacement_effects.register_card_replacement_effects(sleeper, controller)
+    assert gs.move_card(sleeper, controller, "hand", controller, "battlefield")
+    assert sleeper in controller.get("tapped_permanents", set()), \
+        "the printed ETB-tapped replacement did not tap the entering creature"
+
+
+@scenario("614.1c (Callous Sell-Sword)", "it enters with a +1/+1 counter for each creature that died under its controller's control this turn")
+def s_callous_sell_sword_enter_counters():
+    gs = fresh()
+    controller = gs.p1
+    for i in range(2):
+        victim = inject_into_zone(gs, controller, {
+            "name": f"Doomed Goblin {i}", "mana_cost": "{R}", "cmc": 1,
+            "type_line": "Creature - Goblin", "oracle_text": "",
+            "power": 1, "toughness": 1,
+        }, "battlefield")
+        assert gs.move_card(victim, controller, "battlefield", controller, "graveyard")
+    gs.ability_handler.active_triggers = []
+
+    def plus_one_counters(cid):
+        counters = getattr(gs._safe_get_card(cid), 'counters', {}) or {}
+        return sum(v for k, v in counters.items() if "+1" in str(k).replace("_", "/"))
+
+    # Mirror game setup: replacements register from the full pool before play.
+    sword = inject_real_card(gs, controller, "Callous Sell-Sword // Burn Together",
+                             "hand")
+    gs.replacement_effects.register_card_replacement_effects(sword, controller)
+    assert gs.move_card(sword, controller, "hand", controller, "battlefield")
+    assert plus_one_counters(sword) == 2, \
+        (f"two creatures died this turn, expected 2 +1/+1 counters, "
+         f"got {plus_one_counters(sword)}")
+    # With the tracking reset (new turn), a fresh copy enters bare.
+    gs.creatures_died_this_turn = {}
+    sword_two = inject_real_card(gs, controller,
+                                 "Callous Sell-Sword // Burn Together", "hand")
+    gs.replacement_effects.register_card_replacement_effects(sword_two, controller)
+    assert gs.move_card(sword_two, controller, "hand", controller, "battlefield")
+    assert plus_one_counters(sword_two) == 0, \
+        "no creatures died this turn, yet the Sell-Sword entered with counters"
 
 
 @scenario("103.6c (Leyline of Resonance)", "an opening-hand Leyline may begin the game on the battlefield before turn 1")

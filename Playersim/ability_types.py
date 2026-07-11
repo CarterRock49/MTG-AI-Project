@@ -1130,6 +1130,17 @@ class TriggeredAbility(Ability):
                 r"at the beginning of (your|the|each) end step",
                 r"at the end of (the|each) turn"
             ],
+            "BEGINNING_OF_COMBAT": [
+                r"at the beginning of (each )?combat",
+            ],
+            # The phase dispatcher's actual end-step event name. The legacy
+            # END_OF_TURN entry above matches the same wordings but no code
+            # path ever dispatched it.
+            "BEGINNING_OF_END_STEP": [
+                r"at the end of (your|each) turn",
+                r"at the beginning of (your|the|each) end step",
+                r"at the end of (the|each) turn"
+            ],
             "DISCARD": [
                 r"when(ever)?\s+.*discard",
                 r"when(ever)?\s+.*discards?",
@@ -1329,6 +1340,33 @@ class TriggeredAbility(Ability):
                               self.trigger_condition, re.IGNORECASE)
                         and context.get("source_card_id") != context.get("event_card_id")):
                     return False
+            if event_type == "BEGINNING_OF_COMBAT":
+                context = context or {}
+                gs = context.get("game_state")
+                # "at the beginning of combat on your turn" belongs to the
+                # ability controller's own turns only.
+                if ("on your turn" in self.trigger_condition and gs
+                        and gs._get_active_player() is not context.get("controller")):
+                    return False
+            if event_type in ("BEGINNING_OF_UPKEEP", "END_OF_TURN",
+                              "BEGINNING_OF_DRAW", "BEGINNING_OF_END_STEP",
+                              "BEGINNING_OF_PRECOMBAT_MAIN"):
+                context = context or {}
+                gs = context.get("game_state")
+                cond = self.trigger_condition.lower()
+                # "your upkeep / your end step" belongs to the ability
+                # controller's own turns; "an opponent's upkeep" to turns of
+                # the controller's opponents. Ungated wordings previously
+                # fired on every player's phase.
+                if (gs and re.search(
+                        r"\byour\s+(?:upkeep|end step|draw step|precombat main)",
+                        cond)
+                        and gs._get_active_player() is not context.get("controller")):
+                    return False
+                if (gs and re.search(
+                        r"\b(?:each\s+)?opponent'?s?\s+(?:upkeep|end step)", cond)
+                        and gs._get_active_player() is context.get("controller")):
+                    return False
 
             # Parse for any conditional clause in the trigger text
             condition_clause = getattr(self, 'intervening_if', None) or self._extract_condition_clause(self.effect_text)
@@ -1477,6 +1515,16 @@ class TriggeredAbility(Ability):
     def _check_additional_condition(self, context):
         """Checks self.additional_condition using the same evaluation logic."""
         if not self.additional_condition: return True
+        # Callable conditions (Offspring's cost-paid check, the synthesized
+        # Impending tick) take the trigger context directly; passing them to
+        # the TEXT evaluator raised, and check_abilities' per-ability
+        # exception handler silently dropped the trigger.
+        if callable(self.additional_condition):
+            try:
+                return bool(self.additional_condition(context))
+            except Exception as e:
+                logging.error(f"Error in callable additional_condition: {e}")
+                return False
         return self._evaluate_condition(self.additional_condition, context)
     
 
@@ -2909,6 +2957,55 @@ class DamageEffect(AbilityEffect):
             else: controller['life'] += total_actual_damage
 
         return success_overall
+
+
+class KeywordChoiceGrantEffect(AbilityEffect):
+    """'Target creature gains your choice of <kw1> or <kw2>' (Manifold Mouse).
+
+    Resolution pauses in PHASE_CHOOSE so the controller picks the keyword;
+    the chosen grant is then an ordinary layer-6 GainKeywordEffect.
+    """
+
+    def __init__(self, first_keyword, second_keyword, duration="end_of_turn",
+                 condition=None):
+        self.options = [first_keyword.lower().strip(),
+                        second_keyword.lower().strip()]
+        self.duration = duration
+        super().__init__(
+            f"target creature gains your choice of {self.options[0]} "
+            f"or {self.options[1]}", condition)
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        target_ids = []
+        if isinstance(targets, dict):
+            for ids in targets.values():
+                if isinstance(ids, (list, tuple, set)):
+                    target_ids.extend(ids)
+        if not target_ids:
+            return False
+        if game_state.choice_context:
+            logging.warning(
+                "KeywordChoiceGrantEffect: another choice is already pending.")
+            return False
+        previous_priority_phase = game_state.previous_priority_phase
+        resume_phase = game_state.phase
+        if game_state.phase != game_state.PHASE_CHOOSE:
+            game_state.previous_priority_phase = game_state.phase
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.choice_context = {
+            "type": "keyword_grant",
+            "player": controller,
+            "options": list(self.options),
+            "target_id": target_ids[0],
+            "source_id": source_id,
+            "duration": self.duration,
+            "resume_phase": resume_phase,
+            "previous_priority_phase_before_choice": previous_priority_phase,
+        }
+        game_state.priority_player = controller
+        game_state.priority_pass_count = 0
+        return True
 
 
 class TorchTheTowerEffect(AbilityEffect):

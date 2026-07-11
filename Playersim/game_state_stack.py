@@ -205,6 +205,16 @@ class GameStateStackMixin:
                  or re.search(r"\btarget(?:\s+[a-z-]+){1,4}\s+permanents?\b", text)):
              return "permanent"
          if "any target" in text or "any other target" in text: return "any"
+         # "target <creature subtype> you control" (Manifold Mouse's
+         # "target Mouse you control"): pass the subtype through so the
+         # targeting system can filter by it. The generic categories above
+         # have already been ruled out at this point.
+         subtype_match = re.search(r"\btarget\s+([a-z][a-z'\-]+)\s+you control\b", text)
+         if subtype_match and subtype_match.group(1) not in {
+                 "spell", "ability", "player", "opponent", "card",
+                 "permanent", "creature", "land", "artifact", "enchantment",
+                 "planeswalker", "battle"}:
+             return subtype_match.group(1)
          return "target" # Default
 
     def _can_finalize_targeted_cast(self, targeting_context, selected_targets):

@@ -56,6 +56,7 @@ class GameStateSetupMixin:
         # Create or reset turn tracking data
         gs.spells_cast_this_turn = []
         gs.attackers_this_turn = set()
+        gs.creatures_died_this_turn = {}
         gs.damage_dealt_this_turn = {}
         gs.cards_drawn_this_turn = {gs.p1: 0, gs.p2: 0}
         

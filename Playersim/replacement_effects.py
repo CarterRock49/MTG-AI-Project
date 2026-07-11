@@ -113,7 +113,28 @@ class ReplacementEffectSystem:
         if not card or not hasattr(card, 'oracle_text'):
             return []
 
+        # Text-derived registration runs at game setup AND again on every
+        # battlefield entry; the re-registrations stacked duplicate live
+        # effects. One registration per card per game. (v1: a control change
+        # does not re-register; these self-replacements key on the card.)
+        if not hasattr(self, '_text_registered_cards'):
+            self._text_registered_cards = set()
+        if card_id in self._text_registered_cards:
+            return []
+        self._text_registered_cards.add(card_id)
+
         oracle_text = card.oracle_text
+        # Split/aftermath cards keep their text on faces; the battlefield
+        # object is the front face (Callous Sell-Sword // Burn Together).
+        if not (oracle_text or '').strip():
+            faces = getattr(card, 'faces', None) or []
+            for face in faces:
+                face_text = (face.get('oracle_text', '')
+                             if isinstance(face, dict)
+                             else getattr(face, 'oracle_text', '')) or ''
+                if face_text.strip():
+                    oracle_text = face_text
+                    break
         source_name = card.name if hasattr(card, 'name') else f"Card {card_id}"
         registered_effects = []
 
@@ -132,7 +153,10 @@ class ReplacementEffectSystem:
 
         # Scan for ETB with counters effects (separate from 'as enters')
         # Make this more specific to avoid overlap with 'as enters' counter effects
-        if "enters the battlefield with" in oracle_text.lower() and "counter" in oracle_text.lower() and not "as this permanent enters" in oracle_text.lower():
+        if (("enters the battlefield with" in oracle_text.lower()
+                or re.search(r"\benters with\b", oracle_text.lower()))
+                and "counter" in oracle_text.lower()
+                and not "as this permanent enters" in oracle_text.lower()):
             effect_id = self._register_etb_with_effect(card_id, player, oracle_text)
             if effect_id:
                 registered_effects.append(effect_id)
@@ -385,8 +409,14 @@ class ReplacementEffectSystem:
             card_id = event_context.get('card_id') # Get card_id early if available
             card = self.game_state._safe_get_card(card_id) if card_id else None
 
-            # Get applicable effects from index
+            # Get applicable effects from index. ENTERS_BATTLEFIELD is a
+            # legacy registration alias: move_card only ever applies
+            # ENTER_BATTLEFIELD, so effects registered under the alias were
+            # silently dead (ETB counters, as-enters, ETB tapped).
             applicable_effects = self.effect_index.get(event_type, [])
+            if event_type == 'ENTER_BATTLEFIELD':
+                applicable_effects = list(applicable_effects) + \
+                    self.effect_index.get('ENTERS_BATTLEFIELD', [])
 
             # --- Madness Check (Specific logic before standard replacements) ---
             # If discard event, card exists, and has Madness:
@@ -1603,25 +1633,50 @@ class ReplacementEffectSystem:
         source_card = self.game_state._safe_get_card(card_id)
         source_name = source_card.name if source_card and hasattr(source_card, 'name') else f"Card {card_id}"
 
-        # Check for counters
-        counter_match = re.search(r'enters the battlefield with (\w+|\d+)\s+([\+\-\d/]+)\s+counters?', oracle_text.lower())
+        # Check for counters. Modern templating drops "the battlefield"
+        # ("This creature enters with a +1/+1 counter on it for each ..."),
+        # and a "for each <expr>" tail makes the count dynamic at entry.
+        counter_match = re.search(
+            r'enters(?: the battlefield)? with (\w+|\d+)\s+([\+\-\d/]+)\s+counters?'
+            r'(?:\s+on\s+it)?(?:\s+for\s+each\s+([^.\n]+?))?\s*(?:\.|\n|$)',
+            oracle_text.lower())
         if counter_match:
-            count_word, counter_type = counter_match.groups()
+            # Registration happens at game setup AND again on each battlefield
+            # entry; a second live copy of this effect would double the
+            # counters, so keep it idempotent per source card.
+            for existing in self.effect_index.get('ENTER_BATTLEFIELD', []):
+                if (isinstance(existing, dict)
+                        and existing.get('source_id') == card_id
+                        and str(existing.get('description', '')).endswith('ETB with counters')):
+                    return None
+            count_word, counter_type, for_each_expr = counter_match.groups()
             count = self._word_to_number(count_word)
             counter_type = counter_type.replace('/','_').upper() # Normalize like +1_+1
+            if for_each_expr:
+                for_each_expr = for_each_expr.strip()
 
             def condition(ctx):
                 return ctx.get('card_id') == card_id
 
             def replacement(ctx):
-                 logging.debug(f"Applying ETB counters from {source_name} to {card_id}: {count} {counter_type}")
+                 applied_count = count
+                 if for_each_expr:
+                     each_count = self.game_state.count_dynamic_quantity(
+                         for_each_expr, player)
+                     applied_count = max(0, count * each_count)
+                 if applied_count <= 0:
+                     return ctx
+                 logging.debug(f"Applying ETB counters from {source_name} to {card_id}: {applied_count} {counter_type}")
                  # Add counters info to the context, Layer system or ETB handler will use it
                  ctx['enter_counters'] = ctx.get('enter_counters', [])
-                 ctx['enter_counters'].append({'type': counter_type, 'count': count})
+                 ctx['enter_counters'].append({'type': counter_type, 'count': applied_count})
                  return ctx
 
+            # ENTER_BATTLEFIELD (not ENTERS_) is the event move_card actually
+            # applies and whose enter_counters reach add_counter; effects
+            # registered under ENTERS_BATTLEFIELD never fired from zone moves.
             effect_id = self.register_effect({
-                'source_id': card_id, 'event_type': 'ENTERS_BATTLEFIELD',
+                'source_id': card_id, 'event_type': 'ENTER_BATTLEFIELD',
                 'condition': condition, 'replacement': replacement,
                 'duration': 'permanent', 'controller_id': player,
                 'description': f"{source_name} ETB with counters"
@@ -2462,4 +2517,9 @@ class ReplacementEffectSystem:
              logging.debug(f"Removing {len(effects_to_remove)} replacement effects from source {source_id_to_remove}")
              for effect_id in effects_to_remove:
                  self.remove_effect(effect_id)
+        # The card's text-derived effects are gone, so the per-card
+        # registration guard must allow a rebuild (phasing back in
+        # re-registers; without this the abilities were lost permanently).
+        if hasattr(self, '_text_registered_cards'):
+            self._text_registered_cards.discard(source_id_to_remove)
         return len(effects_to_remove)

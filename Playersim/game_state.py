@@ -44,7 +44,7 @@ class GameState(
                  "mana_system", "replacement_effects", "cards_drawn_this_turn", "cards_milled_this_turn",
                  "combat_resolver", "temp_control_effects", "abilities_activated_this_turn",
                  "card_evaluator", "spells_cast_this_turn", "_phase_history",
-                 "strategic_planner", "attackers_this_turn", 'strategy_memory',
+                 "strategic_planner", "attackers_this_turn", "creatures_died_this_turn", 'strategy_memory',
                  "_logged_card_ids", "_logged_errors", "targeting_system",
                  "_phase_action_count", "priority_player", "stats_tracker",
                  "card_memory", 'original_p2_deck', "_consecutive_no_ops",
@@ -515,6 +515,7 @@ class GameState(
             # Turn-based tracking (resets each turn usually)
             self.spells_cast_this_turn = []
             self.attackers_this_turn = set()
+            self.creatures_died_this_turn = {}
             self.damage_dealt_this_turn = {}
             self.cards_drawn_this_turn = {} # Initialize as empty, will be populated like {'p1': 0, 'p2': 0}
             self.cards_milled_this_turn = {} # MillEffect tracking; was written but never declared (crashed on __slots__)
@@ -1207,6 +1208,14 @@ class GameState(
         expr = (expr or "").lower().strip()
         p = controller
         opp = self.p2 if controller == self.p1 else self.p1
+
+        # "creature(s) that died under your control this turn" (Callous
+        # Sell-Sword) reads the per-player death tracking reset each turn.
+        if re.search(r"creatures? that died under your control this turn", expr):
+            died_key = "p1" if controller is self.p1 else (
+                "p2" if controller is self.p2 else None)
+            tracking = getattr(self, "creatures_died_this_turn", None) or {}
+            return tracking.get(died_key, 0) if died_key else 0
 
         # Domain: "for each basic land type among lands you control" counts
         # DISTINCT basic land types, not lands. Nonbasic duals contribute each

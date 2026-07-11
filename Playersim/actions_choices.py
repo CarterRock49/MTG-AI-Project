@@ -1190,6 +1190,29 @@ class ChoiceHandlersMixin:
             success = gs.complete_forced_sacrifice_choice(param)
             return (0.0 if success else -0.1), success
         if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'keyword_grant'):
+            ctx = gs.choice_context
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if ctx.get('player') is not player:
+                logging.warning("Keyword-grant choice called for the wrong player.")
+                return -0.2, False
+            options = ctx.get('options', [])
+            if not (0 <= param < len(options)):
+                return -0.1, False
+            from .ability_types import GainKeywordEffect
+            ok = GainKeywordEffect(
+                options[param], target_type="target creature",
+                duration=ctx.get('duration', 'end_of_turn')).apply(
+                    gs, ctx.get('source_id'), player,
+                    {"creatures": [ctx.get('target_id')]})
+            gs.choice_context = None
+            gs.phase = ctx.get('resume_phase', gs.PHASE_MAIN_PRECOMBAT)
+            gs.previous_priority_phase = ctx.get(
+                'previous_priority_phase_before_choice')
+            gs.priority_player = gs._get_active_player()
+            gs.priority_pass_count = 0
+            return (0.05 if ok else -0.1), bool(ok)
+        if (getattr(gs, 'choice_context', None)
                 and gs.choice_context.get('type') == 'saddle'):
             ctx = gs.choice_context
             player = gs.p1 if gs.agent_is_p1 else gs.p2

@@ -1098,6 +1098,23 @@ class EffectFactory:
                 gt = "target creature" if "target" in clause_lower else "self"
                 created_effect = GainKeywordEffect("cant_attack", target_type=gt, duration=dur)
 
+            # Keyword choice grant: "gains your choice of <kw1> or <kw2>"
+            # (Manifold Mouse). The pick is exposed through PHASE_CHOOSE
+            # instead of auto-resolving; must precede the plain-grant branch.
+            elif re.search(r"gains?\s+your choice of\s+", clause_lower):
+                cm = re.search(
+                    r"gains?\s+your choice of\s+([\w\- ]+?)\s+or\s+"
+                    r"([\w\- ]+?)(?:\s+until end of turn)?\s*\.?$",
+                    clause_lower)
+                if cm:
+                    from .ability_types import KeywordChoiceGrantEffect
+                    duration = ("end_of_turn"
+                                if "until end of turn" in clause_lower
+                                else "permanent")
+                    created_effect = KeywordChoiceGrantEffect(
+                        cm.group(1).strip(), cm.group(2).strip(),
+                        duration=duration)
+
             # Keyword grant: "target creature gains <keyword> [until end of turn]".
             # Must come before the Buff branch (which only handles +N/+N) and
             # only fire when there is NO P/T change in the clause.

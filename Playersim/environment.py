@@ -77,7 +77,12 @@ class AlphaZeroMTGEnv(gym.Env):
         # limit on GameState while observing every directly actionable hand slot.
         self.hand_observation_size = max(10, max_hand_size)
         self.max_battlefield = max_battlefield
-        self.strategy_memory = StrategyMemory()
+        # Scope the strategy-memory file to this env's storage instead of the
+        # process CWD: a shared global pkl leaked between unrelated runs
+        # (perturbing the rec/mem observation features of seeded runs) and
+        # SubprocVecEnv workers would race on one file.
+        self.strategy_memory = StrategyMemory(
+            memory_file=self._strategy_memory_file())
         self.current_episode_actions = []
         self.replay_actions = []
         self.reset_seed = None
@@ -279,10 +284,19 @@ class AlphaZeroMTGEnv(gym.Env):
 
         
 
+    def _strategy_memory_file(self):
+        """Per-env strategy-memory location under this env's storage scope."""
+        memory_dir = getattr(self, 'card_memory_path', None) or \
+            getattr(self, 'deck_stats_path', None)
+        if memory_dir:
+            return os.path.join(memory_dir, "strategy_memory.pkl")
+        return "strategy_memory.pkl"
+
     def initialize_strategic_memory(self):
         """Initialize and connect the strategy memory system."""
         try:
-            self.strategy_memory = StrategyMemory()
+            self.strategy_memory = StrategyMemory(
+                memory_file=self._strategy_memory_file())
             # Enable the strategy memory to access critical game state components
             self.game_state.strategy_memory = self.strategy_memory
             logging.debug("Strategic memory system initialized successfully")

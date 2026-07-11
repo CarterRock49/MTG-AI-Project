@@ -671,6 +671,7 @@ class GameStateTurnMixin:
         self.day_night_checked_this_turn = False
         self.spells_cast_this_turn = []
         self.attackers_this_turn = set()
+        self.creatures_died_this_turn = {}
         self.extra_combat_phases = 0
         self.damage_dealt_this_turn = {}
         self.cards_drawn_this_turn = {'p1': 0, 'p2': 0} # Reset draw counts
@@ -784,8 +785,11 @@ class GameStateTurnMixin:
             # Trigger abilities via AbilityHandler - Pass None as source_id for general phase triggers
             # *** CORRECTED CALL: Use self.ability_handler.check_abilities ***
             if self.ability_handler:
+                # check_abilities scans every registered ability and stamps
+                # each with its own controller, so one dispatch reaches both
+                # players; a second call with the other player's context only
+                # queued exact duplicates of every matching trigger.
                 self.ability_handler.check_abilities(None, event_type, trigger_context_ap)
-                self.ability_handler.check_abilities(None, event_type, trigger_context_nap)
                 # Process any queued triggers immediately AFTER checking
                 self.ability_handler.process_triggered_abilities()
             else:

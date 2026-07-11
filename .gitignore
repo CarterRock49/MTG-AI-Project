@@ -77,3 +77,7 @@ sqlite:///
 .agents
 Mtg_Cards
 Format Card Lists
+
+# Runtime artifacts
+strategy_memory.pkl
+bugs/

@@ -792,8 +792,11 @@ class AbilityHandler:
                 for text_block in oracle_text_sources:
                     if not text_block or not isinstance(text_block, str): continue
 
-                    # Remove reminder text early
-                    cleaned_text_block = re.sub(r'\s*\([^()]*?\)\s*', ' ', text_block).strip()
+                    # Remove reminder text early. Only eat spaces/tabs around
+                    # it, never newlines: "Impending 4—{2}{W}{W} (reminder)\n
+                    # Whenever..." must stay two clauses, not fuse into one
+                    # unclassifiable line.
+                    cleaned_text_block = re.sub(r'[ \t]*\([^()]*?\)[ \t]*', ' ', text_block).strip()
                     if not cleaned_text_block: continue
 
                     # Check if the whole block was handled by special parser (Spree, Class)
@@ -919,6 +922,28 @@ class AbilityHandler:
                             activated_ability_counter += new_activated_count # Update main counter
 
 
+                # --- Synthesize the Impending end-step tick when its text is
+                # reminder-only (the Overlords): the remove-a-counter trigger
+                # exists solely inside stripped reminder text, so nothing
+                # printed can register it. Only fires while time counters are
+                # active on this permanent.
+                if (getattr(card, 'is_impending', False)
+                        and not any(getattr(ab, '_is_impending_remove_counter', False)
+                                    for ab in abilities_list)):
+                    tick = TriggeredAbility(
+                        card_id=card_id,
+                        trigger_condition="at the beginning of your end step",
+                        effect="remove a time counter from it",
+                        effect_text="At the beginning of your end step, remove a time counter from it.")
+                    tick._is_impending_remove_counter = True
+                    tick.additional_condition = (
+                        lambda ctx, _cid=card_id: bool(
+                            ctx and ctx.get('game_state')
+                            and ctx['game_state']._is_impending_active(_cid)))
+                    setattr(tick, 'source_card', card)
+                    abilities_list.append(tick)
+                    logging.debug(f"Synthesized Impending end-step tick for {card.name}")
+
                 # --- Apply Static Abilities and Finalize ---
                 logging.debug(f"Parsed {len(abilities_list)} total functional abilities for {card.name} ({card_id})")
 
@@ -998,6 +1023,16 @@ class AbilityHandler:
             r"^if\s+a\s+source\s+would\s+deal\s+damage\s+to.*?prevent",
             r"^\s*domain\b", r"^\s*as an additional cost", r"^\s*collect evidence\s+\d+",
             r"^\s*[ivx]+\s*[—\u2014-]", r"^\s*Split second\b",
+        ]
+        # Keyword-cost declaration lines; Card parses these costs itself and
+        # the reminder text that used to hide them is stripped before split.
+        replacement_or_non_ability_patterns += [
+            r"^\s*impending\s+\d+\s*(?:[——-]\s*(?:\{[^}]+\})+)?\s*$",
+            r"^\s*offspring\s*(?:\{[^}]+\})+\s*$",
+            # Handled by the discard pipeline (Obstinate Baloth).
+            r"^\s*if a spell or ability an opponent controls causes you to discard this card",
+            # Handled by ETB-counter replacement registration.
+            r"^\s*this (?:creature|permanent|artifact|enchantment) enters(?: the battlefield)? with .*counter",
         ]
         if any(re.match(pattern, text_lower_stripped, re.IGNORECASE) for pattern in replacement_or_non_ability_patterns):
             # logging.debug(f"Skipping clause '{clause_text}' as likely Replacement/Non-functional Ability.")

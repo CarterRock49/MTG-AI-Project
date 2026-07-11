@@ -644,6 +644,13 @@ class ActionSpaceMixin:
                         context={"option_index": option_index},
                     )
 
+            elif choice_type == "keyword_grant":
+                for option_index, keyword in enumerate(context.get("options", [])[:10]):
+                    set_valid_action(
+                        353 + option_index,
+                        f"CHOOSE_KEYWORD {keyword}",
+                        context={"option_index": option_index})
+
             elif choice_type == "saddle":
                 selected = set(context.get("selected", []))
                 for option_index, card_id in enumerate(context.get("options", [])[:10]):

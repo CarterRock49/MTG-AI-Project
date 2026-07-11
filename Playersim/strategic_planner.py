@@ -79,7 +79,10 @@ class MTGStrategicPlanner(
 
             # Check if game state is properly initialized including action_handler
             if not hasattr(gs, 'p1') or not hasattr(gs, 'p2') or not gs.p1 or not gs.p2:
-                logging.warning("StrategicPlanner cannot init_after_reset: GS players not ready.")
+                # Expected once during environment construction (players do
+                # not exist until the first reset); the post-reset call path
+                # initializes for real.
+                logging.debug("StrategicPlanner init_after_reset deferred: GS players not ready.")
                 return
             # --- Check if action_handler is available on the GameState ---
             if not hasattr(gs, 'action_handler') or gs.action_handler is None:
