@@ -1249,6 +1249,108 @@ class EnhancedManaSystem:
             logging.error(traceback.format_exc())
             return False  # Assume can't pay on error
         
+    def can_pay_mana_cost_with_lands(self, player, cost, context=None):
+        """Affordability check that also counts the player's untapped lands.
+
+        The mask uses this so a spell is castable without the policy having
+        to float mana first; pay_mana_cost auto-taps the planned lands so
+        mask legality and execution stay consistent.
+        """
+        if self.can_pay_mana_cost(player, cost, context):
+            return True
+        if context and context.get('use_alt_cost'):
+            return False
+        return self._plan_auto_tap(player, cost, context) is not None
+
+    def _plan_auto_tap(self, player, cost, context=None):
+        """Plan land taps that, with the current pool, cover ``cost``.
+
+        Returns a list of (card_id, option) taps, or None when the cost stays
+        unpayable. Colored and hybrid pips are matched exactly (augmenting-
+        path matching over pool units and land outputs); leftover units cover
+        generic. Restricted outputs ("spend this mana only ...") are skipped;
+        pain-land options are used only when nothing damage-free fits.
+        """
+        try:
+            context = context or {}
+            parsed = cost if isinstance(cost, dict) else self.parse_mana_cost(cost)
+
+            pool_units = []
+            for color in ('W', 'U', 'B', 'R', 'G', 'C'):
+                pool_units.extend([color] * player["mana_pool"].get(color, 0))
+
+            lands = []
+            seen_land_ids = set()
+            for card_id in player.get("battlefield", []):
+                # tapped_permanents is a set of ids, so duplicate-id copies
+                # (fixture decks) can only ever tap once; plan them as one.
+                if (card_id in player.get("tapped_permanents", set())
+                        or card_id in seen_land_ids):
+                    continue
+                card = self.game_state._safe_get_card(card_id)
+                if (not card or 'land' not in
+                        (getattr(card, 'type_line', '') or '').lower()):
+                    continue
+                options = [o for o in self._land_mana_options(player, card)
+                           if not o.get("restriction")]
+                if options:
+                    options.sort(key=lambda o: int(o.get("damage", 0) or 0))
+                    lands.append((card_id, options))
+                    seen_land_ids.add(card_id)
+
+            needs = []
+            for color in ('W', 'U', 'B', 'R', 'G', 'C'):
+                needs.extend([{color}] * parsed.get(color, 0))
+            for pair in parsed.get('hybrid', []):
+                needs.append({str(c).upper() for c in pair})
+            # Phyrexian pips fall back to life during payment; don't demand
+            # mana for them here (can_pay_mana_cost still verifies life).
+            generic_needed = parsed.get('generic', 0)
+            if parsed.get('X', 0) and 'X' in context:
+                generic_needed += parsed['X'] * int(context.get('X', 0) or 0)
+
+            sources = [{unit} for unit in pool_units] + [
+                {option['symbol'] for option in options}
+                for _, options in lands]
+            match_of_source = [None] * len(sources)
+
+            def assign(need_idx, seen):
+                for s_idx, symbols in enumerate(sources):
+                    if s_idx in seen or not (needs[need_idx] & symbols):
+                        continue
+                    seen.add(s_idx)
+                    if (match_of_source[s_idx] is None
+                            or assign(match_of_source[s_idx], seen)):
+                        match_of_source[s_idx] = need_idx
+                        return True
+                return False
+
+            for need_idx in range(len(needs)):
+                if not assign(need_idx, set()):
+                    return None
+            free_sources = [i for i, m in enumerate(match_of_source) if m is None]
+            if len(free_sources) < generic_needed:
+                return None
+
+            taps = []
+            for s_idx, need_idx in enumerate(match_of_source):
+                if need_idx is None or s_idx < len(pool_units):
+                    continue
+                card_id, options = lands[s_idx - len(pool_units)]
+                option = next(o for o in options
+                              if o['symbol'] in needs[need_idx])
+                taps.append((card_id, option))
+            # Free pool units cover generic first; tap lands for the rest.
+            free_pool = sum(1 for i in free_sources if i < len(pool_units))
+            free_lands = [i for i in free_sources if i >= len(pool_units)]
+            for s_idx in free_lands[:max(0, generic_needed - free_pool)]:
+                card_id, options = lands[s_idx - len(pool_units)]
+                taps.append((card_id, options[0]))
+            return taps
+        except Exception as e:
+            logging.warning(f"Auto-tap planning failed: {e}")
+            return None
+
     def calculate_cost_reduction(self, player, cost, card_id, context=None):
         """
         Calculate cost reduction effects that apply to a card.
@@ -1872,6 +1974,16 @@ class EnhancedManaSystem:
         if "delve_cards" in context: check_context_costs += len(context["delve_cards"])
         if "improvise_artifacts" in context: check_context_costs += len(context["improvise_artifacts"])
         cost_for_check['generic'] = max(0, cost_for_check['generic'] - check_context_costs)
+
+        if (not self.can_pay_mana_cost(player, cost_for_check, context)
+                and not context.get('use_alt_cost')):
+            # The pool alone is short: tap lands planned by the same check the
+            # action mask uses, so mask-legal casts pay without a manual
+            # tap-then-cast sequence.
+            auto_taps = self._plan_auto_tap(player, cost_for_check, context)
+            if auto_taps:
+                for land_id, option in auto_taps:
+                    self._produce_land_mana_option(player, land_id, option)
 
         if not self.can_pay_mana_cost(player, cost_for_check, context):
             cost_str = self._format_mana_cost_for_logging(final_cost, context.get('X', 0) if 'X' in final_cost else 0)

@@ -53,7 +53,7 @@ class AlphaZeroMTGEnv(gym.Env):
     """
     ACTION_SPACE_SIZE = 480 # Moved constant here
 
-    def __init__(self, decks, card_db, max_turns=20, max_hand_size=7, max_battlefield=20,
+    def __init__(self, decks, card_db, max_turns=30, max_hand_size=7, max_battlefield=20,
                  deck_stats_path="./deck_stats", card_memory_path="./card_memory",
                  planner_recommendations=False, agent_is_p1=True,
                  alternate_agent_seat=False):
@@ -1709,6 +1709,18 @@ class AlphaZeroMTGEnv(gym.Env):
                     "Scripted Opponent: No legal %s destination available.",
                     choice_type)
                 return None, {}
+            if choice_type in ("choose_mode", "land_mana"):
+                # Mandatory picks (spell modes, dual-land mana colors) expose
+                # only CHOOSE_MODE-range actions; take the first legal one.
+                for action_idx in range(353, 363):
+                    if opponent_mask[action_idx]:
+                        logging.debug(
+                            "Scripted Opponent: %s (Index %s)",
+                            choice_type.upper(), action_idx - 353)
+                        return action_idx, {}
+                if opponent_mask[11]:
+                    return 11, {}
+                return None, {}
             if choice_type in (
                     "sacrifice_effect", "activation_sacrifice_cost",
                     "distribute_counters", "dig_select"):
@@ -1797,6 +1809,14 @@ class AlphaZeroMTGEnv(gym.Env):
             for action_idx in spell_actions:
                 if opponent_mask[action_idx]:
                     return choose(action_idx)
+
+            # Spell affordability is checked against floating mana only, so
+            # tap lands during our main phase until a spell becomes castable.
+            if (gs.phase in (gs.PHASE_MAIN_PRECOMBAT, gs.PHASE_MAIN_POSTCOMBAT)
+                    and gs._get_active_player() is opponent_player):
+                for action_idx in range(68, 88):
+                    if opponent_mask[action_idx]:
+                        return choose(action_idx)
 
             if opponent_mask[11]:
                 logging.debug("Scripted Opponent: PASS_PRIORITY")

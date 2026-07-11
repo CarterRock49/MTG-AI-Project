@@ -255,7 +255,7 @@ class GameStateStackMixin:
         candidate_cost = self.mana_system.apply_cost_modifiers(
             controller, copy_module.deepcopy(cost_before_modifiers),
             card_id, cast_context)
-        return self.mana_system.can_pay_mana_cost(
+        return self.mana_system.can_pay_mana_cost_with_lands(
             controller, candidate_cost, cast_context)
 
     def trigger_ability(self, card_id, event_type, context=None):
@@ -1090,7 +1090,7 @@ class GameStateStackMixin:
         if not card or not getattr(card, "is_plot", False) or not plot_cost:
             return False
         parsed_cost = self.mana_system.parse_mana_cost(plot_cost)
-        if not self.mana_system.can_pay_mana_cost(player, parsed_cost):
+        if not self.mana_system.can_pay_mana_cost_with_lands(player, parsed_cost):
             return False
         paid = self.mana_system.pay_mana_cost_get_details(player, parsed_cost)
         if paid is None:
@@ -1349,7 +1349,7 @@ class GameStateStackMixin:
             for x_value in range(0, 11):
                 candidate_context = dict(context)
                 candidate_context['X'] = x_value
-                if self.mana_system.can_pay_mana_cost(
+                if self.mana_system.can_pay_mana_cost_with_lands(
                         player, final_cost_dict, candidate_context):
                     affordable_values.append(x_value)
             if not affordable_values:
@@ -1420,7 +1420,7 @@ class GameStateStackMixin:
 
                 target_selection_pending = True
                 if self.mana_system.has_target_dependent_reduction(card):
-                    can_pay_without_discount = self.mana_system.can_pay_mana_cost(
+                    can_pay_without_discount = self.mana_system.can_pay_mana_cost_with_lands(
                         player, final_cost_dict, context)
                     can_pay_with_discount = (
                         self.mana_system.can_pay_with_target_dependent_reduction(
@@ -1441,7 +1441,7 @@ class GameStateStackMixin:
         if not can_pay_non_mana_add: return False
 
         # Check final mana affordability
-        if (not self.mana_system.can_pay_mana_cost(
+        if (not self.mana_system.can_pay_mana_cost_with_lands(
                 player, final_cost_dict, context)
                 and not (target_selection_pending
                          and target_selection_affordable_via_reduction)):

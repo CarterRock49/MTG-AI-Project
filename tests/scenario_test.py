@@ -7610,6 +7610,84 @@ def s_torch_targets_before_bargain_payment():
         "the fizzled Torch did not finish without a targeting loop"
 
 
+@scenario("614.6 / Obliterating Bolt",
+          "a lethal Bolt exiles its victim instead of destroying it")
+def s_obliterating_bolt_exiles_dead_victim():
+    gs = fresh()
+    controller, opponent = gs.p1, gs.p2
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    victim = inject_into_zone(gs, opponent, {
+        "name": "Bolt Victim", "mana_cost": "{2}{G}", "cmc": 3,
+        "type_line": "Creature - Beast", "oracle_text": "",
+        "power": 3, "toughness": 3,
+    }, "battlefield")
+    bolt = inject_into_zone(gs, controller, {
+        "name": "Obliterating Bolt", "mana_cost": "{1}{R}", "cmc": 2,
+        "type_line": "Sorcery", "oracle_text": (
+            "Obliterating Bolt deals 4 damage to target creature or planeswalker. "
+            "If that creature or planeswalker would die this turn, exile it instead."
+        ),
+    }, "hand")
+    controller["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 1, 'G': 0, 'C': 1}
+    handler = get_env().action_handler
+
+    assert gs.cast_spell(bolt, controller), "Bolt could not begin casting"
+    assert gs.phase == gs.PHASE_TARGETING, "Bolt did not enter target selection"
+    valid_map = gs.targeting_system.get_valid_targets(
+        bolt, controller, gs.targeting_context["required_type"],
+        effect_text=gs.targeting_context["effect_text"])
+    valid_targets = sorted({target_id for ids in valid_map.values() for target_id in ids})
+    assert victim in valid_targets, "Bolt did not accept a creature target"
+    _, ok = handler._handle_select_target(valid_targets.index(victim), {})
+    assert ok and gs.resolve_top_of_stack(), "Bolt did not resolve"
+    assert victim in opponent["exile"] and victim not in opponent["graveyard"], \
+        f"Bolt victim zones were wrong: bf={victim in opponent['battlefield']} " \
+        f"gy={victim in opponent['graveyard']} exile={victim in opponent['exile']}"
+
+
+@scenario("614.6 / Obliterating Bolt",
+          "a surviving Bolt victim is still exiled if it dies later that turn")
+def s_obliterating_bolt_delayed_exile_replacement():
+    gs = fresh()
+    controller, opponent = gs.p1, gs.p2
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    victim = inject_into_zone(gs, opponent, {
+        "name": "Later-Dying Bolt Victim", "mana_cost": "{4}{G}", "cmc": 5,
+        "type_line": "Creature - Beast", "oracle_text": "",
+        "power": 5, "toughness": 5,
+    }, "battlefield")
+    bolt = inject_into_zone(gs, controller, {
+        "name": "Obliterating Bolt", "mana_cost": "{1}{R}", "cmc": 2,
+        "type_line": "Sorcery", "oracle_text": (
+            "Obliterating Bolt deals 4 damage to target creature or planeswalker. "
+            "If that creature or planeswalker would die this turn, exile it instead."
+        ),
+    }, "hand")
+    controller["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 1, 'G': 0, 'C': 1}
+    handler = get_env().action_handler
+
+    assert gs.cast_spell(bolt, controller), "Bolt could not begin casting"
+    valid_map = gs.targeting_system.get_valid_targets(
+        bolt, controller, gs.targeting_context["required_type"],
+        effect_text=gs.targeting_context["effect_text"])
+    valid_targets = sorted({target_id for ids in valid_map.values() for target_id in ids})
+    _, ok = handler._handle_select_target(valid_targets.index(victim), {})
+    assert ok and gs.resolve_top_of_stack(), "Bolt did not resolve"
+    assert opponent["damage_counters"].get(victim) == 4, \
+        "Bolt did not deal exactly 4 damage"
+    assert victim in opponent["battlefield"], "the 5-toughness victim died early"
+    assert gs.apply_damage_to_permanent(victim, 1, source_id=None) == 1
+    gs.check_state_based_actions()
+    assert victim in opponent["exile"] and victim not in opponent["graveyard"], \
+        "a permanent damaged by Bolt was not exiled when it died later that turn"
+
+
 @scenario("701.60", "manifest dread exposes the top-two choice, graves the other card, and creates an exact face-down 2/2")
 def s_manifest_dread_choice_and_turn_face_up():
     from Playersim.ability_utils import EffectFactory
@@ -10152,6 +10230,45 @@ def scenario_play_spell_from_main_priority_wrapper():
     assert not info.get('execution_failed'), info.get('error_message')
     assert nightmare_id not in player['hand'], \
         "the mask-valid Hopeless Nightmare remained in hand"
+
+
+@scenario("policy contract / auto-tap",
+          "an empty pool casts a spell by auto-tapping untapped lands")
+def scenario_auto_tap_cast_from_untapped_lands():
+    gs = fresh(); env = get_env(); handler = env.action_handler
+    gs.agent_is_p1 = True
+    player = gs.p1
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    gs.priority_pass_count = 0
+    gs.stack.clear()
+    mountain = inject_into_zone(gs, player, {
+        "name": "Mountain", "type_line": "Basic Land - Mountain",
+        "oracle_text": "{T}: Add {R}.",
+    }, "battlefield")
+    forest = inject_into_zone(gs, player, {
+        "name": "Forest", "type_line": "Basic Land - Forest",
+        "oracle_text": "{T}: Add {G}.",
+    }, "battlefield")
+    bear, = replace_hand(gs, player, [{
+        "name": "Auto-Tap Bear", "mana_cost": "{1}{R}", "cmc": 2,
+        "type_line": "Creature - Bear", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }])
+    player["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
+
+    mask = env.action_mask()
+    assert mask[20], \
+        "PLAY_SPELL was not mask-legal with an empty pool and payable untapped lands"
+    _, _, _, _, info = env.step(20)
+    assert not info.get('execution_failed'), info.get('error_message')
+    assert bear not in player['hand'], "the mask-valid spell remained in hand"
+    tapped = player.get("tapped_permanents", set())
+    assert mountain in tapped and forest in tapped, \
+        "auto-tap did not tap both lands to pay {1}{R}"
+    assert sum(player["mana_pool"].values()) == 0, \
+        "auto-tap floated mana beyond the spell's cost"
 
 
 @scenario("117.1 / 601.2c", "a targeted sorcery preserves its main phase through target selection")

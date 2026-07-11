@@ -141,7 +141,7 @@ class GameState(
 
     phase = property(_get_phase, _set_phase)
 
-    def __init__(self, card_db, max_turns=20, max_hand_size=7, max_battlefield=20):
+    def __init__(self, card_db, max_turns=30, max_hand_size=7, max_battlefield=20):
         # ... (Keep basic param init) ...
         self.card_db = card_db
         self.max_turns = max_turns

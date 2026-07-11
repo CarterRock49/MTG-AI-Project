@@ -1729,7 +1729,7 @@ class ActionSpaceMixin:
             parsed_cost = gs.mana_system.parse_mana_cost(cost_str)
             # Apply cost modifiers based on context (Kicker, Additional, Alternative)
             final_cost = gs.mana_system.apply_cost_modifiers(player, parsed_cost, card_id, context)
-            if gs.mana_system.can_pay_mana_cost(player, final_cost, context):
+            if gs.mana_system.can_pay_mana_cost_with_lands(player, final_cost, context):
                 return True
             return gs.mana_system.can_pay_with_target_dependent_reduction(
                 player, parsed_cost, card_id, context)
@@ -1749,7 +1749,7 @@ class ActionSpaceMixin:
         try:
             parsed_cost = gs.mana_system.parse_mana_cost(cost_string)
             # No cost modifiers applied here, assumes string is the final cost
-            return gs.mana_system.can_pay_mana_cost(player, parsed_cost, context)
+            return gs.mana_system.can_pay_mana_cost_with_lands(player, parsed_cost, context)
         except Exception as e:
             logging.warning(f"Error checking mana cost string '{cost_string}': {e}")
             return False
@@ -1769,6 +1769,14 @@ class ActionSpaceMixin:
         card_id = getattr(card, 'card_id', None)
         if card_id is None or not hasattr(card, 'oracle_text') or 'target' not in card.oracle_text.lower():
             return True # No target needed or cannot check
+        # Permanent spells other than Auras do not choose targets on cast
+        # (CR 601.2c); 'target' in their text belongs to triggered/activated
+        # abilities or reminder text and must not block casting them.
+        card_types = [str(t).lower() for t in getattr(card, 'card_types', [])]
+        if 'instant' not in card_types and 'sorcery' not in card_types:
+            subtypes = [str(s).lower() for s in getattr(card, 'subtypes', [])]
+            if 'aura' not in subtypes:
+                return True
         if gs._target_bounds_from_text(card.oracle_text)[0] == 0:
             return True
 

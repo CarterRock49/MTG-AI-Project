@@ -16,7 +16,7 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 12/12, and 270/270, plus 10/10 fixture-
+   every delivery (currently 9/9, 12/12, and 273/273, plus 10/10 fixture-
    harvest tests, 5/5 production-protocol tests, 6/6 fuzz/replay tests, and
    the deterministic 8-seed / 8,000-action default fuzz profile, and the
    strict 32-seed / 320,000-action long profile).
@@ -57,7 +57,7 @@ The project is complete when all of the following hold:
 - Tier 5 (operations/integration): ◐ Harvest orchestration is complete; strength
   qualification, production throughput profiling, and deck-builder integration
   remain open.
-- Test gates: smoke 9/9, training 12/12, scenarios 270/270 (grown from 12),
+- Test gates: smoke 9/9, training 12/12, scenarios 273/273 (grown from 12),
   fixture harvest 10/10, production Harvest protocol 5/5, fuzz/replay
   configuration 6/6, deterministic default fuzz 8 seeds x 1,000 valid
   actions, and strict long fuzz 32 seeds x 10,000 valid actions.
@@ -1157,9 +1157,48 @@ validation with no new warning or error file. Gates remain 270/270 scenarios,
 9/9 smoke, 12/12 training, 10/10 + 5/5 Harvest, 6/6 fuzz/replay configuration,
 the exact failure replay, and 8,000/8,000 default-fuzz actions.
 
+**Round 7.43 (July 2026):** run analysis — games never concluded
+Analysis of `ALPHA_ZERO_MTG_V3.00_20260711_132035` (131,072 steps, clean
+telemetry) showed the stats were structurally worthless: 98.5% of the 532
+recorded games ended at the turn limit, 43% were draws, only 4 games in the
+whole run ended by life total, GruulProwess went 0-for-50, and every Domain
+game was a turn-limit draw. Probes reproduced whole 20-turn games in which
+casting a spell was never once mask-legal. Four root causes, all fixed:
+
+1. *Cast-time targeting over-blocked permanents.* `_targets_available`
+   demanded a live target whenever a card's oracle text contained the word
+   "target" anywhere — including triggered abilities and reminder text, which
+   never gate casting (CR 601.2c). On an empty board this made most creatures
+   uncastable and shut GruulProwess (Valiant text on its whole curve) out of
+   the game. The mask now enforces cast-time targets only for instants,
+   sorceries, and Auras.
+2. *The scripted opponent could never cast.* Affordability is checked against
+   floating mana and the opponent's priority list never tapped a land, so it
+   passed every game action forever (hand pinned at 7, discarding each turn
+   cycle). It now taps lands in its own main phases and resolves the
+   `choose_mode`/`land_mana` choices duals raise.
+3. *Casting needed a learned tap-then-cast dance.* Mask affordability and
+   every cast_spell gate now count the player's untapped lands
+   (`can_pay_mana_cost_with_lands`), and payment auto-taps the planned lands
+   (exact augmenting-path matching for colored/hybrid pips, damage-free
+   options preferred, restricted outputs skipped, duplicate-id fixture copies
+   planned once — the last found by the default fuzz profile before delivery).
+   A policy-contract scenario proves an empty pool casts from untapped lands.
+4. *"Exile it instead" riders were dead outside Torch the Tower.* Obliterating
+   Bolt and Elspeth's Smite fell through to the no-op base effect (the run's
+   single warning). A generalized `DamageWithExileReplacementEffect` registers
+   the end-of-turn DIES→exile replacement, planeswalker-aware per the rider's
+   wording, with immediate-kill and delayed-death guard scenarios.
+
+`max_turns` also rose 20 → 30: with both seats actually playing, aggro
+pressure reached lethal around turn 25, past the old cap. Scripted-vs-scripted
+probes now end by life total or decking instead of turn-limit adjudication.
+Gates: 273/273 scenarios (three new), 9/9 smoke, 12/12 training, 10/10 + 5/5
+Harvest, 6/6 fuzz/replay configuration, and 8,000/8,000 default-fuzz actions.
+
 ## Tier 4 — Verification & calibration
 
-1. ✅ Golden scenario harness — 270 scenarios and growing; scenario-first is a
+1. ✅ Golden scenario harness — 273 scenarios and growing; scenario-first is a
    working agreement, not a suggestion.
 2. ✅ **Property/invariant harness**: exact non-token zone/stack conservation,
    SBA fixed points, mask-valid action execution/handler coverage, declared

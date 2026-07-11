@@ -520,6 +520,22 @@ class EffectFactory:
             from .ability_types import TorchTheTowerEffect
             return [TorchTheTowerEffect()]
 
+        # "…deals N damage to target …. If that creature (or planeswalker)
+        # would die this turn, exile it instead." (Obliterating Bolt,
+        # Elspeth's Smite). The rider modifies the damage sentence, so both
+        # stay one atomic effect.
+        exile_rider = re.search(
+            r"deals (\d+) damage to target [^.]+\.\s*"
+            r"if that (creature or planeswalker|creature|permanent) would "
+            r"die this turn, exile it instead",
+            effect_text, re.IGNORECASE)
+        if exile_rider:
+            from .ability_types import DamageWithExileReplacementEffect
+            rider_scope = exile_rider.group(2).lower()
+            return [DamageWithExileReplacementEffect(
+                int(exile_rider.group(1)),
+                includes_planeswalkers=rider_scope != "creature")]
+
         if (re.search(
                 r"destroy target creature, enchantment, or planeswalker",
                 effect_text, re.IGNORECASE)

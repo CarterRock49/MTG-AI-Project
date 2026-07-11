@@ -3118,6 +3118,81 @@ class TorchTheTowerEffect(AbilityEffect):
                 game_state, source_id, controller, targets or {})
         return damage_dealt > 0
 
+class DamageWithExileReplacementEffect(AbilityEffect):
+    """Deal damage to one target; if it would die this turn, exile it instead.
+
+    Covers riders like Obliterating Bolt's "If that creature or planeswalker
+    would die this turn, exile it instead." (Torch the Tower keeps its own
+    effect because Bargain changes its damage and adds a scry.)
+    """
+
+    def __init__(self, amount, includes_planeswalkers=False, condition=None):
+        super().__init__(
+            f"deals {amount} damage to target; exiled instead if it would "
+            "die this turn", condition)
+        self.amount = amount
+        self.includes_planeswalkers = includes_planeswalkers
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        target_ids = []
+        if isinstance(targets, dict):
+            for ids in targets.values():
+                if isinstance(ids, (list, tuple, set)):
+                    target_ids.extend(ids)
+        if not target_ids:
+            return False
+        target_id = target_ids[0]
+        target = game_state._safe_get_card(target_id)
+        target_controller, target_zone = game_state.find_card_location(target_id)
+        if (not target or target_zone != "battlefield"
+                or not set(getattr(target, "card_types", [])).intersection(
+                    {"creature", "planeswalker"})):
+            return False
+
+        if "creature" in getattr(target, "card_types", []):
+            damage_dealt = game_state.apply_damage_to_permanent(
+                target_id, self.amount, source_id)
+        else:
+            damage_dealt = game_state.damage_planeswalker(
+                target_id, self.amount, source_id, defer_sba=True)
+
+        if damage_dealt > 0 and game_state.replacement_effects:
+            rider_types = {"creature"}
+            if self.includes_planeswalkers:
+                rider_types.add("planeswalker")
+
+            def _is_damaged_target_dying(event_context):
+                if event_context.get("card_id") != target_id:
+                    return False
+                dying = game_state._safe_get_card(target_id)
+                return bool(
+                    dying
+                    and rider_types.intersection(
+                        getattr(dying, "card_types", [])))
+
+            def _exile_instead(event_context):
+                event_context["to_player"] = (
+                    event_context.get("to_player") or target_controller)
+                event_context["to_zone"] = "exile"
+                return event_context
+
+            game_state.replacement_effects.register_effect({
+                "event_type": "DIES",
+                "condition": _is_damaged_target_dying,
+                "replacement": _exile_instead,
+                "source_id": source_id,
+                "controller_id": controller,
+                "duration": "end_of_turn",
+                "description": (
+                    "Damaged permanent is exiled instead of dying this turn"),
+            })
+
+        # No player receives priority between the spell's instructions. Run
+        # SBAs only after the damage-linked replacement exists.
+        game_state.check_state_based_actions()
+        return damage_dealt > 0
+
 class AddCountersEffect(AbilityEffect):
     """Effect that adds counters to permanents or players."""
     def __init__(self, counter_type, count=1, target_type="creature", condition=None):
