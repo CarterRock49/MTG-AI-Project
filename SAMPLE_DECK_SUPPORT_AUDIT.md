@@ -244,9 +244,29 @@ exactly the Treasure, 4 life, two blue 1/1 Fish, and one draw that apply.
 These should make affected card statistics ineligible for harvest until the
 listed behavior is implemented and guarded by scenarios.
 
-None newly confirmed after the Round 7.29 log-driven repairs. Four remaining
-classification groups are retained under **High-Risk Partial Support** until
-their complete printed effects have exact resolution scenarios.
+None currently confirmed in the audited eight-deck sample. Rounds 7.30–7.32
+closed the remaining classification groups and the first strength-run warning
+and error signatures with exact scenarios.
+
+## Closed In Round 7.32
+
+- Leyline of Resonance's `copy that spell` instruction now copies the spell
+  referenced by its CAST_SPELL trigger context and preserves the printed option
+  to choose new targets.
+- This Town Ain't Big Enough can legally resolve after its controller selects
+  zero permanents; `up to two` is retained in the parsed bounce effect instead
+  of becoming a mandatory generic target.
+- Enchant restrictions, Leyline opening-hand permissions, and enters-tapped
+  declarations are treated as already-handled rules/replacement text rather
+  than registered as dead layer effects.
+- Mixed integer card IDs and string token IDs no longer crash discard-policy
+  synergy evaluation. Game-draw sentinels and non-copyable runtime stack
+  references no longer produce false card/context warnings.
+
+The real two-worker CUDA canary completed 128 transitions and a 256-step final
+validation with zero newly written warning or error records. Gates: 253/253
+scenarios, 9/9 smoke, 11/11 training, 10/10 + 5/5 Harvest, 6/6 fuzz config,
+and 8,000/8,000 default-fuzz actions.
 
 ## Closed In Round 7.29
 
@@ -305,26 +325,11 @@ The remaining seven-part Tier 2 batch is implemented and guarded.
 
 ## High-Risk Partial Support
 
-These cards reach generic parser paths, but at least one value-changing part
-is likely incomplete. They need focused scenarios before their statistics are
-trusted.
-
-The post-Round-7.29 eight-deck reset still reports four value-changing clauses
-whose mechanic entry is known but whose complete resolution is not yet proved:
-
-- Overlord of the Mistmoors and Overlord of the Hauntwoods: verify that both
-  ordinary entry and attack create their printed tokens while Impending is
-  active and after it expires.
-- Obstinate Baloth: verify the opponent-caused discard replacement moves it
-  directly to the battlefield.
-- Callous Sell-Sword: verify its entry counter count uses creatures that died
-  under its controller this turn.
-- Manifold Mouse: verify the beginning-of-combat Mouse target and the policy's
-  double-strike/trample choice alongside Offspring.
-
-Emberheart Challenger emits the sixth repeated classification line, but its
-Valiant impulse-draw rider already has an exact end-to-end scenario; that line
-is warning hygiene rather than an unproved value path.
+None currently known in the audited eight-deck sample. Round 7.30 added exact
+real-card scenarios for both Overlords, Obstinate Baloth, Callous Sell-Sword,
+Manifold Mouse, and Emberheart Challenger, and removed their classification
+warnings. This is sample coverage, not format-wide proof; new work remains
+ordered by real Harvest manifest counts.
 
 ## Closed In Round 7.22
 

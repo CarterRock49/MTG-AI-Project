@@ -228,6 +228,29 @@ def check_regressions():
     assert "Attempting fallback" not in apply_source, \
         "handler TypeErrors must not retry a potentially partially-mutated action"
 
+    # Bug-log retention is per family, including after a multi-worker run.
+    # Exercise the pure pruning helper in isolation so the test does not touch
+    # the user's real bugs/ directory.
+    from Playersim import debug as debug_module
+    with tempfile.TemporaryDirectory() as log_tmp:
+        expected_newest = {}
+        for family in ("mtg_errors_", "mtg_warnings_", "mtg_debug_"):
+            paths = []
+            for index in range(8):
+                path = os.path.join(log_tmp, f"{family}{index}.log")
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(str(index))
+                os.utime(path, (index + 1, index + 1))
+                paths.append(path)
+            expected_newest[family] = set(paths[-5:])
+        debug_module._prune_old_logs(log_tmp, keep=5)
+        for family, expected in expected_newest.items():
+            remaining = {
+                os.path.join(log_tmp, name)
+                for name in os.listdir(log_tmp) if name.startswith(family)}
+            assert remaining == expected, \
+                f"{family} retention kept {len(remaining)} files: {remaining}"
+
     from Playersim.strategic_planner import MTGStrategicPlanner, MCTSNode  # noqa: F401
     sp_mro = {c.__name__ for c in MTGStrategicPlanner.__mro__}
     for expected in ("ArchetypeAnalysisMixin", "CardEvaluationMixin",

@@ -1021,6 +1021,9 @@ class AbilityHandler:
             r"^as\s+.*\s+enters\b",
             r"^if.*?would.*?instead",
             r"^if\s+a\s+source\s+would\s+deal\s+damage\s+to.*?prevent",
+            r"^(?:this\s+\w+|[\w' -]+)\s+enters(?:\s+the\s+battlefield)?\s+tapped(?:\s+unless\b.*)?$",
+            r"^if\s+this\s+card\s+is\s+in\s+your\s+opening\s+hand,?\s+you\s+may\s+begin\s+the\s+game\s+with\s+it\s+on\s+the\s+battlefield$",
+            r"^enchant\b",
             r"^\s*domain\b", r"^\s*as an additional cost", r"^\s*collect evidence\s+\d+",
             r"^\s*[ivx]+\s*[—\u2014-]", r"^\s*Split second\b",
         ]
@@ -1232,6 +1235,11 @@ class AbilityHandler:
         if not keyword_lower or not full_text:
             logging.warning(f"Skipping keyword ability creation due to empty keyword/text.")
             return False # <<< Added Return
+
+        # Enchant is an Aura attachment restriction, not a continuous layer
+        # effect. Attachment legality reads the printed text directly.
+        if keyword_lower == "enchant":
+            return True
 
         current_value = None
         is_parametrized_keyword = False

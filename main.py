@@ -11,6 +11,7 @@ import logging
 import argparse
 import numpy as np
 import traceback
+import warnings
 from datetime import datetime, timezone
 from importlib import metadata as importlib_metadata
 from typing import Any, Dict, List, Type, Union, Optional
@@ -2190,12 +2191,22 @@ def main():
         if selected_device == "cuda":
             torch.cuda.reset_peak_memory_stats()
         logging.info(f"Starting training run: {run_id}")
-        model.learn(
-            total_timesteps=args.timesteps,
-            callback=callbacks,
-            tb_log_name=run_id,
-            reset_num_timesteps=not args.resume
-        )
+        # SB3 compares the outer wrapper classes and warns because training is
+        # VecMonitor while evaluation adds StrictEvaluationVecEnv around its
+        # VecMonitor. Their spaces are deliberately identical; suppress only
+        # this known structural false positive, not general training warnings.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"Training and eval env are not of the same type.*",
+                category=UserWarning,
+                module=r"stable_baselines3\.common\.callbacks")
+            model.learn(
+                total_timesteps=args.timesteps,
+                callback=callbacks,
+                tb_log_name=run_id,
+                reset_num_timesteps=not args.resume
+            )
 
         training_duration = time.time() - start_time
         hours, remainder = divmod(training_duration, 3600)
@@ -2266,9 +2277,17 @@ def main():
         exit_code = 0
 
     except (Exception, KeyboardInterrupt) as e:
-        logging.error(f"Training error: {str(e)}")
+        was_interrupted = isinstance(e, KeyboardInterrupt)
+        if was_interrupted:
+            logging.warning(
+                "Training interrupted by user; preserving an incomplete checkpoint.")
+        else:
+            logging.error(f"Training error: {str(e)}")
         failure_traceback = traceback.format_exc()
-        logging.error(failure_traceback)
+        if was_interrupted:
+            logging.debug(failure_traceback)
+        else:
+            logging.error(failure_traceback)
         failed_model_save_error = None
         if model is not None:
             failed_model_path = os.path.join(run_model_dir, "failed_model")
@@ -2307,7 +2326,7 @@ def main():
             publish_manifest()
         except Exception as manifest_error:
             logging.error("Could not publish failure manifest: %s", manifest_error)
-        if isinstance(e, KeyboardInterrupt):
+        if was_interrupted:
             exit_code = 130
     finally:
         if vec_env is not None:
@@ -2317,6 +2336,8 @@ def main():
 
     if exit_code == 0:
         logging.info(f"Training run {run_id} completed")
+    elif exit_code == 130:
+        logging.warning(f"Training run {run_id} was interrupted")
     else:
         logging.error(f"Training run {run_id} failed")
     return exit_code

@@ -1422,7 +1422,16 @@ class EffectFactory:
                 if "from your graveyard" in clause_lower: zone = "graveyard"; target_type="card"
                 elif "from exile" in clause_lower: zone = "exile"; target_type="card"
                 # Add other zones
-                created_effect = ReturnToHandEffect(target_type=target_type, zone=zone)
+                optional_match = re.search(
+                    r"\bup to\s+(one|two|three|\d+)\s+target\b", clause_lower)
+                min_targets = 0 if optional_match else 1
+                max_targets = (text_to_number(optional_match.group(1))
+                               if optional_match else 1)
+                if not isinstance(max_targets, int) or max_targets < 1:
+                    max_targets = 1
+                created_effect = ReturnToHandEffect(
+                    target_type=target_type, zone=zone,
+                    min_targets=min_targets, max_targets=max_targets)
 
             # Search Library
             elif re.search(r"\bsearch(?:es)?\s+your library", clause_lower):
@@ -1484,7 +1493,8 @@ class EffectFactory:
             # Life Drain (Checked earlier with em dash fix)
 
             # Copy Spell
-            elif re.search(r"\bcopy target\b.*\bspell\b", clause_lower):
+            elif (re.search(r"\bcopy target\b.*\bspell\b", clause_lower)
+                  or re.search(r"\bcopy that spell\b", clause_lower)):
                  target_type = "spell"
                  if "instant or sorcery spell" in clause_lower: target_type = "instant or sorcery spell"
                  elif "instant spell" in clause_lower: target_type = "instant"
@@ -1492,7 +1502,9 @@ class EffectFactory:
                  elif "creature spell" in clause_lower: target_type = "creature spell"
                  # Add other types
                  new_targets = "choose new targets" in clause_lower
-                 created_effect = CopySpellEffect(target_type=target_type, new_targets=new_targets)
+                 created_effect = CopySpellEffect(
+                     target_type=target_type, new_targets=new_targets,
+                     copy_that="copy that spell" in clause_lower)
 
             # Transform
             elif re.search(r"\btransform\b", clause_lower):

@@ -9555,6 +9555,132 @@ def scenario_deck_legality_validation():
     assert any("maximum 4" in error for error in errors) and any("banned" in error for error in errors)
 
 
+@scenario("601.2c / 609.3", "an up-to-two bounce may legally resolve with zero chosen targets")
+def scenario_optional_bounce_accepts_zero_targets():
+    from Playersim.ability_types import ReturnToHandEffect
+    from Playersim.ability_utils import EffectFactory
+
+    gs = fresh()
+    player = gs.p1
+    effects = EffectFactory.create_effects(
+        "Return up to two target nonland permanents to their owners' hands.")
+    bounce = next((effect for effect in effects
+                   if isinstance(effect, ReturnToHandEffect)), None)
+    assert bounce is not None, "optional bounce did not parse"
+    assert bounce.min_targets == 0 and bounce.max_targets == 2
+    assert bounce.apply(gs, None, player, targets={}), \
+        "a legal zero-target optional bounce reported resolution failure"
+
+
+@scenario("707.10 / Leyline of Resonance", "copy-that-spell resolves against the triggering spell without retargeting it")
+def scenario_leyline_copy_that_spell_resolves():
+    from Playersim.ability_types import CopySpellEffect
+    from Playersim.ability_utils import EffectFactory
+
+    gs = fresh()
+    player = gs.p1
+    leyline = inject_into_zone(gs, player, {
+        "name": "Leyline of Resonance", "mana_cost": "{2}{R}{R}",
+        "type_line": "Enchantment", "oracle_text": "",
+    }, "battlefield")
+    spell = inject_card(gs, {
+        "name": "Triggered Cantrip", "mana_cost": "{U}",
+        "type_line": "Instant", "oracle_text": "Draw a card.",
+    })
+    gs.stack.append(("SPELL", spell, player, {
+        "targets": {}, "requires_target": False, "num_targets": 0,
+    }))
+    effects = EffectFactory.create_effects(
+        "Copy that spell. You may choose new targets for the copy.")
+    copy_effect = next((effect for effect in effects
+                        if isinstance(effect, CopySpellEffect)), None)
+    assert copy_effect is not None and copy_effect.copy_that
+    assert copy_effect.new_targets, \
+        "Leyline lost its printed option to choose new targets for the copy"
+    assert not copy_effect.requires_target, \
+        "'that spell' was incorrectly exposed as a new target choice"
+    assert copy_effect.apply(
+        gs, leyline, player, targets={}, context={"cast_card_id": spell})
+    copies = [item for item in gs.stack
+              if item[0] == "SPELL" and item[1] == spell
+              and item[3].get("is_copy")]
+    assert len(copies) == 1, "Leyline did not create exactly one spell copy"
+
+
+@scenario("704.5 / evaluator IDs", "game sentinels and mixed token IDs do not enter card lookup/sorting paths")
+def scenario_runtime_sentinels_and_mixed_ids_are_safe():
+    from Playersim.card import Card
+    from Playersim.enhanced_card_evaluator import EnhancedCardEvaluator
+
+    gs = fresh()
+    card_id = inject_card(gs, {
+        "name": "Mixed ID Creature", "mana_cost": "{1}",
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 1, "toughness": 1,
+    })
+    token_id = "TOKEN_MIXED_ID"
+    token = Card({
+        "name": "Mixed ID Token", "type_line": "Token Creature - Test",
+        "oracle_text": "", "power": 1, "toughness": 1,
+    })
+    token.card_id = token_id
+    gs.card_db[token_id] = token
+    evaluator = EnhancedCardEvaluator(gs)
+    value = evaluator._calculate_synergy_value(card_id, [token_id, card_id])
+    assert isinstance(value, (int, float)), \
+        "heterogeneous battlefield IDs crashed evaluator cache construction"
+
+    logged_ids = gs._logged_card_ids
+    logged_ids.discard("both")
+    gs.turn = gs.max_turns + 1
+    gs.p1["life"] = gs.p2["life"] = 10
+    gs._turn_limit_checked = False
+    gs.check_state_based_actions()
+    assert "both" not in gs._logged_card_ids, \
+        "the DRAW_GAME sentinel was still looked up as a card ID"
+
+
+@scenario("112.1 / 614.1c", "rule declarations handled elsewhere are not registered as dead layer abilities")
+def scenario_non_layer_declarations_are_not_static_abilities():
+    from Playersim.ability_types import StaticAbility, TriggeredAbility
+
+    gs = fresh()
+    player = gs.p1
+    land = inject_into_zone(gs, player, {
+        "name": "Quiet Dual", "type_line": "Land",
+        "oracle_text": "This land enters tapped.\n{T}: Add {U}.",
+    }, "battlefield")
+    land_abilities = gs.ability_handler.registered_abilities.get(land, [])
+    assert not any(isinstance(ability, StaticAbility)
+                   and "enters tapped" in ability.effect_text.lower()
+                   for ability in land_abilities)
+
+    role = inject_into_zone(gs, player, {
+        "name": "Test Role", "type_line": "Token Enchantment - Aura Role",
+        "keywords": ["Enchant"],
+        "oracle_text": "Enchant creature\nEnchanted creature gets +1/+1.",
+    }, "battlefield")
+    role_abilities = gs.ability_handler.registered_abilities.get(role, [])
+    assert not any(isinstance(ability, StaticAbility)
+                   and ability.effect_text.lower() == "enchant creature"
+                   for ability in role_abilities)
+
+    leyline = inject_card(gs, {
+        "name": "Test Leyline", "type_line": "Enchantment",
+        "oracle_text": (
+            "If this card is in your opening hand, you may begin the game with "
+            "it on the battlefield.\nWhenever you cast a spell, draw a card."),
+    })
+    gs.ability_handler._parse_and_register_abilities(
+        leyline, gs._safe_get_card(leyline))
+    leyline_abilities = gs.ability_handler.registered_abilities.get(leyline, [])
+    assert any(isinstance(ability, TriggeredAbility)
+               for ability in leyline_abilities)
+    assert not any(isinstance(ability, StaticAbility)
+                   and "opening hand" in ability.effect_text.lower()
+                   for ability in leyline_abilities)
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------

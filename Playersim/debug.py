@@ -3,6 +3,7 @@
 import logging
 import traceback
 import os
+import atexit
 import numpy as np
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -15,6 +16,11 @@ os.makedirs("bugs", exist_ok=True)
 KEEP_RECENT_LOGS = 5
 
 def _prune_old_logs(directory="bugs", keep=KEEP_RECENT_LOGS):
+    """Keep at most ``keep`` files for each bug-log family.
+
+    Windows spawn workers can all pass an import-time prune before any of them
+    creates its delayed log files. Shutdown pruning is therefore also required.
+    """
     import glob
 
     def mtime(path):
@@ -24,7 +30,9 @@ def _prune_old_logs(directory="bugs", keep=KEEP_RECENT_LOGS):
             return 0.0
 
     for family in ("mtg_errors_", "mtg_warnings_", "mtg_debug_"):
-        files = sorted(glob.glob(os.path.join(directory, family + "*")),
+        files = sorted((path for path in glob.glob(
+                            os.path.join(directory, family + "*"))
+                        if os.path.isfile(path)),
                        key=mtime, reverse=True)
         for stale in files[keep:]:
             try:
@@ -44,7 +52,7 @@ timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 # Set up rotating error file handler with 2GB size limit
 MAX_LOG_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB in bytes
-BACKUP_COUNT = 8  # Number of backup files to keep
+BACKUP_COUNT = KEEP_RECENT_LOGS - 1
 
 # Set up error file handler with rotation. delay=True defers creating the
 # file until a record is actually written: importing this module used to
@@ -104,6 +112,21 @@ root_logger.addHandler(error_handler)
 root_logger.addHandler(warning_handler)
 root_logger.addHandler(debug_handler)
 root_logger.addHandler(console_handler)
+
+
+def _shutdown_bug_logging():
+    """Close this process's bug handlers, then enforce family retention."""
+    for handler in (error_handler, warning_handler, debug_handler):
+        try:
+            root_logger.removeHandler(handler)
+            handler.flush()
+            handler.close()
+        except (OSError, ValueError):
+            pass
+    _prune_old_logs()
+
+
+atexit.register(_shutdown_bug_logging)
 
 # Helper function to track environment resets
 def log_reset(env_id):

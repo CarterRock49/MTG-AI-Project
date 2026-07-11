@@ -16,7 +16,7 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 11/11, and 249/249, plus 10/10 fixture-
+   every delivery (currently 9/9, 11/11, and 253/253, plus 10/10 fixture-
    harvest tests, 5/5 production-protocol tests, 6/6 fuzz/replay tests, and
    the deterministic 8-seed / 8,000-action default fuzz profile, and the
    strict 32-seed / 320,000-action long profile).
@@ -55,7 +55,7 @@ The project is complete when all of the following hold:
 - Tier 5 (operations/integration): ◐ Harvest orchestration is complete; strength
   qualification, production throughput profiling, and deck-builder integration
   remain open.
-- Test gates: smoke 9/9, training 11/11, scenarios 249/249 (grown from 12),
+- Test gates: smoke 9/9, training 11/11, scenarios 253/253 (grown from 12),
   fixture harvest 10/10, production Harvest protocol 5/5, fuzz/replay
   configuration 6/6, deterministic default fuzz 8 seeds x 1,000 valid
   actions, and strict long fuzz 32 seeds x 10,000 valid actions.
@@ -854,9 +854,34 @@ silent-bug-catalog pattern, now fixed and scenario-guarded:
 Regression gates: 249/249 scenarios, 9/9 smoke, 11/11 training, 10/10 + 5/5
 harvest, 6/6 fuzz config, and the full default fuzz profile.
 
+**Round 7.32 (July 2026):** converted every signal from the first post-audit
+strength-training attempt into a fix or an explicitly classified interruption.
+Bug-log retention now closes each process's handlers and prunes again at exit,
+so Windows spawn workers cannot leave more than five debug, warning, or error
+files per family; rotating backups share the same five-file ceiling.
+
+The run's engine findings are scenario-guarded: discard evaluation builds stable
+cache keys across integer database IDs and string token IDs; game-level draw
+sentinels no longer enter card lookup; optional `up to two` bounce resolves
+successfully with zero targets; and Leyline of Resonance's `copy that spell`
+copies the triggering stack object instead of falling back to an inert generic
+effect. Runtime Card/GameState references are deliberately omitted from copied
+stack context without warning. `Enchant`, opening-hand permissions, and printed
+enters-tapped declarations are recognized as rules/replacement text rather than
+dead continuous layer abilities. A user `KeyboardInterrupt` now preserves the
+incomplete checkpoint and exit code 130 without reporting a blank training
+error; the known SB3 wrapper-type false-positive warning is narrowly suppressed.
+
+The real two-worker CUDA canary `ALPHA_ZERO_MTG_V3.00_20260711_022032` completed
+128/128 training transitions and passed its 256-step reload/mask/progress/cycle
+validation. Its newly written bug logs contain zero warnings and zero errors,
+and the folder contains exactly five files per family. Regression gates:
+253/253 scenarios, 9/9 smoke, 11/11 training, 10/10 + 5/5 harvest, 6/6 fuzz
+config, and all 8,000 default-profile mask-valid fuzz actions.
+
 ## Tier 4 — Verification & calibration
 
-1. ✅ Golden scenario harness — 249 scenarios and growing; scenario-first is a
+1. ✅ Golden scenario harness — 253 scenarios and growing; scenario-first is a
    working agreement, not a suggestion.
 2. ✅ **Property/invariant harness**: exact non-token zone/stack conservation,
    SBA fixed points, mask-valid action execution/handler coverage, declared

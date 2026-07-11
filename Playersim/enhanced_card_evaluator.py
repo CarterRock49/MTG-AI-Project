@@ -864,7 +864,11 @@ class EnhancedCardEvaluator:
             return 0.0
         
         # Check cache first
-        cache_key = (card_id, tuple(sorted(board)))
+        # Database cards use integer IDs while tokens/copies use strings.
+        # Canonicalize heterogeneous IDs without comparing unlike types.
+        board_key = tuple(sorted(
+            board, key=lambda value: (type(value).__name__, repr(value))))
+        cache_key = (card_id, board_key)
         if cache_key in self.synergy_memory:
             return self.synergy_memory[cache_key]
         

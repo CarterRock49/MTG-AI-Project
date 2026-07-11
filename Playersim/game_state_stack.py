@@ -39,7 +39,9 @@ class GameStateStackMixin:
         """
         copied = {}
         for key, value in dict(context or {}).items():
-            if key in {"card", "controller", "player", "ability"}:
+            if key in {
+                    "card", "controller", "player", "ability",
+                    "source_card", "event_card", "game_state"}:
                 continue
             try:
                 copied[key] = copy_module.deepcopy(value)

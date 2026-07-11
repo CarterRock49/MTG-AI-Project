@@ -3697,13 +3697,21 @@ class CreateRoleEffect(AbilityEffect):
 
 class ReturnToHandEffect(AbilityEffect):
     """Effect that returns cards to their owner's hand."""
-    def __init__(self, target_type="permanent", zone="battlefield", condition=None, scope="target"):
+    def __init__(self, target_type="permanent", zone="battlefield", condition=None,
+                 scope="target", min_targets=1, max_targets=1):
         target_type_str = str(target_type).lower() if target_type is not None else "permanent"
         zone_str = str(zone).lower() if zone is not None else "battlefield"
         # scope: 'target' | 'all' (all matching permanents) | 'all_yours'
         # (all you control). July 2026 parser expansion for mass bounce.
         self.scope = scope
-        desc = "Return target" if scope == "target" else "Return all"
+        self.min_targets = int(min_targets)
+        self.max_targets = int(max_targets)
+        if scope == "target" and self.min_targets == 0:
+            count_word = {1: "one", 2: "two", 3: "three"}.get(
+                self.max_targets, str(self.max_targets))
+            desc = f"Return up to {count_word} target"
+        else:
+            desc = "Return target" if scope == "target" else "Return all"
         super().__init__(f"{desc} {target_type_str} from {zone_str} to its owner's hand", condition)
         self.target_type = target_type_str
         self.zone = zone_str
@@ -3734,6 +3742,8 @@ class ReturnToHandEffect(AbilityEffect):
                         target_ids_to_process.append(cid)
         elif self.requires_target:
             if not targets or not any(v for v in targets.values()):
+                if self.min_targets == 0:
+                    return True
                 logging.warning(f"ReturnToHandEffect requires targets, none provided/resolved: {targets}")
                 return False
             for category in relevant_categories:
@@ -4761,14 +4771,22 @@ class LifeDrainEffect(AbilityEffect):
 
 
 class CopySpellEffect(AbilityEffect):
-    def __init__(self, target_type="spell", new_targets=True, condition=None):
-        super().__init__(f"Copy target {target_type}{' and you may choose new targets' if new_targets else ''}", condition)
+    def __init__(self, target_type="spell", new_targets=True, condition=None,
+                 copy_that=False):
+        reference = "that spell" if copy_that else f"target {target_type}"
+        super().__init__(f"Copy {reference}{' and you may choose new targets' if new_targets else ''}", condition)
         self.target_type = target_type # spell, instant, sorcery
         self.new_targets = new_targets # If the copy can choose new targets
-        self.requires_target = True
+        self.copy_that = bool(copy_that)
+        self.requires_target = not self.copy_that
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         target_ids = targets.get("spells", []) # Expect spell target
+        if not target_ids and self.copy_that:
+            context = getattr(self, "resolution_context", {}) or {}
+            referenced_id = context.get("cast_card_id", context.get("spell_id"))
+            if referenced_id is not None:
+                target_ids = [referenced_id]
         if not target_ids:
              logging.warning("CopySpellEffect: No spell target provided in targets dict.")
              return False

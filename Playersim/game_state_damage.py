@@ -290,7 +290,12 @@ class GameStateDamageMixin:
                 # BUGFIX: card ids are ints throughout the engine; the old isinstance(target, str)
                 # check resolved target_id to None for EVERY card-level SBA, so destruction,
                 # the legend rule, 0-toughness deaths, and counter annihilation never applied.
-                target_id = target if isinstance(target, (int, str)) else None
+                card_action_types = {
+                    "CHECK_DESTROY", "MOVE_TO_GY", "UNEQUIP",
+                    "ANNIHILATE_COUNTERS", "PHASE_IN",
+                }
+                target_id = (target if action_type in card_action_types
+                             and isinstance(target, (int, str)) else None)
                 target_card = self._safe_get_card(target_id) if target_id else None
                 target_name = getattr(target_card, 'name', target_id) if target_card else str(target)
 
