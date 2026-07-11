@@ -914,6 +914,31 @@ run directory; its architecture summary is inside the run. Gates: 255/255
 scenarios, 9/9 smoke, 12/12 training, 10/10 + 5/5 Harvest, 6/6 fuzz/replay
 configuration tests, and all 8,000 default-profile fuzz actions.
 
+**Round 7.34 (July 2026):** the next six-worker strength attempt supplied the
+missing worker-local evidence for action 19. Restless Anchorage was in hand
+slot 6, its controller was the active player with priority, the stack was
+empty, and no land had been played—but the engine was in transient
+`PHASE_PRIORITY` over an underlying main phase. Mask generation correctly used
+the canonical sorcery-speed predicate and exposed the play; `play_land()` used
+a narrower literal-phase check and rejected it. Land execution now uses the
+same canonical timing predicate as the mask while retaining its priority check.
+The exact transient-priority case is part of the action-19 regression.
+
+The failure also proved the new replay path could be interrupted by NumPy
+`int64` values in action history. Policy diagnostics now normalize action IDs,
+replay export recursively preserves its full structure while converting NumPy
+scalars/arrays, and a failed write removes its temporary file. The forced
+execution-failure regression includes a NumPy action and verifies the complete
+JSON replay, diagnostic, and final action.
+
+The deterministic six-worker CUDA rerun
+`ALPHA_ZERO_MTG_V3.00_20260711_031143` used the failed run's seed and completed
+the full first rollout: 12,288/12,288 transitions at 127 FPS, followed by the
+256-step checkpoint reload/mask/progress/cycle validation. It passed the
+original worker-4/action-19 point and wrote no new warning or error records.
+Gates: 255/255 scenarios, 9/9 smoke, 12/12 training, 10/10 + 5/5 Harvest,
+6/6 fuzz/replay configuration, and 8,000/8,000 default-fuzz actions.
+
 ## Tier 4 — Verification & calibration
 
 1. ✅ Golden scenario harness — 255 scenarios and growing; scenario-first is a

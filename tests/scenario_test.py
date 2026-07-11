@@ -9546,7 +9546,8 @@ def scenario_play_land_slot_six_contract():
     gs = fresh(); env = get_env(); handler = env.action_handler
     player = gs.p1 if gs.agent_is_p1 else gs.p2
     gs.turn = 1 if player is gs.p1 else 2
-    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.previous_priority_phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.phase = gs.PHASE_PRIORITY
     gs.priority_player = player
     gs.stack.clear()
     player["land_played"] = False
@@ -9627,6 +9628,7 @@ def scenario_play_land_slot_six_contract():
     game_state_type = type(gs)
     original_play_land = game_state_type.play_land
     try:
+        env.current_episode_actions.append(np.int64(393))
         game_state_type.play_land = lambda *_args, **_kwargs: False
         assert env.action_mask()[19]
         _, _, _, _, failure_info = env.step(19)
@@ -9643,6 +9645,7 @@ def scenario_play_land_slot_six_contract():
         replay_payload = json.load(replay_handle)
     assert replay_payload["actions"][-1]["action"] == 19
     assert replay_payload["failure"]["handler_error"]
+    assert replay_payload["failure"]["recent_actions"][-2:] == [393, 19]
     assert failed_land_id in player["hand"], \
         "opponent simulation mutated state after the forced execution failure"
 

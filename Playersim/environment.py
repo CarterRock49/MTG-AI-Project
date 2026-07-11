@@ -1054,6 +1054,8 @@ class AlphaZeroMTGEnv(gym.Env):
             "phase": int(getattr(gs, "phase", -1)),
             "phase_name": getattr(gs, "_PHASE_NAMES", {}).get(
                 getattr(gs, "phase", -1), "UNKNOWN"),
+            "underlying_priority_phase": getattr(
+                gs, "previous_priority_phase", None),
             "priority_player": player_label(
                 getattr(gs, "priority_player", None)),
             "choice_type": choice.get("type"),
@@ -1146,7 +1148,8 @@ class AlphaZeroMTGEnv(gym.Env):
             diagnostic["last_mask_error"] = str(mask_error)
         if recent_action is not None:
             diagnostic["recent_actions"] = (
-                list(self.current_episode_actions[-31:]) + [int(recent_action)])
+                [int(action) for action in self.current_episode_actions[-31:]]
+                + [int(recent_action)])
         if valid_mask is not None:
             diagnostic["valid_actions"] = np.flatnonzero(valid_mask).tolist()
         return diagnostic
@@ -1695,8 +1698,32 @@ class AlphaZeroMTGEnv(gym.Env):
         }
         if path:
             with open(path, 'w', encoding='utf-8') as handle:
-                json.dump(payload, handle, indent=2, sort_keys=True)
+                json.dump(
+                    self._json_safe_replay_value(payload), handle,
+                    indent=2, sort_keys=True)
         return payload
+
+    @staticmethod
+    def _json_safe_replay_value(value):
+        """Preserve replay structure while converting NumPy runtime scalars."""
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, np.ndarray):
+            return [AlphaZeroMTGEnv._json_safe_replay_value(item)
+                    for item in value.tolist()]
+        if isinstance(value, dict):
+            return {
+                str(key): AlphaZeroMTGEnv._json_safe_replay_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [AlphaZeroMTGEnv._json_safe_replay_value(item)
+                    for item in value]
+        if isinstance(value, os.PathLike):
+            return os.fspath(value)
+        return str(value)
 
     def _persist_failure_replay(self, diagnostic, action_idx, context):
         """Atomically preserve the action path and terminal diagnostic."""
@@ -1709,10 +1736,19 @@ class AlphaZeroMTGEnv(gym.Env):
         replay_path = os.path.join(self.deck_stats_path, "failure_replay.json")
         temporary_path = f"{replay_path}.tmp"
         os.makedirs(self.deck_stats_path, exist_ok=True)
-        with open(temporary_path, "w", encoding="utf-8") as handle:
-            json.dump(replay_payload, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-        os.replace(temporary_path, replay_path)
+        try:
+            with open(temporary_path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    self._json_safe_replay_value(replay_payload), handle,
+                    indent=2, sort_keys=True)
+                handle.write("\n")
+            os.replace(temporary_path, replay_path)
+        except Exception:
+            try:
+                os.remove(temporary_path)
+            except OSError:
+                pass
+            raise
         return replay_path
 
     def replay(self, payload):

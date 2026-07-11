@@ -1661,14 +1661,19 @@ class GameStateStackMixin:
                 logging.warning(f"Player has already played a land this turn")
                 return False
             
-            # Check if it's a valid phase to play a land
-            if self.phase not in [self.PHASE_MAIN_PRECOMBAT, self.PHASE_MAIN_POSTCOMBAT]:
-                logging.warning(f"Cannot play a land during phase {self.phase}")
+            # Use the same timing predicate as action-mask generation. The
+            # engine represents post-resolution priority as PHASE_PRIORITY
+            # while retaining the underlying main phase separately; checking
+            # only the literal phase constants rejected mask-valid land plays.
+            if not self._can_act_at_sorcery_speed(controller):
+                logging.warning(
+                    "Cannot play a land at sorcery speed during phase %s "
+                    "(underlying phase %s)",
+                    self.phase, self.previous_priority_phase)
                 return False
-            
-            # Check if the player has priority
-            active_player = self._get_active_player()
-            if controller != active_player:
+
+            # Land play is a special action and still requires priority.
+            if self.priority_player is not None and self.priority_player != controller:
                 logging.warning(f"Player does not have priority to play a land")
                 return False
             

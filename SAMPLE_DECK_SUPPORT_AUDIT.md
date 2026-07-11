@@ -244,9 +244,24 @@ exactly the Treasure, 4 life, two blue 1/1 Fish, and one draw that apply.
 These should make affected card statistics ineligible for harvest until the
 listed behavior is implemented and guarded by scenarios.
 
-None currently confirmed in the audited eight-deck sample. Rounds 7.30–7.33
+None currently confirmed in the audited eight-deck sample. Rounds 7.30–7.34
 closed the remaining classification groups and the first strength-run warning
 and error signatures with exact scenarios.
+
+## Closed In Round 7.34
+
+- The mask-valid Restless Anchorage failure was a timing-contract mismatch:
+  the mask recognized an empty-stack `PHASE_PRIORITY` wrapper over a main
+  phase, while `play_land()` required the literal main-phase number. Both now
+  use the canonical sorcery-speed predicate, with priority still required.
+- Failure replays convert NumPy runtime values without collapsing their
+  structure, and failed atomic writes remove the temporary file. The regression
+  verifies a complete replay containing a NumPy action history.
+
+The same-seed six-worker CUDA rerun completed 12,288 transitions plus the
+256-step final validation, passed the original failure point, and created no
+new warning/error records. Gates: 255/255 scenarios, 9/9 smoke, 12/12 training,
+10/10 + 5/5 Harvest, 6/6 fuzz configuration, and 8,000/8,000 default fuzz.
 
 ## Closed In Round 7.33
 
