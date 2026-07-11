@@ -403,8 +403,30 @@ class AlphaZeroMTGEnv(gym.Env):
                     p1_deck_data = {"name": "Dummy Deck P1", "cards": dummy_deck}
                     p2_deck_data = {"name": "Dummy Deck P2", "cards": dummy_deck}
                 else:
-                    p1_deck_data = random.choice(self.decks)
-                    p2_deck_data = random.choice(self.decks)
+                    requested_p1 = (options or {}).get("p1_deck")
+                    requested_p2 = (options or {}).get("p2_deck")
+
+                    def deck_by_name(requested_name):
+                        if requested_name is None:
+                            return None
+                        return next(
+                            (deck for deck in self.decks
+                             if isinstance(deck, dict)
+                             and deck.get("name") == requested_name),
+                            None)
+
+                    p1_deck_data = deck_by_name(requested_p1)
+                    p2_deck_data = deck_by_name(requested_p2)
+                    if requested_p1 is not None and p1_deck_data is None:
+                        raise ValueError(
+                            f"Requested replay P1 deck is unavailable: {requested_p1}")
+                    if requested_p2 is not None and p2_deck_data is None:
+                        raise ValueError(
+                            f"Requested replay P2 deck is unavailable: {requested_p2}")
+                    if p1_deck_data is None:
+                        p1_deck_data = random.choice(self.decks)
+                    if p2_deck_data is None:
+                        p2_deck_data = random.choice(self.decks)
                 
                 self.current_deck_name_p1 = p1_deck_data.get("name", "P1_Deck")
                 self.current_deck_name_p2 = p2_deck_data.get("name", "P2_Deck")
@@ -423,6 +445,9 @@ class AlphaZeroMTGEnv(gym.Env):
                 if (self.alternate_agent_seat
                         and self._successful_reset_count % 2 == 1):
                     seat_is_p1 = not seat_is_p1
+                requested_seat = (options or {}).get("agent_is_p1")
+                if isinstance(requested_seat, bool):
+                    seat_is_p1 = requested_seat
                 gs.agent_is_p1 = seat_is_p1
 
                 # --- Link Subsystems to Environment ---
@@ -1691,9 +1716,10 @@ class AlphaZeroMTGEnv(gym.Env):
     def export_replay(self, path=None):
         """Return (and optionally persist) a deterministic episode replay."""
         payload = {
-            "version": 1, "seed": self.reset_seed,
+            "version": 2, "seed": self.reset_seed,
             "p1_deck": getattr(self, 'current_deck_name_p1', None),
             "p2_deck": getattr(self, 'current_deck_name_p2', None),
+            "agent_is_p1": bool(getattr(self.game_state, 'agent_is_p1', True)),
             "actions": list(self.replay_actions),
         }
         if path:
@@ -1756,7 +1782,16 @@ class AlphaZeroMTGEnv(gym.Env):
         if isinstance(payload, (str, os.PathLike)):
             with open(payload, 'r', encoding='utf-8') as handle:
                 payload = json.load(handle)
-        obs, info = self.reset(seed=payload.get('seed'))
+        replay_seat = payload.get('agent_is_p1')
+        if replay_seat is None:
+            replay_seat = (payload.get('failure') or {}).get('agent_is_p1')
+        obs, info = self.reset(
+            seed=payload.get('seed'),
+            options={
+                'p1_deck': payload.get('p1_deck'),
+                'p2_deck': payload.get('p2_deck'),
+                'agent_is_p1': replay_seat,
+            })
         if (payload.get('p1_deck') != self.current_deck_name_p1
                 or payload.get('p2_deck') != self.current_deck_name_p2):
             raise ValueError("Replay deck selection does not match the recorded seed")

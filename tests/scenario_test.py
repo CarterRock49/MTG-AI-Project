@@ -8994,9 +8994,24 @@ def scenario_seeded_action_replay():
     action = int(225 if mask[225] else valid[0])
     first = env.step(action)
     payload = env.export_replay()
+    assert payload['version'] == 2
+    assert payload['agent_is_p1'] == env.game_state.agent_is_p1
     snapshot = (env.game_state.turn, env.game_state.phase,
                 env.game_state.p1['life'], env.game_state.p2['life'])
-    replayed = env.replay(payload)
+    original_decks = env.decks
+    original_initial_seat = env.initial_agent_is_p1
+    try:
+        # Replay identity must not depend on the caller's current deck ordering
+        # or seat configuration (evaluation uses a shuffled deck subset).
+        env.decks = list(reversed(env.decks))
+        env.initial_agent_is_p1 = not payload['agent_is_p1']
+        replayed = env.replay(payload)
+    finally:
+        env.decks = original_decks
+        env.initial_agent_is_p1 = original_initial_seat
+    assert env.current_deck_name_p1 == payload['p1_deck']
+    assert env.current_deck_name_p2 == payload['p2_deck']
+    assert env.game_state.agent_is_p1 == payload['agent_is_p1']
     assert (env.game_state.turn, env.game_state.phase,
             env.game_state.p1['life'], env.game_state.p2['life']) == snapshot
     assert bool(first[2]) == bool(replayed[2]) and bool(first[3]) == bool(replayed[3])
@@ -9648,6 +9663,36 @@ def scenario_play_land_slot_six_contract():
     assert replay_payload["failure"]["recent_actions"][-2:] == [393, 19]
     assert failed_land_id in player["hand"], \
         "opponent simulation mutated state after the forced execution failure"
+
+
+@scenario("policy contract / PLAY_SPELL", "a permanent spell casts from a transient main-phase priority window")
+def scenario_play_spell_from_main_priority_wrapper():
+    gs = fresh(); env = get_env(); handler = env.action_handler
+    gs.agent_is_p1 = False
+    player = gs.p2
+    gs.turn = 2
+    gs.previous_priority_phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.phase = gs.PHASE_PRIORITY
+    gs.priority_player = player
+    gs.priority_pass_count = 0
+    gs.stack.clear()
+    player['mana_pool'] = {
+        color: 5 for color in ('W', 'U', 'B', 'R', 'G', 'C')}
+    replace_hand(gs, player, [{
+        "name": "Spell Slot Filler", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Sorcery", "oracle_text": "Draw a card."
+    }])
+    nightmare_id = inject_real_card(gs, player, "Hopeless Nightmare", "hand")
+    assert player['hand'][1] == nightmare_id
+    mask = env.action_mask()
+    assert mask[21], "Hopeless Nightmare was absent from mask action 21"
+    context = handler.action_reasons_with_context[21]['context']
+    assert context.get('card_id') == nightmare_id
+    assert context.get('controller_id') == 'p2'
+    _, _, _, _, info = env.step(21)
+    assert not info.get('execution_failed'), info.get('error_message')
+    assert nightmare_id not in player['hand'], \
+        "the mask-valid Hopeless Nightmare remained in hand"
 
 
 @scenario("deck legality", "format status, copy limits, bans, restrictions, basics, and minimum size are validated")

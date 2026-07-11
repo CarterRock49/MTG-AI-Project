@@ -424,7 +424,12 @@ class ActionSpaceMixin:
                         if self._targets_available(card, player, opponent):
                             # --- STANDARD PLAY_SPELL ACTION ---
                             # Provide context: hand_idx
-                            play_context = {'hand_idx': i}
+                            play_context = {
+                                'hand_idx': i,
+                                'card_id': card_id,
+                                'controller_id': (
+                                    'p1' if player is gs.p1 else 'p2'),
+                            }
                             action_index = 20 + i if i < 8 else 396 + (i - 8)
                             set_valid_action(action_index, f"PLAY_SPELL {card.name}", context=play_context)
                             # Offer Kicker / Additional Cost Payment (If applicable) - Should check affordability
@@ -509,7 +514,11 @@ class ActionSpaceMixin:
                 if (is_instant_speed and 'land' not in card.type_line.lower()
                         and self._can_afford_card(player, card, context={})
                         and self._targets_available(card, player, opponent)):
-                    play_context = {'hand_idx': i}
+                    play_context = {
+                        'hand_idx': i,
+                        'card_id': card_id,
+                        'controller_id': 'p1' if player is gs.p1 else 'p2',
+                    }
                     action_index = 20 + i if i < 8 else 396 + (i - 8)
                     set_valid_action(
                         action_index, f"PLAY_SPELL (Instant) {card.name}",

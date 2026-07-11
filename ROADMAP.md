@@ -16,7 +16,7 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 12/12, and 255/255, plus 10/10 fixture-
+   every delivery (currently 9/9, 12/12, and 256/256, plus 10/10 fixture-
    harvest tests, 5/5 production-protocol tests, 6/6 fuzz/replay tests, and
    the deterministic 8-seed / 8,000-action default fuzz profile, and the
    strict 32-seed / 320,000-action long profile).
@@ -55,7 +55,7 @@ The project is complete when all of the following hold:
 - Tier 5 (operations/integration): ◐ Harvest orchestration is complete; strength
   qualification, production throughput profiling, and deck-builder integration
   remain open.
-- Test gates: smoke 9/9, training 12/12, scenarios 255/255 (grown from 12),
+- Test gates: smoke 9/9, training 12/12, scenarios 256/256 (grown from 12),
   fixture harvest 10/10, production Harvest protocol 5/5, fuzz/replay
   configuration 6/6, deterministic default fuzz 8 seeds x 1,000 valid
   actions, and strict long fuzz 32 seeds x 10,000 valid actions.
@@ -939,9 +939,33 @@ original worker-4/action-19 point and wrote no new warning or error records.
 Gates: 255/255 scenarios, 9/9 smoke, 12/12 training, 10/10 + 5/5 Harvest,
 6/6 fuzz/replay configuration, and 8,000/8,000 default-fuzz actions.
 
+**Round 7.35 (July 2026):** repaired the next strict-evaluation failure from
+run `ALPHA_ZERO_MTG_V3.00_20260711_031708`. Action 21 exposed Hopeless
+Nightmare from hand slot 1 while player 2 had priority, the stack was empty,
+and `PHASE_PRIORITY` wrapped `MAIN_PRECOMBAT`; mask generation correctly
+allowed the permanent spell, but `_can_cast_now()` still required a literal
+main phase. Spell execution now shares the canonical sorcery-speed predicate
+with mask generation. The check is also face-aware for modal double-faced and
+Adventure cards, so timing follows the face actually being cast.
+
+Ordinary `PLAY_SPELL` actions now pin hand slot, card ID, and controller through
+execution, reject stale slots, and report full card/phase/seat context if a
+future mask-valid cast fails. Replay schema v2 records the agent seat and
+restores the exact named P1/P2 decks independently of deck-list ordering. The
+historical 48-action failure replay now restores GolgariMidrange vs DimirSelf,
+player 2 as the agent, and executes the formerly failing Hopeless Nightmare.
+
+The exact failed checkpoint was resumed in six-worker CUDA canary
+`ALPHA_ZERO_MTG_V3.00_20260711_032854`. It completed a 12,288-transition
+rollout, one four-episode periodic evaluation, and the 256-step checkpoint
+reload/mask/progress/cycle validation. The manifest reports both evaluation
+and final validation passed, and the run created no warning or error records.
+Gates: 256/256 scenarios, 9/9 smoke, 12/12 training, 10/10 + 5/5 Harvest,
+6/6 fuzz/replay configuration, and 8,000/8,000 default-fuzz actions.
+
 ## Tier 4 — Verification & calibration
 
-1. ✅ Golden scenario harness — 255 scenarios and growing; scenario-first is a
+1. ✅ Golden scenario harness — 256 scenarios and growing; scenario-first is a
    working agreement, not a suggestion.
 2. ✅ **Property/invariant harness**: exact non-token zone/stack conservation,
    SBA fixed points, mask-valid action execution/handler coverage, declared

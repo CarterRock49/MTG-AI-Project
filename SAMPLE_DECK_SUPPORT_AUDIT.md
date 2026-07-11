@@ -244,9 +244,29 @@ exactly the Treasure, 4 life, two blue 1/1 Fish, and one draw that apply.
 These should make affected card statistics ineligible for harvest until the
 listed behavior is implemented and guarded by scenarios.
 
-None currently confirmed in the audited eight-deck sample. Rounds 7.30–7.34
+None currently confirmed in the audited eight-deck sample. Rounds 7.30–7.35
 closed the remaining classification groups and the first strength-run warning
 and error signatures with exact scenarios.
+
+## Closed In Round 7.35
+
+- Hopeless Nightmare's mask-valid action 21 failure was another transient
+  priority timing mismatch: mask generation accepted the empty-stack main-phase
+  wrapper, while spell execution required a literal main phase. Both now use
+  the canonical sorcery-speed predicate, including face-aware timing for modal
+  double-faced and Adventure casts.
+- Ordinary `PLAY_SPELL` actions pin the observed hand slot, card ID, and
+  controller through execution, reject stale slots, and preserve detailed
+  failure context.
+- Replay schema v2 records the agent seat and restores exact named deck seats
+  regardless of the caller's deck-list ordering. The original 48-action replay
+  now reaches and executes the formerly failing cast.
+
+The exact failed checkpoint completed a six-worker, 12,288-transition CUDA
+canary with a four-episode periodic evaluation and 256-step final validation.
+Both validations passed and no new warning/error records were created. Gates:
+256/256 scenarios, 9/9 smoke, 12/12 training, 10/10 + 5/5 Harvest, 6/6 fuzz
+configuration, and 8,000/8,000 default fuzz.
 
 ## Closed In Round 7.34
 

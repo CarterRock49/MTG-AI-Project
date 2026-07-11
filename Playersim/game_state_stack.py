@@ -1137,9 +1137,16 @@ class GameStateStackMixin:
         if not card_in_source:
             logging.warning(f"Cannot cast {getattr(card,'name', card_id)}: Not found in {player['name']}'s {source_zone}.")
             return False
-        if not self._can_cast_now(card_id, player):
-             logging.warning(f"Cannot cast {getattr(card,'name', card_id)}: Invalid timing (Phase: {self._PHASE_NAMES.get(self.phase)}, Prio: {getattr(self.priority_player,'name','None')}, Stack:{len(self.stack)}).")
-             return False
+        if not self._can_cast_now(card_id, player, context=context):
+            priority_name = (
+                self.priority_player.get('name', 'None')
+                if isinstance(self.priority_player, dict)
+                else getattr(self.priority_player, 'name', 'None'))
+            logging.warning(
+                f"Cannot cast {getattr(card,'name', card_id)}: Invalid timing "
+                f"(Phase: {self._PHASE_NAMES.get(self.phase)}, "
+                f"Prio: {priority_name}, Stack:{len(self.stack)}).")
+            return False
 
         # --- 2. Check for Modal Spell ---
         modal_modes, min_modes, max_modes = None, 0, 0
@@ -1573,7 +1580,7 @@ class GameStateStackMixin:
 
         return True
 
-    def _can_cast_now(self, card_id, player):
+    def _can_cast_now(self, card_id, player, context=None):
         """
         Check if a spell can be cast at the current time based on phase, stack state, etc.
         
@@ -1584,27 +1591,45 @@ class GameStateStackMixin:
         Returns:
             bool: Whether the spell can be cast
         """
+        context = context or {}
         card = self._safe_get_card(card_id)
         if not card or not hasattr(card, 'card_types'):
             return False
-        
-        # Check phase compatibility
-        is_instant = 'instant' in card.card_types
-        has_flash = hasattr(card, 'oracle_text') and 'flash' in card.oracle_text.lower()
-        
-        # Instants and cards with flash can be cast anytime player has priority
-        if not (is_instant or has_flash):
-            # Non-instant speed spells can only be cast in main phases with empty stack
-            if self.phase not in [self.PHASE_MAIN_PRECOMBAT, self.PHASE_MAIN_POSTCOMBAT]:
-                return False
-            if self.stack:  # Can't cast sorcery-speed spells if stack isn't empty
-                return False
-        
+
+        # Timing follows the face/Adventure actually being cast. A front-face
+        # type must not make an instant back face sorcery-only (or vice versa).
+        type_line = getattr(card, 'type_line', '') or ''
+        oracle_text = getattr(card, 'oracle_text', '') or ''
+        use_printed_card_types = True
+        if context.get('cast_as_back_face') and hasattr(card, 'get_face_type_line'):
+            type_line = card.get_face_type_line(1) or type_line
+            oracle_text = card.get_face_text(1) or ''
+            use_printed_card_types = False
+        elif context.get('cast_as_adventure') and hasattr(card, 'get_adventure_data'):
+            adventure = card.get_adventure_data() or {}
+            type_line = adventure.get('type', '') or type_line
+            oracle_text = adventure.get('effect', '') or ''
+            use_printed_card_types = False
+
+        type_line_lower = type_line.lower()
+        is_instant = ('instant' in type_line_lower
+                      or (use_printed_card_types
+                          and 'instant' in getattr(card, 'card_types', [])))
+        has_flash = 'flash' in oracle_text.lower()
+
         # Check if player has priority
         active_player = self._get_active_player()
         has_priority = (player == active_player and self.priority_pass_count == 0) or self.priority_player == player
-        
-        return has_priority
+        if not has_priority:
+            return False
+
+        # Instants and cards with flash can be cast whenever the player has
+        # priority. Every other spell uses the exact canonical predicate used
+        # by action-mask generation, including transient PHASE_PRIORITY over a
+        # main phase.
+        if is_instant or has_flash:
+            return True
+        return self._can_act_at_sorcery_speed(player)
 
     def play_land(self, card_id, controller, play_back_face=False,
                   source_zone="hand", permission=None):

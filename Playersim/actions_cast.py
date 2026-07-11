@@ -169,15 +169,30 @@ class CastingHandlersMixin:
 
     def _handle_play_spell(self, param, **kwargs):
         gs = self.game_state
-        player = self._get_policy_player(kwargs.get('context'))
         context = kwargs.get('context', {})
-        hand_idx = param
+        player = self._get_policy_player(context)
+        hand_idx = context.get('hand_idx', param)
 
-        if hand_idx >= len(player.get("hand", [])):
-            logging.warning(f"PLAY_SPELL: Invalid hand index {hand_idx}")
+        if (not isinstance(hand_idx, int) or hand_idx < 0
+                or hand_idx >= len(player.get("hand", []))):
+            self.last_handler_error = (
+                f"PLAY_SPELL invalid hand index {hand_idx!r} for a "
+                f"{len(player.get('hand', []))}-card hand")
+            logging.warning(self.last_handler_error)
             return -0.2, False
 
         card_id = player["hand"][hand_idx]
+        expected_card_id = context.get('card_id')
+        if expected_card_id is not None and card_id != expected_card_id:
+            if expected_card_id in player.get("hand", []):
+                hand_idx = player["hand"].index(expected_card_id)
+                card_id = expected_card_id
+            else:
+                self.last_handler_error = (
+                    f"PLAY_SPELL stale hand slot {context.get('hand_idx', param)}: "
+                    f"expected card {expected_card_id}, found {card_id}")
+                logging.warning(self.last_handler_error)
+                return -0.2, False
         card = gs._safe_get_card(card_id)
         if not card: return -0.2, False
 
@@ -191,8 +206,20 @@ class CastingHandlersMixin:
 
         success = gs.cast_spell(card_id, player, context=context)
         if success:
+            self.last_handler_error = None
             return 0.1 + card_value * 0.3, True # Success
         else:
+            self.last_handler_error = (
+                "PLAY_SPELL rejected after mask validation: "
+                f"card_id={card_id}, card={getattr(card, 'name', None)!r}, "
+                f"hand_idx={hand_idx}, in_hand={card_id in player.get('hand', [])}, "
+                f"phase={getattr(gs, 'phase', None)}, "
+                f"underlying_phase={getattr(gs, 'previous_priority_phase', None)}, "
+                f"priority_controller="
+                f"{'p1' if gs.priority_player is gs.p1 else 'p2' if gs.priority_player is gs.p2 else None}, "
+                f"acting_controller={'p1' if player is gs.p1 else 'p2'}, "
+                f"stack_size={len(getattr(gs, 'stack', []))}")
+            logging.warning(self.last_handler_error)
             logging.debug(f"PLAY_SPELL: Failed (handled by gs.cast_spell). Card: {card_id}")
             return -0.1, False # Failure
 
