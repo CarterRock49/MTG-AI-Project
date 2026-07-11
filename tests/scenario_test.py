@@ -6596,10 +6596,18 @@ def s_floodpits_drowner_stun_shuffle():
         "power": 1, "toughness": 1,
     }, "battlefield")
     gs.ability_handler.active_triggers.clear()
-    gs._safe_get_card(stunned).counters["stun"] = 1
     controller["entered_battlefield_this_turn"].discard(source)
     controller["mana_pool"] = {'W': 0, 'U': 1, 'B': 0, 'R': 0, 'G': 0, 'C': 1}
     handler = get_env().action_handler
+    ability_action = 100 + controller["battlefield"].index(source) * 3
+    mask = handler.generate_valid_actions()
+    assert not mask[ability_action], \
+        "Drowner was mask-valid without a stun-counter creature to target"
+
+    gs._safe_get_card(stunned).counters["stun"] = 1
+    mask = handler.generate_valid_actions()
+    assert mask[ability_action], \
+        "Drowner stayed masked after a legal stun-counter target appeared"
 
     _, ok = handler._handle_activate_ability(None, {
         "battlefield_idx": controller["battlefield"].index(source),
@@ -10144,6 +10152,46 @@ def scenario_play_spell_from_main_priority_wrapper():
     assert not info.get('execution_failed'), info.get('error_message')
     assert nightmare_id not in player['hand'], \
         "the mask-valid Hopeless Nightmare remained in hand"
+
+
+@scenario("117.1 / 601.2c", "a targeted sorcery preserves its main phase through target selection")
+def scenario_targeted_spell_from_main_priority_wrapper():
+    gs = fresh(); handler = get_env().action_handler
+    gs.agent_is_p1 = False
+    player = gs.p2
+    gs.turn = 2
+    gs.previous_priority_phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.phase = gs.PHASE_PRIORITY
+    gs.priority_player = player
+    gs.priority_pass_count = 0
+    gs.stack.clear()
+    duress = inject_into_zone(gs, player, {
+        "name": "Duress", "mana_cost": "{B}", "cmc": 1,
+        "type_line": "Sorcery",
+        "oracle_text": (
+            "Target opponent reveals their hand. You choose a noncreature, "
+            "nonland card from it. That player discards that card."),
+    }, "hand")
+    player["mana_pool"] = {
+        'W': 0, 'U': 0, 'B': 1, 'R': 0, 'G': 0, 'C': 0}
+
+    assert gs.cast_spell(duress, player), \
+        "Duress could not begin targeting from transient main priority"
+    assert gs.phase == gs.PHASE_TARGETING and gs.targeting_context
+    assert gs.targeting_context.get("targeting_return_phase") == gs.PHASE_PRIORITY
+    assert (gs.targeting_context.get(
+        "targeting_return_previous_priority_phase") ==
+        gs.PHASE_MAIN_PRECOMBAT)
+    candidates = handler._get_target_selection_candidates(
+        player, gs.targeting_context)
+    assert candidates == ["p1"], f"Duress target candidates were {candidates}"
+    reward, ok = handler._handle_select_target(0, {})
+    assert ok, f"mask-valid Duress target failed with reward {reward}"
+    assert gs.stack and gs.stack[-1][1] == duress, \
+        "Duress did not finish casting after target selection"
+    assert (gs.phase == gs.PHASE_PRIORITY
+            and gs.previous_priority_phase == gs.PHASE_MAIN_PRECOMBAT), \
+        "target selection lost the main phase beneath priority"
 
 
 @scenario("deck legality", "format status, copy limits, bans, restrictions, basics, and minimum size are validated")

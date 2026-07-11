@@ -814,7 +814,11 @@ class ChoiceHandlersMixin:
         categorized_targets = dict(categorized_targets)
 
         def restore_phase(priority_player):
-            if gs.previous_priority_phase is not None:
+            if "targeting_return_phase" in ctx:
+                gs.phase = ctx.get("targeting_return_phase")
+                gs.previous_priority_phase = ctx.get(
+                    "targeting_return_previous_priority_phase")
+            elif gs.previous_priority_phase is not None:
                 gs.phase = gs.previous_priority_phase
                 gs.previous_priority_phase = None
             else:

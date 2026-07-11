@@ -1892,7 +1892,27 @@ class AbilityHandler:
         activated_abilities = self.get_activated_abilities(card_id)
         if 0 <= ability_index < len(activated_abilities):
             ability = activated_abilities[ability_index]
-            return ability.can_pay_cost(self.game_state, controller)
+            if not ability.can_pay_cost(self.game_state, controller):
+                return False
+
+            # CR 602.2b: a required target must exist before an ability can be
+            # activated.  The execution handler already enforced this, but
+            # the mask-side predicate checked costs only, exposing Floodpits
+            # Drowner with no stun-counter creature to target.
+            effect_text = getattr(
+                ability, 'effect', getattr(ability, 'effect_text', '')) or ''
+            if "target" in effect_text.lower():
+                minimum, _ = self.game_state._target_bounds_from_text(
+                    effect_text)
+                if minimum > 0:
+                    target_type = self.game_state._get_target_type_from_text(
+                        effect_text)
+                    valid_map = self.targeting_system.get_valid_targets(
+                        card_id, controller, target_type,
+                        effect_text=effect_text)
+                    if not any(valid_map.values()):
+                        return False
+            return True
                 
         return False
 

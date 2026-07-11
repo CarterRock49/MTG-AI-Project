@@ -1496,9 +1496,13 @@ class GameStateStackMixin:
         # Stage every uncommitted target choice, then re-enter cast_spell with
         # the committed target set before mana/nonmana costs or zone movement.
         if target_selection_pending:
-            if self.phase not in [
-                    self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
-                self.previous_priority_phase = self.phase
+            # Preserve both layers of timing state.  PHASE_PRIORITY may wrap a
+            # main phase in previous_priority_phase; overwriting that field
+            # with PHASE_PRIORITY made a legal sorcery (Duress) fail timing
+            # when its target choice resumed.
+            targeting_return_phase = self.phase
+            targeting_return_previous_priority_phase = \
+                self.previous_priority_phase
             self.phase = self.PHASE_TARGETING
             self.targeting_context = {
                 "source_id": card_id, "controller": player,
@@ -1510,6 +1514,9 @@ class GameStateStackMixin:
                 "effect_text": targeting_text,
                 "resume_cast": True,
                 "original_cast_context": dict(context),
+                "targeting_return_phase": targeting_return_phase,
+                "targeting_return_previous_priority_phase":
+                    targeting_return_previous_priority_phase,
                 # Pure pre-modifier cost snapshot used by the action mask to
                 # reject completed target sets that cannot pay.
                 "cost_before_modifiers": copy_module.deepcopy(

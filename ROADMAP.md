@@ -16,7 +16,7 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 12/12, and 269/269, plus 10/10 fixture-
+   every delivery (currently 9/9, 12/12, and 270/270, plus 10/10 fixture-
    harvest tests, 5/5 production-protocol tests, 6/6 fuzz/replay tests, and
    the deterministic 8-seed / 8,000-action default fuzz profile, and the
    strict 32-seed / 320,000-action long profile).
@@ -57,7 +57,7 @@ The project is complete when all of the following hold:
 - Tier 5 (operations/integration): ◐ Harvest orchestration is complete; strength
   qualification, production throughput profiling, and deck-builder integration
   remain open.
-- Test gates: smoke 9/9, training 12/12, scenarios 269/269 (grown from 12),
+- Test gates: smoke 9/9, training 12/12, scenarios 270/270 (grown from 12),
   fixture harvest 10/10, production Harvest protocol 5/5, fuzz/replay
   configuration 6/6, deterministic default fuzz 8 seeds x 1,000 valid
   actions, and strict long fuzz 32 seeds x 10,000 valid actions.
@@ -1120,9 +1120,46 @@ new warning or error file. Gates: 269/269 scenarios, 9/9 smoke, 12/12 training,
 10/10 + 5/5 Harvest, 6/6 fuzz/replay configuration, and 8,000/8,000
 default-fuzz actions.
 
+**Round 7.41 (July 2026):** strength run
+`ALPHA_ZERO_MTG_V3.00_20260711_124331` found the remaining deferred-cast timing
+path. Duress began legally during transient `PRIORITY` over Player 2's main
+phase, but staging its opponent target overwrote `previous_priority_phase`.
+After the target was selected, the resumed sorcery saw bare priority with no
+underlying main phase and rejected its mask-valid action 274.
+
+Targeted casts now snapshot and restore both the visible phase and underlying
+priority phase, matching the casting-choice repair from Round 7.39. The exact
+122-action EsperSelf-vs-GolgariMidrange replay now completes the target action,
+puts Duress on the stack, and records no execution failure. CUDA canary
+`ALPHA_ZERO_MTG_V3.00_20260711_125649` resumed the failed run's best checkpoint
+and completed 8,192 transitions at 139 rollout FPS. Checkpoint reload and the
+256-step mask/reward/progress/cycle validation passed with no new warning or
+error file. Gates: 270/270 scenarios, 9/9 smoke, 12/12 training, 10/10 + 5/5
+Harvest, 6/6 fuzz/replay configuration, the exact failure replay, and
+8,000/8,000 default-fuzz actions.
+
+**Round 7.42 (July 2026):** strength run
+`ALPHA_ZERO_MTG_V3.00_20260711_125937` exposed Floodpits Drowner's shuffle
+ability as mask-valid with no creature bearing a stun counter. Execution already
+enforced the required target and rejected action 118; the shared mask predicate
+checked only whether the mana/tap costs were payable. `can_activate_ability`
+now also requires at least one legal target for every targeted activated
+ability whose minimum target count is nonzero.
+
+The exact 212-action DimirSelf mirror replay now masks action 118; forcing the
+recorded action is handled as an ordinary invalid action rather than a fidelity
+failure. The existing exact-card Drowner scenario proves both mask directions:
+the action is absent without a stun target and appears as soon as one exists.
+CUDA canary `ALPHA_ZERO_MTG_V3.00_20260711_131724` resumed the failed run's
+65,536-step best checkpoint, advanced it to 73,728 steps at 147 rollout FPS,
+and passed checkpoint reload plus the 256-step mask/reward/progress/cycle
+validation with no new warning or error file. Gates remain 270/270 scenarios,
+9/9 smoke, 12/12 training, 10/10 + 5/5 Harvest, 6/6 fuzz/replay configuration,
+the exact failure replay, and 8,000/8,000 default-fuzz actions.
+
 ## Tier 4 — Verification & calibration
 
-1. ✅ Golden scenario harness — 269 scenarios and growing; scenario-first is a
+1. ✅ Golden scenario harness — 270 scenarios and growing; scenario-first is a
    working agreement, not a suggestion.
 2. ✅ **Property/invariant harness**: exact non-token zone/stack conservation,
    SBA fixed points, mask-valid action execution/handler coverage, declared

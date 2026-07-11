@@ -248,6 +248,33 @@ None currently confirmed in the audited eight-deck sample. Rounds 7.30–7.35
 closed the remaining classification groups and the first strength-run warning
 and error signatures with exact scenarios.
 
+## Closed In Round 7.42
+
+- Targeted activated abilities are mask-valid only when at least one legal
+  required target exists. Floodpits Drowner's shuffle action is absent without
+  a creature bearing a stun counter and appears immediately when one exists.
+
+Run `ALPHA_ZERO_MTG_V3.00_20260711_125937` found the mismatch through action
+118 in a DimirSelf mirror. The exact 212-action replay now masks that action.
+CUDA canary `ALPHA_ZERO_MTG_V3.00_20260711_131724` advanced the checkpoint from
+65,536 to 73,728 steps and passed final validation without a new warning/error
+file. Gates remain 270/270 scenarios, 9/9 smoke, 12/12 training, 10/10 + 5/5
+Harvest, 6/6 fuzz configuration, and 8,000/8,000 default-fuzz actions.
+
+## Closed In Round 7.41
+
+- Targeted casts preserve the complete timing window while the policy chooses
+  targets. Duress can begin during transient priority over a main phase, select
+  its opponent, and resume the same legal sorcery cast without losing its
+  underlying phase.
+
+Run `ALPHA_ZERO_MTG_V3.00_20260711_124331` exposed this through a mask-valid
+Duress target action. Its exact 122-action replay now places Duress on the
+stack. CUDA canary `ALPHA_ZERO_MTG_V3.00_20260711_125649` completed 8,192
+transitions and final checkpoint validation without a new warning/error file.
+Gates: 270/270 scenarios, 9/9 smoke, 12/12 training, 10/10 + 5/5 Harvest, 6/6
+fuzz configuration, and 8,000/8,000 default-fuzz actions.
+
 ## Closed In Round 7.40
 
 - Pawpatch Recruit now triggers only when one of its controller's creatures is
