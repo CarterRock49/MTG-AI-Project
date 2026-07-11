@@ -244,9 +244,28 @@ exactly the Treasure, 4 life, two blue 1/1 Fish, and one draw that apply.
 These should make affected card statistics ineligible for harvest until the
 listed behavior is implemented and guarded by scenarios.
 
-None currently confirmed in the audited eight-deck sample. Rounds 7.30–7.32
+None currently confirmed in the audited eight-deck sample. Rounds 7.30–7.33
 closed the remaining classification groups and the first strength-run warning
 and error signatures with exact scenarios.
+
+## Closed In Round 7.33
+
+- `PLAY_LAND` actions now carry the observed card ID and controller as well as
+  the encoded hand slot. Slot 6/action 19 is covered end to end across all 33
+  real lands in the audited pool, stale slot rebinding is rejected, and future
+  execution failures persist the exact policy state and replay instead of
+  losing the worker-local cause.
+- Plot, Saddle, and Mockingbird's copy-as-enters declaration lines no longer
+  duplicate their dedicated mechanic paths as static layer effects.
+- Ceased tokens keep last-known characteristics for their pending triggers and
+  abilities without remaining in `card_db` or producing missing-card warnings.
+- Unreset evaluation shutdown is quiet, and every model artifact—including the
+  architecture summary—is contained under one `models/<run_id>/` directory.
+
+The real two-worker CUDA canary completed 128 transitions and a 256-step final
+validation with no new warning/error records and exactly one model directory
+for the run. Gates: 255/255 scenarios, 9/9 smoke, 12/12 training, 10/10 + 5/5
+Harvest, 6/6 fuzz configuration, and 8,000/8,000 default-fuzz actions.
 
 ## Closed In Round 7.32
 

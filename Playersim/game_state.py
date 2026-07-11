@@ -37,7 +37,7 @@ class GameState(
                  "turn", "_phase", "_last_turn_phase", "agent_is_p1", "combat_damage_dealt", "day_night_state",
                  "current_attackers", "current_block_assignments", 'mulligan_data',
                  "current_spell_requires_target", "current_spell_card_id", "exhaust_ability_used",
-                 "_last_card_locations",
+                 "_last_card_locations", "_ceased_token_cards",
                  "optimal_attackers", "attack_suggestion_used", 'cards_played', 'play_history', 'phased_out_state',
                  "p1", "p2", "ability_handler", "damage_dealt_this_turn",
                  "previous_priority_phase", "layer_system", "until_end_of_turn_effects",
@@ -164,6 +164,7 @@ class GameState(
         self.current_block_assignments = {}
         self.exhaust_ability_used = {} # Add this line
         self._last_card_locations = {}
+        self._ceased_token_cards = {}
         # Combat optimization variables
         self.optimal_attackers = None
         self.attack_suggestion_used = False
@@ -635,6 +636,7 @@ class GameState(
             self.play_history = {0: {}, 1: {}} # {player_idx: {turn: [card_ids]}} — real play turns for stats
             self.exhaust_ability_used = {} # Reset exhaust tracking
             self._last_card_locations = {}
+            self._ceased_token_cards = {}
             self._consecutive_no_ops = 0
             # Ensure decks exist and are at least copy-able, with fallbacks if necessary
             p1_deck_safe = p1_deck.copy() if isinstance(p1_deck, list) else []
@@ -936,6 +938,7 @@ class GameState(
         # Use shallow copy (.copy() or [:]) only if absolutely sure elements are immutable (like IDs) AND no nested mutables exist.
         mutable_attrs_deepcopy = [
             "stack", "current_block_assignments", "exhaust_ability_used", "_last_card_locations",
+            "_ceased_token_cards",
             "impending_cards", "_offspring_cost_paid_context", "until_end_of_turn_effects",
             "temp_control_effects", "abilities_activated_this_turn", "spells_cast_this_turn",
             "cards_played", "damage_dealt_this_turn", "cards_drawn_this_turn",
@@ -1307,6 +1310,29 @@ class GameState(
             # Use standardized dictionary format
             if card_id in self.card_db:
                 return self.card_db[card_id]
+
+            # Tokens cease to exist immediately after leaving the
+            # battlefield. Delayed triggers may still carry their last-known
+            # ID, which is valid event context and must not be reported as a
+            # corrupt database lookup. Keep warning if the ID is somehow still
+            # present in a live zone/stack, because that would be a real bug.
+            if isinstance(card_id, str) and card_id.startswith("TOKEN_"):
+                ceased_card = self._ceased_token_cards.get(card_id)
+                if ceased_card is not None:
+                    return ceased_card
+                live_zone_reference = any(
+                    card_id in player.get(zone, ())
+                    for player in (self.p1, self.p2) if player is not None
+                    for zone in ("library", "hand", "battlefield",
+                                 "graveyard", "exile")
+                )
+                live_stack_reference = any(
+                    isinstance(item, tuple) and len(item) > 1
+                    and item[1] == card_id
+                    for item in self.stack
+                )
+                if not live_zone_reference and not live_stack_reference:
+                    return default_value
                     
             # Log only on first occurrence
             if not hasattr(self, '_logged_card_ids'):

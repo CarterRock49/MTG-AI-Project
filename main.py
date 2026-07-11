@@ -969,7 +969,7 @@ def training_artifacts(run_model_dir, run_id):
         "feature_extractor": artifact_identity(
             os.path.join(run_model_dir, "feature_extractor.pth")),
         "network_summary": artifact_identity(os.path.join(
-            MODEL_DIR, f"{run_id}_architecture", "network_summary.txt")),
+            run_model_dir, "architecture", "network_summary.txt")),
         "checkpoints": checkpoints,
     }
 
@@ -1661,7 +1661,7 @@ class TrainingPerformanceCallback(BaseCallback):
 
 def record_network_architecture(model, run_id):
     """Record the neural network architecture to a text file"""
-    architecture_dir = os.path.join(MODEL_DIR, f"{run_id}_architecture")
+    architecture_dir = os.path.join(MODEL_DIR, run_id, "architecture")
     os.makedirs(architecture_dir, exist_ok=True)
     
     try:

@@ -772,6 +772,33 @@ def check_extractor_registration(model):
         f"phase embedding has {n_emb} slots but phases reach {true_max_phase}")
 
 
+@stage("one model directory contains every run artifact")
+def check_model_artifact_layout(model):
+    import main as m
+
+    original_model_dir = m.MODEL_DIR
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            m.MODEL_DIR = temp_dir
+            run_id = "LAYOUT_TEST_RUN"
+            run_model_dir = os.path.join(temp_dir, run_id)
+            os.makedirs(run_model_dir)
+            m.record_network_architecture(model, run_id)
+
+            summary = os.path.join(
+                run_model_dir, "architecture", "network_summary.txt")
+            assert os.path.isfile(summary)
+            assert sorted(os.listdir(temp_dir)) == [run_id], (
+                "recording architecture created a sibling top-level model "
+                f"directory: {os.listdir(temp_dir)}")
+            artifacts = m.training_artifacts(run_model_dir, run_id)
+            expected_display_path = os.path.relpath(
+                summary, m.BASE_DIR).replace(os.sep, "/")
+            assert artifacts["network_summary"]["path"] == expected_display_path
+    finally:
+        m.MODEL_DIR = original_model_dir
+
+
 @stage("short training run (128 timesteps)")
 def short_train(model):
     model.learn(total_timesteps=128, progress_bar=False)
@@ -813,6 +840,7 @@ def main():
         if model is None:
             return finish()
         check_extractor_registration(model)
+        check_model_artifact_layout(model)
         short_train(model)
         save_load_roundtrip(model, vec_env)
         vec_env.close()

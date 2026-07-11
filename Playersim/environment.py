@@ -768,7 +768,11 @@ class AlphaZeroMTGEnv(gym.Env):
     def close(self):
         """Persist all statistics before shutdown so no recorded game is lost."""
         try:
-            self.ensure_game_result_recorded()
+            # Eval environments may be constructed and then closed when a
+            # training worker fails before the evaluator's first reset.  That
+            # is a normal shutdown state, not a missing-player game error.
+            if self.game_state.p1 is not None and self.game_state.p2 is not None:
+                self.ensure_game_result_recorded()
         except Exception:
             pass  # best effort: closing mid-game may have no result to record
         try:
@@ -1237,10 +1241,32 @@ class AlphaZeroMTGEnv(gym.Env):
             reward, done, truncated, handler_info = self.action_handler.apply_action(action_idx, context=action_context)
             env_info.update(handler_info) # Merge info
 
+            if handler_info.get("execution_failed"):
+                diagnostic = self._policy_state_diagnostic(
+                    recent_action=action_idx, valid_mask=current_mask)
+                diagnostic["failed_action"] = handler_info.get("failed_action")
+                diagnostic["handler_error"] = handler_info.get("handler_error")
+                env_info["policy_state"] = diagnostic
+                env_info["error_message"] = (
+                    f"{handler_info.get('error_message', 'Mask-valid action failed')}; "
+                    f"state={diagnostic}")
+                try:
+                    env_info["failure_replay_path"] = \
+                        self._persist_failure_replay(
+                            diagnostic, action_idx,
+                            handler_info.get("failed_action", {}).get(
+                                "context", action_context))
+                except Exception as replay_error:
+                    logging.error(
+                        "Could not persist execution-failure replay: %s",
+                        replay_error)
+
             # --- 4. Opponent Simulation Loop (Only if agent's action was valid and game not over) ---
             opponent_loop_count = 0
             max_opponent_loops = 50 # Safety break
-            while not done and not truncated and opponent_loop_count < max_opponent_loops:
+            while (not done and not truncated
+                    and not env_info.get("execution_failed")
+                    and opponent_loop_count < max_opponent_loops):
                 opponent_loop_count += 1
                 # --- a. Check if opponent needs to act ---
                 opponent_player, opponent_context = self._opponent_needs_to_act()
@@ -1331,21 +1357,9 @@ class AlphaZeroMTGEnv(gym.Env):
                     f"Episode exceeded {self.max_episode_steps} steps: "
                     f"{diagnostic}")
                 try:
-                    replay_payload = self.export_replay()
-                    replay_payload["actions"].append({
-                        "action": int(action_idx),
-                        "context": dict(action_context),
-                    })
-                    replay_payload["failure"] = diagnostic
-                    replay_path = os.path.join(
-                        self.deck_stats_path, "failure_replay.json")
-                    temporary_path = f"{replay_path}.tmp"
-                    os.makedirs(self.deck_stats_path, exist_ok=True)
-                    with open(temporary_path, "w", encoding="utf-8") as handle:
-                        json.dump(replay_payload, handle, indent=2, sort_keys=True)
-                        handle.write("\n")
-                    os.replace(temporary_path, replay_path)
-                    env_info["failure_replay_path"] = replay_path
+                    env_info["failure_replay_path"] = \
+                        self._persist_failure_replay(
+                            diagnostic, action_idx, action_context)
                 except Exception as replay_error:
                     logging.error(
                         "Could not persist step-limit replay: %s", replay_error)
@@ -1683,6 +1697,23 @@ class AlphaZeroMTGEnv(gym.Env):
             with open(path, 'w', encoding='utf-8') as handle:
                 json.dump(payload, handle, indent=2, sort_keys=True)
         return payload
+
+    def _persist_failure_replay(self, diagnostic, action_idx, context):
+        """Atomically preserve the action path and terminal diagnostic."""
+        replay_payload = self.export_replay()
+        replay_payload["actions"].append({
+            "action": int(action_idx),
+            "context": dict(context or {}),
+        })
+        replay_payload["failure"] = diagnostic
+        replay_path = os.path.join(self.deck_stats_path, "failure_replay.json")
+        temporary_path = f"{replay_path}.tmp"
+        os.makedirs(self.deck_stats_path, exist_ok=True)
+        with open(temporary_path, "w", encoding="utf-8") as handle:
+            json.dump(replay_payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(temporary_path, replay_path)
+        return replay_path
 
     def replay(self, payload):
         """Reset to a recorded seed and replay its agent action sequence."""

@@ -379,8 +379,16 @@ class ActionSpaceMixin:
                     card_id = player["hand"][i]
                     card = gs._safe_get_card(card_id)
                     if card and 'land' in getattr(card, 'type_line', '').lower():
-                        # Context needed: hand_idx for the land card itself
-                        play_land_context = {'hand_idx': i}
+                        # Pin both the observed card and acting seat.  The
+                        # action index only encodes a hand slot; generated
+                        # context makes execution reject stale/rebound slots
+                        # instead of silently attempting a different card.
+                        controller_id = "p1" if player is gs.p1 else "p2"
+                        play_land_context = {
+                            'hand_idx': i,
+                            'card_id': card_id,
+                            'controller_id': controller_id,
+                        }
                         action_index = 13 + i if i < 7 else 393 + (i - 7)
                         set_valid_action(action_index, f"PLAY_LAND {card.name}", context=play_land_context)
 
@@ -389,7 +397,12 @@ class ActionSpaceMixin:
                         if (i < 8 and hasattr(card, 'is_mdfc') and card.is_mdfc()
                                 and back_face_data
                                 and 'land' in back_face_data.get('type_line','').lower()):
-                            mdfc_land_context = {'hand_idx': i, 'play_back_face': True}
+                            mdfc_land_context = {
+                                'hand_idx': i,
+                                'card_id': card_id,
+                                'controller_id': controller_id,
+                                'play_back_face': True,
+                            }
                             set_valid_action(180 + i, f"PLAY_MDFC_LAND_BACK {back_face_data.get('name', 'Unknown')}", context=mdfc_land_context)
                 except IndexError:
                     logging.warning(f"IndexError accessing hand for PLAY_LAND at index {i}")

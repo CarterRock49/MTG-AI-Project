@@ -16,7 +16,7 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 11/11, and 253/253, plus 10/10 fixture-
+   every delivery (currently 9/9, 12/12, and 255/255, plus 10/10 fixture-
    harvest tests, 5/5 production-protocol tests, 6/6 fuzz/replay tests, and
    the deterministic 8-seed / 8,000-action default fuzz profile, and the
    strict 32-seed / 320,000-action long profile).
@@ -55,7 +55,7 @@ The project is complete when all of the following hold:
 - Tier 5 (operations/integration): ◐ Harvest orchestration is complete; strength
   qualification, production throughput profiling, and deck-builder integration
   remain open.
-- Test gates: smoke 9/9, training 11/11, scenarios 253/253 (grown from 12),
+- Test gates: smoke 9/9, training 12/12, scenarios 255/255 (grown from 12),
   fixture harvest 10/10, production Harvest protocol 5/5, fuzz/replay
   configuration 6/6, deterministic default fuzz 8 seeds x 1,000 valid
   actions, and strict long fuzz 32 seeds x 10,000 valid actions.
@@ -879,9 +879,44 @@ and the folder contains exactly five files per family. Regression gates:
 253/253 scenarios, 9/9 smoke, 11/11 training, 10/10 + 5/5 harvest, 6/6 fuzz
 config, and all 8,000 default-profile mask-valid fuzz actions.
 
+**Round 7.33 (July 2026):** repaired and hardened the first longer strength run.
+The run stopped after 11 completed worker-4 games when mask-valid action 19
+(`PLAY_LAND` for hand slot 6) was rejected. Land masks now pin the observed
+card ID, hand slot, and controller through execution, and the handler refuses a
+stale/rebound slot instead of attempting a different card. Any mask-valid
+execution failure now includes the card/seat/phase preconditions, compact
+policy state, and an atomic replay artifact; opponent simulation stops at that
+boundary so it cannot mutate the failed state before capture.
+
+The same run exposed two operational faults. An evaluation environment closed
+before its first reset no longer emits a false missing-player game error, and
+network architecture output now lives under
+`models/<run_id>/architecture/` instead of creating a second
+`models/<run_id>_architecture/` sibling. The artifact manifest reads that same
+contained path, and a training-stack regression asserts that architecture
+recording leaves exactly one top-level directory for the run.
+
+Warning triage is also closed: Plot, Saddle, and Mockingbird's copy-as-enters
+declarations are handled by their dedicated mechanics and no longer register
+as dead static/layer abilities. Ceased tokens retain last-known card
+characteristics outside `card_db`, allowing their already-stacked abilities and
+death triggers to resolve without false `Failed to find card` warnings. The
+action-19 regression plays all 33 real lands in the audited pool from slot 6,
+including Cavern, Restless lands, fast lands, pain lands, typed tapped lands,
+and Verges.
+
+The real two-worker CUDA canary `ALPHA_ZERO_MTG_V3.00_20260711_025239`
+completed 128/128 transitions and passed its 256-step checkpoint reload,
+mask-valid prediction, progress, finite-reward, and short-cycle validation.
+It exercised six real land plays (including hand slot 7) with zero new warning
+or error records. `models/` contains only `baselines/` and that single canary
+run directory; its architecture summary is inside the run. Gates: 255/255
+scenarios, 9/9 smoke, 12/12 training, 10/10 + 5/5 Harvest, 6/6 fuzz/replay
+configuration tests, and all 8,000 default-profile fuzz actions.
+
 ## Tier 4 — Verification & calibration
 
-1. ✅ Golden scenario harness — 253 scenarios and growing; scenario-first is a
+1. ✅ Golden scenario harness — 255 scenarios and growing; scenario-first is a
    working agreement, not a suggestion.
 2. ✅ **Property/invariant harness**: exact non-token zone/stack conservation,
    SBA fixed points, mask-valid action execution/handler coverage, declared

@@ -550,6 +550,7 @@ class ActionHandler(
             return -5.0, True, False, info # reward, done, truncated, info
 
         # --- Initialization for the step ---
+        self.last_handler_error = None
         reward = 0.0
         done = False
         truncated = False # Gymnasium API requires truncated flag
@@ -723,6 +724,9 @@ class ActionHandler(
                     "param": param,
                     "context": _process_safe_info_value(action_context),
                 }
+                if self.last_handler_error:
+                    info["handler_error"] = str(self.last_handler_error)
+                    info["error_message"] += f": {self.last_handler_error}"
                 # Don't end the game here, return the state and let agent retry
                 return reward, done, truncated, info # Return 4-tuple
 

@@ -17,6 +17,7 @@ report as XPASS, reminding you to flip the flag.
 """
 
 import copy
+import json
 import logging
 import numpy as np
 import os
@@ -9540,6 +9541,112 @@ def scenario_ten_card_hand_action_window():
         "the mask-valid instant MDFC back-face action failed"
 
 
+@scenario("policy contract / PLAY_LAND", "hand slot six pins its card and controller from mask through execution")
+def scenario_play_land_slot_six_contract():
+    gs = fresh(); env = get_env(); handler = env.action_handler
+    player = gs.p1 if gs.agent_is_p1 else gs.p2
+    gs.turn = 1 if player is gs.p1 else 2
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    gs.stack.clear()
+    player["land_played"] = False
+    replace_hand(gs, player, [{
+        "name": f"Slot Filler {i}", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Sorcery", "oracle_text": ""
+    } for i in range(6)] + [{
+        "name": "Slot Six Land", "mana_cost": "", "cmc": 0,
+        "type_line": "Basic Land - Forest", "oracle_text": "{T}: Add {G}."
+    }])
+    land_id = player["hand"][6]
+    mask = env.action_mask()
+    assert mask[19], "PLAY_LAND(6) was absent for a legal seventh hand card"
+    context = handler.action_reasons_with_context[19]["context"]
+    assert context == {
+        "hand_idx": 6,
+        "card_id": land_id,
+        "controller_id": "p1" if player is gs.p1 else "p2",
+    }, f"PLAY_LAND(6) did not pin its generated identity: {context}"
+    _, _, _, _, info = env.step(19)
+    assert not info.get("execution_failed"), info.get("error_message")
+    assert land_id in player["battlefield"] and land_id not in player["hand"], \
+        "the exact land exposed by action 19 was not moved to the battlefield"
+
+    # Exercise the production path for every land printed in the audited deck
+    # pool at the exact slot that failed the strength run. This includes fast
+    # lands, typed tapped lands, Restless lands, pain lands, Verges, and Cavern.
+    global _REAL_DB
+    if _REAL_DB is None:
+        from Playersim.card import load_decks_and_card_db
+        _, _REAL_DB = load_decks_and_card_db(os.path.join(REPO_ROOT, "Decks"))
+    real_land_names = sorted({
+        card.name for card in _REAL_DB.values()
+        if "land" in getattr(card, "type_line", "").lower()
+    })
+    assert real_land_names
+    for offset, land_name in enumerate(real_land_names):
+        gs = fresh(SEED + 50_000 + offset * 100); env = get_env()
+        handler = env.action_handler
+        player = gs.p1 if gs.agent_is_p1 else gs.p2
+        gs.turn = 1 if player is gs.p1 else 2
+        gs.phase = gs.PHASE_MAIN_PRECOMBAT
+        gs.priority_player = player
+        gs.stack.clear()
+        player["land_played"] = False
+        replace_hand(gs, player, [{
+            "name": f"Real Land Filler {i}", "mana_cost": "{1}", "cmc": 1,
+            "type_line": "Sorcery", "oracle_text": ""
+        } for i in range(6)])
+        real_land_id = inject_real_card(gs, player, land_name, "hand")
+        assert player["hand"][6] == real_land_id
+        mask = handler.generate_valid_actions()
+        assert mask[19], f"{land_name} was not exposed at hand slot 6"
+        handler.current_valid_actions = mask
+        _, _, _, land_info = handler.apply_action(19)
+        assert not land_info.get("execution_failed"), \
+            f"{land_name} failed action 19: {land_info.get('error_message')}"
+        assert real_land_id in player["battlefield"], \
+            f"{land_name} did not reach the battlefield from action 19"
+
+    # A future engine-side rejection must preserve enough evidence to replay
+    # and diagnose it. Force only the final play_land call to reject while the
+    # public mask remains legal; restore the class method immediately.
+    gs = fresh(SEED + 90_000); env = get_env(); handler = env.action_handler
+    player = gs.p1 if gs.agent_is_p1 else gs.p2
+    gs.turn = 1 if player is gs.p1 else 2
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    player["land_played"] = False
+    replace_hand(gs, player, [{
+        "name": f"Failure Filler {i}", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Sorcery", "oracle_text": ""
+    } for i in range(6)] + [{
+        "name": "Failure Land", "type_line": "Basic Land - Forest",
+        "oracle_text": "{T}: Add {G}.",
+    }])
+    failed_land_id = player["hand"][6]
+    game_state_type = type(gs)
+    original_play_land = game_state_type.play_land
+    try:
+        game_state_type.play_land = lambda *_args, **_kwargs: False
+        assert env.action_mask()[19]
+        _, _, _, _, failure_info = env.step(19)
+    finally:
+        game_state_type.play_land = original_play_land
+    assert failure_info.get("execution_failed")
+    assert failure_info.get("handler_error")
+    diagnostic = failure_info.get("policy_state", {})
+    assert diagnostic.get("failed_action", {}).get("context", {}).get(
+        "card_id") == failed_land_id
+    replay_path = failure_info.get("failure_replay_path")
+    assert replay_path and os.path.isfile(replay_path)
+    with open(replay_path, encoding="utf-8") as replay_handle:
+        replay_payload = json.load(replay_handle)
+    assert replay_payload["actions"][-1]["action"] == 19
+    assert replay_payload["failure"]["handler_error"]
+    assert failed_land_id in player["hand"], \
+        "opponent simulation mutated state after the forced execution failure"
+
+
 @scenario("deck legality", "format status, copy limits, bans, restrictions, basics, and minimum size are validated")
 def scenario_deck_legality_validation():
     from Playersim.card import Card
@@ -9640,6 +9747,29 @@ def scenario_runtime_sentinels_and_mixed_ids_are_safe():
         "the DRAW_GAME sentinel was still looked up as a card ID"
 
 
+@scenario("111.1 / 704.5d", "a ceased token ID remains valid last-known context without a missing-card warning")
+def scenario_ceased_token_lookup_is_silent():
+    gs = fresh()
+    player = gs.p1
+    token_id = gs.create_token(player, {
+        "name": "Fish Token", "type_line": "Token Creature - Fish",
+        "oracle_text": "", "power": 1, "toughness": 1,
+    })
+    assert token_id and token_id in player["battlefield"]
+    assert gs.move_card(
+        token_id, player, "battlefield", player, "graveyard",
+        cause="test_token_ceases")
+    assert token_id not in gs.card_db
+    assert all(token_id not in zone_player.get(zone, ())
+               for zone_player in (gs.p1, gs.p2)
+               for zone in ("library", "hand", "battlefield", "graveyard", "exile"))
+    gs._logged_card_ids.discard(token_id)
+    assert gs._safe_get_card(token_id, None) is not None, \
+        "last-known token characteristics were discarded before triggers resolved"
+    assert token_id not in gs._logged_card_ids, \
+        "a normal last-known token ID was reported as a missing database card"
+
+
 @scenario("112.1 / 614.1c", "rule declarations handled elsewhere are not registered as dead layer abilities")
 def scenario_non_layer_declarations_are_not_static_abilities():
     from Playersim.ability_types import StaticAbility, TriggeredAbility
@@ -9679,6 +9809,28 @@ def scenario_non_layer_declarations_are_not_static_abilities():
     assert not any(isinstance(ability, StaticAbility)
                    and "opening hand" in ability.effect_text.lower()
                    for ability in leyline_abilities)
+
+    declarations = (
+        ("Test Saddle", "Saddle 3"),
+        ("Test Plot", "Plot {1}{R}"),
+        ("Test Mockingbird", (
+            "You may have this creature enter as a copy of any creature on the "
+            "battlefield with mana value less than or equal to the amount of "
+            "mana spent to cast this creature, except it's a Bird in addition "
+            "to its other types and it has flying")),
+    )
+    for name, declaration in declarations:
+        card_id = inject_card(gs, {
+            "name": name, "type_line": "Creature - Bird Mount",
+            "oracle_text": declaration, "power": 1, "toughness": 1,
+        })
+        gs.ability_handler._parse_and_register_abilities(
+            card_id, gs._safe_get_card(card_id))
+        abilities = gs.ability_handler.registered_abilities.get(card_id, [])
+        assert not any(isinstance(ability, StaticAbility)
+                       and declaration.lower() in ability.effect_text.lower()
+                       for ability in abilities), \
+            f"dedicated declaration was also registered as static: {declaration}"
 
 
 # ---------------------------------------------------------------------------

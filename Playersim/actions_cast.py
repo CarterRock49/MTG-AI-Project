@@ -84,20 +84,55 @@ class CastingHandlersMixin:
 
     def _handle_play_land(self, param, **kwargs):
         gs = self.game_state
-        player = self._get_policy_player(kwargs.get('context'))
-        hand_idx = param
         context = kwargs.get('context', {})
+        player = self._get_policy_player(context)
+        hand_idx = context.get('hand_idx', param)
+
+        if not isinstance(hand_idx, int) or hand_idx < 0:
+            self.last_handler_error = (
+                f"PLAY_LAND received invalid hand index {hand_idx!r}")
+            return -0.2, False
 
         if hand_idx >= len(player.get("hand", [])):
-            logging.warning(f"PLAY_LAND: Invalid hand index {hand_idx}")
+            self.last_handler_error = (
+                f"PLAY_LAND hand index {hand_idx} is outside a "
+                f"{len(player.get('hand', []))}-card hand")
+            logging.warning(self.last_handler_error)
             return -0.2, False
 
         card_id = player["hand"][hand_idx]
+        expected_card_id = context.get('card_id')
+        if expected_card_id is not None and card_id != expected_card_id:
+            # A generated action must keep referring to the card it exposed.
+            # Duplicate printed IDs are interchangeable, so relocating the
+            # expected ID is safe; otherwise this is a stale action contract.
+            if expected_card_id in player.get("hand", []):
+                hand_idx = player["hand"].index(expected_card_id)
+                card_id = expected_card_id
+            else:
+                self.last_handler_error = (
+                    f"PLAY_LAND stale hand slot {context.get('hand_idx', param)}: "
+                    f"expected card {expected_card_id}, found {card_id}")
+                logging.warning(self.last_handler_error)
+                return -0.2, False
+
         success = gs.play_land(card_id, player, play_back_face=context.get('play_back_face', False))
         if success:
+            self.last_handler_error = None
             return 0.2, True # Success
         else:
-            logging.debug(f"PLAY_LAND: Failed (handled by gs.play_land). Card: {card_id}, Back: {context.get('play_back_face', False)}")
+            card = gs._safe_get_card(card_id, None)
+            active_player = gs._get_active_player()
+            self.last_handler_error = (
+                "PLAY_LAND rejected after mask validation: "
+                f"card_id={card_id}, card={getattr(card, 'name', None)!r}, "
+                f"hand_idx={hand_idx}, in_hand={card_id in player.get('hand', [])}, "
+                f"land_played={bool(player.get('land_played', False))}, "
+                f"phase={getattr(gs, 'phase', None)}, "
+                f"active_controller={'p1' if active_player is gs.p1 else 'p2'}, "
+                f"acting_controller={'p1' if player is gs.p1 else 'p2'}, "
+                f"back_face={bool(context.get('play_back_face', False))}")
+            logging.warning(self.last_handler_error)
             return -0.1, False # Failure
 
     def _handle_play_from_graveyard(self, param, context=None, **kwargs):

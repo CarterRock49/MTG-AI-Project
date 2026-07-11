@@ -1024,6 +1024,11 @@ class AbilityHandler:
             r"^(?:this\s+\w+|[\w' -]+)\s+enters(?:\s+the\s+battlefield)?\s+tapped(?:\s+unless\b.*)?$",
             r"^if\s+this\s+card\s+is\s+in\s+your\s+opening\s+hand,?\s+you\s+may\s+begin\s+the\s+game\s+with\s+it\s+on\s+the\s+battlefield$",
             r"^enchant\b",
+            # These declaration lines have dedicated engine paths. Treating
+            # them as layer effects duplicates work and emits false warnings.
+            r"^\s*saddle\s+\d+\s*$",
+            r"^\s*plot\s*(?:\{[^}]+\})+\s*$",
+            r"^\s*you may have this creature enter as a copy of\b",
             r"^\s*domain\b", r"^\s*as an additional cost", r"^\s*collect evidence\s+\d+",
             r"^\s*[ivx]+\s*[—\u2014-]", r"^\s*Split second\b",
         ]

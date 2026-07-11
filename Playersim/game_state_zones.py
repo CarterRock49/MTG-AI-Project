@@ -766,6 +766,7 @@ class GameStateZonesMixin:
                  elif isinstance(dest_list_live, set) and card_id in dest_list_live: dest_list_live.discard(card_id)
              # Remove from card_db
              if card_id in self.card_db:
+                  self._ceased_token_cards[card_id] = card
                   del self.card_db[card_id]
                   logging.debug(f"Token {card_name} ({card_id}) ceased to exist after moving to {final_destination_zone}.")
              # Remove from player's token tracking if present

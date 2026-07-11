@@ -860,6 +860,7 @@ class GameStatePermanentsMixin:
             for card_id, zone_name in tokens_in_non_bf_zones:
                  # Remove from card_db
                  if card_id in self.card_db:
+                      self._ceased_token_cards[card_id] = self.card_db[card_id]
                       del self.card_db[card_id]
                       logging.debug(f"SBA: Token {card_id} ceased to exist in {zone_name}.")
                       removed_token = True
