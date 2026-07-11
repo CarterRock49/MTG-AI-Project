@@ -845,6 +845,14 @@ class GameStateTurnMixin:
                 _castable.discard(_cid)
             self.impulse_until_eot = set()
 
+        # "Until the end of your next turn" graveyard Adventure permissions
+        # remain usable through that turn's cleanup, then expire.
+        self.graveyard_adventure_permissions = [
+            entry for entry in getattr(
+                self, "graveyard_adventure_permissions", [])
+            if entry.get("expires_turn", self.turn) > self.turn
+        ]
+
         # 3. "Until end of turn" and "this turn" effects end
         # --- LayerSystem handles duration removal ---
         if hasattr(self, 'layer_system'):

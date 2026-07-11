@@ -73,6 +73,20 @@ class CombatActionHandler:
                         # Check affordability based on loyalty
                         if current_loyalty + cost < 0 and cost < 0: continue # Cannot pay minus if loyalty goes < 0
 
+                        effect_text = ability.get('effect', '')
+                        if 'target' in effect_text.lower():
+                            target_type = gs._get_target_type_from_text(effect_text)
+                            minimum, _ = gs._target_bounds_from_text(effect_text)
+                            valid_map = gs.targeting_system.get_valid_targets(
+                                card_id, player, target_type,
+                                effect_text=effect_text)
+                            valid_ids = {
+                                target_id for ids in valid_map.values()
+                                for target_id in ids
+                            }
+                            if len(valid_ids) < minimum:
+                                continue
+
                         action_context = {
                             "battlefield_idx": idx,
                             "ability_idx": ability_idx,
@@ -801,11 +815,17 @@ class CombatActionHandler:
              logging.warning(f"Tried to end Declare Blockers in phase {gs.phase}")
              return False
 
-        for attacker_id, blockers in list(getattr(gs, 'current_block_assignments', {}).items()):
-            attacker_card = gs._safe_get_card(attacker_id)
-            if attacker_card and self._has_keyword(attacker_card, "menace") and len(blockers) == 1:
-                logging.warning(f"Illegal block assignment: {attacker_card.name} has menace and only one blocker.")
-                return False
+        # Sequential declaration actions can be separated by state-based
+        # changes. Drop blockers that have left combat before validating the
+        # completed declaration; mask generation uses the same live view.
+        gs.current_block_assignments = self._live_block_assignments()
+        incomplete_menace = self._incomplete_menace_attacker()
+        if incomplete_menace is not None:
+            attacker_card = gs._safe_get_card(incomplete_menace)
+            logging.warning(
+                "Illegal block assignment: %s has menace and only one blocker.",
+                getattr(attacker_card, 'name', incomplete_menace))
+            return False
 
         # Determine if First Strike combat step is needed
         needs_first_strike_step = False
@@ -829,6 +849,153 @@ class CombatActionHandler:
         gs.priority_player = gs._get_active_player() # Priority back to active player for damage step
         gs.priority_pass_count = 0
         return True
+
+    def _incomplete_menace_attacker(self):
+        """Return an attacker with an illegal one-blocker menace assignment.
+
+        Blocking restrictions apply to the completed declaration, while this
+        action API constructs that declaration over several policy actions.
+        Keeping this predicate shared by mask generation and execution prevents
+        a finish action that the executor must reject.
+
+        The zone model intentionally permits repeated canonical card IDs for
+        physical copies, so count list occurrences rather than distinct IDs.
+        """
+        gs = self.game_state
+        assignments = self._live_block_assignments()
+        for attacker_id, blockers in list(assignments.items()):
+            attacker_card = gs._safe_get_card(attacker_id)
+            if (attacker_card and self._has_keyword(attacker_card, "menace")
+                    and len(blockers) == 1):
+                return attacker_id
+        return None
+
+    def _live_block_assignments(self):
+        """Return assignments backed by physical defender battlefield slots.
+
+        Canonical card IDs can repeat, so consume occurrence counts instead of
+        converting the battlefield to a set. Tapped blockers remain in combat;
+        permanents that left the battlefield, phased out, or stopped being
+        creatures do not.
+        """
+        from collections import Counter
+
+        gs = self.game_state
+        defender = gs._get_non_active_player()
+        remaining = Counter(defender.get('battlefield', []))
+        live = {}
+        for attacker_id, blockers in getattr(
+                gs, 'current_block_assignments', {}).items():
+            if attacker_id not in getattr(gs, 'current_attackers', []):
+                continue
+            kept = []
+            for blocker_id in blockers:
+                blocker = gs._safe_get_card(blocker_id)
+                if (remaining[blocker_id] <= 0 or not blocker
+                        or 'creature' not in getattr(
+                            blocker, 'card_types', [])
+                        or blocker_id in getattr(gs, 'phased_out', set())):
+                    continue
+                remaining[blocker_id] -= 1
+                kept.append(blocker_id)
+            if kept:
+                live[attacker_id] = kept
+        return live
+
+    def _blocking_attacker_for_slot(self, player, battlefield_index,
+                                    assignments=None):
+        """Map one physical battlefield occurrence to its assignment.
+
+        Repeated canonical IDs are separate physical cards in list zones. The
+        first matching battlefield occurrence corresponds to the first matching
+        assignment occurrence, the second to the second, and so on.
+        """
+        battlefield = player.get('battlefield', [])
+        if not (0 <= battlefield_index < len(battlefield)):
+            return None
+        blocker_id = battlefield[battlefield_index]
+        occurrence_index = sum(
+            1 for candidate_id in battlefield[:battlefield_index]
+            if candidate_id == blocker_id)
+        matching_assignments = []
+        source_assignments = (
+            self._live_block_assignments()
+            if assignments is None else assignments)
+        for attacker_id, blockers in source_assignments.items():
+            matching_assignments.extend(
+                attacker_id for assigned_id in blockers
+                if assigned_id == blocker_id)
+        if occurrence_index < len(matching_assignments):
+            return matching_assignments[occurrence_index]
+        return None
+
+    def _can_finish_block_declaration(self):
+        """Whether the current sequential block declaration is complete/legal."""
+        return self._incomplete_menace_attacker() is None
+
+    def _ordinary_block_targets(self, blocker_id):
+        """Legal targets for one sequential BLOCK action.
+
+        A menace attacker with no blockers must be blocked atomically by the
+        multi-block action. Exposing a first ordinary blocker creates an
+        illegal intermediate state and can strand a monotonic policy when no
+        second blocker exists. A second ordinary blocker remains available for
+        recovery from a pre-existing partial declaration.
+        """
+        gs = self.game_state
+        assignments = self._live_block_assignments()
+        targets = []
+        for attacker_id in getattr(gs, 'current_attackers', []):
+            if not self._can_block(blocker_id, attacker_id):
+                continue
+            attacker_card = gs._safe_get_card(attacker_id)
+            if (attacker_card and self._has_keyword(attacker_card, "menace")
+                    and not assignments.get(attacker_id)
+                    and not self._can_start_sequential_menace_block(
+                        attacker_id)):
+                continue
+            targets.append(attacker_id)
+        return targets
+
+    def _can_start_sequential_menace_block(self, attacker_id):
+        """Whether menace must use sequential blocking for this attacker.
+
+        The public map has atomic multi-block slots only for attacker indices
+        0-9. For a later attacker, permit a first ordinary blocker only when at
+        least two independently addressable blocker slots can complete the
+        declaration. This preserves coverage without recreating the lone-
+        blocker dead end fixed for the normal atomic range.
+        """
+        gs = self.game_state
+        try:
+            attacker_index = list(gs.current_attackers).index(attacker_id)
+        except ValueError:
+            return False
+        if attacker_index < 10:
+            return False
+
+        from collections import Counter
+
+        assigned_remaining = Counter(
+            blocker_id
+            for blockers in self._live_block_assignments().values()
+            for blocker_id in blockers)
+        defender = gs._get_non_active_player()
+        available_count = 0
+        # Only slots 0-19 have ordinary BLOCK actions (48-67).
+        for candidate_id in defender.get('battlefield', [])[:20]:
+            if assigned_remaining[candidate_id] > 0:
+                assigned_remaining[candidate_id] -= 1
+                continue
+            candidate = gs._safe_get_card(candidate_id)
+            if (not candidate
+                    or 'creature' not in getattr(candidate, 'card_types', [])
+                    or candidate_id in defender.get('tapped_permanents', set())
+                    or candidate_id in getattr(gs, 'phased_out', set())):
+                continue
+            if self._can_block(candidate_id, attacker_id):
+                available_count += 1
+        return available_count >= 2
     
 
     def handle_attack_planeswalker(self, param=None, context=None, **kwargs):
@@ -876,6 +1043,10 @@ class CombatActionHandler:
         blocker_identifiers = context.get('blocker_identifiers') # List of indices or IDs
         if not blocker_identifiers or not isinstance(blocker_identifiers, list):
             logging.error("Missing or invalid 'blocker_identifiers' list in context for multi-block.")
+            return False
+        if len(set(blocker_identifiers)) != len(blocker_identifiers):
+            logging.warning(
+                "Multi-block context repeated one physical blocker slot.")
             return False
 
         # --- Validate Blockers ---
@@ -1067,37 +1238,77 @@ class CombatActionHandler:
     def _add_block_declaration_actions(self, player, valid_actions, set_valid_action):
         """Adds actions specific to the Declare Blockers step. (Called by ActionHandler)"""
         gs = self.game_state
-        if not getattr(gs, 'current_attackers', []): return
+        if not getattr(gs, 'current_attackers', []):
+            set_valid_action(439, "Finish Declaring No Blockers")
+            return
 
         player_battlefield = player.get("battlefield", [])
         possible_blockers = []
+        live_assignments = self._live_block_assignments()
         for i in range(min(len(player_battlefield), 20)): # Indices 0-19 map to actions 48-67
             try:
                 card_id = player_battlefield[i]
                 card = gs._safe_get_card(card_id)
                 if not card: continue
 
-                if 'creature' not in getattr(card, 'card_types', []) or card_id in player.get("tapped_permanents", set()):
+                card_name = getattr(card, 'name', f'Blocker {i}')
+                blocking_attacker = self._blocking_attacker_for_slot(
+                    player, i, live_assignments)
+                if blocking_attacker is not None:
+                    # Recovery must remain available even if the blocker was
+                    # tapped or can no longer satisfy the original restriction.
+                    attacker_card = gs._safe_get_card(blocking_attacker)
+                    if (attacker_card
+                            and self._has_keyword(attacker_card, "menace")
+                            and len(live_assignments.get(
+                                blocking_attacker, [])) == 1):
+                        set_valid_action(
+                            48 + i,
+                            f"Withdraw incomplete menace block with {card_name}")
                     continue
 
-                can_block_anything = False
-                for attacker_id in gs.current_attackers:
-                    if self._can_block(card_id, attacker_id):
-                        can_block_anything = True
-                        break
-                if can_block_anything:
-                    card_name = getattr(card, 'name', f'Blocker {i}')
-                    is_currently_blocking = any(
-                        card_id in blockers
-                        for blockers in gs.current_block_assignments.values())
-                    # Like attacker declaration, the public sequential choice
-                    # is monotonic. Re-exposing an assigned blocker as an
-                    # unassign toggle lets a policy alternate forever instead
-                    # of completing combat.
-                    if is_currently_blocking:
-                        continue
-                    set_valid_action(48 + i, f"Assign Block with {card_name}")
+                if ('creature' not in getattr(card, 'card_types', [])
+                        or card_id in player.get("tapped_permanents", set())):
+                    continue
+
+                pairwise_targets = [
+                    attacker_id for attacker_id in gs.current_attackers
+                    if self._can_block(card_id, attacker_id)
+                ]
+                if pairwise_targets:
+
+                    # Keep every physically indexed candidate for the atomic
+                    # multi-block action, including duplicate canonical IDs.
                     possible_blockers.append((i, card_id))
+
+                    ordinary_targets = self._ordinary_block_targets(card_id)
+                    if ordinary_targets:
+                        # Bind the exact target used to justify the mask. The
+                        # executor previously chose a target independently,
+                        # which could invalidate an otherwise legal mask slot.
+                        def target_priority(attacker_id):
+                            attacker = gs._safe_get_card(attacker_id)
+                            has_menace = bool(
+                                attacker
+                                and self._has_keyword(attacker, "menace"))
+                            assigned_count = len(
+                                live_assignments.get(attacker_id, []))
+                            # Complete a partial menace declaration first, then
+                            # prioritize out-of-range menace that has no atomic
+                            # action slot, before using the power heuristic.
+                            return (
+                                int(has_menace and assigned_count == 1),
+                                int(has_menace and assigned_count == 0
+                                    and self._can_start_sequential_menace_block(
+                                        attacker_id)),
+                                getattr(attacker, 'power', 0) or 0,
+                            )
+
+                        target_attacker_id = max(
+                            ordinary_targets, key=target_priority)
+                        set_valid_action(
+                            48 + i, f"Assign Block with {card_name}",
+                            context={"target_attacker_id": target_attacker_id})
             except IndexError:
                 logging.warning(f"Combat Handler: IndexError accessing battlefield for BLOCK at index {i}")
                 break
@@ -1131,7 +1342,7 @@ class CombatActionHandler:
         for attacker_id, pw_id in getattr(
                 gs, 'planeswalker_attack_targets', {}).items():
             legal = [(bf_idx, blocker_id) for bf_idx, blocker_id in possible_blockers
-                     if self._can_block(blocker_id, attacker_id)]
+                     if attacker_id in self._ordinary_block_targets(blocker_id)]
             if legal:
                 blocker_idx, _ = legal[0]
                 set_valid_action(
@@ -1143,7 +1354,7 @@ class CombatActionHandler:
         for attacker_id, battle_id in getattr(
                 gs, 'battle_attack_targets', {}).items():
             legal = [(bf_idx, blocker_id) for bf_idx, blocker_id in possible_blockers
-                     if self._can_block(blocker_id, attacker_id)]
+                     if attacker_id in self._ordinary_block_targets(blocker_id)]
             if legal:
                 blocker_idx, _ = legal[0]
                 set_valid_action(
@@ -1152,8 +1363,10 @@ class CombatActionHandler:
                              "defender_identifier": blocker_idx})
                 break
 
-        # Allow finishing block declaration - corrected from 434 to 439
-        set_valid_action(439, "Finish Declaring Blockers")
+        # The executor rejects a lone blocker on a menace attacker. Keep the
+        # public mask aligned with that same completed-declaration predicate.
+        if self._can_finish_block_declaration():
+            set_valid_action(439, "Finish Declaring Blockers")
 
 
     def _add_combat_damage_actions(self, player, valid_actions, set_valid_action):

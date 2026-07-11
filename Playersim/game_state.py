@@ -33,6 +33,7 @@ class GameState(
     __slots__ = ["card_db", "max_turns", "max_hand_size", "max_battlefield", "day_night_checked_this_turn",
                  "fidelity_counters", "_sba_in_progress", "delayed_triggers",
                  "delayed_event_triggers", "copy_overrides", "plotted_cards",
+                 "graveyard_adventure_permissions",
                  "phase_history", "stack", "priority_pass_count", "last_stack_size",
                  "turn", "_phase", "_last_turn_phase", "agent_is_p1", "combat_damage_dealt", "day_night_state",
                  "current_attackers", "current_block_assignments", 'mulligan_data',
@@ -508,6 +509,7 @@ class GameState(
             self.manifested_cards = {}
             self.copy_overrides = {}
             self.plotted_cards = []
+            self.graveyard_adventure_permissions = []
             self.epic_spells = {}
             self.myriad_tokens = []
             self.persist_returned = set()
@@ -952,7 +954,7 @@ class GameState(
             "saga_counters", "battle_cards", "suspended_cards", "rebounded_cards", "phased_out_state",
             "melded_permanents", "mutated_permanents", "specialized_cards", "last_die_roll", "die_roll_history",
             "foretold_cards", "epic_spells", "morphed_cards", "manifested_cards",
-            "copy_overrides", "plotted_cards",
+            "copy_overrides", "plotted_cards", "graveyard_adventure_permissions",
             "planeswalker_attack_targets", "battle_attack_targets", "planeswalker_protectors",
             "mulligan_count", "mulligan_data" # Dicts need deepcopy
             # Contexts will be handled separately due to player references

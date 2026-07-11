@@ -372,6 +372,13 @@ class EffectFactory:
         if source_key == "oildeep gearhulk" and "look at target player's hand" in effect_text.lower():
             from .ability_types import HandSelectionEffect
             return [HandSelectionEffect(optional=True, rummage=True)]
+        if (source_key == "mosswood dreadknight // dread whispers"
+                and re.search(
+                    r"cast it from your graveyard as an adventure until the "
+                    r"end of your next turn",
+                    effect_text, re.IGNORECASE)):
+            from .ability_types import GraveyardAdventurePermissionEffect
+            return [GraveyardAdventurePermissionEffect()]
         if source_key == "cacophony scamp" and "may sacrifice" in effect_text.lower():
             from .ability_types import OptionalSacrificeProliferateEffect
             return [OptionalSacrificeProliferateEffect()]

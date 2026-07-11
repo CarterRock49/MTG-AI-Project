@@ -13,7 +13,12 @@ from typing import Dict, List, Any, Optional, Tuple, Union
 from enum import Enum
 import math
 # Version information for tracking schema changes
-STATS_VERSION = "3.1.0"  # Updated version for new format
+STATS_VERSION = "3.2.0"  # Deck-seat-normalized prevalence rates
+
+
+def _deck_seat_share(appearances: int, total_games: int) -> float:
+    """Probability that a randomly selected deck seat has an appearance."""
+    return appearances / (2 * total_games) if total_games else 0.0
 
 # Game stage definitions
 class GameStage(Enum):
@@ -1219,6 +1224,14 @@ class DeckStatsTracker:
                     "monthly": {}
                 }
             }
+        # ``games`` on card/archetype aggregates counts deck-seat appearances,
+        # while ``total_games`` counts matches.  Normalize legacy 3.1 files on
+        # read so recommendation code never consumes the old >100% rates.
+        total_games = meta_data.get("total_games", 0)
+        for card_data in meta_data.get("cards", {}).values():
+            card_data["play_rate"] = _deck_seat_share(
+                card_data.get("games", 0), total_games)
+        meta_data["version"] = STATS_VERSION
         return meta_data
 
     def save_meta_data(self) -> bool:
@@ -1377,9 +1390,8 @@ class DeckStatsTracker:
         # the latest matchup. Refresh all rates so old entries do not retain a
         # stale play-rate denominator.
         for card_data in meta_data["cards"].values():
-            card_data["play_rate"] = (
-                card_data["games"] / meta_data["total_games"]
-                if meta_data["total_games"] else 0)
+            card_data["play_rate"] = _deck_seat_share(
+                card_data["games"], meta_data["total_games"])
         
         # Save updated meta data
         return self.save("meta/meta_data.json", meta_data)
@@ -1500,11 +1512,12 @@ class DeckStatsTracker:
         
         return {
             "total_games": meta_data["total_games"],
-            "last_updated": meta_data["last_updated"],
+            "last_updated": meta_data.get("last_updated"),
             "top_archetypes": self.get_top_archetypes(),
             "top_cards": self.get_top_cards(),
             "archetype_distribution": {
-                archetype: data["games"] / meta_data["total_games"]
+                archetype: _deck_seat_share(
+                    data["games"], meta_data["total_games"])
                 for archetype, data in meta_data["archetypes"].items()
                 if data["games"] >= 5  # Filter for relevant archetypes
             }
@@ -1725,7 +1738,9 @@ class DeckStatsTracker:
         if deck_archetype in meta_data["archetypes"]:
             archetype_data = meta_data["archetypes"][deck_archetype]
             stats["meta_position"]["archetype_win_rate"] = archetype_data["win_rate"]
-            stats["meta_position"]["archetype_popularity"] = archetype_data["games"] / max(1, meta_data["total_games"])
+            stats["meta_position"]["archetype_popularity"] = \
+                _deck_seat_share(
+                    archetype_data["games"], meta_data["total_games"])
             
             # Get matchups
             stats["meta_position"]["matchups"] = self.get_archetype_matchups(deck_archetype)
@@ -3713,7 +3728,8 @@ class DeckStatsTracker:
                     "games_played": arch_data["games"],
                     "win_rate": arch_data["win_rate"],
                     "percentile": percentile,
-                    "meta_share": arch_data["games"] / max(1, meta_snapshot["total_games"])
+                    "meta_share": _deck_seat_share(
+                        arch_data["games"], meta_snapshot["total_games"])
                 }
                 
         # Get archetype matchups
@@ -3732,7 +3748,8 @@ class DeckStatsTracker:
             
             for arch_data in top_archetypes:
                 arch_name = arch_data["archetype"]
-                arch_meta_share = arch_data["games"] / max(1, meta_snapshot["total_games"])
+                arch_meta_share = _deck_seat_share(
+                    arch_data["games"], meta_snapshot["total_games"])
                 
                 matchup_win_rate = matchups.get(arch_name, 0.5)  # Default to 50% if unknown
                 

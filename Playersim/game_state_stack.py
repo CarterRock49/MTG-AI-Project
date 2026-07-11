@@ -182,7 +182,16 @@ class GameStateStackMixin:
         if not pending:
             self.priority_player = self._get_active_player()
             self.priority_pass_count = 0
-        return success
+        if not success:
+            # The chooser's mask-valid action was legal and fully applied. A
+            # later instruction of the resolving object no-opping must not
+            # retroactively fail that action — it doesn't during ordinary
+            # (unpaused) resolution either.
+            logging.warning(
+                "Effect continuation from source %s finished with a failed "
+                "instruction; the completed choice action stands.",
+                continuation.get('source_id'))
+        return True
 
     def _get_target_type_from_text(self, text):
          """Simple helper to guess target type."""
@@ -1071,12 +1080,62 @@ class GameStateStackMixin:
         """Helper to combine two parsed mana cost dictionaries."""
         combined = cost_dict1.copy()
         for key, value in cost_dict2.items():
-            combined[key] = combined.get(key, 0) + value
+            if isinstance(value, list):
+                combined[key] = list(combined.get(key, [])) + list(value)
+            elif isinstance(value, dict):
+                nested = dict(combined.get(key, {}))
+                nested.update(value)
+                combined[key] = nested
+            else:
+                combined[key] = combined.get(key, 0) + value
         return combined
 
     @staticmethod
     def _player_key_for_permission(player, p1):
         return "p1" if player is p1 else "p2"
+
+    def grant_graveyard_adventure_permission(self, player, card_id):
+        """Permit this graveyard object to be cast as its Adventure half."""
+        if card_id not in player.get("graveyard", []):
+            return False
+        card = self._safe_get_card(card_id)
+        adventure = card.get_adventure_data() if card else None
+        if not adventure:
+            return False
+        active_player = self._get_active_player()
+        expires_turn = self.turn + (2 if active_player is player else 1)
+        player_key = self._player_key_for_permission(player, self.p1)
+        self.graveyard_adventure_permissions = [
+            entry for entry in self.graveyard_adventure_permissions
+            if not (entry.get("card_id") == card_id
+                    and entry.get("controller") == player_key)
+        ]
+        self.graveyard_adventure_permissions.append({
+            "card_id": card_id,
+            "controller": player_key,
+            "granted_turn": self.turn,
+            "expires_turn": expires_turn,
+        })
+        return True
+
+    def has_graveyard_adventure_permission(self, player, card_id):
+        player_key = self._player_key_for_permission(player, self.p1)
+        return any(
+            entry.get("card_id") == card_id
+            and entry.get("controller") == player_key
+            and entry.get("expires_turn", -1) >= self.turn
+            and card_id in player.get("graveyard", [])
+            for entry in self.graveyard_adventure_permissions)
+
+    def _consume_graveyard_adventure_permission(self, player, card_id):
+        player_key = self._player_key_for_permission(player, self.p1)
+        before = len(self.graveyard_adventure_permissions)
+        self.graveyard_adventure_permissions = [
+            entry for entry in self.graveyard_adventure_permissions
+            if not (entry.get("card_id") == card_id
+                    and entry.get("controller") == player_key)
+        ]
+        return len(self.graveyard_adventure_permissions) != before
 
     def plot_card(self, player, hand_index):
         """Take the Plot special action from hand at sorcery speed."""
@@ -1177,6 +1236,13 @@ class GameStateStackMixin:
                         getattr(card, "card_types", []))):
                 logging.warning("Invalid Wrenn-emblem graveyard cast permission.")
                 return False
+        if context.get("graveyard_adventure_cast"):
+            if (source_zone != "graveyard"
+                    or not context.get("cast_as_adventure")
+                    or not self.has_graveyard_adventure_permission(
+                        player, card_id)):
+                logging.warning("Invalid graveyard Adventure cast permission.")
+                return False
         source_idx = context.get("source_idx")
         source_list = None
         card_in_source = False
@@ -1253,6 +1319,13 @@ class GameStateStackMixin:
              if final_cost_dict is None: return False
         else: # Normal cost
             base_cost_str = getattr(card, 'mana_cost', '')
+            if context.get('cast_as_adventure') and hasattr(
+                    card, 'get_adventure_data'):
+                adventure = card.get_adventure_data() or {}
+                if not adventure:
+                    return False
+                base_cost_str = adventure.get('cost', '')
+                context['effect_text'] = adventure.get('effect', '')
             # MDFC back-face casting (July 2026): use the BACK face's mana cost
             # when this cast is flagged as the back face. Previously the spell
             # path always used the front cost, so casting a spell MDFC's back
@@ -1264,10 +1337,16 @@ class GameStateStackMixin:
 
         # --- 4. Calculate Final Cost (Mana & Non-Mana) ---
         # Parse base cost if applicable
-        if base_cost_str and not alt_cost_type:
+        if cast_for_impending:
+            # Impending replaces the normal cost with another printed mana
+            # cost. Parse that cost before modifiers/payment; treating it like
+            # a non-mana alternative left an empty dict and could become either
+            # a sparse-cost crash or a free cast.
+            final_cost_dict = self.mana_system.parse_mana_cost(base_cost_str)
+        elif base_cost_str and not alt_cost_type:
             final_cost_dict = self.mana_system.parse_mana_cost(base_cost_str)
         elif not alt_cost_type: # Handle cases with no base cost (like Suspend resolution?)
-            final_cost_dict = {} # Start with empty dict
+            final_cost_dict = self.mana_system.parse_mana_cost("")
 
         # Add additional mana costs ONLY IF NOT using a fully replacing alternative cost
         # Check alt_cost_type (Impending is handled above, others might replace fully)
@@ -1454,10 +1533,20 @@ class GameStateStackMixin:
         if (sample_additional_cost
                 and not context.get("sample_nonmana_cost_complete", False)):
             if sample_additional_cost["type"] == "return_permanent":
-                options = list(player.get("battlefield", []))
+                # Returning a permanent can strip an untapped land the mana
+                # plan counts on; only offer returns that keep the final cost
+                # payable, so every mask-exposed choice completes the cast.
+                options = [
+                    permanent_id
+                    for permanent_id in dict.fromkeys(
+                        player.get("battlefield", []))
+                    if self.mana_system.can_pay_mana_cost_with_lands(
+                        player, final_cost_dict, context,
+                        exclude_ids={permanent_id})]
                 if not options:
                     logging.warning(
-                        f"Cannot cast {card.name}: no permanent can pay its return cost.")
+                        f"Cannot cast {card.name}: no permanent can pay its "
+                        "return cost while leaving its mana cost payable.")
                     return False
                 return self._begin_casting_choice({
                     "type": "casting_additional_return",
@@ -1594,6 +1683,9 @@ class GameStateStackMixin:
              self.cards_castable_from_exile.discard(card_id)
         if source_zone == "exile":
              self._consume_plot_permission(player, card_id)
+        if source_zone == "graveyard" and context.get(
+                "graveyard_adventure_cast"):
+             self._consume_graveyard_adventure_permission(player, card_id)
 
         # --- Prepare FINAL stack context ---
         final_stack_context = context.copy()
@@ -1974,6 +2066,23 @@ class GameStateStackMixin:
     def resolve_top_of_stack(self):
         """Resolve the top item of the stack."""
         if not self.stack: return False
+
+        # Targets are chosen while an object is being put on the stack, never
+        # after both players pass.  This guard repairs legacy/interleaved trigger
+        # batches whose pending choice was not opened immediately.  With no
+        # legal mandatory target, start_pending_stack_target_choice removes the
+        # object as required; otherwise it opens the policy choice and leaves
+        # the stack untouched.
+        if any(
+                isinstance(item, tuple) and len(item) >= 4
+                and isinstance(item[3], dict)
+                and item[3].get("target_choice_pending")
+                for item in self.stack):
+            if self.start_pending_stack_target_choice():
+                return True
+            if not self.stack:
+                return True
+
         top_item = self.stack.pop()
         expected_spell_occurrences = None
         if (isinstance(top_item, tuple) and len(top_item) >= 3
@@ -2294,7 +2403,10 @@ class GameStateStackMixin:
         # --- NON-MODAL SPELL RESOLUTION ---
         else:
             # Handle different card types (calls helpers which use move_card)
-            if 'creature' in card_types:
+            if context.get('cast_as_adventure'):
+                 success = self._resolve_instant_sorcery_spell(
+                     spell_id, controller, context)
+            elif 'creature' in card_types:
                  success = self._resolve_creature_spell(spell_id, controller, context)
             elif 'planeswalker' in card_types:
                  success = self._resolve_planeswalker_spell(spell_id, controller, context)
@@ -2623,7 +2735,15 @@ class GameStateStackMixin:
         effects = []
         effect_targets = self._effect_targets_from_context(context)
         if hasattr(self, 'ability_handler'):
-            effects = EffectFactory.create_effects(getattr(spell, 'oracle_text', ''), effect_targets, source_name=getattr(spell, 'name', None))
+            resolving_text = context.get('effect_text')
+            if resolving_text is None and context.get('cast_as_adventure'):
+                resolving_text = (spell.get_adventure_data() or {}).get(
+                    'effect', '')
+            if resolving_text is None:
+                resolving_text = getattr(spell, 'oracle_text', '')
+            effects = EffectFactory.create_effects(
+                resolving_text, effect_targets,
+                source_name=getattr(spell, 'name', None))
         else:
             logging.warning("No ability handler found to resolve instant/sorcery effects.")
 

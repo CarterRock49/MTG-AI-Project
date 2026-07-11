@@ -285,6 +285,42 @@ def check_mask_aware_evaluation():
             else:
                 raise AssertionError(
                     "strict training accepted a two-state policy loop")
+
+            metrics = {}
+            fake_logger = SimpleNamespace(
+                record=lambda name, value: metrics.__setitem__(name, value),
+                record_mean=lambda name, value: metrics.__setitem__(name, value),
+            )
+            rewards = m.RewardComponentsCallback()
+            rewards.model = SimpleNamespace(logger=fake_logger)
+            rewards.locals = {
+                "infos": [
+                    {"terminal_reason": "life_total"},
+                    {"terminal_reason": "decking"}, {}, {},
+                ],
+                "dones": np.array([True, True, False, False]),
+            }
+            assert rewards._on_step()
+            assert metrics["terminal/any_count"] == 2
+            assert metrics["terminal/any_rate"] == 0.5
+            assert metrics["terminal/life_total_rate"] == 0.25
+            assert metrics["terminal/decking_rate"] == 0.25
+            rewards.locals = {
+                "infos": [{}, {}, {}, {}],
+                "dones": np.array([False, False, False, False]),
+            }
+            assert rewards._on_step()
+            assert metrics["terminal/any_rate"] == 0.25
+            assert metrics["terminal/life_total_rate"] == 0.125
+            assert metrics["terminal/decking_rate"] == 0.125
+
+            resources = m.ResourceMonitorCallback(
+                os.path.join(tmp, "resource_metrics"))
+            resources.num_timesteps = 5000
+            resources.n_calls = 625
+            resources._sample_index = 17
+            assert resources._tensorboard_step() == 5000, \
+                "resource metrics used VecEnv calls/sample indices as steps"
         finally:
             m.MODEL_DIR, m.LOG_DIR = old_model_dir, old_log_dir
     eval_env.close()

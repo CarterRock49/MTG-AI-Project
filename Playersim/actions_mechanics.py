@@ -95,10 +95,11 @@ class MechanicsHandlersMixin:
             logging.warning("LEVEL_UP_CREATURE failed: mana system unavailable.")
             return -0.15, False
 
-        # Check affordability, then pay.
+        # Check affordability, then pay. The mask counts untapped lands, so
+        # this pre-gate must too (payment auto-taps the planned lands).
         try:
             parsed = gs.mana_system.parse_mana_cost(cost_str)
-            if not gs.mana_system.can_pay_mana_cost(player, parsed):
+            if not gs.mana_system.can_pay_mana_cost_with_lands(player, parsed):
                 logging.debug(f"Cannot afford level up for {card.name} (cost {cost_str}).")
                 return -0.1, False
         except Exception as e:
@@ -396,7 +397,8 @@ class MechanicsHandlersMixin:
             return -0.1, False
 
         cost_str = "{2}" # Standard foretell cost
-        if not gs.mana_system.can_pay_mana_cost(player, cost_str):
+        # Match the mask's untapped-land affordability; payment auto-taps.
+        if not gs.mana_system.can_pay_mana_cost_with_lands(player, cost_str):
             logging.debug(f"Foretell failed: Cannot afford cost {cost_str} for {card.name}")
             return -0.05, False
 
@@ -439,7 +441,7 @@ class MechanicsHandlersMixin:
         card_drawn_id = None
         if player["library"]:
             card_drawn_id = gs._draw_card(player)
-            if card_drawn_id:
+            if card_drawn_id is not None:
                 drew_card = True; overall_success = True # Action led to something
                 card_name = getattr(gs._safe_get_card(card_drawn_id), 'name', card_drawn_id)
                 logging.debug(f"Learn: Drew {card_name}")
@@ -453,7 +455,7 @@ class MechanicsHandlersMixin:
             if self.card_evaluator: lowest_value=float('inf') ; [ (val < lowest_value and (lowest_value:=val, chosen_discard_id:=cid)) for cid in player["hand"] if (val := self.card_evaluator.evaluate_card(cid, "discard")) ]
             else: chosen_discard_id = card_drawn_id if card_drawn_id in player["hand"] else (player["hand"][0] if player["hand"] else None)
 
-            if chosen_discard_id:
+            if chosen_discard_id is not None:
                 discard_success = gs.move_card(chosen_discard_id, player, "hand", player, "graveyard", cause="learn_discard")
                 if discard_success:
                     discarded_card = True; overall_success = True
@@ -886,7 +888,8 @@ class MechanicsHandlersMixin:
         cost_str = cost_match.group(1)
         if cost_str.isdigit(): cost_str = f"{{{cost_str}}}"
 
-        if not gs.mana_system.can_pay_mana_cost(player, cost_str): logging.debug(f"Cycling failed: Cannot afford cost {cost_str}"); return -0.05, False
+        # Match the mask's untapped-land affordability; payment auto-taps.
+        if not gs.mana_system.can_pay_mana_cost_with_lands(player, cost_str): logging.debug(f"Cycling failed: Cannot afford cost {cost_str}"); return -0.05, False
         if not gs.mana_system.pay_mana_cost(player, cost_str): logging.warning(f"Cycling cost payment failed for {card.name}"); return -0.05, False
 
         success_discard = gs.move_card(card_id, player, "hand", player, "graveyard", cause="cycling_discard")

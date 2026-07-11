@@ -65,18 +65,22 @@ class CastingHandlersMixin:
              logging.warning(f"Impending cost not found for card {card_id} at index {hand_idx}.")
              return -0.05, False
 
-        # Use full context for affordability check
-        if not self._can_afford_cost_string(player, impending_cost_str, context=context):
-            logging.debug(f"Cannot afford Impending cost {impending_cost_str} for {card.name}")
-            return -0.05, False
-
         # Create context for casting
         cast_context = context.copy()
         cast_context['use_alt_cost'] = 'impending'
+        cast_context['card_id'] = card_id
         cast_context['hand_idx'] = hand_idx
         cast_context['source_zone'] = 'hand'
         # --- Flag needed for move_card/ETB ---
         cast_context['cast_for_impending'] = True
+
+        if not gs.mana_system.can_pay_replacing_cost_with_lands(
+                player, card_id, impending_cost_str, 'impending',
+                context=cast_context):
+            logging.debug(
+                f"Cannot afford Impending cost {impending_cost_str} "
+                f"for {card.name}")
+            return -0.05, False
 
         success = gs.cast_spell(card_id, player, context=cast_context)
         reward = 0.25 if success else -0.1
@@ -136,16 +140,35 @@ class CastingHandlersMixin:
             return -0.1, False # Failure
 
     def _handle_play_from_graveyard(self, param, context=None, **kwargs):
-        """Use Wrenn's emblem to play a land or cast a permanent spell."""
+        """Use an explicit graveyard play/cast permission."""
         gs = self.game_state
         player = self._get_policy_player(context)
+        context = dict(context or {})
+        source_index = context.get("source_idx", param)
+        if context.get("graveyard_adventure_cast"):
+            if (not isinstance(source_index, int)
+                    or not 0 <= source_index < len(player.get("graveyard", []))):
+                return -0.15, False
+            card_id = player["graveyard"][source_index]
+            if not gs.has_graveyard_adventure_permission(player, card_id):
+                return -0.15, False
+            cast_context = dict(context)
+            cast_context.update({
+                "source_zone": "graveyard",
+                "source_idx": source_index,
+                "cast_as_adventure": True,
+                "graveyard_adventure_cast": True,
+            })
+            success = gs.cast_spell(card_id, player, context=cast_context)
+            return (0.2, True) if success else (-0.1, False)
         if not any(
                 emblem.get("kind") == "graveyard_permanents"
                 for emblem in player.get("emblems", [])):
             return -0.15, False
-        if not isinstance(param, int) or not 0 <= param < len(player.get("graveyard", [])):
+        if (not isinstance(source_index, int)
+                or not 0 <= source_index < len(player.get("graveyard", []))):
             return -0.15, False
-        card_id = player["graveyard"][param]
+        card_id = player["graveyard"][source_index]
         card = gs._safe_get_card(card_id)
         if not card:
             return -0.15, False
@@ -161,7 +184,7 @@ class CastingHandlersMixin:
         cast_context = dict(context or {})
         cast_context.update({
             "source_zone": "graveyard",
-            "source_idx": param,
+            "source_idx": source_index,
             "emblem_graveyard_cast": True,
         })
         success = gs.cast_spell(card_id, player, context=cast_context)

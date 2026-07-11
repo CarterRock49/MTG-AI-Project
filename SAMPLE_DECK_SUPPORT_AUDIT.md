@@ -244,9 +244,64 @@ exactly the Treasure, 4 life, two blue 1/1 Fish, and one draw that apply.
 These should make affected card statistics ineligible for harvest until the
 listed behavior is implemented and guarded by scenarios.
 
-None currently confirmed in the audited eight-deck sample. Rounds 7.30–7.35
-closed the remaining classification groups and the first strength-run warning
-and error signatures with exact scenarios.
+Three Steps Ahead: its three Spree modes parse, but the casting pipeline does
+not yet collect each chosen mode's additional cost and targets or resolve an
+arbitrary chosen combination. Spree spells are therefore mask-excluded and
+recorded once as `unparsed`; the deck builder must exclude them from trustworthy
+harvest pools until the complete Spree casting flow is implemented.
+
+## Closed In Round 7.44
+
+- Three Steps Ahead can no longer enter its incomplete Spree casting path as an
+  ordinary `{U}` spell. The real-card parser preserves all three modes, the mask
+  excludes the spell, and the support manifest reports the gap without repeated
+  mask probes inflating its count.
+- Mandatory targets are committed before triggered and loyalty abilities
+  resolve. Missing targets fizzle cleanly, while targetless triggers retain
+  their normal resolution path; Kaito's targeted loyalty ability is guarded end
+  to end through target choice, stack placement, and resolution.
+- Oildeep Gearhulk's combined `lifelink, ward {1}` clause registers each keyword
+  once instead of duplicating a generic static layer effect.
+- Draw effects preserve physical card id `0` and treat empty-library drawing as
+  a completed rules event rather than an unimplemented instruction.
+- Legal boards above 20 permanents keep exact scalar counts without observation
+  degradation; the fixed-size per-card detail tensor remains capped at 20.
+- Scripted-opponent execution failures now persist a deterministic replay for
+  the agent action that entered the opponent loop.
+- Card observations retain the full 225-field pool schema (all 48 subtype
+  fields plus MDFC fields), legal signed live power/toughness, and exact
+  component bounds instead of silently truncating the feature tail.
+- Zur grants deathtouch, lifelink, and hexproof only to controlled enchantment
+  creatures, updates later entrants, and removes the grants with its source.
+- Card and archetype prevalence uses deck-seat share
+  (`appearances / (2 * matches)`), keeping `play_rate` and `meta_share` within
+  `[0, 1]`. TensorBoard terminal charts now expose cumulative counts and
+  per-timestep rates on one policy-timestep axis.
+- Mosswood Dreadknight's dies trigger grants a real, expiring graveyard cast of
+  Dread Whispers; it uses the Adventure face's cost/effect and follows the
+  normal Adventure exile/recast path.
+- Sequential blocking can no longer strand one blocker on a menace attacker.
+  The mask uses atomic multi-blocking to begin a menace block, binds ordinary
+  blocks to their validated attacker, offers recovery for a stale partial
+  declaration, and exposes action 439 only when it will execute.
+- Overlord of the Hauntwoods' Impending cast now parses and pays its real
+  `{1}{G}{G}` replacing cost. Sparse cost mappings are normalized, the mask and
+  handler include taxes, reductions, and land auto-tapping, and Convoke, Delve,
+  and Improvise reductions apply exactly once.
+
+Run `ALPHA_ZERO_MTG_V3.00_20260711_145919` exposed the Spree mismatch and the
+associated warning families; later fresh canaries exposed the observation,
+Zur, stats, Mosswood, and menace paths. The exact combat failure state now has
+permanent public-mask, duplicate-occurrence, and scripted-policy regressions,
+and failed canary `ALPHA_ZERO_MTG_V3.00_20260711_163807` exposed the sparse
+Impending replacing-cost failure. Exact-source CUDA canary
+`ALPHA_ZERO_MTG_V3.00_20260711_165824` completed 8,192/8,192 transitions at 99
+rollout FPS with 14 terminals (3 decking, 3 life total, 8 turn limit); final
+validation passed with no warning or error file. Gates are 287/287 scenarios,
+9/9 smoke, 12/12 training, 11/11 +
+5/5 Harvest, 6/6 fuzz configuration, and 8,000/8,000 default-fuzz actions.
+Correcting both the observation shape and declared bounds creates a checkpoint-
+space boundary, so models saved before this round cannot be resumed.
 
 ## Closed In Round 7.42
 

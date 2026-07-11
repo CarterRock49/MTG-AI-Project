@@ -667,21 +667,52 @@ class LayerSystem:
     def _get_affected_card_ids(self):
         """Get all card IDs currently affected by any registered continuous effect."""
         affected_card_ids = set()
+
+        def add_effect_ids(effect_data):
+            ids = effect_data.get('affected_ids')
+            if ids and isinstance(ids, (list, set, tuple)):
+                affected_card_ids.update(ids)
+            scope = effect_data.get('affected_scope') or {}
+            if scope.get('player') == 'controller':
+                controller = effect_data.get('controller_id')
+                if controller:
+                    affected_card_ids.update(controller.get('battlefield', []))
+
         for layer_num in range(1, 8):
             if layer_num == 7:
                 for sublayer_effects in self.layers[7].values():
                     for _, effect_data in sublayer_effects:
-                        # Ensure affected_ids exists and is iterable
-                        ids = effect_data.get('affected_ids')
-                        if ids and isinstance(ids, (list, set)):
-                           affected_card_ids.update(ids)
+                        add_effect_ids(effect_data)
             else:
                 effects = self.layers.get(layer_num, [])
                 for _, effect_data in effects:
-                    ids = effect_data.get('affected_ids')
-                    if ids and isinstance(ids, (list, set)):
-                         affected_card_ids.update(ids)
+                    add_effect_ids(effect_data)
         return affected_card_ids
+
+    def _resolved_affected_ids(self, effect_data, calculated_characteristics):
+        """Resolve a live scope after earlier layers have changed card types."""
+        scope = effect_data.get('affected_scope') or {}
+        if scope.get('player') != 'controller':
+            return effect_data.get('affected_ids', [])
+        controller = effect_data.get('controller_id')
+        if not controller:
+            return []
+        required_types = {
+            str(card_type).lower()
+            for card_type in scope.get('all_card_types', ())
+        }
+        result = []
+        for card_id in controller.get('battlefield', []):
+            chars = calculated_characteristics.get(card_id)
+            if not chars:
+                continue
+            live_types = {
+                str(card_type).lower()
+                for card_type in chars.get('card_types', [])
+            }
+            if required_types.issubset(live_types):
+                result.append(card_id)
+        return result
 
         
     def _sort_layer_effects(self, layer_num, effects, sublayer=None):
@@ -913,7 +944,8 @@ class LayerSystem:
     def _calculate_layer6_abilities(self, effect_data, calculated_characteristics):
         effect_type = effect_data.get('effect_type')
         ability_val = effect_data.get('effect_value') # Usually string name
-        for target_id in effect_data.get('affected_ids', []):
+        for target_id in self._resolved_affected_ids(
+                effect_data, calculated_characteristics):
             if target_id in calculated_characteristics:
                 chars = calculated_characteristics[target_id]
                 # Initialize sets if they don't exist
@@ -1075,8 +1107,9 @@ class LayerSystem:
             granted = chars.setdefault('_granted_abilities', set())
             granted -= all_band_kw
             try:
-                current = self._approximate_keywords_set(
-                    " ".join(live.get_leveler_abilities(lvl)))
+                current = set()
+                for ability_text in live.get_leveler_abilities(lvl):
+                    current |= self._approximate_keywords_set(ability_text)
             except Exception:
                 current = set()
             granted |= current
@@ -1115,41 +1148,21 @@ class LayerSystem:
 
 
     def _approximate_keywords_set(self, oracle_text):
-         """ Helper to get a set of keywords found in text. (Refined) """
-         found_keywords = set()
-         if not oracle_text: return found_keywords
+         """Return only keywords intrinsic to the object itself."""
+         found_keywords = set(Card.intrinsic_keyword_names(oracle_text))
+         if not oracle_text:
+             return found_keywords
          text_lower = oracle_text.lower()
-         text_lines = [line.strip() for line in text_lower.splitlines() if line.strip()]
-         conditional_markers = re.compile(
-             r'\b(?:during|as long as|if|when|whenever|until|unless)\b')
-
-         # Check canonical keywords
-         for kw in Card.ALL_KEYWORDS:
-              kw_lower = kw.lower()
-              # More precise matching to avoid substrings ("linking" != "lifelink")
-              # Regex with word boundaries for single words, simple check for multi-word
-              pattern = r'\b' + re.escape(kw_lower) + r'\b' if ' ' not in kw_lower else re.escape(kw_lower)
-              matching_lines = [line for line in text_lines if re.search(pattern, line)]
-              if (matching_lines
-                      and all(conditional_markers.search(line)
-                              for line in matching_lines)):
-                    # Conditional grants are registered as their own layer
-                    # effects. They are not inherent printed keywords.
-                    continue
-              if re.search(pattern, text_lower):
-                    # Specific exclusions (e.g., don't match "haste" in "afterhaste") are handled by word boundaries mostly.
-                    # Handle parametrized keywords - mark the base keyword only
-                    if kw_lower == "protection from": found_keywords.add("protection")
-                    elif kw_lower == "landwalk": # Specific landwalk types imply 'landwalk'
-                        found_keywords.add("landwalk")
-                    elif kw_lower.endswith("walk") and kw_lower != "landwalk": found_keywords.add("landwalk")
-                    else: found_keywords.add(kw_lower)
 
          # Handle common phrases not in keyword list exactly
-         if "can't be blocked" in text_lower: found_keywords.add("unblockable")
-         if "can't block" in text_lower: found_keywords.add("cant_block") # Treat as ability
-         if "attacks each combat if able" in text_lower: found_keywords.add("must_attack")
-         if "blocks each combat if able" in text_lower: found_keywords.add("must_block")
+         if re.search(r'^\s*(?:this creature|it) can\'t be blocked\b', text_lower, re.MULTILINE):
+             found_keywords.add("unblockable")
+         if re.search(r'^\s*(?:this creature|it) can\'t block\b', text_lower, re.MULTILINE):
+             found_keywords.add("cant_block")
+         if re.search(r'^\s*(?:this creature|it) attacks each combat if able\b', text_lower, re.MULTILINE):
+             found_keywords.add("must_attack")
+         if re.search(r'^\s*(?:this creature|it) blocks each combat if able\b', text_lower, re.MULTILINE):
+             found_keywords.add("must_block")
 
 
          return found_keywords

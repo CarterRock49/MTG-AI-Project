@@ -172,12 +172,12 @@ def _write_valid_artifact_fixture(output: Path, version: str) -> dict:
         "cards": {
             "Winner Card": {
                 "games": 1, "wins": 1, "losses": 0, "draws": 0,
-                "usage_count": 60, "win_rate": 1.0, "play_rate": 1.0,
+                "usage_count": 60, "win_rate": 1.0, "play_rate": 0.5,
                 "archetypes": {"midrange": 1},
             },
             "Loser Card": {
                 "games": 1, "wins": 0, "losses": 1, "draws": 0,
-                "usage_count": 60, "win_rate": 0.0, "play_rate": 1.0,
+                "usage_count": 60, "win_rate": 0.0, "play_rate": 0.5,
                 "archetypes": {"midrange": 1},
             },
         },
@@ -195,6 +195,37 @@ def _write_valid_artifact_fixture(output: Path, version: str) -> dict:
 
 
 class HarvestFixturesTest(unittest.TestCase):
+    def test_meta_rates_use_two_deck_seats_per_match(self):
+        from Playersim.card import Card
+        from Playersim.deck_stats_tracker import DeckStatsTracker, STATS_VERSION
+
+        cards = {}
+        for card_id, name in enumerate(("Shared", "Winner Only", "Loser Only")):
+            card = Card({"name": name, "type_line": "Artifact", "oracle_text": ""})
+            card.card_id = card_id
+            cards[card_id] = card
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tracker = DeckStatsTracker(storage_path=temp_dir, card_db=cards)
+            for _ in range(5):
+                self.assertTrue(tracker.update_meta_with_game_result(
+                    [0, 1], [0, 2], "aggro", "control", {}, 5))
+            meta = tracker._load_meta_data()
+            self.assertEqual(meta["version"], STATS_VERSION)
+            self.assertEqual(meta["total_games"], 5)
+            self.assertEqual(meta["cards"]["Shared"]["games"], 10)
+            self.assertEqual(meta["cards"]["Shared"]["play_rate"], 1.0)
+            self.assertEqual(meta["cards"]["Winner Only"]["play_rate"], 0.5)
+            self.assertEqual(meta["cards"]["Loser Only"]["play_rate"], 0.5)
+            self.assertTrue(all(
+                0 <= card_data["play_rate"] <= 1
+                for card_data in meta["cards"].values()))
+            snapshot = tracker.get_meta_snapshot()
+            self.assertEqual(snapshot["archetype_distribution"], {
+                "aggro": 0.5, "control": 0.5,
+            })
+            self.assertIsNone(snapshot["last_updated"])
+
     def test_project_loader_finds_the_audited_eight_decks(self):
         decks, card_db = harvest.load_sample_decks()
         self.assertEqual(

@@ -23,28 +23,6 @@ from collections import defaultdict
 from .deck_stats_tracker import DeckStatsTracker
 from .card_memory import CardMemory
 from .ability_types import ManaAbility
-
-try:
-    # Create a dummy card to get feature dimension
-    logging.info("Creating dummy card for feature dimension calculation...")
-    dummy_card_data = {"name": "Dummy", "type_line": "Creature", "mana_cost": "{1}"}
-    dummy_card = Card(dummy_card_data)
-    logging.info(f"Successfully created dummy card: {dummy_card}")
-    
-    # Try to get the feature vector with detailed debugging
-    logging.info("Attempting to get feature vector from dummy card...")
-    feature_vector = dummy_card.to_feature_vector()
-    logging.info(f"Got feature vector with type: {type(feature_vector)}, shape: {len(feature_vector)}")
-    
-    # Set the dimension
-    FEATURE_DIM = len(feature_vector)
-    logging.info(f"Successfully determined FEATURE_DIM dynamically: {FEATURE_DIM}")
-except Exception as e:
-    import traceback
-    logging.error(f"Error determining FEATURE_DIM dynamically: {e}")
-    logging.error(traceback.format_exc())
-    logging.warning("Using fallback dimension value of 223")
-    FEATURE_DIM = 223  # Fallback
     
 class AlphaZeroMTGEnv(gym.Env):
     """
@@ -98,8 +76,25 @@ class AlphaZeroMTGEnv(gym.Env):
         # becomes a policy input) and far too expensive for rollouts.  Keep the
         # legacy feature opt-in for diagnostics; training uses the cheap default.
         self.planner_recommendations = bool(planner_recommendations)
-        self._feature_dim = FEATURE_DIM if 'FEATURE_DIM' in globals() else 223  # Store determined feature dim with fallback
-        logging.info(f"Using feature dimension: {self._feature_dim}")
+        # Card.SUBTYPE_VOCAB is populated by load_decks_and_card_db *after*
+        # this module is imported.  The former import-time dummy therefore
+        # measured a zero-subtype vector (177 fields) and silently truncated
+        # every production vector (225 fields for the current pool).  Capture
+        # this environment's vocabulary and build vectors against it so later
+        # test/database loads cannot mutate the policy schema underneath us.
+        subtype_vocab = tuple(Card.SUBTYPE_VOCAB)
+        if not subtype_vocab:
+            subtype_vocab = tuple(sorted({
+                str(subtype).lower()
+                for card in card_db.values()
+                for subtype in getattr(card, "subtypes", [])
+            }))
+        self._subtype_vocab = subtype_vocab
+        self._feature_dim = (
+            4 + 6 + len(Card.ALL_KEYWORDS) + 5 + len(self._subtype_vocab) + 3)
+        logging.info(
+            "Using feature dimension %s (%s subtype fields)",
+            self._feature_dim, len(self._subtype_vocab))
 
         # Initialize deck statistics tracker (Corrected class name usage)
         try:
@@ -149,6 +144,35 @@ class AlphaZeroMTGEnv(gym.Env):
         keyword_dimension = len(Card.ALL_KEYWORDS)
         logging.info(f"Using keyword dimension: {keyword_dimension}")
 
+        # Fixed-size card-detail tensors deliberately retain only the first
+        # ``max_battlefield`` objects, but exact scalar counts describe the
+        # complete rules state.  Magic has no 20-permanent ceiling, so those
+        # scalars need independent bounds.
+        count_observation_max = 1000
+        combat_stat_observation_max = 1_000_000
+
+        # Card features are heterogeneous.  P/T is signed and can legally
+        # leave the old -1..50 range, while keyword/color/subtype flags remain
+        # binary.  Use component-aware bounds for every card-detail tensor.
+        card_feature_low = np.zeros(self._feature_dim, dtype=np.float32)
+        card_feature_high = np.ones(self._feature_dim, dtype=np.float32)
+        card_feature_high[0] = combat_stat_observation_max  # mana value
+        card_feature_low[2:4] = -combat_stat_observation_max
+        card_feature_high[2:4] = combat_stat_observation_max
+        card_feature_high[4:10] = combat_stat_observation_max  # mana pips
+        mdfc_offset = (
+            4 + 6 + len(Card.ALL_KEYWORDS) + 5 + len(self._subtype_vocab))
+        card_feature_low[mdfc_offset + 1:mdfc_offset + 3] = \
+            -combat_stat_observation_max
+        card_feature_high[mdfc_offset + 1:mdfc_offset + 3] = \
+            combat_stat_observation_max
+
+        def card_feature_space(rows):
+            return spaces.Box(
+                low=np.broadcast_to(card_feature_low, (rows, self._feature_dim)).copy(),
+                high=np.broadcast_to(card_feature_high, (rows, self._feature_dim)).copy(),
+                dtype=np.float32)
+
         # --- UPDATED: Observation Space with Context Facilitation Fields ---
         # *** MODIFIED: Updated estimated_opponent_hand shape ***
         self.observation_space = spaces.Dict({
@@ -166,7 +190,7 @@ class AlphaZeroMTGEnv(gym.Env):
             "life_difference": spaces.Box(low=-20000, high=20000, shape=(1,), dtype=np.int32),
             "p1_life": spaces.Box(low=-10000, high=10000, shape=(1,), dtype=np.int32),
             "p2_life": spaces.Box(low=-10000, high=10000, shape=(1,), dtype=np.int32),
-            "my_hand": spaces.Box(low=-1, high=50, shape=(self.hand_observation_size, self._feature_dim), dtype=np.float32),
+            "my_hand": card_feature_space(self.hand_observation_size),
             "my_hand_count": spaces.Box(low=0, high=1000, shape=(1,), dtype=np.int32),
             "opp_hand_count": spaces.Box(low=0, high=1000, shape=(1,), dtype=np.int32),
             "hand_playable": spaces.Box(low=0, high=1, shape=(self.hand_observation_size,), dtype=np.float32),
@@ -174,45 +198,45 @@ class AlphaZeroMTGEnv(gym.Env):
             "hand_performance": spaces.Box(low=0, high=1, shape=(self.hand_observation_size,), dtype=np.float32),
             "hand_synergy_scores": spaces.Box(low=0, high=1, shape=(self.hand_observation_size,), dtype=np.float32),
             "opportunity_assessment": spaces.Box(low=0, high=10, shape=(self.hand_observation_size,), dtype=np.float32),
-            "my_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, self._feature_dim), dtype=np.float32),
+            "my_battlefield": card_feature_space(self.max_battlefield),
             "my_battlefield_flags": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5), dtype=np.float32),
             "my_battlefield_keywords": spaces.Box(low=0, high=1, shape=(self.max_battlefield, keyword_dimension), dtype=np.float32),
             "my_tapped_permanents": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=bool),
-            "opp_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, self._feature_dim), dtype=np.float32),
+            "opp_battlefield": card_feature_space(self.max_battlefield),
             "opp_battlefield_flags": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5), dtype=np.float32),
-            "p1_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, self._feature_dim), dtype=np.float32),
-            "p2_battlefield": spaces.Box(low=-1, high=50, shape=(self.max_battlefield, self._feature_dim), dtype=np.float32),
-            "p1_bf_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
-            "p2_bf_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
-            "my_creature_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
-            "opp_creature_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
-            "my_total_power": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
-            "my_total_toughness": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
-            "opp_total_power": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
-            "opp_total_toughness": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
-            "creature_advantage": spaces.Box(low=-self.max_battlefield, high=self.max_battlefield, shape=(1,), dtype=np.int32),
-            "power_advantage": spaces.Box(low=-100, high=100, shape=(1,), dtype=np.int32),
-            "toughness_advantage": spaces.Box(low=-100, high=100, shape=(1,), dtype=np.int32),
+            "p1_battlefield": card_feature_space(self.max_battlefield),
+            "p2_battlefield": card_feature_space(self.max_battlefield),
+            "p1_bf_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
+            "p2_bf_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
+            "my_creature_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
+            "opp_creature_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
+            "my_total_power": spaces.Box(low=-combat_stat_observation_max, high=combat_stat_observation_max, shape=(1,), dtype=np.int32),
+            "my_total_toughness": spaces.Box(low=-combat_stat_observation_max, high=combat_stat_observation_max, shape=(1,), dtype=np.int32),
+            "opp_total_power": spaces.Box(low=-combat_stat_observation_max, high=combat_stat_observation_max, shape=(1,), dtype=np.int32),
+            "opp_total_toughness": spaces.Box(low=-combat_stat_observation_max, high=combat_stat_observation_max, shape=(1,), dtype=np.int32),
+            "creature_advantage": spaces.Box(low=-count_observation_max, high=count_observation_max, shape=(1,), dtype=np.int32),
+            "power_advantage": spaces.Box(low=-combat_stat_observation_max, high=combat_stat_observation_max, shape=(1,), dtype=np.int32),
+            "toughness_advantage": spaces.Box(low=-combat_stat_observation_max, high=combat_stat_observation_max, shape=(1,), dtype=np.int32),
             "threat_assessment": spaces.Box(low=0, high=10, shape=(self.max_battlefield,), dtype=np.float32),
             "card_synergy_scores": spaces.Box(low=-1, high=1, shape=(self.max_battlefield, self.max_battlefield), dtype=np.float32),
             "my_mana_pool": spaces.Box(low=0, high=100, shape=(6,), dtype=np.int32),
             "my_mana": spaces.Box(low=0, high=20, shape=(1,), dtype=np.int32),
             "total_available_mana": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
-            "untapped_land_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
-            "remaining_mana_sources": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
+            "untapped_land_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
+            "remaining_mana_sources": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
             "turn_vs_mana": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
             "my_graveyard_count": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "opp_graveyard_count": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "my_dead_creatures": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "opp_dead_creatures": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
-            "graveyard_key_cards": spaces.Box(low=-1, high=50, shape=(10, self._feature_dim), dtype=np.float32),
-            "exile_key_cards": spaces.Box(low=-1, high=50, shape=(10, self._feature_dim), dtype=np.float32),
-            "stack_count": spaces.Box(low=0, high=20, shape=(1,), dtype=np.int32),
+            "graveyard_key_cards": card_feature_space(10),
+            "exile_key_cards": card_feature_space(10),
+            "stack_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
             "stack_controller": spaces.Box(low=-1, high=1, shape=(5,), dtype=np.int32),
             "stack_card_types": spaces.Box(low=0, high=1, shape=(5, 5), dtype=np.float32),
-            "attackers_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
-            "blockers_count": spaces.Box(low=0, high=self.max_battlefield, shape=(1,), dtype=np.int32),
-            "potential_combat_damage": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
+            "attackers_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
+            "blockers_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
+            "potential_combat_damage": spaces.Box(low=0, high=combat_stat_observation_max, shape=(1,), dtype=np.int32),
             "ability_features": spaces.Box(low=0, high=10, shape=(self.max_battlefield, 5), dtype=np.float32),
             "ability_timing": spaces.Box(low=0, high=1, shape=(5,), dtype=np.float32),
             "planeswalker_activations": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=np.float32),
@@ -230,7 +254,7 @@ class AlphaZeroMTGEnv(gym.Env):
             "ability_recommendations": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5, 2), dtype=np.float32),
             "strategic_metrics": spaces.Box(low=-1, high=1, shape=(10,), dtype=np.float32),
             "position_advantage": spaces.Box(low=-1, high=1, shape=(1,), dtype=np.float32),
-            "estimated_opponent_hand": spaces.Box(low=-1, high=50, shape=(self.hand_observation_size, self._feature_dim), dtype=np.float32), # Use dynamic feature dim
+            "estimated_opponent_hand": card_feature_space(self.hand_observation_size),
             "deck_composition_estimate": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
             "opponent_archetype": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
             "future_state_projections": spaces.Box(low=-1, high=1, shape=(7,), dtype=np.float32),
@@ -249,7 +273,7 @@ class AlphaZeroMTGEnv(gym.Env):
             "sacrificeable_permanents": spaces.Box(low=-1, high=self.max_battlefield, shape=(self.max_battlefield,), dtype=np.int32),
             "selectable_modes": spaces.Box(low=-1, high=10, shape=(10,), dtype=np.int32),
             "selectable_colors": spaces.Box(low=-1, high=4, shape=(5,), dtype=np.int32),
-            "choice_cards": spaces.Box(low=-1, high=50, shape=(10, self._feature_dim), dtype=np.float32),
+            "choice_cards": card_feature_space(10),
             "choice_card_mask": spaces.Box(low=0, high=1, shape=(10,), dtype=bool),
             "choice_kind": spaces.Box(low=0, high=16, shape=(1,), dtype=np.int32),
             "choice_remaining": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
@@ -390,6 +414,8 @@ class AlphaZeroMTGEnv(gym.Env):
                 self._game_logged = False
                 self._logged_card_ids = set()
                 self._logged_errors = set()
+                self.last_observation_error = None
+                self.last_observation_traceback = None
                 self.last_n_actions = np.full(self.action_memory_size, -1, dtype=np.int32)
                 self.last_n_rewards = np.zeros(self.action_memory_size, dtype=np.float32)
                 if hasattr(self, '_phase_history_counts'): self._phase_history_counts = defaultdict(int)
@@ -1400,11 +1426,35 @@ class AlphaZeroMTGEnv(gym.Env):
                     # silently continuing from a potentially partial mutation.
                     env_info["execution_failed"] = True
                     env_info["opponent_execution_failed"] = True
-                    env_info["error_message"] = opp_handler_info.get(
+                    diagnostic = self._policy_state_diagnostic(
+                        recent_action=opponent_action_idx,
+                        valid_mask=opponent_mask)
+                    diagnostic["actor"] = "opponent"
+                    diagnostic["failed_action"] = opp_handler_info.get(
+                        "failed_action")
+                    diagnostic["handler_error"] = opp_handler_info.get(
+                        "handler_error")
+                    env_info["policy_state"] = diagnostic
+                    base_error = opp_handler_info.get(
                         "error_message",
                         f"Mask-valid opponent action {opponent_action_idx} failed")
+                    env_info["error_message"] = (
+                        f"{base_error}; state={diagnostic}")
                     logging.error(env_info["error_message"])
                     gs.agent_is_p1 = initial_agent_is_p1
+                    try:
+                        # Replay files contain agent decisions; replaying the
+                        # current agent action deterministically re-enters this
+                        # scripted-opponent loop and reproduces its failed
+                        # action.  Persist only after restoring the recorded
+                        # agent seat in the payload.
+                        env_info["failure_replay_path"] = \
+                            self._persist_failure_replay(
+                                diagnostic, action_idx, action_context)
+                    except Exception as replay_error:
+                        logging.error(
+                            "Could not persist opponent execution-failure "
+                            "replay: %s", replay_error)
                     break
 
                 # Restore perspective AFTER applying opponent action successfully
@@ -1767,16 +1817,25 @@ class AlphaZeroMTGEnv(gym.Env):
                         return action_idx, {}
                 return None, {}
 
-        # 3. Handle Other Choice Phases (simple pass for now)
+        # 3. Handle Other Choice Phases (pass when optional, else first legal)
         if phase_ctx in ["TARGETING", "SACRIFICE", "CHOOSE"]:
-            # Simple: Opponent just finishes the choice (Passes)
+            # Optional choices expose PASS; decline them (conservative baseline).
             if opponent_mask[11]:
                 logging.debug(f"Scripted Opponent: PASS_PRIORITY (Finish {phase_ctx})")
                 return 11, {}
-            else:
-                 logging.warning(f"Scripted Opponent: No PASS available during {phase_ctx}?")
-                 # Maybe CONCEDE if truly stuck?
-                 return opponent_mask[12] if opponent_mask[12] else None, {}
+            # Mandatory choices (bargain, choose_x, ...) expose only their
+            # option actions; take the first legal one instead of stalling
+            # the opponent loop.
+            for action_idx, valid in enumerate(opponent_mask):
+                if valid and action_idx not in (12, 224):
+                    logging.debug(
+                        "Scripted Opponent: first legal action %s during %s",
+                        action_idx, phase_ctx)
+                    return choose(action_idx)
+            if opponent_mask[224]:
+                return 224, {}
+            logging.warning(f"Scripted Opponent: No legal action during {phase_ctx}?")
+            return (12 if opponent_mask[12] else None), {}
 
 
         # 4. Handle Standard Priority
@@ -1789,7 +1848,33 @@ class AlphaZeroMTGEnv(gym.Env):
                 if opponent_mask[438]:
                     return choose(438)
             if gs.phase == gs.PHASE_DECLARE_BLOCKERS:
+                # If a sequential declaration is incomplete, add the next
+                # blocker before considering the withdrawal action occupying
+                # an earlier slot. Otherwise the ascending first-action policy
+                # can alternate assign/withdraw forever for out-of-range
+                # menace attackers.
+                live_assignments = (
+                    self.action_handler.combat_handler
+                    ._live_block_assignments())
                 for action_idx in range(48, 68):
+                    if not opponent_mask[action_idx]:
+                        continue
+                    generated = (
+                        self.action_handler.action_reasons_with_context.get(
+                            action_idx, {}))
+                    target_attacker_id = generated.get(
+                        'context', {}).get('target_attacker_id')
+                    if len(live_assignments.get(
+                            target_attacker_id, [])) == 1:
+                        return choose(action_idx)
+                for action_idx in range(48, 68):
+                    if opponent_mask[action_idx]:
+                        return choose(action_idx)
+                # Menace blocks begin atomically so the sequential action API
+                # never enters an illegal one-blocker intermediate state.
+                # Prefer the first mask-valid attacker-specific multi-block
+                # before declining blocks with DECLARE_BLOCKERS_DONE.
+                for action_idx in range(383, 393):
                     if opponent_mask[action_idx]:
                         return choose(action_idx)
                 if opponent_mask[439]:
@@ -1988,9 +2073,15 @@ class AlphaZeroMTGEnv(gym.Env):
                         f"feature {key}",
                         ValueError("value exceeded declared observation bounds"))
                     if first_bound_error:
+                        violation_index = tuple(
+                            int(index) for index in
+                            np.argwhere(np.not_equal(array, bounded))[0])
                         logging.warning(
                             "Observation feature '%s' exceeded its declared bounds; "
-                            "the public value was clipped.", key)
+                            "index=%s value=%s bounds=[%s, %s]; the public "
+                            "value was clipped.",
+                            key, violation_index, array[violation_index],
+                            space.low[violation_index], space.high[violation_index])
                 normalized[key] = bounded.astype(space.dtype, copy=False)
             except Exception as exc:
                 self._record_observation_error(f"feature {key}", exc)
@@ -2703,7 +2794,8 @@ class AlphaZeroMTGEnv(gym.Env):
                 return np.zeros(feature_dim, dtype=np.float32)
                 
             # Get the feature vector
-            feature_vector = card.to_feature_vector()
+            feature_vector = card.to_feature_vector(
+                subtype_vocab=self._subtype_vocab)
             
             # Ensure the vector has the expected dimension
             if len(feature_vector) != feature_dim:
@@ -2819,8 +2911,6 @@ class AlphaZeroMTGEnv(gym.Env):
 
     def _get_obs(self):
         """Build the observation dictionary. Assumes helpers are implemented."""
-        self.last_observation_error = None
-        self.last_observation_traceback = None
         try:
             # 0. Ensure layer effects are applied first
             if hasattr(self, 'layer_system') and self.layer_system:

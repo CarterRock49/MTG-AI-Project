@@ -16,6 +16,11 @@ import gzip
 import glob
 import datetime
 
+
+def _deck_seat_share(appearances, total_games):
+    """Share of the two deck seats per recorded match."""
+    return appearances / (2 * total_games) if total_games else 0.0
+
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 server = app.server
 CORS(server)  # Enable CORS for all routes
@@ -180,7 +185,9 @@ class StatisticsLoader:
                 archetypes[archetype] = {
                     "games": data.get("games", 0),
                     "win_rate": data.get("win_rate", 0),
-                    "meta_share": data.get("games", 0) / max(1, self.meta_data.get("total_games", 1))
+                    "meta_share": _deck_seat_share(
+                        data.get("games", 0),
+                        self.meta_data.get("total_games", 0))
                 }
                 
         return {
@@ -340,7 +347,11 @@ class StatisticsLoader:
             if data.get("games", 0) >= 3:  # Lower threshold
                 top_archetypes.append({
                     "archetype": archetype,
-                    "meta_share": data.get("games", 0) / max(1, meta_data.get("total_games", 1)),
+                    "meta_share": data.get(
+                        "meta_share",
+                        _deck_seat_share(
+                            data.get("games", 0),
+                            meta_data.get("total_games", 0))),
                     "win_rate": data.get("win_rate", 0)
                 })
                 

@@ -153,6 +153,13 @@ runtime dependencies, deck provenance, lifecycle result, and artifact paths. A
 dirty run also stores a hashed `source_worktree.patch` beside the manifest so
 the exact tracked source delta is retained.
 
+> **Checkpoint boundary (Round 7.44):** card observations now retain the full
+> 225-field pool schema (including 48 subtype fields and MDFC fields), signed
+> live power/toughness, and exact count/stat bounds large enough for legal boards
+> above 20 permanents. Stable-Baselines validates the complete observation shape
+> and bounds, so do not resume a checkpoint created before this change; start the
+> next training run without `--resume`.
+
 ### Hyperparameter Optimization
 
 ```bash
@@ -195,6 +202,11 @@ The project uses TensorBoard for monitoring training progress. Various metrics a
 - Action distributions
 - Network parameter changes
 - Resource usage (CPU/GPU/Memory)
+
+All time-series use policy timesteps as their x-axis. Terminal telemetry is
+reported both as cumulative `terminal/*_count` values and normalized
+`terminal/*_rate` values, so a single ending is not displayed as a permanent
+100% rate.
 
 To view training progress:
 

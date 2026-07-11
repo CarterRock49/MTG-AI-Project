@@ -460,7 +460,13 @@ class Card:
 
         # Normalize oracle text for consistent parsing
         # Remove reminder text first
-        oracle_text_cleaned = re.sub(r'\s*\([^()]*?\)\s*', ' ', self.oracle_text).strip()
+        # Preserve line boundaries around reminder text.  Consuming ``\n``
+        # here joined Spree's reminder line to its first ``+ cost`` line, while
+        # the mode parser deliberately looks for a mode beginning on a new
+        # line.  Real Three Steps Ahead therefore lost its first mode even
+        # though reminder-free fixtures parsed all three.
+        oracle_text_cleaned = re.sub(
+            r'[ \t]*\([^()]*?\)[ \t]*', ' ', self.oracle_text).strip()
         oracle_text_lower = oracle_text_cleaned.lower() # Use lowercase for matching
 
         # Robust Spree identification using keyword
@@ -2070,9 +2076,13 @@ class Card:
 
     def has_adventure(self):
         """Check if this card has an Adventure component."""
-        if not hasattr(self, 'oracle_text'):
-            return False
-        return 'adventure' in self.oracle_text.lower()
+        if getattr(self, "layout", "") == "adventure":
+            return bool(self.faces and len(self.faces) >= 2)
+        if any(
+                "adventure" in str(face.get("type_line", "")).lower()
+                for face in (self.faces or [])):
+            return True
+        return 'adventure' in (getattr(self, 'oracle_text', '') or '').lower()
 
     def get_adventure_data(self):
         """
@@ -2081,6 +2091,16 @@ class Card:
         """
         if not self.has_adventure():
             return None
+
+        for face in self.faces or []:
+            if "adventure" not in str(face.get("type_line", "")).lower():
+                continue
+            return {
+                "name": face.get("name", "Adventure"),
+                "cost": face.get("mana_cost", ""),
+                "type": face.get("type_line", ""),
+                "effect": face.get("oracle_text", ""),
+            }
             
         oracle_text = self.oracle_text
         
@@ -2107,56 +2127,61 @@ class Card:
     #
     # Keyword and subtype handling methods
     #
-    def _extract_keywords(self, oracle_text):
-        """Extract keywords from oracle text with comprehensive support for all MTG keywords."""
-        # Initialize keyword array with all zeros
-        keywords = [0] * len(self.ALL_KEYWORDS)
-        
+    @classmethod
+    def intrinsic_keyword_names(cls, oracle_text):
+        """Return keywords printed as abilities of this object itself.
+
+        Searching the whole oracle paragraph makes a source inherit keywords it
+        merely grants or mentions.  Zur, for example, was treated as having
+        deathtouch, lifelink, and hexproof because those words occur in
+        "Enchantment creatures you control have ...".  Scryfall formats an
+        object's own keyword declarations as standalone lines, so recognize
+        those declarations and leave scoped/targeted/conditional grants to the
+        layer and effect parsers.
+        """
         if not oracle_text:
-            return keywords
-            
-        # Normalize oracle text for more reliable matching
-        oracle_text = oracle_text.lower()
-        
-        # Use more efficient lookup with set operations
-        oracle_words = set(re.findall(r'\b\w+\b', oracle_text))
-        
-        # Check for each keyword using more efficient matching
-        for i, keyword in enumerate(self.ALL_KEYWORDS):
-            # Handle multi-word keywords (e.g., "first strike")
-            if ' ' in keyword:
-                if keyword in oracle_text:
-                    keywords[i] = 1
-            else:
-                # For single-word keywords, use word boundaries to avoid partial matches
-                if keyword in oracle_words:
-                    keywords[i] = 1
-                # Check for variations (cycling -> cycles, etc.)
-                elif f"{keyword}s" in oracle_words or f"{keyword}ing" in oracle_words:
-                    keywords[i] = 1
-        
-        # Special handling for keywords with variations
-        # "can't be blocked" -> unblockable
-        if "can't be blocked" in oracle_text:
-            idx = self.ALL_KEYWORDS.index('unblockable')
-            if idx < len(keywords):
-                keywords[idx] = 1
-            
-        # "protection from" -> protection
-        if "protection from" in oracle_text:
-            idx = self.ALL_KEYWORDS.index('protection')
-            if idx < len(keywords):
-                keywords[idx] = 1
-            
-        # Check landwalk variations
-        for land_type in ["island", "mountain", "forest", "swamp", "plains", "desert", "legendary"]:
-            if f"{land_type}walk" in oracle_text:
-                idx = self.ALL_KEYWORDS.index('landwalk')
-                if idx < len(keywords):
-                    keywords[idx] = 1
-                break
-        
-        return keywords
+            return set()
+        cleaned = re.sub(r'\([^()]*?\)', ' ', str(oracle_text).lower())
+        cleaned = re.sub(r'"[^"]*?"', ' ', cleaned)
+        conditional = re.compile(
+            r'\b(?:during|as long as|if|when|whenever|until|unless)\b')
+        found = set()
+        canonical = sorted(cls.ALL_KEYWORDS, key=len, reverse=True)
+
+        for raw_line in cleaned.splitlines():
+            line = raw_line.strip().strip('. ')
+            if not line or conditional.search(line):
+                continue
+
+            declaration = False
+            for keyword in canonical:
+                prefix = re.escape(keyword)
+                if re.match(
+                        rf'^{prefix}(?:\s*$|\s*[,;{{\d/—–-]|\s+from\b|\s+creature\b)',
+                        line):
+                    declaration = True
+                    break
+            if not declaration:
+                continue
+
+            for keyword in canonical:
+                pattern = (r'\b' + re.escape(keyword) + r'\b'
+                           if ' ' not in keyword else re.escape(keyword))
+                if re.search(pattern, line):
+                    found.add(keyword)
+
+            if "can't be blocked" in line:
+                found.add('unblockable')
+            if re.search(
+                    r'\b(?:island|mountain|forest|swamp|plains|desert)walk\b',
+                    line):
+                found.add('landwalk')
+        return found
+
+    def _extract_keywords(self, oracle_text):
+        """Encode the object's intrinsic printed keyword declarations."""
+        intrinsic = self.intrinsic_keyword_names(oracle_text)
+        return [1 if keyword in intrinsic else 0 for keyword in self.ALL_KEYWORDS]
 
     def _extract_colors(self, color_identity):
         """Extract colors from color identity."""
@@ -2209,7 +2234,7 @@ class Card:
                     pass
         return [cost["W"], cost["U"], cost["B"], cost["R"], cost["G"], cost["generic"]]
 
-    def to_feature_vector(self):
+    def to_feature_vector(self, subtype_vocab=None):
         """
         Feature vector:
         - Base stats: cmc, is_land (1/0), power, toughness (4 dimensions)
@@ -2221,6 +2246,14 @@ class Card:
         Total dimension = 4 + 6 + 11 + 5 + len(Card.SUBTYPE_VOCAB) + 3
         """
         cost_vector = self.get_cost_vector()
+        if subtype_vocab is None:
+            subtype_vector = self.subtype_vector
+        else:
+            card_subtypes = {str(subtype).lower() for subtype in self.subtypes}
+            subtype_vector = [
+                1 if str(subtype).lower() in card_subtypes else 0
+                for subtype in subtype_vocab
+            ]
         
         # A face-down permanent has only its public face-down characteristics.
         # Keep private double-face metadata out of policy observations.
@@ -2249,7 +2282,10 @@ class Card:
             back_toughness
         ]
         
-        return np.array(base_vector + cost_vector + self.keywords + self.colors + self.subtype_vector + mdfc_vector, dtype=np.float32)
+        return np.array(
+            base_vector + cost_vector + self.keywords + self.colors
+            + subtype_vector + mdfc_vector,
+            dtype=np.float32)
 
 # Deck loading function
 def load_decks_and_card_db(decks_folder, format_name=None, banned_names=None,

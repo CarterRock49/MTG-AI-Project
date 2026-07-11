@@ -1063,6 +1063,11 @@ class TriggeredAbility(Ability):
         if self.effect == "unknown":
              raise ValueError(f"TriggeredAbility requires effect. Got text='{effect_text}'")
 
+        # Targeting belongs to the parsed instruction, not necessarily the
+        # reconstructed full trigger text.  AbilityHandler uses this marker as
+        # a defensive resolution contract after targets have been chosen.
+        self.requires_target = "target" in self.effect
+
         # Store original text if not provided
         if not effect_text:
             self.effect_text = f"{self.trigger_condition.capitalize()}, {self.effect.capitalize()}." # Reconstruct from parts
@@ -1572,6 +1577,49 @@ class StaticAbility(Ability):
         if not effect_text and self.effect:
             self.effect_text = self.effect.capitalize()
 
+    def _parse_static_keyword_grants(self, effect_lower_clean):
+        """Return every canonical keyword granted by a static declaration."""
+        match = re.search(
+            r'\b(?:have|has|gain|gains)\s+(.+?)$', effect_lower_clean)
+        if not match:
+            return []
+        grant_text = match.group(1).strip().strip('. ')
+        grant_text = re.sub(r',\s*and\s+', ',', grant_text)
+        grant_text = re.sub(r'\s+and\s+', ',', grant_text)
+        values = []
+        canonical = {keyword.lower(): keyword for keyword in Card.ALL_KEYWORDS}
+        for part in (piece.strip() for piece in grant_text.split(',')):
+            if not part:
+                continue
+            if part in canonical:
+                values.append(canonical[part])
+                continue
+            if part.startswith('ward'):
+                values.append(part)
+                continue
+            if part.startswith('protection from '):
+                values.append(part)
+                continue
+            # A non-keyword item means this is not a pure keyword bundle.
+            return []
+        return values
+
+    def _dynamic_affected_scope(self, effect_lower_clean):
+        """Describe scopes whose membership must be recomputed each layer pass."""
+        compound_scopes = {
+            r'\benchantment creatures? you control\b':
+                ('enchantment', 'creature'),
+            r'\bartifact creatures? you control\b':
+                ('artifact', 'creature'),
+        }
+        for pattern, required_types in compound_scopes.items():
+            if re.search(pattern, effect_lower_clean):
+                return {
+                    'player': 'controller',
+                    'all_card_types': required_types,
+                }
+        return None
+
     def apply(self, game_state, affected_cards=None):
         """Register the static ability's effect with the LayerSystem. Validates controller."""
         gs = game_state # Alias
@@ -1608,6 +1656,7 @@ class StaticAbility(Ability):
         # Clean effect text for layer determination
         effect_lower_clean = self.effect.lower().strip('.—\u2014: ')
         layer = self._determine_layer_for_effect(effect_lower_clean)
+        dynamic_scope = self._dynamic_affected_scope(effect_lower_clean)
 
         if layer is None:
             logging.warning(f"StaticAbility.apply: Could not determine layer for static effect: '{self.effect_text}'")
@@ -1634,6 +1683,8 @@ class StaticAbility(Ability):
                     'controller_id': controller,
                     **layer_data # Merge parsed layer, sublayer, type, value
                 }
+                if dynamic_scope:
+                    final_data['affected_scope'] = dynamic_scope
                 if game_state.layer_system.register_effect(final_data):
                     registered_count += 1
             if registered_count > 0:
@@ -1665,6 +1716,8 @@ class StaticAbility(Ability):
                      'controller_id': controller,
                      **parsed_data_single # Add sublayer, type, value
                  }
+                 if dynamic_scope:
+                     effect_data['affected_scope'] = dynamic_scope
                  if game_state.layer_system.register_effect(effect_data):
                       logging.debug(f"Registered static effect (single) '{self.effect_text}' in Layer {layer}")
                       return True
@@ -1682,6 +1735,17 @@ class StaticAbility(Ability):
         Returns a list of effect data dictionaries, one for each layer/sublayer.
         Returns None if no complex pattern is matched.
         """
+        keyword_grants = self._parse_static_keyword_grants(effect_lower_clean)
+        if len(keyword_grants) > 1:
+            return [
+                {
+                    'layer': 6,
+                    'effect_type': 'add_ability',
+                    'effect_value': keyword,
+                }
+                for keyword in keyword_grants
+            ]
+
         # Example: Kaito: "During your turn, as long as Kaito has one or more loyalty counters on him, he's a 3/4 Ninja creature and has hexproof."
         kaito_match = re.match(r"(during your turn,)?\s*(as long as .+?,)?\s*(?:it's|he's|she's)\s+a\s+(\d+)/(\d+)\s+(.*?)\s+creature(?: and has (.*?))?(?:\.|$)", effect_lower_clean)
         if kaito_match:
@@ -1864,6 +1928,13 @@ class StaticAbility(Ability):
         # ability retains the actual payment detail separately.
         if re.fullmatch(r"ward(?:\s+.+)?", effect_lower_clean):
             return {'effect_type': 'add_ability', 'effect_value': 'Ward'}
+
+        keyword_grants = self._parse_static_keyword_grants(effect_lower_clean)
+        if keyword_grants:
+            return {
+                'effect_type': 'add_ability',
+                'effect_value': keyword_grants[0],
+            }
 
         # Simple "loses X" check - uses cleaned text
         lose_match = re.search(r"loses ([\w\s\-]+?)(?: and |,|$)", effect_lower_clean) # Removed check for trailing punctuation as it should be stripped
@@ -2080,6 +2151,8 @@ class StaticAbility(Ability):
         # Parsed keyword abilities can arrive as internal forms such as
         # ``ward ward_generic`` without a leading "has" or "gains" phrase.
         # They are still ability-layer effects.
+        if self._parse_static_keyword_grants(cleaned_effect):
+            return 6
         if any(
                 cleaned_effect == keyword.lower()
                 or cleaned_effect.startswith(f"{keyword.lower()} ")
@@ -2153,6 +2226,10 @@ class StaticAbility(Ability):
 
         # Common scopes using regex for more flexibility
         scopes = {
+            r"\benchantment creatures? you control\b":
+                (me, ("enchantment", "creature")),
+            r"\bartifact creatures? you control\b":
+                (me, ("artifact", "creature")),
             r"\bcreatures? you control\b": (me, "creature"),
             r"\bartifacts? you control\b": (me, "artifact"),
             r"\bpermanents? you control\b": (me, "permanent"),
@@ -2204,8 +2281,11 @@ class StaticAbility(Ability):
         """Helper to check if a card matches the scope criteria (type, state)."""
         if not card: return False
         # Check basic type
-        if type_scope != "any":
-            card_types = getattr(card, 'card_types', [])
+        card_types = getattr(card, 'card_types', [])
+        if isinstance(type_scope, (tuple, list, set)):
+            if not all(required in card_types for required in type_scope):
+                return False
+        elif type_scope != "any":
             if type_scope != "permanent" and type_scope not in card_types and type_scope not in getattr(card,'subtypes',[]): # Allow subtype match
                 return False # Type doesn't match
 
@@ -2535,8 +2615,18 @@ class DrawCardEffect(AbilityEffect):
             for _ in range(effective_count):
                 if hasattr(game_state, '_draw_card'):
                     drawn_card_id = game_state._draw_card(p)
-                    if drawn_card_id: num_drawn += 1
-                    else: success_player = False; break
+                    if drawn_card_id is not None:
+                        # Numeric card ID 0 is a valid card, not a failed draw.
+                        num_drawn += 1
+                    elif p.get("attempted_draw_from_empty", False):
+                        # The draw instruction completed with the normal
+                        # rules-defined decking loss.  Stop this batch without
+                        # labeling the resolving effect as an engine failure.
+                        break
+                    else:
+                        # A replacement such as Dredge can consume a draw and
+                        # intentionally return no drawn card.
+                        continue
                 else: # Fallback
                     if p["library"]: p["hand"].append(p["library"].pop(0)); num_drawn += 1
                     else: p["attempted_draw_from_empty"] = True; success_player = False; break
@@ -2865,6 +2955,8 @@ class GainKeywordEffect(AbilityEffect):
             'duration': self.duration, 'description': f"grant {self.keyword} ({self.duration})",
         })
         if effect_id:
+            game_state.layer_system.invalidate_cache()
+            game_state.layer_system.apply_all_effects()
             logging.debug(f"Granted '{self.keyword}' to {affected} ({self.duration}).")
             return True
         return False
@@ -4069,6 +4161,20 @@ class DiscardEffect(AbilityEffect):
             is_random=self.is_random,
             cause="discard",
         )
+
+class GraveyardAdventurePermissionEffect(AbilityEffect):
+    """Allow a dying Adventure card to cast that half from its graveyard."""
+
+    def __init__(self):
+        super().__init__(
+            "you may cast it from your graveyard as an Adventure until the "
+            "end of your next turn")
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        return game_state.grant_graveyard_adventure_permission(
+            controller, source_id)
+
 
 class ImpulseDrawEffect(AbilityEffect):
     """Exile the top N cards; the controller may play them for a duration.

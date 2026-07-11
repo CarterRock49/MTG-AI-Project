@@ -112,9 +112,16 @@ class CombatHandlersMixin:
 
         if not hasattr(gs, 'current_block_assignments'): gs.current_block_assignments = {}
         currently_blocking_attacker = None
-        for atk_id, blockers_list in gs.current_block_assignments.items():
-            if blocker_id in blockers_list:
-                currently_blocking_attacker = atk_id; break
+        if self.combat_handler:
+            live_assignments = self.combat_handler._live_block_assignments()
+            gs.current_block_assignments = live_assignments
+            currently_blocking_attacker = \
+                self.combat_handler._blocking_attacker_for_slot(
+                    blocker_player, battlefield_idx, live_assignments)
+        else:
+            for atk_id, blockers_list in gs.current_block_assignments.items():
+                if blocker_id in blockers_list:
+                    currently_blocking_attacker = atk_id; break
 
         if currently_blocking_attacker is not None:
             gs.current_block_assignments[currently_blocking_attacker].remove(blocker_id)
@@ -141,7 +148,13 @@ class CombatHandlersMixin:
 
             if target_attacker_id not in gs.current_block_assignments:
                 gs.current_block_assignments[target_attacker_id] = []
-            if blocker_id not in gs.current_block_assignments[target_attacker_id]:
+            # With occurrence-aware battlefield slots, the same canonical ID
+            # may legitimately appear more than once in the assignment list.
+            # ``currently_blocking_attacker`` already established that this
+            # selected physical occurrence is free.
+            if (self.combat_handler
+                    or blocker_id not in
+                    gs.current_block_assignments[target_attacker_id]):
                 gs.current_block_assignments[target_attacker_id].append(blocker_id)
                 logging.debug(f"BLOCK: Assigned {blocker_card.name} to block {gs._safe_get_card(target_attacker_id).name}")
                 return 0.1, True # Assignment successful

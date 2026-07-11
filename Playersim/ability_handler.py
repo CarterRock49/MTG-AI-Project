@@ -841,7 +841,16 @@ class AbilityHandler:
                             continue
 
                         # Check if the clause *only* contains keywords already handled
-                        words_in_clause = set(re.findall(r'\b\w+\b', clause_text.lower()))
+                        # Parameterized keyword costs are not separate ability
+                        # words.  For example, Oildeep Gearhulk's
+                        # ``Lifelink, ward {1}`` is already represented by its
+                        # two explicit keyword abilities; treating the ``1``
+                        # inside the cost as an unhandled word synthesized a
+                        # duplicate StaticAbility that no layer could classify.
+                        keyword_only_clause = re.sub(
+                            r'\{[^}]+\}', ' ', clause_text.lower())
+                        words_in_clause = set(re.findall(
+                            r'\b[a-z][a-z-]*\b', keyword_only_clause))
                         is_just_handled_keywords = False
                         if words_in_clause.issubset(handled_keywords):
                             # Further check: doesn't look like activated/triggered
@@ -1567,10 +1576,9 @@ class AbilityHandler:
         if ability:
             setattr(ability, 'source_card', card) # Ensure card link
             abilities_list.append(ability)
-            if isinstance(ability, StaticAbility):
-                # Apply rule markers/static grants immediately
-                if hasattr(ability, 'apply') and callable(ability.apply):
-                     ability.apply(self.game_state)
+            # Static abilities are registered exactly once by the final loop
+            # in _parse_and_register_abilities.  Applying keyword statics here
+            # as well duplicated their layer entries.
             logging.debug(f"Created {type(ability).__name__} for keyword: {full_text} (Card: {card.name})")
             return True # Indicate success
         else:
@@ -2161,13 +2169,40 @@ class AbilityHandler:
             # ...(Rest of standard ability resolution remains the same)...
             # --- Target Validation ---
             ability_effect_text = getattr(ability, 'effect_text', effect_text_from_context)
+            ability_targeting_text = (
+                context.get("targeting_text")
+                or getattr(ability, 'effect', ability_effect_text))
             valid_targets = True
-            requires_target = getattr(ability, 'requires_target', False) or (targets_on_stack and any(targets_on_stack.values()))
+            parsed_min_targets, _ = (
+                gs._target_bounds_from_text(ability_targeting_text)
+                if "target" in ability_targeting_text.lower()
+                else (0, 0))
+            committed_target_count = len(gs._flatten_target_ids(
+                targets_on_stack if isinstance(targets_on_stack, dict) else {}))
+            requires_target = (
+                getattr(ability, 'requires_target', False)
+                or parsed_min_targets > 0
+                or committed_target_count > 0)
+
+            if parsed_min_targets > committed_target_count:
+                # A mandatory targeted object should have entered the target
+                # choice flow before reaching resolution.  If a legacy/stale
+                # stack object leaks through, it has no legal target to affect:
+                # fizzle it cleanly rather than running TapEffect (or another
+                # effect) with an empty target dictionary.
+                logging.debug(
+                    "Targeted %s from %s resolved without its mandatory "
+                    "targets (%s/%s): %s. Fizzling.",
+                    ability_type, source_name, committed_target_count,
+                    parsed_min_targets, ability_targeting_text)
+                return True
 
             if requires_target:
                 if self.targeting_system:
                     validation_targets = targets_on_stack if isinstance(targets_on_stack, dict) else {}
-                    validation_text = ability_effect_text if ability_effect_text != "Unknown" else None
+                    validation_text = (ability_targeting_text
+                                       if ability_targeting_text != "Unknown"
+                                       else None)
                     valid_targets = self.targeting_system.validate_targets(card_id, validation_targets, controller, effect_text=validation_text)
                     if not valid_targets:
                          logging.info(f"Targets for '{ability_effect_text}' from {source_name} became invalid via TargetingSystem. Fizzling.")

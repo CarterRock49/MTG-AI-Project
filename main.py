@@ -594,6 +594,10 @@ class ResourceMonitorCallback(BaseCallback):
             self.gputil_available = True
         except ImportError:
             logging.warning("GPUtil not available. GPU monitoring disabled.")
+
+    def _tensorboard_step(self):
+        """Use policy transitions as the single resource-metric x-axis."""
+        return int(getattr(self, 'num_timesteps', 0))
     
     def _init_callback(self):
         # Initialize TensorBoard writer
@@ -641,10 +645,9 @@ class ResourceMonitorCallback(BaseCallback):
         while not self._monitor_stop.wait(1.0):
             try:
                 self._sample_index += 1
-                step = self._sample_index
+                step = self._tensorboard_step()
                 self.writer.add_scalar(
-                    "system/training_timesteps",
-                    int(getattr(self, 'num_timesteps', 0)), step)
+                    "system/resource_sample_index", self._sample_index, step)
                 if process is not None:
                     children = process.children(recursive=True)
                     process_cpu = process.cpu_percent(None)
@@ -706,48 +709,47 @@ class ResourceMonitorCallback(BaseCallback):
     
     def _on_step(self):
         if self.n_calls % self.monitor_freq == 0:
+            step = self._tensorboard_step()
             # Monitor CPU and RAM
             if self.psutil_available:
                 import psutil
                 # CPU usage per core
                 cpu_percent_per_core = psutil.cpu_percent(percpu=True)
                 for i, percent in enumerate(cpu_percent_per_core):
-                    self.writer.add_scalar(f"system/cpu_core{i}_percent", percent, self.n_calls)
+                    self.writer.add_scalar(f"system/cpu_core{i}_percent", percent, step)
                 
                 # Overall CPU usage
                 cpu_percent = psutil.cpu_percent()
-                self.writer.add_scalar("system/cpu_percent", cpu_percent, self.n_calls)
+                self.writer.add_scalar("system/cpu_percent", cpu_percent, step)
                 
                 # RAM usage (GB)
                 ram = psutil.virtual_memory()
                 ram_used_gb = ram.used / (1024**3)
                 ram_percent = ram.percent
                 
-                self.writer.add_scalar("system/ram_used_gb", ram_used_gb, self.n_calls)
-                self.writer.add_scalar("system/ram_percent", ram_percent, self.n_calls)
+                self.writer.add_scalar("system/ram_used_gb", ram_used_gb, step)
+                self.writer.add_scalar("system/ram_percent", ram_percent, step)
                 
                 # Disk usage
                 disk = psutil.disk_usage('/')
                 disk_percent = disk.percent
-                self.writer.add_scalar("system/disk_percent", disk_percent, self.n_calls)
+                self.writer.add_scalar("system/disk_percent", disk_percent, step)
                 
                 # Network IO
                 net_io = psutil.net_io_counters()
-                self.writer.add_scalar("system/net_sent_mb", net_io.bytes_sent / (1024**2), self.n_calls)
-                self.writer.add_scalar("system/net_recv_mb", net_io.bytes_recv / (1024**2), self.n_calls)
+                self.writer.add_scalar("system/net_sent_mb", net_io.bytes_sent / (1024**2), step)
+                self.writer.add_scalar("system/net_recv_mb", net_io.bytes_recv / (1024**2), step)
                 
                 if self.verbose > 0:
                     logging.info(f"Step {self.n_calls}: CPU: {cpu_percent}% RAM: {ram_used_gb:.1f} GB ({ram_percent}%)")
             
-            # Monitor PyTorch memory
+            # The one-second background sampler is the sole owner of CUDA
+            # TensorBoard tags. Keeping a second writer here interleaved
+            # VecEnv-call steps with wall-clock sample steps in one series.
             if torch.cuda.is_available():
                 for i in range(torch.cuda.device_count()):
                     mem_allocated = torch.cuda.memory_allocated(i) / (1024**3)  # GB
                     mem_reserved = torch.cuda.memory_reserved(i) / (1024**3)  # GB
-                    
-                    self.writer.add_scalar(f"system/cuda{i}_allocated_gb", mem_allocated, self.n_calls)
-                    self.writer.add_scalar(f"system/cuda{i}_reserved_gb", mem_reserved, self.n_calls)
-                    
                     if self.verbose > 0:
                         logging.info(f"CUDA {i}: Allocated: {mem_allocated:.2f} GB, Reserved: {mem_reserved:.2f} GB")
         
@@ -1835,16 +1837,35 @@ class StrictTrainingFidelityCallback(BaseCallback):
 class RewardComponentsCallback(BaseCallback):
     """Expose environment reward composition in the normal PPO TensorBoard."""
 
+    def __init__(self):
+        super().__init__(verbose=0)
+        self._terminal_counts = {}
+        self._terminal_total = 0
+        self._transition_total = 0
+
     def _on_step(self):
-        for info in self.locals.get("infos", ()) or ():
+        infos = list(self.locals.get("infos", ()) or ())
+        dones = self.locals.get("dones")
+        self._transition_total += len(infos)
+        for index, info in enumerate(infos):
             for name, value in (info.get("reward_components") or {}).items():
                 if np.isfinite(value):
                     self.logger.record_mean(f"reward/{name}", float(value))
             reason = info.get("terminal_reason")
-            if reason:
+            is_done = dones is None or index >= len(dones) or bool(dones[index])
+            if reason and is_done:
                 safe_reason = str(reason).replace(" ", "_").replace("/", "_")
-                self.logger.record_mean(
-                    f"terminal/{safe_reason}", 1.0)
+                self._terminal_counts[safe_reason] = (
+                    self._terminal_counts.get(safe_reason, 0) + 1)
+                self._terminal_total += 1
+        denominator = max(1, self._transition_total)
+        self.logger.record(
+            "terminal/any_count", self._terminal_total)
+        self.logger.record(
+            "terminal/any_rate", self._terminal_total / denominator)
+        for reason, count in sorted(self._terminal_counts.items()):
+            self.logger.record(f"terminal/{reason}_count", count)
+            self.logger.record(f"terminal/{reason}_rate", count / denominator)
         return True
 
 

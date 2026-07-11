@@ -225,9 +225,13 @@ class ActionSpaceMixin:
                             active_p_gs = gs._get_active_player()
                             non_active_p_gs = gs._get_non_active_player()
 
-                            if gs.phase == gs.PHASE_DECLARE_ATTACKERS and perspective_player == active_p_gs:
+                            if (gs.phase == gs.PHASE_DECLARE_ATTACKERS
+                                    and perspective_player == active_p_gs
+                                    and not gs.stack):
                                 self.combat_handler._add_attack_declaration_actions(perspective_player, non_active_p_gs, valid_actions, set_valid_action)
-                            elif gs.phase == gs.PHASE_DECLARE_BLOCKERS and perspective_player == non_active_p_gs and getattr(gs, 'current_attackers', []):
+                            elif (gs.phase == gs.PHASE_DECLARE_BLOCKERS
+                                    and perspective_player == non_active_p_gs
+                                    and not gs.stack):
                                 self.combat_handler._add_block_declaration_actions(perspective_player, valid_actions, set_valid_action)
 
                             # Ninjutsu is activated after blockers are declared by the
@@ -259,6 +263,18 @@ class ActionSpaceMixin:
                                     if cost_str and self._can_afford_cost_string(perspective_player, cost_str, context=pending_context):
                                         offspring_context = {'action_source': 'offspring_payment_opportunity'}
                                         set_valid_action(295, f"Optional: PAY_OFFSPRING_COST for {getattr(card, 'name', card_id)}", context=offspring_context)
+
+                # Pass is a backward-compatible alias for explicit declaration
+                # completion, but must be hidden whenever that completion would
+                # be illegal (for example one blocker on a menace attacker).
+                if (not gs.stack and gs.phase == gs.PHASE_DECLARE_BLOCKERS
+                        and priority_player_obj == perspective_player
+                        and perspective_player == gs._get_non_active_player()
+                        and hasattr(self, 'combat_handler')
+                        and self.combat_handler
+                        and not self.combat_handler._can_finish_block_declaration()):
+                    valid_actions[11] = False
+                    action_reasons.pop(11, None)
 
                 # --- 5. Final Concede Check ---
                 self.action_reasons_with_context = action_reasons.copy()
@@ -420,7 +436,8 @@ class ActionSpaceMixin:
 
                 if is_sorcery_speed_type:
                     # Check base cost affordability FIRST for the standard PLAY_SPELL action
-                    if self._can_afford_card(player, card, context={}):
+                    if (self._spell_cast_supported(card)
+                            and self._can_afford_card(player, card, context={})):
                         if self._targets_available(card, player, opponent):
                             # --- STANDARD PLAY_SPELL ACTION ---
                             # Provide context: hand_idx
@@ -437,7 +454,9 @@ class ActionSpaceMixin:
 
                     # --- OFFER ALTERNATIVE CASTING MODES (Impending) ---
                     if getattr(card, 'is_impending', False) and getattr(card, 'impending_cost', None):
-                         if self._can_afford_cost_string(player, card.impending_cost):
+                         if gs.mana_system.can_pay_replacing_cost_with_lands(
+                                 player, card_id, card.impending_cost,
+                                 'impending', context={'hand_idx': i}):
                               # Provide context: hand_idx
                               impending_context = {'hand_idx': i}
                               set_valid_action(294, f"Alt: CAST_FOR_IMPENDING {card.name}", context=impending_context)
@@ -512,6 +531,7 @@ class ActionSpaceMixin:
                 is_instant_speed = 'instant' in card.card_types or self._has_flash(card_id)
 
                 if (is_instant_speed and 'land' not in card.type_line.lower()
+                        and self._spell_cast_supported(card)
                         and self._can_afford_card(player, card, context={})
                         and self._targets_available(card, player, opponent)):
                     play_context = {
@@ -1719,16 +1739,26 @@ class ActionSpaceMixin:
 
         oracle_text = getattr(card_or_data, 'oracle_text', '') \
             if isinstance(card_or_data, Card) else card_or_data.get('oracle_text', '')
-        if (re.search(
-                r"as an additional cost to cast this spell,\s*return a permanent "
-                r"you control to its owner'?s hand", oracle_text.lower())
-                and not player.get("battlefield")):
+        requires_return = bool(re.search(
+            r"as an additional cost to cast this spell,\s*return a permanent "
+            r"you control to its owner'?s hand", oracle_text.lower()))
+        if requires_return and not player.get("battlefield"):
             return False
 
         try:
             parsed_cost = gs.mana_system.parse_mana_cost(cost_str)
             # Apply cost modifiers based on context (Kicker, Additional, Alternative)
             final_cost = gs.mana_system.apply_cost_modifiers(player, parsed_cost, card_id, context)
+            if requires_return:
+                # The returned permanent may be an untapped land the mana plan
+                # needs; the cast is affordable only if some permanent can
+                # leave while the cost stays payable.
+                return any(
+                    gs.mana_system.can_pay_mana_cost_with_lands(
+                        player, final_cost, context,
+                        exclude_ids={permanent_id})
+                    for permanent_id in dict.fromkeys(
+                        player.get("battlefield", [])))
             if gs.mana_system.can_pay_mana_cost_with_lands(player, final_cost, context):
                 return True
             return gs.mana_system.can_pay_with_target_dependent_reduction(
@@ -1762,6 +1792,28 @@ class ActionSpaceMixin:
     def _has_flash_text(self, oracle_text):
         """Check if oracle text contains flash keyword."""
         return oracle_text and 'flash' in oracle_text.lower()
+
+    def _spell_cast_supported(self, card):
+        """Gate spells whose casting flow the engine cannot complete yet."""
+        if getattr(card, 'is_spree', False):
+            # Spree mode selection is not wired into cast_spell (spree_context
+            # is never populated), so exposing the spell offers a cast that
+            # rejects after mask validation. Exclude it and record the gap.
+            # Report once per parsed card object.  This predicate runs for
+            # every mask while the card remains in hand; reporting every probe
+            # would turn decision-step frequency into a bogus support count.
+            if not getattr(card, '_spree_support_gap_reported', False):
+                try:
+                    from .card_support import report_unsupported
+                    report_unsupported(
+                        getattr(card, 'name', 'unknown'),
+                        "spree casting flow not implemented",
+                        severity="unparsed")
+                    card._spree_support_gap_reported = True
+                except Exception:
+                    pass
+            return False
+        return True
 
     def _targets_available(self, card, caster, opponent):
         """Check target availability using TargetingSystem."""
@@ -2374,10 +2426,15 @@ class ActionSpaceMixin:
 
     def _add_emblem_graveyard_actions(self, player, opponent, valid_actions,
                                       set_valid_action, is_sorcery_speed):
-        """Expose Wrenn-emblem land plays and permanent-spell casts."""
-        if not any(
+        """Expose bounded graveyard play/cast permissions."""
+        has_emblem = any(
                 emblem.get("kind") == "graveyard_permanents"
-                for emblem in player.get("emblems", [])):
+                for emblem in player.get("emblems", []))
+        has_adventure_permission = any(
+            self.game_state.has_graveyard_adventure_permission(
+                player, card_id)
+            for card_id in player.get("graveyard", []))
+        if not has_emblem and not has_adventure_permission:
             return
         gs = self.game_state
         permanent_spell_types = {
@@ -2386,6 +2443,30 @@ class ActionSpaceMixin:
         for graveyard_index, card_id in enumerate(player.get("graveyard", [])[:6]):
             card = gs._safe_get_card(card_id)
             if not card:
+                continue
+            if gs.has_graveyard_adventure_permission(player, card_id):
+                adventure = card.get_adventure_data() or {}
+                adventure_type = adventure.get("type", "").lower()
+                is_instant_adventure = "instant" in adventure_type
+                if (not is_sorcery_speed and not is_instant_adventure):
+                    continue
+                if not self._can_afford_cost_string(
+                        player, adventure.get("cost", ""), context={}):
+                    continue
+                if not self._targets_available_from_text(
+                        adventure.get("effect", ""), player, opponent):
+                    continue
+                set_valid_action(
+                    472 + graveyard_index,
+                    f"CAST_ADVENTURE_FROM_GRAVEYARD {card.name}",
+                    context={
+                        "source_zone": "graveyard",
+                        "source_idx": graveyard_index,
+                        "graveyard_adventure_cast": True,
+                        "cast_as_adventure": True,
+                    })
+                continue
+            if not has_emblem:
                 continue
             card_types = set(getattr(card, "card_types", []))
             is_land = "land" in card_types

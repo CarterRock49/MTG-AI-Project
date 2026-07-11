@@ -382,6 +382,45 @@ def s_kaito_stun_effect_sequence():
     assert gs._safe_get_card(target).counters.get("stun", 0) == 2, \
         "Kaito did not put two stun counters on the selected target"
 
+    # Exercise the production loyalty -> target choice -> stack continuation,
+    # not just the two parsed effects in isolation.
+    gs = fresh(SEED + 120); env = get_env(); handler = env.action_handler
+    controller, opponent = gs.p1, gs.p2
+    gs.agent_is_p1 = True
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = controller
+    gs.stack.clear()
+    kaito = inject_into_zone(gs, controller, {
+        "name": "Kaito, Bane of Nightmares", "mana_cost": "{2}{U}{B}",
+        "type_line": "Legendary Planeswalker - Kaito", "loyalty": 4,
+        "oracle_text": (
+            "+1: You get an emblem with \"Ninjas you control get +1/+1.\"\n"
+            "0: Surveil 2.\n"
+            "-2: Tap target creature. Put two stun counters on it."),
+    }, "battlefield")
+    target = inject_into_zone(gs, opponent, {
+        "name": "Kaito Full-Path Target", "type_line": "Creature - Beast",
+        "oracle_text": "", "power": 3, "toughness": 3,
+    }, "battlefield")
+    mask = handler.generate_valid_actions()
+    assert mask[442], "Kaito's legal -2 was absent from the action mask"
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(442)
+    assert not info.get("execution_failed") and gs.phase == gs.PHASE_TARGETING
+    candidates = handler._get_target_selection_candidates(
+        controller, gs.targeting_context)
+    assert target in candidates
+    target_mask = handler.generate_valid_actions()
+    handler.current_valid_actions = target_mask
+    _, _, _, info = handler.apply_action(274 + candidates.index(target))
+    assert not info.get("execution_failed"), info.get("error_message")
+    assert gs.phase == gs.PHASE_PRIORITY and gs.stack, \
+        "Kaito's targeted loyalty ability never reached the stack"
+    assert gs.resolve_top_of_stack()
+    assert target in opponent["tapped_permanents"]
+    assert gs._safe_get_card(target).counters.get("stun", 0) == 2
+
 
 @scenario("603 / 122.1d (Floodpits Drowner)", "Floodpits Drowner's ETB puts a stun counter on its chosen target")
 def s_floodpits_drowner_stun_etb():
@@ -423,6 +462,53 @@ def s_floodpits_drowner_stun_etb():
     assert target in opponent["tapped_permanents"], "Floodpits Drowner did not tap its target"
     assert gs._safe_get_card(target).counters.get("stun", 0) == 1, \
         "Floodpits Drowner did not put a stun counter on its target"
+
+
+@scenario("603.3d / 608.2b", "a mandatory targeted trigger without a target never runs TapEffect")
+def scenario_targetless_trigger_fizzles_without_effect_warning():
+    from unittest.mock import patch
+    from Playersim.ability_types import TriggeredAbility
+
+    gs = fresh(SEED + 121)
+    controller, opponent = gs.p1, gs.p2
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    for card_id in list(opponent.get("battlefield", [])):
+        gs.move_card(card_id, opponent, "battlefield", opponent, "graveyard")
+    source = inject_card(gs, {
+        "name": "Targetless Drowner", "type_line": "Creature - Merfolk",
+        "oracle_text": (
+            "When this creature enters, tap target creature an opponent "
+            "controls and put a stun counter on it."),
+        "power": 2, "toughness": 1,
+    })
+    controller["library"].append(source)
+    gs._last_card_locations[source] = (controller, "library")
+    with patch("Playersim.ability_types.logging.warning") as warn:
+        assert gs.move_card(
+            source, controller, "library", controller, "battlefield")
+        gs.ability_handler.process_triggered_abilities()
+    assert not gs.targeting_context and not gs.stack, \
+        "a trigger with no legal mandatory target remained on the stack"
+    assert not any("TapEffect failed" in str(call)
+                   for call in warn.call_args_list)
+
+    # A legacy stack object that somehow missed target selection is also
+    # contained at resolution instead of applying an effect to {}.
+    ability = TriggeredAbility(
+        source, trigger_condition="when this creature enters",
+        effect=("tap target creature an opponent controls and put a stun "
+                "counter on it"))
+    gs.add_to_stack("TRIGGER", source, controller, {
+        "ability": ability,
+        "effect_text": ability.effect_text,
+        "targets": {},
+    })
+    with patch("Playersim.ability_types.logging.warning") as warn:
+        assert gs.resolve_top_of_stack()
+    assert not any("TapEffect failed" in str(call)
+                   for call in warn.call_args_list)
+    assert source not in controller.get("tapped_permanents", set())
 
 
 @scenario("603.2 (Valiant)", "Valiant triggers only on the first spell or ability its controller uses to target it each turn")
@@ -2572,6 +2658,187 @@ def s_menace_requires_two_blockers_to_finish_declaration():
         "declare-blockers step rejected two blockers on a menace attacker"
     assert gs.phase in (gs.PHASE_COMBAT_DAMAGE, gs.PHASE_FIRST_STRIKE_DAMAGE), \
         "phase did not advance after a legal menace block assignment"
+
+
+@scenario("702.111 / 509.1c", "the public mask cannot strand a partial menace block declaration")
+def s_menace_public_block_mask_contract():
+    gs = fresh(); handler = get_env().action_handler
+    gs.agent_is_p1 = False
+    gs.turn = 1
+    gs.phase = gs.PHASE_DECLARE_BLOCKERS
+    gs.priority_player = gs.p2
+    gs.priority_pass_count = 0
+    gs.stack.clear()
+    gs.current_block_assignments = {}
+
+    attacker = inject_into_zone(gs, gs.p1, {
+        "name": "Mask Menace Attacker", "mana_cost": "{3}{B}", "cmc": 4,
+        "type_line": "Creature - Horror", "oracle_text": "Menace",
+        "power": 4, "toughness": 4,
+    }, "battlefield")
+    blocker_a = inject_into_zone(gs, gs.p2, {
+        "name": "Only Mask Blocker", "mana_cost": "{1}{G}", "cmc": 2,
+        "type_line": "Creature - Elf", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    grant_keyword(gs, attacker, "menace")
+    gs.current_attackers = [attacker]
+    blocker_a_action = 48 + gs.p2["battlefield"].index(blocker_a)
+
+    mask = handler.generate_valid_actions()
+    assert not mask[blocker_a_action], \
+        "a lone ordinary blocker was exposed against an unassigned menace attacker"
+    assert mask[11], \
+        "PASS was not retained as a legal completion alias"
+    assert mask[439], \
+        "declaring no blockers against menace was not available"
+    _, _, _, info = handler.apply_action(11)
+    assert not info.get("execution_failed"), \
+        f"Pass did not route through legal block completion: {info}"
+    assert gs.phase in (gs.PHASE_COMBAT_DAMAGE, gs.PHASE_FIRST_STRIKE_DAMAGE), \
+        "Pass left the declaration open or bypassed its combat transition"
+
+    # A stale partial declaration cannot finish, but it can withdraw its lone
+    # blocker and return to the legal no-block declaration.
+    gs.phase = gs.PHASE_DECLARE_BLOCKERS
+    gs.priority_player = gs.p2
+    gs.current_attackers = [attacker]
+    gs.current_block_assignments = {attacker: [blocker_a]}
+    mask = handler.generate_valid_actions()
+    assert not mask[11] and not mask[439], \
+        "finish remained mask-valid for an illegal one-blocker menace assignment"
+    assert mask[blocker_a_action], \
+        "an incomplete menace declaration had no blocker-withdrawal recovery"
+    _, _, _, info = handler.apply_action(blocker_a_action)
+    assert not info.get("execution_failed"), \
+        f"withdrawing an incomplete menace block failed: {info}"
+    assert not gs.current_block_assignments
+
+    # If the partial blocker's physical occurrence left combat, the live
+    # declaration is an ordinary no-block declaration. The mask and executor
+    # both prune it instead of requiring an impossible withdrawal action.
+    gs.current_block_assignments = {attacker: [blocker_a]}
+    assert gs.move_card(
+        blocker_a, gs.p2, "battlefield", gs.p2, "graveyard",
+        cause="menace_partial_recovery_probe")
+    assert handler.generate_valid_actions()[439], \
+        "a departed partial blocker stranded the declare-blockers mask"
+    _, _, _, info = handler.apply_action(439)
+    assert not info.get("execution_failed"), \
+        f"departed menace blocker was not pruned at completion: {info}"
+    assert not gs.current_block_assignments
+    assert gs.move_card(
+        blocker_a, gs.p2, "graveyard", gs.p2, "battlefield",
+        cause="menace_multi_block_probe")
+    gs.phase = gs.PHASE_DECLARE_BLOCKERS
+    gs.priority_player = gs.p2
+    gs.current_attackers = [attacker]
+
+    # Two physical blockers are exposed through the atomic multi-block action;
+    # the completed declaration then aligns action 439 with its executor.
+    blocker_b = inject_into_zone(gs, gs.p2, {
+        "name": "Second Mask Blocker", "mana_cost": "{2}{G}", "cmc": 3,
+        "type_line": "Creature - Elf", "oracle_text": "",
+        "power": 3, "toughness": 3,
+    }, "battlefield")
+    blocker_a_action = 48 + gs.p2["battlefield"].index(blocker_a)
+    blocker_b_action = 48 + gs.p2["battlefield"].index(blocker_b)
+    mask = handler.generate_valid_actions()
+    assert not mask[blocker_a_action] and not mask[blocker_b_action], \
+        "menace exposed a sequential first blocker instead of an atomic declaration"
+    assert mask[383], "two legal menace blockers did not expose multi-block"
+    blocker_a_index = gs.p2["battlefield"].index(blocker_a)
+    assert not gs.combat_action_handler.handle_assign_multiple_blockers(
+        param=0,
+        context={"blocker_identifiers": [blocker_a_index, blocker_a_index]}), \
+        "one physical blocker slot was accepted twice by multi-block"
+    selected_action, selected_context = get_env()._get_scripted_opponent_action(
+        gs.p2, mask, {"phase_context": "priority"})
+    assert selected_action == 383, \
+        "the scripted opponent declined a legal atomic menace block"
+    _, _, _, info = handler.apply_action(
+        selected_action, context=selected_context)
+    assert not info.get("execution_failed"), \
+        f"mask-valid menace multi-block failed: {info}"
+    assert gs.current_block_assignments.get(attacker) == [blocker_a, blocker_b]
+    assert handler.generate_valid_actions()[439], \
+        "finish was absent after a complete two-blocker menace declaration"
+    _, _, _, info = handler.apply_action(439)
+    assert not info.get("execution_failed"), \
+        f"completed menace declaration failed to finish: {info}"
+
+
+@scenario("702.111 / action-map bounds", "menace remains blockable beyond the ten atomic multi-block slots")
+def s_menace_sequential_fallback_beyond_atomic_slots():
+    gs = fresh(); handler = get_env().action_handler
+    gs.agent_is_p1 = False
+    gs.turn = 1
+    gs.phase = gs.PHASE_DECLARE_BLOCKERS
+    gs.priority_player = gs.p2
+    gs.priority_pass_count = 0
+    gs.stack.clear()
+    gs.current_block_assignments = {}
+
+    earlier_attackers = []
+    for index in range(10):
+        earlier_attackers.append(inject_into_zone(gs, gs.p1, {
+            "name": f"Earlier Attacker {index}", "mana_cost": "{1}",
+            "cmc": 1, "type_line": "Creature - Soldier",
+            "oracle_text": "", "power": 30 if index == 0 else 1,
+            "toughness": 30 if index == 0 else 1,
+        }, "battlefield"))
+    menace = inject_into_zone(gs, gs.p1, {
+        "name": "Eleventh Menace Attacker", "mana_cost": "{4}{B}",
+        "cmc": 5, "type_line": "Creature - Horror",
+        "oracle_text": "Menace", "power": 20, "toughness": 20,
+    }, "battlefield")
+    blocker_a = inject_into_zone(gs, gs.p2, {
+        "name": "Late Menace Blocker A", "mana_cost": "{1}{G}",
+        "cmc": 2, "type_line": "Creature - Elf", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    # Fixture decks use repeated canonical IDs for physical copies. Exercise
+    # the occurrence-aware sequential path with a second copy of blocker A.
+    gs.p2["library"].append(blocker_a)
+    assert gs.move_card(
+        blocker_a, gs.p2, "library", gs.p2, "battlefield",
+        cause="duplicate_blocker_probe")
+    blocker_b = blocker_a
+    grant_keyword(gs, menace, "menace")
+    gs.current_attackers = earlier_attackers + [menace]
+    blocker_slots = [
+        index for index, card_id in enumerate(gs.p2["battlefield"])
+        if card_id == blocker_a
+    ]
+    assert len(blocker_slots) == 2
+    action_a, action_b = (48 + blocker_slots[0], 48 + blocker_slots[1])
+
+    mask = handler.generate_valid_actions()
+    assert mask[action_a] and mask[action_b]
+    assert handler.action_reasons_with_context[action_a]["context"].get(
+        "target_attacker_id") == menace, \
+        "the sequential fallback did not bind the out-of-range menace attacker"
+    first_action, first_context = get_env()._get_scripted_opponent_action(
+        gs.p2, mask, {"phase_context": "priority"})
+    assert first_action in (action_a, action_b)
+    _, _, _, info = handler.apply_action(
+        first_action, context=first_context)
+    assert not info.get("execution_failed"), info
+    second_action = action_b if first_action == action_a else action_a
+    mask = handler.generate_valid_actions()
+    assert not mask[439] and mask[second_action], \
+        "the partial sequential menace declaration hid its required second blocker"
+    assert handler.action_reasons_with_context[second_action]["context"].get(
+        "target_attacker_id") == menace
+    selected_action, selected_context = get_env()._get_scripted_opponent_action(
+        gs.p2, mask, {"phase_context": "priority"})
+    assert selected_action == second_action, \
+        "the scripted opponent withdrew instead of completing a menace block"
+    _, _, _, info = handler.apply_action(
+        selected_action, context=selected_context)
+    assert not info.get("execution_failed"), info
+    assert gs.current_block_assignments.get(menace) == [blocker_a, blocker_b]
+    assert handler.generate_valid_actions()[439]
 
 
 @scenario("702.16b/e", "protection from red prevents red blocking and red damage")
@@ -8297,6 +8564,134 @@ def s_overlord_impending_time_ticks():
     assert time_counters() == 0, "the tick kept firing after impending completed"
 
 
+@scenario("702.187 / 601.2f", "a mask-valid Impending cast pays its sparse alternative mana cost")
+def s_overlord_impending_public_cast_cost():
+    gs = fresh(); handler = get_env().action_handler
+    controller = gs.p1
+    gs.agent_is_p1 = True
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.previous_priority_phase = None
+    gs.priority_player = controller
+    gs.priority_pass_count = 0
+    gs.stack.clear()
+    controller["mana_pool"] = {
+        "W": 0, "U": 0, "B": 0, "R": 0, "G": 2, "C": 1,
+    }
+    overlord = inject_real_card(
+        gs, controller, "Overlord of the Hauntwoods", "hand")
+    hand_index = controller["hand"].index(overlord)
+
+    # Every public cost-dict entry accepts a sparse mapping without losing
+    # metadata or sharing its mutable symbol lists.
+    sparse = {
+        "G": 2, "generic": 1, "hybrid": [("W", "U")],
+        "exile_cards": 3,
+    }
+    normalized = gs.mana_system._normalize_mana_cost(sparse)
+    assert all(key in normalized for key in (
+        "W", "U", "B", "R", "G", "C", "generic", "X",
+        "hybrid", "phyrexian", "snow"))
+    assert normalized["exile_cards"] == 3
+    normalized["hybrid"].append(("B", "R"))
+    assert sparse["hybrid"] == [("W", "U")], \
+        "normalization shared a mutable hybrid-symbol list"
+    minimum_checked = gs.mana_system.apply_minimum_cost_effects(
+        controller, {"G": 2, "generic": 1}, overlord)
+    assert minimum_checked["G"] == 2 and minimum_checked["generic"] == 1
+    assert minimum_checked["W"] == 0 and minimum_checked["hybrid"] == []
+
+    tax = inject_into_zone(gs, gs.p2, {
+        "name": "Impending Tax Probe", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Artifact", "oracle_text":
+        "Creature spells your opponents cast cost {1} more.",
+    }, "battlefield")
+    assert not handler.generate_valid_actions()[294], \
+        "Impending mask ignored a battlefield cost increase"
+    assert gs.move_card(
+        tax, gs.p2, "battlefield", gs.p2, "graveyard",
+        cause="impending_tax_probe")
+
+    controller["mana_pool"]["C"] = 0
+    reducer = inject_into_zone(gs, controller, {
+        "name": "Impending Reduction Probe", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Artifact", "oracle_text":
+        "Creature spells you cast cost {1} less.",
+    }, "battlefield")
+    assert handler.generate_valid_actions()[294], \
+        "Impending mask ignored a battlefield cost reduction"
+    assert gs.move_card(
+        reducer, controller, "battlefield", controller, "graveyard",
+        cause="impending_reduction_probe")
+    controller["mana_pool"]["C"] = 1
+
+    mask = handler.generate_valid_actions()
+    assert mask[294], "affordable Impending cast was absent from the mask"
+    assert handler.action_reasons_with_context[294]["context"].get(
+        "hand_idx") == hand_index
+    _, _, _, info = handler.apply_action(294)
+    assert not info.get("execution_failed"), \
+        f"mask-valid Impending cast failed: {info}"
+    assert overlord not in controller["hand"]
+    assert gs.stack and gs.stack[-1][0] == "SPELL" \
+        and gs.stack[-1][1] == overlord
+    stack_context = gs.stack[-1][3]
+    paid_cost = stack_context.get("final_paid_cost", {})
+    assert stack_context.get("cast_for_impending")
+    assert paid_cost.get("generic") == 1 and paid_cost.get("G") == 2, \
+        f"Impending charged the wrong cost: {paid_cost}"
+    assert all(controller["mana_pool"].get(color, 0) == 0
+               for color in ("W", "U", "B", "R", "G", "C")), \
+        "Impending did not spend its {1}{G}{G} cost"
+
+
+@scenario("702.51 / 601.2f", "Convoke choices reduce a final mana cost exactly once")
+def s_convoke_cost_reduction_is_not_duplicated():
+    gs = fresh(); controller = gs.p1
+    creature_a = inject_into_zone(gs, controller, {
+        "name": "Convoke Helper A", "mana_cost": "{W}", "cmc": 1,
+        "type_line": "Creature - Citizen", "oracle_text": "",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    creature_b = inject_into_zone(gs, controller, {
+        "name": "Convoke Helper B", "mana_cost": "{G}", "cmc": 1,
+        "type_line": "Creature - Citizen", "oracle_text": "",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    spell = inject_card(gs, {
+        "name": "Convoke Cost Probe", "mana_cost": "{5}", "cmc": 5,
+        "type_line": "Sorcery", "oracle_text": "Convoke",
+    })
+    helper_indices = [
+        controller["battlefield"].index(creature_a),
+        controller["battlefield"].index(creature_b),
+    ]
+    context = {
+        "card_id": spell,
+        "convoke_creatures": helper_indices,
+    }
+    final_cost = gs.mana_system.apply_cost_modifiers(
+        controller, gs.mana_system.parse_mana_cost("{5}"), spell, context)
+    assert final_cost["generic"] == 3, \
+        f"two Convoke helpers changed {{5}} to {final_cost}"
+    convoke_mods = [
+        entry for entry in
+        context.get("applied_cost_modifications", {}).get("reductions", [])
+        if "convoke" in str(entry.get("source", "")).lower()
+    ]
+    assert len(convoke_mods) == 1 and convoke_mods[0]["amount"] == 2, \
+        f"Convoke reduction was applied more than once: {convoke_mods}"
+
+    controller["mana_pool"] = {
+        "W": 0, "U": 0, "B": 0, "R": 0, "G": 0, "C": 3,
+    }
+    assert gs.mana_system.pay_mana_cost(controller, final_cost, context), \
+        "the once-reduced final Convoke cost was not payable"
+    assert creature_a in controller["tapped_permanents"] \
+        and creature_b in controller["tapped_permanents"]
+    assert controller["mana_pool"]["C"] == 0
+
+
 @scenario("Valiant (Emberheart Challenger)", "the real card text registers its Valiant trigger separately from the Prowess keyword line")
 def s_emberheart_real_text_registration():
     gs = fresh()
@@ -10271,6 +10666,60 @@ def scenario_auto_tap_cast_from_untapped_lands():
         "auto-tap floated mana beyond the spell's cost"
 
 
+@scenario("601.2b / auto-tap",
+          "a return-permanent additional cost only offers returns that keep the cost payable")
+def scenario_return_cost_preserves_mana_plan():
+    gs = fresh(); env = get_env(); handler = env.action_handler
+    gs.agent_is_p1 = True
+    player = gs.p1
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    gs.priority_pass_count = 0
+    gs.stack.clear()
+    islands = [inject_into_zone(gs, player, {
+        "name": f"Isolation Island {i}", "type_line": "Basic Land - Island",
+        "oracle_text": "{T}: Add {U}.",
+    }, "battlefield") for i in range(2)]
+    fear, = replace_hand(gs, player, [{
+        "name": "Isolation Test Fear", "mana_cost": "{U}{U}", "cmc": 2,
+        "type_line": "Creature - Nightmare", "power": 2, "toughness": 2,
+        "oracle_text": (
+            "As an additional cost to cast this spell, return a permanent "
+            "you control to its owner's hand.\nFlying"
+        ),
+    }])
+    player["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
+
+    # With only the two Islands, any return leaves {U}{U} unpayable.
+    mask = env.action_mask()
+    assert not mask[20], \
+        "PLAY_SPELL was offered although every return breaks the mana plan"
+
+    mountain = inject_into_zone(gs, player, {
+        "name": "Isolation Mountain", "type_line": "Basic Land - Mountain",
+        "oracle_text": "{T}: Add {R}.",
+    }, "battlefield")
+    mask = env.action_mask()
+    assert mask[20], \
+        "PLAY_SPELL was absent although returning the Mountain keeps {U}{U} payable"
+    _, _, _, _, info = env.step(20)
+    assert not info.get('execution_failed'), info.get('error_message')
+    assert gs.phase == gs.PHASE_CHOOSE \
+        and gs.choice_context.get("type") == "casting_additional_return", \
+        "the cast did not enter its return-permanent choice"
+    assert gs.choice_context.get("options") == [mountain], \
+        f"viable return options were wrong: {gs.choice_context.get('options')}"
+    _, _, _, _, info = env.step(353)
+    assert not info.get('execution_failed'), info.get('error_message')
+    assert mountain in player["hand"], "the returned Mountain did not reach hand"
+    assert gs.stack and gs.stack[-1][1] == fear, \
+        "the spell did not reach the stack after paying its return cost"
+    tapped = player.get("tapped_permanents", set())
+    assert all(island in tapped for island in islands), \
+        "auto-tap did not use both Islands after the Mountain was returned"
+
+
 @scenario("117.1 / 601.2c", "a targeted sorcery preserves its main phase through target selection")
 def scenario_targeted_spell_from_main_priority_wrapper():
     gs = fresh(); handler = get_env().action_handler
@@ -10495,6 +10944,394 @@ def scenario_non_layer_declarations_are_not_static_abilities():
                        and declaration.lower() in ability.effect_text.lower()
                        for ability in abilities), \
             f"dedicated declaration was also registered as static: {declaration}"
+
+
+@scenario("702.172 / policy contract", "unsupported Spree cards are masked and excluded exactly once")
+def scenario_spree_cast_is_masked_and_manifested_once():
+    from Playersim import card_support
+
+    card_support.reset_manifest_for_tests()
+    try:
+        gs = fresh(SEED + 130); env = get_env()
+        gs.agent_is_p1 = False
+        player = gs.p2
+        gs.turn = 2
+        gs.phase = gs.PHASE_UPKEEP
+        gs.previous_priority_phase = None
+        gs.priority_player = player
+        gs.priority_pass_count = 0
+        gs.stack.clear()
+        replace_hand(gs, player, [{
+            "name": f"Spree Slot Filler {index}", "mana_cost": "{1}",
+            "type_line": "Sorcery", "oracle_text": "Draw a card.",
+        } for index in range(2)])
+        spree_id = inject_real_card(gs, player, "Three Steps Ahead", "hand")
+        spree = gs._safe_get_card(spree_id)
+        assert len(spree.spree_modes) == 3, \
+            f"real reminder-text Spree parsed {spree.spree_modes}"
+        assert spree.spree_modes[0]["cost"] == "{1}{U}" \
+            and "counter target spell" in spree.spree_modes[0]["effect"].lower()
+        player["mana_pool"] = {
+            "W": 0, "U": 5, "B": 0, "R": 0, "G": 0, "C": 5}
+        inject_into_zone(gs, player, {
+            "name": "Spree Copy Candidate", "type_line": "Artifact",
+            "oracle_text": "",
+        }, "battlefield")
+
+        first_mask = env.action_mask()
+        second_mask = env.action_mask()
+        assert not first_mask[22] and not second_mask[22], \
+            "Three Steps Ahead was exposed as an ordinary base-cost instant"
+        entry = card_support.get_manifest().entries.get("Three Steps Ahead")
+        assert entry and entry["severity"] == "unparsed", entry
+        assert entry["count"] == 1 \
+            and entry["reasons"].get("spree casting flow not implemented") == 1, \
+            f"mask probes inflated the Spree support count: {entry}"
+    finally:
+        card_support.reset_manifest_for_tests()
+
+
+@scenario("613.1f / 702.15 / 702.21", "combined parameterized keyword lines register one ability per keyword")
+def scenario_oildeep_keyword_line_has_no_duplicate_static():
+    from Playersim.ability_types import StaticAbility
+
+    gs = fresh(SEED + 131)
+    player = gs.p1
+    oildeep = inject_real_card(gs, player, "Oildeep Gearhulk", "battlefield")
+    statics = [
+        ability
+        for ability in gs.ability_handler.registered_abilities.get(oildeep, [])
+        if isinstance(ability, StaticAbility)
+    ]
+    lifelink = [ability for ability in statics
+                if getattr(ability, "keyword", None) == "lifelink"]
+    ward = [ability for ability in statics
+            if getattr(ability, "keyword", None) == "ward"]
+    assert len(lifelink) == 1 and len(ward) == 1, \
+        f"Oildeep keyword abilities were duplicated: {statics}"
+    assert getattr(ward[0], "keyword_value", None) == "{1}"
+    assert not any(
+        "lifelink, ward" in getattr(ability, "effect_text", "").lower()
+        for ability in statics), \
+        "the combined keyword declaration became a dead StaticAbility"
+    layer_six = [
+        data for _, data in gs.layer_system.layers[6]
+        if data.get("source_id") == oildeep
+    ]
+    assert len(layer_six) == 2, \
+        f"keyword statics registered duplicate layer effects: {layer_six}"
+    assert gs.check_keyword(oildeep, "lifelink")
+    assert gs.check_keyword(oildeep, "ward")
+    assert gs.ability_handler.get_ward_costs(oildeep) == ["{1}"]
+
+
+@scenario("121.1 / 704.5b", "draw effects accept card ID zero, replacements, and rules-defined decking")
+def scenario_draw_effect_completion_is_not_truthiness_based():
+    from unittest.mock import patch
+    from Playersim.ability_types import DrawCardEffect
+    from Playersim.card import Card
+
+    gs = fresh(SEED + 132)
+    player = gs.p1
+    zero_card = Card({
+        "name": "Zero ID Draw", "mana_cost": "{0}",
+        "type_line": "Artifact", "oracle_text": "",
+    })
+    zero_card.card_id = 0
+    gs.card_db[0] = zero_card
+    for owner in (gs.p1, gs.p2):
+        for zone in ("library", "hand", "battlefield", "graveyard", "exile"):
+            owner[zone] = [card_id for card_id in owner.get(zone, [])
+                           if card_id != 0]
+    player["library"] = [0]
+    player["hand"] = []
+    assert DrawCardEffect(1).apply(gs, None, player, {})
+    assert player["hand"] == [0], "numeric card ID 0 was treated as no draw"
+
+    player["library"] = []
+    player["life"] = 20
+    player.pop("attempted_draw_from_empty", None)
+    assert DrawCardEffect(1).apply(gs, None, player, {}), \
+        "a normal decking draw was mislabeled as an effect failure"
+    assert player.get("attempted_draw_from_empty") \
+        and gs.terminal_reason == "decking"
+
+    gs = fresh(SEED + 133)
+    player = gs.p1
+    with patch.object(type(gs), "_draw_card", return_value=None):
+        assert DrawCardEffect(1).apply(gs, None, player, {}), \
+            "a replaced draw was mislabeled as an effect failure"
+
+
+@scenario("109.3 / observation contract", "exact battlefield scalars exceed the fixed card-detail tensor safely")
+def scenario_large_board_counts_remain_exact_and_diagnostics_stick():
+    env = get_env(); gs = fresh(SEED + 134)
+    gs.p1["battlefield"] = []
+    gs.p2["battlefield"] = []
+    for owner, count, prefix in ((gs.p1, 21, "P1"), (gs.p2, 22, "P2")):
+        for index in range(count):
+            card_id = inject_card(gs, {
+                "name": f"{prefix} Large Board {index}",
+                "type_line": "Artifact", "oracle_text": "",
+            })
+            owner["battlefield"].append(card_id)
+            gs._last_card_locations[card_id] = (owner, "battlefield")
+    env.last_observation_error = None
+    env.last_observation_traceback = None
+    observation = env._get_obs()
+    assert observation["p1_bf_count"].tolist() == [21]
+    assert observation["p2_bf_count"].tolist() == [22]
+    assert env.observation_space.contains(observation)
+    assert env.last_observation_error is None
+
+    assert env._record_observation_error(
+        "sticky probe", ValueError("first episode failure"))
+    env._get_obs()
+    assert "first episode failure" in env.last_observation_error, \
+        "observation construction erased an earlier episode diagnostic"
+    env.reset(seed=SEED + 135)
+    assert env.last_observation_error is None, \
+        "a new episode retained the prior observation diagnostic"
+
+
+@scenario("training diagnostics / opponent", "opponent execution failures retain an agent-replayable artifact")
+def scenario_opponent_failure_persists_replay():
+    from unittest.mock import patch
+
+    gs = fresh(SEED + 136); env = get_env(); handler = env.action_handler
+    gs.agent_is_p1 = True
+    gs.priority_player = gs.p1
+    calls = []
+
+    def fake_apply(_handler, action_idx, context=None):
+        calls.append(action_idx)
+        if len(calls) == 1:
+            return 0.0, False, False, {}
+        return 0.0, False, False, {
+            "execution_failed": True,
+            "error_message": "forced opponent mask-contract failure",
+            "handler_error": "forced opponent handler error",
+            "failed_action": {"action_index": action_idx,
+                              "context": dict(context or {})},
+        }
+
+    opponent = gs.p2
+    with patch.object(type(handler), "apply_action", new=fake_apply), \
+            patch.object(env, "_opponent_needs_to_act",
+                         return_value=(opponent, {})), \
+            patch.object(env, "_get_opponent_policy_action",
+                         return_value=(224, {})):
+        assert env.action_mask()[11]
+        _, _, _, _, info = env.step(11)
+    assert info.get("opponent_execution_failed")
+    replay_path = info.get("failure_replay_path")
+    assert replay_path and os.path.isfile(replay_path)
+    with open(replay_path, encoding="utf-8") as handle:
+        payload = json.load(handle)
+    assert payload["agent_is_p1"] is True
+    assert payload["actions"][-1]["action"] == 11, \
+        "the replay stored the scripted action instead of its triggering agent action"
+    assert payload["failure"]["actor"] == "opponent"
+    assert payload["failure"]["recent_actions"][-1] == 224
+
+
+@scenario("613.1f / 604.1", "Zur grants all three keywords only to controlled enchantment creatures")
+def scenario_zur_keyword_bundle_is_scoped_and_live():
+    from Playersim.ability_types import StaticAbility
+    from Playersim.card import Card
+
+    gs = fresh(SEED + 137)
+    controller, opponent = gs.p1, gs.p2
+    zur = inject_real_card(
+        gs, controller, "Zur, Eternal Schemer", "battlefield")
+    normal_creature = inject_into_zone(gs, controller, {
+        "name": "Zur Ordinary Creature", "type_line": "Creature - Human",
+        "oracle_text": "", "power": 2, "toughness": 2,
+    }, "battlefield")
+    opposing_enchantment_creature = inject_into_zone(gs, opponent, {
+        "name": "Zur Opposing Enchantment Creature",
+        "type_line": "Enchantment Creature - Spirit",
+        "oracle_text": "", "power": 2, "toughness": 2,
+    }, "battlefield")
+
+    # This object enters after Zur, proving the grant is a live scope rather
+    # than a frozen list captured when the source entered.
+    friendly_enchantment_creature = inject_into_zone(gs, controller, {
+        "name": "Zur Friendly Enchantment Creature",
+        "type_line": "Enchantment Creature - Spirit",
+        "oracle_text": "", "power": 2, "toughness": 2,
+    }, "battlefield")
+    gs.layer_system.invalidate_cache()
+    gs.layer_system.apply_all_effects()
+
+    grant_keywords = {"deathtouch", "lifelink", "hexproof"}
+    grant_effects = [
+        data for _, data in gs.layer_system.layers[6]
+        if data.get("source_id") == zur
+        and str(data.get("effect_value", "")).lower() in grant_keywords
+        and data.get("affected_scope")
+    ]
+    assert {str(data["effect_value"]).lower() for data in grant_effects} \
+        == grant_keywords, f"Zur did not register all keyword grants: {grant_effects}"
+    for keyword in grant_keywords:
+        assert gs.check_keyword(friendly_enchantment_creature, keyword), \
+            f"Zur failed to grant {keyword} to a controlled enchantment creature"
+        assert not gs.check_keyword(normal_creature, keyword), \
+            f"Zur incorrectly granted {keyword} to an ordinary creature"
+        assert not gs.check_keyword(opposing_enchantment_creature, keyword), \
+            f"Zur incorrectly granted {keyword} to an opponent's permanent"
+        assert not gs.check_keyword(zur, keyword), \
+            f"Zur inherited {keyword} from text that grants it to other objects"
+    assert gs.check_keyword(zur, "flying"), "Zur lost its own printed Flying"
+
+    zur_card = gs._safe_get_card(zur)
+    intrinsic = {
+        keyword for index, keyword in enumerate(Card.ALL_KEYWORDS)
+        if zur_card.keywords[index]
+    }
+    assert intrinsic == {"flying"}, \
+        f"Zur's printed keyword vector contains scoped grants: {intrinsic}"
+    statics = [
+        ability
+        for ability in gs.ability_handler.registered_abilities.get(zur, [])
+        if isinstance(ability, StaticAbility)
+    ]
+    assert not any(
+        getattr(ability, "keyword", None) in grant_keywords
+        for ability in statics), "scoped grants became intrinsic source abilities"
+
+    assert gs.move_card(
+        zur, controller, "battlefield", controller, "graveyard")
+    gs.layer_system.invalidate_cache()
+    gs.layer_system.apply_all_effects()
+    for keyword in grant_keywords:
+        assert not gs.check_keyword(friendly_enchantment_creature, keyword), \
+            f"Zur's {keyword} grant survived after its source left"
+
+
+@scenario("109.3 / observation schema", "card vectors retain subtypes/MDFC fields and signed live P/T")
+def scenario_card_feature_schema_is_complete_and_signed():
+    from Playersim.card import Card
+
+    env = get_env(); gs = fresh(SEED + 138)
+    expected_dim = (
+        4 + 6 + len(Card.ALL_KEYWORDS)
+        + 5 + len(env._subtype_vocab) + 3)
+    assert env._feature_dim == expected_dim
+
+    agent = gs.p1 if gs.agent_is_p1 else gs.p2
+    opponent = gs.p2 if agent is gs.p1 else gs.p1
+    weakened = inject_into_zone(gs, opponent, {
+        "name": "Signed Feature Creature", "type_line": "Creature - Spirit",
+        "oracle_text": "", "power": 1, "toughness": 1,
+    }, "battlefield")
+    gs.layer_system.register_effect({
+        "source_id": weakened, "layer": 7, "sublayer": "c",
+        "affected_ids": [weakened], "effect_type": "modify_pt",
+        "effect_value": (-3, -3), "duration": "permanent",
+    })
+    gs.layer_system.invalidate_cache()
+    gs.layer_system.apply_all_effects()
+    assert (gs._safe_get_card(weakened).power,
+            gs._safe_get_card(weakened).toughness) == (-2, -2)
+
+    env.last_observation_error = None
+    env.last_observation_traceback = None
+    observation = env._get_obs()
+    row = opponent["battlefield"].index(weakened)
+    assert observation["opp_battlefield"][row, 2:4].tolist() == [-2.0, -2.0]
+    assert observation["opp_total_power"].tolist() == [-2]
+    assert observation["opp_total_toughness"].tolist() == [-2]
+    assert env.last_observation_error is None
+    assert env.observation_space.contains(observation)
+
+    # A later database load may change Card.SUBTYPE_VOCAB globally; the
+    # environment must still project cards into its captured schema and retain
+    # the final MDFC fields instead of truncating them.
+    mdfc = inject_card(gs, {
+        "name": "Feature MDFC Front", "layout": "modal_dfc",
+        "type_line": "Creature - Spirit", "oracle_text": "",
+        "power": 2, "toughness": 3,
+    })
+    mdfc_card = gs._safe_get_card(mdfc)
+    mdfc_card.faces = [
+        {"name": "Feature MDFC Front", "type_line": "Creature - Spirit",
+         "oracle_text": "", "power": "2", "toughness": "3"},
+        {"name": "Feature MDFC Back", "type_line": "Creature - Spirit",
+         "oracle_text": "", "power": "7", "toughness": "8"},
+    ]
+    vector = env._get_card_feature(mdfc, env._feature_dim)
+    assert len(vector) == env._feature_dim
+    assert vector[-3:].tolist() == [1.0, 7.0, 8.0], \
+        f"MDFC fields were lost from the policy vector: {vector[-3:]}"
+    battlefield_space = env.observation_space["opp_battlefield"]
+    assert battlefield_space.low[0, 2] < -2 \
+        and battlefield_space.high[0, 2] > 50
+    assert battlefield_space.low[0, 10] == 0 \
+        and battlefield_space.high[0, 10] == 1
+
+
+@scenario("603.6c / 715.3", "Mosswood Dreadknight grants and expires a graveyard Adventure cast")
+def scenario_mosswood_dreadknight_graveyard_adventure_permission():
+    gs = fresh(SEED + 139); env = get_env(); handler = env.action_handler
+    controller = gs.p1
+    gs.agent_is_p1 = True
+    controller["graveyard"] = []
+    dreadknight = inject_real_card(
+        gs, controller, "Mosswood Dreadknight // Dread Whispers",
+        "battlefield")
+    card = gs._safe_get_card(dreadknight)
+    adventure = card.get_adventure_data()
+    assert adventure and adventure["name"] == "Dread Whispers", adventure
+
+    assert gs.move_card(
+        dreadknight, controller, "battlefield", controller, "graveyard",
+        cause="destroy")
+    gs.ability_handler.process_triggered_abilities()
+    assert gs.stack and gs.stack[-1][1] == dreadknight, \
+        "Dreadknight's dies trigger did not reach the stack"
+    assert gs.resolve_top_of_stack(), \
+        "Dreadknight's graveyard Adventure permission did not resolve"
+    assert gs.has_graveyard_adventure_permission(controller, dreadknight)
+
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.previous_priority_phase = None
+    gs.priority_player = controller
+    gs.priority_pass_count = 0
+    controller["mana_pool"] = {
+        "W": 0, "U": 0, "B": 1, "R": 0, "G": 0, "C": 1,
+    }
+    graveyard_index = controller["graveyard"].index(dreadknight)
+    action_index = 472 + graveyard_index
+    mask = handler.generate_valid_actions()
+    assert mask[action_index], \
+        "the permitted Dread Whispers cast was absent from the action mask"
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(action_index)
+    assert not info.get("execution_failed"), info
+    assert dreadknight not in controller["graveyard"]
+    assert gs.stack and gs.stack[-1][1] == dreadknight
+    assert not gs.has_graveyard_adventure_permission(controller, dreadknight), \
+        "the graveyard permission was not consumed by casting"
+
+    life_before = controller["life"]
+    hand_before = len(controller["hand"])
+    assert gs.resolve_top_of_stack(), "Dread Whispers did not resolve"
+    assert dreadknight in controller["exile"]
+    assert dreadknight in gs.cards_castable_from_exile
+    assert controller["life"] == life_before - 1
+    assert len(controller["hand"]) == hand_before + 1
+
+    assert gs.move_card(
+        dreadknight, controller, "exile", controller, "graveyard",
+        cause="permission_expiry_probe")
+    assert gs.grant_graveyard_adventure_permission(controller, dreadknight)
+    expires_turn = gs.graveyard_adventure_permissions[0]["expires_turn"]
+    gs.turn = expires_turn
+    gs._cleanup_step_actions(controller, discard_to_max=False)
+    assert not gs.has_graveyard_adventure_permission(controller, dreadknight), \
+        "the until-end-of-next-turn permission survived its cleanup"
 
 
 # ---------------------------------------------------------------------------

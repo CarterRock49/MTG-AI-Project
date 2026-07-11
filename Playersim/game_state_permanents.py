@@ -1812,7 +1812,8 @@ class GameStatePermanentsMixin:
             if not cost_to_pay_str:
                 return False
             parsed_cost = self.mana_system.parse_mana_cost(cost_to_pay_str)
-            if not self.mana_system.can_pay_mana_cost(player, parsed_cost):
+            # Match the mask's untapped-land affordability; payment auto-taps.
+            if not self.mana_system.can_pay_mana_cost_with_lands(player, parsed_cost):
                 return False
             if self.mana_system.pay_mana_cost_get_details(
                     player, parsed_cost) is None:

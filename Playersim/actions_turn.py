@@ -481,6 +481,20 @@ class TurnPhaseHandlersMixin:
 
     def _handle_pass_priority(self, param, **kwargs):
         gs = self.game_state
+        # Declaration phases use explicit completion handlers. Treat Pass as a
+        # backward-compatible alias when the appropriate declarer has priority
+        # so generic two-pass phase advancement cannot bypass attack triggers
+        # or whole-declaration legality.
+        if (not gs.stack and self.combat_handler
+                and gs.phase == gs.PHASE_DECLARE_ATTACKERS
+                and gs.priority_player is gs._get_active_player()):
+            success = self.combat_handler.handle_declare_attackers_done()
+            return (0.05 if success else -0.1), success
+        if (not gs.stack and self.combat_handler
+                and gs.phase == gs.PHASE_DECLARE_BLOCKERS
+                and gs.priority_player is gs._get_non_active_player()):
+            success = self.combat_handler.handle_declare_blockers_done()
+            return (0.05 if success else -0.1), success
         if (gs.phase == gs.PHASE_CHOOSE and getattr(gs, 'choice_context', None)
                 and gs.choice_context.get('type') == 'saddle'):
             ctx = gs.choice_context

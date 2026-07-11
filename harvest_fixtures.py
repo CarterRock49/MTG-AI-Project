@@ -578,8 +578,9 @@ def _validate_tracker_artifacts(
             raise RuntimeError(f"Tracker metadata card {card_name} has an invalid win_rate")
         play_rate = _finite_number(
             stats.get("play_rate"), f"tracker metadata card {card_name}.play_rate",
-            minimum=0)
-        expected_play_rate = stats["games"] / len(records) if records else 0.0
+            minimum=0, maximum=1)
+        expected_play_rate = (
+            stats["games"] / (2 * len(records)) if records else 0.0)
         if not math.isclose(
                 play_rate, expected_play_rate, rel_tol=1e-9, abs_tol=1e-9):
             raise RuntimeError(f"Tracker metadata card {card_name} has a stale play_rate")

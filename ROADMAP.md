@@ -16,7 +16,7 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 12/12, and 273/273, plus 10/10 fixture-
+   every delivery (currently 9/9, 12/12, and 287/287, plus 11/11 fixture-
    harvest tests, 5/5 production-protocol tests, 6/6 fuzz/replay tests, and
    the deterministic 8-seed / 8,000-action default fuzz profile, and the
    strict 32-seed / 320,000-action long profile).
@@ -47,8 +47,10 @@ The project is complete when all of the following hold:
   across all six training workers.
 - Tier 1 (rules correctness): ✅ complete — all seven items plus the P1
   placeholder triage delivered; see appendix for the bug catalog.
-- Tier 2 (card coverage): ◐ the audited eight-deck sample has no known
-  high-risk partials; format-wide quantified coverage remains manifest-driven.
+- Tier 2 (card coverage): ◐ the audited eight-deck sample has no unknown
+  high-risk partials; Three Steps Ahead remains explicitly mask-excluded and
+  `unparsed` pending full Spree support. Format-wide quantified coverage remains
+  manifest-driven.
 - Tier 3 (training/environment): ◐ policy plumbing and audit work are complete;
   a trained checkpoint still needs to beat scripted play before Harvest is
   promoted to policy-vs-policy.
@@ -57,8 +59,8 @@ The project is complete when all of the following hold:
 - Tier 5 (operations/integration): ◐ Harvest orchestration is complete; strength
   qualification, production throughput profiling, and deck-builder integration
   remain open.
-- Test gates: smoke 9/9, training 12/12, scenarios 273/273 (grown from 12),
-  fixture harvest 10/10, production Harvest protocol 5/5, fuzz/replay
+- Test gates: smoke 9/9, training 12/12, scenarios 287/287 (grown from 12),
+  fixture harvest 11/11, production Harvest protocol 5/5, fuzz/replay
   configuration 6/6, deterministic default fuzz 8 seeds x 1,000 valid
   actions, and strict long fuzz 32 seeds x 10,000 valid actions.
 - **Stats collected before July 2026 are unusable** (wrong player, wrong
@@ -1196,9 +1198,70 @@ probes now end by life total or decking instead of turn-limit adjudication.
 Gates: 273/273 scenarios (three new), 9/9 smoke, 12/12 training, 10/10 + 5/5
 Harvest, 6/6 fuzz/replay configuration, and 8,000/8,000 default-fuzz actions.
 
+**Round 7.44 (July 2026):** strength run
+`ALPHA_ZERO_MTG_V3.00_20260711_145919` exposed Three Steps Ahead as an
+ordinary mask-valid cast even though the engine does not yet implement Spree's
+per-mode additional costs, target collection, and combined resolution. The
+real card now parses all three printed modes, but Spree spells are deliberately
+mask-excluded and recorded once per card object as `unparsed` support gaps until
+that complete casting flow exists. This converts a fatal policy-contract breach
+into explicit deck-builder exclusion rather than pretending the card is safe.
+
+The same run's warning families led to six shared repairs. Targeted triggered
+and loyalty abilities now collect committed targets before resolution and
+fizzle cleanly when a mandatory target disappears, while targetless triggers
+do not enter that path. Combined keyword clauses such as Oildeep Gearhulk's
+`lifelink, ward {1}` no longer register duplicate static/layer effects. Draw
+effects treat physical card id `0` as valid and regard an empty-library draw as
+a successfully executed rules event. Exact scalar observations now retain
+legal boards above the 20-slot detail tensor instead of degrading or warning on
+them, and the first observation error remains sticky for the episode. Finally,
+a failure inside the scripted-opponent loop writes a deterministic replay for
+the agent action that entered that loop.
+
+The fresh CUDA canaries then exercised paths that the synthetic fixtures had
+not reached. Card observations now use the complete immutable 225-field schema
+for this pool (including all 48 subtype fields and MDFC fields), preserve legal
+signed live power/toughness, and validate component-specific bounds instead of
+silently truncating vectors. Zur's exact static ability grants deathtouch,
+lifelink, and hexproof only to its controller's enchantment creatures, including
+later entrants, and removes those grants when Zur leaves. Tracker format 3.2
+normalizes card/archetype prevalence by the two deck seats in every match;
+TensorBoard uses policy timesteps as its single x-axis and exports cumulative
+terminal counts alongside per-timestep rates.
+
+Mosswood Dreadknight now recognizes its real two-face Adventure data. Its dies
+trigger grants the printed graveyard Adventure permission through the end of
+the controller's next turn, the cast uses Dread Whispers' cost and effect, and
+successful resolution exiles the card with the normal creature-side recast
+permission. Finally, the exact turn-16 replay from failed canary
+`ALPHA_ZERO_MTG_V3.00_20260711_160213` proved that an ordinary BLOCK action
+could strand one blocker on Harvester of Misery. Menace now starts blocking
+through the atomic multi-block action, ordinary block masks bind the exact
+attacker they validated, incomplete legacy declarations expose an undo, and
+action 439 is present exactly when its completion handler can execute.
+
+Failed canary `ALPHA_ZERO_MTG_V3.00_20260711_163807` then exposed action 294:
+Overlord of the Hauntwoods' Impending `{1}{G}{G}` replacing cost was not parsed,
+and its sparse cost mapping reached a `KeyError: 'W'`. Cost boundaries now
+normalize the complete mana schema, and both the mask and handler price the
+actual alternative cost with taxes, reductions, and land auto-tapping.
+Convoke, Delve, and Improvise reductions are produced exactly once instead of
+being applied again during affordability checks.
+
+The corrected observation shape and scalar bounds change the declared Gym
+observation space. Stable-Baselines checkpoint compatibility includes both, so
+checkpoints created before Round 7.44 must not be resumed. Fresh eight-worker
+CUDA canary `ALPHA_ZERO_MTG_V3.00_20260711_165824` completed 8,192/8,192
+transitions at 99 rollout FPS and recorded 14 terminal games (3 decking, 3 life
+total, 8 turn limit). Final validation passed with no warning or error file.
+Gates: 287/287 scenarios, 9/9 smoke, 12/12 training, 11/11 + 5/5 Harvest, 6/6
+fuzz/replay configuration, the exact failure-state regressions, and 8,000/8,000
+default-fuzz actions.
+
 ## Tier 4 — Verification & calibration
 
-1. ✅ Golden scenario harness — 273 scenarios and growing; scenario-first is a
+1. ✅ Golden scenario harness — 287 scenarios and growing; scenario-first is a
    working agreement, not a suggestion.
 2. ✅ **Property/invariant harness**: exact non-token zone/stack conservation,
    SBA fixed points, mask-valid action execution/handler coverage, declared

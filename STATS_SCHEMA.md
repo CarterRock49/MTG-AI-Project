@@ -3,6 +3,9 @@
 Everything the downstream deck-construction AI needs to consume Playersim output.
 All files are written relative to the training process's working directory.
 
+The append-only game-log contract remains schema version `1`. Tracker aggregate
+files use an independent `STATS_VERSION`, currently `3.2.0`.
+
 ## Directory layout
 
 ```
@@ -72,6 +75,20 @@ Validated fields per deck record: `name`, `card_list`, `archetype`, `games`,
 `wins`, `losses`, `draws`, `win_rate`, `usage_count`. Deck identity is a
 fingerprint of the card list; name mappings live under `meta/`.
 
+Tracker metadata written by the current engine carries version `3.2.0`.
+`meta.total_games` is a match count, while card/archetype `games` values count
+deck-seat appearances. Popularity fields therefore use deck-seat share:
+
+```
+play_rate or meta_share = appearances / (2 * meta.total_games)
+```
+
+This is the probability that a randomly selected deck seat contains that card
+or belongs to that archetype, and must remain in `[0, 1]`. Outputs produced by
+older tracker versions divided appearances by matches and can exceed 1; reload
+them through the current tracker/viewer normalization or rebuild them from the
+game log before using prevalence in deck-builder features.
+
 Draw/opening/play telemetry is sourced directly from GameState as of Round
 7.37: `games_drawn` and `draw_performance_by_turn` use completed draws,
 `games_in_opening_hand` uses the final post-mulligan hand, and play-turn maps
@@ -88,7 +105,9 @@ with current card-performance aggregates.
    from ranking until the engine covers them.
 3. **`error` / `invalid_limit` results** are recorded as draws in the tracker
    aggregates; filter them out via `game_log.jsonl` when computing win rates.
-4. **Versioning**: bump handling when `schema_version` > 1 appears.
+4. **Versioning**: for `game_log.jsonl`, bump handling when `schema_version > 1`
+   appears. Tracker consumers must separately recognize aggregate version
+   `3.2.0`; `last_updated` is optional and may be null.
 
 ---
 

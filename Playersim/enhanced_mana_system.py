@@ -502,7 +502,7 @@ class EnhancedManaSystem:
         Returns:
             dict: The modified cost
         """
-        modified_cost = cost.copy()
+        modified_cost = self._normalize_mana_cost(cost)
         
         if effect['applies_to'] == 'generic':
             if effect['type'] == 'reduction':
@@ -526,9 +526,10 @@ class EnhancedManaSystem:
     def apply_cost_modifiers(self, player, cost, card_id, context=None):
         """Apply cost modifiers, now accepting context."""
         gs = self.game_state
-        card = gs._safe_get_card(card_id) if card_id else None # Handle cases where card_id is None
+        card = (gs._safe_get_card(card_id)
+                if card_id is not None else None)
 
-        modified_cost = cost.copy()
+        modified_cost = self._normalize_mana_cost(cost)
         applied_modifications = {'reductions': [], 'increases': []}
 
         # Get effects based on the card being cast (or generic if no card)
@@ -567,36 +568,6 @@ class EnhancedManaSystem:
                  change_amount = original_cost_values.get(color,0) - modified_cost.get(color,0)
              if change_amount > 0:
                   applied_modifications['reductions'].append({ 'amount': change_amount, 'source': effect.get('source', 'unknown'), 'type': effect['applies_to']})
-
-        # Apply context-based reductions (Convoke, Delve, Improvise)
-        # These modify the *cost itself* before payment check
-        if context:
-            # Convoke: Reduce generic and colored based on tapped creatures
-            if context.get("convoke_creatures") and card and "convoke" in getattr(card, 'oracle_text', '').lower():
-                 convoke_creatures = context["convoke_creatures"]
-                 # ManaSystem should provide creature colors
-                 # Simple version: Reduce generic by count
-                 convoke_reduction = len(convoke_creatures)
-                 original_generic = modified_cost['generic']
-                 modified_cost['generic'] = max(0, modified_cost['generic'] - convoke_reduction)
-                 applied_amount = original_generic - modified_cost['generic']
-                 if applied_amount > 0: applied_modifications['reductions'].append({'amount': applied_amount, 'source': 'Convoke', 'type': 'generic'})
-
-            # Delve: Reduce generic based on exiled cards
-            if context.get("delve_cards") and card and "delve" in getattr(card, 'oracle_text', '').lower():
-                 delve_reduction = len(context["delve_cards"])
-                 original_generic = modified_cost['generic']
-                 modified_cost['generic'] = max(0, modified_cost['generic'] - delve_reduction)
-                 applied_amount = original_generic - modified_cost['generic']
-                 if applied_amount > 0: applied_modifications['reductions'].append({'amount': applied_amount, 'source': 'Delve', 'type': 'generic'})
-
-            # Improvise: Reduce generic based on tapped artifacts
-            if context.get("improvise_artifacts") and card and "improvise" in getattr(card, 'oracle_text', '').lower():
-                improvise_reduction = len(context["improvise_artifacts"])
-                original_generic = modified_cost['generic']
-                modified_cost['generic'] = max(0, modified_cost['generic'] - improvise_reduction)
-                applied_amount = original_generic - modified_cost['generic']
-                if applied_amount > 0: applied_modifications['reductions'].append({'amount': applied_amount, 'source': 'Improvise', 'type': 'generic'})
 
         # Apply minimum cost effects last
         final_cost = self.apply_minimum_cost_effects(player, modified_cost, card_id, context)
@@ -656,10 +627,9 @@ class EnhancedManaSystem:
         """
         gs = self.game_state
         card = gs._safe_get_card(card_id)
+        final_cost = self._normalize_mana_cost(cost)
         if not card:
-            return cost
-        
-        final_cost = cost.copy()
+            return final_cost
         
         # Calculate the total mana value of the spell
         total_cost = 0
@@ -836,6 +806,31 @@ class EnhancedManaSystem:
                 logging.warning(f"Unrecognized mana token: {token} in {cost_text}")
         
         return mana_cost
+
+    @staticmethod
+    def _normalize_mana_cost(cost):
+        """Return an independent, complete parsed-cost mapping.
+
+        Alternative-cost and legacy callers can supply sparse dictionaries.
+        Unknown metadata keys remain available to specialized costs, while
+        mutable fields are copied so affordability probes cannot mutate their
+        caller's context.
+        """
+        normalized = {
+            'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0,
+            'generic': 0, 'X': 0, 'hybrid': [], 'phyrexian': [],
+            'snow': 0, 'any_color': 0, 'conditional': [],
+        }
+        if not isinstance(cost, dict):
+            return normalized
+        for key, value in cost.items():
+            if isinstance(value, list):
+                normalized[key] = list(value)
+            elif isinstance(value, dict):
+                normalized[key] = value.copy()
+            else:
+                normalized[key] = value
+        return normalized
     
     def calculate_alternative_cost(self, card_id, controller, alt_cost_type, context=None):
         """
@@ -1136,6 +1131,7 @@ class EnhancedManaSystem:
         Returns:
             bool: Whether the cost can be paid
         """
+        cost_is_precomputed = isinstance(cost, dict)
         try:
             # Handle different input types
             if hasattr(cost, 'mana_cost'):
@@ -1150,7 +1146,7 @@ class EnhancedManaSystem:
                 card_id = None
             elif isinstance(cost, dict):
                 # If it's already a parsed cost dictionary, use it directly
-                parsed_cost = cost
+                parsed_cost = self._normalize_mana_cost(cost)
                 card_id = None
             else:
                 # Invalid input type
@@ -1158,7 +1154,8 @@ class EnhancedManaSystem:
                 return False
 
             # Check for alternative costs
-            if context and context.get('use_alt_cost'):
+            if (not cost_is_precomputed and context
+                    and context.get('use_alt_cost')):
                 alt_cost_type = context['use_alt_cost']
                 card_id = context.get('card_id', card_id)
                 if card_id is not None:
@@ -1249,20 +1246,43 @@ class EnhancedManaSystem:
             logging.error(traceback.format_exc())
             return False  # Assume can't pay on error
         
-    def can_pay_mana_cost_with_lands(self, player, cost, context=None):
+    def can_pay_mana_cost_with_lands(self, player, cost, context=None,
+                                     exclude_ids=None):
         """Affordability check that also counts the player's untapped lands.
 
         The mask uses this so a spell is castable without the policy having
         to float mana first; pay_mana_cost auto-taps the planned lands so
-        mask legality and execution stay consistent.
+        mask legality and execution stay consistent. ``exclude_ids`` removes
+        battlefield permanents from the land scan — used to test whether a
+        cost stays payable after an additional cost returns one of them.
         """
         if self.can_pay_mana_cost(player, cost, context):
             return True
-        if context and context.get('use_alt_cost'):
+        if (context and context.get('use_alt_cost')
+                and not isinstance(cost, dict)):
             return False
-        return self._plan_auto_tap(player, cost, context) is not None
+        return self._plan_auto_tap(
+            player, cost, context, exclude_ids=exclude_ids) is not None
 
-    def _plan_auto_tap(self, player, cost, context=None):
+    def can_pay_replacing_cost_with_lands(self, player, card_id, cost,
+                                          alt_cost_type, context=None):
+        """Price and probe one replacing alternative mana cost exactly once."""
+        probe_context = dict(context or {})
+        probe_context.update({
+            'card_id': card_id,
+            'use_alt_cost': alt_cost_type,
+        })
+        if alt_cost_type == 'impending':
+            probe_context['cast_for_impending'] = True
+        parsed_cost = (self._normalize_mana_cost(cost)
+                       if isinstance(cost, dict)
+                       else self.parse_mana_cost(cost))
+        final_cost = self.apply_cost_modifiers(
+            player, parsed_cost, card_id, probe_context)
+        return self.can_pay_mana_cost_with_lands(
+            player, final_cost, probe_context)
+
+    def _plan_auto_tap(self, player, cost, context=None, exclude_ids=None):
         """Plan land taps that, with the current pool, cover ``cost``.
 
         Returns a list of (card_id, option) taps, or None when the cost stays
@@ -1273,14 +1293,16 @@ class EnhancedManaSystem:
         """
         try:
             context = context or {}
-            parsed = cost if isinstance(cost, dict) else self.parse_mana_cost(cost)
+            parsed = (self._normalize_mana_cost(cost)
+                      if isinstance(cost, dict)
+                      else self.parse_mana_cost(cost))
 
             pool_units = []
             for color in ('W', 'U', 'B', 'R', 'G', 'C'):
                 pool_units.extend([color] * player["mana_pool"].get(color, 0))
 
             lands = []
-            seen_land_ids = set()
+            seen_land_ids = set(exclude_ids or ())
             for card_id in player.get("battlefield", []):
                 # tapped_permanents is a set of ids, so duplicate-id copies
                 # (fixture decks) can only ever tap once; plan them as one.
@@ -1367,9 +1389,9 @@ class EnhancedManaSystem:
         gs = self.game_state
         card = gs._safe_get_card(card_id)
         if not card:
-            return cost
+            return self._normalize_mana_cost(cost)
         
-        reduced_cost = cost.copy()
+        reduced_cost = self._normalize_mana_cost(cost)
         
         # Check for cost reduction effects on the battlefield
         for battlefield_id in player["battlefield"]:
@@ -1609,9 +1631,9 @@ class EnhancedManaSystem:
         gs = self.game_state
         card = gs._safe_get_card(card_id)
         if not card:
-            return cost
+            return self._normalize_mana_cost(cost)
         
-        increased_cost = cost.copy()
+        increased_cost = self._normalize_mana_cost(cost)
         opponent = gs.p2 if player == gs.p1 else gs.p1
         
         # Check for cost increasing effects on the battlefield for all players
@@ -1929,6 +1951,7 @@ class EnhancedManaSystem:
         Now handles non-mana costs first and includes rollback. (Complete Implementation)
         """
         if context is None: context = {}
+        cost_is_precomputed = isinstance(cost, dict)
         gs = self.game_state
 
         # Track payment details - EXPANDED
@@ -1952,13 +1975,10 @@ class EnhancedManaSystem:
                 parsed_cost_base = self.parse_mana_cost(cost)
                 final_cost = self.apply_cost_modifiers(player, parsed_cost_base, card_id, context)
             elif isinstance(cost, dict): # Pre-parsed/Modified Cost Dict
-                # Ensure all keys are present
-                default_keys = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0, 'generic': 0, 'X': 0, 'hybrid': [], 'phyrexian': [], 'snow': 0}
-                cost_dict_checked = {**default_keys, **cost}
                 # A dict is the caller's already-calculated final cost. Applying
                 # modifiers here again double-discounts cast_spell's result
                 # (Domain {2}{W} became {W}, for example).
-                final_cost = cost_dict_checked.copy()
+                final_cost = self._normalize_mana_cost(cost)
             else:
                 logging.error(f"Invalid cost type provided to pay_mana_cost: {type(cost)}")
                 return False
@@ -1967,16 +1987,13 @@ class EnhancedManaSystem:
              return False
 
         # --- Affordability Check (Before Paying Anything) ---
-        # Create a temporary cost dict reflecting context costs that reduce mana needs
+        # ``final_cost`` already includes context reductions. Reapplying
+        # Convoke/Delve/Improvise here underprices the spell a second time.
         cost_for_check = final_cost.copy()
-        check_context_costs = 0
-        if "convoke_creatures" in context: check_context_costs += len(context["convoke_creatures"])
-        if "delve_cards" in context: check_context_costs += len(context["delve_cards"])
-        if "improvise_artifacts" in context: check_context_costs += len(context["improvise_artifacts"])
-        cost_for_check['generic'] = max(0, cost_for_check['generic'] - check_context_costs)
 
         if (not self.can_pay_mana_cost(player, cost_for_check, context)
-                and not context.get('use_alt_cost')):
+                and (cost_is_precomputed
+                     or not context.get('use_alt_cost'))):
             # The pool alone is short: tap lands planned by the same check the
             # action mask uses, so mask-legal casts pay without a manual
             # tap-then-cast sequence.
@@ -3405,6 +3422,7 @@ class EnhancedManaSystem:
     
     def _format_mana_cost_for_logging(self, parsed_cost, x_value=0):
         """Format a parsed mana cost for logging."""
+        parsed_cost = self._normalize_mana_cost(parsed_cost)
         parts = []
         
         # Add generic mana

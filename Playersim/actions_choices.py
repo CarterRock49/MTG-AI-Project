@@ -853,6 +853,35 @@ class ChoiceHandlersMixin:
                 return -0.1, False
             return 0.05, True
 
+        # Loyalty abilities pay their cost before targeting, but are not put on
+        # the stack until their targets are committed.  The old generic branch
+        # only knew how to update an object already on the stack, so Kaito's -2
+        # could never leave its target choice.
+        stack_info = ctx.get("stack_info")
+        if isinstance(stack_info, dict):
+            stack_context = dict(stack_info.get("context", {}))
+            stack_context["targets"] = categorized_targets
+            if targets_by_slot:
+                stack_context["targets_by_slot"] = targets_by_slot
+            item_type = stack_info.get("item_type", "ABILITY")
+            source_id = stack_info.get("source_id", ctx.get("source_id"))
+            controller = stack_info.get("controller", ctx.get("controller"))
+            if source_id is None or controller is None:
+                logging.error("Targeted stack continuation is missing source/controller.")
+                return -0.2, False
+            gs.targeting_context = None
+            gs.add_to_stack(item_type, source_id, controller, stack_context)
+            gs.notify_targets_committed(
+                source_id, controller, categorized_targets,
+                stack_context=stack_context)
+            # add_to_stack deliberately preserves special-choice phases.  A
+            # loyalty ability now on the stack instead returns to priority over
+            # the main phase saved in previous_priority_phase.
+            gs.phase = gs.PHASE_PRIORITY
+            gs.priority_player = controller
+            gs.priority_pass_count = 0
+            return 0.05, True
+
         pending_effect = ctx.get("resume_effect")
         if pending_effect is not None:
             source_id = ctx.get("source_id")
