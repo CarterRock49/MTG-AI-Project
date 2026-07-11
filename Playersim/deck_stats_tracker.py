@@ -2450,6 +2450,8 @@ class DeckStatsTracker:
             stats["losses"] += 1
 
         stats["total_turns"] += turn_count
+        stats["avg_game_length"] = (
+            stats["total_turns"] / max(1, stats["games"]))
         # Update win_rate to account for draws (0.5 points per draw)
         if stats["games"] > 0: # Avoid division by zero
              stats["win_rate"] = (stats["wins"] + 0.5 * stats["draws"]) / stats["games"]

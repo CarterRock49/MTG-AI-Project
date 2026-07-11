@@ -14,6 +14,42 @@ class ChoiceHandlersMixin:
 
     __slots__ = ()
 
+    def _get_target_selection_candidates(self, player, context):
+        """Return the exact ordered candidates represented by SELECT_TARGET.
+
+        Mask generation and execution share this helper so filtering a final,
+        unaffordable target set cannot change the meaning of an action index.
+        """
+        gs = self.game_state
+        context = context or {}
+        if not gs.targeting_system:
+            return []
+
+        valid_map = gs.targeting_system.get_valid_targets(
+            context.get("source_id"), player,
+            context.get("required_type", "target"),
+            effect_text=context.get("effect_text"))
+        selected_targets = list(context.get("selected_targets", []))
+        candidates = sorted({
+            target_id
+            for category_targets in valid_map.values()
+            for target_id in category_targets
+            if target_id not in selected_targets
+        }, key=lambda target_id: (isinstance(target_id, str), target_id))
+
+        # Selecting the last available slot auto-finalizes in
+        # _handle_select_target.  Do not expose a candidate that would turn a
+        # mask-valid action into a failed cast at that boundary.
+        max_targets = int(context.get(
+            "max_targets", context.get("required_count", 1)))
+        if len(selected_targets) + 1 >= max_targets:
+            candidates = [
+                target_id for target_id in candidates
+                if gs._can_finalize_targeted_cast(
+                    context, selected_targets + [target_id])
+            ]
+        return candidates
+
     def _handle_target_page_next(self, param=None, context=None, **kwargs):
         gs = self.game_state
         ctx = getattr(gs, 'targeting_context', None)
@@ -98,6 +134,48 @@ class ChoiceHandlersMixin:
                 (trigger, followup_controller, trigger_context))
         gs._resume_effect_continuation(ctx)
         return False
+
+    def _finish_dig_select_choice(self, ctx):
+        """Place unchosen cards and resume a Dig-style effect continuation."""
+        gs = self.game_state
+        player = ctx.get('player')
+        options = list(ctx.get('options', []))
+        source_zone = ctx.get('source_zone', 'library_implicit')
+        destination = ctx.get('rest_destination', 'bottom')
+
+        if destination == 'bottom':
+            if source_zone == 'library_implicit':
+                player['library'].extend(options)
+            else:
+                for card_id in options:
+                    gs.move_card(
+                        card_id, player, source_zone, player, 'library',
+                        cause='dig_rest_bottom')
+        elif destination == 'top':
+            if source_zone == 'library_implicit':
+                player['library'][:0] = options
+            else:
+                moved = []
+                for card_id in options:
+                    if gs.move_card(
+                            card_id, player, source_zone, player, 'library',
+                            cause='dig_rest_top'):
+                        moved.append(card_id)
+                for card_id in moved:
+                    player['library'].remove(card_id)
+                player['library'][:0] = moved
+        elif destination == 'graveyard' and source_zone != 'graveyard':
+            for card_id in options:
+                gs.move_card(
+                    card_id, player, source_zone, player, 'graveyard',
+                    cause='dig_discard')
+        elif destination != 'stay':
+            logging.warning(
+                "Unknown Dig rest destination %r; leaving cards in %s.",
+                destination, source_zone)
+
+        gs._resume_effect_continuation(ctx)
+        return True
 
     def recommend_ability_activation(self, card_id, ability_idx):
         """
@@ -586,9 +664,10 @@ class ChoiceHandlersMixin:
                 gs.priority_player = player
             return 0.1, True
         
-        # Mark exhaust used (if applicable)
+        # ``ActivatedAbility.pay_cost`` is the single owner of Exhaust
+        # bookkeeping. The handler still dispatches the activation event,
+        # but must not mark the same ability a second time.
         if is_exhaust:
-            gs.mark_exhaust_used(card_id, internal_idx)
             # Trigger exhaust event
             if gs.ability_handler:
                 exhaust_context = {"activator": player, "source_card_id": card_id, "ability_index": internal_idx}
@@ -718,6 +797,13 @@ class ChoiceHandlersMixin:
         else:
             targets_by_slot = []
             committed_targets = selected_targets
+
+        if (ctx.get("resume_cast")
+                and not gs._can_finalize_targeted_cast(ctx, committed_targets)):
+            logging.warning(
+                "Cannot finalize targeting: the committed targets leave the "
+                "deferred spell unaffordable.")
+            return -0.1, False
 
         categorized_targets = defaultdict(list)
         for target_id in committed_targets:
@@ -866,21 +952,7 @@ class ChoiceHandlersMixin:
             logging.error("Targeting system not available during target selection.")
             return -0.15, False
 
-        valid_map = gs.targeting_system.get_valid_targets(
-            ctx["source_id"], player, ctx["required_type"],
-            effect_text=ctx.get("effect_text"))
-        # Numeric card ids sort ahead of player ids ("p1"/"p2") so a mixed
-        # "any target" set stays sortable (plain sorted() raises TypeError on
-        # int-vs-str) while all-numeric sets keep their existing order.
-        valid_targets_list = sorted({
-            target_id
-            for category_targets in valid_map.values()
-            for target_id in category_targets
-        }, key=lambda t: (isinstance(t, str), t))
-        valid_targets_list = [
-            target_id for target_id in valid_targets_list
-            if target_id not in selected_targets
-        ]
+        valid_targets_list = self._get_target_selection_candidates(player, ctx)
 
         absolute_index = int(ctx.get('target_page', 0)) * 10 + target_choice_index
         if not isinstance(target_choice_index, int) or not 0 <= absolute_index < len(valid_targets_list):
@@ -1276,7 +1348,11 @@ class ChoiceHandlersMixin:
             if ctx.get('player') is not player or not (0 <= absolute_param < len(options)):
                 return -0.1, False
             card_id = options[absolute_param]
-            if not gs.move_card(card_id, player, 'library_implicit', player, 'hand', cause='dig'):
+            source_zone = ctx.get('source_zone', 'library_implicit')
+            destination = ctx.get('destination', 'hand')
+            if not gs.move_card(
+                    card_id, player, source_zone, player, destination,
+                    cause=ctx.get('move_cause', 'dig')):
                 return -0.1, False
             options.pop(absolute_param)
             ctx['choice_page'] = 0
@@ -1284,16 +1360,7 @@ class ChoiceHandlersMixin:
             ctx['remaining'] = max(0, int(ctx.get('remaining', 1)) - 1)
             if ctx['remaining'] > 0 and options:
                 return 0.02, True
-            destination = ctx.get('rest_destination', 'bottom')
-            rest = list(options)
-            if destination == 'bottom':
-                player['library'].extend(rest)
-            elif destination == 'top':
-                player['library'][:0] = rest
-            elif destination == 'graveyard':
-                for rest_id in rest:
-                    gs.move_card(rest_id, player, 'library_implicit', player, 'graveyard', cause='dig_discard')
-            gs._resume_effect_continuation(ctx)
+            self._finish_dig_select_choice(ctx)
             return 0.05, True
         if (getattr(gs, 'choice_context', None)
                 and gs.choice_context.get('type') == 'optional_sacrifice_proliferate'):

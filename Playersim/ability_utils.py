@@ -647,6 +647,60 @@ class EffectFactory:
                 return_zone="battlefield", effect_text=effect_text))
             return effects
 
+        # ``Mill N. You may put ... from among the milled cards`` binds its
+        # selection to the exact physical cards moved by the first sentence.
+        # Preserve it before commas in a type union can fragment the text.
+        linked_mill_text = re.sub(
+            r'\s*\([^()]*\)\s*', ' ', effect_text).strip()
+        linked_mill = re.search(
+            r"\bmill\s+(\d+|x|a|an|one|two|three|four|five|six|seven|eight|nine|ten)"
+            r"\s+cards?\s*\.\s*you may put\s+(?:a|an|one)\s+(.+?)\s+card\s+"
+            r"from among\s+(?:the\s+)?(?:milled cards?|cards? milled(?: this way)?)\s+"
+            r"into your hand\s*\.?",
+            linked_mill_text, re.IGNORECASE | re.DOTALL)
+        linked_mill_suffix = (
+            linked_mill_text[linked_mill.end():].strip(" .")
+            if linked_mill else "")
+        supported_mill_suffix = (
+            not linked_mill_suffix
+            or re.fullmatch(
+                r"you gain\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+life",
+                linked_mill_suffix, re.IGNORECASE))
+        if linked_mill and supported_mill_suffix:
+            raw_count = linked_mill.group(1).lower()
+            count = ('x' if raw_count == 'x'
+                     else text_to_number(raw_count))
+            allowed_text = linked_mill.group(2).lower()
+            permanent_types = (
+                "artifact", "battle", "creature", "enchantment", "land",
+                "planeswalker")
+            allowed_types = (["permanent"] if "permanent" in allowed_text
+                             else [card_type for card_type in permanent_types
+                                   if re.search(rf"\b{card_type}s?\b", allowed_text)])
+            if isinstance(count, int) and count > 0 and allowed_types:
+                from .ability_types import MillThenChooseEffect
+                effects.append(MillThenChooseEffect(
+                    count=count, allowed_types=allowed_types, optional=True,
+                    effect_text=linked_mill.group(0).strip()))
+                if linked_mill_suffix:
+                    effects.extend(EffectFactory.create_effects(
+                        linked_mill_suffix, targets, source_name))
+                return effects
+
+        # Result-linked bounce/counter instructions are one resolution unit:
+        # the counter is created only if the optional target was returned.
+        if (re.search(
+                r"return up to one target\s+.+?\s+permanent you control\s+"
+                r"to its owner(?:'|\u2019)s hand",
+                effect_text, re.IGNORECASE | re.DOTALL)
+                and re.search(
+                    r"if a permanent was returned this way,\s*put a "
+                    r"\+1/\+1 counter on this creature",
+                    effect_text, re.IGNORECASE | re.DOTALL)):
+            from .ability_types import ReturnThenAddCounterEffect
+            effects.append(ReturnThenAddCounterEffect(effect_text))
+            return effects
+
         processed_clauses = []
         # Basic clause splitting. Most multi-sentence effects are parsed as one
         # semantic unit (copy, impulse, dig), so only split a plain sentence
@@ -660,7 +714,27 @@ class EffectFactory:
                          r'\s*—\s*|\s*\u2014\s*')
         split_text = re.sub(r'\s*\([^()]*\)\s*', ' ', effect_text).strip('. ')
         parts = re.split(split_pattern, split_text)
-        processed_clauses.extend(p.strip() for p in parts if p.strip())
+        # Carry only an explicit leading player subject into a grammatically
+        # subjectless player-action fragment.  This repairs shapes such as
+        # ``each opponent discards ... and loses ...`` without binding object
+        # conjunctions such as ``destroy target creature and gain 3 life``.
+        carried_subject = None
+        subjectless_player_verb = re.compile(
+            r"^(?:loses?|gains?|draws?|discards?|mills?|sacrifices?)\b",
+            re.IGNORECASE)
+        for raw_part in parts:
+            part = raw_part.strip()
+            if not part:
+                continue
+            subject_match = re.match(
+                r"^(each opponents?|each other player|each players?|"
+                r"target player|target opponent|you)\b",
+                part, re.IGNORECASE)
+            if subject_match:
+                carried_subject = subject_match.group(1).lower()
+            elif carried_subject and subjectless_player_verb.match(part):
+                part = f"{carried_subject} {part}"
+            processed_clauses.append(part)
         if not processed_clauses: processed_clauses = [effect_text] # Use full text if split fails
 
         # Assuming these are imported at the module level of ability_utils.py:
@@ -671,7 +745,8 @@ class EffectFactory:
             SearchLibraryEffect, AddCountersEffect, ReturnToHandEffect,
             ScryEffect, SurveilEffect, CopySpellEffect, TransformEffect, FightEffect,
             ImpulseDrawEffect, LoseLifeEffect, GainKeywordEffect,
-            SacrificeEffect, ReanimateEffect, AddManaEffect, ControlEffect,
+            SacrificeEffect, SacrificeSourceEffect, ReanimateEffect,
+            AddManaEffect, ControlEffect,
             RegenerateEffect, DigEffect, PutOnLibraryEffect,
             ShuffleGraveyardEffect, PreventDamageEffect,
             AnimateLandEffect, RevealHandEffect)
@@ -687,6 +762,10 @@ class EffectFactory:
             clause_clean = re.sub(r'\s*\([^()]*?\)\s*', ' ', clause).strip() # Basic reminder text removal
             clause_lower = clause_clean.lower()
             created_effect = None
+            source_sacrifice = re.search(
+                r"\bsacrifice\s+this\s+"
+                r"(artifact|battle|creature|enchantment|land|permanent|token)\b",
+                clause_lower)
 
             # --- Offspring ETB special handling ---
             if offspring_trigger_pattern.search(clause_lower):
@@ -952,6 +1031,10 @@ class EffectFactory:
 
             # Sacrifice / Edict: "sacrifice a <type>", "target player sacrifices
             # a <type>", "each player/opponent sacrifices a <type>".
+            elif source_sacrifice:
+                created_effect = SacrificeSourceEffect(
+                    permanent_type=source_sacrifice.group(1))
+
             elif re.search(r"sacrifices?\s+(?:a|an|one|two|\d+)\s+(\w+)", clause_lower):
                 m = re.search(r"sacrifices?\s+(a|an|one|two|three|\d+)\s+(\w+)", clause_lower)
                 ptype = m.group(2) if m else "creature"
@@ -1256,7 +1339,10 @@ class EffectFactory:
 
                 target_desc = EffectFactory._extract_target_description(clause_lower) or "target_player"
                 target_specifier = "target_player"
-                if "you mill" in clause_lower: target_specifier = "controller"
+                if (re.search(r"\byou\s+(?:may\s+)?mill\b", clause_lower)
+                        or re.match(r"^mill\b", clause_lower)
+                        or re.search(r",\s*mill\b", clause_lower)):
+                    target_specifier = "controller"
                 elif "opponent mills" in clause_lower or "each opponent mills" in clause_lower: target_specifier = "opponent"
                 elif "each player mills" in clause_lower: target_specifier = "each_player"  # underscore: MillEffect's branch key (space form silently no-opped)
                 created_effect = MillEffect(count, target=target_specifier) # Pass 'x' or number

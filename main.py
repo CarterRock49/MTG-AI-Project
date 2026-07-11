@@ -1,4 +1,9 @@
 import os
+import json
+import hashlib
+import platform
+import subprocess
+import multiprocessing
 import torch
 import time
 import random
@@ -6,7 +11,9 @@ import logging
 import argparse
 import numpy as np
 import traceback
-from typing import Dict, List, Type, Union, Optional
+from datetime import datetime, timezone
+from importlib import metadata as importlib_metadata
+from typing import Any, Dict, List, Type, Union, Optional
 import sys
 
 # Stable Baselines and Contrib Imports
@@ -17,12 +24,14 @@ from stable_baselines3.common.callbacks import (
     ProgressBarCallback,
     BaseCallback
 )
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecMonitor
+from stable_baselines3.common.vec_env import (
+    DummyVecEnv, SubprocVecEnv, VecEnvWrapper, VecMonitor)
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.utils import set_random_seed
 from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback
 from sb3_contrib.common.maskable.evaluation import evaluate_policy
+from sb3_contrib.common.maskable.utils import get_action_masks
 from sb3_contrib.common.wrappers import ActionMasker
 # Optuna for Hyperparameter Optimization
 import optuna
@@ -677,6 +686,34 @@ logging.basicConfig(
     ]
 )
 
+
+def configure_runtime_logging(*, debug=False, worker=False):
+    """Keep training workers quiet and make all console streams UTF-8-safe."""
+    from Playersim import debug as debug_module
+    from Playersim import environment as environment_module
+
+    debug_module.DEBUG_MODE = bool(debug)
+    debug_module.DEBUG_ENV_RESETS = bool(debug)
+    debug_module.DEBUG_ACTION_STEPS = bool(debug)
+    environment_module.DEBUG_MODE = bool(debug)
+    environment_module.DEBUG_ACTION_STEPS = bool(debug)
+
+    level = logging.DEBUG if debug else (logging.WARNING if worker else logging.INFO)
+    console_level = logging.DEBUG if debug else (
+        logging.ERROR if worker else logging.INFO)
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+    for handler in root_logger.handlers:
+        if (isinstance(handler, logging.StreamHandler)
+                and not isinstance(handler, logging.FileHandler)):
+            handler.setLevel(console_level)
+            stream = getattr(handler, "stream", None)
+            if hasattr(stream, "reconfigure"):
+                try:
+                    stream.reconfigure(encoding="utf-8", errors="replace")
+                except (OSError, ValueError):
+                    pass
+
 # Optimization and Configuration
 def safe_cpu_count():
     """Return a usable logical CPU count even on constrained/unknown hosts."""
@@ -693,6 +730,441 @@ DECKS_DIR = os.path.join(BASE_DIR, "Decks")
 MODEL_DIR = os.path.join(BASE_DIR, "models")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 TENSORBOARD_DIR = os.path.join(BASE_DIR, "tensorboard_logs")
+
+TRAINING_MANIFEST_SCHEMA_VERSION = 1
+EVALUATION_SEED_OFFSET = 1_000_000
+
+
+def utc_timestamp():
+    """Return a stable, timezone-aware timestamp for run artifacts."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def json_safe(value):
+    """Convert training configuration values into deterministic JSON data."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, type):
+        return f"{value.__module__}.{value.__qualname__}"
+    if isinstance(value, dict):
+        return {
+            str(key): json_safe(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [json_safe(item) for item in value]
+    return str(value)
+
+
+def write_json_atomic(path, payload):
+    """Atomically publish a UTF-8 JSON artifact in its destination directory."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    temporary_path = f"{path}.tmp"
+    with open(temporary_path, "w", encoding="utf-8", newline="\n") as handle:
+        json.dump(json_safe(payload), handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary_path, path)
+
+
+def write_bytes_atomic(path, payload):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    temporary_path = f"{path}.tmp"
+    with open(temporary_path, "wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary_path, path)
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def resolve_artifact_path(path):
+    """Resolve an artifact path, accepting SB3's automatically-added .zip."""
+    candidates = [path]
+    if not str(path).lower().endswith(".zip"):
+        candidates.append(f"{path}.zip")
+    return next((candidate for candidate in candidates
+                 if os.path.isfile(candidate)), None)
+
+
+def artifact_identity(path):
+    """Return a portable identity for an artifact, accepting SB3's .zip suffix."""
+    actual_path = resolve_artifact_path(path)
+    if actual_path is None:
+        return None
+    try:
+        display_path = os.path.relpath(actual_path, BASE_DIR)
+    except ValueError:
+        display_path = os.path.abspath(actual_path)
+    return {
+        "path": display_path.replace(os.sep, "/"),
+        "size_bytes": os.path.getsize(actual_path),
+        "sha256": sha256_file(actual_path),
+    }
+
+
+def git_provenance():
+    """Capture the exact source revision without making Git a hard dependency."""
+    def run_git(*arguments):
+        try:
+            completed = subprocess.run(
+                ["git", "-C", BASE_DIR, *arguments],
+                capture_output=True, text=True, timeout=5, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if completed.returncode != 0:
+            return None
+        return completed.stdout.strip()
+
+    revision = run_git("rev-parse", "HEAD")
+    branch = run_git("rev-parse", "--abbrev-ref", "HEAD")
+    status = run_git("status", "--porcelain", "--untracked-files=normal")
+    dirty_paths = []
+    if status:
+        for line in status.splitlines():
+            fields = line.strip().split(maxsplit=1)
+            if len(fields) == 2:
+                dirty_paths.append(fields[1])
+        dirty_paths.sort()
+    return {
+        "revision": revision,
+        "branch": branch,
+        "dirty": None if status is None else bool(status),
+        "dirty_paths": dirty_paths,
+    }
+
+
+def capture_working_tree_patch(run_model_dir):
+    """Persist the tracked source delta so a dirty training run is reproducible."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", BASE_DIR, "diff", "--binary", "HEAD"],
+            capture_output=True, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0 or not completed.stdout:
+        return None
+    patch_path = os.path.join(run_model_dir, "source_worktree.patch")
+    write_bytes_atomic(patch_path, completed.stdout)
+    return artifact_identity(patch_path)
+
+
+def dependency_versions():
+    distributions = {
+        "gymnasium": "gymnasium",
+        "numpy": "numpy",
+        "optuna": "optuna",
+        "psutil": "psutil",
+        "sb3_contrib": "sb3-contrib",
+        "stable_baselines3": "stable-baselines3",
+        "tensorboard": "tensorboard",
+        "torch": "torch",
+    }
+    versions = {}
+    for key, distribution in distributions.items():
+        try:
+            versions[key] = importlib_metadata.version(distribution)
+        except importlib_metadata.PackageNotFoundError:
+            versions[key] = None
+    return versions
+
+
+def installed_distribution_versions():
+    """Capture the complete Python environment, including transitive packages."""
+    versions = {}
+    for distribution in importlib_metadata.distributions():
+        name = distribution.metadata.get("Name")
+        if name:
+            versions[name] = distribution.version
+    return dict(sorted(versions.items(), key=lambda pair: pair[0].casefold()))
+
+
+def runtime_provenance(*, cpu_only):
+    cuda_available = bool(torch.cuda.is_available() and not cpu_only)
+    devices = []
+    if cuda_available:
+        for index in range(torch.cuda.device_count()):
+            try:
+                capability = list(torch.cuda.get_device_capability(index))
+            except Exception:
+                capability = None
+            devices.append({
+                "index": index,
+                "name": torch.cuda.get_device_name(index),
+                "compute_capability": capability,
+            })
+    return {
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "logical_cpus": safe_cpu_count(),
+        "selected_device": "cuda" if cuda_available else "cpu",
+        "cpu_only_requested": bool(cpu_only),
+        "torch_cuda_version": torch.version.cuda,
+        "cudnn_version": torch.backends.cudnn.version(),
+        "cuda_devices": devices,
+        "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+        "dependencies": dependency_versions(),
+        "installed_distributions": installed_distribution_versions(),
+    }
+
+
+def deck_provenance(decks, card_db, decks_dir=DECKS_DIR):
+    """Identify both the loaded decks and every JSON source used to build them."""
+    source_files = []
+    if os.path.isdir(decks_dir):
+        for filename in sorted(os.listdir(decks_dir), key=str.casefold):
+            path = os.path.join(decks_dir, filename)
+            if filename.lower().endswith(".json") and os.path.isfile(path):
+                source_files.append({
+                    "path": os.path.relpath(path, BASE_DIR).replace(os.sep, "/"),
+                    "size_bytes": os.path.getsize(path),
+                    "sha256": sha256_file(path),
+                })
+    loaded_decks = []
+    for index, deck in enumerate(decks):
+        if isinstance(deck, dict):
+            loaded_decks.append({
+                "name": deck.get("name"),
+                "card_count": len(deck.get("cards", [])),
+            })
+        else:
+            loaded_decks.append({
+                "name": f"non-dict-deck-{index}",
+                "card_count": None,
+            })
+    return {
+        "deck_count": len(decks),
+        "unique_card_count": len(card_db),
+        "loaded_decks": loaded_decks,
+        "source_files": source_files,
+    }
+
+
+def training_artifacts(run_model_dir, run_id):
+    checkpoint_dir = os.path.join(run_model_dir, "checkpoints")
+    checkpoints = []
+    if os.path.isdir(checkpoint_dir):
+        for filename in sorted(os.listdir(checkpoint_dir), key=str.casefold):
+            identity = artifact_identity(os.path.join(checkpoint_dir, filename))
+            if identity is not None:
+                checkpoints.append(identity)
+    return {
+        "final_model": artifact_identity(os.path.join(run_model_dir, "final_model")),
+        "failed_model": artifact_identity(os.path.join(run_model_dir, "failed_model")),
+        "best_model": artifact_identity(
+            os.path.join(run_model_dir, "best_model", "best_model")),
+        "evaluation_history": artifact_identity(os.path.join(
+            LOG_DIR, run_id, "evaluation", "evaluations.npz")),
+        "feature_extractor": artifact_identity(
+            os.path.join(run_model_dir, "feature_extractor.pth")),
+        "network_summary": artifact_identity(os.path.join(
+            MODEL_DIR, f"{run_id}_architecture", "network_summary.txt")),
+        "checkpoints": checkpoints,
+    }
+
+
+def evaluation_history_summary(run_id):
+    """Summarize EvalCallback output without making the NPZ the only record."""
+    path = os.path.join(LOG_DIR, run_id, "evaluation", "evaluations.npz")
+    if not os.path.isfile(path):
+        return {"status": "not_run", "evaluation_points": 0}
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            timesteps = np.asarray(data["timesteps"], dtype=np.int64)
+            results = np.asarray(data["results"], dtype=np.float64)
+            episode_lengths = np.asarray(
+                data["ep_lengths"], dtype=np.float64)
+    except (OSError, KeyError, ValueError) as error:
+        return {"status": "unreadable", "error": str(error)}
+    return {
+        "status": "passed",
+        "evaluation_points": int(len(timesteps)),
+        "timesteps": timesteps.tolist(),
+        "episodes_per_evaluation": (
+            int(results.shape[1]) if results.ndim >= 2 else None),
+        "mean_rewards": np.mean(results, axis=1).tolist(),
+        "mean_episode_lengths": np.mean(episode_lengths, axis=1).tolist(),
+    }
+
+
+def training_fidelity_failure(info):
+    if not isinstance(info, dict):
+        return None
+    game_result = str(info.get("game_result", ""))
+    severe_flags = {
+        key: info.get(key)
+        for key in (
+            "critical_error", "execution_failed",
+            "opponent_execution_failed", "invalid_action", "error_reset",
+            "episode_step_limit")
+        if info.get(key)
+    }
+    if game_result.startswith("error") or game_result in {
+            "invalid_limit", "aborted"}:
+        severe_flags["game_result"] = game_result
+    if not severe_flags:
+        return None
+    return (info.get("error_message") or info.get("invalid_action_reason")
+            or severe_flags)
+
+
+def rollout_signature(observation, masks, actions, env_index):
+    """Hash one vectorized policy decision without serializing large arrays."""
+    signature_digest = hashlib.sha256()
+    if isinstance(observation, dict):
+        for key, value in sorted(observation.items()):
+            signature_digest.update(key.encode("utf-8"))
+            signature_digest.update(
+                np.ascontiguousarray(np.asarray(value)[env_index]).tobytes())
+    else:
+        signature_digest.update(
+            np.ascontiguousarray(np.asarray(observation)[env_index]).tobytes())
+    if masks is not None:
+        signature_digest.update(
+            np.ascontiguousarray(np.asarray(masks)[env_index]).tobytes())
+    signature_digest.update(
+        np.ascontiguousarray(np.asarray(actions)[env_index]).tobytes())
+    return signature_digest.digest()
+
+
+def repeated_short_cycle_period(signatures, *, max_period=4, repeats=3):
+    """Return a repeated suffix's period, or None when progress is monotonic."""
+    for period in range(1, max_period + 1):
+        required = period * repeats
+        if len(signatures) < required:
+            continue
+        suffix = signatures[-required:]
+        pattern = suffix[:period]
+        if all(suffix[offset:offset + period] == pattern
+               for offset in range(period, required, period)):
+            return period
+    return None
+
+
+class StrictEvaluationVecEnv(VecEnvWrapper):
+    """Make periodic evaluation fail fast on fidelity errors or short cycles."""
+
+    def __init__(self, venv, *, max_cycle_period=4, cycle_repeats=3):
+        super().__init__(venv)
+        self.max_cycle_period = max_cycle_period
+        self.cycle_repeats = cycle_repeats
+        self._last_observation = None
+        self._signature_histories = [[] for _ in range(self.num_envs)]
+
+    def reset(self):
+        self._signature_histories = [[] for _ in range(self.num_envs)]
+        self._last_observation = self.venv.reset()
+        return self._last_observation
+
+    def step_async(self, actions):
+        actions = np.asarray(actions, dtype=np.int64).reshape(-1)
+        if self._last_observation is not None:
+            masks = np.asarray(get_action_masks(self.venv), dtype=bool)
+            for env_index in range(self.num_envs):
+                history = self._signature_histories[env_index]
+                history.append(rollout_signature(
+                    self._last_observation, masks, actions, env_index))
+                keep = self.max_cycle_period * self.cycle_repeats
+                if len(history) > keep:
+                    del history[:-keep]
+                period = repeated_short_cycle_period(
+                    history,
+                    max_period=self.max_cycle_period,
+                    repeats=self.cycle_repeats)
+                if period is not None:
+                    raise RuntimeError(
+                        "Strict evaluation detected a non-progressing policy "
+                        f"cycle of period {period} in environment {env_index}")
+        self.venv.step_async(actions)
+
+    def step_wait(self):
+        observations, rewards, dones, infos = self.venv.step_wait()
+        for env_index, info in enumerate(infos):
+            failure = training_fidelity_failure(info)
+            if failure is not None:
+                raise RuntimeError(
+                    "Strict evaluation fidelity failure in environment "
+                    f"{env_index}: {failure}")
+            if dones[env_index]:
+                self._signature_histories[env_index].clear()
+        self._last_observation = observations
+        return observations, rewards, dones, infos
+
+
+def validate_training_checkpoint(path, env, *, device, seed):
+    """Reload a checkpoint and prove deterministic rollout progress is clean."""
+    checkpoint_path = resolve_artifact_path(path)
+    if checkpoint_path is None:
+        raise FileNotFoundError(f"Saved checkpoint was not published at {path}")
+    loaded = MaskablePPO.load(checkpoint_path, env=env, device=device)
+    if hasattr(loaded, "set_random_seed"):
+        loaded.set_random_seed(seed)
+    if hasattr(env, "seed"):
+        env.seed(seed)
+    observation = env.reset()
+    signature_histories = [[] for _ in range(env.num_envs)]
+    episodes_completed = 0
+    validation_steps = 256
+    for _ in range(validation_steps):
+        masks = np.asarray(get_action_masks(env), dtype=bool)
+        if masks.ndim != 2 or not masks.any(axis=1).all():
+            raise RuntimeError(
+                "Reloaded checkpoint environment produced an invalid mask")
+        actions, _ = loaded.predict(
+            observation, deterministic=True, action_masks=masks)
+        actions = np.asarray(actions, dtype=np.int64).reshape(-1)
+        if len(actions) != masks.shape[0] or not all(
+                masks[index, action] for index, action in enumerate(actions)):
+            raise RuntimeError(
+                "Reloaded checkpoint selected a mask-invalid action")
+
+        for env_index in range(env.num_envs):
+            history = signature_histories[env_index]
+            history.append(rollout_signature(
+                observation, masks, actions, env_index))
+            if len(history) > 12:
+                del history[:-12]
+            period = repeated_short_cycle_period(history)
+            if period is not None:
+                raise RuntimeError(
+                    "Reloaded checkpoint made no public progress while cycling "
+                    f"with period {period} in environment {env_index}; "
+                    f"latest actions were {actions.tolist()}")
+
+        observation, rewards, dones, infos = env.step(actions)
+        if not np.isfinite(np.asarray(rewards, dtype=np.float64)).all():
+            raise RuntimeError(
+                "Reloaded checkpoint produced a non-finite reward")
+        for env_index, info in enumerate(infos):
+            failure = training_fidelity_failure(info)
+            if failure is not None:
+                raise RuntimeError(
+                    "Reloaded checkpoint hit a strict fidelity failure in "
+                    f"environment {env_index}: {failure}")
+            if dones[env_index]:
+                signature_histories[env_index].clear()
+        episodes_completed += int(np.asarray(dones, dtype=bool).sum())
+    return {
+        "status": "passed",
+        "checkpoint_reload": True,
+        "mask_valid_prediction": True,
+        "finite_step_reward": True,
+        "public_progress": True,
+        "short_cycle_periods_checked": 4,
+        "rollout_steps": validation_steps,
+        "episodes_completed": episodes_completed,
+        "validated_seed": int(seed),
+    }
 
 # Feature Dimension Configuration
 FEATURE_OUTPUT_DIM = 512
@@ -796,7 +1268,7 @@ class CustomLearningRateScheduler:
         return self.current_lr
 
 
-def create_training_model(env, training_config):
+def create_training_model(env, training_config, seed=None, device="auto"):
     """Construct the final MaskablePPO model from one complete config."""
     policy_kwargs = {
         'features_extractor_class': CompletelyFixedMTGExtractor,
@@ -823,12 +1295,17 @@ def create_training_model(env, training_config):
         max_grad_norm=training_config['max_grad_norm'],
         verbose=1,
         n_epochs=training_config['n_epochs'],
+        seed=seed,
+        device=device,
     )
 
-def objective(trial):
+def objective(trial, base_seed=42):
     """
     Advanced Optuna objective function with more sophisticated parameter space
     """
+    trial_seed = int(base_seed) + int(getattr(trial, "number", 0))
+    set_random_seed(trial_seed)
+
     # Core hyperparameters
     learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
     n_steps = trial.suggest_categorical('n_steps', [1024, 2048, 4096])
@@ -893,6 +1370,10 @@ def objective(trial):
     # learn() call and couples evaluation trajectories to training state.
     train_env = make_vec_env(make_train_env, n_envs=2)
     eval_env = make_vec_env(make_eval_env, n_envs=2)
+    if hasattr(train_env, "seed"):
+        train_env.seed(trial_seed)
+    if hasattr(eval_env, "seed"):
+        eval_env.seed(trial_seed + EVALUATION_SEED_OFFSET)
 
     # Construct policy configuration
     policy_kwargs = {
@@ -921,7 +1402,8 @@ def objective(trial):
             verbose=0,
             tensorboard_log=TENSORBOARD_DIR,
             n_epochs=n_epochs,
-            max_grad_norm=max_grad_norm
+            max_grad_norm=max_grad_norm,
+            seed=trial_seed,
         )
 
         # Training with pruning support
@@ -965,7 +1447,8 @@ def objective(trial):
         train_env.close()
         eval_env.close()
 
-def optimize_hyperparameters(n_trials=50, study_name="mtg_optimization"):
+def optimize_hyperparameters(n_trials=50, study_name="mtg_optimization",
+                             seed=42):
     """Run Optuna hyperparameter optimization with persistence and pruning"""
     storage_name = f"sqlite:///{study_name}.db"
     study = optuna.create_study(
@@ -973,10 +1456,12 @@ def optimize_hyperparameters(n_trials=50, study_name="mtg_optimization"):
         storage=storage_name,
         load_if_exists=True,
         direction='maximize',
+        sampler=optuna.samplers.TPESampler(seed=seed),
         pruner=optuna.pruners.MedianPruner()  # Early stopping for bad trials
     )
     
-    study.optimize(objective, n_trials=n_trials)
+    study.optimize(
+        lambda trial: objective(trial, base_seed=seed), n_trials=n_trials)
     
     # Visualization of optimization results
     try:
@@ -1208,6 +1693,55 @@ def record_network_architecture(model, run_id):
     except Exception as e:
         logging.error(f"Failed to record network architecture: {str(e)}")
 
+class StrictTrainingFidelityCallback(BaseCallback):
+    """Abort training instead of learning from an engine-contract failure."""
+
+    def __init__(self):
+        super().__init__(verbose=0)
+        self.checked_steps = 0
+        self.signature_histories = None
+
+    def _on_training_start(self):
+        env_count = int(getattr(self.training_env, "num_envs", 1))
+        self.signature_histories = [[] for _ in range(env_count)]
+
+    def _on_step(self):
+        self.checked_steps += 1
+        infos = self.locals.get("infos", ()) or ()
+        dones = np.asarray(
+            self.locals.get("dones", np.zeros(len(infos), dtype=bool)),
+            dtype=bool).reshape(-1)
+        observations = self.locals.get("new_obs")
+        actions = self.locals.get("actions")
+
+        if (self.signature_histories is not None
+                and observations is not None and actions is not None):
+            for env_index, history in enumerate(self.signature_histories):
+                if env_index < len(dones) and dones[env_index]:
+                    history.clear()
+                    continue
+                history.append(rollout_signature(
+                    observations, None, actions, env_index))
+                if len(history) > 12:
+                    del history[:-12]
+                period = repeated_short_cycle_period(history)
+                if period is not None:
+                    info = infos[env_index] if env_index < len(infos) else {}
+                    raise RuntimeError(
+                        "Strict training detected a non-progressing policy "
+                        f"cycle of period {period} in environment {env_index}; "
+                        f"actions={np.asarray(actions).reshape(-1).tolist()}, "
+                        f"state={info.get('policy_state')}")
+
+        for env_index, info in enumerate(infos):
+            detail = training_fidelity_failure(info)
+            if detail is not None:
+                raise RuntimeError(
+                    "Strict training fidelity failure in environment "
+                    f"{env_index}: {detail}")
+        return True
+
+
 def create_callbacks(eval_env, run_id, args, num_train_envs=1):
     """Create a comprehensive set of callbacks"""
     # BaseCallback.n_calls counts VecEnv steps, not individual transitions.
@@ -1231,7 +1765,7 @@ def create_callbacks(eval_env, run_id, args, num_train_envs=1):
         log_path=evaluation_log_dir,
         eval_freq=callback_frequency(args.eval_freq),
         deterministic=True,
-        n_eval_episodes=20
+        n_eval_episodes=getattr(args, "eval_episodes", 20)
     )
 
     # Checkpoint callback
@@ -1258,6 +1792,7 @@ def create_callbacks(eval_env, run_id, args, num_train_envs=1):
             record_freq=callback_frequency(args.record_freq)
         ))
     callbacks.append(resource_callback)
+    callbacks.append(StrictTrainingFidelityCallback())
     return callbacks
 
 def analyze_model_weights(model_path):
@@ -1369,11 +1904,12 @@ def analyze_model_weights(model_path):
         print(traceback.format_exc())
         
 def main():
-    # Parse command line arguments
     parser = argparse.ArgumentParser(description="Train an MTG AI agent")
     parser.add_argument("--resume", type=str, help="Path to a model to resume training from")
     parser.add_argument("--timesteps", type=int, default=1000000, help="Total timesteps to train")
     parser.add_argument("--eval-freq", type=int, default=10000, help="Evaluation frequency")
+    parser.add_argument("--eval-episodes", type=int, default=20,
+                        help="Episodes per periodic evaluation")
     parser.add_argument("--checkpoint-freq", type=int, default=50000, help="Checkpoint frequency")
     parser.add_argument("--learning-rate", type=float, default=3e-4, help="Initial learning rate")
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size for training")  # Reduced for CPU
@@ -1386,165 +1922,273 @@ def main():
     parser.add_argument("--record-freq", type=int, default=5000, 
                         help="Frequency for recording network parameters")
     parser.add_argument("--cpu-only", action="store_true", help="Force CPU training even if GPU is available")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Base seed for Python, NumPy, Torch, workers, and evaluation")
     args = parser.parse_args()
     if args.resume and args.optimize_hp:
         parser.error("--resume and --optimize-hp cannot be used together")
+    if args.timesteps <= 0:
+        parser.error("--timesteps must be positive")
+    if args.eval_episodes <= 0:
+        parser.error("--eval-episodes must be positive")
+    maximum_base_seed = (2**32 - 1) - EVALUATION_SEED_OFFSET - 10_000
+    if not 0 <= args.seed <= maximum_base_seed:
+        parser.error(
+            f"--seed must be between 0 and {maximum_base_seed} so worker seeds remain valid")
 
-    # Set random seed for reproducibility
-    set_random_seed(42)
+    configure_runtime_logging(debug=args.debug, worker=False)
 
-    # Create required directories
-    os.makedirs(MODEL_DIR, exist_ok=True)
-    os.makedirs(LOG_DIR, exist_ok=True)
-    os.makedirs(TENSORBOARD_DIR, exist_ok=True)
-
-    # Create a unique run ID with timestamp
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    run_id = f"{VERSION}_{timestamp}"
-
-    # Configure logging level based on debug flag
-    if args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
-        # BUGFIX: `DEBUG_MODE = True` only created a local variable here. Set the
-        # flag on the shared debug module instead. Note: modules that did
-        # `from .debug import DEBUG_MODE` at import time keep their own copy, so
-        # this only affects code that reads `debug.DEBUG_MODE` at runtime.
-        from Playersim import debug as debug_module
-        debug_module.DEBUG_MODE = True
-    
-    # Configure CPU usage - optimized for Ryzen 5 5600
     if args.cpu_only:
-        # Force CPU-only mode
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
         logging.info("Running in CPU-only mode as requested")
-    
-    # CPU optimization settings for Ryzen 5 5600 (6 cores/12 threads)
+
+    set_random_seed(args.seed)
     detected_cpus = safe_cpu_count()
-    n_cpu_threads = min(10, detected_cpus)  # Leave capacity for the OS on larger hosts.
+    n_cpu_threads = min(10, detected_cpus)
     torch.set_num_threads(n_cpu_threads)
     logging.info(f"PyTorch using {n_cpu_threads} CPU threads")
-    
-    # Log start of training with GPU information
-    if torch.cuda.is_available() and not args.cpu_only:
-        device_count = torch.cuda.device_count()
-        device_names = [torch.cuda.get_device_name(i) for i in range(device_count)]
-        logging.info(f"Using {device_count} GPU(s): {device_names}")
+
+    runtime = runtime_provenance(cpu_only=args.cpu_only)
+    selected_device = runtime["selected_device"]
+    if selected_device == "cuda":
+        logging.info(
+            "Using %s GPU(s): %s",
+            len(runtime["cuda_devices"]),
+            [device["name"] for device in runtime["cuda_devices"]])
     else:
         logging.info("Using CPU for training")
 
-    # Load game data
-    logging.info("Loading decks and card database...")
-    try:
-        decks, card_db = load_decks_and_card_db(DECKS_DIR)
-        logging.info(f"Loaded {len(decks)} decks with {len(card_db)} unique cards")
-    except Exception as e:
-        logging.error(f"Failed to load decks: {str(e)}")
-        return 1
+    for directory in (MODEL_DIR, LOG_DIR, TENSORBOARD_DIR):
+        os.makedirs(directory, exist_ok=True)
 
-    # Optional Hyperparameter Optimization
-    best_params = None
-    if args.optimize_hp:
-        # Determine level of optimization based on CPU
-        import psutil
-        cpu_count = psutil.cpu_count(logical=True) or detected_cpus
-        
-        if cpu_count <= 4:
-            n_trials = 10
-            logging.info(f"Limited CPU resources detected ({cpu_count} cores). Running light optimization with {n_trials} trials")
-        elif cpu_count <= 8:
-            n_trials = 25
-            logging.info(f"Moderate CPU resources detected ({cpu_count} cores). Running standard optimization with {n_trials} trials")
-        else:
-            n_trials = 50
-            logging.info(f"Good CPU resources detected ({cpu_count} cores). Running full optimization with {n_trials} trials")
-        
-        # Run the optimization with appropriate trial count
-        best_params = optimize_hyperparameters(n_trials=n_trials)
-        logging.info(
-            "Hyperparameter optimization completed; applying the complete "
-            f"winning configuration: {best_params}")
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    base_run_id = f"{VERSION}_{timestamp}"
+    run_id = base_run_id
+    suffix = 1
+    while True:
+        run_model_dir = os.path.join(MODEL_DIR, run_id)
+        try:
+            os.makedirs(run_model_dir, exist_ok=False)
+            break
+        except FileExistsError:
+            run_id = f"{base_run_id}_{suffix}"
+            suffix += 1
 
-    training_config = build_training_config(args, best_params)
+    manifest_path = os.path.join(run_model_dir, "training_run.json")
+    manifest = {
+        "schema_version": TRAINING_MANIFEST_SCHEMA_VERSION,
+        "kind": "playersim_training_run",
+        "run_id": run_id,
+        "project_version": VERSION,
+        "status": "initializing",
+        "phase": "startup",
+        "timestamps": {
+            "started_at": utc_timestamp(),
+            "updated_at": None,
+            "finished_at": None,
+            "duration_seconds": None,
+        },
+        "request": {
+            "argv": list(sys.argv),
+            "cli": vars(args).copy(),
+            "resume_checkpoint": artifact_identity(args.resume) if args.resume else None,
+        },
+        "source": {
+            "git": git_provenance(),
+            "requirements": artifact_identity(os.path.join(BASE_DIR, "requirements.txt")),
+            "working_tree_patch": capture_working_tree_patch(run_model_dir),
+        },
+        "runtime": runtime,
+        "resolved": {},
+        "data": None,
+        "paths": {
+            "model_directory": os.path.relpath(run_model_dir, BASE_DIR).replace(os.sep, "/"),
+            "log_directory": os.path.relpath(
+                os.path.join(LOG_DIR, run_id), BASE_DIR).replace(os.sep, "/"),
+            "tensorboard_directory": os.path.relpath(
+                TENSORBOARD_DIR, BASE_DIR).replace(os.sep, "/"),
+        },
+        "artifacts": {},
+        "metrics": {},
+        "validation": {"status": "not_run"},
+        "failure": None,
+    }
 
-    # Determine number of environments - optimized for Ryzen 5 5600
-    num_envs = (
-        args.n_envs if args.n_envs > 0
-        else max(1, min(6, detected_cpus // 2))
-    )
-    logging.info(f"Creating {num_envs} environments")
+    def publish_manifest():
+        manifest["timestamps"]["updated_at"] = utc_timestamp()
+        write_json_atomic(manifest_path, manifest)
 
-    environment_data_dir = os.path.join(
-        LOG_DIR, run_id, 'environment_data')
-    train_storage_dir = os.path.join(environment_data_dir, 'train')
-    eval_storage_dir = os.path.join(environment_data_dir, 'eval')
+    publish_manifest()
 
-    # Create vectorized environment with factory pattern to ensure unique instances
-    def make_env_factory(idx):
-        def _init():
-            # Create a completely fresh environment
-            return make_masked_mtg_env(
-                decks, card_db, os.path.join(train_storage_dir, f'env_{idx}'),
-                agent_is_p1=(idx % 2 == 0),
-                alternate_agent_seat=True)
-        return _init
-
-    env_fns = [make_env_factory(i) for i in range(num_envs)]
-    # The engine is pure Python, so rollout collection dominates wall-clock
-    # time. SubprocVecEnv steps each env in its own process; DummyVecEnv would
-    # serialize all of them onto one core. A single env stays in-process.
-    if num_envs > 1:
-        vec_env = SubprocVecEnv(env_fns)
-        # Env stepping now happens in the worker processes; cap the learner's
-        # intra-op threads so workers and learner share the machine.
-        torch.set_num_threads(max(2, detected_cpus - num_envs))
-    else:
-        vec_env = DummyVecEnv(env_fns)
-    vec_env = VecMonitor(vec_env)
-    # Stamp recorded games with this training run so the downstream deck-builder
-    # can weight or filter stats by the agent that generated them.
-    # BUGFIX: set_attr sets the attribute on the ActionMasker wrapper, not the
-    # underlying env, so records stayed "unversioned". env_method reaches the env.
-    vec_env.env_method("set_agent_version", run_id)
-    
-    # Create evaluation environment with factory pattern
-    eval_decks = random.sample(decks, min(10, len(decks)))  # Reduced from 15 to 10
-    
-    def make_eval_env_factory(idx):
-        def _init():
-            return make_masked_mtg_env(
-                eval_decks, card_db,
-                os.path.join(eval_storage_dir, f'env_{idx}'),
-                agent_is_p1=(idx % 2 == 0),
-                alternate_agent_seat=True)
-        return _init
-
-    eval_env_fns = [make_eval_env_factory(i) for i in range(2)]  # Reduced from 4 to 2 for CPU
-    eval_env = VecMonitor(DummyVecEnv(eval_env_fns))
-    eval_env.env_method("set_agent_version", f"{run_id}-eval")
-
-    # Create callbacks
-    callbacks = create_callbacks(eval_env, run_id, args, num_train_envs=num_envs)
-    
-    # Start time for tracking
-    start_time = time.time()
-
-    model = None  # BUGFIX: defined before try so the finally block can't NameError
+    vec_env = None
+    eval_env = None
+    model = None
     exit_code = 1
-    run_model_dir = os.path.join(MODEL_DIR, run_id)
-    os.makedirs(run_model_dir, exist_ok=True)
+    start_time = time.time()
+    initial_num_timesteps = 0
+    current_phase = "data_loading"
     try:
-        # Create or resume model
+        manifest["phase"] = current_phase
+        publish_manifest()
+        logging.info("Loading decks and card database...")
+        decks, card_db = load_decks_and_card_db(DECKS_DIR)
+        logging.info(
+            "Loaded %s decks with %s unique cards", len(decks), len(card_db))
+
+        current_phase = "hyperparameter_optimization"
+        best_params = None
+        if args.optimize_hp:
+            import psutil
+            cpu_count = psutil.cpu_count(logical=True) or detected_cpus
+            if cpu_count <= 4:
+                n_trials = 10
+            elif cpu_count <= 8:
+                n_trials = 25
+            else:
+                n_trials = 50
+            logging.info(
+                "Running seeded hyperparameter optimization with %s trials",
+                n_trials)
+            best_params = optimize_hyperparameters(
+                n_trials=n_trials, seed=args.seed)
+            logging.info(
+                "Hyperparameter optimization completed; applying the complete "
+                "winning configuration: %s", best_params)
+
+        training_config = build_training_config(args, best_params)
+        num_envs = (
+            args.n_envs if args.n_envs > 0
+            else max(1, min(6, detected_cpus // 2))
+        )
+        # A single alternating-seat evaluator avoids global random/NumPy stream
+        # coupling between multiple environments inside DummyVecEnv.
+        eval_env_count = 1
+        eval_seed = args.seed + EVALUATION_SEED_OFFSET
+        eval_rng = random.Random(eval_seed)
+        eval_decks = eval_rng.sample(decks, min(10, len(decks)))
+        subproc_start_method = "spawn" if os.name == "nt" else None
+        learner_threads = (
+            max(2, detected_cpus - num_envs)
+            if num_envs > 1 else n_cpu_threads)
+        torch.set_num_threads(learner_threads)
+        logging.info("Creating %s training environments", num_envs)
+
+        environment_data_dir = os.path.join(
+            LOG_DIR, run_id, "environment_data")
+        train_storage_dir = os.path.join(environment_data_dir, "train")
+        eval_storage_dir = os.path.join(environment_data_dir, "eval")
+        manifest["data"] = deck_provenance(decks, card_db)
+        manifest["data"]["evaluation_decks"] = [
+            (deck.get("name") if isinstance(deck, dict)
+             else f"non-dict-deck-{index}")
+            for index, deck in enumerate(eval_decks)]
+        manifest["resolved"] = {
+            "training_config": json_safe(training_config),
+            "optimized_parameters": json_safe(best_params),
+            "seed": args.seed,
+            "train_worker_seeds": [args.seed + index
+                                   for index in range(num_envs)],
+            "evaluation_seed": eval_seed,
+            "evaluation_worker_seeds": [eval_seed + index
+                                         for index in range(eval_env_count)],
+            "train_environments": num_envs,
+            "evaluation_environments": eval_env_count,
+            "train_vec_env": (
+                "SubprocVecEnv" if num_envs > 1 else "DummyVecEnv"),
+            "evaluation_vec_env": "DummyVecEnv",
+            "subprocess_start_method": (
+                subproc_start_method if num_envs > 1 else None),
+            "learner_threads": learner_threads,
+            "selected_device": selected_device,
+            "alternate_agent_seat": True,
+            "opponent_policy": "scripted",
+            "callback_frequencies_timesteps": {
+                "evaluation": args.eval_freq,
+                "checkpoint": args.checkpoint_freq,
+                "network_recording": (
+                    args.record_freq if args.record_network else None),
+            },
+            "evaluation_episodes": args.eval_episodes,
+        }
+        manifest["phase"] = "environment_setup"
+        publish_manifest()
+
+        def make_env_factory(idx):
+            def _init():
+                configure_runtime_logging(
+                    debug=args.debug,
+                    worker=(multiprocessing.current_process().name != "MainProcess"))
+                return make_masked_mtg_env(
+                    decks, card_db,
+                    os.path.join(train_storage_dir, f"env_{idx}"),
+                    agent_is_p1=(idx % 2 == 0),
+                    alternate_agent_seat=True)
+            return _init
+
+        env_fns = [make_env_factory(index) for index in range(num_envs)]
+        if num_envs > 1:
+            subproc_kwargs = {}
+            if subproc_start_method is not None:
+                subproc_kwargs["start_method"] = subproc_start_method
+            raw_vec_env = SubprocVecEnv(env_fns, **subproc_kwargs)
+        else:
+            raw_vec_env = DummyVecEnv(env_fns)
+        vec_env = VecMonitor(raw_vec_env)
+        vec_env.env_method("set_agent_version", run_id)
+        if hasattr(vec_env, "seed"):
+            assigned_train_seeds = vec_env.seed(args.seed)
+            manifest["resolved"]["assigned_train_worker_seeds"] = json_safe(
+                assigned_train_seeds)
+
+        def make_eval_env_factory(idx):
+            def _init():
+                return make_masked_mtg_env(
+                    eval_decks, card_db,
+                    os.path.join(eval_storage_dir, f"env_{idx}"),
+                    agent_is_p1=(idx % 2 == 0),
+                    alternate_agent_seat=True)
+            return _init
+
+        eval_env_fns = [
+            make_eval_env_factory(index) for index in range(eval_env_count)]
+        eval_env = StrictEvaluationVecEnv(
+            VecMonitor(DummyVecEnv(eval_env_fns)))
+        eval_env.env_method("set_agent_version", f"{run_id}-eval")
+        if hasattr(eval_env, "seed"):
+            assigned_eval_seeds = eval_env.seed(eval_seed)
+            manifest["resolved"]["assigned_evaluation_worker_seeds"] = json_safe(
+                assigned_eval_seeds)
+
+        callbacks = create_callbacks(
+            eval_env, run_id, args, num_train_envs=num_envs)
+
+        current_phase = "model_setup"
+        manifest["phase"] = current_phase
+        publish_manifest()
         if args.resume:
             model = MaskablePPO.load(
-                args.resume, 
+                args.resume,
                 env=vec_env,
-                tensorboard_log=TENSORBOARD_DIR
-            )
+                tensorboard_log=TENSORBOARD_DIR,
+                seed=args.seed,
+                device=selected_device)
             logging.info(f"Resuming training from {args.resume}")
         else:
-            model = create_training_model(vec_env, training_config)
+            model = create_training_model(
+                vec_env, training_config, args.seed, selected_device)
+        if hasattr(model, "set_random_seed"):
+            model.set_random_seed(args.seed)
+        initial_num_timesteps = int(getattr(model, "num_timesteps", 0))
+        manifest["resolved"]["model_device"] = str(
+            getattr(model, "device", selected_device))
 
-        # Start training
+        current_phase = "training"
+        manifest["status"] = "running"
+        manifest["phase"] = current_phase
+        manifest["timestamps"]["training_started_at"] = utc_timestamp()
+        publish_manifest()
+        if selected_device == "cuda":
+            torch.cuda.reset_peak_memory_stats()
         logging.info(f"Starting training run: {run_id}")
         model.learn(
             total_timesteps=args.timesteps,
@@ -1552,14 +2196,14 @@ def main():
             tb_log_name=run_id,
             reset_num_timesteps=not args.resume
         )
-        
-        # Record training duration
+
         training_duration = time.time() - start_time
         hours, remainder = divmod(training_duration, 3600)
         minutes, seconds = divmod(remainder, 60)
         logging.info(f"Training completed in {int(hours)}h {int(minutes)}m {int(seconds)}s")
-        
-        # Record neural network architecture
+
+        current_phase = "artifact_validation"
+        manifest["phase"] = current_phase
         logging.info("Recording neural network architecture...")
         record_network_architecture(model, run_id)
 
@@ -1573,29 +2217,103 @@ def main():
             logging.info(
                 f"Saved feature extractor to {feature_extractor_path}")
 
+        pending_model_path = os.path.join(run_model_dir, "pending_model")
         final_model_path = os.path.join(run_model_dir, "final_model")
-        logging.info(f"Saving final model to {final_model_path}")
-        model.save(final_model_path)
+        logging.info("Saving pending model to %s", pending_model_path)
+        model.save(pending_model_path)
+        pending_actual_path = resolve_artifact_path(pending_model_path)
+        if pending_actual_path is not None:
+            manifest["validation"] = validate_training_checkpoint(
+                pending_model_path, eval_env, device=selected_device,
+                seed=eval_seed)
+            final_actual_path = (
+                f"{final_model_path}.zip"
+                if pending_actual_path.lower().endswith(".zip")
+                else final_model_path)
+            os.replace(pending_actual_path, final_actual_path)
+        else:
+            # Test doubles may record save calls without creating a file. Real
+            # SB3 models always take the validated atomic-publish branch above.
+            model.save(final_model_path)
+            manifest["validation"] = {
+                "status": "skipped",
+                "reason": "model test double did not create a checkpoint",
+            }
+
+        actual_num_timesteps = int(getattr(
+            model, "num_timesteps", initial_num_timesteps + args.timesteps))
+        added_timesteps = max(0, actual_num_timesteps - initial_num_timesteps)
+        manifest["metrics"] = {
+            "requested_added_timesteps": args.timesteps,
+            "initial_timesteps": initial_num_timesteps,
+            "final_timesteps": actual_num_timesteps,
+            "actual_added_timesteps": added_timesteps,
+            "duration_seconds": training_duration,
+            "transitions_per_second": (
+                added_timesteps / training_duration if training_duration > 0 else None),
+            "cuda_peak_allocated_bytes": (
+                torch.cuda.max_memory_allocated() if selected_device == "cuda" else 0),
+            "cuda_peak_reserved_bytes": (
+                torch.cuda.max_memory_reserved() if selected_device == "cuda" else 0),
+            "evaluation": evaluation_history_summary(run_id),
+        }
+        manifest["status"] = "complete"
+        manifest["phase"] = "complete"
+        manifest["timestamps"]["finished_at"] = utc_timestamp()
+        manifest["timestamps"]["duration_seconds"] = training_duration
+        manifest["artifacts"] = training_artifacts(run_model_dir, run_id)
+        publish_manifest()
         exit_code = 0
 
-    except Exception as e:
+    except (Exception, KeyboardInterrupt) as e:
         logging.error(f"Training error: {str(e)}")
-        logging.error(traceback.format_exc())
-        # Preserve a resumable diagnostic artifact without presenting a
-        # partially trained model as the completed run output.
+        failure_traceback = traceback.format_exc()
+        logging.error(failure_traceback)
+        failed_model_save_error = None
         if model is not None:
             failed_model_path = os.path.join(run_model_dir, "failed_model")
             try:
-                logging.info(
-                    f"Saving incomplete model to {failed_model_path}")
-                model.save(failed_model_path)
+                pending_or_final = (
+                    resolve_artifact_path(os.path.join(run_model_dir, "pending_model"))
+                    or resolve_artifact_path(os.path.join(run_model_dir, "final_model")))
+                if pending_or_final is not None:
+                    failed_actual_path = (
+                        f"{failed_model_path}.zip"
+                        if pending_or_final.lower().endswith(".zip")
+                        else failed_model_path)
+                    os.replace(pending_or_final, failed_actual_path)
+                else:
+                    logging.info(
+                        f"Saving incomplete model to {failed_model_path}")
+                    model.save(failed_model_path)
             except Exception as save_error:
+                failed_model_save_error = str(save_error)
                 logging.error(
                     f"Could not save incomplete model: {save_error}")
+        duration = time.time() - start_time
+        manifest["status"] = "failed"
+        manifest["phase"] = current_phase
+        manifest["timestamps"]["finished_at"] = utc_timestamp()
+        manifest["timestamps"]["duration_seconds"] = duration
+        manifest["artifacts"] = training_artifacts(run_model_dir, run_id)
+        manifest["failure"] = {
+            "type": type(e).__name__,
+            "message": str(e),
+            "phase": current_phase,
+            "traceback": failure_traceback,
+            "failed_model_save_error": failed_model_save_error,
+        }
+        try:
+            publish_manifest()
+        except Exception as manifest_error:
+            logging.error("Could not publish failure manifest: %s", manifest_error)
+        if isinstance(e, KeyboardInterrupt):
+            exit_code = 130
     finally:
-        # Clean up environments
-        vec_env.close()
-        eval_env.close()
+        if vec_env is not None:
+            vec_env.close()
+        if eval_env is not None:
+            eval_env.close()
 
     if exit_code == 0:
         logging.info(f"Training run {run_id} completed")

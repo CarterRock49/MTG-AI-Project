@@ -191,7 +191,7 @@ class ActivatedAbility(Ability):
         if not self.cost and not self.effect:
              # If parsing failed completely (returned None, None) and the original text
              # *looked* like it should have been activated (had ':'), raise the error.
-             if parsed_cost is None and parsed_effect is None and (":" in self.effect_text or "—" in self.effect_text or "\u2014" in self.effect_text or "-" in self.effect_text):
+             if parsed_cost is None and parsed_effect is None and ":" in self.effect_text:
                   # *** This error indicates a potential parsing issue for seemingly valid activated text ***
                   # Keep this as an error because it points to a problem needing fixing.
                   raise ValueError(f"Failed to parse cost/effect from text with separator: '{self.effect_text}'")
@@ -208,19 +208,25 @@ class ActivatedAbility(Ability):
     def _parse_cost_effect_strict(text):
         """
         Strict parser for Activated Abilities. Requires a valid cost indicator
-        followed by a separator (:, —, -, –) OR a known keyword-cost pattern.
+        followed by a colon or whitespace-delimited dash, OR a known
+        keyword-cost pattern.
         Includes warning if separator found but cost pattern not matched.
         Returns (cost_str, effect_str) or (None, None).
         """
         if not text: return None, None
         text = text.strip()
 
-        # 1. Check for Explicit Separators (Colon or Dash variants)
-        separator_match = re.match(r'^\s*(.+?)\s*[:—\u2014-]\s*(.+)\s*$', text, re.DOTALL)
+        # 1. Check for explicit separators. An ASCII hyphen inside a word or
+        # modifier (``non-Faerie``, ``-3/-3``) is not a separator. Colons may
+        # be tight; dash variants must be surrounded by whitespace.
+        separator_match = re.match(
+            r'^\s*(.+?)(\s*:\s*|\s+(?:–|—|\u2013|\u2014|-)\s+)(.+)\s*$',
+            text, re.DOTALL)
 
         if separator_match:
             cost_part = separator_match.group(1).strip()
-            effect_part = separator_match.group(2).strip().rstrip('.') # Clean effect
+            separator = separator_match.group(2)
+            effect_part = separator_match.group(3).strip().rstrip('.') # Clean effect
 
             # Validate cost part: Does it contain known cost elements?
             cost_indicators_pattern = r'\{[WUBRGCXSPMTQ0-9\/\.]+\}|\(\{T\}\)|\b(Tap|Sacrifice|Discard|Pay\s+\d+\s+life|Remove\s+.*?\s+counter|Exhaust|Cycling|Equip|Flashback|Level\s+up)\b|^\s*\d+\s*$'
@@ -228,9 +234,11 @@ class ActivatedAbility(Ability):
                 logging.debug(f"_parse_cost_effect_strict: Parsed Separator Cost='{cost_part}', Effect='{effect_part}'")
                 return cost_part, effect_part
             else:
-                # *** RE-ADDED WARNING ***
-                # Separator found, but no standard cost before it. Log as warning.
-                logging.warning(f"_parse_cost_effect_strict: Found separator in '{text}', but left side '{cost_part}' not recognized as standard cost. Treating as non-activated.")
+                # A colon strongly signals a malformed activation. A dash is
+                # also ordinary ability-word punctuation (Valiant —, Eerie —)
+                # and should not flood every reset with warnings.
+                log = logging.warning if ":" in separator else logging.debug
+                log(f"_parse_cost_effect_strict: Found separator in '{text}', but left side '{cost_part}' not recognized as standard cost. Treating as non-activated.")
                 return None, None # Return None, None as it's not a clearly parsed activated ability
 
         # 2. Check for Keyword-Only Structures (No explicit separator)
@@ -1127,6 +1135,9 @@ class TriggeredAbility(Ability):
                 r"when(ever)?\s+.*discards?",
                 r"when(ever)?\s+.*is discarded"
             ],
+            "LEAVE_GRAVEYARD": [
+                r"when(ever)?\s+.*\bleave(?:s)?\s+(?:your|a|the) graveyard",
+            ],
             "DOOR_UNLOCKED": [
                 r"when(ever)?\s+.*unlock",
                 r"when(ever)?\s+.*unlocks?",
@@ -1213,6 +1224,25 @@ class TriggeredAbility(Ability):
                     if ('enchantment' not in event_types
                             or context.get('event_controller', context.get('controller')) is not context.get('controller')):
                         return False
+            if event_type == "LEAVE_GRAVEYARD":
+                context = context or {}
+                if ("your graveyard" in self.trigger_condition
+                        and context.get("from_player") is not context.get("controller")):
+                    return False
+                event_card = context.get("event_card") or context.get("card")
+                event_types = {
+                    str(card_type).lower()
+                    for card_type in getattr(event_card, "card_types", [])
+                }
+                trigger_prefix = self.trigger_condition.split("leave", 1)[0]
+                mentioned_types = {
+                    card_type for card_type in (
+                        "artifact", "battle", "creature", "enchantment",
+                        "land", "planeswalker")
+                    if re.search(rf"\b{card_type}s?\b", trigger_prefix)
+                }
+                if mentioned_types and not event_types.intersection(mentioned_types):
+                    return False
             if event_type == "CAST_SPELL" and "targets only a single creature you control" in self.trigger_condition:
                 context = context or {}
                 if context.get('controller') is not context.get('casting_player', context.get('controller')):
@@ -2561,6 +2591,36 @@ class SacrificeEffect(AbilityEffect):
         return True
 
 
+class SacrificeSourceEffect(AbilityEffect):
+    """Sacrifice the source object named by ``this <permanent type>``.
+
+    This wording appears on the effect side of abilities such as
+    ``{2}{B}: Sacrifice this enchantment``.  It is not an activation cost and
+    must never open a chooser that could sacrifice a different permanent.
+    """
+    def __init__(self, permanent_type="permanent", condition=None):
+        self.permanent_type = str(permanent_type or "permanent").lower()
+        super().__init__(f"Sacrifice this {self.permanent_type}", condition)
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        # An activated ability exists independently of its source.  If the
+        # source left or changed controllers before resolution, its original
+        # controller cannot substitute another permanent and the instruction
+        # simply does nothing.
+        if source_id not in controller.get("battlefield", []):
+            return True
+        owner = game_state._find_card_owner_fallback(source_id) or controller
+        if not game_state.move_card(
+                source_id, controller, "battlefield", owner, "graveyard",
+                cause="sacrifice", context={"source_id": source_id}):
+            return False
+        game_state.trigger_ability(
+            source_id, "SACRIFICED",
+            {"controller": controller, "cause": "ability_effect"})
+        return True
+
+
 class DistributeCountersEffect(AbilityEffect):
     """Let the policy assign counters one at a time among committed targets."""
     def __init__(self, counter_type="+1/+1", count=1, condition=None,
@@ -3562,7 +3622,7 @@ class ReturnToHandEffect(AbilityEffect):
         if "creature" == self.target_type: relevant_categories.add("creatures")
         elif "artifact" == self.target_type: relevant_categories.add("artifacts")
         # ... add other specific types ...
-        elif "permanent" == self.target_type: relevant_categories.update(["creatures", "artifacts", "enchantments", "planeswalkers", "lands", "battles"])
+        elif "permanent" == self.target_type: relevant_categories.update(["permanents", "creatures", "artifacts", "enchantments", "planeswalkers", "lands", "battles"])
         elif "card" == self.target_type: relevant_categories.add("cards") # Assumes target dict might have 'cards' key for GY/Exile targets
         else: relevant_categories.add(self.target_type + "s") # Pluralize fallback
 
@@ -3588,7 +3648,17 @@ class ReturnToHandEffect(AbilityEffect):
 
         # Process unique targets
         for target_id in set(target_ids_to_process):
-            location_info = game_state.find_card_location(target_id)
+            # A repeated deck ID can have one physical occurrence in a
+            # graveyard and another on the battlefield.  For an effect whose
+            # declared source zone is the battlefield, resolve the targeted
+            # permanent occurrence directly instead of accepting a newer
+            # unrelated move hint from find_card_location().
+            if self.zone == 'battlefield':
+                battlefield_controller = game_state.get_card_controller(target_id)
+                location_info = ((battlefield_controller, 'battlefield')
+                                 if battlefield_controller is not None else None)
+            else:
+                location_info = game_state.find_card_location(target_id)
             if not location_info:
                  logging.warning(f"ReturnToHandEffect: Could not find location for target {target_id}.")
                  continue
@@ -3608,6 +3678,54 @@ class ReturnToHandEffect(AbilityEffect):
                  logging.warning(f"ReturnToHandEffect: Failed to move {target_id} to hand from {current_zone}.")
 
         return returned_count > 0
+
+
+class ReturnThenAddCounterEffect(AbilityEffect):
+    """Return an optional target, then counter the source only on success.
+
+    This preserves result-linked wording such as ``If a permanent was
+    returned this way`` as one resolution unit.  Supplying no target for an
+    ``up to one`` instruction is a successful resolution with no follow-up.
+    """
+    def __init__(self, effect_text, target_type="permanent",
+                 counter_type="+1/+1", count=1, condition=None):
+        self.target_type = str(target_type or "permanent").lower()
+        self.counter_type = str(counter_type or "+1/+1")
+        self.count = max(1, int(count))
+        super().__init__(effect_text, condition)
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        target_ids = []
+        if isinstance(targets, dict):
+            for category in (
+                    "permanents", "creatures", "artifacts", "enchantments",
+                    "lands", "planeswalkers", "battles"):
+                target_ids.extend(targets.get(category, []))
+        target_ids = list(dict.fromkeys(target_ids))
+        if not target_ids:
+            return True
+
+        hand_counts = []
+        for target_id in target_ids:
+            target_controller = game_state.get_card_controller(target_id)
+            owner = game_state._find_card_owner_fallback(target_id) \
+                or target_controller
+            if owner:
+                hand_counts.append(
+                    (owner, target_id, owner.get("hand", []).count(target_id)))
+
+        bounce = ReturnToHandEffect(
+            target_type=self.target_type, zone="battlefield")
+        bounce._apply_effect(game_state, source_id, controller, targets)
+        returned = any(
+            owner.get("hand", []).count(target_id) > before
+            for owner, target_id, before in hand_counts)
+        if returned and source_id in controller.get("battlefield", []):
+            return bool(game_state.add_counter(
+                source_id, self.counter_type, self.count))
+        return True
+
 
 class CounterSpellEffect(AbilityEffect):
     """Effect that counters a spell on the stack."""
@@ -3835,6 +3953,99 @@ class MillEffect(AbilityEffect):
                   if not p.get("library"): p["library_empty_warning"] = True
 
         return overall_success
+
+
+class MillThenChooseEffect(AbilityEffect):
+    """Mill the controller, then optionally recover one newly milled card.
+
+    The eligible set is bound to the physical moves performed by this effect,
+    rather than the controller's whole graveyard.  This models the common
+    ``from among the milled cards`` wording while reusing the policy-visible
+    Dig choice machinery for the optional selection.
+    """
+    _PERMANENT_TYPES = frozenset({
+        "artifact", "battle", "creature", "enchantment", "land",
+        "planeswalker",
+    })
+
+    def __init__(self, count=1, allowed_types=None, optional=True,
+                 effect_text=None, condition=None):
+        self.base_count = count
+        self.allowed_types = frozenset(
+            str(card_type).lower().rstrip("s")
+            for card_type in (allowed_types or ("permanent",)))
+        self.optional = bool(optional)
+        count_text = "X" if count == "x" else str(count)
+        allowed_text = ", ".join(sorted(self.allowed_types))
+        super().__init__(
+            effect_text or (
+                f"Mill {count_text} cards. You may put a {allowed_text} card "
+                "from among the milled cards into your hand"),
+            condition)
+        self.requires_target = False
+
+    def _is_eligible(self, game_state, card_id):
+        card = game_state._safe_get_card(card_id)
+        if not card:
+            return False
+        card_types = {
+            str(card_type).lower().rstrip("s")
+            for card_type in getattr(card, "card_types", [])
+        }
+        if "permanent" in self.allowed_types:
+            return bool(card_types.intersection(self._PERMANENT_TYPES))
+        return bool(card_types.intersection(self.allowed_types))
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        has_chosen_x = isinstance(targets, dict) and "X" in targets
+        if self.base_count == "x" and has_chosen_x:
+            count = int(targets.get("X", 0))
+        else:
+            count = text_to_number(self.base_count)
+        if not isinstance(count, int) or count <= 0:
+            return True
+
+        library = controller.get("library", [])
+        to_mill = list(library[:min(count, len(library))])
+        milled = []
+        for card_id in to_mill:
+            graveyard_count = controller.get("graveyard", []).count(card_id)
+            moved = game_state.move_card(
+                card_id, controller, "library", controller, "graveyard",
+                cause="mill", context={"source_id": source_id})
+            if (moved and controller.get("graveyard", []).count(card_id)
+                    > graveyard_count):
+                milled.append(card_id)
+
+        if milled:
+            if not hasattr(game_state, "cards_milled_this_turn"):
+                game_state.cards_milled_this_turn = {}
+            player_id = "p1" if controller is game_state.p1 else "p2"
+            game_state.cards_milled_this_turn[player_id] = (
+                game_state.cards_milled_this_turn.get(player_id, 0)
+                + len(milled))
+            if not controller.get("library"):
+                controller["library_empty_warning"] = True
+
+        options = [
+            card_id for card_id in milled
+            if self._is_eligible(game_state, card_id)
+        ]
+        if not options:
+            return True
+
+        game_state.choice_context = {
+            "type": "dig_select", "player": controller,
+            "options": options, "remaining": 1, "selected": [],
+            "source_zone": "graveyard", "destination": "hand",
+            "rest_destination": "stay", "optional": self.optional,
+            "move_cause": "milled_card_selection",
+            "source_id": source_id, "resume_phase": game_state.phase,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = controller
+        return True
+
 
 class SearchLibraryEffect(AbilityEffect):
     """Effect that allows searching a library for cards."""

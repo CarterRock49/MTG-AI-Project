@@ -88,6 +88,15 @@ def fresh(seed=SEED):
     else:
         raise AssertionError("could not obtain a non-mirror match in 25 resets")
     gs = env.game_state
+    # Rule scenarios start after pregame decisions unless a scenario explicitly
+    # reconstructs mulligans itself. Complete both policy decisions through the
+    # real London-mulligan path instead of relying on a stale turn-number guard.
+    if gs.mulligan_in_progress:
+        assert gs.mulligan_player is gs.p1
+        gs.perform_mulligan(gs.p1, keep_hand=True)
+        assert gs.mulligan_player is gs.p2
+        gs.perform_mulligan(gs.p2, keep_hand=True)
+        assert not gs.mulligan_in_progress
     gs.phase = gs.PHASE_MAIN_PRECOMBAT
     return gs
 
@@ -517,6 +526,17 @@ def s_monstrous_rage_valiant_and_monster_role():
     card = gs._safe_get_card(hero)
     assert (card.power, card.toughness) == (5, 3), \
         f"Valiant, Rage, and Role modifiers produced {card.power}/{card.toughness}, expected 5/3"
+    from unittest.mock import patch
+    with patch("Playersim.layer_system.logging.warning") as warn:
+        gs.layer_system.invalidate_cache()
+        gs.layer_system.apply_all_effects()
+    missing_optional = [
+        str(call) for call in warn.call_args_list
+        if "missing attribute 'loyalty'" in str(call)
+        or "missing attribute 'defense'" in str(call)
+    ]
+    assert not missing_optional, \
+        f"Role layer updates still warn about absent optional fields: {missing_optional}"
 
 
 @scenario("707.10 / 603.2", "a copied spell with inherited targets can trigger Valiant")
@@ -1038,6 +1058,119 @@ def s_mana_empties_between_phases():
     _, _, _, info = handler.apply_action(439)
     assert not info.get("execution_failed"), f"DECLARE_BLOCKERS_DONE failed: {info}"
     assert_empty()
+
+
+@scenario("508.1 (attack declaration contract)", "a declared attacker cannot be toggled forever through the public mask")
+def s_attack_declaration_mask_is_monotonic():
+    gs = fresh(); handler = get_env().action_handler
+    gs.agent_is_p1 = True
+    gs.turn = 1
+    gs.phase = gs.PHASE_DECLARE_ATTACKERS
+    gs.priority_player = gs.p1
+    gs.priority_pass_count = 0
+    gs.current_attackers = []
+    gs.stack.clear()
+
+    first = inject_into_zone(gs, gs.p1, {
+        "name": "Monotonic Attacker A", "mana_cost": "{1}{G}", "cmc": 2,
+        "type_line": "Creature - Beast", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    second = inject_into_zone(gs, gs.p1, {
+        "name": "Monotonic Attacker B", "mana_cost": "{2}{G}", "cmc": 3,
+        "type_line": "Creature - Beast", "oracle_text": "",
+        "power": 3, "toughness": 3,
+    }, "battlefield")
+    gs.p1.get("entered_battlefield_this_turn", set()).difference_update(
+        (first, second))
+    first_action = 28 + gs.p1["battlefield"].index(first)
+    second_action = 28 + gs.p1["battlefield"].index(second)
+
+    initial_mask = handler.generate_valid_actions()
+    assert initial_mask[first_action] and initial_mask[second_action]
+    _, _, _, info = handler.apply_action(first_action)
+    assert not info.get("execution_failed"), \
+        f"first attack declaration failed: {info}"
+    assert gs.current_attackers == [first]
+
+    next_mask = handler.generate_valid_actions()
+    assert not next_mask[first_action], \
+        "the selected ATTACK action remained legal and could toggle forever"
+    assert next_mask[second_action] and next_mask[438], \
+        "declaring one attacker hid another attacker or the finish action"
+    state_before = list(gs.current_attackers)
+    _, _, _, info = handler.apply_action(first_action)
+    assert info.get("invalid_action_reason"), \
+        "the repeated ATTACK action was not rejected by its current mask"
+    assert gs.current_attackers == state_before, \
+        "a mask-invalid repeated ATTACK action changed the declaration"
+
+    handler.generate_valid_actions()
+    _, _, _, info = handler.apply_action(second_action)
+    assert not info.get("execution_failed"), \
+        f"second attack declaration failed: {info}"
+    assert gs.current_attackers == [first, second]
+
+
+@scenario("509.1 (block declaration contract)", "an assigned blocker cannot be toggled forever through the public mask")
+def s_block_declaration_mask_is_monotonic():
+    gs = fresh(); handler = get_env().action_handler
+    gs.agent_is_p1 = False
+    gs.turn = 1
+    gs.phase = gs.PHASE_DECLARE_BLOCKERS
+    gs.priority_player = gs.p2
+    gs.priority_pass_count = 0
+    gs.stack.clear()
+    gs.current_block_assignments = {}
+
+    attacker = inject_into_zone(gs, gs.p1, {
+        "name": "Block Contract Attacker", "mana_cost": "{2}{R}", "cmc": 3,
+        "type_line": "Creature - Beast", "oracle_text": "",
+        "power": 3, "toughness": 3,
+    }, "battlefield")
+    first = inject_into_zone(gs, gs.p2, {
+        "name": "Monotonic Blocker A", "mana_cost": "{1}{W}", "cmc": 2,
+        "type_line": "Creature - Soldier", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    second = inject_into_zone(gs, gs.p2, {
+        "name": "Monotonic Blocker B", "mana_cost": "{2}{W}", "cmc": 3,
+        "type_line": "Creature - Soldier", "oracle_text": "",
+        "power": 2, "toughness": 3,
+    }, "battlefield")
+    gs.current_attackers = [attacker]
+    first_action = 48 + gs.p2["battlefield"].index(first)
+    second_action = 48 + gs.p2["battlefield"].index(second)
+
+    initial_mask = handler.generate_valid_actions()
+    assert initial_mask[first_action] and initial_mask[second_action]
+    handler.current_valid_actions = initial_mask
+    _, _, _, info = handler.apply_action(first_action)
+    assert not info.get("execution_failed"), \
+        f"first block declaration failed: {info}"
+    assert gs.current_block_assignments == {attacker: [first]}
+
+    next_mask = handler.generate_valid_actions()
+    assert not next_mask[first_action], \
+        "the assigned BLOCK action remained legal and could toggle forever"
+    assert next_mask[second_action] and next_mask[439], \
+        "assigning one blocker hid another blocker or the finish action"
+    state_before = {
+        attack_id: list(blockers)
+        for attack_id, blockers in gs.current_block_assignments.items()
+    }
+    handler.current_valid_actions = next_mask
+    _, _, _, info = handler.apply_action(first_action)
+    assert info.get("invalid_action_reason"), \
+        "the repeated BLOCK action was not rejected by its current mask"
+    assert gs.current_block_assignments == state_before, \
+        "a mask-invalid repeated BLOCK action changed the declaration"
+
+    handler.current_valid_actions = handler.generate_valid_actions()
+    _, _, _, info = handler.apply_action(second_action)
+    assert not info.get("execution_failed"), \
+        f"second block declaration failed: {info}"
+    assert gs.current_block_assignments == {attacker: [first, second]}
 
 
 @scenario("603.7", "a delayed trigger fires at the beginning of the next end step")
@@ -1826,6 +1959,13 @@ def s_this_town_target_discount():
         "name": "Opposing Town Target", "mana_cost": "{2}",
         "type_line": "Creature", "oracle_text": "", "power": 2, "toughness": 2,
     }, "battlefield")
+    # Fixture decks use one database ID for repeated physical copies. Simulate
+    # another copy having moved to the graveyard more recently: targeting must
+    # still classify and resolve the occurrence currently on the battlefield.
+    controller["graveyard"].append(own_target)
+    gs._last_card_locations[own_target] = (controller, "graveyard")
+    assert gs.find_card_location(own_target)[1] == "graveyard"
+    assert gs.get_card_controller(own_target) is controller
     spell = inject_into_zone(gs, controller, {
         "name": "This Town Ain't Big Enough", "mana_cost": "{4}{U}", "cmc": 5,
         "type_line": "Instant",
@@ -1841,17 +1981,36 @@ def s_this_town_target_discount():
     assert gs.cast_spell(spell, controller), "This Town was not castable for its reduced cost"
     assert gs.phase == gs.PHASE_TARGETING and not gs.stack, \
         "This Town was paid for before choosing its targets"
+    handler = get_env().action_handler
+    assert not handler.generate_valid_actions()[11], \
+        "This Town exposed FINISH with zero targets even though the full cost was unaffordable"
     valid_map = gs.targeting_system.get_valid_targets(
         spell, controller, gs.targeting_context["required_type"],
         effect_text=gs.targeting_context["effect_text"])
     valid_ids = sorted(set(cid for ids in valid_map.values() for cid in ids))
     assert own_target in valid_ids and opposing_target in valid_ids
-    assert get_env().action_handler._handle_select_target(
-        valid_ids.index(own_target), {})[1], "could not select the friendly discount target"
+    # An opposing target alone is legal rules-wise but does not earn the {3}
+    # discount, so it must not make the deferred cast finishable with this mana.
+    candidates = handler._get_target_selection_candidates(
+        controller, gs.targeting_context)
+    assert handler._handle_select_target(
+        candidates.index(opposing_target), {})[1], \
+        "could not select the opposing target"
     assert gs.targeting_context, "up-to-two targeting finalized after only one target"
-    remaining_valid_ids = [cid for cid in valid_ids if cid != own_target]
-    assert get_env().action_handler._handle_select_target(
-        remaining_valid_ids.index(opposing_target), {})[1], "could not select the opposing target"
+    assert not handler.generate_valid_actions()[11], \
+        "This Town exposed FINISH for an unaffordable opponent-only target set"
+    assert gs._determine_target_category(own_target) == "enchantments", \
+        "a battlefield target was recategorized from a repeated-ID graveyard hint"
+
+    # At the final target slot the shared candidate helper filters selections
+    # that would auto-finalize an unaffordable cast while retaining the friendly
+    # target that activates the discount.
+    remaining_candidates = handler._get_target_selection_candidates(
+        controller, gs.targeting_context)
+    assert own_target in remaining_candidates
+    assert handler._handle_select_target(
+        remaining_candidates.index(own_target), {})[1], \
+        "could not select the friendly discount target"
 
     paid_cost = gs.stack[-1][3].get("final_paid_cost", {})
     assert paid_cost.get("generic") == 1 and paid_cost.get("U") == 1, \
@@ -1859,6 +2018,8 @@ def s_this_town_target_discount():
     assert gs.resolve_top_of_stack(), "This Town did not resolve"
     assert own_target in controller["hand"] and opposing_target in opponent["hand"], \
         "This Town did not return both chosen permanents to their owners"
+    assert own_target in controller["graveyard"], \
+        "bouncing the battlefield occurrence consumed the repeated graveyard copy"
 
 
 @scenario("601.2h", "Fear of Isolation returns a chosen permanent as a mandatory casting cost")
@@ -2217,10 +2378,12 @@ def s_multiple_blockers_public_action_dispatch():
     assert not done and not truncated and not info.get("execution_failed"), \
         f"mask-valid ordinary block was rejected: {info}"
     assert gs.current_block_assignments.get(attacker) == [blocker_a]
-    # Toggle it off again so the multi-block assertion starts from a clean map.
-    assert handler.generate_valid_actions()[48]
-    _, _, _, info = handler.apply_action(48)
-    assert not info.get("execution_failed") and not gs.current_block_assignments
+    # Public declaration is monotonic: an assigned blocker cannot be toggled
+    # off through the same BLOCK slot. Rebuild the clean rule fixture directly
+    # before checking the independent multi-block dispatcher.
+    next_mask = handler.generate_valid_actions()
+    assert not next_mask[48] and next_mask[49] and next_mask[439]
+    gs.current_block_assignments = {}
 
     assert handler.generate_valid_actions()[383], \
         "ASSIGN_MULTIPLE_BLOCKERS absent from its legal mask"
@@ -2413,6 +2576,12 @@ def s_hexproof_and_shroud_targeting_legality():
 @scenario("target mask", "hexproof-filtered targeting actions expose only legal selectable targets")
 def s_target_action_mask_excludes_illegal_hexproof_targets():
     gs = fresh()
+    veil_text = (
+        "Put a +1/+1 counter on target creature you control. It gains "
+        "hexproof until end of turn. (It can't be the target of spells or "
+        "abilities your opponents control.)")
+    assert gs._target_bounds_from_text(veil_text) == (1, 1), \
+        "Snakeskin Veil reminder text invented a second target"
     handler = get_env().action_handler
     gs.agent_is_p1 = True
     caster = gs.p1
@@ -3767,6 +3936,273 @@ def s_parser_life_loss():
         e.apply(gs, src_id, player, {"players": ["p2"]})
     assert opp["life"] == life_before - 2, \
         f"target player life went {life_before} -> {opp['life']}, expected -2"
+
+
+@scenario("608.2c / parser", "Hopeless Nightmare preserves its shared opponent subject and self-sacrifice")
+def s_hopeless_nightmare_compound_resolution():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+
+    player, opp = gs.p1, gs.p2
+    source = inject_into_zone(gs, player, {
+        "name": "Hopeless Nightmare Probe", "mana_cost": "{B}", "cmc": 1,
+        "type_line": "Enchantment", "oracle_text": "",
+    }, "battlefield")
+    replace_hand(gs, opp, [{
+        "name": "Nightmare Discard", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Artifact", "oracle_text": "",
+    }])
+
+    effects = EffectFactory.create_effects(
+        "Each opponent discards a card and loses 2 life.",
+        source_name="Hopeless Nightmare")
+    assert [type(effect).__name__ for effect in effects] == [
+        "DiscardEffect", "LoseLifeEffect"], \
+        f"compound opponent instruction parsed incorrectly: {effects}"
+    assert effects[0].target == "opponent" and effects[1].target == "opponent", \
+        "the shared 'each opponent' subject was not inherited by life loss"
+
+    # Model the real stack-resolution phase wrapper and ensure the discard
+    # choice does not erase the underlying main phase.
+    gs.phase = gs.PHASE_PRIORITY
+    gs.previous_priority_phase = gs.PHASE_MAIN_PRECOMBAT
+    life_before = opp["life"]
+    _, pending = gs._run_effect_sequence(effects, source, player, {})
+    assert pending and gs.choice_context \
+        and gs.choice_context.get("type") == "discard", \
+        "opponent discard did not pause the effect sequence for its choice"
+    assert opp["life"] == life_before, \
+        "life loss resolved before the opponent completed the discard"
+    assert gs.choose_discard_card(0), "opponent could not complete the discard"
+    assert opp["life"] == life_before - 2, \
+        "the deferred shared-subject life loss did not resume after discard"
+    assert (gs.phase == gs.PHASE_PRIORITY
+            and gs.previous_priority_phase == gs.PHASE_MAIN_PRECOMBAT), \
+        "the discard continuation lost the stack's underlying turn phase"
+
+    # An empty hand skips the choice but not the later life-loss instruction.
+    empty_life = opp["life"]
+    _, pending = gs._run_effect_sequence(effects, source, player, {})
+    assert not pending and opp["life"] == empty_life - 2, \
+        "an opponent with no discard choice incorrectly skipped life loss"
+
+    sacrifice = EffectFactory.create_effects(
+        "Sacrifice this enchantment.", source_name="Hopeless Nightmare")
+    assert len(sacrifice) == 1 \
+        and type(sacrifice[0]).__name__ == "SacrificeSourceEffect", \
+        f"self-sacrifice remained generic: {sacrifice}"
+    assert sacrifice[0].apply(gs, source, player, {}), \
+        "Hopeless Nightmare self-sacrifice reported failure"
+    assert source not in player["battlefield"] and source in player["graveyard"], \
+        "Hopeless Nightmare did not sacrifice itself to its owner's graveyard"
+    substitute = inject_into_zone(gs, player, {
+        "name": "Substitute Enchantment", "type_line": "Enchantment",
+        "oracle_text": "",
+    }, "battlefield")
+    assert sacrifice[0].apply(gs, source, player, {}), \
+        "a source-absent self-sacrifice should resolve doing nothing"
+    assert substitute in player["battlefield"], \
+        "a resolved source-only sacrifice substituted another enchantment"
+
+
+@scenario("701.13 / 608.2c", "Dredger's Insight mills its controller and chooses only from those cards")
+def s_dredgers_insight_linked_mill_choice():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+
+    player = gs.p1
+    source = inject_into_zone(gs, player, {
+        "name": "Dredger's Insight Probe", "mana_cost": "{1}{G}", "cmc": 2,
+        "type_line": "Enchantment", "oracle_text": "",
+    }, "battlefield")
+    preexisting = inject_into_zone(gs, player, {
+        "name": "Old Graveyard Relic", "type_line": "Artifact",
+        "oracle_text": "",
+    }, "graveyard")
+    top_cards = [
+        inject_card(gs, {"name": "Milled Relic", "type_line": "Artifact", "oracle_text": ""}),
+        inject_card(gs, {"name": "Milled Beast", "type_line": "Creature - Beast",
+                         "power": 2, "toughness": 2, "oracle_text": ""}),
+        inject_card(gs, {"name": "Milled Forest", "type_line": "Land - Forest", "oracle_text": ""}),
+        inject_card(gs, {"name": "Milled Trick", "type_line": "Instant", "oracle_text": ""}),
+    ]
+    player["library"][:0] = top_cards
+    for card_id in top_cards:
+        gs._last_card_locations[card_id] = (player, "library")
+
+    effects = EffectFactory.create_effects(
+        "Mill four cards. You may put an artifact, creature, or land card "
+        "from among the milled cards into your hand.",
+        source_name="Dredger's Insight")
+    assert len(effects) == 1 \
+        and type(effects[0]).__name__ == "MillThenChooseEffect", \
+        f"linked mill/selection was split or left generic: {effects}"
+
+    _, pending = gs._run_effect_sequence(effects, source, player, {})
+    assert pending and gs.choice_context \
+        and gs.choice_context.get("type") == "dig_select", \
+        "linked mill did not expose its card choice"
+    assert all(card_id in player["graveyard"] for card_id in top_cards), \
+        "the controller's top four cards were not milled"
+    assert set(gs.choice_context.get("options", [])) == set(top_cards[:3]), \
+        "the choice was not limited to eligible cards milled by this effect"
+    assert preexisting not in gs.choice_context.get("options", []), \
+        "a pre-existing graveyard card leaked into the newly-milled choice"
+    assert gs.choice_context.get("optional") \
+        and gs.choice_context.get("source_zone") == "graveyard", \
+        "the milled-card choice lost its optional/source-zone semantics"
+
+    gs.agent_is_p1 = player is gs.p1
+    handler = get_env().action_handler
+    mask = handler.generate_valid_actions()
+    assert mask[11] and mask[353:363].sum() == 3, \
+        "the action mask did not expose decline plus the three legal cards"
+    chosen = top_cards[1]
+    _, ok = handler._handle_choose_mode(
+        gs.choice_context["options"].index(chosen), {})
+    assert ok and chosen in player["hand"] and chosen not in player["graveyard"], \
+        "the chosen newly milled card did not move from graveyard to hand"
+    assert top_cards[3] in player["graveyard"] and gs.choice_context is None, \
+        "an ineligible/unselected milled card left the graveyard"
+
+    decline_cards = [
+        inject_card(gs, {"name": f"Declined Mill {index}",
+                         "type_line": "Creature", "power": 1,
+                         "toughness": 1, "oracle_text": ""})
+        for index in range(4)
+    ]
+    player["library"][:0] = decline_cards
+    for card_id in decline_cards:
+        gs._last_card_locations[card_id] = (player, "library")
+    hand_before = len(player["hand"])
+    _, pending = gs._run_effect_sequence(effects, source, player, {})
+    assert pending and handler.generate_valid_actions()[11], \
+        "a second linked mill did not expose its optional decline"
+    _, ok = handler._handle_pass_priority(None)
+    assert ok and gs.choice_context is None and len(player["hand"]) == hand_before, \
+        "declining the linked mill selection changed the hand or stranded choice state"
+    assert all(card_id in player["graveyard"] for card_id in decline_cards), \
+        "declining moved an unchosen newly milled card out of the graveyard"
+
+    seed_cards = [
+        inject_card(gs, {"name": "Seed Permanent", "type_line": "Land",
+                         "oracle_text": ""}),
+        inject_card(gs, {"name": "Seed Instant", "type_line": "Instant",
+                         "oracle_text": ""}),
+    ]
+    player["library"][:0] = seed_cards
+    for card_id in seed_cards:
+        gs._last_card_locations[card_id] = (player, "library")
+    seed_effects = EffectFactory.create_effects(
+        "Mill two cards. You may put a permanent card from among the milled "
+        "cards into your hand. You gain 2 life.", source_name="Seed of Hope")
+    assert [type(effect).__name__ for effect in seed_effects] == [
+        "MillThenChooseEffect", "GainLifeEffect"], \
+        f"Seed's linked mill/life sequence parsed incorrectly: {seed_effects}"
+    seed_life = player["life"]
+    _, pending = gs._run_effect_sequence(seed_effects, source, player, {})
+    assert pending and player["life"] == seed_life, \
+        "Seed gained life before its optional milled-card choice completed"
+    assert handler._handle_pass_priority(None)[1]
+    assert player["life"] == seed_life + 2, \
+        "Seed's life-gain suffix did not resume after declining the choice"
+
+    # Dredger's other printed trigger watches only matching cards leaving its
+    # controller's graveyard.
+    watcher = inject_into_zone(gs, player, {
+        "name": "Dredger's Insight Watcher", "mana_cost": "{1}{G}", "cmc": 2,
+        "type_line": "Enchantment",
+        "oracle_text": (
+            "Whenever one or more artifact and/or creature cards leave your "
+            "graveyard, you gain 1 life."),
+    }, "battlefield")
+    leaving_artifact = inject_into_zone(gs, player, {
+        "name": "Leaving Relic", "type_line": "Artifact", "oracle_text": "",
+    }, "graveyard")
+    trigger_life = player["life"]
+    assert gs.move_card(
+        leaving_artifact, player, "graveyard", player, "hand",
+        cause="graveyard_recovery")
+    gs.ability_handler.process_triggered_abilities()
+    while gs.stack:
+        assert gs.resolve_top_of_stack()
+    assert player["life"] == trigger_life + 1, \
+        "Dredger did not gain life when its artifact left its graveyard"
+
+    leaving_instant = inject_into_zone(gs, player, {
+        "name": "Leaving Trick", "type_line": "Instant", "oracle_text": "",
+    }, "graveyard")
+    assert gs.move_card(
+        leaving_instant, player, "graveyard", player, "hand",
+        cause="graveyard_recovery")
+    gs.ability_handler.process_triggered_abilities()
+    while gs.stack:
+        assert gs.resolve_top_of_stack()
+    assert player["life"] == trigger_life + 1 and watcher in player["battlefield"], \
+        "Dredger triggered for a non-artifact/noncreature graveyard card"
+
+
+@scenario("603.1 / 608.2c", "Nurturing Pixie keeps its restricted bounce and conditional counter atomic")
+def s_nurturing_pixie_linked_bounce_counter():
+    gs = fresh()
+    from Playersim.ability_utils import EffectFactory
+
+    player = gs.p1
+    pixie = inject_into_zone(gs, player, {
+        "name": "Nurturing Pixie Probe", "mana_cost": "{W}", "cmc": 1,
+        "type_line": "Creature - Faerie Rogue", "power": 1, "toughness": 1,
+        "oracle_text": "",
+    }, "battlefield")
+    legal = inject_into_zone(gs, player, {
+        "name": "Pixie Parcel", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Artifact", "oracle_text": "",
+    }, "battlefield")
+    faerie = inject_into_zone(gs, player, {
+        "name": "Other Faerie", "mana_cost": "{U}", "cmc": 1,
+        "type_line": "Creature - Faerie", "power": 1, "toughness": 1,
+        "oracle_text": "",
+    }, "battlefield")
+    land = inject_into_zone(gs, player, {
+        "name": "Pixie Meadow", "type_line": "Land - Plains", "oracle_text": "",
+    }, "battlefield")
+    opponent = gs.p2
+    opposing = inject_into_zone(gs, opponent, {
+        "name": "Opponent Parcel", "type_line": "Artifact", "oracle_text": "",
+    }, "battlefield")
+    text = (
+        "Return up to one target non-Faerie, nonland permanent you control "
+        "to its owner's hand. If a permanent was returned this way, put a "
+        "+1/+1 counter on this creature.")
+    effects = EffectFactory.create_effects(text, source_name="Nurturing Pixie")
+    assert len(effects) == 1 \
+        and type(effects[0]).__name__ == "ReturnThenAddCounterEffect", \
+        f"Pixie's linked instruction was fragmented: {effects}"
+
+    valid_map = gs.targeting_system.get_valid_targets(
+        pixie, player, "permanent", effect_text=effects[0].effect_text)
+    valid_ids = {card_id for values in valid_map.values() for card_id in values}
+    assert (legal in valid_ids and faerie not in valid_ids
+            and land not in valid_ids and opposing not in valid_ids), \
+        "Pixie's non-Faerie/nonland/controller restrictions were not preserved"
+
+    from Playersim.ability_types import ActivatedAbility
+    assert ActivatedAbility._parse_cost_effect_strict(text) == (None, None), \
+        "the hyphen in non-Faerie was still treated as an ability separator"
+    assert ActivatedAbility._parse_cost_effect_strict(
+        "{2}{B}: Sacrifice this enchantment.") == (
+            "{2}{B}", "Sacrifice this enchantment"), \
+        "tight colon-separated activated abilities stopped parsing"
+
+    assert effects[0].apply(gs, pixie, player, {"permanents": [legal]}), \
+        "Pixie's linked bounce/counter effect reported failure"
+    assert legal in player["hand"] and legal not in player["battlefield"], \
+        "Pixie did not return the chosen permanent"
+    assert gs._safe_get_card(pixie).counters.get("+1/+1", 0) == 1, \
+        "Pixie did not get its conditional +1/+1 counter"
+    assert effects[0].apply(gs, pixie, player, {}), \
+        "declining Pixie's up-to-one target should resolve successfully"
+    assert gs._safe_get_card(pixie).counters.get("+1/+1", 0) == 1, \
+        "Pixie received a counter without returning a permanent"
 
 
 @scenario("parser: keyword grant", "'target creature gains flying until end of turn' grants the keyword")
@@ -5500,8 +5936,8 @@ def s_mutate_cast_merge_trigger_and_separation():
     mutate_context = handler.action_reasons_with_context[426]["context"]
     reward, ok = handler._handle_mutate(None, mutate_context)
     assert ok, f"mutate cast failed with reward {reward}"
-    assert mutating not in controller["hand"] and gs.stack[-1][1] == mutating, \
-        "mutate did not become a spell on the stack"
+    assert mutating in controller["hand"] and not gs.stack, \
+        "mutate paid costs or entered the stack before choosing its target"
     assert gs.phase == gs.PHASE_TARGETING and gs.targeting_context, \
         "mutate did not ask the agent for its target"
     valid_map = gs.targeting_system.get_valid_targets(
@@ -5512,6 +5948,8 @@ def s_mutate_cast_merge_trigger_and_separation():
         "mutate target legality did not enforce non-Human ownership"
     reward, ok = handler._handle_select_target(valid_targets.index(base), {})
     assert ok, f"mutate target selection failed with reward {reward}"
+    assert mutating not in controller["hand"] and gs.stack[-1][1] == mutating, \
+        "mutate did not become a spell after its target was committed"
     assert gs.stack and gs.stack[-1][3].get("targets") == {"creatures": [base]}, \
         "selected mutate target was not stored on the spell"
 
@@ -6729,6 +7167,71 @@ def s_unbargained_torch_delayed_exile_replacement():
         "a permanent damaged by Torch was not exiled when it died later that turn"
 
 
+@scenario("601.2c / 601.2h / Torch the Tower",
+          "targets are committed before Bargain sacrifices the spell's only legal target")
+def s_torch_targets_before_bargain_payment():
+    gs = fresh()
+    controller, opponent = gs.p1, gs.p2
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    bargain_target = inject_into_zone(gs, controller, {
+        "name": "Sole Bargain Target", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Artifact Creature - Beast", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    torch = inject_into_zone(gs, controller, {
+        "name": "Torch the Tower", "mana_cost": "{R}", "cmc": 1,
+        "type_line": "Instant", "oracle_text": (
+            "Bargain\nTorch the Tower deals 2 damage to target creature or planeswalker. "
+            "If this spell was bargained, instead it deals 3 damage to that permanent "
+            "and you scry 1.\nIf a permanent dealt damage by Torch the Tower would die "
+            "this turn, exile it instead."
+        ),
+    }, "hand")
+    controller["mana_pool"] = {
+        'W': 0, 'U': 0, 'B': 0, 'R': 1, 'G': 0, 'C': 0,
+    }
+    assert not any(
+        "creature" in getattr(gs._safe_get_card(card_id), "card_types", [])
+        or "planeswalker" in getattr(gs._safe_get_card(card_id), "card_types", [])
+        for card_id in opponent["battlefield"]), "setup added another Torch target"
+    handler = get_env().action_handler
+
+    assert gs.cast_spell(torch, controller), "Torch could not begin casting"
+    options = gs.choice_context.get("options", [])
+    assert bargain_target in options, "the sole artifact creature was not a Bargain option"
+    _, ok = handler._handle_choose_mode(options.index(bargain_target), {})
+    assert ok and gs.phase == gs.PHASE_TARGETING, \
+        "Bargain did not advance to pre-payment target selection"
+    assert bargain_target in controller["battlefield"] and torch in controller["hand"], \
+        "Bargain or spell movement happened before targets were committed"
+    assert controller["mana_pool"]['R'] == 1, "Torch spent mana before choosing a target"
+
+    mask = handler.generate_valid_actions()
+    candidates = handler._get_target_selection_candidates(
+        controller, gs.targeting_context)
+    assert candidates == [bargain_target], f"Torch offered the wrong targets: {candidates}"
+    assert mask[274] and not mask[224], \
+        "the sole target was not policy-accessible without the fallback NO_OP"
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(274)
+    assert not info.get("execution_failed") and gs.targeting_context is None, \
+        f"the mask-valid target action failed: {info}"
+    assert bargain_target in controller["graveyard"] \
+        and bargain_target not in controller["battlefield"], \
+        "Bargain did not sacrifice its staged permanent after target selection"
+    assert torch not in controller["hand"] and gs.stack and gs.stack[-1][1] == torch, \
+        "Torch did not enter the stack after its target and costs were committed"
+    stack_targets = gs._flatten_target_ids(gs.stack[-1][3].get("targets", {}))
+    assert stack_targets == [bargain_target], \
+        f"Torch did not retain its now-illegal target: {stack_targets}"
+    assert gs.resolve_top_of_stack(), "Torch did not fizzle cleanly on its illegal target"
+    assert torch in controller["graveyard"] and not gs.targeting_context, \
+        "the fizzled Torch did not finish without a targeting loop"
+
+
 @scenario("701.60", "manifest dread exposes the top-two choice, graves the other card, and creates an exact face-down 2/2")
 def s_manifest_dread_choice_and_turn_face_up():
     from Playersim.ability_utils import EffectFactory
@@ -7784,6 +8287,11 @@ def s_beza_multi_condition_etb():
     activated = gs.ability_handler.get_activated_abilities(treasure_id)
     assert len(activated) == 1 and isinstance(activated[0], ManaAbility), \
         f"Beza's Treasure did not register its printed mana ability: {[(type(a).__name__, getattr(a, 'cost', None), getattr(a, 'effect', None)) for a in activated]}"
+    treasure_slot = controller["battlefield"].index(treasure_id)
+    ability_features = get_env()._get_ability_features(
+        controller["battlefield"], controller)
+    assert ability_features[treasure_slot, 2] >= 1, \
+        "the observation did not classify Treasure's ManaAbility"
     stack_before = list(gs.stack)
     # Exercise the non-active-player path: the color sub-choice must return
     # priority to the activator, not silently hand it to the active player.
@@ -8112,6 +8620,58 @@ def scenario_sample_card_exact_path_sweep():
     assert any(isinstance(effect, FightEffect) for effect in effects)
 
 
+@scenario("702.167 / policy contract", "Exhaust is marked once and only the used ability leaves the action mask")
+def scenario_exhaust_single_owner_bookkeeping():
+    from unittest.mock import patch
+
+    gs = fresh(); env = get_env(); handler = env.action_handler
+    player = gs.p1 if gs.agent_is_p1 else gs.p2
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    exhaust_card = inject_into_zone(gs, player, {
+        "name": "Double Exhaust Probe", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Creature - Human Artificer", "power": 1, "toughness": 1,
+        "oracle_text": (
+            "Exhaust - Pay 1 life: You gain 1 life.\n"
+            "Exhaust - Pay 1 life: Draw a card."),
+    }, "battlefield")
+    battlefield_index = player["battlefield"].index(exhaust_card)
+    first_action = 100 + battlefield_index * 3
+    second_action = first_action + 1
+    life_before = player["life"]
+
+    mask = handler.generate_valid_actions()
+    assert mask[first_action] and mask[second_action], \
+        "both unused Exhaust abilities were not initially legal"
+    first_context = handler.action_reasons_with_context[first_action]["context"]
+    with patch("Playersim.game_state_permanents.logging.warning") as warn:
+        reward, ok = handler._handle_activate_ability(None, first_context)
+    assert ok and reward > 0, "the first mask-valid Exhaust activation failed"
+    duplicate_marks = [
+        str(call) for call in warn.call_args_list
+        if "already used exhaust ability" in str(call).lower()
+    ]
+    assert not duplicate_marks, \
+        f"the handler marked an Exhaust cost twice: {duplicate_marks}"
+    assert player["life"] == life_before - 1, \
+        "the Exhaust life cost was not paid exactly once"
+    assert list(gs.exhaust_ability_used) == [(exhaust_card, 0)], \
+        f"unexpected Exhaust bookkeeping keys: {gs.exhaust_ability_used}"
+    assert len(gs.stack) == 1 and gs.stack[-1][1] == exhaust_card, \
+        "Exhaust did not create exactly one stack entry"
+
+    gs.priority_player = player
+    post_mask = handler.generate_valid_actions()
+    assert not post_mask[first_action] and post_mask[second_action], \
+        "using Exhaust index 0 disabled the wrong ability/index"
+    stack_size = len(gs.stack)
+    retry_life = player["life"]
+    _, retry_ok = handler._handle_activate_ability(None, first_context)
+    assert not retry_ok and player["life"] == retry_life \
+        and len(gs.stack) == stack_size, \
+        "a direct Exhaust retry paid a cost or created another stack entry"
+
+
 @scenario("training / hidden information", "opponent hand identities and library order do not change the agent observation")
 def scenario_hidden_information_observation_boundary():
     import numpy as np
@@ -8356,6 +8916,194 @@ def scenario_action_mask_is_pure_for_paged_choices():
         f"non-card choice options degraded the observation: {env.last_observation_error}"
     assert not obs['choice_card_mask'].any(), \
         "mana-option dictionaries were misrepresented as visible cards"
+
+    for choice_type, symbolic_options in (
+            ('as_enters_creature_type', ['avatar', 'horror', 'wizard']),
+            ('mana_ability_color', ['W', 'U', 'B', 'R', 'G']),
+            ('player_selection', ['p1', 'p2'])):
+        gs.choice_context = {
+            'type': choice_type, 'player': player, 'controller': player,
+            'source_id': player['battlefield'][0] if player['battlefield'] else 0,
+            'options': symbolic_options,
+        }
+        obs = env._get_obs()
+        assert env.last_observation_error is None, \
+            f"{choice_type} symbolic options degraded the observation"
+        assert not obs['choice_card_mask'].any(), \
+            f"{choice_type} symbolic options were represented as phantom cards"
+
+
+@scenario("103.4 (environment mulligans)", "reset exposes P1's mulligan and one step routes P2 through its policy")
+def scenario_environment_routes_both_mulligan_decisions():
+    env = get_env()
+    observation, info = env.reset(seed=SEED + 909)
+    gs = env.game_state
+    assert info.get("mulligan_active") and gs.mulligan_in_progress, \
+        "reset skipped the pregame mulligan phase"
+    initial_mask = np.asarray(info["action_mask"], dtype=bool)
+    assert initial_mask[225] and initial_mask[6], \
+        "P1 was not offered KEEP_HAND and MULLIGAN"
+    assert env.observation_space.contains(observation)
+
+    observation, _, terminated, truncated, info = env.step(225)
+    assert not terminated and not truncated
+    assert not gs.mulligan_in_progress and gs.mulligan_player is None, \
+        "the scripted opponent did not complete P2's mulligan decision"
+    assert gs.turn == 1 and gs.phase == gs.PHASE_UPKEEP, \
+        "completed mulligans did not begin turn 1 at upkeep"
+    assert gs.priority_player is gs.p1, \
+        "the starting player did not receive the first priority"
+    assert env.observation_space.contains(observation)
+    assert env.last_observation_error is None
+    assert np.asarray(info["action_mask"], dtype=bool).any()
+    assert gs._safe_get_card(None) is None, \
+        "an absent card ID was converted into a phantom Card"
+
+    original_agent_is_p1 = env.initial_agent_is_p1
+    try:
+        env.initial_agent_is_p1 = False
+        observation, info = env.reset(seed=SEED + 910)
+        gs = env.game_state
+        initial_mask = np.asarray(info["action_mask"], dtype=bool)
+        assert initial_mask[224] and not initial_mask[225], \
+            "P2 agent did not initially wait for P1's mulligan decision"
+        observation, _, terminated, truncated, info = env.step(224)
+        assert not terminated and not truncated, \
+            f"P1 mulligan routing aborted the P2-agent episode: {info}"
+        assert gs.mulligan_in_progress and gs.mulligan_player is gs.p2
+        p2_mask = np.asarray(info["action_mask"], dtype=bool)
+        assert p2_mask[225] and p2_mask[6] and not p2_mask[224], \
+            "control did not return to P2 for its mulligan decision"
+        observation, _, terminated, truncated, info = env.step(225)
+        assert not terminated and not truncated, \
+            f"P2 keep-hand did not enter normal play: {info}"
+        assert not gs.mulligan_in_progress
+        assert env.observation_space.contains(observation)
+    finally:
+        env.initial_agent_is_p1 = original_agent_is_p1
+
+
+@scenario("environment episode bound", "the configured step cap terminates a non-progressing episode")
+def scenario_environment_enforces_episode_step_limit():
+    env = get_env()
+    original_limit = env.max_episode_steps
+    try:
+        _, info = env.reset(seed=SEED + 911)
+        assert np.asarray(info["action_mask"], dtype=bool)[225]
+        env.max_episode_steps = 1
+        _, _, terminated, truncated, info = env.step(225)
+        assert not terminated and truncated, \
+            f"the one-step episode limit was not enforced: {info}"
+        assert info.get("episode_step_limit") is True
+        assert info.get("game_result") == "error_episode_step_limit"
+        assert os.path.isfile(info.get("failure_replay_path", "")), \
+            "the step-limit failure did not retain its action replay"
+        assert isinstance(env.reset_seed, int)
+    finally:
+        env.max_episode_steps = original_limit
+    env.reset()
+    assert isinstance(env.reset_seed, int), \
+        "an automatic follow-up episode did not receive a replayable seed"
+
+
+@scenario("117 / 502 / 514 (NO_OP)", "automatic-step NO_OP advances once and an invalid NO_OP cannot mutate state")
+def scenario_no_op_contract_is_explicit_and_mask_safe():
+    gs = fresh(); env = get_env(); handler = env.action_handler
+    player = gs.p1 if gs.agent_is_p1 else gs.p2
+    gs.mulligan_in_progress = False
+    gs.targeting_context = None
+    gs.sacrifice_context = None
+    gs.choice_context = None
+    gs.stack.clear()
+    gs.phase = gs.PHASE_CLEANUP
+    gs.priority_player = None
+    turn_before = gs.turn
+    cleanup_mask = handler.generate_valid_actions()
+    assert cleanup_mask[224], "cleanup did not expose its automatic-step NO_OP"
+    handler.current_valid_actions = cleanup_mask
+    _, _, _, info = handler.apply_action(224)
+    assert not info.get("invalid_action_reason"), \
+        f"a mask-valid cleanup NO_OP invalidated itself: {info}"
+    assert gs.turn == turn_before + 1 and gs.phase == gs.PHASE_UPKEEP, \
+        "cleanup NO_OP did not advance exactly once into the next upkeep"
+    assert gs.priority_player is gs._get_active_player(), \
+        "the new active player did not receive upkeep priority"
+
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    gs.priority_pass_count = 0
+    main_mask = handler.generate_valid_actions()
+    assert not main_mask[224] and main_mask[11]
+    handler.current_valid_actions = main_mask
+    state_before = (gs.turn, gs.phase, gs.priority_player,
+                    gs.priority_pass_count, tuple(gs.stack))
+    _, _, _, info = handler.apply_action(224)
+    assert info.get("invalid_action_reason"), \
+        "a mask-invalid NO_OP was not rejected"
+    state_after = (gs.turn, gs.phase, gs.priority_player,
+                   gs.priority_pass_count, tuple(gs.stack))
+    assert state_after == state_before, \
+        "a mask-invalid NO_OP mutated priority, phase, turn, or stack"
+
+    gs = fresh(); env = get_env(); handler = env.action_handler
+    agent = gs.p1 if gs.agent_is_p1 else gs.p2
+    opponent = gs.p2 if agent is gs.p1 else gs.p1
+    gs.phase = gs.PHASE_CLEANUP
+    gs.priority_player = opponent
+    gs.priority_pass_count = 1
+    turn_before = gs.turn
+    cleanup_wait_mask = handler.generate_valid_actions()
+    assert cleanup_wait_mask[224]
+    observation, _, terminated, truncated, info = env.step(224)
+    assert not terminated and not truncated, \
+        f"cleanup priority routing aborted the episode: {info}"
+    assert gs.turn == turn_before + 1 and gs.phase == gs.PHASE_UPKEEP, \
+        "opponent priority in cleanup was not routed through its pass"
+    assert env.observation_space.contains(observation)
+
+    gs = fresh()
+    gs.phase = gs.PHASE_PRIORITY
+    gs.previous_priority_phase = gs.PHASE_CLEANUP
+    gs.priority_player = None
+    gs.priority_pass_count = 0
+    turn_before = gs.turn
+    gs._advance_phase()
+    assert gs.turn == turn_before + 1 and gs.phase == gs.PHASE_UPKEEP, \
+        "internal Priority did not normalize back through Cleanup"
+    assert gs.previous_priority_phase is None
+
+    # A choice opened while a stack item resolves can overwrite the legacy
+    # resume slot with PHASE_PRIORITY. Reproduce that exact nesting sequence:
+    # real End Step -> Priority -> Choose -> Priority with the slot cleared.
+    gs = fresh()
+    gs.phase = gs.PHASE_END_STEP
+    gs.previous_priority_phase = gs.PHASE_END_STEP
+    gs.phase = gs.PHASE_PRIORITY
+    gs.previous_priority_phase = gs.phase
+    gs.phase = gs.PHASE_CHOOSE
+    gs.choice_context = None
+    gs.phase = gs.previous_priority_phase
+    gs.previous_priority_phase = None
+    assert gs.phase == gs.PHASE_PRIORITY
+    assert gs._last_turn_phase == gs.PHASE_END_STEP
+    gs._advance_phase()
+    assert gs.phase == gs.PHASE_CLEANUP, \
+        "nested choice lost the underlying End Step and reset to main"
+    assert gs.previous_priority_phase is None
+
+    # Corruption with no trustworthy turn phase must be surfaced, not hidden
+    # by the old arbitrary reset to precombat main.
+    gs = fresh()
+    gs._last_turn_phase = None
+    gs.phase = gs.PHASE_PRIORITY
+    gs.previous_priority_phase = None
+    try:
+        gs._advance_phase()
+    except RuntimeError as exc:
+        assert "no valid underlying turn phase" in str(exc)
+    else:
+        raise AssertionError("unrecoverable transient phase did not fail loudly")
+    assert gs.phase == gs.PHASE_PRIORITY
 
 
 @scenario("policy contract / hand window", "all ten observed hand slots expose ordinary land and spell actions")

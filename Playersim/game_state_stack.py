@@ -19,7 +19,7 @@ class GameStateStackMixin:
     __slots__ = ()
 
     _ASYNC_EFFECT_CHOICE_TYPES = frozenset({
-        "sacrifice_effect", "distribute_counters", "dig_select",
+        "discard", "sacrifice_effect", "distribute_counters", "dig_select",
     })
 
     def _effect_controller_id(self, controller):
@@ -207,6 +207,45 @@ class GameStateStackMixin:
          if "any target" in text or "any other target" in text: return "any"
          return "target" # Default
 
+    def _can_finalize_targeted_cast(self, targeting_context, selected_targets):
+        """Whether the current target set leaves a deferred cast payable.
+
+        Target-dependent discounts are determined after targets are chosen.  A
+        spell may therefore be affordable for *some* legal target set while an
+        optional zero-target or opponent-only set is not affordable.  Target
+        selection uses this pure probe before exposing FINISH (and before an
+        at-maximum selection auto-commits the cast).
+        """
+        context = targeting_context or {}
+        if not context.get("resume_cast"):
+            return True
+
+        card_id = context.get("source_id")
+        controller = context.get("controller")
+        card = self._safe_get_card(card_id)
+        if (not card or not controller or not self.mana_system
+                or not self.mana_system.has_target_dependent_reduction(card)):
+            return True
+
+        cost_before_modifiers = context.get("cost_before_modifiers")
+        if not isinstance(cost_before_modifiers, dict):
+            # Older/directly-constructed contexts do not carry the pure cost
+            # snapshot.  Preserve their historical behavior rather than
+            # guessing at alternative or additional costs.
+            return True
+
+        # Casting contexts can contain Card/effect objects linked back to this
+        # GameState (and therefore thread locks). The affordability probe only
+        # adds a top-level targets entry, so a shallow copy is both sufficient
+        # and safe under Windows SubprocVecEnv.
+        cast_context = dict(context.get("original_cast_context", {}))
+        cast_context["targets"] = {"chosen": list(selected_targets or [])}
+        candidate_cost = self.mana_system.apply_cost_modifiers(
+            controller, copy_module.deepcopy(cost_before_modifiers),
+            card_id, cast_context)
+        return self.mana_system.can_pay_mana_cost(
+            controller, candidate_cost, cast_context)
+
     def trigger_ability(self, card_id, event_type, context=None):
         """Forward ability triggering to the AbilityHandler"""
         queued = False
@@ -362,6 +401,15 @@ class GameStateStackMixin:
     @staticmethod
     def _target_bounds_from_text(effect_text):
         text = (effect_text or "").lower()
+        # Reminder text and later references such as "the target creature" do
+        # not create additional target choices.
+        text = re.sub(r"\([^()]*\)", " ", text)
+
+        def target_designator_count(value):
+            return len(re.findall(
+                r"(?<!the )(?<!that )(?<!each )(?<!chosen )"
+                r"\btarget\s+(?!of\b)", value))
+
         word_counts = {"two": 2, "three": 3, "four": 4, "five": 5}
         if "any number of target" in text:
             distribute = re.search(r"distribute\s+(one|two|three|four|five|\d+)", text)
@@ -381,12 +429,12 @@ class GameStateStackMixin:
         if counted:
             maximum = word_counts[counted.group(1)]
         else:
-            maximum = max(1, text.count("target "))
+            maximum = max(1, target_designator_count(text))
         if "up to" in text:
             mandatory_text = re.sub(
                 r"\bup to\s+(?:one|two|three|four|five|\d+)\s+target\b",
                 "", text)
-            minimum = mandatory_text.count("target ")
+            minimum = target_designator_count(mandatory_text)
         else:
             minimum = maximum
         return minimum, maximum
@@ -1182,7 +1230,18 @@ class GameStateStackMixin:
         requires_target = False
         num_targets = 0
         up_to_N = False
-        targeting_text = context.get('effect_text') or getattr(card, 'oracle_text', '')
+        explicit_effect_text = context.get('effect_text')
+        spell_types = set(getattr(card, 'card_types', []) or [])
+        # Printed targets in a permanent's triggered/activated abilities are
+        # not targets of the permanent spell itself.  Alternate casts such as
+        # Mutate provide their actual spell text explicitly; instants and
+        # sorceries use their printed resolving instructions.
+        if explicit_effect_text is not None:
+            targeting_text = explicit_effect_text
+        elif spell_types.intersection({'instant', 'sorcery'}):
+            targeting_text = getattr(card, 'oracle_text', '')
+        else:
+            targeting_text = ''
         if is_modal_spell:
             selected_modes = context.get('selected_modes', [])
             targeting_text = " ".join(
@@ -1198,6 +1257,8 @@ class GameStateStackMixin:
         min_targets = parsed_min
         targets_committed = (
             "targets" in context and isinstance(context.get("targets"), dict))
+        target_selection_pending = False
+        target_selection_affordable_via_reduction = False
 
         # Apply Generic Cost Modifiers LAST. Preserve the premodifier total so
         # an affordability probe can recalculate once with a candidate target.
@@ -1285,6 +1346,7 @@ class GameStateStackMixin:
                         f"({len(valid_target_ids)}/{min_targets} needed).")
                     return False
 
+                target_selection_pending = True
                 if self.mana_system.has_target_dependent_reduction(card):
                     can_pay_without_discount = self.mana_system.can_pay_mana_cost(
                         player, final_cost_dict, context)
@@ -1295,26 +1357,7 @@ class GameStateStackMixin:
                         logging.warning(
                             f"Cannot cast {card.name}: no legal target selection is affordable.")
                         return False
-                    if self.phase not in [
-                            self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
-                        self.previous_priority_phase = self.phase
-                    self.phase = self.PHASE_TARGETING
-                    self.targeting_context = {
-                        "source_id": card_id, "controller": player,
-                        "required_type": target_type,
-                        "required_count": num_targets,
-                        "min_targets": min_targets,
-                        "max_targets": num_targets,
-                        "selected_targets": [],
-                        "effect_text": targeting_text,
-                        "resume_cast": True,
-                        "original_cast_context": dict(context),
-                    }
-                    self.priority_player = player
-                    self.priority_pass_count = 0
-                    logging.info(
-                        f"Waiting for targets before determining the cost of {card.name}.")
-                    return True
+                    target_selection_affordable_via_reduction = can_pay_with_discount
 
         # --- Check Affordability and nonmana costs ---
         additional_cost_info = context.get('additional_cost_info')
@@ -1326,7 +1369,10 @@ class GameStateStackMixin:
         if not can_pay_non_mana_add: return False
 
         # Check final mana affordability
-        if not self.mana_system.can_pay_mana_cost(player, final_cost_dict, context):
+        if (not self.mana_system.can_pay_mana_cost(
+                player, final_cost_dict, context)
+                and not (target_selection_pending
+                         and target_selection_affordable_via_reduction)):
             cost_str_log = self.mana_system._format_mana_cost_for_logging(
                 final_cost_dict, context.get('X', 0))
             logging.warning(f"Cannot cast {card.name}: Cannot afford final cost {cost_str_log}.")
@@ -1370,6 +1416,37 @@ class GameStateStackMixin:
                     })
                 context["sample_nonmana_cost_complete"] = True
                 context["evidence_collected"] = False
+
+        # CR 601.2c chooses targets before CR 601.2h pays any costs.  Deferring
+        # only target-priced spells left ordinary targeted spells able to pay
+        # and sacrifice their sole legal target (for example, Bargain on Torch
+        # the Tower), stranding the policy in TARGETING with no legal action.
+        # Stage every uncommitted target choice, then re-enter cast_spell with
+        # the committed target set before mana/nonmana costs or zone movement.
+        if target_selection_pending:
+            if self.phase not in [
+                    self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+                self.previous_priority_phase = self.phase
+            self.phase = self.PHASE_TARGETING
+            self.targeting_context = {
+                "source_id": card_id, "controller": player,
+                "required_type": target_type,
+                "required_count": num_targets,
+                "min_targets": min_targets,
+                "max_targets": num_targets,
+                "selected_targets": [],
+                "effect_text": targeting_text,
+                "resume_cast": True,
+                "original_cast_context": dict(context),
+                # Pure pre-modifier cost snapshot used by the action mask to
+                # reject completed target sets that cannot pay.
+                "cost_before_modifiers": copy_module.deepcopy(
+                    cost_before_modifiers),
+            }
+            self.priority_player = player
+            self.priority_pass_count = 0
+            logging.info(f"Waiting for targets before casting {card.name}.")
+            return True
 
         # --- Costs Paid Here ---
         # 1. Pay Non-Mana Additional Costs FIRST
@@ -1459,23 +1536,9 @@ class GameStateStackMixin:
                  card_id, player, final_stack_context.get("targets", {}),
                  stack_context=final_stack_context)
         elif requires_target and num_targets > 0:
-             logging.debug(f"{card.name} requires target(s). Entering TARGETING phase.")
-             if self.phase not in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
-                 self.previous_priority_phase = self.phase
-             self.phase = self.PHASE_TARGETING
-             self.targeting_context = {
-                 "source_id": card_id, "controller": player,
-                 "required_type": self._get_target_type_from_text(targeting_text),
-                 "required_count": num_targets, "min_targets": min_targets,
-                 "max_targets": num_targets, "selected_targets": [],
-                 "effect_text": targeting_text,
-                 "stack_info": {
-                       "item_type": "SPELL", "source_id": card_id, "controller": player,
-                       "context": final_stack_context,
-                  }
-             }
-             self.priority_player = player
-             self.priority_pass_count = 0
+             raise RuntimeError(
+                 f"Targeted spell {card.name} reached the stack without "
+                 "committed targets")
 
         logging.info(f"Successfully cast spell: {card.name} ({card_id}) from {source_zone}")
 
@@ -1764,6 +1827,26 @@ class GameStateStackMixin:
         # or keep a local version for GameState internal use.
         if target_id in ["p1", "p2"]:
             return "players"
+
+        # Repeated fixture/deck IDs can legitimately exist in a graveyard and
+        # on the battlefield at the same time.  ``find_card_location`` honors
+        # the latest physical-move hint, which is useful for zone movement but
+        # must not recategorize a target selected from the battlefield as a
+        # graveyard card while a spell is being committed.
+        battlefield_controller = self.get_card_controller(target_id)
+        if battlefield_controller is not None:
+             card = self._safe_get_card(target_id)
+             if card:
+                  types = getattr(card, 'card_types', [])
+                  type_line = getattr(card, 'type_line', '').lower()
+                  if 'creature' in types: return 'creatures'
+                  if 'planeswalker' in types: return 'planeswalkers'
+                  if 'battle' in type_line: return 'battles'
+                  if 'land' in types: return 'lands'
+                  if 'artifact' in types: return 'artifacts'
+                  if 'enchantment' in types: return 'enchantments'
+             return 'permanents'
+
         owner, zone = self.find_card_location(target_id)
         if zone == 'player': return 'players'
         if zone == 'stack':

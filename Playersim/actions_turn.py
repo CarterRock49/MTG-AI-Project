@@ -121,34 +121,29 @@ class TurnPhaseHandlersMixin:
                         self._end_mulligan_phase()
                         return False
             
-            # Case 5: Final safety check - if in limbo, force end
-            if (gs.mulligan_in_progress or gs.bottoming_in_progress) and gs.turn >= 1:
-                logging.error("Critical inconsistency: In mulligan/bottoming but turn >= 1. Forcing end.")
-                self._end_mulligan_phase()
-                return False
-            
+            # ``turn`` is intentionally initialized to 1 before pregame
+            # decisions, so it cannot diagnose a stale mulligan phase.
             return True
 
     def _handle_no_op(self, param, context=None, **kwargs):
-            """Handles NO_OP. Checks for stuck state and forces recovery."""
+            """Wait for the other policy or advance a no-priority turn step."""
             gs = self.game_state
             logging.debug("Executed NO_OP action.")
-            
-            # Stuck State Recovery: 
-            # If NO_OP executed when priority is None in a playable phase (not Untap/Cleanup),
-            # it means the game state has lost track of the active actor.
-            if gs.priority_player is None and gs.phase not in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP, gs.PHASE_TARGETING, gs.PHASE_SACRIFICE, gs.PHASE_CHOOSE]:
+
+            # Untap and cleanup are automatic turn-based steps where nobody
+            # receives priority. Their public NO_OP action advances exactly
+            # once; waiting for the opponent in all other phases is inert.
+            if (gs.priority_player is None
+                    and gs.phase in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP]):
+                gs._advance_phase()
+            elif (gs.priority_player is None
+                    and gs.phase not in [
+                        gs.PHASE_TARGETING, gs.PHASE_SACRIFICE,
+                        gs.PHASE_CHOOSE]):
                 logging.warning("NO_OP executed while priority is None. Attempting recovery.")
-                
-                # 1. Try standard logic to assign priority
-                gs._pass_priority() 
-                
-                # 2. Force assignment if standard logic skipped it (e.g. due to non-empty stack check failure)
-                if gs.priority_player is None:
-                    logging.warning("Recovery: Force assigning priority to Active Player.")
-                    gs.priority_player = gs._get_active_player()
-                    gs.priority_pass_count = 0
-                
+                gs.priority_player = gs._get_active_player()
+                gs.priority_pass_count = 0
+
             return 0.0, True
 
     def _handle_end_turn(self, param, **kwargs):
@@ -513,6 +508,15 @@ class TurnPhaseHandlersMixin:
             if ctx.get('player') is not player:
                 return -0.1, False
             self._advance_or_finish_sacrifice_effect(ctx, performed=False)
+            return 0.0, True
+        if (gs.phase == gs.PHASE_CHOOSE and getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'dig_select'
+                and gs.choice_context.get('optional')):
+            ctx = gs.choice_context
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if ctx.get('player') is not player:
+                return -0.1, False
+            self._finish_dig_select_choice(ctx)
             return 0.0, True
         if (gs.phase == gs.PHASE_CHOOSE and getattr(gs, 'choice_context', None)
                 and gs.choice_context.get('type') == 'optional_sacrifice_proliferate'):

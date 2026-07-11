@@ -5,4 +5,5 @@ Playersim/actions_mechanics.py -text whitespace=trailing-space,cr-at-eol
 Playersim/actions_turn.py -text whitespace=trailing-space,cr-at-eol
 Playersim/strategic_planner_archetypes.py -text whitespace=trailing-space,cr-at-eol
 Playersim/game_state_permanents.py -text whitespace=trailing-space,cr-at-eol
+Playersim/game_state_setup.py -text whitespace=trailing-space,cr-at-eol
 Playersim/game_state_turn.py -text whitespace=trailing-space,cr-at-eol

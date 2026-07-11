@@ -1019,6 +1019,15 @@ class CombatActionHandler:
         for i in range(min(len(player_battlefield), 20)): # Indices 0-19 map to actions 28-47
             try:
                 card_id = player_battlefield[i]
+                # ATTACK is a declaration action in the public policy API, not
+                # an endlessly repeatable toggle.  Keeping an already-declared
+                # creature's slot mask-valid let deterministic policies select
+                # it again, remove it, and alternate forever between the same
+                # two combat states.  Although the tabletop declaration is one
+                # atomic choice, this sequential action interface intentionally
+                # makes each selection monotonic until the declaration is done.
+                if card_id in getattr(gs, 'current_attackers', []):
+                    continue
                 # Use internal validation which delegates back to GS/Layers etc.
                 if self.is_valid_attacker(card_id):
                     card = gs._safe_get_card(card_id)
@@ -1078,9 +1087,16 @@ class CombatActionHandler:
                         break
                 if can_block_anything:
                     card_name = getattr(card, 'name', f'Blocker {i}')
-                    is_currently_blocking = any(card_id in blockers for blockers in gs.current_block_assignments.values())
-                    action_text = "Assign Block" if not is_currently_blocking else "Unassign Block"
-                    set_valid_action(48 + i, f"{action_text} with {card_name}")
+                    is_currently_blocking = any(
+                        card_id in blockers
+                        for blockers in gs.current_block_assignments.values())
+                    # Like attacker declaration, the public sequential choice
+                    # is monotonic. Re-exposing an assigned blocker as an
+                    # unassign toggle lets a policy alternate forever instead
+                    # of completing combat.
+                    if is_currently_blocking:
+                        continue
+                    set_valid_action(48 + i, f"Assign Block with {card_name}")
                     possible_blockers.append((i, card_id))
             except IndexError:
                 logging.warning(f"Combat Handler: IndexError accessing battlefield for BLOCK at index {i}")

@@ -507,17 +507,23 @@ class GameStateTurnMixin:
             # If we were in a sub-phase (Targeting, etc.) and are done, return to the game phase
             if old_phase in [self.PHASE_PRIORITY, self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
                 if not self.stack and not self.targeting_context and not self.sacrifice_context and not self.choice_context:
-                    if hasattr(self, 'previous_priority_phase') and self.previous_priority_phase is not None:
-                        # Don't return to Untap/Cleanup from a priority check
-                        if self.previous_priority_phase in [self.PHASE_UNTAP, self.PHASE_CLEANUP]:
-                            # Logic below will handle finding the *next* logical phase from here
-                            old_phase = self.previous_priority_phase 
-                        else:
-                            self.phase = self.previous_priority_phase
-                            self.previous_priority_phase = None
-                            self._phase_action_count = 0
-                            # We returned to the main phase, now we need to advance FROM it.
-                            # Fall through to the while loop below.
+                    resume_phase = self.previous_priority_phase
+                    if resume_phase not in phase_sequence:
+                        resume_phase = getattr(self, '_last_turn_phase', None)
+                    if resume_phase not in phase_sequence:
+                        raise RuntimeError(
+                            "Cannot advance transient phase "
+                            f"{old_phase}: no valid underlying turn phase "
+                            f"(previous={self.previous_priority_phase!r}, "
+                            f"last={getattr(self, '_last_turn_phase', None)!r}).")
+
+                    # Normalize the actual phase before advancing from the
+                    # phase that opened this internal priority window. Nested
+                    # choices can overwrite the single legacy resume slot with
+                    # PHASE_PRIORITY; _last_turn_phase remains authoritative.
+                    self.phase = resume_phase
+                    self.previous_priority_phase = None
+                    self._phase_action_count = 0
                 else:
                     return # State busy, do not advance
 
@@ -532,10 +538,9 @@ class GameStateTurnMixin:
                 try:
                     current_idx = phase_sequence.index(current_phase_for_check)
                 except ValueError:
-                    logging.error(f"Current phase {current_phase_for_check} unknown. Resetting to Main.")
-                    self.phase = self.PHASE_MAIN_PRECOMBAT
-                    self.priority_player = self._get_active_player()
-                    return
+                    raise RuntimeError(
+                        f"Cannot advance unknown phase {current_phase_for_check}; "
+                        "refusing to reset the turn to main phase.")
 
                 # Determine next phase
                 next_idx = (current_idx + 1) % len(phase_sequence)

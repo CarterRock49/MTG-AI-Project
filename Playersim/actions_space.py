@@ -146,13 +146,7 @@ class ActionSpaceMixin:
                     if acting_player == perspective_player:
                         if gs.phase == gs.PHASE_TARGETING: 
                             self._add_targeting_actions(perspective_player, valid_actions, set_valid_action)
-                            # Allow passing if minimum requirements met
-                            min_req = gs.targeting_context.get("min_targets", 1)
-                            sel = len(gs.targeting_context.get("selected_targets", []))
-                            max_targets = gs.targeting_context.get("max_targets", 1)
-                            if sel >= min_req and (min_req < max_targets or sel == max_targets):
-                                set_valid_action(11, "PASS_PRIORITY (Finish Targeting)")
-                                
+
                         elif gs.phase == gs.PHASE_SACRIFICE: 
                             self._add_sacrifice_actions(perspective_player, valid_actions, set_valid_action)
                             
@@ -755,6 +749,8 @@ class ActionSpaceMixin:
                     set_valid_action(
                         479, f"DIG_PAGE_NEXT ({page + 1}/{page_count})",
                         context={"page_count": page_count})
+                if context.get('optional'):
+                    set_valid_action(11, "DECLINE_DIG_SELECTION")
 
             elif choice_type == "optional_sacrifice_proliferate":
                 source_id = context.get('source_id')
@@ -1006,39 +1002,23 @@ class ActionSpaceMixin:
             source_id = context.get('source_id')
             source_card = gs._safe_get_card(source_id)
             source_name = source_card.name if source_card and hasattr(source_card, 'name') else source_id
-            target_type = context.get('required_type', 'target') # e.g., 'creature', 'player'
             required_count = context.get('required_count', 1)
             min_targets = context.get('min_targets', required_count)
             max_targets = context.get('max_targets', required_count)
             selected_count = len(context.get('selected_targets', []))
 
-            # Get valid targets using TargetingSystem if possible
-            valid_targets_map = {}
-            if hasattr(gs, 'targeting_system') and gs.targeting_system:
-                valid_targets_map = gs.targeting_system.get_valid_targets(
-                    source_id, player, target_type,
-                    effect_text=context.get('effect_text'))
-            else:
-                # Fallback: Add basic logic here or assume it's handled by agent
-                logging.warning("Targeting system not available, cannot generate specific targeting actions.")
-                pass # Need a fallback
-
-            # Flatten the valid targets map into a list
-            valid_targets_list = []
-            for category, targets in valid_targets_map.items():
-                valid_targets_list.extend(targets)
-            valid_targets_list = sorted(
-                set(valid_targets_list),
-                key=lambda target_id: (isinstance(target_id, str), target_id))
-
-            # Remove already selected targets to avoid duplicates
-            already_selected = context.get('selected_targets', [])
-            valid_targets_list = [target for target in valid_targets_list if target not in already_selected]
+            if not getattr(gs, 'targeting_system', None):
+                logging.warning(
+                    "Targeting system not available, cannot generate specific targeting actions.")
+            valid_targets_list = self._get_target_selection_candidates(
+                player, context)
 
             # Generate SELECT_TARGET actions for available targets
             if context.get('allow_keep_original_targets') and selected_count == 0:
                 set_valid_action(11, "KEEP_ORIGINAL_TARGETS")
-            elif selected_count >= min_targets:
+            elif (selected_count >= min_targets
+                  and gs._can_finalize_targeted_cast(
+                      context, context.get('selected_targets', []))):
                 set_valid_action(11, "FINISH_TARGET_SELECTION")
             if selected_count < max_targets:
                 page = int(context.get('target_page', 0))
@@ -1047,10 +1027,13 @@ class ActionSpaceMixin:
                     page = 0
                 page_targets = valid_targets_list[page * 10:(page + 1) * 10]
                 for i, target_id in enumerate(page_targets):
-                    target_card = gs._safe_get_card(target_id)
-                    target_name = target_card.name if target_card and hasattr(target_card, 'name') else target_id
-                    if isinstance(target_id, str) and target_id in ["p1", "p2"]: # Handle player targets
+                    if isinstance(target_id, str) and target_id in ["p1", "p2"]:
                         target_name = "Player 1" if target_id == "p1" else "Player 2"
+                    else:
+                        target_card = gs._safe_get_card(target_id)
+                        target_name = (target_card.name
+                                       if target_card and hasattr(target_card, 'name')
+                                       else target_id)
                     set_valid_action(274 + i, f"SELECT_TARGET ({i}): {target_name} for {source_name}")
                 if page_count > 1:
                     set_valid_action(

@@ -263,6 +263,31 @@ from .actions_choices import ChoiceHandlersMixin
 from .actions_mechanics import MechanicsHandlersMixin
 
 
+def _process_safe_info_value(value, depth=0):
+    """Summarize action metadata so SubprocVecEnv can always pickle ``info``."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, np.generic):
+        return value.item()
+    if depth >= 3:
+        return f"<{type(value).__name__}>"
+    if isinstance(value, dict):
+        if {"hand", "library", "battlefield"}.issubset(value):
+            return {"player": value.get("name")}
+        return {
+            str(key): _process_safe_info_value(item, depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_process_safe_info_value(item, depth + 1) for item in value]
+    summary = {"type": type(value).__name__}
+    for attribute in ("card_id", "name", "effect_text"):
+        item = getattr(value, attribute, None)
+        if isinstance(item, (str, int, float, bool)):
+            summary[attribute] = item
+    return summary
+
+
 class ActionHandler(
     ActionSpaceMixin,
     TurnPhaseHandlersMixin,
@@ -512,47 +537,6 @@ class ActionHandler(
         """
         gs = self.game_state
         
-        # *** EARLY SAFETY CHECK FOR STUCK STATE ***
-        if action_idx == 224:  # NO_OP action
-            # Count consecutive NO_OPs
-            if not hasattr(gs, '_consecutive_no_ops'):
-                gs._consecutive_no_ops = 0
-            gs._consecutive_no_ops += 1
-            
-            # Progressive Recovery Strategy
-            if gs._consecutive_no_ops > 3:
-                logging.warning(f"STUCK STATE DETECTED: {gs._consecutive_no_ops} consecutive NO_OPs!")
-                
-                # Level 1: Fix missing priority
-                if gs.priority_player is None and gs.phase not in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP]:
-                    active_player = gs._get_active_player()
-                    logging.warning(f"Emergency fix L1: Assigning priority to {active_player.get('name', 'Active Player')}")
-                    gs.priority_player = active_player
-                    gs.priority_pass_count = 0
-                
-                # Level 2: Force Pass Priority (if stuck with priority or opponent stalled)
-                # This usually happens if the env thinks agent acts, but agent thinks no priority
-                elif gs._consecutive_no_ops > 6:
-                    logging.warning("Emergency fix L2: Forcing priority pass/stack resolution.")
-                    gs._pass_priority()
-                
-                # Level 3: Force Phase Advance (Hard Stuck)
-                if gs._consecutive_no_ops > 12:
-                    logging.error("Emergency fix L3: Hard stuck. Forcing phase advance.")
-                    if hasattr(gs, '_advance_phase'):
-                         gs._advance_phase()
-                    else:
-                         # Fallback manual advance
-                         if hasattr(gs, '_empty_mana_pools'):
-                              gs._empty_mana_pools()
-                         gs.phase = gs.phase + 1 if gs.phase < gs.PHASE_CLEANUP else gs.PHASE_UNTAP
-                         gs.priority_player = gs._get_active_player()
-                         gs.priority_pass_count = 0
-
-        else:
-            # Reset counter on non-NO_OP action
-            gs._consecutive_no_ops = 0
-        
         me = None
         opp = None
         if hasattr(gs, 'p1') and gs.p1 and hasattr(gs, 'p2') and gs.p2:
@@ -634,7 +618,11 @@ class ActionHandler(
 
             # 3. Get Action Info (remains the same)
             action_type, param = self.get_action_info(action_idx)
-            logging.info(f"Applying action: {action_idx} -> {action_type}({param}) with context: {action_context}")
+            # Per-step action traces are useful in debug runs but overwhelm
+            # long training/evaluation canaries at the normal INFO level.
+            logging.debug(
+                "Applying action: %s -> %s(%s) with context: %s",
+                action_idx, action_type, param, action_context)
 
             # 4. Store Pre-Action State for Reward Shaping (remains the same)
             prev_state = {}
@@ -727,6 +715,14 @@ class ActionHandler(
                 self.current_valid_actions = self.generate_valid_actions() if hasattr(self, 'generate_valid_actions') else np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
                 info["action_mask"] = self.current_valid_actions.astype(bool) # Return current mask
                 info["execution_failed"] = True
+                info["error_message"] = (
+                    f"Mask-valid action {action_idx} {action_type}({param}) "
+                    "failed execution")
+                info["failed_action"] = {
+                    "index": int(action_idx), "type": action_type,
+                    "param": param,
+                    "context": _process_safe_info_value(action_context),
+                }
                 # Don't end the game here, return the state and let agent retry
                 return reward, done, truncated, info # Return 4-tuple
 

@@ -482,6 +482,10 @@ def check_stats_pipeline(decks, card_db):
                 f"{deck_name} aggregate games inflated: {payload.get('games')} != {game_count}"
             assert payload.get("total_turns") == expected_turns[deck_name], \
                 f"{deck_name} aggregate turns inflated: {payload.get('total_turns')} != {expected_turns[deck_name]}"
+            expected_average = expected_turns[deck_name] / game_count
+            assert payload.get("avg_game_length") == expected_average, \
+                (f"{deck_name} average game length is stale: "
+                 f"{payload.get('avg_game_length')} != {expected_average}")
     finally:
         if env is not None:
             env.close()

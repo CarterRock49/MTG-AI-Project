@@ -359,12 +359,8 @@ class GameStateSetupMixin:
                     self._end_mulligan_phase()
                     return False
         
-        # Case 5: Final safety check - if in limbo, force end
-        if (self.mulligan_in_progress or self.bottoming_in_progress) and self.turn >= 1:
-            logging.error("Critical inconsistency: In mulligan/bottoming but turn >= 1. Forcing end.")
-            self._end_mulligan_phase()
-            return False
-        
+        # ``turn`` is intentionally initialized to 1 before pregame decisions,
+        # so it cannot be used as evidence that the mulligan phase is stale.
         # In non-error cases, continue
         return True
 
@@ -737,4 +733,4 @@ class GameStateSetupMixin:
             import traceback
             logging.error(traceback.format_exc())
             self.targeting_system = None
-
+

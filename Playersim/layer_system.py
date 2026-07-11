@@ -435,6 +435,12 @@ class LayerSystem:
                             logging.error(f"LayerSystem Update: Error setting attribute '{attr}' on card {card_id}. Value: {repr(value)}. Error: {e}")
                 else:
                      # Attribute doesn't exist on live card - might be okay for internal _base P/T
+                     # Optional characteristics such as loyalty/defense are
+                     # represented as None in the calculation map even when a
+                     # runtime token does not expose those attributes. There
+                     # is no value to write and no fidelity loss to report.
+                     if value is None:
+                         continue
                      if attr not in ['_base_power', '_base_toughness']:
                          logging.warning(f"LayerSystem Update: Live card {card_id} missing attribute '{attr}' during final update.")
 

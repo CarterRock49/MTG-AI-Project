@@ -167,9 +167,11 @@ consumes exactly one Plot permission.
 
 Bargain and Torch the Tower are supported for all 4 copies. Casting exposes an
 optional policy choice among controlled artifacts, enchantments, and tokens,
-then sacrifices the selected permanent as a casting cost. Torch deals 2 when
-declined or 3 and scries 1 when bargained. A creature it actually damaged is
-exiled instead if it would die later that turn.
+then commits targets before sacrificing the selected permanent or paying mana.
+The selected Bargain permanent may legally be Torch's target; that target is
+retained on the stack and Torch fizzles cleanly after the sacrifice. Torch
+deals 2 when Bargain is declined or 3 and scries 1 when bargained. A creature
+it actually damaged is exiled instead if it would die later that turn.
 
 Manifest dread and Turn Inside Out are supported for all 4 copies. The policy
 chooses one of the top two cards to put onto the battlefield face down and the
@@ -242,7 +244,38 @@ exactly the Treasure, 4 life, two blue 1/1 Fish, and one draw that apply.
 These should make affected card statistics ineligible for harvest until the
 listed behavior is implemented and guarded by scenarios.
 
-None in the current eight-deck sample after Round 7.21.
+None newly confirmed after the Round 7.29 log-driven repairs. Four remaining
+classification groups are retained under **High-Risk Partial Support** until
+their complete printed effects have exact resolution scenarios.
+
+## Closed In Round 7.29
+
+The final training canary exposed three value-changing gaps that construction-
+time coverage had missed, plus several misleading warning sources.
+
+- Hopeless Nightmare now makes each opponent finish the discard choice before
+  losing 2 life. Its activated instruction sacrifices that exact source on
+  resolution and cannot substitute another enchantment if the source left.
+- Dredger's Insight mills its controller, offers only the artifact, creature,
+  or land cards moved by that resolution, and permits decline. Its separate
+  artifact/creature-leaves-your-graveyard trigger now gains life. Seed of Hope
+  and Wrenn and Realmbreaker share the same permanent-selection path; Seed's
+  life-gain suffix resumes after either choosing or declining.
+- Nurturing Pixie's optional target keeps the non-Faerie, nonland, and
+  controller restrictions. The source gets its counter only when the selected
+  permanent actually reaches its owner's hand.
+- Exhaust use is marked once by the cost transaction; the action handler no
+  longer marks it again. A two-ability regression proves that using index 0
+  masks only index 0 and that a direct retry cannot pay another cost.
+- Initial deck aggregates calculate `avg_game_length` before validation, and
+  optional `None` layer characteristics no longer flood Monster Role logs.
+  Warnings remain intact for missing non-`None` characteristics.
+
+The warning-enabled exact regressions contain none of the old life-loss,
+mill-target, generic self-sacrifice, or fragmented Pixie signatures. An
+eight-deck reset likewise produces zero strict-separator and Role optional-
+attribute warnings. Gates: 241/241 scenarios, 9/9 smoke, 11/11 training, and
+8/8 deterministic default-fuzz seeds (8,000 mask-valid actions).
 
 ## Closed In Round 7.21
 
@@ -276,7 +309,22 @@ These cards reach generic parser paths, but at least one value-changing part
 is likely incomplete. They need focused scenarios before their statistics are
 trusted.
 
-None in the current eight-deck sample after Round 7.22.
+The post-Round-7.29 eight-deck reset still reports four value-changing clauses
+whose mechanic entry is known but whose complete resolution is not yet proved:
+
+- Overlord of the Mistmoors and Overlord of the Hauntwoods: verify that both
+  ordinary entry and attack create their printed tokens while Impending is
+  active and after it expires.
+- Obstinate Baloth: verify the opponent-caused discard replacement moves it
+  directly to the battlefield.
+- Callous Sell-Sword: verify its entry counter count uses creatures that died
+  under its controller this turn.
+- Manifold Mouse: verify the beginning-of-combat Mouse target and the policy's
+  double-strike/trample choice alongside Offspring.
+
+Emberheart Challenger emits the sixth repeated classification line, but its
+Valiant impulse-draw rider already has an exact end-to-end scenario; that line
+is warning hygiene rather than an unproved value path.
 
 ## Closed In Round 7.22
 

@@ -23,9 +23,13 @@ What it verifies:
   5. A short MaskablePPO training run completes.
   6. Save -> load -> predict round-trips (used to fail because feature_merger
      did not exist on a freshly constructed policy).
+  7. Two masked MTG environments reset and step through SubprocVecEnv using
+     Windows-compatible spawn semantics, then shut their worker processes down.
 """
 
 import os
+import json
+from functools import partial
 import shutil
 import sys
 import tempfile
@@ -53,6 +57,19 @@ def test_artifact_paths():
         "deck_stats_path": os.path.join(TEST_ARTIFACT_ROOT, "deck_stats"),
         "card_memory_path": os.path.join(TEST_ARTIFACT_ROOT, "card_memory"),
     }
+
+
+def _make_subproc_masked_env(decks, card_db, storage_root, worker_index):
+    """Top-level factory target so Windows ``spawn`` can import it safely."""
+    import main as m
+
+    return m.make_masked_mtg_env(
+        decks,
+        card_db,
+        os.path.join(storage_root, f"env_{worker_index}"),
+        agent_is_p1=(worker_index % 2 == 0),
+        alternate_agent_seat=True,
+    )
 
 
 def stage(name):
@@ -85,6 +102,8 @@ def do_imports():
 
 @stage("mask-aware callback and evaluation enforce action masks")
 def check_mask_aware_evaluation():
+    import pickle
+    import threading
     from types import SimpleNamespace
 
     import gymnasium as gym
@@ -94,11 +113,19 @@ def check_mask_aware_evaluation():
         evaluate_policy as maskable_evaluate_policy,
     )
     from sb3_contrib.common.wrappers import ActionMasker
+    from stable_baselines3.common.vec_env import DummyVecEnv
     import main as m
+    from Playersim.actions import _process_safe_info_value
 
     # Periodic training evaluation goes through create_callbacks(), while
     # Optuna calls main.evaluate_policy directly. Guard both call sites.
     assert m.evaluate_policy is maskable_evaluate_policy
+    safe_info = _process_safe_info_value({
+        "nested": {"lock": threading.RLock()},
+        "ordinary": [1, "two", None],
+    })
+    pickle.dumps(safe_info)
+    assert safe_info["nested"]["lock"]["type"] == "RLock"
 
     class OnlyActionZeroEnv(gym.Env):
         """One-step env that fails immediately if evaluation ignores its mask."""
@@ -147,8 +174,51 @@ def check_mask_aware_evaluation():
     assert all(np.array_equal(mask, [[True, False]])
                for mask in model.seen_masks)
 
+    assert m.repeated_short_cycle_period([b"a"] * 3) == 1
+    assert m.repeated_short_cycle_period([b"a", b"b"] * 3) == 2
+    assert m.repeated_short_cycle_period(
+        [b"a", b"b", b"c", b"a", b"b", b"d"]) is None
+
+    class TwoStateCycleEnv(gym.Env):
+        metadata = {"render_modes": []}
+
+        def __init__(self):
+            self.action_space = spaces.Discrete(1)
+            self.observation_space = spaces.Box(
+                low=0, high=1, shape=(1,), dtype=np.int32)
+            self.state = 0
+
+        def reset(self, *, seed=None, options=None):
+            super().reset(seed=seed)
+            self.state = 0
+            return np.array([self.state], dtype=np.int32), {}
+
+        def step(self, action):
+            self.state = 1 - self.state
+            return (np.array([self.state], dtype=np.int32), 0.0,
+                    False, False, {})
+
+    cycle_env = m.StrictEvaluationVecEnv(DummyVecEnv([
+        lambda: ActionMasker(
+            TwoStateCycleEnv(),
+            lambda _env: np.array([True], dtype=bool))
+    ]), max_cycle_period=2, cycle_repeats=3)
+    try:
+        cycle_env.reset()
+        for _ in range(5):
+            cycle_env.step(np.array([0], dtype=np.int64))
+        try:
+            cycle_env.step(np.array([0], dtype=np.int64))
+        except RuntimeError as error:
+            assert "cycle of period 2" in str(error)
+        else:
+            raise AssertionError("strict evaluation accepted a two-state loop")
+    finally:
+        cycle_env.close()
+
     args = SimpleNamespace(
         eval_freq=10,
+        eval_episodes=3,
         checkpoint_freq=20,
         record_network=True,
         record_freq=30,
@@ -164,6 +234,7 @@ def check_mask_aware_evaluation():
             assert callbacks[0].use_masking is True
             assert callbacks[0].deterministic is True
             assert callbacks[0].eval_freq == 5
+            assert callbacks[0].n_eval_episodes == 3
             assert callbacks[1].save_freq == 10
             assert callbacks[0].best_model_save_path == os.path.join(
                 m.MODEL_DIR, "mask_smoke", "best_model")
@@ -171,6 +242,8 @@ def check_mask_aware_evaluation():
                 m.LOG_DIR, "mask_smoke", "evaluation", "evaluations")
             assert callbacks[1].save_path == os.path.join(
                 m.MODEL_DIR, "mask_smoke", "checkpoints")
+            assert any(isinstance(callback, m.StrictTrainingFidelityCallback)
+                       for callback in callbacks)
             network_callbacks = [
                 callback for callback in callbacks
                 if isinstance(callback, m.NetworkRecordingCallback)]
@@ -182,6 +255,36 @@ def check_mask_aware_evaluation():
                 eval_env, "mask_smoke_2", args, num_train_envs=2)
             assert not any(isinstance(callback, m.NetworkRecordingCallback)
                            for callback in callbacks)
+
+            fidelity = m.StrictTrainingFidelityCallback()
+            fidelity.locals = {"infos": [{"game_result": "undetermined"}]}
+            assert fidelity._on_step() is True
+            fidelity.locals = {
+                "infos": [{"game_result": "error_opponent_loop"}]}
+            try:
+                fidelity._on_step()
+            except RuntimeError as error:
+                assert "Strict training fidelity failure" in str(error)
+            else:
+                raise AssertionError("strict fidelity callback accepted an engine error")
+
+            fidelity = m.StrictTrainingFidelityCallback()
+            fidelity.signature_histories = [[]]
+            try:
+                for value in [0, 1, 0, 1, 0, 1]:
+                    fidelity.locals = {
+                        "new_obs": {
+                            "state": np.array([[value]], dtype=np.int32)},
+                        "actions": np.array([31], dtype=np.int64),
+                        "dones": np.array([False]),
+                        "infos": [{"policy_state": {"phase": 5}}],
+                    }
+                    fidelity._on_step()
+            except RuntimeError as error:
+                assert "cycle of period 2" in str(error)
+            else:
+                raise AssertionError(
+                    "strict training accepted a two-state policy loop")
         finally:
             m.MODEL_DIR, m.LOG_DIR = old_model_dir, old_log_dir
     eval_env.close()
@@ -333,11 +436,13 @@ def check_runtime_configuration():
     original_ppo = m.MaskablePPO
     try:
         m.MaskablePPO = CapturingMaskablePPO
-        m.create_training_model("training-env", config)
+        m.create_training_model("training-env", config, 1234, "cpu")
     finally:
         m.MaskablePPO = original_ppo
 
     assert captured["env"] == "training-env"
+    assert captured["seed"] == 1234
+    assert captured["device"] == "cpu"
     assert captured["learning_rate"].initial_lr == optimized["learning_rate"]
     for key in (
         "n_steps", "batch_size", "gamma", "gae_lambda", "clip_range",
@@ -388,6 +493,8 @@ def check_main_failure_semantics():
 
     saved_paths = []
     made_vec_envs = []
+    assigned_seeds = []
+    parent_seeds = []
 
     class FakeVecEnv:
         def __init__(self, _factories):
@@ -396,6 +503,10 @@ def check_main_failure_semantics():
 
         def env_method(self, *_args, **_kwargs):
             pass
+
+        def seed(self, seed):
+            assigned_seeds.append(seed)
+            return [seed]
 
         def close(self):
             self.closed = True
@@ -420,6 +531,7 @@ def check_main_failure_semantics():
     patched_names = (
         "MODEL_DIR", "LOG_DIR", "TENSORBOARD_DIR",
         "load_decks_and_card_db", "DummyVecEnv", "VecMonitor",
+        "StrictEvaluationVecEnv",
         "create_callbacks", "create_training_model", "MaskablePPO",
         "record_network_architecture", "set_random_seed", "safe_cpu_count",
     )
@@ -436,9 +548,10 @@ def check_main_failure_semantics():
             m.load_decks_and_card_db = lambda _path: ([object()], {})
             m.DummyVecEnv = FakeVecEnv
             m.VecMonitor = lambda env: env
+            m.StrictEvaluationVecEnv = lambda env: env
             m.create_callbacks = lambda *_args, **_kwargs: []
             m.record_network_architecture = lambda *_args, **_kwargs: None
-            m.set_random_seed = lambda _seed: None
+            m.set_random_seed = lambda seed: parent_seeds.append(seed)
             m.safe_cpu_count = lambda: 1
             m.torch.set_num_threads = lambda _count: None
             m.torch.cuda.is_available = lambda: False
@@ -452,15 +565,36 @@ def check_main_failure_semantics():
             assert saved_paths and saved_paths[-1].endswith("failed_model")
             assert not any("final_model" in path for path in saved_paths)
             assert made_vec_envs and all(env.closed for env in made_vec_envs)
+            first_manifest_path = os.path.join(
+                m.MODEL_DIR, "ALPHA_ZERO_MTG_V3.00_20000101_000000",
+                "training_run.json")
+            with open(first_manifest_path, encoding="utf-8") as handle:
+                first_manifest = json.load(handle)
+            assert first_manifest["status"] == "failed"
+            assert first_manifest["phase"] == "training"
+            assert first_manifest["request"]["cli"]["seed"] == 42
+            assert first_manifest["resolved"]["train_worker_seeds"] == [42]
 
             # A successful learn() is the only path allowed to publish final_model.
             saved_paths.clear()
             made_vec_envs.clear()
             m.create_training_model = lambda *_args: FakeModel(fail=False)
+            sys.argv = [
+                "main.py", "--timesteps", "1", "--n-envs", "1",
+                "--seed", "1234",
+            ]
             assert m.main() == 0
             assert saved_paths and saved_paths[-1].endswith("final_model")
             assert not any("failed_model" in path for path in saved_paths)
             assert all(env.closed for env in made_vec_envs)
+            second_manifest_path = os.path.join(
+                m.MODEL_DIR, "ALPHA_ZERO_MTG_V3.00_20000101_000000_1",
+                "training_run.json")
+            with open(second_manifest_path, encoding="utf-8") as handle:
+                second_manifest = json.load(handle)
+            assert second_manifest["status"] == "complete"
+            assert second_manifest["validation"]["status"] == "skipped"
+            assert second_manifest["request"]["cli"]["seed"] == 1234
 
             # A checkpoint load failure must also be observable to the shell.
             saved_paths.clear()
@@ -473,6 +607,13 @@ def check_main_failure_semantics():
             assert m.main() == 1
             assert not saved_paths
             assert all(env.closed for env in made_vec_envs)
+            third_manifest_path = os.path.join(
+                m.MODEL_DIR, "ALPHA_ZERO_MTG_V3.00_20000101_000000_2",
+                "training_run.json")
+            with open(third_manifest_path, encoding="utf-8") as handle:
+                third_manifest = json.load(handle)
+            assert third_manifest["status"] == "failed"
+            assert third_manifest["phase"] == "model_setup"
 
             # Deck-loading failures happen before environments exist but still
             # must return a nonzero process status.
@@ -480,6 +621,16 @@ def check_main_failure_semantics():
                 RuntimeError("synthetic deck-load failure"))
             sys.argv = ["main.py"]
             assert m.main() == 1
+            fourth_manifest_path = os.path.join(
+                m.MODEL_DIR, "ALPHA_ZERO_MTG_V3.00_20000101_000000_3",
+                "training_run.json")
+            with open(fourth_manifest_path, encoding="utf-8") as handle:
+                fourth_manifest = json.load(handle)
+            assert fourth_manifest["status"] == "failed"
+            assert fourth_manifest["phase"] == "data_loading"
+            assert parent_seeds == [42, 1234, 42, 42]
+            assert assigned_seeds == [
+                42, 1000042, 1234, 1001234, 42, 1000042]
         finally:
             sys.argv = original_argv
             for name, original in originals.items():
@@ -487,6 +638,70 @@ def check_main_failure_semantics():
             m.torch.set_num_threads = original_set_num_threads
             m.torch.cuda.is_available = original_cuda_available
             m.time.strftime = original_strftime
+
+
+@stage("two-worker SubprocVecEnv reset, masks, steps, and close")
+def check_subproc_vec_env(deck_folder):
+    from sb3_contrib.common.maskable.utils import get_action_masks
+    from stable_baselines3.common.vec_env import SubprocVecEnv
+    from Playersim.card import load_decks_and_card_db
+
+    decks, card_db = load_decks_and_card_db(deck_folder)
+    vec_env = None
+
+    # Keep every file a worker may produce outside the project tree. Closing
+    # the worker pool before leaving this context also makes cleanup reliable
+    # on Windows, where open child-process handles prevent directory removal.
+    with tempfile.TemporaryDirectory() as storage_root:
+        factories = [
+            partial(
+                _make_subproc_masked_env,
+                decks,
+                card_db,
+                storage_root,
+                worker_index,
+            )
+            for worker_index in range(2)
+        ]
+        try:
+            # Explicit ``spawn`` exercises the Windows production failure mode
+            # even when this smoke test is run on another operating system.
+            vec_env = SubprocVecEnv(factories, start_method="spawn")
+            assert vec_env.num_envs == 2
+
+            assigned_seeds = vec_env.seed(20260710)
+            assert assigned_seeds == [20260710, 20260711]
+            observations = vec_env.reset()
+
+            for _ in range(4):
+                assert isinstance(observations, dict)
+                assert observations
+                assert all(np.asarray(value).shape[0] == 2
+                           for value in observations.values())
+
+                masks = np.asarray(get_action_masks(vec_env), dtype=bool)
+                assert masks.shape == (2, vec_env.action_space.n)
+                assert np.all(masks.any(axis=1)), (
+                    "a subprocess returned an action mask with no legal action")
+                assert np.array_equal(
+                    np.asarray(observations["action_mask"], dtype=bool), masks), (
+                    "batched observation masks differ from live worker masks")
+
+                actions = np.argmax(masks, axis=1).astype(np.int64)
+                assert all(masks[index, action]
+                           for index, action in enumerate(actions))
+                observations, rewards, dones, infos = vec_env.step(actions)
+
+                assert np.asarray(rewards).shape == (2,)
+                assert np.isfinite(rewards).all()
+                assert np.asarray(dones).shape == (2,)
+                assert len(infos) == 2
+                assert all(isinstance(info, dict) for info in infos)
+        finally:
+            if vec_env is not None:
+                vec_env.close()
+
+        assert vec_env is not None and vec_env.closed
 
 
 @stage("build masked vec env from fixture decks")
@@ -590,6 +805,7 @@ def main():
     from smoke_test import build_fixture_decks  # tests/ is on sys.path via cwd
     with tempfile.TemporaryDirectory() as folder:
         build_fixture_decks(folder)
+        check_subproc_vec_env(folder)
         vec_env = build_vec_env(folder)
         if vec_env is None:
             return finish()

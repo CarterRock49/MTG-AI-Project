@@ -22,6 +22,7 @@ from .strategy_memory import StrategyMemory
 from collections import defaultdict
 from .deck_stats_tracker import DeckStatsTracker
 from .card_memory import CardMemory
+from .ability_types import ManaAbility
 
 try:
     # Create a dummy card to get feature dimension
@@ -337,9 +338,13 @@ class AlphaZeroMTGEnv(gym.Env):
             # reproducible. Seed both global RNGs when a seed is provided.
             # (Indented to match this function's existing 12-space body style --
             # a shallower block here would swallow the whole body as its suite.)
-            if seed is not None:
-                random.seed(seed)
-                np.random.seed(seed % (2**32))
+            if seed is None:
+                # Gymnasium supplies an explicit seed only for the first
+                # VecEnv reset. Derive and record one for every later episode
+                # so a failure replay never carries an unusable null seed.
+                seed = random.randrange(0, 2**32)
+            random.seed(seed)
+            np.random.seed(seed % (2**32))
             self.reset_seed = seed
             """
             Reset the environment and return initial observation and info.
@@ -1010,6 +1015,124 @@ class AlphaZeroMTGEnv(gym.Env):
         logging.warning(f"Unknown phase {current_phase} in force_phase_transition, defaulting to MAIN_POSTCOMBAT")
         return gs.PHASE_MAIN_POSTCOMBAT
     
+    def _policy_state_diagnostic(self, *, recent_action=None, valid_mask=None):
+        """Return a compact, process-safe policy-boundary state summary."""
+        gs = self.game_state
+
+        def player_label(player):
+            if player is gs.p1:
+                return "p1"
+            if player is gs.p2:
+                return "p2"
+            return None
+
+        choice = (getattr(gs, "targeting_context", None)
+                  or getattr(gs, "sacrifice_context", None)
+                  or getattr(gs, "choice_context", None)
+                  or {})
+        diagnostic = {
+            "episode_step": int(self.current_step),
+            "turn": int(getattr(gs, "turn", -1)),
+            "phase": int(getattr(gs, "phase", -1)),
+            "phase_name": getattr(gs, "_PHASE_NAMES", {}).get(
+                getattr(gs, "phase", -1), "UNKNOWN"),
+            "priority_player": player_label(
+                getattr(gs, "priority_player", None)),
+            "choice_type": choice.get("type"),
+            "choice_player": player_label(
+                choice.get("controller") or choice.get("player")),
+            "stack_size": len(getattr(gs, "stack", ()) or ()),
+            "agent_is_p1": bool(getattr(gs, "agent_is_p1", True)),
+            "attacker_count": len(getattr(gs, "current_attackers", ()) or ()),
+            "blocker_count": sum(
+                len(blockers)
+                for blockers in getattr(
+                    gs, "current_block_assignments", {}).values()),
+        }
+        targeting = getattr(gs, "targeting_context", None)
+        if targeting:
+            source_id = targeting.get("source_id")
+            source_card = gs._safe_get_card(source_id)
+            raw_targets = {}
+            candidates = []
+            try:
+                raw_targets = gs.targeting_system.get_valid_targets(
+                    source_id,
+                    targeting.get("controller"),
+                    targeting.get("required_type", "target"),
+                    effect_text=targeting.get("effect_text"),
+                )
+                raw_targets = {
+                    str(category): sorted(
+                        target_ids,
+                        key=lambda target_id: (
+                            isinstance(target_id, str), target_id),
+                    )
+                    for category, target_ids in raw_targets.items()
+                }
+                if self.action_handler:
+                    candidates = self.action_handler._get_target_selection_candidates(
+                        targeting.get("controller"), targeting)
+            except Exception as target_error:
+                raw_targets = {"diagnostic_error": str(target_error)}
+            diagnostic["targeting"] = {
+                "source_id": source_id,
+                "source_name": getattr(source_card, "name", None),
+                "effect_text": targeting.get("effect_text"),
+                "required_type": targeting.get("required_type"),
+                "min_targets": int(targeting.get("min_targets", 0)),
+                "max_targets": int(targeting.get(
+                    "max_targets", targeting.get("required_count", 0))),
+                "selected_targets": list(
+                    targeting.get("selected_targets", ())),
+                "resume_effect": type(targeting.get("resume_effect")).__name__
+                if targeting.get("resume_effect") is not None else None,
+                "resume_cast": bool(targeting.get("resume_cast")),
+                "raw_valid_targets": raw_targets,
+                "selection_candidates": list(candidates),
+            }
+            stack_summary = []
+            for stack_index, item in enumerate(getattr(gs, "stack", ()) or ()):
+                if not (isinstance(item, tuple) and len(item) >= 3):
+                    stack_summary.append({
+                        "index": stack_index,
+                        "item_type": type(item).__name__,
+                    })
+                    continue
+                item_context = (
+                    item[3] if len(item) > 3 and isinstance(item[3], dict)
+                    else {})
+                ability = item_context.get("ability")
+                item_card = gs._safe_get_card(item[1])
+                stack_summary.append({
+                    "index": stack_index,
+                    "item_type": str(item[0]),
+                    "source_id": item[1],
+                    "source_name": getattr(item_card, "name", None),
+                    "context_keys": sorted(str(key) for key in item_context),
+                    "target_choice_pending": bool(
+                        item_context.get("target_choice_pending")),
+                    "target_instance_id": item_context.get(
+                        "target_instance_id"),
+                    "targeting_text": item_context.get("targeting_text"),
+                    "effect_text": item_context.get("effect_text"),
+                    "ability_type": type(ability).__name__
+                    if ability is not None else None,
+                    "trigger_condition": getattr(
+                        ability, "trigger_condition", None),
+                    "ability_effect": getattr(ability, "effect", None),
+                })
+            diagnostic["stack"] = stack_summary
+        mask_error = getattr(self.action_handler, "last_mask_error", None)
+        if mask_error:
+            diagnostic["last_mask_error"] = str(mask_error)
+        if recent_action is not None:
+            diagnostic["recent_actions"] = (
+                list(self.current_episode_actions[-31:]) + [int(recent_action)])
+        if valid_mask is not None:
+            diagnostic["valid_actions"] = np.flatnonzero(valid_mask).tolist()
+        return diagnostic
+
     def step(self, action_idx, context=None):
         """
         Execute the agent's action, simulate opponent actions until control returns
@@ -1176,6 +1299,43 @@ class AlphaZeroMTGEnv(gym.Env):
                  env_info["game_result"] = "error_opponent_loop" # Set specific result string
                  gs.agent_is_p1 = initial_agent_is_p1 # Restore perspective before exiting
 
+            # ``max_episode_steps`` existed since the environment was created,
+            # but was never enforced. A mask-valid policy cycle could therefore
+            # block periodic evaluation forever without reaching the turn cap.
+            if (not done and not truncated
+                    and self.current_step >= self.max_episode_steps):
+                diagnostic = self._policy_state_diagnostic(
+                    recent_action=action_idx, valid_mask=current_mask)
+                logging.error(
+                    "Episode exceeded the %s-step safety limit. State: %s",
+                    self.max_episode_steps, diagnostic)
+                truncated = True
+                env_info["episode_step_limit"] = True
+                env_info["game_result"] = "error_episode_step_limit"
+                env_info["policy_state"] = diagnostic
+                env_info["error_message"] = (
+                    f"Episode exceeded {self.max_episode_steps} steps: "
+                    f"{diagnostic}")
+                try:
+                    replay_payload = self.export_replay()
+                    replay_payload["actions"].append({
+                        "action": int(action_idx),
+                        "context": dict(action_context),
+                    })
+                    replay_payload["failure"] = diagnostic
+                    replay_path = os.path.join(
+                        self.deck_stats_path, "failure_replay.json")
+                    temporary_path = f"{replay_path}.tmp"
+                    os.makedirs(self.deck_stats_path, exist_ok=True)
+                    with open(temporary_path, "w", encoding="utf-8") as handle:
+                        json.dump(replay_payload, handle, indent=2, sort_keys=True)
+                        handle.write("\n")
+                    os.replace(temporary_path, replay_path)
+                    env_info["failure_replay_path"] = replay_path
+                except Exception as replay_error:
+                    logging.error(
+                        "Could not persist step-limit replay: %s", replay_error)
+
 
             # --- 5. Final State Calculations (After agent + opponent simulation) ---
             step_reward = reward # Start with agent action's direct reward (if any)
@@ -1272,6 +1432,9 @@ class AlphaZeroMTGEnv(gym.Env):
                     env_info["fidelity"] = {k: (sorted(v) if isinstance(v, set) else v)
                                             for k, v in fc.items()}
 
+            env_info.setdefault(
+                "policy_state", self._policy_state_diagnostic())
+
             return obs, step_reward, done, truncated, env_info
 
         except Exception as e:
@@ -1305,12 +1468,16 @@ class AlphaZeroMTGEnv(gym.Env):
 
             # Mulligan/Bottoming Phase
             mulligan_target = getattr(gs, 'mulligan_player', None)
-            if mulligan_target == opponent_player_obj:
-                return opponent_player_obj, {"phase_context": "mulligan_decision"}
-
             bottoming_target = getattr(gs, 'bottoming_player', None)
-            if bottoming_target == opponent_player_obj:
-                return opponent_player_obj, {"phase_context": "bottoming"}
+            if getattr(gs, 'mulligan_in_progress', False):
+                if mulligan_target == opponent_player_obj:
+                    return opponent_player_obj, {
+                        "phase_context": "mulligan_decision"}
+                if bottoming_target == opponent_player_obj:
+                    return opponent_player_obj, {"phase_context": "bottoming"}
+                # The learned seat owns the pending pregame decision. Do not
+                # fall through to the conceptual Turn-1 priority fields.
+                return None, None
 
             # Special Choice Phase (Targeting, Sacrifice, etc.)
             if gs.phase in [gs.PHASE_TARGETING, gs.PHASE_SACRIFICE, gs.PHASE_CHOOSE]:
@@ -1322,13 +1489,18 @@ class AlphaZeroMTGEnv(gym.Env):
                 if context:
                     acting_player = context.get('controller') or context.get('player')
                     if acting_player == opponent_player_obj:
-                        return opponent_player_obj, {"phase_context": gs._PHASE_NAMES.get(gs.phase)}
+                        return opponent_player_obj, {
+                            "phase_context": gs._PHASE_NAMES.get(gs.phase)}
+                # A special choice always belongs to exactly one policy. If it
+                # is not the opponent's, return control to the learned seat.
+                return None, None
 
             # Priority Check (Outside Mulligan/Choice)
             priority_target = getattr(gs, 'priority_player', None)
-            if priority_target == opponent_player_obj and gs.phase not in [gs.PHASE_UNTAP, gs.PHASE_CLEANUP]:
+            if priority_target == opponent_player_obj:
                 # FIX: If opponent has priority, they MUST act, even if only Pass/Concede is available.
-                # Previously, this block skipped if mask sum was low, causing Agent NO_OP loops.
+                # Cleanup normally has no priority, but CR 514.3 can grant it;
+                # excluding the phase here left the learned seat in NO_OP forever.
                 return opponent_player_obj, {"phase_context": "priority"}
 
             return None, None # Agent needs to act or game state error
@@ -2565,8 +2737,15 @@ class AlphaZeroMTGEnv(gym.Env):
                             option.get('card_id', option.get('id'))
                             if isinstance(option, dict) else option)
                         try:
-                            candidate_card = gs._safe_get_card(candidate_id)
-                        except (TypeError, ValueError):
+                            # Choice options are heterogeneous: some are card
+                            # IDs, while others are creature subtypes, mana
+                            # symbols, player selectors, or structured values.
+                            # _safe_get_card intentionally returns a truthy
+                            # synthetic Card for unknown IDs, so it cannot be
+                            # used as a membership probe here without turning
+                            # symbolic options into visible phantom cards.
+                            candidate_card = gs.card_db.get(candidate_id)
+                        except (KeyError, TypeError, ValueError):
                             candidate_card = None
                         choice_card_ids.append(
                             candidate_id if candidate_card is not None else None)
@@ -3587,7 +3766,7 @@ class AlphaZeroMTGEnv(gym.Env):
                     if not effect_text: continue
 
                     # Check mana
-                    is_mana = isinstance(ability, gs.ability_handler.ManaAbility) or ("add mana" in effect_text or "add {" in effect_text and "target" not in effect_text)
+                    is_mana = isinstance(ability, ManaAbility) or ("add mana" in effect_text or "add {" in effect_text and "target" not in effect_text)
                     if is_mana and (feature_idx_base + 1 < num_ability_features): mana_count += 1
 
                     # Check draw

@@ -16,7 +16,7 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 10/10, and 231/231, plus 10/10 fixture-
+   every delivery (currently 9/9, 11/11, and 241/241, plus 10/10 fixture-
    harvest tests, 5/5 production-protocol tests, 6/6 fuzz/replay tests, and
    the deterministic 8-seed / 8,000-action default fuzz profile, and the
    strict 32-seed / 320,000-action long profile).
@@ -45,7 +45,7 @@ The project is complete when all of the following hold:
 - Tier 0 (stats plumbing): ✅ complete.
 - Tier 1 (rules correctness): ✅ complete — all seven items plus the P1
   placeholder triage delivered; see appendix for the bug catalog.
-- Test gates: smoke 9/9, training 10/10, scenarios 231/231 (grown from 12),
+- Test gates: smoke 9/9, training 11/11, scenarios 241/241 (grown from 12),
   fixture harvest 10/10, production Harvest protocol 5/5, fuzz/replay
   configuration 6/6, deterministic default fuzz 8 seeds x 1,000 valid
   actions, and strict long fuzz 32 seeds x 10,000 valid actions.
@@ -697,9 +697,81 @@ multi-env training from DummyVecEnv to SubprocVecEnv with a learner
 intra-op thread cap, so rollout collection parallelizes across cores instead
 of serializing on one.
 
+**Round 7.28 (July 2026):** qualified the reproducible Windows/CUDA training
+pipeline and closed every engine failure found by its canaries. `main.py` now
+accepts one root seed and records an atomic per-run `training_run.json` with
+the CLI request, resolved configuration, train/evaluation worker seeds, device
+and CUDA details, dependency inventory, deck/source hashes, Git revision and
+dirty paths, a restorable working-tree patch, timings, evaluation history,
+artifact hashes, and failure traceback when applicable. Multi-environment
+rollouts use real Windows `spawn` `SubprocVecEnv` workers; evaluation remains
+isolated. Incomplete runs write only `failed_model.zip`; successful runs first
+write a pending model, reload it, perform a 256-step mask-aware validation with
+period-1-through-4 cycle detection, then atomically publish `final_model.zip`.
+Training and evaluation fail fast on engine-fidelity flags, mask-valid
+execution failures, episode step limits, and repeated public-state/action
+cycles. The training smoke suite includes a real two-worker spawned reset,
+mask, legal-step, and close integration test.
+
+The canary sequence exposed and closed nested-choice phase loss, reversible
+attack/block selection loops, missing episode bounds/replay diagnostics,
+process-unsafe failure contexts, deferred-target affordability/index drift,
+and the final Torch the Tower loop. The Torch root cause was CR 601 ordering:
+ordinary targeted spells paid costs before choosing targets, so Bargain could
+sacrifice the only legal target and strand `TARGETING` on fallback `NO_OP`.
+Every targeted spell now commits targets before mana, sacrifices, or stack
+movement; permanent ETB targets are not mistaken for spell targets; Mutate
+uses the same pre-cost path; and a focused public-mask regression preserves a
+now-illegal bargained target so Torch fizzles cleanly. Patchwork Beastie's
+"you may mill" is parsed as milling its controller rather than a phantom
+target player. Policy-boundary diagnostics retain process-safe choice,
+target, stack, and action context for any future long-run failure.
+
+The final qualification run
+`ALPHA_ZERO_MTG_V3.00_20260710_212719` completed 20,480/20,480 transitions
+with two spawned training workers on the RTX 5060. It wrote checkpoints at
+5,120, 10,240, 15,360, and 20,480; completed two strict four-episode
+evaluations (mean rewards -21.62 and -30.79); reached 42.63 transitions/second
+including evaluation/validation; peaked at 351,822,848 CUDA bytes allocated;
+and passed final reload, finite-reward, nonempty-mask, mask-valid-prediction,
+public-progress, and short-cycle validation. A downstream two-worker Harvest
+smoke loaded the final model by SHA-256 and completed 2/2 games with zero
+fidelity counters and a clean support manifest at 0.114 games/second. This is
+pipeline qualification, not evidence of playing strength. Regression gates:
+237/237 scenarios, 9/9 smoke stages, and 11/11 training stages; the post-fix
+default fuzz profile also passed all 8,000 mask-valid actions.
+
+**Round 7.29 (July 2026):** converted the final canary's highest-signal
+warnings into generalized rules fixes and exact regressions. Compound player
+instructions now retain an explicit shared subject, and discard choices pause
+the shared effect sequencer without losing the underlying turn phase; this
+restores Hopeless Nightmare's opponent life loss. `Sacrifice this <type>`
+resolves against the source object only, so Hopeless Nightmare's activated
+ability can no longer become a generic no-op or sacrifice a substitute.
+
+`Mill N cards. You may put ... from among the milled cards` is now one atomic,
+policy-visible effect. It mills the controller, offers only eligible cards
+physically moved by that resolution, supports decline/pagination/cloned
+continuations, and resumes suffixes such as Seed of Hope's life gain. Dredger's
+Insight and Wrenn and Realmbreaker use the same path. A new graveyard-leave
+event also makes Dredger's artifact/creature watcher function. Nurturing
+Pixie's restricted optional bounce and result-dependent counter remain one
+effect, with controller, nonland, and excluded-subtype targeting enforced.
+Hyphens inside `non-Faerie`, `non-outlaw`, and P/T modifiers are no longer
+mistaken for activated-ability separators.
+
+The same warning pass removed duplicate Exhaust marking while retaining the
+activation event, computes `avg_game_length` before first-save validation, and
+suppresses only absent optional layer attributes whose calculated value is
+`None`. A warning-enabled eight-deck reset now emits zero strict-separator,
+legacy life-loss/mill/self-sacrifice, and missing-attribute warnings; six
+repeated sample-card classification clauses remain the next fidelity audit.
+Regression gates: 241/241 scenarios, 9/9 smoke, 11/11 training, and all 8,000
+default-profile mask-valid fuzz actions.
+
 ## Tier 4 — Verification & calibration
 
-1. ✅ Golden scenario harness — 228 scenarios and growing; scenario-first is a
+1. ✅ Golden scenario harness — 241 scenarios and growing; scenario-first is a
    working agreement, not a suggestion.
 2. ✅ **Property/invariant harness**: exact non-token zone/stack conservation,
    SBA fixed points, mask-valid action execution/handler coverage, declared
@@ -720,16 +792,18 @@ of serializing on one.
 ## Tier 5 — Harvest operations & deck-builder integration
 
 1. ◐ **Throughput**: isolated parallel workers and aggregate games/second
-   telemetry are implemented. The final 2-game orchestration smoke measured 0.296
-   games/second; profile a production-size checkpoint run before treating that
-   number as capacity planning, then optimize measured hot paths.
+   telemetry are implemented. The trained-checkpoint 2-game/two-worker smoke
+   measured 0.114 games/second; this tiny run validates loading and orchestration,
+   not capacity. Profile a production-size checkpoint harvest, then optimize
+   measured hot paths.
 2. ✅ **Harvest protocol**: `harvest_fixtures.py` supplies strict deterministic
    shards and `harvest_protocol.py` supplies parallel operation, checkpoint
    loading/identity, aggregate success-only manifests, paired-seat candidate
    scoring, and promotion gates. The protocol is complete and regression-
-   tested. Operational next step: train a candidate and baseline checkpoint,
-   then run the first real promotion; no checkpoint currently exists in
-   `models/`, so random-vs-scripted plumbing data remains non-strength data.
+   tested. The 20,480-transition CUDA canary now proves checkpoint loading from
+   training through Harvest, but it is intentionally only a pipeline candidate.
+   Operational next step: train a longer strength candidate, freeze a baseline
+   checkpoint, then run the first paired-seat promotion and calibration study.
 3. ▢ **Deck-builder contract**: `STATS_SCHEMA.md` + support manifest are the
    full interface; the builder's exclusion logic and confidence weighting
    consume them directly.

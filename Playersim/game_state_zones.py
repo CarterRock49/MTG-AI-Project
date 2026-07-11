@@ -131,6 +131,8 @@ class GameStateZonesMixin:
 
         first = entries.pop(0)
         chooser = self._discard_player_from_key(first["player_key"])
+        resume_phase = self.phase
+        previous_priority_phase = self.previous_priority_phase
         if self.phase != self.PHASE_CHOOSE:
             self.previous_priority_phase = self.phase
         self.phase = self.PHASE_CHOOSE
@@ -141,6 +143,8 @@ class GameStateZonesMixin:
             "pending": entries,
             "source_id": source_id,
             "cause": cause,
+            "resume_phase": resume_phase,
+            "previous_priority_phase_before_choice": previous_priority_phase,
         }
         self.priority_player = chooser
         self.priority_pass_count = 0
@@ -169,6 +173,13 @@ class GameStateZonesMixin:
                 return True
 
         return_phase = self.previous_priority_phase
+        if context.get("effect_continuation") is not None:
+            # The remaining instructions of the resolving object are bound to
+            # the completed discard choice.  Resume them only after every
+            # affected player has made every required discard.
+            self.previous_priority_phase = context.get(
+                "previous_priority_phase_before_choice")
+            return self._resume_effect_continuation(context)
         self.choice_context = None
         self.previous_priority_phase = None
         self.phase = return_phase if return_phase is not None else self.PHASE_PRIORITY
@@ -419,6 +430,23 @@ class GameStateZonesMixin:
                  # State is inconsistent, cannot proceed safely
                  return False
         else: removed_successfully = True # Implicit removal assumed
+
+        if (actual_from_zone == "graveyard"
+                and final_destination_zone != "graveyard" and from_player):
+            # Battlefield watchers such as Dredger's Insight need the event
+            # while the moved card's old zone/controller/type are still
+            # explicit.  Emit only after a real removal and after replacements
+            # have selected the final destination.
+            self.trigger_ability(card_id, "LEAVE_GRAVEYARD", {
+                "controller": from_player,
+                "from_player": from_player,
+                "from_zone": actual_from_zone,
+                "to_player": final_destination_player,
+                "to_zone": final_destination_zone,
+                "cause": cause,
+                "card": card,
+                **context,
+            })
 
         if (actual_from_zone == "exile" and from_player
                 and final_destination_zone != "exile"

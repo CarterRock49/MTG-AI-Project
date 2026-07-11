@@ -398,25 +398,22 @@ class TargetingSystem:
 
         # Handle checking keyword on player object (less common)
         if isinstance(card, dict) and 'name' in card: # Player dict
-             # --- ADDED: Delegate Player Keyword Check to GameState ---
-             player_id = card.get("player_id") # Assuming player dict has a unique ID ("p1", "p2")
+             player_id = card.get("player_id")
              if player_id and hasattr(gs, 'check_player_keyword') and callable(gs.check_player_keyword):
-                  # Let GameState determine if the player has the keyword based on global effects, etc.
                   result = gs.check_player_keyword(player_id, keyword)
                   logging.debug(f"Delegated player keyword check to GS for {player_id}/{keyword}: {result}")
                   return result
-             else:
-                 logging.warning(f"Player keyword check for '{keyword}' on {card.get('name')} requires GameState.check_player_keyword method or player_id. Returning False.")
-                 # TODO: Implement GameState.check_player_keyword using LayerSystem results for players.
-                 return False
-             # --- END ADDED ---
+             granted = card.get("keywords", ()) or card.get(
+                 "granted_keywords", ())
+             return str(keyword).lower() in {
+                 str(value).lower() for value in granted}
         elif isinstance(card, Card):
              card_id = getattr(card, 'card_id', None)
         else:
             logging.warning(f"_check_keyword received invalid object type: {type(card)}")
             return False
 
-        if not card_id:
+        if card_id is None:
              # If card object passed without ID, try to find ID?
              logging.warning(f"_check_keyword: Card object {getattr(card, 'name', 'Unknown')} missing card_id.")
              return False
@@ -486,6 +483,27 @@ class TargetingSystem:
                 "exclude_subtypes": ["human"],
             })
             oracle_text = re.sub(mutate_target_pattern, "", oracle_text)
+
+        # Nurturing-Pixie-style exclusions combine a subtype adjective, a
+        # comma, and ``nonland`` before the actual noun.  Parse the whole
+        # target phrase before the generic comma-bounded pattern mistakes
+        # ``non-Faerie`` for the target type.
+        excluded_subtype_nonland = (
+            r"target\s+non-([a-z]+)\s*,\s*nonland\s+permanent"
+            r"(?:\s+(you control|an opponent controls|you don't control))?")
+        for special_match in list(re.finditer(
+                excluded_subtype_nonland, oracle_text)):
+            requirement = {
+                "type": "permanent", "exclude_land": True,
+                "exclude_subtypes": [special_match.group(1).lower()],
+            }
+            controller_text = special_match.group(2)
+            if controller_text == "you control":
+                requirement["controller_is_caster"] = True
+            elif controller_text:
+                requirement["controller_is_opponent"] = True
+            requirements.append(requirement)
+        oracle_text = re.sub(excluded_subtype_nonland, "", oracle_text)
 
         counter_target_pattern = (
             r"target\s+(creature|permanent)\s+with\s+"
@@ -764,12 +782,9 @@ class TargetingSystem:
         # Determine target requirements from the text
         target_requirements = self._parse_targeting_requirements(text_to_parse.lower())
 
-        # Simple check for number of required targets
-        num_required = text_to_parse.lower().count("target ")
-        if num_required == 0 and "target" in text_to_parse.lower(): # Handle "target N"
-             match = re.search(r"target (\w+) ", text_to_parse.lower())
-             if match and match.group(1) in ["two", "three", "four"]: num_required = {"two":2, "three":3, "four":4}.get(match.group(1), 1)
-             else: num_required = 1 # Assume 1 if pattern is complex
+        # Share the casting parser so reminder text and later references to
+        # "the target" do not invent additional choices during resolution.
+        _, num_required = gs._target_bounds_from_text(text_to_parse)
 
         # Select targets (can be AI or rule-based)
         # Simplified: Use strategic selection helper

@@ -34,7 +34,7 @@ class GameState(
                  "fidelity_counters", "_sba_in_progress", "delayed_triggers",
                  "delayed_event_triggers", "copy_overrides", "plotted_cards",
                  "phase_history", "stack", "priority_pass_count", "last_stack_size",
-                 "turn", "phase", "agent_is_p1", "combat_damage_dealt", "day_night_state",
+                 "turn", "_phase", "_last_turn_phase", "agent_is_p1", "combat_damage_dealt", "day_night_state",
                  "current_attackers", "current_block_assignments", 'mulligan_data',
                  "current_spell_requires_target", "current_spell_card_id", "exhaust_ability_used",
                  "_last_card_locations",
@@ -115,6 +115,30 @@ class GameState(
         9: "MAIN_POSTCOMBAT", 10: "END_STEP", 15: "CLEANUP",
         11: "PRIORITY", 17: "TARGETING", 18: "SACRIFICE", 19: "CHOOSE"
     }
+
+    _TURN_PHASES = frozenset({
+        PHASE_UNTAP, PHASE_UPKEEP, PHASE_DRAW, PHASE_MAIN_PRECOMBAT,
+        PHASE_BEGIN_COMBAT, PHASE_DECLARE_ATTACKERS, PHASE_DECLARE_BLOCKERS,
+        PHASE_FIRST_STRIKE_DAMAGE, PHASE_COMBAT_DAMAGE, PHASE_END_OF_COMBAT,
+        PHASE_MAIN_POSTCOMBAT, PHASE_END_STEP, PHASE_CLEANUP,
+    })
+
+    def _get_phase(self):
+        return self._phase
+
+    def _set_phase(self, value):
+        """Set the public phase while retaining the last real turn phase.
+
+        Priority, targeting, sacrifice, and choice are transient engine
+        wrappers, not turn phases.  Nested wrappers can legitimately consume
+        ``previous_priority_phase``; this independent value lets the turn
+        engine resume without guessing which phase was interrupted.
+        """
+        self._phase = value
+        if value in self._TURN_PHASES:
+            self._last_turn_phase = value
+
+    phase = property(_get_phase, _set_phase)
 
     def __init__(self, card_db, max_turns=20, max_hand_size=7, max_battlefield=20):
         # ... (Keep basic param init) ...
@@ -877,7 +901,7 @@ class GameState(
         # --- Copy Primitive/Immutable Attributes ---
         # List all attributes expected to be simple types (int, float, bool, str, None)
         primitive_attrs = [
-            "turn", "phase", "agent_is_p1", "combat_damage_dealt", "day_night_state",
+            "turn", "phase", "_last_turn_phase", "agent_is_p1", "combat_damage_dealt", "day_night_state",
             "day_night_checked_this_turn", "priority_pass_count", "last_stack_size",
             "previous_priority_phase", "mulligan_in_progress", "bottoming_in_progress",
             "cards_to_bottom", "bottoming_count", "split_second_active", "gravestorm_count",
@@ -1262,6 +1286,11 @@ class GameState(
     def _safe_get_card(self, card_id, default_value=None):
         """Safely get a card with proper error handling and type checking"""
         try:
+            # ``None`` represents the absence of a source/choice throughout the
+            # engine. Turning it into a truthy synthetic Card corrupts feature
+            # checks and produces phantom card behavior.
+            if card_id is None:
+                return default_value
             # Handle case where card_id is itself already a Card object
             if isinstance(card_id, Card):
                 return card_id

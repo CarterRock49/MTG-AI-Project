@@ -142,17 +142,25 @@ but a real promotion requires trained candidate and baseline checkpoints.
 ### Training an Agent
 
 ```bash
-python main.py --timesteps 1000000 --learning-rate 3e-4 --batch-size 256
+python main.py --timesteps 1000000 --learning-rate 3e-4 --batch-size 256 --seed 20260710
 ```
 
 Training and evaluation use separate statistics directories and alternate the
-learned policy between P1 and P2 on successive episodes.
+learned policy between P1 and P2 on successive episodes. Each run also writes a
+`training_run.json` provenance manifest under its model directory, recording the
+seed, Git revision and dirty state, CLI and resolved configuration, device and
+runtime dependencies, deck provenance, lifecycle result, and artifact paths. A
+dirty run also stores a hashed `source_worktree.patch` beside the manifest so
+the exact tracked source delta is retained.
 
 ### Hyperparameter Optimization
 
 ```bash
-python main.py --optimize-hp --n-trials 50
+python main.py --optimize-hp
 ```
+
+The optimizer selects 10, 25, or 50 trials automatically based on the available
+logical CPU count.
 
 ### Testing a Trained Agent
 
@@ -165,11 +173,13 @@ python main.py --resume models/trained_model --timesteps 10000
 - `--resume`: Path to a model to resume training from
 - `--timesteps`: Total timesteps to train (default: 1000000)
 - `--eval-freq`: Evaluation frequency (default: 10000)
+- `--eval-episodes`: Episodes per periodic evaluation (default: 20)
 - `--checkpoint-freq`: Checkpoint frequency (default: 50000)
 - `--learning-rate`: Initial learning rate (default: 3e-4)
 - `--batch-size`: Batch size for training (default: 256)
 - `--n-steps`: Number of steps to collect before training (default: 2048)
 - `--n-envs`: Number of environments to run in parallel (0 = auto)
+- `--seed`: Random seed for reproducible training (default: 42)
 - `--debug`: Enable additional debugging
 - `--optimize-hp`: Run hyperparameter optimization
 - `--record-network`: Enable detailed network recording

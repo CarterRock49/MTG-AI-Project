@@ -10,10 +10,34 @@ from logging.handlers import RotatingFileHandler
 # Create bugs directory if it doesn't exist
 os.makedirs("bugs", exist_ok=True)
 
+# Keep only the most recent logs of each family so bugs/ stops growing
+# without bound across runs.
+KEEP_RECENT_LOGS = 5
+
+def _prune_old_logs(directory="bugs", keep=KEEP_RECENT_LOGS):
+    import glob
+
+    def mtime(path):
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return 0.0
+
+    for family in ("mtg_errors_", "mtg_warnings_", "mtg_debug_"):
+        files = sorted(glob.glob(os.path.join(directory, family + "*")),
+                       key=mtime, reverse=True)
+        for stale in files[keep:]:
+            try:
+                os.remove(stale)
+            except OSError:
+                pass  # still open in another process; the next run gets it
+
+_prune_old_logs()
+
 # Configure logging based on debug mode
-DEBUG_MODE = True
-DEBUG_ENV_RESETS = True  # Track environment resets
-DEBUG_ACTION_STEPS = True  # Track action steps
+DEBUG_MODE = False
+DEBUG_ENV_RESETS = False  # Track environment resets
+DEBUG_ACTION_STEPS = False  # Track action steps
 
 # Generate timestamp for the log files
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -22,11 +46,16 @@ timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 MAX_LOG_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB in bytes
 BACKUP_COUNT = 8  # Number of backup files to keep
 
-# Set up error file handler with rotation
+# Set up error file handler with rotation. delay=True defers creating the
+# file until a record is actually written: importing this module used to
+# leave three empty timestamped files behind on every run.
 error_handler = RotatingFileHandler(
     os.path.join("bugs", f"mtg_errors_{timestamp}.log"),
     maxBytes=MAX_LOG_SIZE,
-    backupCount=BACKUP_COUNT
+    backupCount=BACKUP_COUNT,
+    encoding="utf-8",
+    errors="replace",
+    delay=True,
 )
 error_handler.setLevel(logging.ERROR)
 error_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'))
@@ -35,7 +64,10 @@ error_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(fi
 warning_handler = RotatingFileHandler(
     os.path.join("bugs", f"mtg_warnings_{timestamp}.log"),
     maxBytes=MAX_LOG_SIZE,
-    backupCount=BACKUP_COUNT
+    backupCount=BACKUP_COUNT,
+    encoding="utf-8",
+    errors="replace",
+    delay=True,
 )
 warning_handler.setLevel(logging.WARNING)
 warning_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'))
@@ -51,7 +83,10 @@ warning_handler.addFilter(WarningFilter())
 debug_handler = RotatingFileHandler(
     os.path.join("bugs", f"mtg_debug_{timestamp}.log"),
     maxBytes=MAX_LOG_SIZE,
-    backupCount=BACKUP_COUNT
+    backupCount=BACKUP_COUNT,
+    encoding="utf-8",
+    errors="replace",
+    delay=True,
 )
 debug_handler.setLevel(logging.DEBUG)
 debug_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'))
@@ -119,7 +154,7 @@ def debug_log_valid_actions(game_state, valid_actions, action_reasons, action_lo
                 phase_name = getattr(game_state, '_PHASE_NAMES', {}).get(game_state.phase, f"PHASE_{game_state.phase}")
             
             # Header
-            log_lines = [f"\n=== 🤖 AI ACTIONS ({count}): {player_name} [{phase_name}] ==="]
+            log_lines = [f"\n=== AI ACTIONS ({count}): {player_name} [{phase_name}] ==="]
             
             if count == 0:
                 log_lines.append("  (No valid actions found)")
