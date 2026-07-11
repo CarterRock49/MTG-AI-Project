@@ -82,8 +82,14 @@ class GameStateStackMixin:
             previous_choice = getattr(self, 'choice_context', None)
             previous_targeting = getattr(self, 'targeting_context', None)
             try:
+                # Modal/Spree instructions can have independent target sets.
+                # A bound target snapshot keeps the ordinary sequential-effect
+                # runner (including async discard/dig continuations) while
+                # preventing one mode from seeing another mode's targets.
+                effect_targets = getattr(effect, '_bound_targets', targets)
                 applied = effect.apply(
-                    self, source_id, controller, targets, context=context)
+                    self, source_id, controller, effect_targets,
+                    context=context)
                 success = bool(applied) and success
             except Exception:
                 logging.exception(
@@ -202,12 +208,15 @@ class GameStateStackMixin:
              return "permanent"
          if "target creature or vehicle" in text:
              return "creature_or_vehicle"
+         if "target artifact or creature" in text:
+             return "permanent"
          if "target creature or planeswalker" in text:
              return "permanent"
          if ("target creature" in text
                  or re.search(r"\btarget(?:\s+[a-z-]+){1,4}\s+creatures?\b", text)):
              return "creature"
          if "target player" in text or "target opponent" in text: return "player"
+         if "target spell" in text: return "spell"
          if "target card" in text: return "card"
          if "target artifact" in text: return "artifact"
          if "target enchantment" in text: return "enchantment"
@@ -464,6 +473,114 @@ class GameStateStackMixin:
     def _target_count_from_text(effect_text):
         return GameStateStackMixin._target_bounds_from_text(effect_text)[1]
 
+    def _spree_cost_for_modes(self, card_id, controller, selected_modes,
+                              context=None, apply_modifiers=True):
+        """Return the one cumulative mana cost for a Spree announcement.
+
+        Spree mode costs are additional costs, not separate payments.  They
+        join the printed/alternative base before taxes and reductions are
+        applied exactly once (CR 702.172a).
+        """
+        card = self._safe_get_card(card_id)
+        if not card or not getattr(card, 'is_spree', False):
+            return None
+        modes = list(getattr(card, 'spree_modes', []) or [])
+        chosen = sorted(set(selected_modes or []))
+        if (not chosen or any(
+                not isinstance(index, int) or not 0 <= index < len(modes)
+                for index in chosen)):
+            return None
+
+        cast_context = dict(context or {})
+        cast_context['card'] = card
+        cast_context['selected_spree_modes'] = chosen
+        base_cost = self.mana_system.parse_mana_cost(
+            getattr(card, 'mana_cost', '') or '')
+        total_cost = base_cost
+        for index in chosen:
+            mode_cost = self.mana_system.parse_mana_cost(
+                modes[index].get('cost', '') or '')
+            total_cost = self._combine_cost_dicts(total_cost, mode_cost)
+        if apply_modifiers:
+            total_cost = self.mana_system.apply_cost_modifiers(
+                controller, total_cost, card_id, cast_context)
+        return total_cost
+
+    def _spree_target_slots(self, card, selected_modes):
+        """Build one independent casting target slot per chosen Spree mode."""
+        slots = []
+        modes = list(getattr(card, 'spree_modes', []) or [])
+        for mode_index in sorted(set(selected_modes or [])):
+            if not isinstance(mode_index, int) or not 0 <= mode_index < len(modes):
+                continue
+            effect_text = str(modes[mode_index].get('effect', '') or '')
+            if 'target' not in effect_text.lower():
+                continue
+            min_targets, max_targets = self._target_bounds_from_text(effect_text)
+            slots.append({
+                'mode_index': mode_index,
+                'required_type': self._get_target_type_from_text(effect_text),
+                'effect_text': effect_text,
+                'required_count': max_targets,
+                'min_targets': min_targets,
+                'max_targets': max_targets,
+            })
+        return slots
+
+    def _categorize_targets_for_slot(self, slot, target_ids):
+        """Categorize targets using the announced slot, not shared card IDs."""
+        required_type = str(
+            (slot or {}).get('required_type', '') or '').lower()
+        category_map = {
+            'spell': 'spells', 'ability': 'abilities',
+            'player': 'players', 'creature': 'creatures',
+            'permanent': 'permanents', 'land': 'lands',
+            'artifact': 'artifacts', 'enchantment': 'enchantments',
+            'planeswalker': 'planeswalkers', 'card': 'cards',
+        }
+        forced_category = category_map.get(required_type)
+        categorized = {}
+        for target_id in list(target_ids or []):
+            category = forced_category or self._determine_target_category(
+                target_id)
+            categorized.setdefault(category, []).append(target_id)
+        return categorized
+
+    def spree_mode_is_selectable(self, card_id, controller, selected_modes,
+                                  mode_index, context=None):
+        """Whether adding one Spree mode can still complete a legal cast."""
+        card = self._safe_get_card(card_id)
+        modes = list(getattr(card, 'spree_modes', []) or []) if card else []
+        selected = list(selected_modes or [])
+        if (not getattr(card, 'is_spree', False)
+                or not isinstance(mode_index, int)
+                or not 0 <= mode_index < len(modes)
+                or mode_index in selected):
+            return False
+
+        candidate_modes = sorted(selected + [mode_index])
+        pay_context = dict(context or {})
+        pay_context['card'] = card
+        pay_context['selected_spree_modes'] = candidate_modes
+        total_cost = self._spree_cost_for_modes(
+            card_id, controller, candidate_modes, context=pay_context)
+        if (total_cost is None
+                or not self.mana_system.can_pay_mana_cost_with_lands(
+                    controller, total_cost, pay_context)):
+            return False
+
+        effect_text = str(modes[mode_index].get('effect', '') or '')
+        if 'target' not in effect_text.lower():
+            return True
+        target_type = self._get_target_type_from_text(effect_text)
+        minimum, _ = self._target_bounds_from_text(effect_text)
+        valid_map = self.targeting_system.get_valid_targets(
+            card_id, controller, target_type, effect_text=effect_text)
+        valid_ids = {
+            target_id for ids in valid_map.values() for target_id in ids
+        }
+        return len(valid_ids) >= minimum
+
     def modal_mode_is_selectable(self, choice, mode_index):
         """Return whether a pending mode can complete a legal cast.
 
@@ -484,6 +601,11 @@ class GameStateStackMixin:
         card_id = choice.get("card_id")
         if controller is None or card_id is None:
             return False
+
+        if choice.get('is_spree'):
+            return self.spree_mode_is_selectable(
+                card_id, controller, selected, mode_index,
+                context=choice.get('original_cast_context', {}))
 
         candidate_modes = selected + [mode_index]
         targeting_text = " ".join(modes[index] for index in candidate_modes)
@@ -720,7 +842,7 @@ class GameStateStackMixin:
                 and choice.get("type") == "choose_mode"):
             return False
 
-        selected_modes = list(choice.get("selected_modes", []))
+        selected_modes = sorted(set(choice.get("selected_modes", [])))
         min_required = int(choice.get("min_required", 1))
         max_required = int(choice.get("max_required", 1))
         if not (min_required <= len(selected_modes) <= max_required):
@@ -733,7 +855,11 @@ class GameStateStackMixin:
             return False
 
         cast_context = dict(choice.get("original_cast_context", {}))
-        cast_context["selected_modes"] = selected_modes
+        if choice.get('is_spree'):
+            cast_context["selected_spree_modes"] = selected_modes
+            cast_context["is_spree"] = True
+        else:
+            cast_context["selected_modes"] = selected_modes
         self.choice_context = None
         self._restore_casting_return(choice)
         success = self.cast_spell(card_id, controller, cast_context)
@@ -1277,19 +1403,40 @@ class GameStateStackMixin:
 
         # --- 2. Check for Modal Spell ---
         modal_modes, min_modes, max_modes = None, 0, 0
-        is_modal_spell = False
-        if self.ability_handler and hasattr(self.ability_handler, '_parse_modal_text'):
+        is_spree_spell = bool(
+            getattr(card, 'is_spree', False)
+            and getattr(card, 'spree_modes', None))
+        is_modal_spell = is_spree_spell
+        if is_spree_spell:
+             modal_modes = [
+                 str(mode.get('effect', '') or '')
+                 for mode in card.spree_modes]
+             min_modes, max_modes = 1, len(modal_modes)
+        elif self.ability_handler and hasattr(self.ability_handler, '_parse_modal_text'):
              modal_modes, min_modes, max_modes = self.ability_handler._parse_modal_text(getattr(card, 'oracle_text', ''))
              if modal_modes: is_modal_spell = True
 
         # Modes are chosen before targets and costs are determined (CR 601.2b).
-        if is_modal_spell and 'selected_modes' not in context:
+        modes_are_announced = (
+            'selected_spree_modes' in context if is_spree_spell
+            else 'selected_modes' in context)
+        if is_modal_spell and not modes_are_announced:
+             if (is_spree_spell and not any(
+                     self.spree_mode_is_selectable(
+                         card_id, player, [], mode_index, context=context)
+                     for mode_index in range(len(modal_modes)))):
+                 logging.warning(
+                     f"Cannot cast {card.name}: no legal affordable Spree mode.")
+                 return False
              choice_context = {
                  'type': 'choose_mode', 'player': player, 'controller': player,
                  'card_id': card_id,
                  'num_choices': len(modal_modes),
                  'min_required': min_modes, 'max_required': max_modes,
                  'available_modes': modal_modes, 'selected_modes': [],
+                 'is_spree': is_spree_spell,
+                 'mode_costs': ([mode.get('cost', '') for mode in card.spree_modes]
+                                if is_spree_spell else []),
                  'original_cast_context': dict(context),
                  'resolved': False,
              }
@@ -1380,6 +1527,31 @@ class GameStateStackMixin:
                         # *** FIXED: Use internal helper repeatedly ***
                         final_cost_dict = self._combine_cost_dicts(final_cost_dict, escalate_cost_each_dict)
 
+        # Spree mode costs are mandatory additional costs for the modes chosen
+        # at announcement.  They remain payable even when an effect waives or
+        # replaces the printed mana cost, so this intentionally sits outside
+        # ``apply_additional_costs`` and before the one modifier pass.
+        if is_spree_spell:
+            selected_spree_modes = sorted(set(
+                context.get('selected_spree_modes', [])))
+            if (not selected_spree_modes
+                    or any(not isinstance(index, int)
+                           or not 0 <= index < len(card.spree_modes)
+                           for index in selected_spree_modes)):
+                logging.warning(
+                    f"Cannot cast {card.name}: Spree requires one or more "
+                    "distinct valid modes.")
+                return False
+            context['selected_spree_modes'] = selected_spree_modes
+            context['is_spree'] = True
+            context['spree_mode_costs'] = []
+            for mode_index in selected_spree_modes:
+                mode_cost_text = card.spree_modes[mode_index].get('cost', '')
+                mode_cost = self.mana_system.parse_mana_cost(mode_cost_text)
+                final_cost_dict = self._combine_cost_dicts(
+                    final_cost_dict, mode_cost)
+                context['spree_mode_costs'].append(mode_cost_text)
+
         # Work out target bounds before the final cost because some sample
         # spells price themselves from the targets chosen at CR 601.2c.
         requires_target = False
@@ -1397,19 +1569,41 @@ class GameStateStackMixin:
             targeting_text = getattr(card, 'oracle_text', '')
         else:
             targeting_text = ''
+        selected_modes = []
+        spree_target_slots = []
         if is_modal_spell:
-            selected_modes = context.get('selected_modes', [])
+            selected_modes = context.get(
+                'selected_spree_modes' if is_spree_spell else 'selected_modes',
+                [])
             targeting_text = " ".join(
                 modal_modes[index]
                 for index in selected_modes
                 if 0 <= index < len(modal_modes)
             )
-        targeting_text_lower = targeting_text.lower()
-        requires_target = "target" in targeting_text_lower
-        parsed_min, parsed_max = self._target_bounds_from_text(targeting_text) if requires_target else (0, 0)
-        num_targets = parsed_max
-        up_to_N = parsed_min == 0
-        min_targets = parsed_min
+        if is_spree_spell:
+            spree_target_slots = self._spree_target_slots(
+                card, selected_modes)
+            context['spree_target_slots'] = copy_module.deepcopy(
+                spree_target_slots)
+            requires_target = bool(spree_target_slots)
+            min_targets = sum(
+                int(slot.get('min_targets', 0))
+                for slot in spree_target_slots)
+            num_targets = sum(
+                int(slot.get('max_targets', 0))
+                for slot in spree_target_slots)
+            up_to_N = any(
+                int(slot.get('min_targets', 0)) == 0
+                for slot in spree_target_slots)
+        else:
+            targeting_text_lower = targeting_text.lower()
+            requires_target = "target" in targeting_text_lower
+            parsed_min, parsed_max = (
+                self._target_bounds_from_text(targeting_text)
+                if requires_target else (0, 0))
+            num_targets = parsed_max
+            up_to_N = parsed_min == 0
+            min_targets = parsed_min
         targets_committed = (
             "targets" in context and isinstance(context.get("targets"), dict))
         target_selection_pending = False
@@ -1465,50 +1659,111 @@ class GameStateStackMixin:
             context["bargain_sacrifice_id"] = None
 
         # --- Check Targets and target-conditioned affordability ---
+        target_type = None
         if requires_target and num_targets > 0:
             if not self.targeting_system:
                 logging.warning("Cannot check target availability: TargetingSystem missing.")
                 return False
-            target_type = self._get_target_type_from_text(targeting_text)
-            if targets_committed:
-                chosen_targets = context.get("targets", {})
-                chosen_count = len(self._flatten_target_ids(chosen_targets))
-                if not min_targets <= chosen_count <= num_targets:
-                    logging.warning(
-                        f"Cannot cast {card.name}: chose {chosen_count} targets, "
-                        f"expected {min_targets}-{num_targets}.")
-                    return False
-                if not self.targeting_system.validate_targets(
-                        card_id, chosen_targets, player,
-                        effect_text=targeting_text):
-                    logging.warning(f"Cannot cast {card.name}: chosen targets are illegal.")
-                    return False
-            else:
-                valid_targets_map = self.targeting_system.get_valid_targets(
-                    card_id, player, target_type, effect_text=targeting_text)
-                valid_target_ids = {
-                    target_id
-                    for ids in valid_targets_map.values()
-                    for target_id in ids
-                }
-                if len(valid_target_ids) < min_targets:
-                    logging.warning(
-                        f"Cannot cast {card.name}: Not enough valid targets available "
-                        f"({len(valid_target_ids)}/{min_targets} needed).")
-                    return False
-
-                target_selection_pending = True
-                if self.mana_system.has_target_dependent_reduction(card):
-                    can_pay_without_discount = self.mana_system.can_pay_mana_cost_with_lands(
-                        player, final_cost_dict, context)
-                    can_pay_with_discount = (
-                        self.mana_system.can_pay_with_target_dependent_reduction(
-                            player, cost_before_modifiers, card_id, context))
-                    if not (can_pay_without_discount or can_pay_with_discount):
+            if spree_target_slots:
+                target_type = spree_target_slots[0].get(
+                    'required_type', 'target')
+                if targets_committed:
+                    targets_by_slot = context.get('targets_by_slot')
+                    if (not isinstance(targets_by_slot, list)
+                            or len(targets_by_slot) != len(spree_target_slots)):
                         logging.warning(
-                            f"Cannot cast {card.name}: no legal target selection is affordable.")
+                            f"Cannot cast {card.name}: Spree target slots are "
+                            "missing or incomplete.")
                         return False
-                    target_selection_affordable_via_reduction = can_pay_with_discount
+                    for slot, slot_targets in zip(
+                            spree_target_slots, targets_by_slot):
+                        slot_targets = list(slot_targets or [])
+                        slot_min = int(slot.get('min_targets', 0))
+                        slot_max = int(slot.get('max_targets', 0))
+                        if not slot_min <= len(slot_targets) <= slot_max:
+                            logging.warning(
+                                f"Cannot cast {card.name}: Spree mode "
+                                f"{slot.get('mode_index')} chose "
+                                f"{len(slot_targets)} targets, expected "
+                                f"{slot_min}-{slot_max}.")
+                            return False
+                        valid_map = self.targeting_system.get_valid_targets(
+                            card_id, player,
+                            slot.get('required_type', 'target'),
+                            effect_text=slot.get('effect_text', ''))
+                        valid_ids = {
+                            target_id
+                            for ids in valid_map.values()
+                            for target_id in ids
+                        }
+                        if any(
+                                target_id not in valid_ids
+                                for target_id in slot_targets):
+                            logging.warning(
+                                f"Cannot cast {card.name}: chosen target for "
+                                f"Spree mode {slot.get('mode_index')} is illegal.")
+                            return False
+                else:
+                    for slot in spree_target_slots:
+                        valid_targets_map = self.targeting_system.get_valid_targets(
+                            card_id, player,
+                            slot.get('required_type', 'target'),
+                            effect_text=slot.get('effect_text', ''))
+                        valid_target_ids = {
+                            target_id
+                            for ids in valid_targets_map.values()
+                            for target_id in ids
+                        }
+                        if len(valid_target_ids) < int(
+                                slot.get('min_targets', 0)):
+                            logging.warning(
+                                f"Cannot cast {card.name}: no legal target for "
+                                f"Spree mode {slot.get('mode_index')}.")
+                            return False
+                    target_selection_pending = True
+            else:
+                target_type = self._get_target_type_from_text(targeting_text)
+                if targets_committed:
+                    chosen_targets = context.get("targets", {})
+                    chosen_count = len(self._flatten_target_ids(chosen_targets))
+                    if not min_targets <= chosen_count <= num_targets:
+                        logging.warning(
+                            f"Cannot cast {card.name}: chose {chosen_count} targets, "
+                            f"expected {min_targets}-{num_targets}.")
+                        return False
+                    if not self.targeting_system.validate_targets(
+                            card_id, chosen_targets, player,
+                            effect_text=targeting_text):
+                        logging.warning(f"Cannot cast {card.name}: chosen targets are illegal.")
+                        return False
+                else:
+                    valid_targets_map = self.targeting_system.get_valid_targets(
+                        card_id, player, target_type,
+                        effect_text=targeting_text)
+                    valid_target_ids = {
+                        target_id
+                        for ids in valid_targets_map.values()
+                        for target_id in ids
+                    }
+                    if len(valid_target_ids) < min_targets:
+                        logging.warning(
+                            f"Cannot cast {card.name}: Not enough valid targets available "
+                            f"({len(valid_target_ids)}/{min_targets} needed).")
+                        return False
+                    target_selection_pending = True
+
+            if (target_selection_pending
+                    and self.mana_system.has_target_dependent_reduction(card)):
+                can_pay_without_discount = self.mana_system.can_pay_mana_cost_with_lands(
+                    player, final_cost_dict, context)
+                can_pay_with_discount = (
+                    self.mana_system.can_pay_with_target_dependent_reduction(
+                        player, cost_before_modifiers, card_id, context))
+                if not (can_pay_without_discount or can_pay_with_discount):
+                    logging.warning(
+                        f"Cannot cast {card.name}: no legal target selection is affordable.")
+                    return False
+                target_selection_affordable_via_reduction = can_pay_with_discount
 
         # --- Check Affordability and nonmana costs ---
         additional_cost_info = context.get('additional_cost_info')
@@ -1592,15 +1847,27 @@ class GameStateStackMixin:
             targeting_return_phase = self.phase
             targeting_return_previous_priority_phase = \
                 self.previous_priority_phase
+            first_target_slot = (
+                spree_target_slots[0] if spree_target_slots else None)
             self.phase = self.PHASE_TARGETING
             self.targeting_context = {
                 "source_id": card_id, "controller": player,
-                "required_type": target_type,
-                "required_count": num_targets,
-                "min_targets": min_targets,
-                "max_targets": num_targets,
+                "required_type": (
+                    first_target_slot.get('required_type', 'target')
+                    if first_target_slot else target_type),
+                "required_count": (
+                    int(first_target_slot.get('required_count', 1))
+                    if first_target_slot else num_targets),
+                "min_targets": (
+                    int(first_target_slot.get('min_targets', 1))
+                    if first_target_slot else min_targets),
+                "max_targets": (
+                    int(first_target_slot.get('max_targets', 1))
+                    if first_target_slot else num_targets),
                 "selected_targets": [],
-                "effect_text": targeting_text,
+                "effect_text": (
+                    first_target_slot.get('effect_text', '')
+                    if first_target_slot else targeting_text),
                 "resume_cast": True,
                 "original_cast_context": dict(context),
                 "targeting_return_phase": targeting_return_phase,
@@ -1611,6 +1878,12 @@ class GameStateStackMixin:
                 "cost_before_modifiers": copy_module.deepcopy(
                     cost_before_modifiers),
             }
+            if spree_target_slots:
+                self.targeting_context.update({
+                    'target_slots': copy_module.deepcopy(spree_target_slots),
+                    'target_slot_index': 0,
+                    'targets_by_slot': [],
+                })
             self.priority_player = player
             self.priority_pass_count = 0
             logging.info(f"Waiting for targets before casting {card.name}.")
@@ -1902,6 +2175,48 @@ class GameStateStackMixin:
     def _validate_targets_on_resolution(self, source_id, controller, targets, context=None):
         """Checks if the targets selected for a spell/ability are still valid upon resolution."""
         if context is None: context = {} # Ensure context is dict
+
+        # Each chosen Spree mode owns its target slot.  An invalid target skips
+        # only that mode; the whole spell fizzles only when it originally had
+        # targets and every one of them is now illegal (CR 608.2b, 702.172).
+        spree_slots = context.get('spree_target_slots') or []
+        spree_targets = context.get('targets_by_slot') or []
+        if context.get('is_spree') and spree_slots:
+            if len(spree_targets) != len(spree_slots):
+                return False
+            filtered_slots = []
+            original_target_count = 0
+            legal_target_count = 0
+            for slot, selected_ids in zip(spree_slots, spree_targets):
+                selected_ids = list(selected_ids or [])
+                original_target_count += len(selected_ids)
+                valid_map = self.targeting_system.get_valid_targets(
+                    source_id, controller,
+                    slot.get('required_type', 'target'),
+                    effect_text=slot.get('effect_text', ''))
+                valid_ids = {
+                    target_id
+                    for ids in valid_map.values()
+                    for target_id in ids
+                }
+                legal_ids = [
+                    target_id for target_id in selected_ids
+                    if target_id in valid_ids]
+                filtered_slots.append(legal_ids)
+                legal_target_count += len(legal_ids)
+
+            categorized_targets = {}
+            for slot, slot_targets in zip(spree_slots, filtered_slots):
+                for category, target_ids in self._categorize_targets_for_slot(
+                        slot, slot_targets).items():
+                    categorized_targets.setdefault(category, []).extend(
+                        target_ids)
+            context['targets_by_slot'] = filtered_slots
+            context['targets'] = categorized_targets
+            if isinstance(targets, dict):
+                targets.clear()
+                targets.update(categorized_targets)
+            return original_target_count == 0 or legal_target_count > 0
 
         # Use TargetingSystem if available
         if hasattr(self, 'targeting_system') and self.targeting_system:
@@ -2364,6 +2679,11 @@ class GameStateStackMixin:
             fallback_context["requires_target"] = False
             return self._resolve_creature_spell(spell_id, controller, fallback_context)
 
+        if ('selected_spree_modes' in context
+                or context.get('is_spree', False)):
+            return self._resolve_spree_modes(
+                spell_id, controller, context)
+
         # --- MODAL SPELL RESOLUTION ---
         selected_modes_indices = context.get("selected_modes") # Get list of chosen indices
         if selected_modes_indices is not None: # Check specifically for None, empty list is valid (for "up to" maybe)
@@ -2424,6 +2744,67 @@ class GameStateStackMixin:
 
             # Post-resolution SBAs are handled by the main loop
             return success
+
+    def _resolve_spree_modes(self, spell_id, controller, context):
+        """Resolve chosen Spree modes in printed order with bound targets."""
+        spell = self._safe_get_card(spell_id)
+        modes = list(getattr(spell, 'spree_modes', []) or []) if spell else []
+        selected_modes = sorted(set(
+            context.get('selected_spree_modes', [])))
+        if (not modes or not selected_modes
+                or any(not isinstance(index, int)
+                       or not 0 <= index < len(modes)
+                       for index in selected_modes)):
+            logging.error(
+                f"Cannot resolve Spree spell {getattr(spell, 'name', spell_id)}: "
+                "invalid mode announcement.")
+            return False
+
+        targets_by_mode = {}
+        slots = list(context.get('spree_target_slots', []) or [])
+        targets_by_slot = list(context.get('targets_by_slot', []) or [])
+        for slot_index, slot in enumerate(slots):
+            mode_index = slot.get('mode_index')
+            selected_ids = (
+                list(targets_by_slot[slot_index] or [])
+                if slot_index < len(targets_by_slot) else [])
+            targets_by_mode[mode_index] = self._categorize_targets_for_slot(
+                slot, selected_ids)
+
+        effects = []
+        parsed_all_modes = True
+        for mode_index in selected_modes:
+            mode_text = str(modes[mode_index].get('effect', '') or '')
+            mode_targets = targets_by_mode.get(mode_index, {})
+            # Resolution-time validation has already removed illegal targets.
+            # A targeted mode with none left does nothing, while targetless
+            # chosen modes still resolve.
+            if ('target' in mode_text.lower()
+                    and not self._flatten_target_ids(mode_targets)):
+                continue
+            mode_effects = EffectFactory.create_effects(
+                mode_text, mode_targets,
+                source_name=getattr(spell, 'name', None))
+            if not mode_effects:
+                parsed_all_modes = False
+                logging.warning(
+                    f"No effects parsed for Spree mode {mode_index} of "
+                    f"{getattr(spell, 'name', spell_id)}.")
+                continue
+            for effect in mode_effects:
+                effect._bound_targets = copy_module.deepcopy(mode_targets)
+                effect._spree_mode_index = mode_index
+                effects.append(effect)
+
+        finalizer = {
+            'kind': 'modal_spell', 'source_id': spell_id,
+            'controller_id': self._effect_controller_id(controller),
+            'context': self._copy_stack_context(context),
+        }
+        success, pending = self._run_effect_sequence(
+            effects, spell_id, controller, {}, context=context,
+            finalizer=finalizer, initial_success=parsed_all_modes)
+        return True if pending else success
 
     def _finish_modal_spell_resolution(self, spell_id, controller, context,
                                        effects_succeeded=True):

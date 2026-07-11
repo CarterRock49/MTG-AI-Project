@@ -1143,6 +1143,62 @@ def s_cast_and_resolve():
         "empty-stack resolution did not restore the underlying main phase"
 
 
+@scenario("109.2 / 109.2b", "a creature spell on the stack is not a creature target")
+def s_creature_spell_is_not_a_creature_permanent_target():
+    gs = fresh()
+    env = get_env()
+    controller = gs._get_active_player()
+    gs.agent_is_p1 = controller is gs.p1
+    gs.priority_player = controller
+    replace_hand(gs, controller, [])
+    creature_spell = inject_into_zone(gs, controller, {
+        "name": "Pending Creature Spell", "mana_cost": "{G}", "cmc": 1,
+        "type_line": "Creature - Scout", "oracle_text": "",
+        "power": "1", "toughness": "1",
+    }, "hand")
+    removal = inject_into_zone(gs, controller, {
+        "name": "Anoint Targeting Probe", "mana_cost": "{1}{B}", "cmc": 2,
+        "type_line": "Instant",
+        "oracle_text": "Exile target creature if it has mana value 3 or less.",
+    }, "hand")
+    controller["mana_pool"].update({"G": 1, "B": 1, "C": 1})
+    assert gs.cast_spell(creature_spell, controller), \
+        "setup creature did not reach the stack"
+    assert creature_spell not in controller["battlefield"]
+    opponent = gs.p2 if controller is gs.p1 else gs.p1
+    battlefield_creature = inject_into_zone(gs, opponent, {
+        "name": "Legal Creature Permanent", "mana_cost": "{1}{G}", "cmc": 2,
+        "type_line": "Creature - Scout", "oracle_text": "",
+        "power": "2", "toughness": "2",
+    }, "battlefield")
+
+    valid_map = gs.targeting_system.get_valid_targets(
+        removal, controller, "creature",
+        effect_text=gs._safe_get_card(removal).oracle_text)
+    flat_targets = {target for targets in valid_map.values() for target in targets}
+    assert creature_spell not in flat_targets, \
+        "target creature incorrectly included a creature spell on the stack"
+    assert flat_targets == {battlefield_creature}, flat_targets
+    mask = env.action_mask()
+    assert mask[20], "removal was not exposed for its legal creature permanent"
+    env.action_handler.current_valid_actions = mask
+    _, _, _, cast_info = env.action_handler.apply_action(20)
+    assert not cast_info.get("execution_failed"), cast_info
+    assert gs.targeting_context, "the removal did not request its target"
+    candidates = env.action_handler._get_target_selection_candidates(
+        controller, gs.targeting_context)
+    assert candidates == [battlefield_creature], candidates
+    target_mask = env.action_mask()
+    assert target_mask[274]
+    env.action_handler.current_valid_actions = target_mask
+    _, _, _, target_info = env.action_handler.apply_action(274)
+    assert not target_info.get("execution_failed"), target_info
+    assert removal not in controller["hand"]
+    assert gs.stack[-1][1] == removal
+    assert gs.stack[-1][3].get("targets") == {
+        "creatures": [battlefield_creature]}
+
+
 @scenario("500", "phase progression advances through the turn without error")
 def s_phase_progression():
     gs = fresh()
@@ -10946,49 +11002,470 @@ def scenario_non_layer_declarations_are_not_static_abilities():
             f"dedicated declaration was also registered as static: {declaration}"
 
 
-@scenario("702.172 / policy contract", "unsupported Spree cards are masked and excluded exactly once")
-def scenario_spree_cast_is_masked_and_manifested_once():
+def _three_steps_action(hand_index):
+    """The public PLAY_SPELL action for one of the ten actionable hand slots."""
+    assert 0 <= hand_index < 10
+    return 20 + hand_index if hand_index < 8 else 396 + hand_index - 8
+
+
+def _three_steps_mana(generic, blue):
+    return {
+        "W": 0, "U": blue, "B": 0, "R": 0, "G": 0, "C": generic,
+    }
+
+
+def _setup_three_steps(seed, generic, blue, *, hand_index=0,
+                       spell_target=False, copy_target=False):
+    """Create an instant-speed Three Steps Ahead casting decision.
+
+    The target objects are deliberately synthetic and uniquely identified so
+    the public target actions can prove that each selected mode retains its
+    own targeting restriction.
+    """
+    gs = fresh(seed)
+    env = get_env()
+    handler = env.action_handler
+    player = gs.p1 if gs.agent_is_p1 else gs.p2
+    opponent = gs.p2 if player is gs.p1 else gs.p1
+    gs.turn = 1 if player is gs.p1 else 2
+    gs.phase = gs.PHASE_PRIORITY
+    gs.previous_priority_phase = gs.PHASE_UPKEEP
+    gs.priority_player = player
+    gs.priority_pass_count = 0
+    gs.stack.clear()
+
+    replace_hand(gs, player, [{
+        "name": f"Spree Hand Filler {seed}-{index}",
+        "mana_cost": "{1}", "type_line": "Sorcery",
+        "oracle_text": "Draw a card.",
+    } for index in range(hand_index)])
+    spree_id = inject_real_card(gs, player, "Three Steps Ahead", "hand")
+    assert player["hand"].index(spree_id) == hand_index
+    spree = gs._safe_get_card(spree_id)
+    assert [mode.get("cost") for mode in spree.spree_modes] == [
+        "{1}{U}", "{3}", "{2}"], \
+        f"real Three Steps Ahead parsed the wrong Spree modes: {spree.spree_modes}"
+
+    target_spell = None
+    if spell_target:
+        target_spell = inject_card(gs, {
+            "name": f"Spree Target Spell {seed}", "mana_cost": "{1}",
+            "type_line": "Instant", "oracle_text": "Draw a card.",
+        })
+        gs.add_to_stack("SPELL", target_spell, opponent, {
+            "requires_target": False, "num_targets": 0,
+        })
+
+    target_permanent = None
+    if copy_target:
+        target_permanent = inject_into_zone(gs, player, {
+            "name": f"Spree Copy Construct {seed}", "mana_cost": "{3}",
+            "type_line": "Artifact Creature - Construct", "oracle_text": "",
+            "power": 2, "toughness": 3,
+        }, "battlefield")
+
+    # add_to_stack gives its controller priority. The test decision belongs to
+    # the Three Steps Ahead player regardless of whether a target was staged.
+    gs.phase = gs.PHASE_PRIORITY
+    gs.previous_priority_phase = gs.PHASE_UPKEEP
+    gs.priority_player = player
+    gs.priority_pass_count = 0
+    player["mana_pool"] = _three_steps_mana(generic, blue)
+    handler.current_valid_actions = None
+    return (gs, env, handler, player, opponent, spree_id,
+            target_spell, target_permanent)
+
+
+def _apply_public_action(handler, action, message):
+    """Apply an action through the same mask/dispatch boundary used by PPO."""
+    mask = handler.generate_valid_actions()
+    assert mask[action], f"{message}: action {action} absent; valid={np.flatnonzero(mask).tolist()}"
+    handler.current_valid_actions = mask
+    reward, done, truncated, info = handler.apply_action(action)
+    assert not info.get("execution_failed"), \
+        f"{message}: mask-valid action failed: reward={reward}, info={info}"
+    assert not info.get("critical_error"), f"{message}: {info}"
+    return reward, done, truncated, info
+
+
+def _begin_three_steps(handler, hand_index=0):
+    _apply_public_action(
+        handler, _three_steps_action(hand_index), "begin Three Steps Ahead")
+    gs = handler.game_state
+    assert gs.phase == gs.PHASE_CHOOSE and gs.choice_context, \
+        "Spree cast did not enter its mode-choice phase"
+    assert gs.choice_context.get("type") == "choose_mode" \
+        and gs.choice_context.get("is_spree"), \
+        f"Spree used the wrong choice contract: {gs.choice_context}"
+
+
+def _choose_three_steps_mode(handler, mode_index):
+    _apply_public_action(
+        handler, 353 + mode_index, f"choose Three Steps Ahead mode {mode_index}")
+
+
+def _finish_three_steps_modes(handler):
+    gs = handler.game_state
+    if (gs.phase == gs.PHASE_CHOOSE and gs.choice_context
+            and gs.choice_context.get("is_spree")):
+        _apply_public_action(handler, 11, "finish Three Steps Ahead modes")
+
+
+def _select_three_steps_target(handler, player, target_id):
+    gs = handler.game_state
+    assert gs.phase == gs.PHASE_TARGETING and gs.targeting_context, \
+        f"Three Steps Ahead did not request target {target_id}"
+    candidates = handler._get_target_selection_candidates(
+        player, gs.targeting_context)
+    assert target_id in candidates, \
+        f"target {target_id} absent from Spree candidates {candidates}"
+    candidate_index = candidates.index(target_id)
+    for _ in range(candidate_index // 10):
+        _apply_public_action(handler, 479, "page Three Steps Ahead targets")
+    _apply_public_action(
+        handler, 274 + candidate_index % 10,
+        f"select Three Steps Ahead target {target_id}")
+
+
+def _cast_three_steps_modes(handler, player, modes, target_spell=None,
+                            target_permanent=None, selection_order=None):
+    _begin_three_steps(handler, player["hand"].index(
+        next(card_id for card_id in player["hand"]
+             if getattr(handler.game_state._safe_get_card(card_id), "name", "")
+             == "Three Steps Ahead")))
+    for mode_index in (selection_order or modes):
+        _choose_three_steps_mode(handler, mode_index)
+    _finish_three_steps_modes(handler)
+
+    gs = handler.game_state
+    targets_by_mode = {0: target_spell, 1: target_permanent}
+    while gs.phase == gs.PHASE_TARGETING and gs.targeting_context:
+        slots = gs.targeting_context.get("target_slots", [])
+        slot_index = int(gs.targeting_context.get("target_slot_index", 0))
+        assert slots and slot_index < len(slots), \
+            f"Spree targeting omitted its mode slots: {gs.targeting_context}"
+        mode_index = slots[slot_index].get("mode_index")
+        target_id = targets_by_mode.get(mode_index)
+        assert target_id is not None, \
+            f"no test target supplied for Spree mode {mode_index}"
+        _select_three_steps_target(handler, player, target_id)
+
+    assert gs.stack and gs.stack[-1][0] == "SPELL", \
+        "Three Steps Ahead never reached the stack"
+    return gs.stack[-1][3]
+
+
+def _remove_test_spell_from_stack(gs, spell_id, owner):
+    for index, item in enumerate(gs.stack):
+        if isinstance(item, tuple) and item[0] == "SPELL" and item[1] == spell_id:
+            gs.stack.pop(index)
+            assert gs.move_card(
+                spell_id, owner, "stack_implicit", owner, "graveyard",
+                cause="scenario_target_removed")
+            return
+    raise AssertionError(f"test spell {spell_id} was not on the stack")
+
+
+@scenario("702.172 / policy contract", "Three Steps Ahead reaches all three modes from the tenth hand slot")
+def scenario_spree_tenth_hand_slot_and_third_mode_are_addressable():
     from Playersim import card_support
 
     card_support.reset_manifest_for_tests()
     try:
-        gs = fresh(SEED + 130); env = get_env()
-        gs.agent_is_p1 = False
-        player = gs.p2
-        gs.turn = 2
-        gs.phase = gs.PHASE_UPKEEP
-        gs.previous_priority_phase = None
-        gs.priority_player = player
-        gs.priority_pass_count = 0
-        gs.stack.clear()
-        replace_hand(gs, player, [{
-            "name": f"Spree Slot Filler {index}", "mana_cost": "{1}",
-            "type_line": "Sorcery", "oracle_text": "Draw a card.",
-        } for index in range(2)])
-        spree_id = inject_real_card(gs, player, "Three Steps Ahead", "hand")
-        spree = gs._safe_get_card(spree_id)
-        assert len(spree.spree_modes) == 3, \
-            f"real reminder-text Spree parsed {spree.spree_modes}"
-        assert spree.spree_modes[0]["cost"] == "{1}{U}" \
-            and "counter target spell" in spree.spree_modes[0]["effect"].lower()
-        player["mana_pool"] = {
-            "W": 0, "U": 5, "B": 0, "R": 0, "G": 0, "C": 5}
-        inject_into_zone(gs, player, {
-            "name": "Spree Copy Candidate", "type_line": "Artifact",
-            "oracle_text": "",
-        }, "battlefield")
+        (gs, env, handler, player, _, spree_id, _, _) = _setup_three_steps(
+            SEED + 130, 0, 1, hand_index=9)
+        cast_action = _three_steps_action(9)
+        assert cast_action == 397
+        assert not env.action_mask()[cast_action], \
+            "base {U} incorrectly paid a required Spree additional cost"
 
-        first_mask = env.action_mask()
-        second_mask = env.action_mask()
-        assert not first_mask[22] and not second_mask[22], \
-            "Three Steps Ahead was exposed as an ordinary base-cost instant"
-        entry = card_support.get_manifest().entries.get("Three Steps Ahead")
-        assert entry and entry["severity"] == "unparsed", entry
-        assert entry["count"] == 1 \
-            and entry["reasons"].get("spree casting flow not implemented") == 1, \
-            f"mask probes inflated the Spree support count: {entry}"
+        player["mana_pool"] = _three_steps_mana(2, 1)
+        cast_mask = env.action_mask()
+        assert cast_mask[cast_action], \
+            "draw/discard mode did not make Three Steps Ahead castable"
+        handler.current_valid_actions = cast_mask
+        _, _, _, info = handler.apply_action(cast_action)
+        assert not info.get("execution_failed"), info
+        assert spree_id in player["hand"], \
+            "Spree left hand or paid mana before its modes were chosen"
+        assert sum(player["mana_pool"].values()) == 3
+
+        choice_mask = handler.generate_valid_actions()
+        assert not choice_mask[353] and not choice_mask[354] and choice_mask[355], \
+            f"unchosen target requirements leaked into Spree: {np.flatnonzero(choice_mask).tolist()}"
+        assert not choice_mask[11], "Spree allowed choosing zero modes"
+        assert not choice_mask[258:274].any(), \
+            "legacy two-mode Spree actions leaked into the public mask"
+        _choose_three_steps_mode(handler, 2)
+        assert handler.generate_valid_actions()[11], \
+            "Pass was not offered after the first required Spree mode"
+        _finish_three_steps_modes(handler)
+        assert gs.stack[-1][3].get("selected_spree_modes") == [2]
+        paid = gs.stack[-1][3].get("final_paid_cost", {})
+        assert paid.get("generic") == 2 and paid.get("U") == 1, paid
+        assert not card_support.get_manifest().entries.get("Three Steps Ahead"), \
+            "supported Three Steps Ahead remained in the support-gap manifest"
     finally:
         card_support.reset_manifest_for_tests()
+
+
+@scenario("601.2b/f / 702.172", "Spree mode masks use cumulative costs and reject duplicate or forged choices")
+def scenario_spree_cumulative_affordability_and_duplicate_contract():
+    (gs, _, handler, player, _, _, target_spell,
+     target_permanent) = _setup_three_steps(
+         SEED + 131, 3, 2, spell_target=True, copy_target=True)
+    _begin_three_steps(handler)
+    first_mask = handler.generate_valid_actions()
+    assert first_mask[353] and first_mask[354] and first_mask[355], \
+        "an individually affordable legal Spree mode was absent"
+    _choose_three_steps_mode(handler, 0)
+
+    selected_before = list(gs.choice_context.get("selected_modes", []))
+    next_mask = handler.generate_valid_actions()
+    assert not next_mask[353], "the same Spree mode was selectable twice"
+    assert not next_mask[354], \
+        "mode 1 ignored the cumulative {4}{U}{U} cost"
+    assert next_mask[355] and next_mask[11], \
+        "the exact-cost second mode or Finish action was absent"
+    reward, ok = handler._handle_choose_mode(0, {})
+    assert not ok and gs.choice_context.get("selected_modes") == selected_before, \
+        f"duplicate direct mode choice mutated state: reward={reward}"
+    reward, ok = handler._handle_choose_mode(1, {})
+    assert not ok and gs.choice_context.get("selected_modes") == selected_before, \
+        f"unaffordable direct mode choice mutated state: reward={reward}"
+
+    _choose_three_steps_mode(handler, 2)
+    _finish_three_steps_modes(handler)
+    assert gs.targeting_context.get("target_slots", [])[0].get("mode_index") == 0
+    _select_three_steps_target(handler, player, target_spell)
+    stack_context = gs.stack[-1][3]
+    assert stack_context.get("selected_spree_modes") == [0, 2]
+    paid = stack_context.get("final_paid_cost", {})
+    assert paid.get("generic") == 3 and paid.get("U") == 2, paid
+    assert sum(player["mana_pool"].values()) == 0
+    assert target_permanent in player["battlefield"], \
+        "an unchosen Spree target was changed"
+
+
+@scenario("601.2f / 702.172", "all seven Three Steps Ahead mode combinations add their costs exactly once")
+def scenario_three_steps_ahead_all_mode_combination_costs():
+    cases = [
+        ((0,), 1, 2),
+        ((1,), 3, 1),
+        ((2,), 2, 1),
+        ((0, 1), 4, 2),
+        ((0, 2), 3, 2),
+        ((1, 2), 5, 1),
+        ((0, 1, 2), 6, 2),
+    ]
+    for case_index, (modes, generic, blue) in enumerate(cases):
+        (gs, _, handler, player, _, spree_id, target_spell,
+         target_permanent) = _setup_three_steps(
+             SEED + 132 + case_index, generic, blue,
+             spell_target=True, copy_target=True)
+        stack_context = _cast_three_steps_modes(
+            handler, player, modes, target_spell, target_permanent)
+        assert stack_context.get("selected_spree_modes") == list(modes), \
+            f"modes {modes} became {stack_context.get('selected_spree_modes')}"
+        paid = stack_context.get("final_paid_cost", {})
+        assert paid.get("generic") == generic and paid.get("U") == blue, \
+            f"modes {modes} paid {paid}, expected generic={generic}, U={blue}"
+        assert sum(player["mana_pool"].values()) == 0, \
+            f"modes {modes} did not pay their complete cost"
+        assert spree_id not in player["hand"] and gs.stack[-1][1] == spree_id
+
+
+@scenario("701.5 / 702.172", "Three Steps Ahead's first mode targets and counters a spell")
+def scenario_three_steps_ahead_counter_mode_end_to_end():
+    (gs, _, handler, player, opponent, spree_id, target_spell,
+     _) = _setup_three_steps(SEED + 139, 1, 2, spell_target=True)
+    uncounterable = inject_card(gs, {
+        "name": "Spree Uncounterable Probe", "mana_cost": "{1}",
+        "type_line": "Instant", "oracle_text": "This spell can't be countered.",
+    })
+    gs.add_to_stack("SPELL", uncounterable, opponent, {
+        "requires_target": False, "num_targets": 0,
+    })
+    gs.phase = gs.PHASE_PRIORITY
+    gs.priority_player = player
+    player["mana_pool"] = _three_steps_mana(1, 2)
+
+    _begin_three_steps(handler)
+    _choose_three_steps_mode(handler, 0)
+    _finish_three_steps_modes(handler)
+    candidates = handler._get_target_selection_candidates(
+        player, gs.targeting_context)
+    assert target_spell in candidates and uncounterable in candidates, \
+        f"counter-mode candidates were {candidates}"
+    _select_three_steps_target(handler, player, target_spell)
+    assert gs.resolve_top_of_stack(), "counter-mode Three Steps Ahead did not resolve"
+    assert target_spell in opponent["graveyard"], \
+        "Three Steps Ahead did not counter its selected spell"
+    assert any(item[1] == uncounterable for item in gs.stack), \
+        "counter mode affected the unselected uncounterable spell"
+    assert player["graveyard"].count(spree_id) == 1
+
+
+@scenario("707.2 / 702.172", "Three Steps Ahead copies either kind of controlled permanent with printed values")
+def scenario_three_steps_ahead_copy_mode_end_to_end():
+    (gs, _, handler, player, opponent, spree_id, _, _) = _setup_three_steps(
+        SEED + 140, 3, 1)
+    own_artifact = inject_into_zone(gs, player, {
+        "name": "Spree Copy Relic", "mana_cost": "{2}",
+        "type_line": "Artifact", "oracle_text": "",
+    }, "battlefield")
+    own_creature = inject_into_zone(gs, player, {
+        "name": "Spree Copy Bear", "mana_cost": "{2}{G}",
+        "type_line": "Creature - Bear", "oracle_text": "",
+        "power": 2, "toughness": 3,
+    }, "battlefield")
+    own_land = inject_into_zone(gs, player, {
+        "name": "Spree Copy Land", "type_line": "Land", "oracle_text": "",
+    }, "battlefield")
+    opposing_creature = inject_into_zone(gs, opponent, {
+        "name": "Spree Opposing Bear", "mana_cost": "{2}{G}",
+        "type_line": "Creature - Bear", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+
+    _begin_three_steps(handler)
+    _choose_three_steps_mode(handler, 1)
+    _finish_three_steps_modes(handler)
+    candidates = handler._get_target_selection_candidates(
+        player, gs.targeting_context)
+    assert own_artifact in candidates and own_creature in candidates, \
+        f"artifact-or-creature union candidates were {candidates}"
+    assert own_land not in candidates and opposing_creature not in candidates
+
+    original = gs._safe_get_card(own_creature)
+    original.power, original.toughness = 7, 8
+    battlefield_before = set(player["battlefield"])
+    _select_three_steps_target(handler, player, own_creature)
+    assert gs.resolve_top_of_stack(), "copy-mode Three Steps Ahead did not resolve"
+    created_ids = [
+        card_id for card_id in player["battlefield"]
+        if card_id not in battlefield_before]
+    assert len(created_ids) == 1, f"copy mode created {created_ids}"
+    token = gs._safe_get_card(created_ids[0])
+    assert getattr(token, "is_token", False) and token.name == "Spree Copy Bear"
+    assert (int(token.printed("power")), int(token.printed("toughness"))) == (2, 3), \
+        f"copy mode copied live {token.power}/{token.toughness} instead of printed values"
+    assert player["graveyard"].count(spree_id) == 1
+
+
+@scenario("121.2 / 701.8 / 702.172", "Three Steps Ahead draws two then gives its controller the discard choice")
+def scenario_three_steps_ahead_draw_discard_mode_end_to_end():
+    (gs, _, handler, player, opponent, spree_id, _, _) = _setup_three_steps(
+        SEED + 141, 2, 1)
+    hand_before = len(player["hand"])
+    library_before = len(player["library"])
+    opponent_hand_before = list(opponent["hand"])
+    expected_draws = list(player["library"][:2])
+
+    _cast_three_steps_modes(handler, player, (2,))
+    assert gs.resolve_top_of_stack(), "draw/discard Three Steps Ahead did not resolve"
+    assert gs.choice_context and gs.choice_context.get("type") == "discard" \
+        and gs.choice_context.get("player") is player, \
+        "draw mode did not pause for its controller's discard choice"
+    assert all(card_id in player["hand"] for card_id in expected_draws)
+    discarded = player["hand"][0]
+    _apply_public_action(handler, 238, "complete Three Steps Ahead discard")
+    assert discarded in player["graveyard"]
+    assert len(player["library"]) == library_before - 2
+    assert len(player["hand"]) == hand_before, \
+        "cast, draw two, discard one produced the wrong net hand size"
+    assert opponent["hand"] == opponent_hand_before, \
+        "Three Steps Ahead made the opponent discard"
+    assert player["graveyard"].count(spree_id) == 1
+
+
+@scenario("608.2c / 702.172", "all Three Steps Ahead modes retain independent targets and resolve in printed order")
+def scenario_three_steps_ahead_all_modes_end_to_end():
+    (gs, _, handler, player, opponent, spree_id, target_spell,
+     target_permanent) = _setup_three_steps(
+         SEED + 142, 6, 2, spell_target=True, copy_target=True)
+    library_before = len(player["library"])
+    battlefield_before = set(player["battlefield"])
+
+    _begin_three_steps(handler)
+    for mode_index in (2, 1, 0):
+        _choose_three_steps_mode(handler, mode_index)
+    assert gs.phase == gs.PHASE_TARGETING and gs.targeting_context
+    slots = gs.targeting_context.get("target_slots", [])
+    assert [slot.get("mode_index") for slot in slots] == [0, 1], \
+        f"reverse selection changed printed target order: {slots}"
+    _select_three_steps_target(handler, player, target_spell)
+    assert gs.targeting_context.get("target_slots", [])[1].get("mode_index") == 1
+    _select_three_steps_target(handler, player, target_permanent)
+
+    stack_context = gs.stack[-1][3]
+    assert stack_context.get("selected_spree_modes") == [0, 1, 2], \
+        "Spree stored policy selection order instead of printed order"
+    assert [slot.get("mode_index")
+            for slot in stack_context.get("spree_target_slots", [])] == [0, 1]
+    assert stack_context.get("targets_by_slot") == [
+        [target_spell], [target_permanent]], stack_context
+    assert gs.resolve_top_of_stack(), "all-mode Three Steps Ahead did not resolve"
+    assert target_spell in opponent["graveyard"]
+    created = [
+        card_id for card_id in player["battlefield"]
+        if card_id not in battlefield_before
+        and getattr(gs._safe_get_card(card_id), "is_token", False)]
+    assert len(created) == 1 and gs._safe_get_card(created[0]).name == \
+        gs._safe_get_card(target_permanent).name
+    assert len(player["library"]) == library_before - 2
+    assert gs.choice_context and gs.choice_context.get("type") == "discard"
+    _apply_public_action(handler, 238, "complete all-mode Spree discard")
+    assert player["graveyard"].count(spree_id) == 1
+
+
+@scenario("608.2b / 702.172", "Spree fizzles only when every selected mode target is illegal")
+def scenario_three_steps_ahead_partial_and_all_illegal_targets():
+    # One legal target is enough: the legal copy mode and untargeted draw mode
+    # still resolve even though the counter target disappeared.
+    (gs, _, handler, player, opponent, spree_id, target_spell,
+     target_permanent) = _setup_three_steps(
+         SEED + 143, 6, 2, spell_target=True, copy_target=True)
+    _cast_three_steps_modes(
+        handler, player, (0, 1, 2), target_spell, target_permanent)
+    battlefield_before = set(player["battlefield"])
+    library_before = len(player["library"])
+    _remove_test_spell_from_stack(gs, target_spell, opponent)
+    assert gs.resolve_top_of_stack(), "partially legal Spree did not resolve"
+    created = [
+        card_id for card_id in player["battlefield"]
+        if card_id not in battlefield_before
+        and getattr(gs._safe_get_card(card_id), "is_token", False)]
+    assert created, "legal copy mode was lost with the illegal counter target"
+    assert len(player["library"]) == library_before - 2, \
+        "untargeted draw mode was lost with one illegal target"
+    assert gs.choice_context and gs.choice_context.get("type") == "discard"
+    _apply_public_action(handler, 238, "complete partially legal Spree")
+    assert player["graveyard"].count(spree_id) == 1
+
+    # With both chosen targets illegal, none of the selected modes resolve,
+    # including the otherwise untargeted draw/discard instruction.
+    (gs, _, handler, player, opponent, spree_id, target_spell,
+     target_permanent) = _setup_three_steps(
+         SEED + 144, 6, 2, spell_target=True, copy_target=True)
+    _cast_three_steps_modes(
+        handler, player, (0, 1, 2), target_spell, target_permanent)
+    library_before = len(player["library"])
+    _remove_test_spell_from_stack(gs, target_spell, opponent)
+    assert gs.move_card(
+        target_permanent, player, "battlefield", player, "graveyard",
+        cause="scenario_target_removed")
+    battlefield_before = set(player["battlefield"])
+    assert gs.resolve_top_of_stack(), "all-illegal Spree did not finish fizzling"
+    assert len(player["library"]) == library_before, \
+        "all-illegal Spree still resolved its draw mode"
+    assert not (gs.choice_context and gs.choice_context.get("type") == "discard")
+    assert not any(
+        card_id not in battlefield_before
+        and getattr(gs._safe_get_card(card_id), "is_token", False)
+        for card_id in player["battlefield"]), \
+        "all-illegal Spree still created its token copy"
+    assert player["graveyard"].count(spree_id) == 1
 
 
 @scenario("613.1f / 702.15 / 702.21", "combined parameterized keyword lines register one ability per keyword")

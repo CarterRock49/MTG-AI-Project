@@ -16,7 +16,7 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 12/12, and 287/287, plus 11/11 fixture-
+   every delivery (currently 9/9, 12/12, and 295/295, plus 11/11 fixture-
    harvest tests, 5/5 production-protocol tests, 6/6 fuzz/replay tests, and
    the deterministic 8-seed / 8,000-action default fuzz profile, and the
    strict 32-seed / 320,000-action long profile).
@@ -48,9 +48,10 @@ The project is complete when all of the following hold:
 - Tier 1 (rules correctness): ✅ complete — all seven items plus the P1
   placeholder triage delivered; see appendix for the bug catalog.
 - Tier 2 (card coverage): ◐ the audited eight-deck sample has no unknown
-  high-risk partials; Three Steps Ahead remains explicitly mask-excluded and
-  `unparsed` pending full Spree support. Format-wide quantified coverage remains
-  manifest-driven.
+  high-risk partials. The generic Spree casting transaction and exact Three
+  Steps Ahead effects are supported; other Spree cards remain subject to their
+  own effect-parser, scenario, and manifest evidence. Format-wide quantified
+  coverage remains manifest-driven.
 - Tier 3 (training/environment): ◐ policy plumbing and audit work are complete;
   a trained checkpoint still needs to beat scripted play before Harvest is
   promoted to policy-vs-policy.
@@ -59,7 +60,7 @@ The project is complete when all of the following hold:
 - Tier 5 (operations/integration): ◐ Harvest orchestration is complete; strength
   qualification, production throughput profiling, and deck-builder integration
   remain open.
-- Test gates: smoke 9/9, training 12/12, scenarios 287/287 (grown from 12),
+- Test gates: smoke 9/9, training 12/12, scenarios 295/295 (grown from 12),
   fixture harvest 11/11, production Harvest protocol 5/5, fuzz/replay
   configuration 6/6, deterministic default fuzz 8 seeds x 1,000 valid
   actions, and strict long fuzz 32 seeds x 10,000 valid actions.
@@ -1259,9 +1260,45 @@ Gates: 287/287 scenarios, 9/9 smoke, 12/12 training, 11/11 + 5/5 Harvest, 6/6
 fuzz/replay configuration, the exact failure-state regressions, and 8,000/8,000
 default-fuzz actions.
 
+**Round 7.45 (July 2026):** Spree is now a real casting transaction instead of
+a blanket exclusion. The policy must announce one or more distinct modes; the
+mask prices each next choice against the cumulative base cost plus every
+chosen mode's additional cost and requires its mandatory targets to exist.
+Final casting applies taxes and reductions once, auto-taps eligible lands,
+pays one combined cost, and commits an independent target slot for each
+targeted mode. Forged, duplicate, unaffordable, and zero-mode announcements are
+rejected without moving the card or spending mana.
+
+Resolution retains the selected modes in printed order, revalidates their
+targets independently, skips a targeted mode whose targets all became illegal,
+and makes the whole spell fail to resolve only when every target of the spell
+is illegal.
+Choice-producing effects can pause and resume the remaining mode sequence.
+Three Steps Ahead is covered exactly across all seven non-empty mode
+combinations: counter target spell; create a printed-value token copy of a
+controlled artifact or creature; and draw two, then make its controller discard
+one. Its tenth-hand-slot and third-mode actions are addressable, and it no
+longer creates an `unparsed` support-manifest entry. The same targeting audit
+now keeps creature spells on the stack out of creature-permanent target lists,
+guarded through an Anoint with Affliction zone regression.
+
+This closes the generic Spree announcement/payment/targeting/resolution
+transaction and Three Steps Ahead's exact effects. It does **not** certify the
+effect semantics of all 21 Spree cards: each other card remains eligible only
+as its chosen modes parse faithfully and pass card-specific scenario/manifest
+evidence. Malformed Spree mode text remains an explicit support gap.
+
+Gates: 295/295 scenarios, 9/9 smoke, 12/12 training, 11/11 + 5/5 Harvest, 6/6
+fuzz/replay configuration, and 8,000/8,000 default-fuzz actions. Exact-source
+CUDA canary `ALPHA_ZERO_MTG_V3.00_20260711_174419` completed 8,192/8,192
+transitions at 105 rollout FPS with 16 terminals (2 decking, 4 life total, 10
+turn limit). Final checkpoint reload validation passed all 256 steps, including
+mask-valid prediction, finite rewards, public progress, and four short-cycle
+checks; the run emitted a debug log only, with no warning or error file.
+
 ## Tier 4 — Verification & calibration
 
-1. ✅ Golden scenario harness — 287 scenarios and growing; scenario-first is a
+1. ✅ Golden scenario harness — 295 scenarios and growing; scenario-first is a
    working agreement, not a suggestion.
 2. ✅ **Property/invariant harness**: exact non-token zone/stack conservation,
    SBA fixed points, mask-valid action execution/handler coverage, declared
@@ -1301,11 +1338,76 @@ default-fuzz actions.
    their novel cards populate the manifest; support work is prioritized by
    what the builder actually wants to play.
 
-**Current execution order:** freeze a reproducible engine/baseline snapshot;
-train a longer strength candidate; run paired-seat promotion; complete the
-3–5-pair calibration study; profile production-size Harvest throughput; then
-implement the deck-builder contract and automatic feedback loop. New fidelity
-failures discovered along that path pre-empt strength and integration work.
+### Target-format program — Standard, Modern, Pioneer
+
+The narrowed constructed scope is **Standard first, Modern second, and Pioneer
+third**. A "format agent" means one format-specialist policy and checkpoint
+league trained across a representative corpus of decks for that format, not a
+policy tied to one deck. Each policy may use multiple rollout or Harvest
+workers, but its deck corpus, checkpoints, statistics, support observations,
+and promotion/calibration artifacts remain in an isolated format namespace.
+Statistics from different formats must never be merged merely because a card
+or deck name appears in both.
+
+All three format pipelines will share one versioned canonical-card registry
+(stable Oracle identity rather than run-local integer IDs), one frozen
+observation/action feature schema, and one format-parameterized deck builder.
+The registry, format card-pool snapshot, deck-corpus snapshot, and feature
+schema each need a recorded version/hash so adding a builder candidate cannot
+silently change model input width or invalidate a checkpoint.
+
+What exists today is useful foundation, not three completed format agents:
+the three format card-list snapshots exist; deck loading has format-legality
+hooks; the current eight-deck sample can bootstrap Standard; training can use
+multiple environment workers; and Harvest can run isolated shards and
+paired-seat checkpoint promotion. Training is still wired to the shared
+`Decks/` corpus and scripted opponent, fixture Harvest still assumes the
+audited eight decks, statistics do not carry explicit format/pool/corpus
+lineage, no representative Modern or Pioneer training corpus exists, and the
+automatic format-aware builder/feedback queue is not implemented. A clean
+failure manifest also does not prove that an unseen format card was simulated
+faithfully; coverage must distinguish unseen, observed-clean, verified,
+partial, and excluded cards.
+
+Phased milestones:
+
+1. ▢ **Format foundation and lineage**: add explicit `--format` and corpus
+   configuration to training and production Harvest; enforce strict legality;
+   introduce stable canonical card identities and a frozen, versioned feature
+   schema; stamp format, pool hash, corpus hash, engine/schema identity, and
+   policy/checkpoint identity into manifests and the stats contract. Generalize
+   production Harvest beyond the hard-coded sample fixture while retaining the
+   fixture as a regression gate.
+2. ▢ **Standard end to end**: use the current Standard-legal sample only as a
+   bootstrap, assemble and pin a representative Standard corpus, qualify the
+   Standard policy against scripted play, promote it into a checkpoint league,
+   calibrate known matchups, and produce the first format-isolated,
+   fidelity-clean strength harvest.
+3. ▢ **Modern end to end**: assemble a separate strictly legal Modern corpus,
+   triage its observed support gaps, then repeat qualification, league
+   promotion, calibration, and production harvest in the Modern namespace.
+   Do not assume every current sample deck is Modern legal.
+4. ▢ **Pioneer end to end**: assemble a separate strictly legal Pioneer
+   corpus and pass the same support, strength, calibration, and Harvest gates
+   in the Pioneer namespace.
+5. ▢ **Unified builder feedback**: make one builder accept a format as an
+   explicit input and consume only that format's legal pool, version-matched
+   support ledger, fidelity-clean qualified-policy statistics, matchup data,
+   and uncertainty/confidence. Builder candidates enter the affected format's
+   support preflight and paired-seat evaluation queue; accepted candidates feed
+   its training/Harvest corpus without contaminating held-out promotion or
+   calibration results.
+
+**Current execution order:** with the Round 7.45 exact-source CUDA canary
+recorded, the next implementation milestone is the target-format foundation:
+freeze the canonical registry and feature schema, add explicit format/corpus
+configuration and lineage, and generalize production Harvest.
+Then deliver the Standard pipeline end to end, reuse that qualified pipeline
+for Modern and then Pioneer, and finally enable the unified automatic builder
+feedback loop. Production-size throughput profiling and calibration occur as
+gates in each format rather than as one mixed-format exercise. New fidelity
+failures discovered along that path pre-empt strength and integration work in
+the affected format.
 
 ---
 

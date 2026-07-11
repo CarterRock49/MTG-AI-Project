@@ -139,7 +139,10 @@ class TargetingSystem:
                         elif current_zone == 'stack': primary_cat = 'spell'
                         elif current_zone == 'graveyard' or current_zone == 'exile': primary_cat = 'card'
                     elif current_zone == 'player': primary_cat = 'player'
-                    elif current_zone == 'stack' and isinstance(target_object, tuple): primary_cat = 'ability' # Could be spell too
+                    elif current_zone == 'stack' and isinstance(target_object, tuple):
+                        primary_cat = (
+                            'spell' if target_object[0] == 'SPELL'
+                            else 'ability')
 
                     # If specific type requested, use that, otherwise use derived primary category
                     cat_to_add = target_type if target_type else primary_cat
@@ -201,14 +204,34 @@ class TargetingSystem:
 
         if not target_obj: return False
 
-        # 1. Zone Check
+        # 1. Zone Check. Magic distinguishes a permanent from a spell with
+        # permanent-card types: an object with ``creature`` in its types is a
+        # *creature spell* on the stack and a *creature* only on the
+        # battlefield.  Treating stack as a default zone for every target type
+        # exposed creature spells to removal such as Anoint with Affliction;
+        # the selection mask then disagreed with cast-time validation.
         req_zone = requirement.get("zone")
-        if req_zone and target_zone != req_zone: return False
-        if not req_zone and target_zone not in ["battlefield", "stack", "player"]: # Default targetable zones
-            # Check if the type allows targeting outside default zones
-            if target_type == "card" and target_zone not in ["graveyard", "exile", "library"]: return False
-            # Other types usually target battlefield/stack/players unless zone specified
-            elif target_type != "card": return False
+        if req_zone:
+            if target_zone != req_zone:
+                return False
+        else:
+            battlefield_types = {
+                "creature", "permanent", "land", "artifact",
+                "enchantment", "planeswalker", "battle",
+                "creature_or_vehicle",
+            }
+            if target_type in battlefield_types and target_zone != "battlefield":
+                return False
+            if target_type in {"spell", "ability"} and target_zone != "stack":
+                return False
+            if target_type == "player" and target_zone != "player":
+                return False
+            if (target_type in {"any", "target"}
+                    and target_zone not in {"battlefield", "player"}):
+                return False
+            if (target_type == "card"
+                    and target_zone not in {"graveyard", "exile", "library"}):
+                return False
 
 
         # 2. Type Check
@@ -221,9 +244,14 @@ class TargetingSystem:
         elif isinstance(target_obj, Card): # Card object
             actual_types.update(getattr(target_obj, 'card_types', []))
             actual_types.update(getattr(target_obj, 'subtypes', []))
-        elif isinstance(target_obj, tuple): # Stack item (Ability/Trigger)
+        elif isinstance(target_obj, tuple): # Stack item (Spell/Ability/Trigger)
              item_type = target_obj[0]
-             if item_type == "ABILITY": actual_types.add("ability")
+             if item_type == "SPELL":
+                  actual_types.add("spell")
+                  spell_card = gs._safe_get_card(target_obj[1])
+                  if spell_card:
+                       actual_types.update(getattr(spell_card, 'card_types', []))
+             elif item_type == "ABILITY": actual_types.add("ability")
              elif item_type == "TRIGGER": actual_types.add("ability"); actual_types.add("triggered") # Allow target triggered ability
 
         # Check against required type
@@ -236,7 +264,10 @@ class TargetingSystem:
         elif target_type == "permanent" and any(t in actual_types for t in ["creature", "artifact", "enchantment", "land", "planeswalker"]): valid_type = True
         elif target_type == "creature_or_vehicle":
              valid_type = "creature" in actual_types or "vehicle" in actual_types
-        elif target_type == "spell" and target_zone == "stack" and isinstance(target_obj, Card): valid_type = True # Targeting spell on stack
+        elif (target_type == "spell" and target_zone == "stack"
+                and isinstance(target_obj, tuple)
+                and target_obj[0] == "SPELL"):
+             valid_type = True
 
         allowed_types = set(requirement.get("allowed_types", []))
         if allowed_types and not allowed_types.intersection(actual_types):
@@ -459,6 +490,17 @@ class TargetingSystem:
 
         # Alternative type wording needs one OR requirement. Treating only the
         # first noun as authoritative makes noncreature Vehicles invisible.
+        artifact_creature_pattern = (
+            r"target\s+artifact\s+or\s+creature\s+you\s+control")
+        if re.search(artifact_creature_pattern, oracle_text):
+            requirements.append({
+                "type": "permanent",
+                "allowed_types": ["artifact", "creature"],
+                "controller_is_caster": True,
+            })
+            oracle_text = re.sub(
+                artifact_creature_pattern, "", oracle_text)
+
         creature_vehicle_pattern = r"target\s+creature\s+or\s+vehicle"
         if re.search(creature_vehicle_pattern, oracle_text):
             requirements.append({"type": "creature_or_vehicle"})

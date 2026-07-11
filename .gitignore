@@ -81,3 +81,4 @@ Format Card Lists
 # Runtime artifacts
 strategy_memory.pkl
 bugs/
+fuzz_failures

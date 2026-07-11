@@ -1735,6 +1735,14 @@ class ActionSpaceMixin:
         else:
             return False # Invalid input
 
+        if (isinstance(card_or_data, Card)
+                and getattr(card_or_data, 'is_spree', False)):
+            return any(
+                gs.spree_mode_is_selectable(
+                    card_id, player, [], mode_index, context=context)
+                for mode_index in range(len(
+                    getattr(card_or_data, 'spree_modes', []) or [])))
+
         if not cost_str and not context.get('use_alt_cost'): return True # Free spell (unless alt cost used)
 
         oracle_text = getattr(card_or_data, 'oracle_text', '') \
@@ -1796,18 +1804,15 @@ class ActionSpaceMixin:
     def _spell_cast_supported(self, card):
         """Gate spells whose casting flow the engine cannot complete yet."""
         if getattr(card, 'is_spree', False):
-            # Spree mode selection is not wired into cast_spell (spree_context
-            # is never populated), so exposing the spell offers a cast that
-            # rejects after mask validation. Exclude it and record the gap.
-            # Report once per parsed card object.  This predicate runs for
-            # every mask while the card remains in hand; reporting every probe
-            # would turn decision-step frequency into a bogus support count.
+            if getattr(card, 'spree_modes', None):
+                return True
+            # A malformed Spree declaration remains an explicit support gap.
             if not getattr(card, '_spree_support_gap_reported', False):
                 try:
                     from .card_support import report_unsupported
                     report_unsupported(
                         getattr(card, 'name', 'unknown'),
-                        "spree casting flow not implemented",
+                        "spree modes could not be parsed",
                         severity="unparsed")
                     card._spree_support_gap_reported = True
                 except Exception:
@@ -1818,6 +1823,11 @@ class ActionSpaceMixin:
     def _targets_available(self, card, caster, opponent):
         """Check target availability using TargetingSystem."""
         gs = self.game_state
+        # Spree target requirements belong only to modes actually announced.
+        # _can_afford_card probes every single mode through the same cumulative
+        # cost/target predicate used by the live chooser.
+        if getattr(card, 'is_spree', False):
+            return True
         card_id = getattr(card, 'card_id', None)
         if card_id is None or not hasattr(card, 'oracle_text') or 'target' not in card.oracle_text.lower():
             return True # No target needed or cannot check

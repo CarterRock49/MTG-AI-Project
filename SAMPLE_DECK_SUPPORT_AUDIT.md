@@ -244,11 +244,49 @@ exactly the Treasure, 4 life, two blue 1/1 Fish, and one draw that apply.
 These should make affected card statistics ineligible for harvest until the
 listed behavior is implemented and guarded by scenarios.
 
-Three Steps Ahead: its three Spree modes parse, but the casting pipeline does
-not yet collect each chosen mode's additional cost and targets or resolve an
-arbitrary chosen combination. Spree spells are therefore mask-excluded and
-recorded once as `unparsed`; the deck builder must exclude them from trustworthy
-harvest pools until the complete Spree casting flow is implemented.
+None currently known in the audited eight-deck sample. Round 7.45 closes Three
+Steps Ahead's former Spree gap. This is not format-wide evidence: other Spree
+cards and newly introduced cards remain eligible only when their own effect
+semantics are scenario- or manifest-verified.
+
+## Closed In Round 7.45
+
+- Spree now uses one generic casting transaction. The policy announces one or
+  more distinct modes, cumulative affordability includes the printed base plus
+  every selected mode's additional cost, taxes/reductions apply once, eligible
+  lands can be auto-tapped, and the combined cost is paid once. Duplicate,
+  forged, unaffordable, and zero-mode selections are rejected without moving
+  the card or spending mana.
+- Every targeted chosen mode receives its own target slot. Mandatory target
+  availability gates mode selection; targets are committed before the spell
+  reaches the stack, revalidated independently at resolution, and do not leak
+  between modes. Modes resolve in printed order, including across a pending
+  policy choice, while the whole spell fails to resolve only when all of its
+  targets are illegal.
+- Three Steps Ahead is exact across all seven non-empty combinations of its
+  three modes. It counters the selected spell; copies a controlled artifact or
+  creature using printed copiable values; and draws two before its controller
+  chooses a discard. The tenth hand slot and third mode are publicly
+  addressable, all mode costs are paid exactly once, partial target failure
+  preserves legal and untargeted modes, and the supported card no longer enters
+  the support-gap manifest.
+- Target categories are zone-correct: a creature spell on the stack is a spell,
+  not a creature permanent. An Anoint with Affliction regression proves that
+  removal cannot select it while a legal battlefield creature remains visible.
+
+This round closes the generic Spree announcement, payment, targeting, and
+resolution transaction plus Three Steps Ahead's exact effect semantics. It
+does **not** certify all 21 Spree cards. Each other card's chosen-mode effects
+remain subject to the normal parser, card-specific scenarios, and support
+manifest; malformed Spree mode text remains an explicit gap.
+
+Gates: 295/295 scenarios, 9/9 smoke, 12/12 training, 11/11 + 5/5 Harvest, 6/6
+fuzz/replay configuration, and 8,000/8,000 default-fuzz actions. Exact-source
+CUDA canary `ALPHA_ZERO_MTG_V3.00_20260711_174419` completed 8,192/8,192
+transitions at 105 rollout FPS with 16 terminals (2 decking, 4 life total, 10
+turn limit). Final checkpoint reload validation passed all 256 steps, including
+mask-valid prediction, finite rewards, public progress, and four short-cycle
+checks; the run emitted a debug log only, with no warning or error file.
 
 ## Closed In Round 7.44
 
@@ -578,6 +616,11 @@ branches, but these cards no longer rely on wholly unproved routing.
    (320,000/320,000). It guards card conservation, mask/handler execution,
    observation bounds and non-degradation, mask purity, SBA/layer fixed points,
    finite rewards, exact replay contexts, and phase-boundary mana clearing.
-3. **Next:** train and benchmark a checkpoint against scripted play before
-   promoting harvest runs to policy-vs-policy. Treat the random-valid fixture
-   results as plumbing/support evidence only, never as card-strength statistics.
+3. **Next:** implement the shared target-format foundation: stable canonical
+   card IDs, a frozen versioned observation/action schema, explicit
+   format/corpus configuration and lineage, and generalized production
+   Harvest. Deliver the
+   format pipelines in order — Standard, then Modern, then Pioneer — before
+   enabling the unified automatic deck-builder feedback loop. Treat the
+   random-valid fixture results as plumbing/support evidence only, never as
+   card-strength statistics.

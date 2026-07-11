@@ -947,6 +947,18 @@ class EffectFactory:
                  zone = zone_match.group(1) if zone_match else "battlefield"
                  created_effect = ExileEffect(target_type=target_type, zone=zone)
 
+            # Printed-value token copy of a chosen permanent.  This must
+            # precede the generic token branch, which otherwise invents a
+            # vanilla 1/1 for Three Steps Ahead.
+            elif re.search(
+                    r"\bcreate(?:s)?\s+a\s+token\s+that['’]s\s+a\s+copy\s+of\s+"
+                    r"target\s+artifact\s+or\s+creature\s+you\s+control\b",
+                    clause_lower):
+                 from .ability_types import CreateTokenCopyOfTargetEffect
+                 created_effect = CreateTokenCopyOfTargetEffect(
+                     allowed_types={"artifact", "creature"},
+                     controller_only=True)
+
             # Role tokens are Aura enchantments created already attached to a
             # creature, not generic 1/1 creature tokens.
             elif re.search(

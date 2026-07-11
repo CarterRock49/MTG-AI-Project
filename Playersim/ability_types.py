@@ -5051,6 +5051,49 @@ class CopySpellEffect(AbilityEffect):
             allow_new_targets=self.new_targets,
         ) is not None
 
+
+class CreateTokenCopyOfTargetEffect(AbilityEffect):
+    """Create a token using a targeted permanent's copyable values."""
+
+    def __init__(self, allowed_types=None, controller_only=True,
+                 condition=None):
+        allowed = set(allowed_types or {"artifact", "creature"})
+        self.allowed_types = {str(card_type).lower() for card_type in allowed}
+        self.controller_only = bool(controller_only)
+        super().__init__(
+            "Create a token that's a copy of target artifact or creature you control",
+            condition)
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        target_ids = []
+        if isinstance(targets, dict):
+            for category in (
+                    "artifacts", "creatures", "permanents", "chosen",
+                    "targets"):
+                values = targets.get(category, [])
+                if isinstance(values, (list, tuple, set)):
+                    target_ids.extend(values)
+        target_ids = list(dict.fromkeys(target_ids))
+        if not target_ids:
+            logging.warning(
+                "CreateTokenCopyOfTargetEffect: no permanent target supplied.")
+            return False
+
+        target_id = target_ids[0]
+        target = game_state._safe_get_card(target_id)
+        if not target:
+            return False
+        target_types = {
+            str(card_type).lower()
+            for card_type in getattr(target, 'card_types', [])}
+        if not target_types.intersection(self.allowed_types):
+            return False
+        if (self.controller_only
+                and game_state.get_card_controller(target_id) is not controller):
+            return False
+        return game_state.create_token_copy(target, controller) is not None
+
 class MeldEffect(AbilityEffect):
     """Exile a named meld pair and return the combined result."""
     def __init__(self, result_name=None, condition=None):

@@ -3723,7 +3723,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 # Populate based on the specific choice type needed by the agent
                 if choice_kind == 'mode' and current_choice_type == 'choose_mode':
                     num_choices = context.get("num_choices", 0)
-                    max_selectable = context.get("max_modes", 1)
+                    max_selectable = context.get("max_required", 1)
                     selected_already = context.get("selected_modes", [])
                     can_select_more = len(selected_already) < max_selectable
 
@@ -3732,9 +3732,8 @@ class AlphaZeroMTGEnv(gym.Env):
                         for i in range(num_choices):
                             # Mode is represented by its index (0, 1, 2...)
                             # Avoid selecting duplicates if not allowed (most cases)
-                            if max_selectable == 1 and i in selected_already: continue # Don't show selected if only choosing 1
-                            # Add logic here if multiple different modes CAN be selected
-                            if i not in selected_already:
+                            if (i not in selected_already
+                                    and gs.modal_mode_is_selectable(context, i)):
                                 available_mode_indices.append(i)
 
                         # Fill the vector with available mode indices
