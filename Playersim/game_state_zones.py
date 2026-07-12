@@ -241,6 +241,11 @@ class GameStateZonesMixin:
             return False
 
         context["remaining"] = max(0, int(context.get("remaining", 1)) - 1)
+        card = self._safe_get_card(card_id)
+        if (context.get("stop_after_creature")
+                and card
+                and "creature" in getattr(card, "card_types", [])):
+            context["remaining"] = 0
         if context["remaining"] > 0 and chooser.get("hand", []):
             self.priority_player = chooser
             self.priority_pass_count = 0
@@ -510,6 +515,8 @@ class GameStateZonesMixin:
                 and final_destination_zone != "exile"
                 and hasattr(self, "_consume_plot_permission")):
             self._consume_plot_permission(from_player, card_id)
+            getattr(self, "cards_castable_from_exile", set()).discard(card_id)
+            getattr(self, "exile_alternative_costs", {}).pop(card_id, None)
 
 
         meld_partner_id = None

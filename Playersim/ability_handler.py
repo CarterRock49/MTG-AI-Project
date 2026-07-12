@@ -1,4 +1,5 @@
 import logging
+import copy
 from .targeting import TargetingSystem  # noqa: F401  (re-export: kept for backward compatibility)
 
 import numpy as np
@@ -749,6 +750,14 @@ class AbilityHandler:
                     if hasattr(card, 'is_spree') and card.is_spree:
                         processed_special_text_markers = getattr(card, '_spree_related_text_marker', '')
 
+                if any(re.search(r"(?mi)^\s*warp\s+(?:\{[^}]+\})+", text or "")
+                       for text in oracle_text_sources):
+                    from .card_support import report_unsupported
+                    report_unsupported(
+                        getattr(card, "name", str(card_id)),
+                        "Warp casting and delayed exile are not implemented",
+                        severity="partial")
+
 
                 # --- Parse Keywords from Explicit Data ---
                 handled_keywords = set() # Keep track of keywords already handled by _create_keyword_ability
@@ -817,6 +826,14 @@ class AbilityHandler:
                                          cleaned_sub_clause)
                                     and final_clauses):
                                 final_clauses[-1] += "\n" + cleaned_sub_clause
+                            elif (re.match(r"^[•●]\s*", cleaned_sub_clause)
+                                    and final_clauses
+                                    and (re.search(
+                                        r"\bchoose\s+(?:one|two|one or both)\b",
+                                        final_clauses[-1], re.IGNORECASE)
+                                        or "\n•" in final_clauses[-1]
+                                        or "\n●" in final_clauses[-1])):
+                                final_clauses[-1] += "\n" + cleaned_sub_clause
                             else:
                                 final_clauses.append(cleaned_sub_clause)
 
@@ -864,7 +881,9 @@ class AbilityHandler:
                             # We rely on _parse_modal_text to handle these structures during activation phase.
                             # For registration, treat bullet points here as *potential* separate static/triggered abilities,
                             # unless the context clearly makes them modal options.
-                            is_likely_modal_preamble = re.match(r"^\s*choose\s+(\w+)\s*[-—•●]", clause_text.lower())
+                            is_likely_modal_preamble = re.search(
+                                r"\bchoose\s+(?:one|two|one or both)\s*[-—–]",
+                                clause_text.lower())
 
                             if is_likely_modal_preamble:
                                 # Don't split modal choices here; handle during activation.
@@ -1254,6 +1273,16 @@ class AbilityHandler:
         # effect. Attachment legality reads the printed text directly.
         if keyword_lower == "enchant":
             return True
+        if keyword_lower == "warp":
+            # Warp's printed alternate cast, delayed exile, and later
+            # exile-cast permission are not yet a runtime transaction. Keep
+            # cards with Warp conservatively partial even when their other
+            # instructions have exact support.
+            from .card_support import report_unsupported
+            report_unsupported(
+                getattr(card, "name", str(card_id)),
+                "Warp casting and delayed exile are not implemented",
+                severity="partial")
 
         current_value = None
         is_parametrized_keyword = False
@@ -2009,6 +2038,30 @@ class AbilityHandler:
             context_at_trigger['source_id'] = ability.card_id
         if 'effect_text' not in context_at_trigger:
             context_at_trigger['effect_text'] = getattr(ability, 'effect_text', 'Unknown Effect')
+        source_card = gs._safe_get_card(ability.card_id)
+        source_name = str(getattr(source_card, "name", "") or "").casefold()
+        modal_modes = None
+        if source_name == "cosmogrand zenith":
+            modal_modes, _, _ = self._parse_modal_text(
+                getattr(ability, "effect", ""))
+        if modal_modes and "selected_trigger_mode" not in context_at_trigger:
+            context_at_trigger["modal_trigger_modes"] = list(modal_modes)
+            context_at_trigger["mode_choice_pending"] = True
+            gs.add_to_stack(
+                "TRIGGER", ability.card_id, controller, context_at_trigger)
+            resume_phase = gs.phase
+            if gs.phase not in [gs.PHASE_CHOOSE, gs.PHASE_TARGETING,
+                                gs.PHASE_SACRIFICE]:
+                gs.previous_priority_phase = gs.phase
+            gs.phase = gs.PHASE_CHOOSE
+            gs.choice_context = {
+                "type": "trigger_mode", "player": controller,
+                "source_id": ability.card_id, "options": list(modal_modes),
+                "resume_phase": resume_phase,
+            }
+            gs.priority_player = controller
+            gs.priority_pass_count = 0
+            return True
         targeting_text = getattr(ability, 'effect', context_at_trigger['effect_text'])
         # Earthbend's target instruction is defined by the mechanic reminder
         # text and some card parsers intentionally strip that parenthetical
@@ -2022,6 +2075,45 @@ class AbilityHandler:
             context_at_trigger['target_choice_pending'] = True
         gs.add_to_stack("TRIGGER", ability.card_id, controller, context_at_trigger)
         return True
+
+    def choose_trigger_mode(self, mode_index):
+        """Commit a modal trigger's mode before any player receives priority."""
+        gs = self.game_state
+        choice = getattr(gs, "choice_context", None)
+        if not (choice and choice.get("type") == "trigger_mode"):
+            return False
+        options = choice.get("options", [])
+        if not isinstance(mode_index, int) or not 0 <= mode_index < len(options):
+            return False
+        source_id = choice.get("source_id")
+        for stack_index in range(len(gs.stack) - 1, -1, -1):
+            item = gs.stack[stack_index]
+            if not (isinstance(item, tuple) and len(item) >= 4
+                    and item[0] == "TRIGGER" and item[1] == source_id
+                    and item[3].get("mode_choice_pending")):
+                continue
+            context = dict(item[3])
+            selected_text = options[mode_index]
+            selected_ability = copy.copy(context.get("ability"))
+            if not selected_ability:
+                return False
+            selected_ability.effect = selected_text.lower()
+            selected_ability.effect_text = selected_text
+            selected_ability.requires_target = "target" in selected_text.lower()
+            context.update({
+                "ability": selected_ability,
+                "effect_text": selected_text,
+                "selected_trigger_mode": mode_index,
+                "mode_choice_pending": False,
+            })
+            gs.stack[stack_index] = item[:3] + (context,)
+            gs.choice_context = None
+            gs.phase = choice.get("resume_phase", gs.PHASE_PRIORITY)
+            gs.previous_priority_phase = None
+            gs.priority_player = controller = item[2]
+            gs.priority_pass_count = 0
+            return True
+        return False
 
     def _stack_trigger_batch_with_choice(self, batch, next_batch=None):
         """Stack one player's simultaneous triggers (CR 603.3b).

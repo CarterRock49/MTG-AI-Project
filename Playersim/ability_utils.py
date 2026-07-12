@@ -373,6 +373,63 @@ class EffectFactory:
             return list(result or [])
 
         source_key = str(source_name or "").strip().casefold()
+        lowered = effect_text.lower()
+        if ("can't be blocked this turn" in lowered
+                and "target creature" in lowered):
+            from .ability_types import GainKeywordEffect
+            effect = GainKeywordEffect(
+                "unblockable", target_type="target creature",
+                duration="end_of_turn")
+            effect.effect_text = (
+                "target creature with power 2 or less gains unblockable "
+                "until end of turn")
+            return [effect]
+        if (source_key.startswith("aang, swift savior")
+                and "airbend up to one other target creature or spell" in lowered):
+            from .ability_types import AirbendEffect
+            return [AirbendEffect()]
+        if (source_key == "cosmogrand zenith"
+                and re.match(r"^\s*choose one\s*[—–-]", effect_text,
+                             re.IGNORECASE)):
+            modes = [
+                mode.strip(" .\n") for mode in re.split(
+                    r"(?:^|\n)\s*[•●]\s*", effect_text)[1:]
+                if mode.strip(" .\n")]
+            if modes:
+                from .ability_types import ResolutionModalEffect
+                return [ResolutionModalEffect(modes, source_name=source_name)]
+        if (source_key == "brightglass gearhulk"
+                and "search your library" in lowered):
+            from .ability_types import SearchLibraryEffect
+            return [SearchLibraryEffect(
+                search_type="any", destination="hand", count=2,
+                policy_choice=True, optional=True,
+                allowed_types={"artifact", "creature", "enchantment"},
+                max_mana_value=1)]
+        if (source_key == "starfield shepherd"
+                and "search your library" in lowered):
+            from .ability_types import SearchLibraryEffect
+            return [SearchLibraryEffect(
+                search_type="basic plains or small creature",
+                destination="hand", count=1,
+                policy_choice=True, optional=False)]
+        if (source_key == "combustion technique"
+                and "number of lesson cards" in lowered):
+            from .ability_types import LessonDamageWithExileEffect
+            return [LessonDamageWithExileEffect()]
+        if (source_key == "daydream"
+                and "return that card to the battlefield" in lowered):
+            from .ability_types import BlinkWithCounterEffect
+            return [BlinkWithCounterEffect()]
+        if (source_key == "sage of the skies"
+                and "copy this spell" in lowered):
+            from .ability_types import CopySpellEffect
+            return [CopySpellEffect(
+                target_type="spell", new_targets=False, copy_that=True)]
+        if (source_key == "winternight stories"
+                and "draw three cards" in lowered):
+            from .ability_types import DrawCardEffect, DiscardTwoUnlessCreatureEffect
+            return [DrawCardEffect(3), DiscardTwoUnlessCreatureEffect()]
         if source_key == "duress":
             from .ability_types import HandSelectionEffect
             return [HandSelectionEffect(noncreature_nonland=True)]
@@ -462,14 +519,6 @@ class EffectFactory:
         harmonize_lines = [
             line for line in effect_text.splitlines()
             if re.match(r"^\s*harmonize\b", line, re.IGNORECASE)]
-        if harmonize_lines and source_name:
-            # Harmonize casting is not implemented yet. Keep the card partial
-            # while allowing another instruction on the same spell (for
-            # example Roamer's Routine's basic-land search) to parse and run.
-            from .card_support import report_unsupported
-            report_unsupported(
-                source_name, "Harmonize casting is not implemented",
-                severity="partial")
         effect_text = "\n".join(
             line for line in effect_text.splitlines()
             if not re.match(

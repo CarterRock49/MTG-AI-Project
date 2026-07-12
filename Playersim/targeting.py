@@ -47,7 +47,7 @@ class TargetingSystem:
         valid_targets = {
             "creature": [], "player": [], "permanent": [], "spell": [],
             "land": [], "artifact": [], "enchantment": [], "planeswalker": [],
-            "creature_or_vehicle": [],
+            "creature_or_vehicle": [], "creature_or_spell": [],
             "card": [], # For graveyard/exile etc.
             "ability": [], # For targeting abilities on stack
             "other": [] # Fallback
@@ -161,7 +161,9 @@ class TargetingSystem:
         # "any OTHER target" / "another target": the source object is never a
         # legal choice for its own effect (Screaming Nemesis's reflected
         # damage, Restless Ridgeline's pump).
-        if "any other target" in oracle_text or "another target" in oracle_text:
+        if ("any other target" in oracle_text
+                or "another target" in oracle_text
+                or "other target" in oracle_text):
             final_valid_targets = {
                 cat: [t for t in ids if t != card_id]
                 for cat, ids in final_valid_targets.items()}
@@ -219,8 +221,14 @@ class TargetingSystem:
                 "creature", "permanent", "land", "artifact",
                 "enchantment", "planeswalker", "battle",
                 "creature_or_vehicle",
+                "creature_or_spell",
             }
-            if target_type in battlefield_types and target_zone != "battlefield":
+            if (target_type in battlefield_types
+                    and target_type != "creature_or_spell"
+                    and target_zone != "battlefield"):
+                return False
+            if (target_type == "creature_or_spell"
+                    and target_zone not in {"battlefield", "stack"}):
                 return False
             if target_type in {"spell", "ability"} and target_zone != "stack":
                 return False
@@ -264,6 +272,10 @@ class TargetingSystem:
         elif target_type == "permanent" and any(t in actual_types for t in ["creature", "artifact", "enchantment", "land", "planeswalker"]): valid_type = True
         elif target_type == "creature_or_vehicle":
              valid_type = "creature" in actual_types or "vehicle" in actual_types
+        elif target_type == "creature_or_spell":
+             valid_type = (
+                 (target_zone == "battlefield" and "creature" in actual_types)
+                 or (target_zone == "stack" and "spell" in actual_types))
         elif (target_type == "spell" and target_zone == "stack"
                 and isinstance(target_obj, tuple)
                 and target_obj[0] == "SPELL"):
@@ -512,6 +524,11 @@ class TargetingSystem:
             requirements.append({"type": "creature_or_vehicle"})
             oracle_text = re.sub(creature_vehicle_pattern, "", oracle_text)
 
+        creature_spell_pattern = r"target\s+creature\s+or\s+spell"
+        if re.search(creature_spell_pattern, oracle_text):
+            requirements.append({"type": "creature_or_spell"})
+            oracle_text = re.sub(creature_spell_pattern, "", oracle_text)
+
         creature_planeswalker_pattern = r"target\s+creature\s+or\s+planeswalker"
         if re.search(creature_planeswalker_pattern, oracle_text):
             requirements.append({
@@ -598,7 +615,7 @@ class TargetingSystem:
 
         # Pattern to find "target X" phrases, excluding nested clauses
         # Matches "target [adjectives] type [restrictions]"
-        target_pattern = r"target\s+((?:(?:[a-z\-]+)\s+)*?)?([a-z]+)\s*((?:(?:with|of|that)\s+[^,\.;\(]+?|you control|an opponent controls|you don\'t control)*)"
+        target_pattern = r"target\s+((?:(?:[a-z\-]+)\s+)*?)?([a-z]+)\s*((?:(?:with|of|that)\s+[^,\.;\(]+|you control|an opponent controls|you don\'t control)*)"
 
         matches = re.finditer(target_pattern, oracle_text)
 

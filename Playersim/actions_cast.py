@@ -145,6 +145,56 @@ class CastingHandlersMixin:
         player = self._get_policy_player(context)
         context = dict(context or {})
         source_index = context.get("source_idx", param)
+        if context.get("harmonize_cast"):
+            if (not isinstance(source_index, int)
+                    or not 0 <= source_index < len(
+                        player.get("graveyard", []))):
+                return -0.15, False
+            card_id = player["graveyard"][source_index]
+            harmonize_cost = gs.harmonize_cost_for(player, card_id)
+            if not harmonize_cost:
+                return -0.15, False
+            candidates = [
+                creature_id for creature_id in player.get("battlefield", [])
+                if creature_id not in player.get("tapped_permanents", set())
+                and "creature" in getattr(
+                    gs._safe_get_card(creature_id), "card_types", [])]
+            cast_context = dict(context)
+            cast_context.update({
+                "source_zone": "graveyard", "source_idx": source_index,
+                "harmonize_cast": True, "harmonize_cost": harmonize_cost,
+                "use_alt_cost": "harmonize",
+            })
+            def _payable(reduction):
+                cost = gs.mana_system.calculate_alternative_cost(
+                    card_id, player, "harmonize", {
+                        "harmonize_cost": harmonize_cost,
+                        "harmonize_reduction": reduction,
+                    })
+                return bool(cost is not None and
+                    gs.mana_system.can_pay_mana_cost_with_lands(
+                        player, cost, {"card": gs._safe_get_card(card_id)}))
+
+            can_decline = _payable(0)
+            candidates = [
+                creature_id for creature_id in candidates
+                if _payable(max(0, int(getattr(
+                    gs._safe_get_card(creature_id), "power", 0) or 0)))]
+            if candidates:
+                gs.choice_context = {
+                    "type": "harmonize_tap", "player": player,
+                    "card_id": card_id, "options": candidates,
+                    "cast_context": cast_context,
+                    "can_decline": can_decline,
+                    "resume_phase": gs.phase,
+                }
+                gs.phase = gs.PHASE_CHOOSE
+                gs.priority_player = player
+                return 0.05, True
+            if not can_decline:
+                return -0.1, False
+            success = gs.cast_spell(card_id, player, context=cast_context)
+            return (0.2, True) if success else (-0.1, False)
         if context.get("flashback_cast"):
             if (not isinstance(source_index, int)
                     or not 0 <= source_index < len(player.get("graveyard", []))):
@@ -302,6 +352,10 @@ class CastingHandlersMixin:
         if option.get("permission") == "plot":
             context['use_alt_cost'] = 'plot'
             context['plot_cast'] = True
+        elif option.get("permission") == "airbend":
+            context['use_alt_cost'] = 'exile_permission'
+            context['alternative_cost'] = option.get('alternative_cost', '{2}')
+            context['airbend_cast'] = True
 
         card_value = 0
         if self.card_evaluator:

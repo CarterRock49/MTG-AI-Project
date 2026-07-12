@@ -16,7 +16,7 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 13/13, and 315/315, plus 15/15 fixture-
+   every delivery (currently 9/9, 13/13, and 322/322, plus 15/15 fixture-
    harvest tests, 7/7 production-protocol tests, 19/19 card-registry tests,
    1/1 support-preflight tests, 2/2 deck-corpus tests, 13/13 deck-ingest tests,
    6/6 fuzz/replay tests, and the deterministic 8-seed / 8,000-action
@@ -56,12 +56,11 @@ The project is complete when all of the following hold:
   coverage remains manifest-driven. Round 7.50 statically preflighted all
   4,702 current Standard cards and now separates verified, corpus-clean,
   unseen, partial, unparsed, crash, and explicitly excluded evidence. The
-  current July 11 ledger contains 60 verified, 79 observed-clean, 3,310
-  unseen-clean, 843 partial, and 410 unparsed cards: 73.3517652063% is
-  static-clean and 2.9561888558% is evidence-qualified. Ten formerly clean
-  cards were conservatively reclassified partial after the audit surfaced
-  Harmonize and source-duration omissions; this corrects evidence rather than
-  regressing implemented behavior.
+  current July 12 ledger contains 68 verified, 76 observed-clean, 3,337
+  unseen-clean, 857 partial, and 364 unparsed cards: 74.0323266695% is
+  static-clean and 3.0625265844% is evidence-qualified. The representative
+  metagame has zero unparsed/crash cards. Warp is now conservatively reported
+  partial rather than silently clean until its cast/exile transaction lands.
 - Tier 3 (training/environment): ◐ policy plumbing and audit work are complete;
   a trained checkpoint still needs to beat scripted play before Harvest is
   promoted to policy-vs-policy.
@@ -76,7 +75,7 @@ The project is complete when all of the following hold:
   `formats/standard/`, explicit `--format`/`--decks` configuration, and
   lineage-stamped manifests. User-supplied decks now route into isolated format
   pools automatically; policy qualification and builder feedback remain open.
-- Test gates: smoke 9/9, training 13/13, scenarios 315/315 (grown from 12),
+- Test gates: smoke 9/9, training 13/13, scenarios 322/322 (grown from 12),
   fixture harvest 15/15, production Harvest protocol 7/7, card registry
   19/19, deck ingestion 13/13, fuzz/replay configuration 6/6, deterministic
   default fuzz 8 seeds x 1,000 valid actions, and strict long fuzz 32 seeds x
@@ -1649,6 +1648,34 @@ card coverage slice:
 
 Gates added for this round: 315/315 scenarios and 13/13 deck-ingest tests.
 
+**Round 7.53 (July 2026)** closed the representative metagame's remaining
+severe support gaps and delivered a high-impact fidelity slice:
+* **Zero severe representative cards** — Escape Tunnel, Aang, Swift Savior,
+  and Cosmogrand Zenith moved out of `unparsed`; the regenerated representative
+  corpus now contains no `unparsed` or `crash` entry.
+* **Exact high-impact effects** — Escape Tunnel grants power-limited temporary
+  unblockability; Aang airbends creatures or spells and grants the owner's
+  `{2}` exile cast; Cosmogrand gates on the second spell and exposes its mode;
+  Combustion Technique counts Lessons and installs its exile replacement;
+  Daydream blinks with a counter; and Sage of the Skies copies its own creature
+  spell into a token.
+* **Policy-visible searches** — Brightglass Gearhulk and Starfield Shepherd
+  now expose their exact restricted library candidates. Optional/up-to search
+  can be declined. Starfield remains honestly partial because Warp itself is
+  not implemented.
+* **Harmonize is executable** — printed Harmonize cards are castable from the
+  graveyard, may tap one chosen creature to reduce generic mana by its power,
+  and exile after resolving. Winternight Stories also implements its one-
+  creature-or-two-cards discard decision.
+* **Measured coverage** — the 4,702-card ledger now records 68 verified, 76
+  observed-clean, 3,337 unseen-clean, 857 partial, and 364 unparsed cards.
+  Static-clean coverage is 74.0323266695%; evidence-qualified coverage is
+  3.0625265844%. Warp's 31-card family is explicitly partial, replacing a
+  false-clean classification.
+
+Gates for this round: 322/322 scenarios, 9/9 smoke, 19/19 registry,
+13/13 deck-ingest, 2/2 deck-corpus, and 1/1 support-preflight tests.
+
 ---
 
 ## Working agreements
@@ -1734,11 +1761,11 @@ Gates added for this round: 315/315 scenarios and 13/13 deck-ingest tests.
 - Optional "its controller may search" land-search riders currently use the
   correct pre-removal battlefield controller but follow an always-search legal
   policy; declining that search is not yet exposed as a policy choice.
-- Harmonize cards can resolve their ordinary spell instructions, but the
-  graveyard alternative cast, creature-tap reduction, and post-cast exile are
-  not implemented. Source-duration wording such as "for as long as you
-  control" is also conservatively partial where the permission or restriction
-  outlives the resolving instruction.
+- Warp alternate casting, its next-end-step exile, and the later exile-cast
+  permission are not implemented; all 31 Warp cards are explicitly partial.
+  Source-duration wording such as "for as long as you control" is also
+  conservatively partial where the permission or restriction outlives the
+  resolving instruction.
 - Spell-copy retargeting can keep the complete inherited target set or replace
   the complete set. Changing only some targets of a multi-target spell needs a
   future slot-aware target-choice context; ordinary one-target copies are fully

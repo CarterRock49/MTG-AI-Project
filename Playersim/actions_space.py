@@ -992,7 +992,7 @@ class ActionSpaceMixin:
                     set_valid_action(353 + i, label)
 
             # Choose Mode
-            elif choice_type == "choose_mode":
+            elif choice_type in {"choose_mode", "resolution_modal"}:
                 num_choices = context.get("num_choices", 0)
                 max_modes = context.get("max_required", 1)
                 min_modes = context.get("min_required", 1)
@@ -1010,6 +1010,22 @@ class ActionSpaceMixin:
                 # Allow finalizing choice if minimum met (and min != max)
                 if selected_count >= min_modes and min_modes != max_modes:
                     set_valid_action(11, "PASS_PRIORITY (Finish Mode Choice)")
+
+            elif choice_type == "harmonize_tap":
+                for option_index, creature_id in enumerate(
+                        context.get("options", [])[:10]):
+                    creature = gs._safe_get_card(creature_id)
+                    set_valid_action(
+                        353 + option_index,
+                        f"HARMONIZE_TAP {getattr(creature, 'name', creature_id)}")
+                if context.get("can_decline"):
+                    set_valid_action(11, "HARMONIZE_DONT_TAP")
+
+            elif choice_type == "trigger_mode":
+                for option_index, _ in enumerate(context.get("options", [])[:10]):
+                    set_valid_action(
+                        353 + option_index,
+                        f"CHOOSE_TRIGGER_MODE {option_index + 1}")
 
             # Choose X
             elif choice_type == "choose_x":
@@ -1951,6 +1967,9 @@ class ActionSpaceMixin:
                 continue
             if option.get("permission") == "plot":
                 can_afford = True
+            elif option.get("alternative_cost") and hasattr(gs, 'mana_system'):
+                can_afford = gs.mana_system.can_pay_mana_cost(
+                    player, option["alternative_cost"])
             elif hasattr(gs, 'mana_system'):
                 can_afford = gs.mana_system.can_pay_mana_cost(
                     player, getattr(card, "mana_cost", ""))
@@ -2462,7 +2481,11 @@ class ActionSpaceMixin:
         has_flashback = any(
             self.game_state.flashback_cost_for(player, card_id)
             for card_id in player.get("graveyard", []))
-        if not has_emblem and not has_adventure_permission and not has_flashback:
+        has_harmonize = any(
+            self.game_state.harmonize_cost_for(player, card_id)
+            for card_id in player.get("graveyard", []))
+        if (not has_emblem and not has_adventure_permission
+                and not has_flashback and not has_harmonize):
             return
         gs = self.game_state
         permanent_spell_types = {
@@ -2495,6 +2518,41 @@ class ActionSpaceMixin:
                     })
                 continue
             flashback_cost = gs.flashback_cost_for(player, card_id)
+            harmonize_cost = gs.harmonize_cost_for(player, card_id)
+            if harmonize_cost:
+                if not is_sorcery_speed:
+                    continue
+                candidates = [
+                    creature_id for creature_id in player.get("battlefield", [])
+                    if creature_id not in player.get("tapped_permanents", set())
+                    and "creature" in getattr(
+                        gs._safe_get_card(creature_id), "card_types", [])]
+                reductions = [0] + [
+                    max(0, int(getattr(
+                        gs._safe_get_card(creature_id), "power", 0) or 0))
+                    for creature_id in candidates]
+                payable = any(
+                    gs.mana_system.can_pay_mana_cost_with_lands(
+                        player,
+                        gs.mana_system.calculate_alternative_cost(
+                            card_id, player, "harmonize", {
+                                "harmonize_cost": harmonize_cost,
+                                "harmonize_reduction": reduction,
+                            }),
+                        {"card": card})
+                    for reduction in reductions)
+                if not payable:
+                    continue
+                set_valid_action(
+                    472 + graveyard_index,
+                    f"CAST_WITH_HARMONIZE {card.name}",
+                    context={
+                        "source_zone": "graveyard",
+                        "source_idx": graveyard_index,
+                        "harmonize_cast": True,
+                        "harmonize_cost": harmonize_cost,
+                    })
+                continue
             if flashback_cost:
                 is_instant = "instant" in getattr(card, "card_types", [])
                 if not is_sorcery_speed and not is_instant:

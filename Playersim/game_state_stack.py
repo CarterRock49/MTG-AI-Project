@@ -20,6 +20,7 @@ class GameStateStackMixin:
 
     _ASYNC_EFFECT_CHOICE_TYPES = frozenset({
         "discard", "sacrifice_effect", "distribute_counters", "dig_select",
+        "resolution_modal",
     })
 
     def _effect_controller_id(self, controller):
@@ -213,6 +214,8 @@ class GameStateStackMixin:
              return "permanent"
          if "target creature or vehicle" in text:
              return "creature_or_vehicle"
+         if "target creature or spell" in text:
+             return "creature_or_spell"
          if "target artifact or creature" in text:
              return "permanent"
          if "target creature or planeswalker" in text:
@@ -597,7 +600,8 @@ class GameStateStackMixin:
         every printed mode, so Bushwhack's fight mode could be mask-valid with
         only one of its two required creatures on the battlefield.
         """
-        if not isinstance(choice, dict) or choice.get("type") != "choose_mode":
+        if (not isinstance(choice, dict)
+                or choice.get("type") not in {"choose_mode", "resolution_modal"}):
             return False
         modes = list(choice.get("available_modes", []))
         selected = list(choice.get("selected_modes", []))
@@ -1251,6 +1255,48 @@ class GameStateStackMixin:
                 return entry.get("cost")
         return None
 
+    @staticmethod
+    def _printed_harmonize_cost(card):
+        text = getattr(card, "oracle_text", "") or ""
+        match = re.search(
+            r"(?:^|\n)harmonize\s+((?:\{[^}]+\})+)", text,
+            re.IGNORECASE)
+        return match.group(1) if match else None
+
+    def harmonize_cost_for(self, player, card_id):
+        """Return a printed Harmonize cost for a card in that graveyard."""
+        if card_id not in player.get("graveyard", []):
+            return None
+        return self._printed_harmonize_cost(self._safe_get_card(card_id))
+
+    def finalize_harmonize_tap_choice(self, creature_id=None):
+        """Tap zero or one creature, then resume a pending Harmonize cast."""
+        choice = getattr(self, "choice_context", None)
+        if not (self.phase == self.PHASE_CHOOSE and choice
+                and choice.get("type") == "harmonize_tap"):
+            return False
+        player = choice.get("player")
+        card_id = choice.get("card_id")
+        reduction = 0
+        if creature_id is not None:
+            if (creature_id not in choice.get("options", [])
+                    or creature_id not in player.get("battlefield", [])
+                    or creature_id in player.get("tapped_permanents", set())):
+                return False
+            creature = self._safe_get_card(creature_id)
+            reduction = max(0, int(getattr(creature, "power", 0) or 0))
+            if not self.tap_permanent(creature_id, player):
+                return False
+        cast_context = dict(choice.get("cast_context", {}))
+        cast_context["harmonize_reduction"] = reduction
+        self.choice_context = None
+        self.phase = choice.get("resume_phase", self.PHASE_MAIN_PRECOMBAT)
+        self.priority_player = player
+        success = self.cast_spell(card_id, player, cast_context)
+        if not success and creature_id is not None:
+            self.untap_permanent(creature_id, player)
+        return success
+
     def grant_flashback_permission(self, player, card_id, cost=None):
         """Grant one instant/sorcery card Flashback until end of turn."""
         if card_id not in player.get("graveyard", []):
@@ -1356,7 +1402,12 @@ class GameStateStackMixin:
                 options.append({
                     "card_id": card_id,
                     "source_idx": source_idx,
-                    "permission": "ordinary",
+                    "permission": (
+                        "airbend" if card_id in getattr(
+                            self, "exile_alternative_costs", {})
+                        else "ordinary"),
+                    "alternative_cost": getattr(
+                        self, "exile_alternative_costs", {}).get(card_id),
                 })
                 seen_ordinary.add(card_id)
 
@@ -1430,6 +1481,21 @@ class GameStateStackMixin:
                 return False
             context.setdefault("flashback_cost", flashback_cost)
             context["use_alt_cost"] = "flashback"
+        if context.get("harmonize_cast"):
+            harmonize_cost = self.harmonize_cost_for(player, card_id)
+            if source_zone != "graveyard" or not harmonize_cost:
+                logging.warning("Invalid Harmonize graveyard casting permission.")
+                return False
+            context.setdefault("harmonize_cost", harmonize_cost)
+            context["use_alt_cost"] = "harmonize"
+        if context.get("airbend_cast"):
+            alternative_cost = getattr(
+                self, "exile_alternative_costs", {}).get(card_id)
+            if source_zone != "exile" or not alternative_cost:
+                logging.warning("Invalid Airbend exile casting permission.")
+                return False
+            context["alternative_cost"] = alternative_cost
+            context["use_alt_cost"] = "exile_permission"
         source_idx = context.get("source_idx")
         source_list = None
         card_in_source = False
@@ -2015,12 +2081,15 @@ class GameStateStackMixin:
              return False
         if source_zone == "exile" and hasattr(self, "cards_castable_from_exile"):
              self.cards_castable_from_exile.discard(card_id)
+             getattr(self, "exile_alternative_costs", {}).pop(card_id, None)
         if source_zone == "exile":
              self._consume_plot_permission(player, card_id)
         if source_zone == "graveyard" and context.get(
                 "graveyard_adventure_cast"):
              self._consume_graveyard_adventure_permission(player, card_id)
         if source_zone == "graveyard" and context.get("flashback_cast"):
+             self.flashback_cards.add(card_id)
+        if source_zone == "graveyard" and context.get("harmonize_cast"):
              self.flashback_cards.add(card_id)
 
         # --- Prepare FINAL stack context ---
@@ -3222,6 +3291,11 @@ class GameStateStackMixin:
         if (context.get("flashback_cast")
                 or (context.get('source_zone') == 'graveyard'
                     and context.get('use_alt_cost') == 'flashback')):
+            final_zone = "exile"
+            self.flashback_cards.discard(spell_id)
+        elif (context.get("harmonize_cast")
+                or (context.get('source_zone') == 'graveyard'
+                    and context.get('use_alt_cost') == 'harmonize')):
             final_zone = "exile"
             self.flashback_cards.discard(spell_id)
         # --- Adventure (CR 715.3f, July 2026 sweep) ---

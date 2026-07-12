@@ -1327,6 +1327,18 @@ class TriggeredAbility(Ability):
                         and context.get("casting_player") is not
                         context.get("controller")):
                     return False
+                if "your second spell each turn" in self.trigger_condition:
+                    game_state = context.get("game_state")
+                    trigger_controller = context.get("controller")
+                    if game_state is None or trigger_controller is None:
+                        return False
+                    cast_count = sum(
+                        1 for entry in getattr(
+                            game_state, "spells_cast_this_turn", [])
+                        if isinstance(entry, tuple) and len(entry) > 1
+                        and entry[1] is trigger_controller)
+                    if cast_count != 2:
+                        return False
                 mana_value_match = re.search(
                     r"spell with mana value (\d+) or greater",
                     self.trigger_condition, re.IGNORECASE)
@@ -1645,6 +1657,12 @@ class TriggeredAbility(Ability):
              count = int(card_count_match.group(1))
              zone = card_count_match.group(2).replace("your ", "")
              return len(controller.get(zone, [])) >= count
+
+        if "you've cast another spell this turn" in normalized_condition:
+            return sum(
+                1 for entry in getattr(gs, "spells_cast_this_turn", [])
+                if isinstance(entry, tuple) and len(entry) > 1
+                and entry[1] is controller) >= 2
 
         logging.warning(f"Could not parse trigger condition: '{condition_text}'. Assuming True.")
         return True # Default to true if condition unparsed
@@ -4626,7 +4644,9 @@ class SearchLibraryEffect(AbilityEffect):
     def __init__(self, search_type="any", destination="hand", count=1,
                  condition=None, shuffle_required=True, enters_tapped=False,
                  evidence_search_type=None, search_target_controller=False,
-                 untap_land_threshold=None):
+                 untap_land_threshold=None, policy_choice=False,
+                 optional=False, allowed_types=None, max_mana_value=None,
+                 required_subtype=None):
         target_desc = "your library" # Assuming most searches target controller's library
         dest_desc = f"into {destination}" if destination != 'library' else "on top of your library" # Basic phrasing
         super().__init__(f"Search {target_desc} for {count} {search_type} card(s) and put {dest_desc}", condition)
@@ -4638,6 +4658,44 @@ class SearchLibraryEffect(AbilityEffect):
         self.evidence_search_type = evidence_search_type
         self.search_target_controller = search_target_controller
         self.untap_land_threshold = untap_land_threshold
+        self.policy_choice = bool(policy_choice)
+        self.optional = bool(optional)
+        self.allowed_types = {
+            str(card_type).lower() for card_type in (allowed_types or [])}
+        self.max_mana_value = max_mana_value
+        self.required_subtype = (
+            str(required_subtype).lower() if required_subtype else None)
+
+    def _is_policy_candidate(self, game_state, card_id, search_type):
+        card = game_state._safe_get_card(card_id)
+        if not card:
+            return False
+        card_types = {
+            str(card_type).lower()
+            for card_type in getattr(card, "card_types", [])}
+        subtypes = {
+            str(subtype).lower()
+            for subtype in getattr(card, "subtypes", [])}
+        type_line = str(getattr(card, "type_line", "") or "").lower()
+        if self.allowed_types and not self.allowed_types.intersection(card_types):
+            return False
+        if self.required_subtype and self.required_subtype not in subtypes:
+            return False
+        if (self.max_mana_value is not None
+                and float(getattr(card, "cmc", 0) or 0) > self.max_mana_value):
+            return False
+        normalized = str(search_type or "any").lower()
+        if normalized == "any":
+            return True
+        if normalized == "basic plains":
+            return "basic" in type_line and "plains" in subtypes
+        if normalized == "basic land":
+            return "basic" in type_line and "land" in card_types
+        if normalized == "basic plains or small creature":
+            return (("basic" in type_line and "plains" in subtypes)
+                    or ("creature" in card_types
+                        and float(getattr(card, "cmc", 0) or 0) <= 1))
+        return normalized in card_types or normalized in subtypes
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         # Search usually targets controller's library unless specified otherwise
@@ -4670,6 +4728,29 @@ class SearchLibraryEffect(AbilityEffect):
                 and isinstance(targets, dict)
                 and targets.get("evidence_collected", False)):
             active_search_type = self.evidence_search_type
+
+        if self.policy_choice:
+            options = [
+                card_id for card_id in player_to_search.get("library", [])
+                if self._is_policy_candidate(
+                    game_state, card_id, active_search_type)]
+            if not options:
+                if self.shuffle_required:
+                    game_state.shuffle_library(player_to_search)
+                return True
+            game_state.choice_context = {
+                "type": "dig_select", "player": player_to_search,
+                "options": options,
+                "remaining": min(self.count, len(options)), "selected": [],
+                "source_zone": "library", "destination": self.destination,
+                "rest_destination": "stay", "optional": self.optional,
+                "move_cause": "library_search", "source_id": source_id,
+                "resume_phase": game_state.PHASE_PRIORITY,
+                "shuffle_after": self.shuffle_required,
+            }
+            game_state.phase = game_state.PHASE_CHOOSE
+            game_state.priority_player = player_to_search
+            return True
 
         found_card_ids = []
         num_to_find = self.count
@@ -5657,6 +5738,168 @@ class AnimateLandEffect(AbilityEffect):
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         return self.apply(game_state, source_id, controller, targets)
+
+
+class AirbendEffect(AbilityEffect):
+    """Exile up to one other creature or spell and grant its owner a {2} cast."""
+
+    def __init__(self, alternative_cost="{2}", condition=None):
+        super().__init__(
+            "airbend up to one other target creature or spell", condition)
+        self.alternative_cost = alternative_cost
+        self.requires_target = True
+
+    def _grant_permission(self, game_state, owner, card_id):
+        if not owner or card_id not in owner.get("exile", []):
+            return False
+        game_state.cards_castable_from_exile.add(card_id)
+        game_state.exile_alternative_costs[card_id] = self.alternative_cost
+        return True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        target_ids = []
+        for category in ("creatures", "spells", "creature_or_spell",
+                         "permanents", "chosen"):
+            values = (targets or {}).get(category, [])
+            if isinstance(values, (list, tuple, set)):
+                target_ids.extend(values)
+        target_ids = list(dict.fromkeys(target_ids))
+        if not target_ids:
+            return True
+        target_id = target_ids[0]
+        if target_id == source_id:
+            return False
+
+        for stack_index, item in enumerate(list(game_state.stack)):
+            if not (isinstance(item, tuple) and len(item) >= 4
+                    and item[0] == "SPELL" and item[1] == target_id):
+                continue
+            _, spell_id, spell_controller, spell_context = item
+            game_state.stack.pop(stack_index)
+            game_state.last_stack_size = len(game_state.stack)
+            if spell_context.get("is_copy", False):
+                return True
+            moved = game_state.move_card(
+                spell_id, spell_controller, "stack_implicit",
+                spell_controller, "exile", cause="airbend")
+            return bool(
+                moved and self._grant_permission(
+                    game_state, spell_controller, spell_id))
+
+        current_controller, zone = game_state.find_card_location(target_id)
+        card = game_state._safe_get_card(target_id)
+        if (zone != "battlefield" or not current_controller or not card
+                or "creature" not in getattr(card, "card_types", [])):
+            return False
+        owner = game_state._find_card_owner_fallback(target_id) \
+            or current_controller
+        moved = game_state.move_card(
+            target_id, current_controller, "battlefield", owner, "exile",
+            cause="airbend")
+        return bool(moved and self._grant_permission(game_state, owner, target_id))
+
+
+class BlinkWithCounterEffect(AbilityEffect):
+    """Exile a controlled creature and immediately return it with a counter."""
+
+    def __init__(self, counter_type="+1/+1", condition=None):
+        super().__init__(
+            "Exile target creature you control, then return that card to the "
+            "battlefield under its owner's control with a +1/+1 counter on it",
+            condition)
+        self.counter_type = counter_type
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        target_ids = list((targets or {}).get("creatures", []))
+        if not target_ids:
+            return False
+        target_id = target_ids[0]
+        current_controller, zone = game_state.find_card_location(target_id)
+        if zone != "battlefield" or current_controller is not controller:
+            return False
+        owner = game_state._find_card_owner_fallback(target_id) or controller
+        if not game_state.move_card(
+                target_id, controller, "battlefield", owner, "exile",
+                cause="blink"):
+            return False
+        # Tokens cease to exist after leaving the battlefield.
+        if target_id not in owner.get("exile", []):
+            return True
+        if not game_state.move_card(
+                target_id, owner, "exile", owner, "battlefield",
+                cause="blink_return"):
+            return False
+        return bool(game_state.add_counter(target_id, self.counter_type, 1))
+
+
+class LessonDamageWithExileEffect(DamageWithExileReplacementEffect):
+    """Combustion Technique's graveyard-scaled damage and exile rider."""
+
+    def __init__(self, condition=None):
+        super().__init__(2, includes_planeswalkers=False, condition=condition)
+        self.effect_text = (
+            "deals 2 plus Lessons in your graveyard damage to target creature; "
+            "exile it instead if it would die this turn")
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        lessons = sum(
+            1 for card_id in controller.get("graveyard", [])
+            if "lesson" in {
+                str(subtype).lower() for subtype in getattr(
+                    game_state._safe_get_card(card_id), "subtypes", [])})
+        self.amount = 2 + lessons
+        return super()._apply_effect(game_state, source_id, controller, targets)
+
+
+class ResolutionModalEffect(AbilityEffect):
+    """Expose a modal instruction chosen while a trigger is resolving."""
+
+    def __init__(self, modes, source_name=None, condition=None):
+        super().__init__("Choose one — " + " • ".join(modes), condition)
+        self.modes = list(modes)
+        self.source_name = source_name
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        if not self.modes:
+            return False
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.choice_context = {
+            "type": "resolution_modal", "player": controller,
+            "controller": controller, "card_id": source_id,
+            "source_id": source_id, "source_name": self.source_name,
+            "num_choices": len(self.modes), "min_required": 1,
+            "max_required": 1, "available_modes": self.modes,
+            "selected_modes": [], "resume_phase": game_state.PHASE_PRIORITY,
+        }
+        game_state.priority_player = controller
+        game_state.priority_pass_count = 0
+        return True
+
+
+class DiscardTwoUnlessCreatureEffect(AbilityEffect):
+    """Make the controller discard one creature card or any two cards."""
+
+    def __init__(self, condition=None):
+        super().__init__(
+            "Discard two cards unless you discard a creature card", condition)
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        remaining = min(2, len(controller.get("hand", [])))
+        if remaining <= 0:
+            return True
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.choice_context = {
+            "type": "discard", "player": controller,
+            "source_id": source_id, "remaining": remaining,
+            "stop_after_creature": True, "cause": "spell_effect",
+            "resume_phase": game_state.PHASE_PRIORITY,
+        }
+        game_state.priority_player = controller
+        game_state.priority_pass_count = 0
+        return True
 
 
 class EarthbendEffect(AbilityEffect):

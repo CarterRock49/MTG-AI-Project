@@ -58,7 +58,7 @@ class GameState(
                  "adventure_cards", "saga_counters", "mdfc_cards", "battle_cards", 'battle_attack_targets',
                  "melded_permanents", "mutated_permanents", "specialized_cards",
                  "last_die_roll", "die_roll_history",
-                 "cards_castable_from_exile", "impulse_until_eot", "cast_as_back_face", 'planeswalker_attack_targets',
+                 "cards_castable_from_exile", "exile_alternative_costs", "impulse_until_eot", "cast_as_back_face", 'planeswalker_attack_targets',
                  # Additional slots for various tracking variables
                  "phased_out", 'original_p1_deck',
                  "suspended_cards",
@@ -577,6 +577,7 @@ class GameState(
 
             # Cast Tracking
             self.cards_castable_from_exile = set()
+            self.exile_alternative_costs = {}
             self.impulse_until_eot = set() # impulse-drawn cards whose play permission expires at end of turn
             self.cast_as_back_face = set()
 
@@ -979,7 +980,7 @@ class GameState(
         ]
         mutable_attrs_copy = [ # Attributes safe for shallow copy (typically sets/lists of IDs/primitives)
             "current_attackers", "attackers_this_turn", "adventure_cards", "mdfc_cards",
-            "cards_castable_from_exile", "cast_as_back_face", "phased_out", "kicked_cards",
+            "cards_castable_from_exile", "exile_alternative_costs", "cast_as_back_face", "phased_out", "kicked_cards",
             "evoked_cards", "blitz_cards", "dash_cards", "unearthed_cards", "jump_start_cards",
             "buyback_cards", "flashback_cards", "exile_at_end_of_combat", "haste_until_eot",
             "banding_creatures", "crewed_vehicles", "boast_activated", "forecast_used",

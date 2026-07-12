@@ -231,6 +231,9 @@ class ChoiceHandlersMixin:
                 "Unknown Dig rest destination %r; leaving cards in %s.",
                 destination, source_zone)
 
+        if ctx.get('shuffle_after'):
+            gs.shuffle_library(player)
+
         gs._resume_effect_continuation(ctx)
         return True
 
@@ -1598,8 +1601,30 @@ class ChoiceHandlersMixin:
         player = gs.p1 if gs.agent_is_p1 else gs.p2
         chosen_mode_idx = param # Agent's choice index from action
 
+        if (gs.choice_context
+                and gs.choice_context.get("type") == "harmonize_tap"):
+            harmonize = gs.choice_context
+            options = harmonize.get("options", [])
+            if (harmonize.get("player") is not player
+                    or not 0 <= chosen_mode_idx < len(options)):
+                return -0.2, False
+            return ((0.1, True)
+                    if gs.finalize_harmonize_tap_choice(
+                        options[chosen_mode_idx]) else (-0.2, False))
+        if (gs.choice_context
+                and gs.choice_context.get("type") == "trigger_mode"):
+            trigger_choice = gs.choice_context
+            if trigger_choice.get("player") is not player:
+                return -0.2, False
+            return ((0.1, True)
+                    if gs.ability_handler.choose_trigger_mode(chosen_mode_idx)
+                    else (-0.2, False))
+
         # Validate context
-        if not gs.choice_context or gs.choice_context.get("type") != "choose_mode" or gs.choice_context.get("player") != player:
+        if (not gs.choice_context
+                or gs.choice_context.get("type") not in {
+                    "choose_mode", "resolution_modal"}
+                or gs.choice_context.get("player") != player):
              logging.warning("CHOOSE_MODE called out of context.")
              return -0.2, False
 
@@ -1645,6 +1670,20 @@ class ChoiceHandlersMixin:
             # For now, assume finalize only when max is reached.
 
             if finalize_choice:
+                 if ctx.get("type") == "resolution_modal":
+                      from .ability_utils import EffectFactory
+                      selected_effects = []
+                      for mode_index in sorted(selected_modes):
+                           selected_effects.extend(EffectFactory.create_effects(
+                               available_modes_text[mode_index],
+                               source_name=ctx.get("source_name")))
+                      continuation = ctx.get("effect_continuation", {})
+                      continuation["effects"] = (
+                          selected_effects + list(
+                              continuation.get("effects", [])))
+                      ctx["effect_continuation"] = continuation
+                      gs._resume_effect_continuation(ctx)
+                      return 0.1, True
                  if gs.finalize_modal_spell_choice():
                       return 0.1, True
                  logging.error("Failed to finalize completed modal choice.")

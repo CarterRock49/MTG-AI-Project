@@ -92,7 +92,7 @@
       "status": "verified"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 1,
       "corpus_decks": [
         "Selesnya Ouroboroid"
@@ -1225,7 +1225,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -1596,13 +1596,7 @@
       "effect_probes": 3,
       "faces_audited": 2,
       "index": 119,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: airbend up to one other target creature or spell",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Airbend",
         "Flash",
@@ -1616,7 +1610,7 @@
       "name": "Aang, Swift Savior // Aang and La, Ocean's Fury",
       "oracle_id": "cbf09050-39d0-463b-96db-9e22011ae0d8",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "verified"
     },
     {
       "abilities_registered": 3,
@@ -1828,7 +1822,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 2,
       "corpus_decks": [
         "4c Control"
@@ -2448,7 +2442,7 @@
       "status": "partial"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -2581,7 +2575,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -3037,7 +3031,7 @@
       "status": "unparsed"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -3442,7 +3436,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 220,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Warp"
       ],
@@ -3450,7 +3450,7 @@
       "name": "All-Fates Stalker",
       "oracle_id": "da9ec010-8b42-4927-b602-4e96bced4e99",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 2,
@@ -3612,7 +3612,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -4224,6 +4224,11 @@
       "issues": [
         {
           "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        },
+        {
+          "count": 1,
           "reason": "unparsed clause: you may put a permanent card with mana value less than or equal to the number of",
           "severity": "partial"
         }
@@ -4331,19 +4336,13 @@
       "status": "unparsed"
     },
     {
-      "abilities_registered": 3,
+      "abilities_registered": 2,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 269,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Vigilance"
       ],
@@ -4351,7 +4350,7 @@
       "name": "Apothecary Stomper",
       "oracle_id": "6a381121-9134-489c-8c7e-44be1936b0e2",
       "replacement_effects_registered": 1,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -4363,8 +4362,8 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
+          "reason": "unparsed clause: \u2022 target creature you control gains flying until end of turn\n\u2022 airbend another t",
+          "severity": "partial"
         }
       ],
       "keywords": [
@@ -4375,7 +4374,7 @@
       "name": "Appa, Loyal Sky Bison",
       "oracle_id": "c6e28cf0-81c7-4f52-a29b-988cc6fd31ee",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "partial"
     },
     {
       "abilities_registered": 4,
@@ -4743,7 +4742,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 1,
       "corpus_decks": [
         "Mono-Green Landfall"
@@ -4766,7 +4765,7 @@
       "status": "partial"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -5123,7 +5122,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -5265,7 +5264,7 @@
       "status": "partial"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -5421,6 +5420,11 @@
       "issues": [
         {
           "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        },
+        {
+          "count": 1,
           "reason": "unparsed clause: return target noncreature",
           "severity": "partial"
         }
@@ -5532,11 +5536,6 @@
           "count": 1,
           "reason": "unparsed effect text: attach to target creature you control. Equip only as a sorcery.",
           "severity": "unparsed"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose up to one target creature. that creature can't be blocked this turn and h",
-          "severity": "unparsed"
         }
       ],
       "keywords": [
@@ -5643,7 +5642,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -5979,7 +5978,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -6182,7 +6181,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -7097,7 +7096,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -8365,25 +8364,19 @@
       "status": "unparsed"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 1,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 489,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Black Panther, Vanguard",
       "oracle_id": "b0bf1964-c543-4c53-9f09-0dd7c608d5c5",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -8483,19 +8476,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 495,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Blade of the Swarm",
       "oracle_id": "33042d12-f08b-4b3e-b106-c424ef868c13",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -9521,7 +9508,7 @@
       "status": "unparsed"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -9571,7 +9558,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -10095,7 +10082,7 @@
       "status": "partial"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -10221,13 +10208,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 590,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: target creature you control can't be blocked this turn",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Prowess"
       ],
@@ -10235,7 +10216,7 @@
       "name": "Bria, Riptide Rogue",
       "oracle_id": "d627996b-cbcd-4162-bd13-9ab286de64d1",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -10317,13 +10298,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 595,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put them into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "First strike",
         "Trample"
@@ -10332,7 +10307,7 @@
       "name": "Brightglass Gearhulk",
       "oracle_id": "0c7019a7-3cca-481a-9af0-abedb89c15ad",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "verified"
     },
     {
       "abilities_registered": 2,
@@ -10352,7 +10327,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -10392,7 +10367,7 @@
       "status": "partial"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -10658,7 +10633,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 613,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Warp"
       ],
@@ -10666,7 +10647,7 @@
       "name": "Broodguard Elite",
       "oracle_id": "c90da077-de8c-4402-abfc-b63dd15853da",
       "replacement_effects_registered": 1,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 2,
@@ -10906,7 +10887,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -11318,7 +11299,13 @@
       "effect_probes": 0,
       "faces_audited": 1,
       "index": 648,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Warp"
       ],
@@ -11326,7 +11313,7 @@
       "name": "Bygone Colossus",
       "oracle_id": "1bd584d5-4e11-428c-b51e-462e4292b07f",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 3,
@@ -12936,7 +12923,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -13224,13 +13211,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 750,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Harmonize casting is not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Harmonize"
       ],
@@ -13238,7 +13219,7 @@
       "name": "Channeled Dragonfire",
       "oracle_id": "91179937-6f55-4d1b-8f06-2efe1c8fea7a",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -13337,19 +13318,13 @@
       "status": "partial"
     },
     {
-      "abilities_registered": 3,
+      "abilities_registered": 1,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 756,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Scry"
       ],
@@ -13357,7 +13332,7 @@
       "name": "Charming Prince",
       "oracle_id": "c48d844c-3976-4fa5-8e0d-3f0e535e7619",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -13366,13 +13341,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 757,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Haste",
         "Role token",
@@ -13382,7 +13351,7 @@
       "name": "Charming Scoundrel",
       "oracle_id": "9eec304d-ffcb-4287-b877-280ac1e4f496",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -13699,7 +13668,7 @@
       "status": "partial"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 1,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -14466,7 +14435,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 815,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Warp"
       ],
@@ -14474,7 +14449,7 @@
       "name": "Codecracker Hound",
       "oracle_id": "ae791b61-5825-4987-a8c2-80813758d3f7",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 2,
@@ -14567,13 +14542,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 821,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Trample"
       ],
@@ -14581,7 +14550,7 @@
       "name": "Coliseum Behemoth",
       "oracle_id": "076cf4f1-b3d4-4175-b976-938ad851cc0e",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -14659,7 +14628,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -14818,19 +14787,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 834,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: exile it instead",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Combustion Technique",
       "oracle_id": "522a04ff-cbfe-47b0-bd29-ef6fc27a6905",
       "replacement_effects_registered": 1,
-      "status": "partial"
+      "status": "verified"
     },
     {
       "abilities_registered": 0,
@@ -15162,7 +15125,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -15446,7 +15409,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -15771,19 +15734,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 885,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Cosmogrand Zenith",
       "oracle_id": "e2cd65f6-7cbc-497c-bdc9-698ff17da31e",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "verified"
     },
     {
       "abilities_registered": 0,
@@ -15990,7 +15947,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -17198,7 +17155,7 @@
       "status": "partial"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -17238,13 +17195,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 963,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Investigative Journalism",
         "Puff Piece"
@@ -17253,7 +17204,7 @@
       "name": "Daily Bugle Reporters",
       "oracle_id": "2e677ded-7af3-4af0-81df-b70d6ee616ec",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -17295,13 +17246,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 966,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Impound",
         "Repair"
@@ -17310,7 +17255,7 @@
       "name": "Damage Control Crew",
       "oracle_id": "c0f9e604-a8bf-4c7d-8480-487e8076e1d8",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -17857,13 +17802,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 996,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: return that card to the battlefield under its owner's control with a +1/+1 count",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -17871,7 +17810,7 @@
       "name": "Daydream",
       "oracle_id": "094c4486-6cae-4268-850e-ff0082e5ad10",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "verified"
     },
     {
       "abilities_registered": 2,
@@ -17976,7 +17915,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -18036,7 +17975,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -18353,7 +18292,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -18495,7 +18434,7 @@
       "status": "partial"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -18953,19 +18892,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1056,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: Another target creature you control with power 2 or less can't be blocked this t",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Deserter's Disciple",
       "oracle_id": "73ca3132-d849-4cf9-beba-75ba09789332",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -20447,13 +20380,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1138,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flash"
       ],
@@ -20461,7 +20388,7 @@
       "name": "Downwind Ambusher",
       "oracle_id": "1e0a2709-2cd2-4954-81ca-60654ab03d7c",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -21143,7 +21070,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -21179,7 +21106,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1179,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Warp"
       ],
@@ -21187,7 +21120,7 @@
       "name": "Drix Fatemaker",
       "oracle_id": "583102f8-7232-4fbb-a715-087448536bb2",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 4,
@@ -21663,7 +21596,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -22850,7 +22783,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -23663,7 +23596,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -23884,19 +23817,13 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 1327,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: Target creature with power 2 or less can't be blocked this turn",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Escape Tunnel",
       "oracle_id": "0056fc91-4398-471c-b561-7ff99750ac8a",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "verified"
     },
     {
       "abilities_registered": 4,
@@ -24226,7 +24153,13 @@
       "effect_probes": 0,
       "faces_audited": 1,
       "index": 1344,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Landfall",
         "Warp"
@@ -24235,7 +24168,7 @@
       "name": "Eusocial Engineering",
       "oracle_id": "2f3f5a1c-8b88-4080-bd80-14db4d6c8c50",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 3,
@@ -24375,7 +24308,13 @@
       "effect_probes": 0,
       "faces_audited": 1,
       "index": 1352,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Flying",
         "Lifelink",
@@ -24385,7 +24324,7 @@
       "name": "Exalted Sunborn",
       "oracle_id": "43febbcd-ecbe-4edb-ad90-7fc6dc381d05",
       "replacement_effects_registered": 2,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 2,
@@ -24672,7 +24611,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -25097,7 +25036,7 @@
       "status": "partial"
     },
     {
-      "abilities_registered": 3,
+      "abilities_registered": 1,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -25264,19 +25203,13 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 3,
+      "abilities_registered": 2,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1401,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flash",
         "Surveil"
@@ -25285,7 +25218,7 @@
       "name": "Fangkeeper's Familiar",
       "oracle_id": "06343800-b555-4a13-ad4d-19e37d200138",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -25835,7 +25768,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 0,
@@ -26026,19 +25959,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1442,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Ferocification",
       "oracle_id": "814e06c0-9b61-4a64-8c67-73a8eb00a768",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -26974,13 +26901,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1493,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one or both \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flash",
         "Heckle",
@@ -26990,7 +26911,7 @@
       "name": "Flash Thompson, Spider-Fan",
       "oracle_id": "f536a518-160e-4267-89da-3d34accc6d2c",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -28458,7 +28379,7 @@
       "status": "partial"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -28868,25 +28789,19 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 4,
+      "abilities_registered": 1,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1597,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Gaius van Baelsar",
       "oracle_id": "86d2a45a-e452-4241-8ab4-28a2bb808ffa",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -29411,13 +29326,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1626,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Reach"
       ],
@@ -29425,7 +29334,7 @@
       "name": "Gearbane Orangutan",
       "oracle_id": "1f3e7420-86aa-4847-bc2d-21f6bae470c8",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -29645,7 +29554,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1638,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Warp"
       ],
@@ -29653,7 +29568,7 @@
       "name": "Germinating Wurm",
       "oracle_id": "8735c62d-1508-4bdc-a5d0-f7c68d892a5e",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 1,
@@ -29688,7 +29603,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -30018,13 +29933,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1659,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flash",
         "Flying"
@@ -30033,10 +29942,10 @@
       "name": "Giant-Sized Flying Ant",
       "oracle_id": "233e3b4b-faaf-451d-8a2e-e9f5a6ced671",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -30311,13 +30220,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1675,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Harmonize casting is not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Harmonize"
       ],
@@ -30325,7 +30228,7 @@
       "name": "Glacial Dragonhunt",
       "oracle_id": "8f976399-29a9-4eb7-844d-3d3f2fdf6ea7",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -30416,13 +30319,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1680,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flash",
         "Flying"
@@ -30431,7 +30328,7 @@
       "name": "Glamermite",
       "oracle_id": "a7b0d897-38c0-4f90-81e8-3c5b8d31a607",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -30703,7 +30600,7 @@
       "status": "unparsed"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -30819,7 +30716,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -30946,7 +30843,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -31103,13 +31000,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1717,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: Another target creature with power 2 or less can't be blocked this turn",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Haste"
       ],
@@ -31117,10 +31008,10 @@
       "name": "Goblin Smuggler",
       "oracle_id": "eae15f7d-1f6e-4dfc-afea-7698b93cd145",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -32417,7 +32308,7 @@
       "status": "partial"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -33009,7 +32900,13 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 1820,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Warp"
       ],
@@ -33017,7 +32914,7 @@
       "name": "Haliya, Guided by Light",
       "oracle_id": "9b0af3ad-1b4d-4480-af91-fe9baee5d1c5",
       "replacement_effects_registered": 0,
-      "status": "observed_clean"
+      "status": "partial"
     },
     {
       "abilities_registered": 0,
@@ -33667,13 +33564,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1857,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: Target creature with power 2 or less can't be blocked this turn",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Haste",
         "Indestructible",
@@ -33683,7 +33574,7 @@
       "name": "Hazoret, Godseeker",
       "oracle_id": "6c5d8599-75ca-4479-a02b-1b257b7aea57",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -33806,7 +33697,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -34266,7 +34157,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -34358,7 +34249,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -34925,13 +34816,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1926,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Fight"
       ],
@@ -34939,7 +34824,7 @@
       "name": "Hivespine Wolverine",
       "oracle_id": "312be209-dba5-4e6c-938e-1287642f67d4",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -36079,7 +35964,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1989,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed clause: \u2022 Create a 4/4 white",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Scry"
       ],
@@ -36087,7 +35978,7 @@
       "name": "Hylda of the Icy Crown",
       "oracle_id": "1733c71b-fd28-48dd-8a3d-41afd4b22f0e",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 2,
@@ -37223,19 +37114,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2051,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: Choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Insidious Fungus",
       "oracle_id": "0a8d0217-ff24-4177-b6be-707eb2b6b9e9",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -37842,7 +37727,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 0,
       "corpus_copies": 2,
       "corpus_decks": [
         "Jeskai Lessons"
@@ -38456,13 +38341,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2120,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Target artifact or creature's owner puts it on their choice of the top or bottom",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Spree"
       ],
@@ -38470,7 +38349,7 @@
       "name": "Jailbreak Scheme",
       "oracle_id": "bc7f39e1-97bf-4725-a84a-2a04121530c6",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -39099,25 +38978,19 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 1,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2154,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Judith, Carnage Connoisseur",
       "oracle_id": "e86c965b-ac10-4fff-b682-dddd6d9747c6",
       "replacement_effects_registered": 2,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -39446,7 +39319,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 1,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -39567,13 +39440,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2179,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flying"
       ],
@@ -39581,7 +39448,7 @@
       "name": "Kastral, the Windcrested",
       "oracle_id": "ced5fe9a-4237-4c89-9dd6-b133b966ebcc",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -39794,7 +39661,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -40668,7 +40535,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2235,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Warp"
       ],
@@ -40676,7 +40549,7 @@
       "name": "Knight Luminary",
       "oracle_id": "11809d9b-30f3-49d5-9119-e45b4de044c8",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 1,
@@ -41343,19 +41216,13 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 3,
+      "abilities_registered": 2,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2270,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flash",
         "Scry"
@@ -41364,7 +41231,7 @@
       "name": "Kutzil's Flanker",
       "oracle_id": "ba557e19-a409-4c02-a9ac-a8fb77762e43",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -41388,13 +41255,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2272,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flying"
       ],
@@ -41402,7 +41263,7 @@
       "name": "Kykar, Zephyr Awakener",
       "oracle_id": "0156c94b-e64c-49de-a46c-a203c5e05e98",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -42873,7 +42734,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -43117,7 +42978,13 @@
       "effect_probes": 0,
       "faces_audited": 1,
       "index": 2363,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Warp"
       ],
@@ -43125,7 +42992,7 @@
       "name": "Loading Zone",
       "oracle_id": "16156274-8dc0-439c-94c4-e8c89bbb5687",
       "replacement_effects_registered": 1,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 1,
@@ -43316,18 +43183,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2375,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: return it to the battlefield under its owner's control",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed clause: you may exile it. if you do",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Ward"
       ],
@@ -43335,7 +43191,7 @@
       "name": "Long River Lurker",
       "oracle_id": "c65c4d01-29da-47e6-993c-a265cf1f198c",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -43511,19 +43367,13 @@
       "status": "partial"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 1,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2385,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Scry"
       ],
@@ -43531,7 +43381,7 @@
       "name": "Lord Skitter's Butcher",
       "oracle_id": "467f756f-75db-4748-99d3-62651776adfe",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -43549,7 +43399,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 3,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -43653,11 +43503,6 @@
       "faces_audited": 1,
       "index": 2393,
       "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: Choose one \u2014",
-          "severity": "unparsed"
-        },
         {
           "count": 1,
           "reason": "unparsed effect text: attach to target creature you control. Equip only as a sorcery.",
@@ -45017,13 +44862,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2467,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Harmonize casting is not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Harmonize"
       ],
@@ -45031,7 +44870,7 @@
       "name": "Mammoth Bellow",
       "oracle_id": "6f2e4607-bece-42ba-a2a3-5dc50f246793",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -45911,7 +45750,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2515,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Warp"
       ],
@@ -45919,7 +45764,7 @@
       "name": "Mechanozoa",
       "oracle_id": "1aeb43f7-4d8a-4648-9c13-fd101081b448",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 2,
@@ -46093,7 +45938,13 @@
       "effect_probes": 0,
       "faces_audited": 1,
       "index": 2525,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Warp"
       ],
@@ -46101,7 +45952,7 @@
       "name": "Memorial Team Leader",
       "oracle_id": "c71d3775-0c71-4e37-979d-35e319f357f0",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 1,
@@ -46748,7 +46599,13 @@
       "effect_probes": 0,
       "faces_audited": 1,
       "index": 2561,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Double",
         "Landfall",
@@ -46758,7 +46615,7 @@
       "name": "Mightform Harmonizer",
       "oracle_id": "8e025cda-71c5-4d06-8436-decd408667af",
       "replacement_effects_registered": 0,
-      "status": "observed_clean"
+      "status": "partial"
     },
     {
       "abilities_registered": 1,
@@ -47364,19 +47221,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2596,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Mister Hyde, Monster Within",
       "oracle_id": "4a7c7ecc-df72-4da0-af35-dd0af58ec02c",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -47853,7 +47704,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -47910,19 +47761,13 @@
       "status": "observed_clean"
     },
     {
-      "abilities_registered": 4,
+      "abilities_registered": 3,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2627,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flying",
         "Food",
@@ -47933,7 +47778,7 @@
       "name": "Momo, Playful Pet",
       "oracle_id": "85ee8ab6-8db5-45d7-85ae-64838771146a",
       "replacement_effects_registered": 1,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -48560,7 +48405,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -49313,11 +49158,6 @@
       "faces_audited": 1,
       "index": 2704,
       "issues": [
-        {
-          "count": 1,
-          "reason": "Harmonize casting is not implemented",
-          "severity": "partial"
-        },
         {
           "count": 1,
           "reason": "unparsed clause: put it onto the battlefield",
@@ -50361,7 +50201,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2760,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Flying",
         "Haste",
@@ -50371,7 +50217,7 @@
       "name": "Nova Hellkite",
       "oracle_id": "9635d79e-62ec-4d80-ae37-2793489cc13b",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 3,
@@ -50959,19 +50805,13 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 1,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2791,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Scry"
       ],
@@ -50979,7 +50819,7 @@
       "name": "Oltec Archaeologists",
       "oracle_id": "b19c4bbf-258f-4436-8ef9-fc905c283776",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -51005,19 +50845,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2793,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Oltec Matterweaver",
       "oracle_id": "3cb91696-242f-4e91-806b-61b1bb45a20c",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -51253,7 +51087,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -51391,7 +51225,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -51880,7 +51714,7 @@
       "status": "partial"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -52043,7 +51877,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -52636,7 +52470,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -52800,7 +52634,7 @@
       "status": "partial"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -52846,6 +52680,11 @@
       "faces_audited": 1,
       "index": 2896,
       "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        },
         {
           "count": 1,
           "reason": "unparsed clause: gains \"when this creature dies",
@@ -53195,19 +53034,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2914,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: Choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Phoenix Down",
       "oracle_id": "8cc7e418-cc5e-4aef-9757-874223fccd74",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 4,
@@ -53270,7 +53103,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 4,
+      "abilities_registered": 1,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -53477,7 +53310,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2929,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Warp"
       ],
@@ -53485,7 +53324,7 @@
       "name": "Pinnacle Emissary",
       "oracle_id": "522e8db5-857e-492f-afed-d60cd2ce3dcd",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 3,
@@ -53826,7 +53665,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -53987,7 +53826,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -54206,7 +54045,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2968,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Warp"
       ],
@@ -54214,7 +54059,7 @@
       "name": "Possibility Technician",
       "oracle_id": "ebbf84f7-d142-4de5-bfc1-ea86f082d733",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 3,
@@ -54712,7 +54557,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 0,
       "corpus_copies": 1,
       "corpus_decks": [
         "Izzet Spellementals"
@@ -55667,7 +55512,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -55715,7 +55560,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3053,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Flying",
         "Warp"
@@ -55724,7 +55575,7 @@
       "name": "Quantum Riddler",
       "oracle_id": "58582fac-4c42-4a1c-9ab1-4a892b500da4",
       "replacement_effects_registered": 1,
-      "status": "observed_clean"
+      "status": "partial"
     },
     {
       "abilities_registered": 2,
@@ -56002,19 +55853,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3068,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Qutrub Forayer",
       "oracle_id": "500ccb61-83b0-4b1f-ada6-65850ed5a825",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -56251,19 +56096,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3082,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: Target creature with power 2 or less can't be blocked this turn",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Ragged Playmate",
       "oracle_id": "d0732ebf-91ad-4e3c-a09a-f410d20587fc",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -56595,7 +56434,7 @@
       "status": "partial"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 1,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -57334,7 +57173,13 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 3142,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Warp"
       ],
@@ -57342,7 +57187,7 @@
       "name": "Rayblade Trooper",
       "oracle_id": "792da586-a687-428c-a10e-75431249df5b",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 0,
@@ -57788,7 +57633,13 @@
       "effect_probes": 0,
       "faces_audited": 1,
       "index": 3168,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Haste",
         "Warp"
@@ -57797,7 +57648,7 @@
       "name": "Red Tiger Mechan",
       "oracle_id": "94c9aea7-564d-4fc8-ae14-7b22cba18b95",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 3,
@@ -58496,7 +58347,7 @@
       "status": "observed_clean"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -58902,7 +58753,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -59746,7 +59597,7 @@
       "status": "observed_clean"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -59829,13 +59680,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3281,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Harmonize casting is not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Harmonize"
       ],
@@ -59843,7 +59688,7 @@
       "name": "Roamer's Routine",
       "oracle_id": "cf2355f3-11d2-4b03-b663-9fad6b07e4b2",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -60101,19 +59946,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3295,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: Target creature can't be blocked this turn",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Rogue's Passage",
       "oracle_id": "f29dc596-2121-4421-8463-15f6c2e8b9b3",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -60735,7 +60574,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -61062,7 +60901,7 @@
       "status": "partial"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -61347,13 +61186,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3361,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: copy this spell",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flying",
         "Lifelink"
@@ -61362,7 +61195,7 @@
       "name": "Sage of the Skies",
       "oracle_id": "cfc7cef7-0a95-49f8-970f-abff2cacd82d",
       "replacement_effects_registered": 1,
-      "status": "partial"
+      "status": "verified"
     },
     {
       "abilities_registered": 2,
@@ -61738,7 +61571,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -61991,7 +61824,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -62620,7 +62453,7 @@
       "status": "unparsed"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -62746,7 +62579,7 @@
       "status": "unparsed"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -62797,7 +62630,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -63196,7 +63029,7 @@
       "status": "unparsed"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -63265,19 +63098,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3466,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: Two target creatures you control that share a creature type can't be blocked thi",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Secret Tunnel",
       "oracle_id": "632e2979-d88a-482e-9bb8-57b683c5310f",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -63382,7 +63209,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -63471,7 +63298,7 @@
       "status": "partial"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -64729,7 +64556,7 @@
       "status": "unparsed"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -65185,7 +65012,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -65296,7 +65123,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3576,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Warp"
       ],
@@ -65304,7 +65137,7 @@
       "name": "Sinister Cryologist",
       "oracle_id": "be3038ff-b39e-4d2e-97ee-85de074ccfd3",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 2,
@@ -65860,7 +65693,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 3,
+      "abilities_registered": 1,
       "corpus_copies": 1,
       "corpus_decks": [
         "4c Control"
@@ -67193,7 +67026,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -67413,7 +67246,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -68411,7 +68244,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -69013,7 +68846,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3774,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Flying",
         "Surveil",
@@ -69023,7 +68862,7 @@
       "name": "Starbreach Whale",
       "oracle_id": "076865e9-ee10-4a87-9180-4274202d37c1",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 1,
@@ -69060,7 +68899,7 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: put it into your hand",
+          "reason": "Warp casting and delayed exile are not implemented",
           "severity": "partial"
         }
       ],
@@ -69081,7 +68920,13 @@
       "effect_probes": 0,
       "faces_audited": 1,
       "index": 3777,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Warp"
       ],
@@ -69089,7 +68934,7 @@
       "name": "Starfield Vocalist",
       "oracle_id": "4add809e-9caa-45ae-bb0d-4760a360b8e2",
       "replacement_effects_registered": 1,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 1,
@@ -69403,6 +69248,11 @@
       "issues": [
         {
           "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        },
+        {
+          "count": 1,
           "reason": "unparsed clause: you may draw that many cards",
           "severity": "partial"
         }
@@ -69534,7 +69384,7 @@
       "status": "unparsed"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -71865,7 +71715,7 @@
       "status": "observed_clean"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -72132,7 +71982,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3945,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Warp"
       ],
@@ -72140,7 +71996,7 @@
       "name": "Susurian Voidborn",
       "oracle_id": "4f754f11-3b6d-4a4e-86d7-7495e475ef74",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 0,
@@ -72447,7 +72303,7 @@
       "status": "unparsed"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -72485,19 +72341,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3963,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Sylvan Scavenging",
       "oracle_id": "398afdf2-4a12-430e-85c9-c68847230939",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -72544,13 +72394,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3966,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Harmonize casting is not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Harmonize"
       ],
@@ -72558,7 +72402,7 @@
       "name": "Synchronized Charge",
       "oracle_id": "faa0055b-c1d2-4ce7-875f-41b4be8030bd",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -78830,7 +78674,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -79334,7 +79178,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -79843,7 +79687,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -80038,19 +79882,13 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 4367,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: Target creature you control with power 2 or less can't be blocked this turn",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Underfoot Underdogs",
       "oracle_id": "3740b86d-b0e6-4837-b408-e7f62b95c787",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -80170,13 +80008,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4374,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Harmonize casting is not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Harmonize"
       ],
@@ -80184,7 +80016,7 @@
       "name": "Unending Whisper",
       "oracle_id": "c5da5c31-0cf1-4393-8701-eda7880ecebc",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -80236,7 +80068,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -80727,7 +80559,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -80859,13 +80691,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4410,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Harmonize casting is not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Harmonize"
       ],
@@ -80873,7 +80699,7 @@
       "name": "Ureni's Rebuff",
       "oracle_id": "c0b7e989-8194-484c-93aa-a44df0764a77",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 4,
@@ -81260,7 +81086,7 @@
       "status": "partial"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -81462,19 +81288,13 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 1,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4444,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Cloak"
       ],
@@ -81482,7 +81302,7 @@
       "name": "Vannifar, Evolved Enigma",
       "oracle_id": "e8aa0d7d-e5f6-4d66-bdc1-315483e1b256",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -83071,7 +82891,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 1,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -83509,7 +83329,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 0,
@@ -83605,19 +83425,13 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 1,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4563,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Offspring"
       ],
@@ -83625,7 +83439,7 @@
       "name": "Warren Warleader",
       "oracle_id": "a7e7059e-83f8-4124-9cc0-64ba150b5d96",
       "replacement_effects_registered": 1,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -83815,12 +83629,7 @@
         {
           "count": 1,
           "reason": "unparsed clause: if it has four or more quest counters on it",
-          "severity": "unparsed"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed effect text: Target creature can't be blocked this turn",
-          "severity": "unparsed"
+          "severity": "partial"
         }
       ],
       "keywords": [
@@ -83830,7 +83639,7 @@
       "name": "Waterbender Ascension",
       "oracle_id": "aeddfdc2-149b-4703-ba57-8d844b25ef08",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "partial"
     },
     {
       "abilities_registered": 0,
@@ -84246,7 +84055,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4597,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Warp"
       ],
@@ -84254,7 +84069,7 @@
       "name": "Weftblade Enhancer",
       "oracle_id": "4d8ee903-17b3-43c9-9637-ee596955a9f4",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 2,
@@ -84263,7 +84078,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4598,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Warp casting and delayed exile are not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Warp"
       ],
@@ -84271,7 +84092,7 @@
       "name": "Weftstalker Ardent",
       "oracle_id": "926d52a5-4db1-46ce-9567-17c28bf56ae7",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 2,
@@ -84534,19 +84355,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4613,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: choose one \u2014",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "White Widow, Free Agent",
       "oracle_id": "4f0c055f-f614-44b0-9374-c53541f89185",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -84740,13 +84555,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4624,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Harmonize casting is not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Harmonize"
       ],
@@ -84754,7 +84563,7 @@
       "name": "Wild Ride",
       "oracle_id": "61978202-538b-4f92-acfc-e95f4a6ce466",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -85203,13 +85012,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4650,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Harmonize casting is not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Harmonize"
       ],
@@ -85217,7 +85020,7 @@
       "name": "Winternight Stories",
       "oracle_id": "d64687e4-ec37-4db2-9e60-4626c7a3b011",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "verified"
     },
     {
       "abilities_registered": 0,
@@ -85370,7 +85173,7 @@
       "status": "unseen"
     },
     {
-      "abilities_registered": 2,
+      "abilities_registered": 0,
       "corpus_copies": 0,
       "corpus_decks": [],
       "effect_probes": 1,
@@ -86695,7 +86498,7 @@
   "kind": "format_card_support_ledger",
   "overrides": {
     "path": "support_overrides.json",
-    "sha256": "4b485037914c3153280ccd2739e5e12e23816afc65e2f4b3a8ede0b87e0838d4"
+    "sha256": "1b02dcb9084495bb6b7919c892e76a712bc756a5f009237d887a8c690c5002ce"
   },
   "pool_snapshot": {
     "path": "standard.jsonl",
@@ -86703,50 +86506,6 @@
     "size_bytes": 23346767
   },
   "ranked_cards": [
-    {
-      "deck_slots": 4,
-      "decks": [
-        "Mono-Green Landfall"
-      ],
-      "name": "Escape Tunnel",
-      "reasons": [
-        "unparsed effect text: Target creature with power 2 or less can't be blocked this turn"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 4,
-      "decks": [
-        "Selesnya Ouroboroid"
-      ],
-      "name": "Brightglass Gearhulk",
-      "reasons": [
-        "unparsed clause: put them into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 4,
-      "decks": [
-        "Jeskai Lessons"
-      ],
-      "name": "Combustion Technique",
-      "reasons": [
-        "unparsed clause: exile it instead"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 4,
-      "decks": [
-        "Azorius Momo"
-      ],
-      "name": "Daydream",
-      "reasons": [
-        "unparsed clause: return that card to the battlefield under its owner's control with a +1/+1 count"
-      ],
-      "status": "partial"
-    },
     {
       "deck_slots": 4,
       "decks": [
@@ -86762,11 +86521,22 @@
     {
       "deck_slots": 4,
       "decks": [
+        "Mono-Green Landfall"
+      ],
+      "name": "Mightform Harmonizer",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 4,
+      "decks": [
         "Azorius Momo"
       ],
-      "name": "Sage of the Skies",
+      "name": "Quantum Riddler",
       "reasons": [
-        "unparsed clause: copy this spell"
+        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -86777,19 +86547,18 @@
       ],
       "name": "Starfield Shepherd",
       "reasons": [
-        "unparsed clause: put it into your hand"
+        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
     {
-      "deck_slots": 4,
+      "deck_slots": 3,
       "decks": [
-        "Dimir Excruciator",
-        "Izzet Spellementals"
+        "Azorius Momo"
       ],
-      "name": "Winternight Stories",
+      "name": "Haliya, Guided by Light",
       "reasons": [
-        "Harmonize casting is not implemented"
+        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -86804,28 +86573,6 @@
         "unparsed clause: The next spell you cast this turn can't be countered"
       ],
       "status": "partial"
-    },
-    {
-      "deck_slots": 2,
-      "decks": [
-        "Azorius Momo"
-      ],
-      "name": "Aang, Swift Savior // Aang and La, Ocean's Fury",
-      "reasons": [
-        "unparsed effect text: airbend up to one other target creature or spell"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 2,
-      "decks": [
-        "Azorius Momo"
-      ],
-      "name": "Cosmogrand Zenith",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
     },
     {
       "deck_slots": 2,
@@ -87059,24 +86806,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Apothecary Stomper",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Appa, Loyal Sky Bison",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Appa, Steadfast Guardian",
       "reasons": [
         "unparsed effect text: airbend any number of other target nonland permanents you control"
@@ -87107,8 +86836,7 @@
       "decks": [],
       "name": "Atomic Microsizer",
       "reasons": [
-        "unparsed effect text: attach to target creature you control. Equip only as a sorcery.",
-        "unparsed effect text: choose up to one target creature. that creature can't be blocked this turn and h"
+        "unparsed effect text: attach to target creature you control. Equip only as a sorcery."
       ],
       "status": "unparsed"
     },
@@ -87280,24 +87008,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Black Panther, Vanguard",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Blade of the Swarm",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Blasphemous Edict",
       "reasons": [
         "unparsed effect text: You may pay {B} rather than pay this spell's mana cost if there are thirteen or "
@@ -87358,15 +87068,6 @@
       "name": "Breeches, Eager Pillager",
       "reasons": [
         "unparsed effect text: choose one that hasn't been chosen this turn \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Bria, Riptide Rogue",
-      "reasons": [
-        "unparsed effect text: target creature you control can't be blocked this turn"
       ],
       "status": "unparsed"
     },
@@ -87553,24 +87254,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Charming Prince",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Charming Scoundrel",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Chimil, the Inner Sun",
       "reasons": [
         "unparsed effect text: discover 5"
@@ -87601,15 +87284,6 @@
       "name": "Clandestine Meddler",
       "reasons": [
         "unparsed effect text: suspect up to one other target creature you control"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Coliseum Behemoth",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
       ],
       "status": "unparsed"
     },
@@ -87720,24 +87394,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Daily Bugle Reporters",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Damage Control Crew",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Deconstruction Hammer",
       "reasons": [
         "unparsed effect text: attach to target creature you control. Equip only as a sorcery."
@@ -87768,15 +87424,6 @@
       "name": "Descendant of Storms",
       "reasons": [
         "unparsed effect text: you may pay {1}{w}. if you do, it endures 1"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Deserter's Disciple",
-      "reasons": [
-        "unparsed effect text: Another target creature you control with power 2 or less can't be blocked this t"
       ],
       "status": "unparsed"
     },
@@ -87879,15 +87526,6 @@
       "name": "Doran, Besieged by Time",
       "reasons": [
         "unparsed effect text: it gets +x/+x until end of turn, where x is the difference between its power and"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Downwind Ambusher",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
       ],
       "status": "unparsed"
     },
@@ -88062,24 +87700,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Fangkeeper's Familiar",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Ferocification",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Figure of Fable",
       "reasons": [
         "unparsed effect text: If this creature is a Scout, it becomes a Kithkin Soldier with base power and to",
@@ -88128,15 +87748,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Flash Thompson, Spider-Fan",
-      "reasons": [
-        "unparsed effect text: choose one or both \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Flexible Waterbender",
       "reasons": [
         "unparsed effect text: This creature has base power and toughness 5/2 until end of turn"
@@ -88174,15 +87785,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Gaius van Baelsar",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Gastal Thrillroller",
       "reasons": [
         "unparsed clause: tap any number of untapped creatures you control with total power 1 or greater: ",
@@ -88196,15 +87798,6 @@
       "name": "Gateway Sneak",
       "reasons": [
         "unparsed effect text: this creature can't be blocked this turn"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Gearbane Orangutan",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
       ],
       "status": "unparsed"
     },
@@ -88256,27 +87849,9 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Giant-Sized Flying Ant",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Gingerbrute",
       "reasons": [
         "unparsed effect text: This creature can't be blocked this turn except by creatures with haste"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Glamermite",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
       ],
       "status": "unparsed"
     },
@@ -88323,15 +87898,6 @@
       "name": "Goblin Maskmaker",
       "reasons": [
         "unparsed effect text: face-down spells you cast this turn cost {1} less to cast"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Goblin Smuggler",
-      "reasons": [
-        "unparsed effect text: Another target creature with power 2 or less can't be blocked this turn"
       ],
       "status": "unparsed"
     },
@@ -88421,15 +87987,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Hazoret, Godseeker",
-      "reasons": [
-        "unparsed effect text: Target creature with power 2 or less can't be blocked this turn"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Hedge Shredder",
       "reasons": [
         "unparsed clause: put them onto the battlefield tapped",
@@ -88507,15 +88064,6 @@
       "reasons": [
         "unparsed effect text: Proliferate. Activate only as a sorcery",
         "unparsed effect text: each opponent blights 1"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Hivespine Wolverine",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
       ],
       "status": "unparsed"
     },
@@ -88605,15 +88153,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Insidious Fungus",
-      "reasons": [
-        "unparsed effect text: Choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Inspirited Vanguard",
       "reasons": [
         "unparsed effect text: it endures 2"
@@ -88660,27 +88199,9 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Judith, Carnage Connoisseur",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Kang, Temporal Tyrant",
       "reasons": [
         "unparsed effect text: he connives"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Kastral, the Windcrested",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
       ],
       "status": "unparsed"
     },
@@ -88808,24 +88329,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Kutzil's Flanker",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Kykar, Zephyr Awakener",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Kyoshi Battle Fan",
       "reasons": [
         "unparsed effect text: attach to target creature you control. Equip only as a sorcery."
@@ -88907,18 +88410,8 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Lord Skitter's Butcher",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Lost Jitte",
       "reasons": [
-        "unparsed effect text: Choose one \u2014",
         "unparsed effect text: attach to target creature you control. Equip only as a sorcery."
       ],
       "status": "unparsed"
@@ -89065,15 +88558,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Mister Hyde, Monster Within",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Mob Lookout",
       "reasons": [
         "unparsed effect text: target creature you control connives"
@@ -89087,15 +88571,6 @@
       "reasons": [
         "unparsed clause: you may put it onto the battlefield tapped",
         "unparsed effect text: Activate Crew ability."
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Momo, Playful Pet",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
       ],
       "status": "unparsed"
     },
@@ -89174,24 +88649,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Oltec Archaeologists",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Oltec Matterweaver",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Passenger Ferry",
       "reasons": [
         "unparsed effect text: Activate Crew ability."
@@ -89213,15 +88670,6 @@
       "name": "Petrified Hamlet",
       "reasons": [
         "unparsed effect text: choose a land card name"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Phoenix Down",
-      "reasons": [
-        "unparsed effect text: Choose one \u2014"
       ],
       "status": "unparsed"
     },
@@ -89323,27 +88771,9 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Qutrub Forayer",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Radiant Lotus",
       "reasons": [
         "unparsed effect text: Choose a color. Target player adds three mana of the chosen color for each artif"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Ragged Playmate",
-      "reasons": [
-        "unparsed effect text: Target creature with power 2 or less can't be blocked this turn"
       ],
       "status": "unparsed"
     },
@@ -89513,15 +88943,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Rogue's Passage",
-      "reasons": [
-        "unparsed effect text: Target creature can't be blocked this turn"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Rope",
       "reasons": [
         "unparsed effect text: attach to target creature you control. Equip only as a sorcery."
@@ -89652,15 +89073,6 @@
       "name": "Secluded Starforge",
       "reasons": [
         "unparsed effect text: Target creature gets +X/+0 until end of turn. Activate only as a sorcery"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Secret Tunnel",
-      "reasons": [
-        "unparsed effect text: Two target creatures you control that share a creature type can't be blocked thi"
       ],
       "status": "unparsed"
     },
@@ -90031,15 +89443,6 @@
       "reasons": [
         "unparsed effect text: attach up to one target equipment you control to target creature you control",
         "unparsed effect text: it connives"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Sylvan Scavenging",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
       ],
       "status": "unparsed"
     },
@@ -90423,27 +89826,9 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Underfoot Underdogs",
-      "reasons": [
-        "unparsed effect text: Target creature you control with power 2 or less can't be blocked this turn"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Valgavoth's Lair",
       "reasons": [
         "unparsed effect text: Add one mana of the chosen color"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Vannifar, Evolved Enigma",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
       ],
       "status": "unparsed"
     },
@@ -90504,28 +89889,9 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Warren Warleader",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Warrior's Sword",
       "reasons": [
         "unparsed effect text: attach to target creature you control. Equip only as a sorcery."
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Waterbender Ascension",
-      "reasons": [
-        "unparsed clause: if it has four or more quest counters on it",
-        "unparsed effect text: Target creature can't be blocked this turn"
       ],
       "status": "unparsed"
     },
@@ -90562,15 +89928,6 @@
       "name": "White Mage's Staff",
       "reasons": [
         "unparsed effect text: attach to target creature you control. Equip only as a sorcery."
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "White Widow, Free Agent",
-      "reasons": [
-        "unparsed effect text: choose one \u2014"
       ],
       "status": "unparsed"
     },
@@ -90824,6 +90181,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "All-Fates Stalker",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "All-Out Assault",
       "reasons": [
         "unparsed clause: untap each creature you control"
@@ -90882,6 +90248,7 @@
       "decks": [],
       "name": "Anticausal Vestige",
       "reasons": [
+        "Warp casting and delayed exile are not implemented",
         "unparsed clause: you may put a permanent card with mana value less than or equal to the number of"
       ],
       "status": "partial"
@@ -90901,6 +90268,15 @@
       "name": "Anzrag's Rampage",
       "reasons": [
         "unparsed clause: exile the top X cards of your library"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Appa, Loyal Sky Bison",
+      "reasons": [
+        "unparsed clause: \u2022 target creature you control gains flying until end of turn\n\u2022 airbend another t"
       ],
       "status": "partial"
     },
@@ -90976,6 +90352,7 @@
       "decks": [],
       "name": "Astelli Reclaimer",
       "reasons": [
+        "Warp casting and delayed exile are not implemented",
         "unparsed clause: return target noncreature"
       ],
       "status": "partial"
@@ -91382,6 +90759,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Broodguard Elite",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Broodspinner",
       "reasons": [
         "unparsed clause: Create a number of 1/1 black"
@@ -91423,6 +90809,15 @@
       "name": "Burnished Hart",
       "reasons": [
         "unparsed clause: put them onto the battlefield tapped"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Bygone Colossus",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -91593,15 +90988,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Channeled Dragonfire",
-      "reasons": [
-        "Harmonize casting is not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Charmed Sleep",
       "reasons": [
         "unparsed clause: tap enchanted creature"
@@ -91735,6 +91121,15 @@
       "name": "Cloudspire Skycycle",
       "reasons": [
         "unparsed clause: tap any number of untapped creatures you control with total power 1 or greater: "
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Codecracker Hound",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -92336,6 +91731,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Drix Fatemaker",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Dual-Sun Technique",
       "reasons": [
         "unparsed clause: Target creature you control gains double strike until end of turn. If it has a +"
@@ -92628,6 +92032,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Eusocial Engineering",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Everything Pizza",
       "reasons": [
         "unparsed clause: put it into your hand"
@@ -92640,6 +92053,15 @@
       "name": "Evil's Thrall",
       "reasons": [
         "unparsed clause: gain control of that creature until the end of your next turn instead."
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Exalted Sunborn",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -93155,6 +92577,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Germinating Wurm",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Ghalta, Stampede Tyrant",
       "reasons": [
         "unparsed clause: put any number of creature cards from your hand onto the battlefield"
@@ -93185,15 +92616,6 @@
       "name": "Gishath, Sun's Avatar",
       "reasons": [
         "unparsed clause: reveal that many cards from the top of your library. put any number of dinosaur "
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Glacial Dragonhunt",
-      "reasons": [
-        "Harmonize casting is not implemented"
       ],
       "status": "partial"
     },
@@ -93653,6 +93075,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Hylda of the Icy Crown",
+      "reasons": [
+        "unparsed clause: \u2022 Create a 4/4 white"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Hymn of the Faller",
       "reasons": [
         "unparsed clause: you draw another card"
@@ -93838,15 +93269,6 @@
       "name": "Jadzi, Steward of Fate // Oracle's Gift",
       "reasons": [
         "unparsed clause: Create X 0/0 green"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Jailbreak Scheme",
-      "reasons": [
-        "unparsed clause: Target artifact or creature's owner puts it on their choice of the top or bottom"
       ],
       "status": "partial"
     },
@@ -94082,6 +93504,15 @@
       "name": "Kitnap",
       "reasons": [
         "unparsed clause: tap enchanted creature. if the gift wasn't promised"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Knight Luminary",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -94334,10 +93765,9 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Long River Lurker",
+      "name": "Loading Zone",
       "reasons": [
-        "unparsed clause: return it to the battlefield under its owner's control",
-        "unparsed clause: you may exile it. if you do"
+        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -94462,15 +93892,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Mammoth Bellow",
-      "reasons": [
-        "Harmonize casting is not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Map the Frontier",
       "reasons": [
         "unparsed clause: put them onto the battlefield tapped"
@@ -94573,9 +93994,27 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Mechanozoa",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Meek Attack",
       "reasons": [
         "unparsed clause: You may put a creature card with total power"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Memorial Team Leader",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -94856,7 +94295,6 @@
       "decks": [],
       "name": "Nature's Rhythm",
       "reasons": [
-        "Harmonize casting is not implemented",
         "unparsed clause: put it onto the battlefield"
       ],
       "status": "partial"
@@ -94959,6 +94397,15 @@
       "reasons": [
         "unparsed clause: return it to the battlefield tapped under its owner's control",
         "unparsed clause: target creature you control gains \"When this creature dies"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Nova Hellkite",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -95211,6 +94658,7 @@
       "decks": [],
       "name": "Perigee Beckoner",
       "reasons": [
+        "Warp casting and delayed exile are not implemented",
         "unparsed clause: gains \"when this creature dies",
         "unparsed clause: return it to the battlefield tapped under its owner's control.\""
       ],
@@ -95309,6 +94757,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Pinnacle Emissary",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Pinnacle Starcage",
       "reasons": [
         "unparsed clause: Put each card exiled with this artifact into its owner's graveyard"
@@ -95385,6 +94842,15 @@
       "reasons": [
         "source-duration permission/restriction is not fully modeled",
         "unparsed clause: tap any number of untapped creatures you control with total power 1 or greater: "
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Possibility Technician",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -95620,9 +95086,27 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Rayblade Trooper",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Reach the Horizon",
       "reasons": [
         "unparsed clause: put them onto the battlefield tapped"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Red Tiger Mechan",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -95816,15 +95300,6 @@
       "name": "Rise of the Dark Realms",
       "reasons": [
         "unparsed clause: Put all creature cards from all graveyards onto the battlefield under your contr"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Roamer's Routine",
-      "reasons": [
-        "Harmonize casting is not implemented"
       ],
       "status": "partial"
     },
@@ -96288,6 +95763,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Sinister Cryologist",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Sinuous Benthisaur",
       "reasons": [
         "unparsed clause: where x is the number of caves you control plus the number of cave cards in your"
@@ -96699,9 +96183,27 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Starbreach Whale",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Starfall Invocation",
       "reasons": [
         "unparsed clause: return a creature card put into your graveyard this way to the battlefield under"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Starfield Vocalist",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -96737,6 +96239,7 @@
       "decks": [],
       "name": "Starwinder",
       "reasons": [
+        "Warp casting and delayed exile are not implemented",
         "unparsed clause: you may draw that many cards"
       ],
       "status": "partial"
@@ -96917,6 +96420,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Susurian Voidborn",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Swallowed by Leviathan",
       "reasons": [
         "unparsed clause: counter the chosen spell unless its controller pays {1} for each card in your gr"
@@ -96938,15 +96450,6 @@
       "name": "Symbiote Spider-Man",
       "reasons": [
         "unparsed clause: look at that many cards from the top of your library. put one of them into your "
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Synchronized Charge",
-      "reasons": [
-        "Harmonize casting is not implemented"
       ],
       "status": "partial"
     },
@@ -97673,15 +97176,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Unending Whisper",
-      "reasons": [
-        "Harmonize casting is not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Unidentified Hovership",
       "reasons": [
         "unparsed clause: tap any number of untapped creatures you control with total power 1 or greater: ",
@@ -97780,15 +97274,6 @@
       "name": "Urban Retreat",
       "reasons": [
         "unparsed clause: Put this card from your hand onto the battlefield. Activate only as a sorcery"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Ureni's Rebuff",
-      "reasons": [
-        "Harmonize casting is not implemented"
       ],
       "status": "partial"
     },
@@ -98050,6 +97535,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Waterbender Ascension",
+      "reasons": [
+        "unparsed clause: if it has four or more quest counters on it"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Wear Down",
       "reasons": [
         "unparsed clause: instead destroy two target artifacts and/or enchantments"
@@ -98071,6 +97565,24 @@
       "name": "Webstrike Elite",
       "reasons": [
         "unparsed clause: destroy up to one target artifact or enchantment with mana value x"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Weftblade Enhancer",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Weftstalker Ardent",
+      "reasons": [
+        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -98118,15 +97630,6 @@
       "name": "Wild Hypothesis",
       "reasons": [
         "unparsed clause: Create a 0/0 green"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Wild Ride",
-      "reasons": [
-        "Harmonize casting is not implemented"
       ],
       "status": "partial"
     },
@@ -98271,25 +97774,46 @@
   ],
   "ranked_mechanics": [
     {
-      "affected_cards": 854,
-      "deck_cards": 16,
-      "deck_slots": 40,
+      "affected_cards": 31,
+      "deck_cards": 4,
+      "deck_slots": 15,
       "examples": [
-        "Brightglass Gearhulk",
-        "Combustion Technique",
-        "Daydream",
-        "Escape Tunnel",
-        "Sage of the Skies",
+        "Mightform Harmonizer",
+        "Quantum Riddler",
         "Starfield Shepherd",
+        "Haliya, Guided by Light",
+        "All-Fates Stalker",
+        "Anticausal Vestige",
+        "Astelli Reclaimer",
+        "Broodguard Elite",
+        "Bygone Colossus",
+        "Codecracker Hound"
+      ],
+      "mechanic": "Warp",
+      "status_counts": {
+        "partial": 31
+      }
+    },
+    {
+      "affected_cards": 801,
+      "deck_cards": 9,
+      "deck_slots": 14,
+      "examples": [
         "Mistrise Village",
-        "Cosmogrand Zenith",
         "Day of Black Sun",
-        "Erode"
+        "Erode",
+        "No More Lies",
+        "Archdruid's Charm",
+        "Deadly Cover-Up",
+        "Lumbering Worldwagon",
+        "North Wind Avatar",
+        "Strategic Betrayal",
+        "Aang's Iceberg"
       ],
       "mechanic": "unclassified oracle text",
       "status_counts": {
-        "partial": 696,
-        "unparsed": 158
+        "partial": 688,
+        "unparsed": 113
       }
     },
     {
@@ -98315,27 +97839,6 @@
       }
     },
     {
-      "affected_cards": 10,
-      "deck_cards": 1,
-      "deck_slots": 4,
-      "examples": [
-        "Winternight Stories",
-        "Channeled Dragonfire",
-        "Glacial Dragonhunt",
-        "Mammoth Bellow",
-        "Nature's Rhythm",
-        "Roamer's Routine",
-        "Synchronized Charge",
-        "Unending Whisper",
-        "Ureni's Rebuff",
-        "Wild Ride"
-      ],
-      "mechanic": "Harmonize",
-      "status_counts": {
-        "partial": 10
-      }
-    },
-    {
       "affected_cards": 9,
       "deck_cards": 1,
       "deck_slots": 2,
@@ -98353,23 +97856,6 @@
       "mechanic": "layout:prepare",
       "status_counts": {
         "partial": 9
-      }
-    },
-    {
-      "affected_cards": 6,
-      "deck_cards": 1,
-      "deck_slots": 2,
-      "examples": [
-        "Aang, Swift Savior // Aang and La, Ocean's Fury",
-        "Aang, the Last Airbender",
-        "Airbender Ascension",
-        "Appa, Steadfast Guardian",
-        "Glider Staff",
-        "The Legend of Yangchen // Avatar Yangchen"
-      ],
-      "mechanic": "Airbend",
-      "status_counts": {
-        "unparsed": 6
       }
     },
     {
@@ -98649,6 +98135,24 @@
       "deck_cards": 0,
       "deck_slots": 0,
       "examples": [
+        "Aang, the Last Airbender",
+        "Airbender Ascension",
+        "Appa, Loyal Sky Bison",
+        "Appa, Steadfast Guardian",
+        "Glider Staff",
+        "The Legend of Yangchen // Avatar Yangchen"
+      ],
+      "mechanic": "Airbend",
+      "status_counts": {
+        "partial": 1,
+        "unparsed": 5
+      }
+    },
+    {
+      "affected_cards": 6,
+      "deck_cards": 0,
+      "deck_slots": 0,
+      "examples": [
         "Burning Curiosity",
         "Champion of the Weird",
         "Chaos Spewer",
@@ -98808,6 +98312,20 @@
       "deck_cards": 0,
       "deck_slots": 0,
       "examples": [
+        "Appa, Loyal Sky Bison",
+        "Fear of Falling",
+        "High-Flying Ace"
+      ],
+      "mechanic": "Flying",
+      "status_counts": {
+        "partial": 3
+      }
+    },
+    {
+      "affected_cards": 3,
+      "deck_cards": 0,
+      "deck_slots": 0,
+      "examples": [
         "Eddie Brock // Venom, Lethal Protector",
         "Gwen Stacy // Ghost-Spider",
         "Tony Stark // The Invincible Iron Man"
@@ -98869,19 +98387,6 @@
       "mechanic": "Earthbend",
       "status_counts": {
         "unparsed": 2
-      }
-    },
-    {
-      "affected_cards": 2,
-      "deck_cards": 0,
-      "deck_slots": 0,
-      "examples": [
-        "Fear of Falling",
-        "High-Flying Ace"
-      ],
-      "mechanic": "Flying",
-      "status_counts": {
-        "partial": 2
       }
     },
     {
@@ -99082,16 +98587,16 @@
     }
   ],
   "schema_version": 1,
-  "sha256": "03bfbcba321aba24708d1e273119b79a0cb680efc8c5e10e5cc282eb0195bf51",
+  "sha256": "f21b82b918f2b5ddbae9fe087b94cd610dc8f695eefe0b34ec9b958d5c6eff73",
   "summary": {
-    "qualified_fraction": 0.0295618885580604,
-    "static_clean_fraction": 0.7335176520629519,
+    "qualified_fraction": 0.030625265844321566,
+    "static_clean_fraction": 0.7403232666950234,
     "status_counts": {
-      "observed_clean": 79,
-      "partial": 843,
-      "unparsed": 410,
-      "unseen": 3310,
-      "verified": 60
+      "observed_clean": 76,
+      "partial": 857,
+      "unparsed": 364,
+      "unseen": 3337,
+      "verified": 68
     },
     "total": 4702
   }

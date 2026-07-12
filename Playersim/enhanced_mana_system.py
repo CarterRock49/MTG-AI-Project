@@ -897,6 +897,20 @@ class EnhancedManaSystem:
                 alt_cost = self.parse_mana_cost(foretell_cost)
                 logging.debug(f"Calculated foretell cost for {card.name}: {foretell_cost}")
         
+        elif alt_cost_type == "exile_permission":
+            alternative_cost = (context or {}).get("alternative_cost")
+            if not alternative_cost:
+                return None
+            alt_cost = self.parse_mana_cost(alternative_cost)
+        elif alt_cost_type == "harmonize":
+            harmonize_cost = (context or {}).get("harmonize_cost")
+            if not harmonize_cost:
+                return None
+            alt_cost = self.parse_mana_cost(harmonize_cost)
+            alt_cost["generic"] = max(
+                0, int(alt_cost.get("generic", 0))
+                - max(0, int((context or {}).get(
+                    "harmonize_reduction", 0) or 0)))
         elif alt_cost_type == "flashback":
             # Find flashback cost
             import re

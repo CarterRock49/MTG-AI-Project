@@ -538,6 +538,14 @@ class TurnPhaseHandlersMixin:
             gs.phase = ctx.get('resume_phase', gs.PHASE_MAIN_PRECOMBAT)
             gs.choice_context = None
             return 0.0, True
+        if (gs.phase == gs.PHASE_CHOOSE and getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'harmonize_tap'):
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if gs.choice_context.get('player') is not player:
+                return -0.1, False
+            return ((0.0, True)
+                    if gs.finalize_harmonize_tap_choice(None)
+                    else (-0.1, False))
         if gs.phase == gs.PHASE_TARGETING and gs.targeting_context:
             context = gs.targeting_context
             selected_count = len(context.get("selected_targets", []))

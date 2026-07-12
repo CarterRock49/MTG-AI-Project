@@ -12943,6 +12943,276 @@ def scenario_flashback_graveyard_actions_and_exile():
         "a spell cast with Flashback did not exile after resolution"
 
 
+@scenario("509.1b / Escape Tunnel", "Escape Tunnel grants temporary unblockability only to power 2 or less")
+def scenario_escape_tunnel_power_limited_unblockable():
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 153)
+    controller = gs.p1
+    gs.agent_is_p1 = True
+    tunnel = inject_real_card(gs, controller, "Escape Tunnel", "battlefield")
+    small = inject_into_zone(gs, controller, {
+        "name": "Tunnel Scout", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Creature — Scout", "oracle_text": "",
+        "power": "2", "toughness": "2",
+    }, "battlefield")
+    large = inject_into_zone(gs, controller, {
+        "name": "Tunnel Giant", "mana_cost": "{3}", "cmc": 3,
+        "type_line": "Creature — Giant", "oracle_text": "",
+        "power": "3", "toughness": "3",
+    }, "battlefield")
+    effects = EffectFactory.create_effects(
+        "Target creature with power 2 or less can't be blocked this turn.",
+        source_name="Escape Tunnel")
+    assert len(effects) == 1
+    valid = gs.targeting_system.get_valid_targets(
+        tunnel, controller, "creature", effect_text=effects[0].effect_text)
+    legal = set(valid.get("creature", []))
+    assert small in legal and large not in legal, legal
+    assert effects[0].apply(
+        gs, tunnel, controller, targets={"creatures": [small]})
+    assert gs.ability_handler.check_keyword(small, "unblockable"), \
+        "Escape Tunnel did not grant unblockable through the layer system"
+
+
+@scenario("701.67 (Airbend)", "Aang airbends a creature and its owner may cast it for {2}")
+def scenario_aang_airbend_exile_cast_permission():
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 154)
+    controller = gs._get_active_player()
+    owner = controller
+    gs.agent_is_p1 = controller is gs.p1
+    aang = inject_real_card(
+        gs, controller,
+        "Aang, Swift Savior // Aang and La, Ocean's Fury", "battlefield")
+    target = inject_into_zone(gs, owner, {
+        "name": "Airbent Adept", "mana_cost": "{7}{G}", "cmc": 8,
+        "type_line": "Creature — Human Monk", "oracle_text": "",
+        "power": "4", "toughness": "4",
+    }, "battlefield")
+    effects = EffectFactory.create_effects(
+        "Airbend up to one other target creature or spell.",
+        source_name="Aang, Swift Savior // Aang and La, Ocean's Fury")
+    assert len(effects) == 1 and effects[0].apply(
+        gs, aang, controller, targets={"creatures": [target]})
+    assert target in owner["exile"] and target not in owner["battlefield"]
+    options = gs.get_exile_cast_options(owner)
+    option = next(option for option in options if option["card_id"] == target)
+    assert option["permission"] == "airbend" \
+        and option["alternative_cost"] == "{2}", option
+    owner["mana_pool"] = {
+        "W": 0, "U": 0, "B": 0, "R": 0, "G": 0, "C": 2}
+    gs.priority_player = owner
+    gs.agent_is_p1 = owner is gs.p1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    assert gs.cast_spell(target, owner, {
+        "source_zone": "exile", "source_idx": owner["exile"].index(target),
+        "airbend_cast": True, "alternative_cost": "{2}",
+        "use_alt_cost": "exile_permission",
+    }), "the Airbent card could not be cast for {2}"
+    assert target not in owner["exile"] and gs.stack[-1][1] == target
+
+
+@scenario("603.2 / 700.2", "Cosmogrand triggers exactly on the second spell and its mode is policy-chosen")
+def scenario_cosmogrand_second_spell_modal_trigger():
+    from Playersim.ability_types import TriggeredAbility
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 155)
+    controller = gs.p1
+    gs.agent_is_p1 = True
+    source = inject_real_card(gs, controller, "Cosmogrand Zenith", "battlefield")
+    trigger = TriggeredAbility(
+        source,
+        trigger_condition="whenever you cast your second spell each turn",
+        effect=("choose one —\n"
+                "• Create two 1/1 white Human Soldier creature tokens.\n"
+                "• Put a +1/+1 counter on each creature you control."))
+    first = inject_into_zone(gs, controller, {
+        "name": "First Spell", "mana_cost": "{U}", "cmc": 1,
+        "type_line": "Instant", "oracle_text": "",
+    }, "graveyard")
+    second = inject_into_zone(gs, controller, {
+        "name": "Second Spell", "mana_cost": "{U}", "cmc": 1,
+        "type_line": "Instant", "oracle_text": "",
+    }, "graveyard")
+    context = {"game_state": gs, "controller": controller,
+               "casting_player": controller, "cast_card_id": first}
+    gs.spells_cast_this_turn = [(first, controller, {})]
+    assert not trigger.can_trigger("CAST_SPELL", context)
+    gs.spells_cast_this_turn.append((second, controller, {}))
+    context["cast_card_id"] = second
+    assert trigger.can_trigger("CAST_SPELL", context)
+    before = len(controller["battlefield"])
+    assert gs.ability_handler._push_trigger_to_stack(
+        trigger, controller, context)
+    assert gs.stack and gs.choice_context.get("type") == "trigger_mode", \
+        "Cosmogrand did not choose its mode as the trigger entered the stack"
+    assert get_env().action_handler.generate_valid_actions()[353], \
+        "Cosmogrand's first trigger mode was not exposed in the action mask"
+    assert get_env().action_handler._handle_choose_mode(0, {})[1]
+    assert gs.choice_context is None and gs.stack[-1][3].get(
+        "selected_trigger_mode") == 0
+    assert gs.resolve_top_of_stack(), "Cosmogrand's chosen trigger failed"
+    assert len(controller["battlefield"]) == before + 2, \
+        "Cosmogrand's token mode did not create two Soldiers"
+
+
+@scenario("701.19 (Search)", "Gearhulk and Shepherd expose exact restricted library choices")
+def scenario_restricted_searches_are_policy_selectable():
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 156)
+    controller = gs.p1
+    gs.agent_is_p1 = True
+    controller["library"] = []
+    gearhulk = inject_real_card(gs, controller, "Brightglass Gearhulk", "battlefield")
+    small_artifact = inject_into_zone(gs, controller, {
+        "name": "Tiny Relic", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Artifact", "oracle_text": "",
+    }, "library")
+    large_creature = inject_into_zone(gs, controller, {
+        "name": "Large Search Miss", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Creature — Giant", "oracle_text": "",
+        "power": "2", "toughness": "2",
+    }, "library")
+    gear_effect = EffectFactory.create_effects(
+        "When this creature enters, you may search your library for up to two "
+        "artifact, creature, and/or enchantment cards with mana value 1 or "
+        "less, reveal them, put them into your hand, then shuffle.",
+        source_name="Brightglass Gearhulk")[0]
+    assert gear_effect.apply(gs, gearhulk, controller, targets={})
+    assert gs.choice_context["options"] == [small_artifact] \
+        and large_creature not in gs.choice_context["options"]
+    assert get_env().action_handler.generate_valid_actions()[11], \
+        "Brightglass Gearhulk did not expose its legal zero-card search"
+    assert get_env().action_handler._handle_choose_mode(0, {})[1]
+    assert small_artifact in controller["hand"]
+
+    controller["library"] = []
+    shepherd = inject_real_card(gs, controller, "Starfield Shepherd", "battlefield")
+    plains = inject_into_zone(gs, controller, {
+        "name": "Search Plains", "mana_cost": "", "cmc": 0,
+        "type_line": "Basic Land — Plains", "oracle_text": "{T}: Add {W}.",
+    }, "library")
+    wrong_land = inject_into_zone(gs, controller, {
+        "name": "Search Island", "mana_cost": "", "cmc": 0,
+        "type_line": "Basic Land — Island", "oracle_text": "{T}: Add {U}.",
+    }, "library")
+    shepherd_effect = EffectFactory.create_effects(
+        "Search your library for a basic Plains card or a creature card with "
+        "mana value 1 or less, reveal it, put it into your hand, then shuffle.",
+        source_name="Starfield Shepherd")[0]
+    assert shepherd_effect.apply(gs, shepherd, controller, targets={})
+    assert plains in gs.choice_context["options"] \
+        and wrong_land not in gs.choice_context["options"]
+
+
+@scenario("608.2c / 614.1a", "Combustion Technique scales from Lessons and Daydream blinks with a counter")
+def scenario_combustion_and_daydream_atomic_effects():
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 157)
+    controller, opponent = gs.p1, gs.p2
+    for index in range(3):
+        inject_into_zone(gs, controller, {
+            "name": f"Combustion Lesson {index}", "mana_cost": "{U}",
+            "cmc": 1, "type_line": "Sorcery — Lesson", "oracle_text": "",
+        }, "graveyard")
+    target = inject_into_zone(gs, opponent, {
+        "name": "Combustion Target", "mana_cost": "{4}", "cmc": 4,
+        "type_line": "Creature — Beast", "oracle_text": "",
+        "power": "4", "toughness": "5",
+    }, "battlefield")
+    combustion = EffectFactory.create_effects(
+        "Combustion Technique deals damage equal to 2 plus the number of "
+        "Lesson cards in your graveyard to target creature. If that creature "
+        "would die this turn, exile it instead.",
+        source_name="Combustion Technique")[0]
+    assert combustion.apply(
+        gs, None, controller, targets={"creatures": [target]})
+    assert target in opponent["exile"] and target not in opponent["graveyard"]
+
+    blink_target = inject_into_zone(gs, controller, {
+        "name": "Daydream Target", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Creature — Bird", "oracle_text": "",
+        "power": "1", "toughness": "1",
+    }, "battlefield")
+    daydream = EffectFactory.create_effects(
+        "Exile target creature you control, then return that card to the "
+        "battlefield under its owner's control with a +1/+1 counter on it.",
+        source_name="Daydream")[0]
+    assert daydream.apply(
+        gs, None, controller, targets={"creatures": [blink_target]})
+    assert blink_target in controller["battlefield"] \
+        and gs._safe_get_card(blink_target).counters.get("+1/+1") == 1
+
+
+@scenario("707.10 / 608.3b", "Sage copies its creature spell and the copy resolves as a token")
+def scenario_sage_of_the_skies_spell_copy():
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 158)
+    controller = gs.p1
+    sage = inject_real_card(gs, controller, "Sage of the Skies", "hand")
+    controller["hand"].remove(sage)
+    gs.add_to_stack("SPELL", sage, controller, {
+        "source_zone": "hand", "requires_target": False})
+    copy_effect = EffectFactory.create_effects(
+        "Copy this spell. (The copy becomes a token.)",
+        source_name="Sage of the Skies")[0]
+    assert copy_effect.apply(
+        gs, sage, controller, targets={}, context={"cast_card_id": sage})
+    assert len([item for item in gs.stack if item[0] == "SPELL" and item[1] == sage]) == 2
+    assert gs.resolve_top_of_stack(), "Sage's spell copy failed to resolve"
+    tokens = [card_id for card_id in controller["battlefield"]
+              if getattr(gs._safe_get_card(card_id), "is_token", False)]
+    assert tokens, "the copied permanent spell did not become a token"
+
+
+@scenario("702.Harmonize", "Winternight Stories Harmonizes with one creature tap and exiles after conditional discard")
+def scenario_winternight_stories_harmonize():
+    gs = fresh(SEED + 159)
+    env = get_env()
+    handler = env.action_handler
+    controller = gs._get_active_player()
+    gs.agent_is_p1 = controller is gs.p1
+    for card_id in list(controller.get("graveyard", [])):
+        controller["graveyard"].remove(card_id)
+    winternight = inject_real_card(
+        gs, controller, "Winternight Stories", "graveyard")
+    helper = inject_into_zone(gs, controller, {
+        "name": "Harmonize Helper", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Creature — Wizard", "oracle_text": "",
+        "power": "2", "toughness": "2",
+    }, "battlefield")
+    discard_creature = inject_into_zone(gs, controller, {
+        "name": "Winternight Discard", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Creature — Bird", "oracle_text": "",
+        "power": "1", "toughness": "1",
+    }, "hand")
+    controller["mana_pool"] = {
+        "W": 0, "U": 1, "B": 0, "R": 0, "G": 0, "C": 2}
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = controller
+    mask = handler.generate_valid_actions()
+    action = 472 + controller["graveyard"].index(winternight)
+    assert mask[action], "Harmonize was not exposed from the graveyard"
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(action)
+    assert not info.get("execution_failed"), info
+    assert gs.choice_context.get("type") == "harmonize_tap"
+    choice_mask = handler.generate_valid_actions()
+    assert not choice_mask[11], \
+        "Harmonize exposed a no-tap choice that could not pay the full cost"
+    helper_index = gs.choice_context["options"].index(helper)
+    assert handler._handle_choose_mode(helper_index, {})[1]
+    assert helper in controller["tapped_permanents"] and gs.stack[-1][1] == winternight
+    assert gs.resolve_top_of_stack(), "Winternight Stories failed to resolve"
+    assert gs.choice_context.get("type") == "discard" \
+        and gs.choice_context.get("remaining") == 2
+    hand_index = controller["hand"].index(discard_creature)
+    gs.choice_context["choice_page"] = hand_index // 10
+    assert handler._handle_discard_card(hand_index % 10)[1]
+    assert discard_creature in controller["graveyard"] \
+        and winternight in controller["exile"]
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
