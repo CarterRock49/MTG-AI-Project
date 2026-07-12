@@ -3436,13 +3436,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 220,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Warp"
       ],
@@ -3450,7 +3444,7 @@
       "name": "All-Fates Stalker",
       "oracle_id": "da9ec010-8b42-4927-b602-4e96bced4e99",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -4224,11 +4218,6 @@
       "issues": [
         {
           "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
           "reason": "unparsed clause: you may put a permanent card with mana value less than or equal to the number of",
           "severity": "partial"
         }
@@ -4750,19 +4739,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 292,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: reveal it. Put it onto the battlefield tapped if it's a land card. Otherwise",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Archdruid's Charm",
       "oracle_id": "3c1ef404-e2c6-486d-a5a2-d5779c71d498",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "observed_clean"
     },
     {
       "abilities_registered": 0,
@@ -5418,11 +5401,6 @@
       "faces_audited": 1,
       "index": 329,
       "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        },
         {
           "count": 1,
           "reason": "unparsed clause: return target noncreature",
@@ -10633,13 +10611,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 613,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Warp"
       ],
@@ -10647,7 +10619,7 @@
       "name": "Broodguard Elite",
       "oracle_id": "c90da077-de8c-4402-abfc-b63dd15853da",
       "replacement_effects_registered": 1,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -11299,13 +11271,7 @@
       "effect_probes": 0,
       "faces_audited": 1,
       "index": 648,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Warp"
       ],
@@ -11313,7 +11279,7 @@
       "name": "Bygone Colossus",
       "oracle_id": "1bd584d5-4e11-428c-b51e-462e4292b07f",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -14435,13 +14401,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 815,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Warp"
       ],
@@ -14449,7 +14409,7 @@
       "name": "Codecracker Hound",
       "oracle_id": "ae791b61-5825-4987-a8c2-80813758d3f7",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -17779,19 +17739,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 995,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Each creature with mana value X or less loses all abilities until end of turn. D",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Day of Black Sun",
       "oracle_id": "dc857129-533c-41d1-8e8b-1c0443030d69",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "observed_clean"
     },
     {
       "abilities_registered": 1,
@@ -17938,18 +17892,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1004,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: exile a card from an opponent's graveyard. Then search its owner's graveyard",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed clause: exile them. That player shuffles",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Collect evidence"
       ],
@@ -17957,7 +17900,7 @@
       "name": "Deadly Cover-Up",
       "oracle_id": "04e2afbe-0c08-42bc-93e6-662066a958bf",
       "replacement_effects_registered": 1,
-      "status": "partial"
+      "status": "observed_clean"
     },
     {
       "abilities_registered": 0,
@@ -21106,13 +21049,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1179,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Warp"
       ],
@@ -21120,7 +21057,7 @@
       "name": "Drix Fatemaker",
       "oracle_id": "583102f8-7232-4fbb-a715-087448536bb2",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 4,
@@ -22944,7 +22881,7 @@
       "layout": "prepare",
       "name": "Emeritus of Abundance // Regrowth",
       "oracle_id": "e5152e8d-9f55-493d-a0fc-753cc72ee299",
-      "replacement_effects_registered": 0,
+      "replacement_effects_registered": 1,
       "status": "unparsed"
     },
     {
@@ -23065,7 +23002,7 @@
       "layout": "transform",
       "name": "Emet-Selch, Unsundered // Hades, Sorcerer of Eld",
       "oracle_id": "3b102ccc-7629-457c-aba6-e9b00fd50c85",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 3,
       "status": "unseen"
     },
     {
@@ -23724,19 +23661,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1322,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "optional library-search decline is not policy-selectable",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Erode",
       "oracle_id": "2e467fab-e808-44d3-99bf-e3621baeb7cb",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "observed_clean"
     },
     {
       "abilities_registered": 2,
@@ -23872,11 +23803,6 @@
         {
           "count": 1,
           "reason": "unparsed clause: exile",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed clause: exile it",
           "severity": "partial"
         }
       ],
@@ -24153,13 +24079,7 @@
       "effect_probes": 0,
       "faces_audited": 1,
       "index": 1344,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Landfall",
         "Warp"
@@ -24168,7 +24088,7 @@
       "name": "Eusocial Engineering",
       "oracle_id": "2f3f5a1c-8b88-4080-bd80-14db4d6c8c50",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -24308,13 +24228,7 @@
       "effect_probes": 0,
       "faces_audited": 1,
       "index": 1352,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flying",
         "Lifelink",
@@ -24324,7 +24238,7 @@
       "name": "Exalted Sunborn",
       "oracle_id": "43febbcd-ecbe-4edb-ad90-7fc6dc381d05",
       "replacement_effects_registered": 2,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -29554,13 +29468,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1638,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Warp"
       ],
@@ -29568,7 +29476,7 @@
       "name": "Germinating Wurm",
       "oracle_id": "8735c62d-1508-4bdc-a5d0-f7c68d892a5e",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -32900,13 +32808,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 1820,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Warp"
       ],
@@ -32914,7 +32816,7 @@
       "name": "Haliya, Guided by Light",
       "oracle_id": "9b0af3ad-1b4d-4480-af91-fe9baee5d1c5",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "observed_clean"
     },
     {
       "abilities_registered": 0,
@@ -39798,7 +39700,7 @@
       "layout": "adventure",
       "name": "Kellan, Inquisitive Prodigy // Tail the Suspect",
       "oracle_id": "2f2d75a0-d751-4c74-b357-8f92a992447f",
-      "replacement_effects_registered": 0,
+      "replacement_effects_registered": 1,
       "status": "unparsed"
     },
     {
@@ -40535,13 +40437,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2235,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Warp"
       ],
@@ -40549,7 +40445,7 @@
       "name": "Knight Luminary",
       "oracle_id": "11809d9b-30f3-49d5-9119-e45b4de044c8",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -42978,13 +42874,7 @@
       "effect_probes": 0,
       "faces_audited": 1,
       "index": 2363,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Warp"
       ],
@@ -42992,7 +42882,7 @@
       "name": "Loading Zone",
       "oracle_id": "16156274-8dc0-439c-94c4-e8c89bbb5687",
       "replacement_effects_registered": 1,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -43711,18 +43601,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 2404,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "optional library-search decline is not policy-selectable",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed clause: tap any number of untapped creatures you control with total power 1 or greater: ",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Crew"
       ],
@@ -43730,7 +43609,7 @@
       "name": "Lumbering Worldwagon",
       "oracle_id": "7e60a641-1f2d-45ff-b3f2-d389be938b22",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "observed_clean"
     },
     {
       "abilities_registered": 3,
@@ -45750,13 +45629,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2515,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Warp"
       ],
@@ -45764,7 +45637,7 @@
       "name": "Mechanozoa",
       "oracle_id": "1aeb43f7-4d8a-4648-9c13-fd101081b448",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -45938,13 +45811,7 @@
       "effect_probes": 0,
       "faces_audited": 1,
       "index": 2525,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Warp"
       ],
@@ -45952,7 +45819,7 @@
       "name": "Memorial Team Leader",
       "oracle_id": "c71d3775-0c71-4e37-979d-35e319f357f0",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -46599,13 +46466,7 @@
       "effect_probes": 0,
       "faces_audited": 1,
       "index": 2561,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Double",
         "Landfall",
@@ -46615,7 +46476,7 @@
       "name": "Mightform Harmonizer",
       "oracle_id": "8e025cda-71c5-4d06-8436-decd408667af",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "observed_clean"
     },
     {
       "abilities_registered": 1,
@@ -47273,19 +47134,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2599,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: The next spell you cast this turn can't be countered",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Mistrise Village",
       "oracle_id": "339f5334-b65a-445a-a016-20e997e0b4bb",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "observed_clean"
     },
     {
       "abilities_registered": 3,
@@ -49877,19 +49732,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2743,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: exile it instead of putting it into its owner's graveyard",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "No More Lies",
       "oracle_id": "ead1ee6a-e0da-46d5-89e8-31e8c0270bc2",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "observed_clean"
     },
     {
       "abilities_registered": 0,
@@ -50105,13 +49954,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2755,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: you may put a card you own from outside the game into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flying"
       ],
@@ -50119,7 +49962,7 @@
       "name": "North Wind Avatar",
       "oracle_id": "b408c345-b308-4920-8494-4f204d856aa3",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "observed_clean"
     },
     {
       "abilities_registered": 3,
@@ -50201,13 +50044,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2760,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flying",
         "Haste",
@@ -50217,7 +50054,7 @@
       "name": "Nova Hellkite",
       "oracle_id": "9635d79e-62ec-4d80-ae37-2793489cc13b",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -50689,7 +50526,7 @@
       "layout": "transform",
       "name": "Ojer Taq, Deepest Foundation // Temple of Civilization",
       "oracle_id": "486bb9a5-73f1-4cec-b097-fb07ac80b72e",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 2,
       "status": "partial"
     },
     {
@@ -52682,11 +52519,6 @@
       "issues": [
         {
           "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
           "reason": "unparsed clause: gains \"when this creature dies",
           "severity": "partial"
         },
@@ -53139,7 +52971,7 @@
       "layout": "adventure",
       "name": "Picklock Prankster // Free the Fae",
       "oracle_id": "22d82f4c-2896-477e-8d20-8fe43acd4ba2",
-      "replacement_effects_registered": 0,
+      "replacement_effects_registered": 1,
       "status": "partial"
     },
     {
@@ -53310,13 +53142,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2929,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Warp"
       ],
@@ -53324,7 +53150,7 @@
       "name": "Pinnacle Emissary",
       "oracle_id": "522e8db5-857e-492f-afed-d60cd2ce3dcd",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -54045,13 +53871,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2968,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Warp"
       ],
@@ -54059,7 +53879,7 @@
       "name": "Possibility Technician",
       "oracle_id": "ebbf84f7-d142-4de5-bfc1-ea86f082d733",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -55560,13 +55380,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3053,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flying",
         "Warp"
@@ -55575,7 +55389,7 @@
       "name": "Quantum Riddler",
       "oracle_id": "58582fac-4c42-4a1c-9ab1-4a892b500da4",
       "replacement_effects_registered": 1,
-      "status": "partial"
+      "status": "observed_clean"
     },
     {
       "abilities_registered": 2,
@@ -57173,13 +56987,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 3142,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Warp"
       ],
@@ -57187,7 +56995,7 @@
       "name": "Rayblade Trooper",
       "oracle_id": "792da586-a687-428c-a10e-75431249df5b",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -57633,13 +57441,7 @@
       "effect_probes": 0,
       "faces_audited": 1,
       "index": 3168,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Haste",
         "Warp"
@@ -57648,7 +57450,7 @@
       "name": "Red Tiger Mechan",
       "oracle_id": "94c9aea7-564d-4fc8-ae14-7b22cba18b95",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -59095,7 +58897,7 @@
       "layout": "adventure",
       "name": "Riling Dawnbreaker // Signaling Roar",
       "oracle_id": "1fc31651-70fe-4a58-9b7e-7359510bba51",
-      "replacement_effects_registered": 0,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -65123,13 +64925,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3576,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Warp"
       ],
@@ -65137,7 +64933,7 @@
       "name": "Sinister Cryologist",
       "oracle_id": "be3038ff-b39e-4d2e-97ee-85de074ccfd3",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -65460,7 +65256,7 @@
       "layout": "prepare",
       "name": "Skycoach Conductor // All Aboard",
       "oracle_id": "788d3cfa-7706-4728-9c48-cf7bc963d002",
-      "replacement_effects_registered": 0,
+      "replacement_effects_registered": 1,
       "status": "partial"
     },
     {
@@ -68846,13 +68642,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3774,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flying",
         "Surveil",
@@ -68862,7 +68652,7 @@
       "name": "Starbreach Whale",
       "oracle_id": "076865e9-ee10-4a87-9180-4274202d37c1",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -68896,13 +68686,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3776,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flying",
         "Warp"
@@ -68911,7 +68695,7 @@
       "name": "Starfield Shepherd",
       "oracle_id": "42fa99ab-d35f-4439-ab00-fe99bad626ac",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "observed_clean"
     },
     {
       "abilities_registered": 2,
@@ -68920,13 +68704,7 @@
       "effect_probes": 0,
       "faces_audited": 1,
       "index": 3777,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Warp"
       ],
@@ -68934,7 +68712,7 @@
       "name": "Starfield Vocalist",
       "oracle_id": "4add809e-9caa-45ae-bb0d-4760a360b8e2",
       "replacement_effects_registered": 1,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -69246,11 +69024,6 @@
       "faces_audited": 1,
       "index": 3794,
       "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        },
         {
           "count": 1,
           "reason": "unparsed clause: you may draw that many cards",
@@ -70259,19 +70032,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3849,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Target opponent exiles a creature they control",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Strategic Betrayal",
       "oracle_id": "0127c13f-7b0f-44c3-8b35-97f306c5f239",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "observed_clean"
     },
     {
       "abilities_registered": 3,
@@ -71982,13 +71749,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3945,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Warp"
       ],
@@ -71996,7 +71757,7 @@
       "name": "Susurian Voidborn",
       "oracle_id": "4f754f11-3b6d-4a4e-86d7-7495e475ef74",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -79157,7 +78918,7 @@
       "layout": "adventure",
       "name": "Twining Twins // Swift Spiral",
       "oracle_id": "105aea98-8eb9-4fb2-a0cb-7c7513317c5b",
-      "replacement_effects_registered": 0,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -84055,13 +83816,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4597,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Warp"
       ],
@@ -84069,7 +83824,7 @@
       "name": "Weftblade Enhancer",
       "oracle_id": "4d8ee903-17b3-43c9-9637-ee596955a9f4",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -84078,13 +83833,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4598,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "Warp casting and delayed exile are not implemented",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Warp"
       ],
@@ -84092,7 +83841,7 @@
       "name": "Weftstalker Ardent",
       "oracle_id": "926d52a5-4db1-46ce-9567-17c28bf56ae7",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -86513,75 +86262,7 @@
       ],
       "name": "Esper Origins // Summon: Esper Maduin",
       "reasons": [
-        "unparsed clause: exile",
-        "unparsed clause: exile it"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 4,
-      "decks": [
-        "Mono-Green Landfall"
-      ],
-      "name": "Mightform Harmonizer",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 4,
-      "decks": [
-        "Azorius Momo"
-      ],
-      "name": "Quantum Riddler",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 4,
-      "decks": [
-        "Azorius Momo"
-      ],
-      "name": "Starfield Shepherd",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 3,
-      "decks": [
-        "Azorius Momo"
-      ],
-      "name": "Haliya, Guided by Light",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 3,
-      "decks": [
-        "4c Control",
-        "Jeskai Lessons"
-      ],
-      "name": "Mistrise Village",
-      "reasons": [
-        "unparsed clause: The next spell you cast this turn can't be countered"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 2,
-      "decks": [
-        "Dimir Excruciator"
-      ],
-      "name": "Day of Black Sun",
-      "reasons": [
-        "unparsed clause: Each creature with mana value X or less loses all abilities until end of turn. D"
+        "unparsed clause: exile"
       ],
       "status": "partial"
     },
@@ -86593,85 +86274,6 @@
       "name": "Emeritus of Ideation // Ancestral Recall",
       "reasons": [
         "unparsed clause: you may exile eight cards from your graveyard. if you do"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 2,
-      "decks": [
-        "Azorius Momo"
-      ],
-      "name": "Erode",
-      "reasons": [
-        "optional library-search decline is not policy-selectable"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 2,
-      "decks": [
-        "4c Control"
-      ],
-      "name": "No More Lies",
-      "reasons": [
-        "unparsed clause: exile it instead of putting it into its owner's graveyard"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 1,
-      "decks": [
-        "Mono-Green Landfall"
-      ],
-      "name": "Archdruid's Charm",
-      "reasons": [
-        "unparsed clause: reveal it. Put it onto the battlefield tapped if it's a land card. Otherwise"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 1,
-      "decks": [
-        "Dimir Excruciator"
-      ],
-      "name": "Deadly Cover-Up",
-      "reasons": [
-        "unparsed clause: exile a card from an opponent's graveyard. Then search its owner's graveyard",
-        "unparsed clause: exile them. That player shuffles"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 1,
-      "decks": [
-        "Mono-Green Landfall"
-      ],
-      "name": "Lumbering Worldwagon",
-      "reasons": [
-        "optional library-search decline is not policy-selectable",
-        "unparsed clause: tap any number of untapped creatures you control with total power 1 or greater: "
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 1,
-      "decks": [
-        "4c Control"
-      ],
-      "name": "North Wind Avatar",
-      "reasons": [
-        "unparsed clause: you may put a card you own from outside the game into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 1,
-      "decks": [
-        "Dimir Excruciator"
-      ],
-      "name": "Strategic Betrayal",
-      "reasons": [
-        "unparsed clause: Target opponent exiles a creature they control"
       ],
       "status": "partial"
     },
@@ -90181,15 +89783,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "All-Fates Stalker",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "All-Out Assault",
       "reasons": [
         "unparsed clause: untap each creature you control"
@@ -90248,7 +89841,6 @@
       "decks": [],
       "name": "Anticausal Vestige",
       "reasons": [
-        "Warp casting and delayed exile are not implemented",
         "unparsed clause: you may put a permanent card with mana value less than or equal to the number of"
       ],
       "status": "partial"
@@ -90352,7 +89944,6 @@
       "decks": [],
       "name": "Astelli Reclaimer",
       "reasons": [
-        "Warp casting and delayed exile are not implemented",
         "unparsed clause: return target noncreature"
       ],
       "status": "partial"
@@ -90759,15 +90350,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Broodguard Elite",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Broodspinner",
       "reasons": [
         "unparsed clause: Create a number of 1/1 black"
@@ -90809,15 +90391,6 @@
       "name": "Burnished Hart",
       "reasons": [
         "unparsed clause: put them onto the battlefield tapped"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Bygone Colossus",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -91121,15 +90694,6 @@
       "name": "Cloudspire Skycycle",
       "reasons": [
         "unparsed clause: tap any number of untapped creatures you control with total power 1 or greater: "
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Codecracker Hound",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -91731,15 +91295,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Drix Fatemaker",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Dual-Sun Technique",
       "reasons": [
         "unparsed clause: Target creature you control gains double strike until end of turn. If it has a +"
@@ -92032,15 +91587,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Eusocial Engineering",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Everything Pizza",
       "reasons": [
         "unparsed clause: put it into your hand"
@@ -92053,15 +91599,6 @@
       "name": "Evil's Thrall",
       "reasons": [
         "unparsed clause: gain control of that creature until the end of your next turn instead."
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Exalted Sunborn",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -92571,15 +92108,6 @@
       "name": "Geralf, the Fleshwright",
       "reasons": [
         "unparsed clause: create a 2/2 blue"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Germinating Wurm",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -93510,15 +93038,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Knight Luminary",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Koh, the Face Stealer",
       "reasons": [
         "unparsed clause: Choose a creature card exiled with Koh",
@@ -93765,15 +93284,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Loading Zone",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Longstalk Brawl",
       "reasons": [
         "unparsed clause: Gift a tapped Fish Choose target creature you control"
@@ -93994,27 +93504,9 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Mechanozoa",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Meek Attack",
       "reasons": [
         "unparsed clause: You may put a creature card with total power"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Memorial Team Leader",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -94403,15 +93895,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Nova Hellkite",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Ojer Axonil, Deepest Might // Temple of Power",
       "reasons": [
         "unparsed clause: return it to the battlefield tapped",
@@ -94658,7 +94141,6 @@
       "decks": [],
       "name": "Perigee Beckoner",
       "reasons": [
-        "Warp casting and delayed exile are not implemented",
         "unparsed clause: gains \"when this creature dies",
         "unparsed clause: return it to the battlefield tapped under its owner's control.\""
       ],
@@ -94757,15 +94239,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Pinnacle Emissary",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Pinnacle Starcage",
       "reasons": [
         "unparsed clause: Put each card exiled with this artifact into its owner's graveyard"
@@ -94842,15 +94315,6 @@
       "reasons": [
         "source-duration permission/restriction is not fully modeled",
         "unparsed clause: tap any number of untapped creatures you control with total power 1 or greater: "
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Possibility Technician",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -95086,27 +94550,9 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Rayblade Trooper",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Reach the Horizon",
       "reasons": [
         "unparsed clause: put them onto the battlefield tapped"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Red Tiger Mechan",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -95763,15 +95209,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Sinister Cryologist",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Sinuous Benthisaur",
       "reasons": [
         "unparsed clause: where x is the number of caves you control plus the number of cave cards in your"
@@ -96183,27 +95620,9 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Starbreach Whale",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Starfall Invocation",
       "reasons": [
         "unparsed clause: return a creature card put into your graveyard this way to the battlefield under"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Starfield Vocalist",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -96239,7 +95658,6 @@
       "decks": [],
       "name": "Starwinder",
       "reasons": [
-        "Warp casting and delayed exile are not implemented",
         "unparsed clause: you may draw that many cards"
       ],
       "status": "partial"
@@ -96414,15 +95832,6 @@
       "name": "Susur Secundi, Void Altar",
       "reasons": [
         "unparsed clause: Draw cards equal to the sacrificed creature's power. Activate only as a sorcery"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Susurian Voidborn",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
       ],
       "status": "partial"
     },
@@ -97571,24 +96980,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Weftblade Enhancer",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Weftstalker Ardent",
-      "reasons": [
-        "Warp casting and delayed exile are not implemented"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Werefox Bodyguard",
       "reasons": [
         "unparsed clause: exile up to one other target non-fox creature until this creature leaves the bat"
@@ -97774,49 +97165,6 @@
   ],
   "ranked_mechanics": [
     {
-      "affected_cards": 31,
-      "deck_cards": 4,
-      "deck_slots": 15,
-      "examples": [
-        "Mightform Harmonizer",
-        "Quantum Riddler",
-        "Starfield Shepherd",
-        "Haliya, Guided by Light",
-        "All-Fates Stalker",
-        "Anticausal Vestige",
-        "Astelli Reclaimer",
-        "Broodguard Elite",
-        "Bygone Colossus",
-        "Codecracker Hound"
-      ],
-      "mechanic": "Warp",
-      "status_counts": {
-        "partial": 31
-      }
-    },
-    {
-      "affected_cards": 801,
-      "deck_cards": 9,
-      "deck_slots": 14,
-      "examples": [
-        "Mistrise Village",
-        "Day of Black Sun",
-        "Erode",
-        "No More Lies",
-        "Archdruid's Charm",
-        "Deadly Cover-Up",
-        "Lumbering Worldwagon",
-        "North Wind Avatar",
-        "Strategic Betrayal",
-        "Aang's Iceberg"
-      ],
-      "mechanic": "unclassified oracle text",
-      "status_counts": {
-        "partial": 688,
-        "unparsed": 113
-      }
-    },
-    {
       "affected_cards": 30,
       "deck_cards": 1,
       "deck_slots": 4,
@@ -97856,6 +97204,28 @@
       "mechanic": "layout:prepare",
       "status_counts": {
         "partial": 9
+      }
+    },
+    {
+      "affected_cards": 796,
+      "deck_cards": 0,
+      "deck_slots": 0,
+      "examples": [
+        "Aang's Iceberg",
+        "Aang's Journey",
+        "Aberrant Manawurm",
+        "Absorbing Man",
+        "Abuelo, Ancestral Echo",
+        "Abzan Monument",
+        "Additive Evolution",
+        "Aegis Sculptor",
+        "Aerith Gainsborough",
+        "Aetherjacket"
+      ],
+      "mechanic": "unclassified oracle text",
+      "status_counts": {
+        "partial": 683,
+        "unparsed": 113
       }
     },
     {
@@ -98587,15 +97957,15 @@
     }
   ],
   "schema_version": 1,
-  "sha256": "f21b82b918f2b5ddbae9fe087b94cd610dc8f695eefe0b34ec9b958d5c6eff73",
+  "sha256": "572d4e624203b0e48cf6feb703867ede651f829bff085906bbc706b9a5016761",
   "summary": {
-    "qualified_fraction": 0.030625265844321566,
-    "static_clean_fraction": 0.7403232666950234,
+    "qualified_fraction": 0.033390046788600594,
+    "static_clean_fraction": 0.7479795831561038,
     "status_counts": {
-      "observed_clean": 76,
-      "partial": 857,
+      "observed_clean": 89,
+      "partial": 821,
       "unparsed": 364,
-      "unseen": 3337,
+      "unseen": 3360,
       "verified": 68
     },
     "total": 4702

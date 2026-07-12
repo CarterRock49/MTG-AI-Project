@@ -13213,6 +13213,241 @@ def scenario_winternight_stories_harmonize():
         and winternight in controller["exile"]
 
 
+@scenario("702.Warp / 603.7", "Warp uses its alternate cost, exiles at the next end step, and grants a later cast")
+def scenario_warp_complete_transaction():
+    gs = fresh(SEED + 160)
+    handler = get_env().action_handler
+    player = gs._get_active_player()
+    gs.agent_is_p1 = player is gs.p1
+    card_id = inject_real_card(gs, player, "Mightform Harmonizer", "hand")
+    card = gs._safe_get_card(card_id)
+    assert card.is_warp and card.warp_cost == "{2}{g}", card.warp_cost
+    player['mana_pool'] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 1, 'C': 2}
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    hand_index = player['hand'].index(card_id)
+    mask = handler.generate_valid_actions()
+    warp_action = [296, 297, 298, 309, 310, 311, 312, 313][hand_index]
+    assert mask[warp_action], "Warp alternative cast was absent from the mask"
+    reward, ok = handler._handle_plot_card(
+        hand_index, context={'warp_cast': True})
+    assert ok and gs.stack[-1][3].get('warp_cast'), reward
+    assert gs.resolve_top_of_stack() and card_id in player['battlefield']
+    assert gs.process_delayed_triggers(gs.PHASE_END_STEP) == 1
+    assert card_id in player['exile'] and card_id in gs.cards_castable_from_exile
+    assert any(option['card_id'] == card_id
+               for option in gs.get_exile_cast_options(player))
+
+
+@scenario("608.2c / 701.19", "the closure batch preserves linked searches, temporary rules, and an X snapshot")
+def scenario_closure_search_and_temporary_rules():
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 161)
+    controller, opponent = gs.p1, gs.p2
+    gs.agent_is_p1 = True
+    source = inject_into_zone(gs, controller, {
+        'name': 'Closure Source', 'mana_cost': '', 'type_line': 'Land',
+        'oracle_text': ''}, 'battlefield')
+
+    effect = EffectFactory.create_effects(
+        "The next spell you cast this turn can't be countered.",
+        source_name='Mistrise Village')[0]
+    assert effect.apply(gs, source, controller, {})
+    spell = inject_into_zone(gs, controller, {
+        'name': 'Uncounterable Probe', 'mana_cost': '{U}', 'cmc': 1,
+        'type_line': 'Instant', 'oracle_text': ''}, 'hand')
+    controller['mana_pool'] = {'W': 0, 'U': 1, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
+    gs.priority_player = controller
+    assert gs.cast_spell(spell, controller)
+    assert gs.stack[-1][3].get('cant_be_countered')
+
+    target = inject_into_zone(gs, opponent, {
+        'name': 'Erode Target', 'mana_cost': '{2}', 'cmc': 2,
+        'type_line': 'Creature — Beast', 'oracle_text': '',
+        'power': 2, 'toughness': 2}, 'battlefield')
+    opponent['library'] = []
+    basic = inject_into_zone(gs, opponent, {
+        'name': 'Erode Plains', 'mana_cost': '', 'cmc': 0,
+        'type_line': 'Basic Land — Plains', 'oracle_text': '{T}: Add {W}.'},
+        'library')
+    erode = EffectFactory.create_effects(
+        "Destroy target creature or planeswalker. Its controller may search "
+        "their library for a basic land card, put it onto the battlefield "
+        "tapped, then shuffle.", source_name='Erode')[0]
+    assert erode.apply(gs, source, controller, {'creatures': [target]})
+    gs.agent_is_p1 = False
+    assert get_env().action_handler._handle_choose_mode(0, {})[1]
+    assert basic in opponent['battlefield'] \
+        and basic in opponent['tapped_permanents']
+
+    small = inject_into_zone(gs, opponent, {
+        'name': 'Indestructible Small', 'mana_cost': '{1}', 'cmc': 1,
+        'type_line': 'Creature — Spirit', 'oracle_text': 'Indestructible',
+        'power': 1, 'toughness': 1}, 'battlefield')
+    large = inject_into_zone(gs, opponent, {
+        'name': 'Large Survivor', 'mana_cost': '{4}', 'cmc': 4,
+        'type_line': 'Creature — Giant', 'oracle_text': '',
+        'power': 4, 'toughness': 4}, 'battlefield')
+    day = EffectFactory.create_effects(
+        "Each creature with mana value X or less loses all abilities until "
+        "end of turn. Destroy those creatures.", source_name='Day of Black Sun')[0]
+    assert day.apply(gs, source, controller, {'X': 2})
+    assert small in opponent['graveyard'] and large in opponent['battlefield']
+
+
+@scenario("701.5 / 701.19 / 701.11", "counter, Charm, Cover-Up, and opponent exile choices remain policy-visible")
+def scenario_closure_linked_policy_choices():
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 162)
+    controller, opponent = gs.p1, gs.p2
+    source = inject_into_zone(gs, controller, {
+        'name': 'Closure Spell Source', 'mana_cost': '',
+        'type_line': 'Instant', 'oracle_text': ''}, 'graveyard')
+    target_spell = inject_into_zone(gs, opponent, {
+        'name': 'Counter Target', 'mana_cost': '{2}', 'cmc': 2,
+        'type_line': 'Sorcery', 'oracle_text': ''}, 'hand')
+    opponent['hand'].remove(target_spell)
+    gs.add_to_stack('SPELL', target_spell, opponent, {'source_zone': 'hand'})
+    no_lies = EffectFactory.create_effects(
+        "Counter target spell unless its controller pays {3}. If that spell "
+        "is countered this way, exile it instead of putting it into its "
+        "owner's graveyard.", source_name='No More Lies')[0]
+    assert no_lies.apply(gs, source, controller, {'spells': [target_spell]})
+    gs.agent_is_p1 = False
+    assert get_env().action_handler._handle_pass_priority(None)[1]
+    assert target_spell in opponent['exile']
+
+    controller['library'] = []
+    charm_land = inject_into_zone(gs, controller, {
+        'name': 'Charm Forest', 'mana_cost': '', 'cmc': 0,
+        'type_line': 'Basic Land — Forest', 'oracle_text': '{T}: Add {G}.'},
+        'library')
+    charm = EffectFactory.create_effects(
+        "Search your library for a creature or land card and reveal it. Put "
+        "it onto the battlefield tapped if it's a land card. Otherwise, put "
+        "it into your hand. Then shuffle.", source_name="Archdruid's Charm")[0]
+    assert charm.apply(gs, source, controller, {})
+    gs.agent_is_p1 = True
+    assert get_env().action_handler._handle_choose_mode(0, {})[1]
+    assert charm_land in controller['battlefield'] \
+        and charm_land in controller['tapped_permanents']
+
+    named_gy = inject_into_zone(gs, opponent, {
+        'name': 'Cover-Up Name', 'mana_cost': '{1}', 'cmc': 1,
+        'type_line': 'Instant', 'oracle_text': ''}, 'graveyard')
+    named_hand = inject_into_zone(gs, opponent, {
+        'name': 'Cover-Up Name', 'mana_cost': '{1}', 'cmc': 1,
+        'type_line': 'Instant', 'oracle_text': ''}, 'hand')
+    cover = EffectFactory.create_effects(
+        "Destroy all creatures. If evidence was collected, exile a card from "
+        "an opponent's graveyard. Then search its owner's graveyard, hand, "
+        "and library for any number of cards with that name and exile them.",
+        source_name='Deadly Cover-Up')[0]
+    assert cover.apply(gs, source, controller, {},
+                       context={'evidence_collected': True})
+    assert get_env().action_handler._handle_choose_mode(0, {})[1]
+    assert named_gy in opponent['exile'] and named_hand in opponent['exile']
+
+
+@scenario("400 / 702.121", "outside-game, Strategic Betrayal, Crew, and finality use exact zone transactions")
+def scenario_closure_zone_and_crew_transactions():
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 163)
+    controller, opponent = gs.p1, gs.p2
+    source = inject_into_zone(gs, controller, {
+        'name': 'North Wind Avatar', 'mana_cost': '{5}{U}', 'cmc': 6,
+        'type_line': 'Creature — Avatar', 'oracle_text': '',
+        'power': 5, 'toughness': 5}, 'battlefield')
+    wish = inject_card(gs, {'name': 'Outside Card', 'mana_cost': '{1}',
+                           'type_line': 'Instant', 'oracle_text': ''})
+    controller['outside_game'] = [wish]
+    outside = EffectFactory.create_effects(
+        "When this creature enters, if you cast it, you may put a card you "
+        "own from outside the game into your hand.",
+        source_name='North Wind Avatar')[0]
+    assert outside.apply(gs, source, controller, {}, context={'source_zone': 'hand'})
+    gs.agent_is_p1 = True
+    assert get_env().action_handler._handle_choose_mode(0, {})[1]
+    assert wish in controller['hand'] and wish not in controller['outside_game']
+    assert gs.move_card(source, controller, 'battlefield', controller,
+                        'graveyard', cause='test_cleanup')
+
+    victim = inject_into_zone(gs, opponent, {
+        'name': 'Betrayed Creature', 'mana_cost': '{2}', 'cmc': 2,
+        'type_line': 'Creature — Human', 'oracle_text': '',
+        'power': 2, 'toughness': 2}, 'battlefield')
+    grave_card = inject_into_zone(gs, opponent, {
+        'name': 'Betrayed Grave', 'mana_cost': '{1}', 'cmc': 1,
+        'type_line': 'Instant', 'oracle_text': ''}, 'graveyard')
+    betrayal = EffectFactory.create_effects(
+        "Target opponent exiles a creature they control and their graveyard.",
+        source_name='Strategic Betrayal')[0]
+    assert betrayal.apply(gs, source, controller, {'players': ['p2']})
+    gs.agent_is_p1 = False
+    assert get_env().action_handler._handle_choose_mode(0, {})[1]
+    assert victim in opponent['exile'] and grave_card in opponent['exile']
+
+    vehicle = inject_real_card(
+        gs, controller, 'Lumbering Worldwagon', 'battlefield')
+    for index in range(2):
+        inject_into_zone(gs, controller, {
+            'name': f'Worldwagon Land {index}', 'mana_cost': '', 'cmc': 0,
+            'type_line': 'Basic Land — Forest', 'oracle_text': '{T}: Add {G}.'},
+            'battlefield')
+    helper = inject_into_zone(gs, controller, {
+        'name': 'Crew Helper', 'mana_cost': '{3}', 'cmc': 3,
+        'type_line': 'Creature — Giant', 'oracle_text': '',
+        'power': 4, 'toughness': 4}, 'battlefield')
+    gs.agent_is_p1 = True
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = controller
+    vehicle_index = controller['battlefield'].index(vehicle)
+    abilities = gs.ability_handler.get_activated_abilities(vehicle)
+    crew_index = next(index for index, ability in enumerate(abilities)
+                      if getattr(ability, 'keyword', '') == 'crew')
+    assert get_env().action_handler._handle_activate_ability(None, {
+        'battlefield_idx': vehicle_index, 'ability_idx': crew_index,
+        'controller_id': 'p1'})[1]
+    assert gs.choice_context.get('crew_activation')
+    assert get_env().action_handler._handle_choose_mode(0, {})[1]
+    assert get_env().action_handler._handle_pass_priority(None)[1]
+    assert gs.stack and gs.stack[-1][1] == vehicle
+    assert gs.resolve_top_of_stack()
+    assert helper in controller['tapped_permanents'] \
+        and vehicle in gs.crewed_vehicles, \
+        (controller['tapped_permanents'], gs.crewed_vehicles,
+         gs._safe_get_card(vehicle).card_types)
+    assert 'creature' in gs._safe_get_card(vehicle).card_types
+    assert gs._safe_get_card(vehicle).power == 2 \
+        and gs._safe_get_card(vehicle).toughness == 4, \
+        (gs._safe_get_card(vehicle).power,
+         gs._safe_get_card(vehicle).toughness)
+
+    finality = inject_into_zone(gs, controller, {
+        'name': 'Finality Probe', 'mana_cost': '{1}', 'cmc': 1,
+        'type_line': 'Creature — Spirit', 'oracle_text': '',
+        'power': 1, 'toughness': 1}, 'battlefield')
+    gs.add_counter(finality, 'finality', 1)
+    assert gs.move_card(finality, controller, 'battlefield', controller,
+                        'graveyard', cause='destroy_effect')
+    assert finality in controller['exile'] and finality not in controller['graveyard']
+
+    esper = inject_real_card(
+        gs, controller, 'Esper Origins // Summon: Esper Maduin', 'graveyard')
+    controller['graveyard'].remove(esper)
+    esper_effects = EffectFactory.create_effects(
+        gs._safe_get_card(esper).oracle_text,
+        source_name='Esper Origins // Summon: Esper Maduin')
+    transform_effect = next(
+        effect for effect in esper_effects
+        if type(effect).__name__ == 'EsperGraveyardTransformEffect')
+    assert transform_effect.apply(
+        gs, esper, controller, {}, context={'source_zone': 'graveyard'})
+    assert esper in controller['battlefield']
+    assert gs._safe_get_card(esper).current_face == 1
+    assert gs._safe_get_card(esper).counters.get('finality') == 1
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------

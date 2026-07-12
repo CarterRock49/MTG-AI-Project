@@ -503,7 +503,38 @@ class TurnPhaseHandlersMixin:
             player = ctx['player']
             for card_id in ctx.get('selected', []):
                 player.setdefault('tapped_permanents', set()).add(card_id)
-            player.setdefault('saddled_permanents', set()).add(ctx['source_id'])
+            if ctx.get('crew_activation'):
+                activation_context = dict(ctx.get('activation_context', {}))
+                resume_phase = ctx.get('resume_phase', gs.PHASE_PRIORITY)
+                gs.choice_context = None
+                gs.phase = resume_phase
+                gs.priority_player = player
+                gs.priority_pass_count = 0
+                return self._handle_activate_ability(
+                    None, activation_context)
+            if ctx.get('crew'):
+                gs.crewed_vehicles.add(ctx['source_id'])
+                gs.layer_system.register_effect({
+                    'source_id': ctx['source_id'], 'layer': 4,
+                    'affected_ids': [ctx['source_id']],
+                    'effect_type': 'add_type', 'effect_value': 'creature',
+                    'duration': 'end_of_turn', 'start_turn': gs.turn,
+                    'description': 'Crew animation',
+                })
+                crew_card = gs._safe_get_card(ctx['source_id'])
+                if (crew_card and "power is equal to the number of lands you control"
+                        in getattr(crew_card, 'oracle_text', '').lower()):
+                    gs.layer_system.register_effect({
+                        'source_id': ctx['source_id'], 'layer': 7,
+                        'sublayer': 'a', 'affected_ids': [ctx['source_id']],
+                        'effect_type': 'set_pt_cda',
+                        'effect_value': 'land_count_power_self',
+                        'duration': 'permanent',
+                        'description': 'land-count power CDA',
+                    })
+                gs.layer_system.apply_all_effects()
+            else:
+                player.setdefault('saddled_permanents', set()).add(ctx['source_id'])
             gs.phase = ctx.get('resume_phase', gs.PHASE_MAIN_PRECOMBAT)
             gs.choice_context = None
             return 0.05, True
@@ -531,6 +562,29 @@ class TurnPhaseHandlersMixin:
             if ctx.get('player') is not player:
                 return -0.1, False
             self._finish_dig_select_choice(ctx)
+            return 0.0, True
+        if (gs.phase == gs.PHASE_CHOOSE and getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'resolution_choice'
+                and gs.choice_context.get('optional')):
+            ctx = gs.choice_context
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if ctx.get('player') is not player:
+                return -0.1, False
+            if ctx.get('choice_kind') == 'counter_unless_pay':
+                target_id = ctx.get('target_spell_id')
+                for index, item in enumerate(list(gs.stack)):
+                    if item[0] != 'SPELL' or item[1] != target_id:
+                        continue
+                    _, spell_id, caster, spell_context = item
+                    if spell_context.get('cant_be_countered'):
+                        break
+                    gs.stack.pop(index)
+                    if not spell_context.get('is_copy', False):
+                        gs.move_card(
+                            spell_id, caster, 'stack_implicit', caster, 'exile',
+                            cause='countered')
+                    break
+            gs._resume_effect_continuation(ctx)
             return 0.0, True
         if (gs.phase == gs.PHASE_CHOOSE and getattr(gs, 'choice_context', None)
                 and gs.choice_context.get('type') == 'optional_sacrifice_proliferate'):

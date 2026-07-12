@@ -548,6 +548,8 @@ class LayerSystem:
              cda_type = 'unknown'
              if "number of cards in your graveyard" in effect_lower: cda_type = 'graveyard_count_self'
              elif "number of creatures you control" in effect_lower: cda_type = 'creature_count_self'
+             elif ("power is equal to the number of lands you control"
+                   in effect_lower): cda_type = 'land_count_power_self'
              # Add more common CDA types
              logging.debug(f"Registering Layer 7a CDA effect: {cda_type}")
              return {'sublayer': 'a', 'effect_type': 'set_pt_cda', 'effect_value': cda_type} # Pass CDA type identifier
@@ -664,6 +666,19 @@ class LayerSystem:
                                 chars['_base_power'] = count; chars['_base_toughness'] = count
                                 chars['power'] = count; chars['toughness'] = count
                                 logging.debug(f"Layer 7a (CDA): Set Base P/T of {target_id} based on creature count ({count})")
+                      elif cda_type == 'land_count_power_self':
+                           controller = chars.get('_controller')
+                           if controller:
+                                count = sum(
+                                    1 for cid in controller.get('battlefield', [])
+                                    if 'land' in getattr(
+                                        self.game_state._safe_get_card(cid),
+                                        'card_types', []))
+                                chars['_base_power'] = count
+                                chars['power'] = count
+                                logging.debug(
+                                    "Layer 7a (CDA): Set base power of %s from land count (%s)",
+                                    target_id, count)
                       # Add more CDA calculations
                   # Set Base P/T (from copy effects, etc.)
                   elif effect_type == 'set_base_pt' and isinstance(value, (tuple, list)) and len(value)==2:
@@ -1199,6 +1214,18 @@ class LayerSystem:
                                 count = sum(1 for cid in controller.get("battlefield", []) if 'creature' in getattr(self.game_state._safe_get_card(cid),'card_types',[]))
                                 chars['power'] = count; chars['toughness'] = count
                                 logging.debug(f"Layer 7a (CDA): Set P/T of {target_id} based on creature count ({count})")
+                      elif cda_type == 'land_count_power_self':
+                           controller = chars.get('_controller')
+                           if controller:
+                                count = sum(
+                                    1 for cid in controller.get('battlefield', [])
+                                    if 'land' in getattr(
+                                        self.game_state._safe_get_card(cid),
+                                        'card_types', []))
+                                chars['power'] = count
+                                logging.debug(
+                                    "Layer 7a (CDA): Set power of %s from land count (%s)",
+                                    target_id, count)
                       # Add more CDA calculations
                   # Set Base P/T (from copy effects, etc.)
                   elif effect_type == 'set_base_pt' and isinstance(value, (tuple, list)) and len(value)==2:

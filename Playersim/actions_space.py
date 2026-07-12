@@ -520,6 +520,7 @@ class ActionSpaceMixin:
 
         # --- Other Sorcery-speed Actions ---
         self._add_plot_actions(player, valid_actions, set_valid_action)
+        self._add_warp_actions(player, valid_actions, set_valid_action)
         self._add_ability_activation_actions(player, valid_actions, set_valid_action, is_sorcery_speed=True)
         # PW abilities handled by _add_planeswalker_actions
         if hasattr(self, 'combat_handler') and self.combat_handler:
@@ -615,6 +616,8 @@ class ActionSpaceMixin:
                  logging.warning(f"IndexError accessing hand for Instant/Flash spell at index {i}"); break
 
         # --- Other instant speed actions (no changes needed) ---
+        self._add_warp_actions(player, valid_actions, set_valid_action,
+                               require_instant_speed=True)
         self._add_morph_actions(player, valid_actions, set_valid_action)
         self._add_ability_activation_actions(player, valid_actions, set_valid_action, is_sorcery_speed=False)
         self._add_land_tapping_actions(player, valid_actions, set_valid_action)
@@ -840,6 +843,25 @@ class ActionSpaceMixin:
                         context={"page_count": page_count})
                 if context.get('optional'):
                     set_valid_action(11, "DECLINE_DIG_SELECTION")
+
+            elif choice_type == "resolution_choice":
+                options = context.get('options', [])
+                page_count = max(1, (len(options) + 9) // 10)
+                page = int(context.get('choice_page', 0)) % page_count
+                for option_index, option in enumerate(
+                        options[page * 10:(page + 1) * 10]):
+                    card = gs._safe_get_card(option)
+                    label = getattr(card, 'name', option)
+                    set_valid_action(
+                        353 + option_index,
+                        f"RESOLUTION_CHOICE {label}",
+                        context={"option_index": option_index})
+                if page_count > 1:
+                    set_valid_action(
+                        479, f"CHOICE_PAGE_NEXT ({page + 1}/{page_count})",
+                        context={"page_count": page_count})
+                if context.get('optional'):
+                    set_valid_action(11, "DECLINE_RESOLUTION_CHOICE")
 
             elif choice_type == "optional_sacrifice_proliferate":
                 source_id = context.get('source_id')
@@ -1993,6 +2015,23 @@ class ActionSpaceMixin:
                 set_valid_action(
                     action_indices[hand_index], f"PLOT {card.name}",
                     context={"hand_idx": hand_index})
+
+    def _add_warp_actions(self, player, valid_actions, set_valid_action,
+                          require_instant_speed=False):
+        """Expose Warp using Plot's mutually exclusive hand-indexed slots."""
+        action_indices = [296, 297, 298, 309, 310, 311, 312, 313]
+        for hand_index, card_id in enumerate(player.get("hand", [])[:8]):
+            card = self.game_state._safe_get_card(card_id)
+            warp_cost = getattr(card, "warp_cost", None) if card else None
+            if (not card or not getattr(card, "is_warp", False)
+                    or not warp_cost):
+                continue
+            if require_instant_speed and not self._has_flash(card_id):
+                continue
+            if self._can_afford_cost_string(player, warp_cost):
+                set_valid_action(
+                    action_indices[hand_index], f"WARP_CAST {card.name}",
+                    context={"hand_idx": hand_index, "warp_cast": True})
 
     def _add_token_copy_actions(self, player, valid_actions, set_valid_action):
         """Add actions for token creation and copying."""

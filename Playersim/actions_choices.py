@@ -115,7 +115,8 @@ class ChoiceHandlersMixin:
                 and choice.get('type') in (
                     'sacrifice_effect', 'activation_sacrifice_cost',
                     'dig_select', 'distribute_counters', 'discard',
-                    'specialize_discard', 'forced_sacrifice')):
+                    'specialize_discard', 'forced_sacrifice',
+                    'resolution_choice')):
             choice_options = choice.get('options', [])
             if choice.get('type') in ('discard', 'specialize_discard'):
                 choice_options = choice.get('player', {}).get('hand', [])
@@ -420,13 +421,20 @@ class ChoiceHandlersMixin:
                 player["library"].extend(bottom_cards)  # Bottom cards last
                 logging.debug(f"Scry final: {len(top_cards)} cards on top, {len(bottom_cards)} on bottom")
 
-            # Clear context and return to previous phase
+            # Clear context and return to previous phase. Resolution-time
+            # Surveil may have later instructions waiting behind this choice.
+            continuation = context.get('effect_continuation')
             previous_phase = getattr(gs, 'previous_priority_phase', None) or gs.PHASE_PRIORITY
-            gs.choice_context = None
-            gs.phase = previous_phase
-            gs.previous_priority_phase = None
-            gs.priority_pass_count = 0
-            gs.priority_player = gs._get_active_player()
+            if continuation:
+                context['resume_phase'] = previous_phase
+                gs.previous_priority_phase = None
+                gs._resume_effect_continuation(context)
+            else:
+                gs.choice_context = None
+                gs.phase = previous_phase
+                gs.previous_priority_phase = None
+                gs.priority_pass_count = 0
+                gs.priority_player = gs._get_active_player()
             
             # Additional reward for completing the full scry/surveil
             reward += 0.05
@@ -608,6 +616,40 @@ class ChoiceHandlersMixin:
             gs.priority_pass_count = 0
             logging.debug(f"Waiting for a target before paying {card.name}'s activation cost.")
             return 0.02, True
+
+        # Crew taps creatures as an activation cost, before the ability is put
+        # on the stack. Reuse the power-threshold chooser, then resume this
+        # activation with the exact chosen creatures already committed.
+        if (getattr(ability, 'keyword', '').lower() == 'crew'
+                and not context.get('crew_cost_paid')):
+            options = [
+                cid for cid in player.get('battlefield', [])
+                if cid != card_id
+                and cid not in player.get('tapped_permanents', set())
+                and 'creature' in getattr(
+                    gs._safe_get_card(cid), 'card_types', [])]
+            required_power = int(getattr(ability, 'crew_power', 0) or 0)
+            available_power = sum(
+                max(0, int(getattr(gs._safe_get_card(cid), 'power', 0) or 0))
+                for cid in options)
+            if available_power < required_power:
+                return -0.05, False
+            gs.choice_context = {
+                'type': 'saddle', 'crew': True, 'crew_activation': True,
+                'player': player, 'source_id': card_id,
+                'options': options, 'selected': [], 'selected_power': 0,
+                'required_power': required_power, 'resume_phase': gs.phase,
+                'activation_context': {
+                    'battlefield_idx': bf_idx, 'ability_idx': ability_idx,
+                    'controller_id': 'p1' if player is gs.p1 else 'p2',
+                    'activation_source_occurrence': ability_source_occurrence,
+                    'crew_cost_paid': True,
+                },
+            }
+            gs.phase = gs.PHASE_CHOOSE
+            gs.priority_player = player
+            gs.priority_pass_count = 0
+            return 0.02, True
         
         # Prepare cost context
         cost_context = {
@@ -749,7 +791,8 @@ class ChoiceHandlersMixin:
             "effect_text": effect_text,
             "ability": ability,
             "is_exhaust": is_exhaust,
-            "targets": activation_targets or {}
+            "targets": activation_targets or {},
+            "crew_cost_paid": bool(context.get('crew_cost_paid')),
         }
         gs.add_to_stack("ABILITY", card_id, player, stack_context)
         if context.get("commit_activation_targets"):
@@ -1502,6 +1545,19 @@ class ChoiceHandlersMixin:
                     card_id, player, source_zone, player, destination,
                     cause=ctx.get('move_cause', 'dig')):
                 return -0.1, False
+            if (destination == 'battlefield'
+                    and ctx.get('enters_tapped')):
+                player.setdefault('tapped_permanents', set()).add(card_id)
+            if ctx.get('destination_by_card_type'):
+                card = gs._safe_get_card(card_id)
+                if card and 'land' in getattr(card, 'card_types', []):
+                    # The generic move above used hand; linked Charm searches
+                    # put lands onto the battlefield tapped instead.
+                    if card_id in player.get('hand', []):
+                        gs.move_card(
+                            card_id, player, 'hand', player, 'battlefield',
+                            cause='library_search')
+                    player.setdefault('tapped_permanents', set()).add(card_id)
             options.pop(absolute_param)
             ctx['choice_page'] = 0
             ctx.setdefault('selected', []).append(card_id)
@@ -1509,6 +1565,61 @@ class ChoiceHandlersMixin:
             if ctx['remaining'] > 0 and options:
                 return 0.02, True
             self._finish_dig_select_choice(ctx)
+            return 0.05, True
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'resolution_choice'):
+            ctx = gs.choice_context
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            options = ctx.get('options', [])
+            absolute_param = int(ctx.get('choice_page', 0)) * 10 + param
+            if ctx.get('player') is not player or not (0 <= absolute_param < len(options)):
+                return -0.1, False
+            option = options[absolute_param]
+            kind = ctx.get('choice_kind')
+            if kind == 'counter_unless_pay':
+                cost = gs.mana_system.parse_mana_cost(ctx.get('cost', '{0}'))
+                if not gs.mana_system.can_pay_mana_cost_with_lands(player, cost):
+                    return -0.1, False
+                if gs.mana_system.pay_mana_cost_get_details(player, cost) is None:
+                    return -0.1, False
+            elif kind == 'deadly_cover_up':
+                opponent = gs.p1 if ctx.get('opponent_id') == 'p1' else gs.p2
+                card = gs._safe_get_card(option)
+                if option not in opponent.get('graveyard', []) or not card:
+                    return -0.1, False
+                name = getattr(card, 'name', '')
+                hand_exiled = 0
+                for zone in ('graveyard', 'hand', 'library'):
+                    for candidate in list(opponent.get(zone, [])):
+                        if getattr(gs._safe_get_card(candidate), 'name', None) != name:
+                            continue
+                        if gs.move_card(candidate, opponent, zone, opponent,
+                                        'exile', cause='deadly_cover_up'):
+                            hand_exiled += int(zone == 'hand')
+                gs.shuffle_library(opponent)
+                for _ in range(hand_exiled):
+                    gs._draw_phase(opponent)
+            elif kind == 'outside_game':
+                pool = player.setdefault(ctx.get('outside_zone', 'outside_game'), [])
+                if option not in pool:
+                    return -0.1, False
+                pool.remove(option)
+                player.setdefault('hand', []).append(option)
+            elif kind == 'strategic_betrayal':
+                if option not in player.get('battlefield', []):
+                    return -0.1, False
+                card = gs._safe_get_card(option)
+                if not card or 'creature' not in getattr(card, 'card_types', []):
+                    return -0.1, False
+                owner = gs._find_card_owner_fallback(option) or player
+                gs.move_card(option, player, 'battlefield', owner, 'exile',
+                             cause='strategic_betrayal')
+                for grave_card in list(player.get('graveyard', [])):
+                    gs.move_card(grave_card, player, 'graveyard', player,
+                                 'exile', cause='strategic_betrayal')
+            else:
+                return -0.1, False
+            gs._resume_effect_continuation(ctx)
             return 0.05, True
         if (getattr(gs, 'choice_context', None)
                 and gs.choice_context.get('type') == 'optional_sacrifice_proliferate'):

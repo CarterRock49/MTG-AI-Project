@@ -750,15 +750,6 @@ class AbilityHandler:
                     if hasattr(card, 'is_spree') and card.is_spree:
                         processed_special_text_markers = getattr(card, '_spree_related_text_marker', '')
 
-                if any(re.search(r"(?mi)^\s*warp\s+(?:\{[^}]+\})+", text or "")
-                       for text in oracle_text_sources):
-                    from .card_support import report_unsupported
-                    report_unsupported(
-                        getattr(card, "name", str(card_id)),
-                        "Warp casting and delayed exile are not implemented",
-                        severity="partial")
-
-
                 # --- Parse Keywords from Explicit Data ---
                 handled_keywords = set() # Keep track of keywords already handled by _create_keyword_ability
                 parsed_keywords_from_data = self._get_parsed_keywords(keywords_from_card_data)
@@ -1525,7 +1516,9 @@ class AbilityHandler:
         other_zone_activated = ["morph"]
 
         if keyword_lower in activated_map:
-            cost_to_use = current_value if current_value is not None else "{0}"
+            cost_to_use = ("{0}" if keyword_lower == "crew"
+                           else current_value if current_value is not None
+                           else "{0}")
             effect_desc_tmpl = activated_map[keyword_lower]
             val_str = str(_parse_value(full_text, keyword_lower)) # Ensure N value parsed correctly for effect text
             effect_desc = effect_desc_tmpl.format(N=val_str)
@@ -1535,6 +1528,8 @@ class AbilityHandler:
             ability = ActivatedAbility(card_id, cost_to_use, effect_desc, effect_text=full_text)
             setattr(ability, 'keyword', keyword_lower)
             setattr(ability, 'keyword_value', cost_to_use) # Store parsed cost
+            if keyword_lower == "crew":
+                setattr(ability, 'crew_power', int(val_str.strip('{}')))
 
             if keyword_lower in hand_activated: setattr(ability, 'zone', 'hand')
             elif keyword_lower in gy_activated: setattr(ability, 'zone', 'graveyard')

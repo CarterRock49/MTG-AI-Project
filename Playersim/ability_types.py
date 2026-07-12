@@ -301,11 +301,13 @@ class ActivatedAbility(Ability):
         return super()._resolve_ability_implementation(game_state, controller, targets)
 
 
-    def resolve_with_targets(self, game_state, controller, targets=None):
+    def resolve_with_targets(self, game_state, controller, targets=None,
+                             context=None):
         """Resolve this ability with specific targets."""
         # This method is useful if the activation logic needs to pass pre-selected targets.
         # Default implementation calls the main resolve logic.
-        return self._resolve_ability_implementation(game_state, controller, targets)
+        return self._resolve_ability_implementation(
+            game_state, controller, targets, resolution_context=context)
 
 
     @staticmethod
@@ -2016,6 +2018,8 @@ class StaticAbility(Ability):
              cda_type = 'unknown'
              if "number of cards in your graveyard" in effect_lower: cda_type = 'graveyard_count_self'
              elif "number of creatures you control" in effect_lower: cda_type = 'creature_count_self'
+             elif ("power is equal to the number of lands you control"
+                   in effect_lower): cda_type = 'land_count_power_self'
              # Add more common CDA types
              logging.debug(f"Registering Layer 7a CDA effect: {cda_type}")
              return {'sublayer': 'a', 'effect_type': 'set_pt_cda', 'effect_value': cda_type} # Pass CDA type identifier
@@ -4747,6 +4751,7 @@ class SearchLibraryEffect(AbilityEffect):
                 "move_cause": "library_search", "source_id": source_id,
                 "resume_phase": game_state.PHASE_PRIORITY,
                 "shuffle_after": self.shuffle_required,
+                "enters_tapped": self.enters_tapped,
             }
             game_state.phase = game_state.PHASE_CHOOSE
             game_state.priority_player = player_to_search
@@ -6177,6 +6182,308 @@ class TurnInsideOutEffect(AbilityEffect):
             "source_id": source_id,
         })
         return True
+
+
+class GrantNextSpellUncounterableEffect(AbilityEffect):
+    """Make the controller's next spell this turn uncounterable."""
+
+    def __init__(self):
+        super().__init__("The next spell you cast this turn can't be countered")
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        controller['next_spell_uncounterable'] = True
+        return True
+
+
+class DayOfBlackSunEffect(AbilityEffect):
+    """Snapshot the X-or-less creatures, strip abilities, then destroy them."""
+
+    def __init__(self):
+        super().__init__(
+            "Each creature with mana value X or less loses all abilities until "
+            "end of turn. Destroy those creatures.")
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        context = getattr(self, 'resolution_context', {}) or {}
+        x_value = int((targets or {}).get('X', context.get('X', 0)) or 0)
+        affected = []
+        for player in (game_state.p1, game_state.p2):
+            for card_id in list(player.get('battlefield', [])):
+                card = game_state._safe_get_card(card_id)
+                if (card and 'creature' in getattr(card, 'card_types', [])
+                        and float(getattr(card, 'cmc', 0) or 0) <= x_value):
+                    affected.append(card_id)
+        if not affected:
+            return True
+        game_state.layer_system.register_effect({
+            'source_id': source_id, 'layer': 6, 'affected_ids': affected,
+            'effect_type': 'remove_all_abilities', 'effect_value': True,
+            'duration': 'end_of_turn', 'start_turn': game_state.turn,
+            'description': 'Day of Black Sun ability removal',
+        })
+        game_state.layer_system.apply_all_effects()
+        return DestroyEffect('permanent').apply(
+            game_state, source_id, controller, targets={
+                'permanents': affected, 'X': x_value})
+
+
+class ErodeEffect(AbilityEffect):
+    """Destroy the target, then let its controller search for a basic land."""
+
+    def __init__(self):
+        super().__init__(
+            "Destroy target creature or planeswalker. Its controller may "
+            "search their library for a basic land card")
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        target_ids = []
+        for category in ('creatures', 'planeswalkers', 'permanents', 'chosen'):
+            target_ids.extend((targets or {}).get(category, []))
+        if not target_ids:
+            return False
+        target_id = target_ids[0]
+        target_controller = game_state.get_card_controller(target_id)
+        if not target_controller:
+            return False
+        DestroyEffect('permanent').apply(
+            game_state, source_id, controller,
+            {'permanents': [target_id]})
+        options = [
+            cid for cid in target_controller.get('library', [])
+            if SearchLibraryEffect('basic land')._is_policy_candidate(
+                game_state, cid, 'basic land')]
+        if not options:
+            game_state.shuffle_library(target_controller)
+            return True
+        game_state.choice_context = {
+            'type': 'dig_select', 'player': target_controller,
+            'options': options, 'remaining': 1, 'selected': [],
+            'source_zone': 'library', 'destination': 'battlefield',
+            'rest_destination': 'stay', 'optional': True,
+            'enters_tapped': True, 'shuffle_after': True,
+            'source_id': source_id, 'resume_phase': game_state.PHASE_PRIORITY,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = target_controller
+        return True
+
+
+class CounterUnlessPaysEffect(AbilityEffect):
+    """Policy-visible Mana Leak effect with an exile-on-counter rider."""
+
+    def __init__(self, cost='{3}'):
+        super().__init__(f"Counter target spell unless its controller pays {cost}")
+        self.cost = cost
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        spell_ids = (targets or {}).get('spells', [])
+        if not spell_ids:
+            return False
+        target_id = spell_ids[0]
+        item = next((entry for entry in game_state.stack
+                     if entry[0] == 'SPELL' and entry[1] == target_id), None)
+        if not item:
+            return False
+        spell_controller = item[2]
+        if item[3].get('cant_be_countered'):
+            return True
+        cost = game_state.mana_system.parse_mana_cost(self.cost)
+        can_pay = game_state.mana_system.can_pay_mana_cost_with_lands(
+            spell_controller, cost)
+        game_state.choice_context = {
+            'type': 'resolution_choice', 'choice_kind': 'counter_unless_pay',
+            'player': spell_controller, 'options': (['pay'] if can_pay else []),
+            'optional': True, 'cost': self.cost,
+            'target_spell_id': target_id, 'source_id': source_id,
+            'resume_phase': game_state.PHASE_PRIORITY,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = spell_controller
+        return True
+
+
+class ArchdruidSearchEffect(AbilityEffect):
+    def __init__(self):
+        super().__init__("Search your library for a creature or land card")
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        options = []
+        for card_id in controller.get('library', []):
+            card = game_state._safe_get_card(card_id)
+            if card and {'creature', 'land'}.intersection(
+                    getattr(card, 'card_types', [])):
+                options.append(card_id)
+        if not options:
+            game_state.shuffle_library(controller)
+            return True
+        game_state.choice_context = {
+            'type': 'dig_select', 'player': controller, 'options': options,
+            'remaining': 1, 'selected': [], 'source_zone': 'library',
+            'destination': 'hand', 'destination_by_card_type': True,
+            'rest_destination': 'stay', 'optional': False,
+            'shuffle_after': True, 'source_id': source_id,
+            'resume_phase': game_state.PHASE_PRIORITY,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = controller
+        return True
+
+
+class DeadlyCoverUpEffect(AbilityEffect):
+    def __init__(self):
+        super().__init__("Destroy all creatures and collect the evidence rider")
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        DestroyEffect('all creatures').apply(
+            game_state, source_id, controller, targets or {})
+        context = getattr(self, 'resolution_context', {}) or {}
+        if not (context.get('evidence_collected')
+                or (targets or {}).get('evidence_collected')):
+            return True
+        opponent = game_state.p2 if controller is game_state.p1 else game_state.p1
+        options = list(opponent.get('graveyard', []))
+        if not options:
+            return True
+        game_state.choice_context = {
+            'type': 'resolution_choice', 'choice_kind': 'deadly_cover_up',
+            'player': controller, 'options': options, 'optional': False,
+            'opponent_id': 'p1' if opponent is game_state.p1 else 'p2',
+            'source_id': source_id, 'resume_phase': game_state.PHASE_PRIORITY,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = controller
+        return True
+
+
+class OutsideGameCardEffect(AbilityEffect):
+    def __init__(self):
+        super().__init__("You may put a card you own from outside the game into your hand")
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        context = getattr(self, 'resolution_context', {}) or {}
+        if context and not (context.get('was_cast')
+                            or context.get('source_zone') == 'stack_implicit'
+                            or context.get('source_zone') in {'hand', 'exile', 'graveyard'}):
+            return True
+        pool_key = ('outside_game' if 'outside_game' in controller
+                    else 'sideboard')
+        options = list(controller.get(pool_key, []))
+        if not options:
+            return True
+        game_state.choice_context = {
+            'type': 'resolution_choice', 'choice_kind': 'outside_game',
+            'player': controller, 'options': options, 'optional': True,
+            'outside_zone': pool_key,
+            'source_id': source_id, 'resume_phase': game_state.PHASE_PRIORITY,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = controller
+        return True
+
+
+class StrategicBetrayalEffect(AbilityEffect):
+    def __init__(self):
+        super().__init__("Target opponent exiles a creature they control and their graveyard")
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        player_ids = (targets or {}).get('players', [])
+        opponent = (game_state.p1 if player_ids and player_ids[0] == 'p1'
+                    else game_state.p2 if player_ids and player_ids[0] == 'p2'
+                    else game_state.p2 if controller is game_state.p1 else game_state.p1)
+        options = [cid for cid in opponent.get('battlefield', [])
+                   if 'creature' in getattr(
+                       game_state._safe_get_card(cid), 'card_types', [])]
+        if not options:
+            for card_id in list(opponent.get('graveyard', [])):
+                game_state.move_card(card_id, opponent, 'graveyard', opponent,
+                                     'exile', cause='strategic_betrayal')
+            return True
+        game_state.choice_context = {
+            'type': 'resolution_choice', 'choice_kind': 'strategic_betrayal',
+            'player': opponent, 'options': options, 'optional': False,
+            'source_id': source_id, 'resume_phase': game_state.PHASE_PRIORITY,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = opponent
+        return True
+
+
+class CrewEffect(AbilityEffect):
+    def __init__(self, power):
+        self.power = int(power)
+        super().__init__(f"Crew {self.power}")
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        context = getattr(self, 'resolution_context', {}) or {}
+        if context.get('crew_cost_paid'):
+            game_state.crewed_vehicles.add(source_id)
+            game_state.layer_system.register_effect({
+                'source_id': source_id, 'layer': 4,
+                'affected_ids': [source_id], 'effect_type': 'add_type',
+                'effect_value': 'creature', 'duration': 'end_of_turn',
+                'start_turn': game_state.turn,
+                'description': 'Crew animation',
+            })
+            card = game_state._safe_get_card(source_id)
+            if (card and "power is equal to the number of lands you control"
+                    in getattr(card, 'oracle_text', '').lower()):
+                game_state.layer_system.register_effect({
+                    'source_id': source_id, 'layer': 7, 'sublayer': 'a',
+                    'affected_ids': [source_id],
+                    'effect_type': 'set_pt_cda',
+                    'effect_value': 'land_count_power_self',
+                    'duration': 'permanent',
+                    'description': 'land-count power CDA',
+                })
+            game_state.layer_system.apply_all_effects()
+            return True
+        options = [cid for cid in controller.get('battlefield', [])
+                   if cid != source_id
+                   and cid not in controller.get('tapped_permanents', set())
+                   and 'creature' in getattr(
+                       game_state._safe_get_card(cid), 'card_types', [])]
+        game_state.choice_context = {
+            'type': 'saddle', 'crew': True, 'player': controller,
+            'source_id': source_id, 'options': options, 'selected': [],
+            'selected_power': 0, 'required_power': self.power,
+            'resume_phase': game_state.PHASE_PRIORITY,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = controller
+        return True
+
+
+class EsperGraveyardTransformEffect(AbilityEffect):
+    def __init__(self):
+        super().__init__("If cast from a graveyard, exile it then return transformed with a finality counter")
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        context = getattr(self, 'resolution_context', {}) or {}
+        if context.get('source_zone') != 'graveyard':
+            return True
+        card = game_state._safe_get_card(source_id)
+        if not card:
+            return False
+        game_state.move_card(source_id, controller, 'stack_implicit', controller,
+                             'exile', cause='esper_origins')
+        card.set_current_face(1)
+        moved = game_state.move_card(source_id, controller, 'exile', controller,
+                                     'battlefield', cause='esper_origins')
+        if moved:
+            game_state.add_counter(source_id, 'finality', 1)
+            context['skip_default_movement'] = True
+            self.resolution_context['skip_default_movement'] = True
+        return bool(moved)
 
 
 class DestroyEffect(AbilityEffect):

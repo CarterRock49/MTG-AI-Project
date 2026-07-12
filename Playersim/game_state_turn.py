@@ -770,7 +770,22 @@ class GameStateTurnMixin:
 
     def _execute_delayed_trigger_payload(self, payload):
         """Execute a clone-safe structured delayed-trigger payload."""
-        if not isinstance(payload, dict) or payload.get("kind") != "oracle_text":
+        if not isinstance(payload, dict):
+            return False
+        if payload.get("kind") == "warp_exile":
+            card_id = payload.get("card_id")
+            controller = self.p1 if payload.get("controller_id") == "p1" else self.p2
+            current_controller = self.get_card_controller(card_id)
+            if not current_controller or card_id not in current_controller.get("battlefield", []):
+                return True
+            owner = self._find_card_owner_fallback(card_id) or controller
+            moved = self.move_card(
+                card_id, current_controller, "battlefield", owner, "exile",
+                cause="warp_delayed_exile")
+            if moved:
+                self.cards_castable_from_exile.add(card_id)
+            return bool(moved)
+        if payload.get("kind") != "oracle_text":
             return False
         from .ability_types import DelayedTriggerEffect
         from .ability_utils import EffectFactory
@@ -952,6 +967,7 @@ class GameStateTurnMixin:
             entry for entry in getattr(self, "flashback_permissions", [])
             if entry.get("expires_turn", self.turn) > self.turn
         ]
+        player.pop('next_spell_uncounterable', None)
 
         # 3. "Until end of turn" and "this turn" effects end
         # --- LayerSystem handles duration removal ---

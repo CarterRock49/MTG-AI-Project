@@ -397,7 +397,15 @@ class GameStateZonesMixin:
         # ... (Keep existing replacement effect handling) ...
         final_destination_player = to_player
         final_destination_zone = to_zone
+        # Finality counters create a built-in replacement: a creature that
+        # would die is exiled instead. This is checked before ordinary
+        # registered replacements because the counter carries the rule.
+        if (actual_from_zone == "battlefield" and to_zone == "graveyard"
+                and card and "creature" in getattr(card, "card_types", [])
+                and int(getattr(card, 'counters', {}).get('finality', 0) or 0) > 0):
+            final_destination_zone = 'exile'
         event_context = {'card_id': card_id, 'card': card, 'from_player': from_player, 'from_zone': actual_from_zone, 'to_player': to_player, 'to_zone': to_zone, 'cause': cause, **context }
+        event_context['to_zone'] = final_destination_zone
         prevented = False
         if hasattr(self, 'replacement_effects') and self.replacement_effects:
             # "Dies" means a creature would move from the battlefield to a

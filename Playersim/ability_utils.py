@@ -374,6 +374,50 @@ class EffectFactory:
 
         source_key = str(source_name or "").strip().casefold()
         lowered = effect_text.lower()
+        if (source_key.startswith("esper origins")
+                and "surveil 2" in lowered):
+            from .ability_types import (
+                SurveilEffect, GainLifeEffect, EsperGraveyardTransformEffect)
+            return [SurveilEffect(2), GainLifeEffect(2),
+                    EsperGraveyardTransformEffect()]
+        if (source_key == "mistrise village"
+                and "next spell you cast this turn can't be countered" in lowered):
+            from .ability_types import GrantNextSpellUncounterableEffect
+            return [GrantNextSpellUncounterableEffect()]
+        if source_key == "day of black sun" and "loses all abilities" in lowered:
+            from .ability_types import DayOfBlackSunEffect
+            return [DayOfBlackSunEffect()]
+        if source_key == "erode" and lowered.startswith("destroy target"):
+            from .ability_types import ErodeEffect
+            return [ErodeEffect()]
+        if source_key == "no more lies" and "unless its controller pays" in lowered:
+            from .ability_types import CounterUnlessPaysEffect
+            return [CounterUnlessPaysEffect('{3}')]
+        if (source_key == "archdruid's charm"
+                and "search your library for a creature or land card" in lowered):
+            from .ability_types import ArchdruidSearchEffect
+            return [ArchdruidSearchEffect()]
+        if source_key == "deadly cover-up" and "destroy all creatures" in lowered:
+            from .ability_types import DeadlyCoverUpEffect
+            return [DeadlyCoverUpEffect()]
+        if (source_key == "north wind avatar"
+                and "outside the game" in lowered):
+            from .ability_types import OutsideGameCardEffect
+            return [OutsideGameCardEffect()]
+        if source_key == "strategic betrayal" and "their graveyard" in lowered:
+            from .ability_types import StrategicBetrayalEffect
+            return [StrategicBetrayalEffect()]
+        if source_key == "lumbering worldwagon":
+            if "search your library for a basic land card" in lowered:
+                from .ability_types import SearchLibraryEffect
+                return [SearchLibraryEffect(
+                    search_type="basic land", destination="battlefield",
+                    count=1, policy_choice=True, optional=True,
+                    enters_tapped=True)]
+            crew_match = re.search(r"total power\s+(\d+)\s+or greater", lowered)
+            if crew_match:
+                from .ability_types import CrewEffect
+                return [CrewEffect(int(crew_match.group(1)))]
         if ("can't be blocked this turn" in lowered
                 and "target creature" in lowered):
             from .ability_types import GainKeywordEffect
@@ -522,7 +566,7 @@ class EffectFactory:
         effect_text = "\n".join(
             line for line in effect_text.splitlines()
             if not re.match(
-                r"^\s*(?:flashback|harmonize)\b", line,
+                r"^\s*(?:flashback|harmonize|warp)\b", line,
                 re.IGNORECASE))
         unsupported_riders = {
             "if an opponent controls that creature": (

@@ -195,13 +195,13 @@ python -m Playersim.support_preflight --snapshot "Format Card Lists/standard.jso
   --output formats/standard/support_ledger.json
 ```
 
-Current Standard preflight (July 12, 2026): 68 verified, 76
-observed-clean, 3,337 unseen-clean, 857 partial, and 364 unparsed cards across
-the 4,702-card pool. That is 74.0323266695% static-clean coverage and
-3.0625265844% evidence-qualified coverage. The representative metagame now has
-zero `unparsed` or `crash` cards. Warp is explicitly partial until its alternate
-cast and delayed-exile transaction is implemented; that conservative evidence
-correction prevents otherwise-supported Warp cards from being called clean.
+Current Standard preflight (July 12, 2026): 68 verified, 89
+observed-clean, 3,360 unseen-clean, 821 partial, and 364 unparsed cards across
+the 4,702-card pool. That is 74.7979583156% static-clean coverage and
+3.3390046789% evidence-qualified coverage. The representative metagame now has
+zero `partial`, `unparsed`, or `crash` cards. Its remaining Warp, linked-search,
+temporary-rule, outside-game, Crew, and zone-transaction gaps are executable
+and guarded by the scenario suite.
 
 ```bash
 python main.py --timesteps 1000000 --learning-rate 3e-4 --batch-size 256 --seed 20260710

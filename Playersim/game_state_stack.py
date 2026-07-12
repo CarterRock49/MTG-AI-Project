@@ -20,7 +20,7 @@ class GameStateStackMixin:
 
     _ASYNC_EFFECT_CHOICE_TYPES = frozenset({
         "discard", "sacrifice_effect", "distribute_counters", "dig_select",
-        "resolution_modal",
+        "resolution_modal", "resolution_choice", "surveil",
     })
 
     def _effect_controller_id(self, controller):
@@ -2101,6 +2101,8 @@ class GameStateStackMixin:
         final_stack_context["num_targets"] = num_targets
         final_stack_context["min_targets"] = min_targets
         final_stack_context["max_targets"] = num_targets
+        if player.pop('next_spell_uncounterable', False):
+            final_stack_context['cant_be_countered'] = True
         final_stack_context.pop('pay_offspring', None) # Clear intent flag
         final_stack_context.pop('kicker_cost_to_pay', None)
         final_stack_context.pop('additional_cost_info', None)
@@ -3113,6 +3115,14 @@ class GameStateStackMixin:
             success = self.move_card(spell_id, controller, "stack_implicit", controller, "battlefield", cause="spell_resolution", context=context)
             if success:
                  logging.debug(f"Resolved Creature spell {spell.name}")
+                 if context.get("warp_cast"):
+                     self.register_delayed_trigger(
+                         phase=self.PHASE_END_STEP,
+                         description=f"Warp exile {spell.name}",
+                         payload={
+                             "kind": "warp_exile", "card_id": spell_id,
+                             "controller_id": self._effect_controller_id(controller),
+                         })
             else: # Move failed
                  controller["graveyard"].append(spell_id)
             return success
@@ -3322,6 +3332,8 @@ class GameStateStackMixin:
             logging.debug(f"Copy of {spell_name} resolved and ceased to exist.")
         elif context.get("skip_default_movement", False):
              logging.debug(f"Default movement skipped for {spell_name} (e.g., Buyback, Commander tax zone).")
+        elif self.find_card_location(spell_id)[1] == 'battlefield':
+             logging.debug(f"{spell_name} moved itself to the battlefield while resolving.")
         elif final_zone != "battlefield": # Ensure permanents aren't moved here
              # Use move_card to handle triggers etc.
              self.move_card(spell_id, controller, "stack_implicit", controller, final_zone, cause="spell_resolution", context=context)

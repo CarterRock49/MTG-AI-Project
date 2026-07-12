@@ -79,9 +79,17 @@ class Card:
         self.card_id = None # Initialize as None
         # Handle both 'faces' (internal format) and 'card_faces' (Scryfall API format)
         self.faces = card_data.get("faces", None) or card_data.get("card_faces", None)
+        front_face = self.faces[0] if self.faces else {}
         if self.faces:
             self.current_face = 0  # 0: front face, 1: back face
             self.is_transformed = False # Add is_transformed attribute
+            # Multi-face Scryfall records keep castable characteristics on the
+            # face, leaving the top-level mana/type/text fields empty. Cards
+            # must begin with their front face active in every non-battlefield
+            # zone or they cannot be cast or parsed at all.
+            self.mana_cost = front_face.get("mana_cost", self.mana_cost)
+            self.type_line = front_face.get(
+                "type_line", self.type_line).lower()
         else:
             self.current_face = None
             self.is_transformed = False
@@ -90,9 +98,12 @@ class Card:
         self.card_types, self.subtypes, self.supertypes = self.parse_type_line(self.type_line)
 
         self.cmc = card_data.get("cmc", 0)
-        self.power = self._safe_int(card_data.get("power", "0"))
-        self.toughness = self._safe_int(card_data.get("toughness", "0"))
-        self.oracle_text = card_data.get("oracle_text", "")
+        self.power = self._safe_int(
+            front_face.get("power", card_data.get("power", "0")))
+        self.toughness = self._safe_int(
+            front_face.get("toughness", card_data.get("toughness", "0")))
+        self.oracle_text = front_face.get(
+            "oracle_text", card_data.get("oracle_text", ""))
         self.keywords = self._extract_keywords(self.oracle_text.lower())
         self.colors = self._extract_colors(card_data.get("color_identity", []))
         self.subtype_vector = []
@@ -108,7 +119,8 @@ class Card:
         # Track counters on the card
         self.counters = {}
         
-        self.oracle_text = card_data.get("oracle_text", "")
+        self.oracle_text = front_face.get(
+            "oracle_text", card_data.get("oracle_text", ""))
         # Initialize new attributes before keyword extraction
         self.is_offspring = False
         self.offspring_cost = None
@@ -119,6 +131,8 @@ class Card:
         self.specialize_cost = None
         self.is_plot = False
         self.plot_cost = None
+        self.is_warp = False
+        self.warp_cost = None
 
         # Enhanced keyword/cost parsing within __init__
         self._parse_special_keywords(self.oracle_text) # Parse Offspring/Impending
@@ -269,6 +283,13 @@ class Card:
             self.is_plot = True
             self.plot_cost = plot_match.group(1)
             logging.debug(f"Parsed Plot cost '{self.plot_cost}' for {self.name}")
+
+        warp_match = re.search(
+            r"(?:^|\n)\s*warp\s*((?:\{[^}]+\})+)", oracle_lower)
+        if warp_match:
+            self.is_warp = True
+            self.warp_cost = warp_match.group(1)
+            logging.debug(f"Parsed Warp cost '{self.warp_cost}' for {self.name}")
             
     def reset_state_on_zone_change(self):
          """Reset temporary states when card leaves battlefield (e.g., flip, morph)."""

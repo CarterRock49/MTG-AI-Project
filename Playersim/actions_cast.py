@@ -369,9 +369,23 @@ class CastingHandlersMixin:
             return -0.1, False # Failure
 
     def _handle_plot_card(self, param, context=None, **kwargs):
-        """Pay a card's Plot cost and exile it as a special action."""
+        """Take the hand-indexed Plot action or cast a spell for Warp."""
         gs = self.game_state
         player = self._get_policy_player(context)
+        if (context or {}).get("warp_cast"):
+            if not isinstance(param, int) or not 0 <= param < len(player.get("hand", [])):
+                return -0.1, False
+            card_id = player["hand"][param]
+            card = gs._safe_get_card(card_id)
+            warp_cost = getattr(card, "warp_cost", None) if card else None
+            if not warp_cost:
+                return -0.1, False
+            success = gs.cast_spell(card_id, player, {
+                "source_zone": "hand", "source_idx": param,
+                "warp_cast": True, "use_alt_cost": "exile_permission",
+                "alternative_cost": warp_cost,
+            })
+            return (0.2, True) if success else (-0.1, False)
         success = gs.plot_card(player, param)
         return (0.1, True) if success else (-0.1, False)
 

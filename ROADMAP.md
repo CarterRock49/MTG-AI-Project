@@ -16,7 +16,7 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 13/13, and 322/322, plus 15/15 fixture-
+   every delivery (currently 9/9, 13/13, and 326/326, plus 15/15 fixture-
    harvest tests, 7/7 production-protocol tests, 19/19 card-registry tests,
    1/1 support-preflight tests, 2/2 deck-corpus tests, 13/13 deck-ingest tests,
    6/6 fuzz/replay tests, and the deterministic 8-seed / 8,000-action
@@ -56,11 +56,11 @@ The project is complete when all of the following hold:
   coverage remains manifest-driven. Round 7.50 statically preflighted all
   4,702 current Standard cards and now separates verified, corpus-clean,
   unseen, partial, unparsed, crash, and explicitly excluded evidence. The
-  current July 12 ledger contains 68 verified, 76 observed-clean, 3,337
-  unseen-clean, 857 partial, and 364 unparsed cards: 74.0323266695% is
-  static-clean and 3.0625265844% is evidence-qualified. The representative
-  metagame has zero unparsed/crash cards. Warp is now conservatively reported
-  partial rather than silently clean until its cast/exile transaction lands.
+  current July 12 ledger contains 68 verified, 89 observed-clean, 3,360
+  unseen-clean, 821 partial, and 364 unparsed cards: 74.7979583156% is
+  static-clean and 3.3390046789% is evidence-qualified. The representative
+  metagame has zero partial, unparsed, or crash cards after Round 7.54 closed
+  the remaining representative-corpus mechanics and linked transactions.
 - Tier 3 (training/environment): ◐ policy plumbing and audit work are complete;
   a trained checkpoint still needs to beat scripted play before Harvest is
   promoted to policy-vs-policy.
@@ -75,7 +75,7 @@ The project is complete when all of the following hold:
   `formats/standard/`, explicit `--format`/`--decks` configuration, and
   lineage-stamped manifests. User-supplied decks now route into isolated format
   pools automatically; policy qualification and builder feedback remain open.
-- Test gates: smoke 9/9, training 13/13, scenarios 322/322 (grown from 12),
+- Test gates: smoke 9/9, training 13/13, scenarios 326/326 (grown from 12),
   fixture harvest 15/15, production Harvest protocol 7/7, card registry
   19/19, deck ingestion 13/13, fuzz/replay configuration 6/6, deterministic
   default fuzz 8 seeds x 1,000 valid actions, and strict long fuzz 32 seeds x
@@ -1676,6 +1676,39 @@ severe support gaps and delivered a high-impact fidelity slice:
 Gates for this round: 322/322 scenarios, 9/9 smoke, 19/19 registry,
 13/13 deck-ingest, 2/2 deck-corpus, and 1/1 support-preflight tests.
 
+**Round 7.54 (July 2026)** closed every remaining partial in the pinned
+representative Standard corpus as one shared-primitives release:
+* **Warp end to end** — hand-indexed Warp alternative casts pay the printed
+  cost, resolve normally, exile at the next end step through clone-safe delayed
+  payloads, and grant a later ordinary cast from exile without changing the
+  frozen action or feature dimensions.
+* **Linked choices and transactions** — Erode and Lumbering Worldwagon expose
+  optional tapped-land searches; Archdruid's Charm chooses a creature or land
+  and applies its linked destination; No More Lies exposes payment and exiles
+  only a spell countered its way; Deadly Cover-Up purges the chosen name across
+  graveyard, hand, and library and replaces exiled hand cards; Strategic
+  Betrayal gives the affected opponent its creature choice before exiling the
+  graveyard; North Wind Avatar consumes an optional outside-game choice when
+  that pool exists.
+* **Temporary and zone rules** — Mistrise Village marks and consumes the next
+  spell's uncounterability; Day of Black Sun snapshots the X-bounded set,
+  removes abilities in layer 6, then destroys that set; finality counters exile
+  dying creatures; Esper Origins can resolve from a graveyard through exile to
+  its transformed Saga face with a finality counter. Multi-face Card objects
+  now initialize from their front-face Scryfall fields instead of empty
+  top-level fields.
+* **Vehicles** — Crew reuses the power-threshold tapping chooser, taps the
+  committed creatures, and registers the Vehicle's layer-4 animation. Lumbering
+  Worldwagon also receives its land-count power CDA while crewed.
+* **Measured closure** — the regenerated 4,702-card ledger records 68 verified,
+  89 observed-clean, 3,360 unseen-clean, 821 partial, and 364 unparsed cards.
+  Static-clean coverage is 74.7979583156%; evidence-qualified coverage is
+  3.3390046789%. The representative corpus has zero unexplained partial,
+  unparsed, or crash cards.
+
+Gates for this round: 326/326 scenarios; the remaining repository gates are
+listed in the status snapshot above.
+
 ---
 
 ## Working agreements
@@ -1758,12 +1791,13 @@ Gates for this round: 322/322 scenarios, 9/9 smoke, 19/19 registry,
 - Nonland mana abilities expose simple one-symbol colored alternatives such as
   `{R} or {G}`. Multi-symbol packages, colorless alternatives, and independent
   per-mana choices still need a structured production-choice model.
-- Optional "its controller may search" land-search riders currently use the
-  correct pre-removal battlefield controller but follow an always-search legal
-  policy; declining that search is not yet exposed as a policy choice.
-- Warp alternate casting, its next-end-step exile, and the later exile-cast
-  permission are not implemented; all 31 Warp cards are explicitly partial.
-  Source-duration wording such as "for as long as you control" is also
+- Optional "its controller may search" land-search riders preserve the
+  pre-removal battlefield controller and expose decline when supported by the
+  linked effect. Other uncommon linked-search templates still require exact
+  transaction handlers.
+- Warp's cast, next-end-step exile, and later exile-cast transaction is
+  implemented. Source-duration wording such as "for as long as you control" is
+  still
   conservatively partial where the permission or restriction outlives the
   resolving instruction.
 - Spell-copy retargeting can keep the complete inherited target set or replace
