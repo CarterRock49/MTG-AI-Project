@@ -44,7 +44,8 @@ class MechanicsHandlersMixin:
         """Handle leveling up a class card."""
         gs = self.game_state
         player = self._get_policy_player(context)
-        class_idx = param
+        context = context or {}
+        class_idx = context.get('battlefield_idx', param)
 
         if not hasattr(gs, 'ability_handler') or not gs.ability_handler:
             logging.error("LEVEL_UP_CLASS failed: AbilityHandler not found.")
@@ -53,8 +54,13 @@ class MechanicsHandlersMixin:
         if class_idx is None or not isinstance(class_idx, int):
             logging.error(f"LEVEL_UP_CLASS failed: Invalid or missing index parameter '{class_idx}'.")
             return -0.15, False # Failure
+        battlefield = player.get('battlefield', [])
+        if (not 0 <= class_idx < len(battlefield)
+                or (context.get('card_id') is not None
+                    and battlefield[class_idx] != context['card_id'])):
+            return -0.15, False
 
-        if gs.ability_handler.handle_class_level_up(class_idx):
+        if gs.ability_handler.handle_class_level_up(class_idx, player):
             return 0.35, True # Success
         else:
             logging.debug(f"Leveling up class at index {class_idx} failed (handled by ability_handler).")
@@ -70,7 +76,8 @@ class MechanicsHandlersMixin:
         """
         gs = self.game_state
         player = self._get_policy_player(context)
-        bf_idx = param
+        context = context or {}
+        bf_idx = context.get('battlefield_idx', param)
 
         if bf_idx is None or not isinstance(bf_idx, int):
             logging.error(f"LEVEL_UP_CREATURE failed: invalid index parameter '{bf_idx}'.")
@@ -81,6 +88,8 @@ class MechanicsHandlersMixin:
             return -0.15, False
 
         card_id = battlefield[bf_idx]
+        if context.get('card_id') is not None and card_id != context['card_id']:
+            return -0.15, False
         card = gs._safe_get_card(card_id)
         if not card or not getattr(card, 'is_leveler', False):
             logging.warning(f"LEVEL_UP_CREATURE failed: card at index {bf_idx} is not a leveler.")

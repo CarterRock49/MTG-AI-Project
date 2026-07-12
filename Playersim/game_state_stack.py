@@ -1885,19 +1885,47 @@ class GameStateStackMixin:
         # movement. Resume the same cast after the agent supplies the value.
         if final_cost_dict.get('X', 0) > 0 and 'X' not in context:
             affordable_values = []
-            # Affordability is monotonic for the supported mana-cost model.
-            # Walk until the first unaffordable value and paginate the result;
-            # the old fixed 0-10 loop silently hid legal large-X casts.
-            x_value = 0
-            while x_value <= 1000:
+            # Bound X by actual available mana sources instead of an arbitrary
+            # numeric ceiling. This stays finite even for generated pools and
+            # cannot hide a legal value above a hard-coded simulator limit.
+            mana_upper_bound = sum(
+                max(0, int(amount or 0))
+                for amount in player.get('mana_pool', {}).values())
+            mana_upper_bound += sum(
+                max(0, int(amount or 0))
+                for pool in player.get('conditional_mana', {}).values()
+                if isinstance(pool, dict)
+                for amount in pool.values())
+            mana_upper_bound += sum(
+                max(0, int(amount or 0))
+                for amount in player.get(
+                    'phase_restricted_mana', {}).values())
+            for permanent_id in player.get('battlefield', []):
+                if permanent_id in player.get('tapped_permanents', set()):
+                    continue
+                permanent = self._safe_get_card(permanent_id)
+                if not permanent or 'land' not in getattr(
+                        permanent, 'card_types', []):
+                    continue
+                output_counts = []
+                for line in str(getattr(
+                        permanent, 'oracle_text', '') or '').splitlines():
+                    match = re.search(
+                        r"\{t\}\s*:\s*add\s+([^.;\n]+)", line,
+                        re.IGNORECASE)
+                    if match:
+                        output_counts.append(max(
+                            1, len(re.findall(r"\{[WUBRGC]\}",
+                                              match.group(1), re.IGNORECASE))))
+                if output_counts or self.mana_system._land_mana_options(
+                        player, permanent):
+                    mana_upper_bound += max(output_counts or [1])
+            for x_value in range(mana_upper_bound + 1):
                 candidate_context = dict(context)
                 candidate_context['X'] = x_value
                 if self.mana_system.can_pay_mana_cost_with_lands(
                         player, final_cost_dict, candidate_context):
                     affordable_values.append(x_value)
-                    x_value += 1
-                    continue
-                break
             if not affordable_values:
                 logging.warning(f"Cannot cast {card.name}: no affordable value of X.")
                 return False

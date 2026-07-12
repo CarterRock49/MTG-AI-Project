@@ -14997,6 +14997,312 @@ def scenario_activated_x_mana_and_life_transaction():
     assert gs._safe_get_card(krumar).counters.get('+1/+1') == 11
 
 
+@scenario("action protocol / zone permissions", "graveyard overflow and colliding alternate actions remain reachable")
+def scenario_graveyard_and_mechanic_collision_overflow():
+    gs = fresh(SEED + 200)
+    player = gs.p1
+    player["graveyard"] = []
+    for index in range(6):
+        inject_into_zone(gs, player, {
+            "name": f"Graveyard Filler {index}", "mana_cost": "{1}",
+            "type_line": "Creature", "oracle_text": "",
+            "power": 1, "toughness": 1,
+        }, "graveyard")
+    flashback = inject_into_zone(gs, player, {
+        "name": "Seventh-Slot Flashback", "mana_cost": "{0}",
+        "type_line": "Sorcery", "card_types": ["sorcery"],
+        "oracle_text": "",
+    }, "graveyard")
+    assert gs.grant_flashback_permission(player, flashback, "{0}")
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    gs.agent_is_p1 = True
+    handler = get_env().action_handler
+    mask = handler.generate_valid_actions()
+    assert mask[479]
+    catalog_context = handler.action_reasons_with_context[479]["context"]
+    grave_entry = next(
+        entry for entry in catalog_context["options"]
+        if entry.get("handler") == "play_from_graveyard")
+    assert grave_entry["action_context"]["source_idx"] == 6
+    assert handler._handle_target_page_next(context=catalog_context)[1]
+    option = gs.choice_context["options"].index(grave_entry)
+    assert handler._handle_choose_mode(option, {})[1]
+    assert gs.stack and gs.stack[-1][1] == flashback
+    assert gs.resolve_top_of_stack() and flashback in player["exile"]
+
+    gs = fresh(SEED + 201)
+    player = gs.p1
+    player["hand"] = []
+    impending = []
+    for index in range(2):
+        card_id = inject_into_zone(gs, player, {
+            "name": f"Colliding Impending {index}", "mana_cost": "{9}",
+            "type_line": "Creature", "oracle_text": "",
+            "power": 1, "toughness": 1,
+        }, "hand")
+        card = gs._safe_get_card(card_id)
+        card.is_impending = True
+        card.impending_cost = "{0}"
+        impending.append(card_id)
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    handler = get_env().action_handler
+    mask = handler.generate_valid_actions()
+    assert mask[294] and mask[479]
+    assert handler.action_reasons_with_context[294]["context"]["hand_idx"] == 0
+    catalog_context = handler.action_reasons_with_context[479]["context"]
+    collision = next(
+        entry for entry in catalog_context["options"]
+        if entry.get("action_index") == 294)
+    assert collision["action_context"]["hand_idx"] == 1
+    assert handler._handle_target_page_next(context=catalog_context)[1]
+    assert handler._handle_choose_mode(
+        gs.choice_context["options"].index(collision), {})[1]
+    assert gs.stack and gs.stack[-1][1] == impending[1]
+
+
+@scenario("701.17 / 602.2b", "sacrifice predicates are structured and direct callers cannot auto-pick")
+def scenario_sacrifice_predicates_and_no_direct_fallback():
+    from Playersim.ability_types import (
+        ActivatedAbility, SacrificeEffect, _permanent_matches_criteria)
+    gs = fresh(SEED + 202)
+    player = gs.p1
+    source = inject_into_zone(gs, player, {
+        "name": "Sacrifice Decision Source", "type_line": "Artifact",
+        "oracle_text": "",
+    }, "battlefield")
+    eligible = inject_into_zone(gs, player, {
+        "name": "Eligible Sky Legend", "mana_cost": "{2}{R}",
+        "type_line": "Legendary Creature - Dragon",
+        "supertypes": ["legendary"], "card_types": ["creature"],
+        "subtypes": ["Dragon"], "color_identity": ["R"],
+        "oracle_text": "Flying", "power": 3, "toughness": 3,
+    }, "battlefield")
+    missing_counter = inject_into_zone(gs, player, {
+        "name": "Unmodified Sky Legend", "mana_cost": "{2}{R}",
+        "type_line": "Legendary Creature - Dragon",
+        "supertypes": ["legendary"], "card_types": ["creature"],
+        "subtypes": ["Dragon"], "color_identity": ["R"],
+        "oracle_text": "Flying", "power": 4, "toughness": 4,
+    }, "battlefield")
+    assert gs.tap_permanent(eligible, player)
+    assert gs.tap_permanent(missing_counter, player)
+    assert gs.add_counter(eligible, "+1/+1", 1)
+    assert _permanent_matches_criteria(
+        gs, eligible, "red or blue creature with mana value 3 or less",
+        controller=player)
+    assert not _permanent_matches_criteria(
+        gs, eligible, "red and blue creature", controller=player)
+    assert not _permanent_matches_criteria(
+        gs, eligible, "artifact creature with mana value 3 or less",
+        controller=player)
+    effect = SacrificeEffect(
+        "tapped legendary red creature with flying and a +1/+1 counter",
+        who="controller")
+    assert effect.apply(gs, source, player, {})
+    assert gs.choice_context["options"] == [eligible]
+    assert missing_counter in player["battlefield"]
+    gs.choice_context = None
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+
+    direct = ActivatedAbility(
+        source, cost="Sacrifice a creature", effect="Draw a card.")
+    direct.source_card = gs._safe_get_card(source)
+    before = list(player["battlefield"])
+    assert not direct.pay_cost(gs, player), \
+        "a direct caller silently selected a sacrifice"
+    assert player["battlefield"] == before
+
+
+@scenario("107.3 / 602.2b", "nonmana X costs derive exact resource bounds and stage card choices")
+def scenario_nonmana_x_cost_families_and_unbounded_range():
+    from Playersim.ability_types import ActivatedAbility
+
+    gs = fresh(SEED + 203)
+    player = gs.p1
+    source = inject_into_zone(gs, player, {
+        "name": "Unbounded Counter Engine", "type_line": "Artifact",
+        "oracle_text": "",
+    }, "battlefield")
+    card = gs._safe_get_card(source)
+    card.counters["CHARGE"] = 1001
+    ability = ActivatedAbility(
+        source, cost="Remove X charge counters from this artifact",
+        effect="Draw a card.")
+    ability.source_card = card
+    gs.ability_handler.registered_abilities[source] = [ability]
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    gs.agent_is_p1 = True
+    handler = get_env().action_handler
+    activation = {"battlefield_idx": 0, "ability_idx": 0,
+                  "controller_id": "p1"}
+    assert handler._handle_activate_ability(None, activation)[1]
+    assert gs.choice_context["max_x"] == 1001
+    assert get_env()._get_obs()["valid_x_range"].tolist() == [0, 1001]
+    assert handler._handle_choose_x(0, {"x_value": 1001})[1]
+    assert card.counters.get("CHARGE", 0) == 0 \
+        and gs.stack[-1][3]["X"] == 1001
+
+    gs = fresh(SEED + 204)
+    player = gs.p1
+    source = inject_into_zone(gs, player, {
+        "name": "Variable Discard Engine", "type_line": "Artifact",
+        "oracle_text": "",
+    }, "battlefield")
+    ability = ActivatedAbility(
+        source, cost="Discard X cards", effect="Draw a card.")
+    ability.source_card = gs._safe_get_card(source)
+    gs.ability_handler.registered_abilities[source] = [ability]
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    handler = get_env().action_handler
+    activation = {"battlefield_idx": 0, "ability_idx": 0,
+                  "controller_id": "p1"}
+    chosen = [player["hand"][1], player["hand"][3]]
+    assert handler._handle_activate_ability(None, activation)[1]
+    assert handler._handle_choose_x(2, {"x_value": 2})[1]
+    assert gs.choice_context["type"] == "activation_discard_cost"
+    for card_id in chosen:
+        option = gs.choice_context["options"].index(card_id)
+        assert handler._handle_choose_mode(option, {})[1]
+    assert all(card_id in player["graveyard"] for card_id in chosen)
+    assert gs.stack[-1][3]["X"] == 2
+
+    gs = fresh(SEED + 205)
+    player = gs.p1
+    source = inject_into_zone(gs, player, {
+        "name": "Variable Sacrifice Engine", "type_line": "Artifact",
+        "oracle_text": "",
+    }, "battlefield")
+    payments = [inject_into_zone(gs, player, {
+        "name": f"Sacrifice Artifact {index}",
+        "type_line": "Token Artifact - Food", "card_types": ["artifact"],
+        "subtypes": ["Food"], "oracle_text": "", "is_token": True,
+    }, "battlefield") for index in range(2)]
+    ability = ActivatedAbility(
+        source, cost="Sacrifice X artifacts", effect="Draw a card.")
+    ability.source_card = gs._safe_get_card(source)
+    gs.ability_handler.registered_abilities[source] = [ability]
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    handler = get_env().action_handler
+    activation = {"battlefield_idx": 0, "ability_idx": 0,
+                  "controller_id": "p1"}
+    assert handler._handle_activate_ability(None, activation)[1]
+    assert handler._handle_choose_x(2, {"x_value": 2})[1]
+    for card_id in payments:
+        option = gs.choice_context["options"].index(card_id)
+        assert handler._handle_choose_mode(option, {})[1]
+    assert all(card_id not in player["battlefield"] for card_id in payments)
+
+
+@scenario("711 / policy protocol", "level-up remains optional and reaches levelers beyond fixed slots")
+def scenario_level_up_optional_overflow_policy():
+    gs = fresh(SEED + 206)
+    player = gs.p1
+    player["battlefield"] = []
+    for index in range(6):
+        inject_into_zone(gs, player, {
+            "name": f"Level Overflow Filler {index}",
+            "type_line": "Artifact", "oracle_text": "",
+        }, "battlefield")
+    leveler = inject_into_zone(gs, player, {
+        "name": "Overflow Leveler", "mana_cost": "{W}",
+        "type_line": "Creature - Human", "power": 1, "toughness": 1,
+        "oracle_text": "Level up {W}\nLEVEL 1-2\n2/2\nVigilance",
+    }, "battlefield")
+    player["mana_pool"]["W"] = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    gs.agent_is_p1 = True
+    handler = get_env().action_handler
+    mask = handler.generate_valid_actions()
+    assert mask[11] and mask[479], \
+        "level-up did not preserve the policy's decline/activate alternatives"
+    context = handler.action_reasons_with_context[479]["context"]
+    entry = next(
+        item for item in context["options"]
+        if item.get("handler") == "level_up_creature")
+    assert entry["action_context"]["battlefield_idx"] == 6
+    assert handler._handle_target_page_next(context=context)[1]
+    assert handler._handle_choose_mode(
+        gs.choice_context["options"].index(entry), {})[1]
+    assert gs._safe_get_card(leveler).counters.get("level") == 1
+
+
+@scenario("103.6c / scripted policy", "the baseline evaluates optional opening-hand placements")
+def scenario_scripted_opening_hand_accepts_and_declines():
+    def decision(text):
+        gs = fresh(SEED + 207)
+        player = gs.p2
+        player["hand"] = []
+        inject_into_zone(gs, player, {
+            "name": "Opening Placement Probe", "type_line": "Enchantment",
+            "oracle_text": text,
+        }, "hand")
+        gs._opening_hand_players = []
+        gs._begin_opening_hand_choice(player)
+        gs.agent_is_p1 = False
+        handler = get_env().action_handler
+        mask = handler.generate_valid_actions()
+        return get_env()._get_scripted_opponent_action(
+            player, mask, {"phase_context": "CHOOSE"})[0]
+
+    permission = (
+        "If this card is in your opening hand, you may begin the game with "
+        "it on the battlefield.")
+    assert decision(permission) == 353
+    assert decision(permission + " If you do, you lose 10 life.") == 11
+
+
+@scenario("608.2d / policy pagination", "keyword menus support arbitrary counts and subtype targeting")
+def scenario_keyword_grant_arbitrary_options_and_subtype():
+    from Playersim.ability_types import KeywordChoiceGrantEffect
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 208)
+    player = gs.p1
+    source = inject_into_zone(gs, player, {
+        "name": "Keyword Menu Source", "type_line": "Enchantment",
+        "oracle_text": "",
+    }, "battlefield")
+    mouse = inject_into_zone(gs, player, {
+        "name": "Menu Mouse", "type_line": "Creature - Mouse",
+        "oracle_text": "", "power": 1, "toughness": 1,
+    }, "battlefield")
+    bear = inject_into_zone(gs, player, {
+        "name": "Menu Bear", "type_line": "Creature - Bear",
+        "oracle_text": "", "power": 2, "toughness": 2,
+    }, "battlefield")
+    effect = EffectFactory.create_effects(
+        "Target Mouse you control gains your choice of flying, vigilance, "
+        "or lifelink until end of turn.")[0]
+    assert isinstance(effect, KeywordChoiceGrantEffect)
+    assert effect.options == ["flying", "vigilance", "lifelink"]
+    target_type = gs._get_target_type_from_text(effect.effect_text)
+    valid = gs.targeting_system.get_valid_targets(
+        source, player, target_type, effect_text=effect.effect_text)
+    flattened = [card_id for values in valid.values() for card_id in values]
+    assert mouse in flattened and bear not in flattened
+    assert effect.apply(gs, source, player, {"creatures": [mouse]})
+    assert get_env().action_handler._handle_choose_mode(2, {})[1]
+    assert gs.check_keyword(mouse, "lifelink")
+
+    long_menu = KeywordChoiceGrantEffect([
+        "flying", "vigilance", "lifelink", "trample", "haste",
+        "menace", "reach", "deathtouch", "hexproof", "indestructible",
+        "double strike",
+    ])
+    assert long_menu.apply(gs, source, player, {"creatures": [mouse]})
+    mask = get_env().action_handler.generate_valid_actions()
+    assert mask[479]
+    assert get_env().action_handler._handle_target_page_next(
+        context={"page_count": 2})[1]
+    assert get_env().action_handler._handle_choose_mode(0, {})[1]
+    assert gs.check_keyword(mouse, "double strike")
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------

@@ -1084,6 +1084,30 @@ class EffectFactory:
             effects.append(ReturnThenAddCounterEffect(effect_text))
             return effects
 
+        # Preserve comma-separated keyword menus as one semantic clause; the
+        # general conjunction splitter below would otherwise turn the second
+        # and later options into unrelated effects.
+        keyword_choice = re.search(
+            r"^(?P<target>.+?)\s+gains?\s+your choice of\s+"
+            r"(?P<options>.+?)(?:\s+until end of turn)?\s*\.?$",
+            effect_text.strip(), re.IGNORECASE | re.DOTALL)
+        if keyword_choice:
+            from .ability_types import KeywordChoiceGrantEffect
+            raw_options = re.sub(
+                r"\s+(?:or|and)\s+", ",", keyword_choice.group("options"),
+                flags=re.IGNORECASE)
+            options = [
+                option.strip(" .,;").lower()
+                for option in raw_options.split(",")
+                if option.strip(" .,;")]
+            if len(options) >= 2:
+                return [KeywordChoiceGrantEffect(
+                    options,
+                    duration=("end_of_turn" if re.search(
+                        r"until end of turn", effect_text, re.IGNORECASE)
+                              else "permanent"),
+                    targeting_text=keyword_choice.group("target").strip())]
+
         processed_clauses = []
         # Basic clause splitting. Most multi-sentence effects are parsed as one
         # semantic unit (copy, impulse, dig), so only split a plain sentence
@@ -1635,17 +1659,24 @@ class EffectFactory:
             # instead of auto-resolving; must precede the plain-grant branch.
             elif re.search(r"gains?\s+your choice of\s+", clause_lower):
                 cm = re.search(
-                    r"gains?\s+your choice of\s+([\w\- ]+?)\s+or\s+"
-                    r"([\w\- ]+?)(?:\s+until end of turn)?\s*\.?$",
+                    r"^(?P<target>.+?)\s+gains?\s+your choice of\s+"
+                    r"(?P<options>.+?)(?:\s+until end of turn)?\s*\.?$",
                     clause_lower)
                 if cm:
                     from .ability_types import KeywordChoiceGrantEffect
                     duration = ("end_of_turn"
                                 if "until end of turn" in clause_lower
                                 else "permanent")
-                    created_effect = KeywordChoiceGrantEffect(
-                        cm.group(1).strip(), cm.group(2).strip(),
-                        duration=duration)
+                    raw_options = re.sub(
+                        r"\s+(?:or|and)\s+", ",", cm.group("options"))
+                    options = [
+                        option.strip(" .,;")
+                        for option in raw_options.split(",")
+                        if option.strip(" .,;")]
+                    if len(options) >= 2:
+                        created_effect = KeywordChoiceGrantEffect(
+                            options, duration=duration,
+                            targeting_text=cm.group("target").strip())
 
             # Keyword grant: "target creature gains <keyword> [until end of turn]".
             # Must come before the Buff branch (which only handles +N/+N) and

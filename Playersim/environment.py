@@ -284,9 +284,15 @@ class AlphaZeroMTGEnv(gym.Env):
             "choice_cards": card_feature_space(10),
             "choice_card_mask": spaces.Box(low=0, high=1, shape=(10,), dtype=bool),
             "choice_kind": spaces.Box(low=0, high=16, shape=(1,), dtype=np.int32),
-            "choice_remaining": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
-            "choice_allocation_counts": spaces.Box(low=0, high=100, shape=(10,), dtype=np.int32),
-            "valid_x_range": spaces.Box(low=-1, high=100, shape=(2,), dtype=np.int32),
+            "choice_remaining": spaces.Box(
+                low=0, high=np.iinfo(np.int32).max,
+                shape=(1,), dtype=np.int32),
+            "choice_allocation_counts": spaces.Box(
+                low=0, high=np.iinfo(np.int32).max,
+                shape=(10,), dtype=np.int32),
+            "valid_x_range": spaces.Box(
+                low=-1, high=np.iinfo(np.int32).max,
+                shape=(2,), dtype=np.int32),
             "bottomable_cards": spaces.Box(low=0, high=1, shape=(self.hand_observation_size,), dtype=bool),
             "dredgeable_cards_in_gy": spaces.Box(low=-1, high=100, shape=(6,), dtype=np.int32),
         })
@@ -1711,6 +1717,28 @@ class AlphaZeroMTGEnv(gym.Env):
                 action_idx, {}) if self.action_handler else {}
             return action_idx, dict(generated.get('context', {}) or {})
 
+        def accept_opening_hand_placement(card_id):
+            """Baseline policy for optional CR 103.6c placements."""
+            card = gs._safe_get_card(card_id)
+            text = str(getattr(card, "oracle_text", "") or "").lower()
+            downside_phrases = (
+                "you lose ", "you can't ", "you cannot ", "skip your ",
+                "doesn't untap", "sacrifice it", "exile a card from your hand",
+            )
+            if any(phrase in text for phrase in downside_phrases):
+                return False
+            memory = getattr(self, "card_memory", None)
+            stats = (getattr(memory, "card_data", {}) or {}).get(
+                str(gs.canonical_card_id(card_id)), {}) if memory else {}
+            samples = int(stats.get("in_opening_hand", 0) or 0)
+            if samples >= 8:
+                win_rate = float(stats.get("wins_in_opening_hand", 0) or 0) / samples
+                if win_rate < 0.45:
+                    return False
+            evaluator = getattr(self.action_handler, "card_evaluator", None)
+            return (not evaluator
+                    or evaluator.evaluate_card(card_id, "play") >= 0.0)
+
         # 1. Handle Mulligan/Bottoming First
         if phase_ctx == "mulligan_decision":
             # Always Keep (simplest strategy for opponent simulation)
@@ -1793,7 +1821,8 @@ class AlphaZeroMTGEnv(gym.Env):
                 return None, {}
             if choice_type in (
                     "sacrifice_effect", "activation_sacrifice_cost",
-                    "distribute_counters", "dig_select"):
+                    "activation_discard_cost", "distribute_counters",
+                    "dig_select"):
                 for action_idx in range(353, 363):
                     if opponent_mask[action_idx]:
                         return action_idx, {}
@@ -1805,7 +1834,24 @@ class AlphaZeroMTGEnv(gym.Env):
                     if opponent_mask[action_idx]:
                         return action_idx, {}
                 return None, {}
-            if (choice_type in ("opening_hand", "forced_sacrifice")
+            if choice_type == "opening_hand":
+                options = gs.choice_context.get("options", [])
+                current = options[0] if options else None
+                if (current is not None
+                        and accept_opening_hand_placement(current)):
+                    for action_idx in range(353, 363):
+                        generated = self.action_handler.action_reasons_with_context.get(
+                            action_idx, {})
+                        option_index = generated.get("context", {}).get(
+                            "option_index", action_idx - 353)
+                        if (opponent_mask[action_idx]
+                                and 0 <= option_index < len(options)
+                                and options[option_index] == current):
+                            return choose(action_idx)
+                if opponent_mask[11]:
+                    return 11, {}
+                return None, {}
+            if (choice_type == "forced_sacrifice"
                     or choice_type.startswith("as_enters_")):
                 # First-legal-action policy for mandatory or begin-game picks.
                 for action_idx in range(353, 363):

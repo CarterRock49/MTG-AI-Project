@@ -264,13 +264,14 @@ revision and dirty state, CLI and resolved configuration, device and dependency
 inventory, deck/lineage provenance, lifecycle result, and artifact paths. A
 dirty run also stores a hashed `source_worktree.patch` beside the manifest.
 
-> **Checkpoint boundary (Round 7.49).** The full Standard namespace widened card
+> **Checkpoint boundary (Round 7.62).** The full Standard namespace widened card
 > observations to 436 fields (259 subtype fields plus MDFC fields), signed live
 > power/toughness, and count/stat bounds large enough for legal boards above 20
-> permanents. Stable-Baselines validates the complete observation shape, so **do
-> not resume a checkpoint created before this change** — start fresh without
-> `--resume`. (The reward function changed materially at Round 7.37 for the same
-> reason.)
+> permanents. Round 7.62 also widened the declared choice-count, allocation, and
+> X-range bounds to remove the old X ceiling. Stable-Baselines validates the
+> complete observation space, so **do not resume a checkpoint created before
+> Round 7.62** — start fresh without `--resume`. (The reward function changed
+> materially at Round 7.37 for the same reason.)
 
 ### Hyperparameter optimization
 

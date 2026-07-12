@@ -16,7 +16,7 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 13/13, and 355/355, plus 15/15 fixture-
+   every delivery (currently 9/9, 13/13, and 361/361, plus 15/15 fixture-
    harvest tests, 7/7 production-protocol tests, 19/19 card-registry tests,
    1/1 support-preflight tests, 2/2 deck-corpus tests, 13/13 deck-ingest tests,
    6/6 fuzz/replay tests, and the deterministic 8-seed / 8,000-action
@@ -77,7 +77,7 @@ The project is complete when all of the following hold:
   `formats/standard/`, explicit `--format`/`--decks` configuration, and
   lineage-stamped manifests. User-supplied decks now route into isolated format
   pools automatically; policy qualification and builder feedback remain open.
-- Test gates: smoke 9/9, training 13/13, scenarios 355/355 (grown from 12),
+- Test gates: smoke 9/9, training 13/13, scenarios 361/361 (grown from 12),
   fixture harvest 15/15, production Harvest protocol 7/7, card registry
   19/19, deck ingestion 13/13, fuzz/replay configuration 6/6, deterministic
   default fuzz 8 seeds x 1,000 valid actions, and strict long fuzz 32 seeds x
@@ -682,6 +682,32 @@ stages, and 13/13 training stages.
 Gates for this round: 355/355 scenarios, 63/63 repository unit tests, 9/9 smoke
 stages, and 13/13 training stages.
 
+**Round 7.62 (July 2026)** retired the remaining Priority 1 limitations:
+* **Unified overflow catalog** — action 479 now preserves colliding fixed
+  actions and exposes graveyard permissions, Class/leveler actions, additional
+  hand objects, and additional activated abilities through one paginated,
+  revalidated protocol.
+* **Exact policy-owned costs** — sacrifice predicates use a shared structured
+  characteristic matcher. Non-self sacrifice and nonrandom discard activation
+  costs require explicit staged policy selections; direct callers can no
+  longer silently choose a payment.
+* **Resource-derived X choices** — spell and activated-ability X ranges derive
+  from the live resources that constrain them instead of a numeric ceiling.
+  Parsed mana, life, sacrifice, discard, and source-counter X costs all use the
+  same paginated announcement transaction. Widening the declared X/count
+  observation bounds establishes a new checkpoint boundary.
+* **Optional-action policy coverage** — Class and creature level-up remains a
+  genuine activate-or-pass decision even beyond fixed source slots. The
+  scripted baseline evaluates optional opening-hand placements instead of
+  accepting every one.
+* **Arbitrary keyword menus** — keyword-grant choices accept and paginate any
+  parsed option count, retain the effect controller as chooser, and preserve
+  subtype-qualified targeting text.
+
+Gates for this round: 361/361 scenarios, 63/63 repository unit tests, 9/9 smoke
+stages, 13/13 training stages, and the deterministic 8-seed / 8,000-action
+default invariant fuzz profile.
+
 ---
 
 ## Working agreements
@@ -716,19 +742,14 @@ diverge.
 
 ### Priority 1 — decision and action completeness
 
-2. The paginated overflow protocol now covers ordinary hand objects and
-    activated abilities, but graveyard objects beyond their six fixed slots
-    and some mechanic-specific alternate actions can still be omitted.
-7. Sacrifice choices support a bounded Oracle-characteristic vocabulary, and
-    direct non-policy callers retain a deterministic fallback.
-9. X selection retains a defensive ceiling and does not cover every nonmana
-    X-cost expression.
-10. Level-up exposes the legal action but has only basic policy choice around
-    whether and when to spend mana.
-11. The scripted opponent always accepts eligible opening-hand placement
-    effects.
-12. Keyword-grant choices support exactly two printed options and a bounded
-    subtype-target template.
+✅ No known Priority 1 decision/action-completeness limitations remain.
+
+Round 7.62 retired the remaining overflow/collision paths, silent sacrifice
+fallback, capped and partially staged X decisions, level-up source bounds,
+unconditional scripted opening-hand acceptance, and two-option keyword menus.
+Structured sacrifice and X-cost parsers remain intentionally bounded: unknown
+Oracle families fail closed and belong to Priority 2 card-fidelity coverage,
+not hidden policy decisions.
 
 ### Priority 2 — bounded mechanic and card fidelity
 
@@ -768,7 +789,10 @@ diverge.
 32. Specialize requires all five local variant printings; incomplete families
     are fidelity-marked unparsed and excluded from supported play.
 33. Trigger-condition parsing now fails closed but does not yet express every
-    Oracle condition template.
+    Oracle condition template. Structured sacrifice predicates and activation-
+    cost parsing likewise cover the documented Oracle families rather than
+    arbitrary future wording; unsupported families remain bounded coverage and
+    fail closed.
 34. Mutate still lacks per-component replacement choices and library-order
     choice; commander-specific routing is outside the current formats.
 
@@ -778,7 +802,8 @@ diverge.
     saved memory content nondeterministic.
 36. Format registries and schemas are intentionally lineage-bound, name plus
     Oracle-ID based, and best-of-one only; schema growth can require a new
-    policy lineage.
+    policy lineage. Round 7.62's widened X/count observation bounds likewise
+    require a fresh policy rather than resuming an older checkpoint.
 37. Treasure/Beza support is scenario-verified; its retained note documents the
     exact supported path rather than an active correctness gap.
 
@@ -806,26 +831,21 @@ diverge.
   is_leveler / leveler_bands / level_up_cost, with get_leveler_pt(counters)
   and get_leveler_abilities(counters). The action space exposes
   LEVEL_UP_CREATURE, pays the printed cost, adds level counters, and the layer
-  system applies current-band P/T and abilities. Remaining: richer player
-  choice around when/whether to spend mana beyond the basic action mask.
+  system applies current-band P/T and abilities. Round 7.62 preserves the
+  activate-or-pass policy decision and routes sources beyond the five fixed
+  slots through the overflow catalog.
 - Adventure cards — v1 support added (July 2026): casting the Adventure half
   resolves to exile instead of graveyard, marks the creature side castable from
   exile, exposes CAST_FROM_EXILE, consumes that permission on cast, and resolves
   the creature side to the battlefield. Remaining: adventure-half parsing and
   targeting are still heuristic.
-- The fixed 480-action layout can expose only the first three activated
-  abilities on each permanent. Specialized hand actions such as MDFC,
-  Adventure, Plot, cycling, and alternate costs still inspect only the first
-  eight of the ten observed hand slots. Indices 205–223 retain dormant labels
-  for mechanics that have no handler and are deliberately never mask-valid.
-  Several singleton mechanic slots (notably
-  Equipment/Fortification and loyalty families) also retain only one generated
-  source/target context when several equivalent pairs are legal. Every exposed
-  slot is executable after the Round 7.26 audit, but full choice coverage needs
-  a staged/paginated generic source-target chooser or a versioned action-space
-  redesign before those cards are suitable for strength comparisons. Round
-  7.51 removed the Flashback collision for the first six graveyard objects;
-  graveyard pagination beyond six remains open.
+- The fixed 480-action tensor retains compact fast-path slots, while Round
+  7.62's action-479 catalog exposes additional hand, graveyard, activated,
+  level-up, and colliding singleton-mechanic contexts. Catalog selections carry
+  their source context and revalidate through the ordinary handler. Indices
+  205–223 retain dormant labels for mechanics that have no implementation and
+  are deliberately never mask-valid; those are bounded fidelity coverage, not
+  omitted legal choices for supported mechanics.
 - Canonical registry IDs are printing/statistics identities; deck entries
   materialize as distinct runtime IDs with separate mutable
   `Card` objects and explicit owners (Round 7.60). Linked exile and all live
@@ -855,9 +875,9 @@ diverge.
   delayed return currently resolves immediately after the initial zone move
   rather than entering the stack; dynamic X expressions beyond the supported
   last-known-power pattern still need dedicated parsing.
-- Nonland mana abilities expose simple one-symbol colored alternatives such as
-  `{R} or {G}`. Multi-symbol packages, colorless alternatives, and independent
-  per-mana choices still need a structured production-choice model.
+- Nonland mana abilities expose simple alternatives, multi-symbol packages,
+  colorless alternatives, and independent per-mana choices through structured
+  production transactions (Round 7.61).
 - Optional "its controller may search" land-search riders preserve the
   pre-removal battlefield controller and expose decline when supported by the
   linked effect. Other uncommon linked-search templates still require exact
@@ -879,25 +899,22 @@ diverge.
   broader exile-cast cost modifiers remain conservatively partial. Generic
   Equip and Crew are executable, but cards with additional unsupported text
   remain partial on that independent text.
-- Spell-copy retargeting can keep the complete inherited target set or replace
-  the complete set. Changing only some targets of a multi-target spell needs a
-  future slot-aware target-choice context; ordinary one-target copies are fully
-  exposed now.
-- X spell choices paginate beyond ten within the fixed action range. The
-  monotonic affordability walk has a defensive ceiling of 1,000. Activated
-  abilities share that staged chooser when X appears in their mana cost or a
-  “Pay X life” component; other X-dependent nonmana cost expressions remain
-  open.
-- Simultaneous each-player discards are committed sequentially, and the
-  scripted opponent selects its first available legal slot/page until
-  policy-vs-policy self-play lands.
+- Spell-copy retargeting exposes each inherited target slot independently, so
+  a policy may keep or change any legal subset without mutating the original
+  spell (Round 7.61).
+- X choices paginate beyond ten within the fixed action range and derive their
+  finite range from live mana, life, sacrifice, discard, or source-counter
+  resources. Unknown cost wording is bounded parser coverage and must fail
+  closed rather than inventing an arbitrary ceiling or payment.
+- Simultaneous each-player discards stage both players' hidden selections and
+  commit all zone moves together. The installed policy supplies non-agent
+  choices (Round 7.61).
 - Target, Dig, counter-distribution, SacrificeEffect, and activated-cost
-  sacrifice choices paginate beyond ten. Direct programmatic ability callers
-  that omit explicit non-self sacrifice IDs retain a deterministic fallback;
-  policy-facing actions never use it. Sacrifice requirements involving Oracle
-  characteristics beyond the supported type/subtype, token/nontoken, nonland,
-  tapped/untapped, `another`, and type-disjunction vocabulary still need a
-  dedicated cost parser before those cards are harvest-eligible.
+  sacrifice choices paginate beyond ten. Non-self activation payments require
+  explicit staged physical-card selections even for direct callers. The shared
+  predicate covers type/subtype/supertype, token, tap/combat state, color,
+  keyword, counters, source exclusion, names, and numeric characteristics;
+  unfamiliar Oracle criteria fail closed and remain harvest-fidelity work.
 - Round 7.16 target-conditioned pricing recognizes the sample cards' two exact
   conditions: a tapped permanent and a permanent you control. Arbitrary Oracle
   conditions that refer to target characteristics still need dedicated parsers.
@@ -917,21 +934,21 @@ diverge.
   identity, triggers, illegal-target fallback, token cessation, and clone
   isolation are covered. Per-component replacement choices, library ordering,
   and commander routing remain bounded mechanic/decision work.
-- Ward target-tax v1 snapshots obligations when targets are committed and
-  supports parsed mana costs and simple "pay N life" costs by auto-paying when
-  possible. Sacrifice/discard costs and letting the agent deliberately decline
-  payment remain future choice-exposure work.
+- Ward target-tax snapshots obligations when targets are committed and exposes
+  explicit pay-or-decline decisions for parsed mana, life, sacrifice, and
+  discard costs, including paginated physical-card choices (Round 7.61).
 - Attack triggers fire at declare-attackers-done through one ATTACKS dispatch:
   the attacker's own abilities plus "whenever a/another <type> [you control]
   attacks" and "attacks you" watchers on other permanents, scoped by controller
   and printed type (July 2026). Token/nontoken scopes are supported; other
   adjectives outside the card's type/subtype/supertype vocabulary remain
   conservative. Defender-side gating assumes two-player "attacks you".
-- Opening-hand placement v1 now gives each eligible card an independent accept
-  or decline decision; the scripted opponent still always places every eligible
-  card as its policy. Both Leyline of Resonance's begin-game line and its copy
-  trigger on a spell targeting exactly one friendly creature are scenario-
-  verified.
+- Opening-hand placement gives each eligible card an independent accept or
+  decline decision. Round 7.62's scripted baseline rejects explicit downside
+  placements and can use accumulated opening-hand performance before falling
+  back to card evaluation. Both Leyline of Resonance's begin-game line and its
+  copy trigger on a spell targeting exactly one friendly creature are
+  scenario-verified.
 - Screaming Nemesis v1: the reflected damage picks the first committed target,
   and the rest-of-game restriction is a player flag consulted by gain_life and
   lifelink. Effects that add life directly without those entry points would
@@ -956,9 +973,9 @@ diverge.
   causing source on the stack (falling back to the source's current zone
   controller); an undeterminable cause conservatively keeps the graveyard
   destination.
-- The keyword_grant choice v1 supports exactly two printed options and is
-  made by the effect's controller. Subtype target pass-through applies only
-  to "target <subtype> you control" wordings.
+- Keyword-grant choices are made by the effect's controller, accept arbitrary
+  parsed option counts with pagination, and preserve subtype-qualified target
+  text through selection and application (Round 7.62).
 - `creatures_died_this_turn` now attributes deaths from the battlefield
   object's last-known controller, including a permanent under temporary
   control (Round 7.58). Round 7.60's runtime IDs remove the former repeated-copy

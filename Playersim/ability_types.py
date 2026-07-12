@@ -6,6 +6,185 @@ from .card import Card
 from .ability_utils import text_to_number, safe_int, resolve_simple_targeting, EffectFactory
 
 
+def _permanent_matches_criteria(game_state, card_id, criteria,
+                                controller=None, source_id=None):
+    """Match common Oracle permanent characteristics, failing closed."""
+    card = game_state._safe_get_card(card_id)
+    if not card:
+        return False
+    text = str(criteria or "permanent").lower().strip(" .,;")
+    words = set(re.findall(r"[a-z]+", text))
+    types = {str(value).lower() for value in getattr(card, "card_types", [])}
+    subtypes = {str(value).lower() for value in getattr(card, "subtypes", [])}
+    supertypes = {str(value).lower() for value in getattr(card, "supertypes", [])}
+    controller = controller or game_state.get_card_controller(card_id)
+    if "another" in words and card_id == source_id:
+        return False
+    if "nonland" in words and "land" in types:
+        return False
+    if "noncreature" in words and "creature" in types:
+        return False
+    if "nonartifact" in words and "artifact" in types:
+        return False
+    if "nontoken" in words and getattr(card, "is_token", False):
+        return False
+    if ("token" in words and "nontoken" not in words
+            and not getattr(card, "is_token", False)):
+        return False
+    if "nonlegendary" in words and "legendary" in supertypes:
+        return False
+    if ("legendary" in words and "nonlegendary" not in words
+            and "legendary" not in supertypes):
+        return False
+    if "nonbasic" in words and "basic" in supertypes:
+        return False
+    if ("basic" in words and "nonbasic" not in words
+            and "basic" not in supertypes):
+        return False
+    tapped = card_id in (controller or {}).get("tapped_permanents", set())
+    if "tapped" in words and "untapped" not in words and not tapped:
+        return False
+    if "untapped" in words and tapped:
+        return False
+    if "attacking" in words and card_id not in getattr(
+            game_state, "current_attackers", []):
+        return False
+    blockers = {
+        blocker for values in getattr(
+            game_state, "current_block_assignments", {}).values()
+        for blocker in values}
+    if "blocking" in words and card_id not in blockers:
+        return False
+
+    name_match = re.search(r"\bnamed\s+(.+?)(?:\s+with\b|$)", text)
+    if name_match and str(getattr(card, "name", "")).lower() \
+            != name_match.group(1).strip():
+        return False
+
+    for comparison in re.finditer(
+            r"(mana value|power|toughness)\s+(?:is\s+)?(\d+)"
+            r"(?:\s+or\s+(less|greater))?", text):
+        field, raw_value, direction = comparison.groups()
+        actual = (getattr(card, "cmc", 0) if field == "mana value"
+                  else getattr(card, field, 0))
+        try:
+            actual, bound = int(actual or 0), int(raw_value)
+        except (TypeError, ValueError):
+            return False
+        if ((direction == "less" and actual > bound)
+                or (direction == "greater" and actual < bound)
+                or (direction is None and actual != bound)):
+            return False
+    mana_value = int(getattr(card, "cmc", 0) or 0)
+    if "odd mana value" in text and mana_value % 2 != 1:
+        return False
+    if "even mana value" in text and mana_value % 2 != 0:
+        return False
+
+    colors = getattr(card, "colors", []) or []
+    if (isinstance(colors, (list, tuple)) and len(colors) == 5
+            and all(isinstance(value, (int, float, bool)) for value in colors)):
+        present_colors = {
+            symbol for symbol, present in zip("WUBRG", colors) if present}
+    elif isinstance(colors, dict):
+        present_colors = {
+            str(symbol).upper() for symbol, present in colors.items() if present}
+    else:
+        present_colors = {str(value).upper() for value in colors}
+    color_map = {"white": "W", "blue": "U", "black": "B",
+                 "red": "R", "green": "G"}
+    requested_colors = {
+        symbol for word, symbol in color_map.items() if word in words}
+    if requested_colors:
+        color_names = "|".join(color_map)
+        color_disjunction = bool(re.search(
+            rf"\b(?:{color_names})\s+or\s+(?:{color_names})\b", text))
+        if ((color_disjunction
+             and not requested_colors.intersection(present_colors))
+                or (not color_disjunction
+                    and not requested_colors.issubset(present_colors))):
+            return False
+    if "colorless" in words and present_colors:
+        return False
+    if "multicolored" in words and len(present_colors) < 2:
+        return False
+    if "monocolored" in words and len(present_colors) != 1:
+        return False
+
+    counters = getattr(card, "counters", {}) or {}
+    positive_counters = {
+        str(kind).lower(): int(amount or 0)
+        for kind, amount in counters.items() if int(amount or 0) > 0}
+    if "with no counters" in text and positive_counters:
+        return False
+    if "with a counter" in text and not positive_counters:
+        return False
+    counter_match = re.search(
+        r"(?:with|and) (?:an?|one or more) ([+\-/\w]+) counters?", text)
+    if counter_match and positive_counters.get(counter_match.group(1), 0) <= 0:
+        return False
+    without_counter = re.search(r"without (?:an? )?([+\-/\w]+) counters?", text)
+    if without_counter and positive_counters.get(without_counter.group(1), 0) > 0:
+        return False
+
+    matched_keywords = set()
+    for keyword in sorted(Card.ALL_KEYWORDS, key=len, reverse=True):
+        if re.search(rf"\bwith\s+(?:[^,;]+\s+and\s+)?{re.escape(keyword)}\b", text):
+            if not game_state.check_keyword(card_id, keyword):
+                return False
+            matched_keywords.update(re.findall(r"[a-z]+", keyword))
+        if re.search(rf"\bwithout\s+{re.escape(keyword)}\b", text):
+            if game_state.check_keyword(card_id, keyword):
+                return False
+            matched_keywords.update(re.findall(r"[a-z]+", keyword))
+
+    required_types = {
+        word.rstrip("s") for word in words
+        if word.rstrip("s") in set(Card.ALL_CARD_TYPES)}
+    if required_types:
+        type_names = "|".join(re.escape(value) for value in required_types)
+        type_disjunction = bool(re.search(
+            rf"\b(?:{type_names})s?\s+or\s+(?:{type_names})s?\b", text))
+        if type_disjunction:
+            if not required_types.intersection(types):
+                return False
+        elif not required_types.issubset(types):
+            return False
+
+    grammar = {
+        "a", "an", "another", "one", "two", "three", "four", "five",
+        "six", "seven", "eight", "nine", "ten", "x", "or", "and",
+        "other", "this", "it", "the", "of", "that", "its", "their",
+        "permanent", "permanents", "token",
+        "tokens", "nontoken", "nonland", "noncreature", "nonartifact",
+        "tapped", "untapped", "you", "control", "controls", "with",
+        "without", "no", "counter", "counters", "mana", "value", "is",
+        "power", "toughness", "less", "greater", "odd", "even", "named",
+        "white", "blue", "black", "red", "green", "colorless",
+        "multicolored", "monocolored", "legendary", "nonlegendary",
+        "basic", "nonbasic", "attacking", "blocking", "greatest", "least",
+        "among", "creatures", "one", "more",
+    } | required_types | matched_keywords
+    if name_match:
+        grammar.update(re.findall(r"[a-z]+", name_match.group(1)))
+    if counter_match:
+        grammar.update(re.findall(r"[a-z]+", counter_match.group(1)))
+    if without_counter:
+        grammar.update(re.findall(r"[a-z]+", without_counter.group(1)))
+    unknown = {
+        word.rstrip("s") for word in words
+        if not word.isdigit() and word not in grammar
+        and word.rstrip("s") not in grammar
+        and word.rstrip("s") not in subtypes
+        and word.rstrip("s") not in supertypes}
+    if unknown:
+        return False
+    subtype_terms = {
+        word.rstrip("s") for word in words
+        if word.rstrip("s") in subtypes}
+    return not subtype_terms or subtype_terms.issubset(subtypes)
+
+
 class Ability:
     """Base class for card abilities"""
     def __init__(self, card_id, effect_text=""):
@@ -318,6 +497,16 @@ class ActivatedAbility(Ability):
             return 1
         return max(1, text_to_number(normalized))
 
+    @classmethod
+    def _resolve_cost_count(cls, value, context=None, default=1):
+        normalized = str(value or "").lower().strip()
+        if normalized == "x":
+            return max(0, int((context or {}).get(
+                "activation_X", (context or {}).get("X", 0)) or 0))
+        if not normalized:
+            return default
+        return cls._word_to_number(normalized)
+
     @staticmethod
     def _is_self_sacrifice_requirement(requirement):
         req_lower = str(requirement or "").lower().strip(" .,;")
@@ -341,14 +530,78 @@ class ActivatedAbility(Ability):
             return None
         requirement = match.group(1).strip(" .,;")
         count_match = re.match(
-            r"^(a|an|another|one|two|three|four|five|six|seven|eight|nine|ten|\d+)\b",
+            r"^(a|an|another|one|two|three|four|five|six|seven|eight|nine|ten|x|\d+)\b",
             requirement)
-        count = self._word_to_number(count_match.group(1)) if count_match else 1
+        count_expr = count_match.group(1) if count_match else "one"
         return {
-            "count": count,
+            "count": count_expr,
             "requirement": requirement,
             "self_sacrifice": self._is_self_sacrifice_requirement(requirement),
         }
+
+    def get_discard_cost_spec(self, context=None):
+        match = re.search(
+            r"\bdiscard\s+(?:(a|an|one|two|three|four|five|x|\d+)\s+)?"
+            r"(?:(\w+)\s+)?cards?(?:\s+at random)?",
+            str(self.cost or "").lower())
+        if not match:
+            return None
+        count_expr = match.group(1) or "one"
+        return {
+            "count": self._resolve_cost_count(count_expr, context),
+            "count_expr": count_expr,
+            "qualifier": (match.group(2) or "card").lower(),
+            "random": "at random" in match.group(0),
+        }
+
+    def get_discard_cost_candidates(self, game_state, controller, spec):
+        qualifier = str((spec or {}).get("qualifier", "card")).lower()
+        candidates = []
+        for card_id in controller.get("hand", []):
+            card = game_state._safe_get_card(card_id)
+            if card is None:
+                continue
+            types = set(getattr(card, "card_types", []))
+            if qualifier == "card" or qualifier in types:
+                candidates.append(card_id)
+        return candidates
+
+    def max_affordable_x(self, game_state, controller, context=None):
+        """Derive a finite X bound from every parsed resource in the cost."""
+        cost = str(self.cost or "").lower()
+        bounds = []
+        if "{x}" in cost:
+            pools = [controller.get("mana_pool", {})]
+            pools.extend((
+                controller.get("conditional_mana", {}) or {}).values())
+            mana_bound = sum(
+                max(0, int(amount or 0))
+                for pool in pools if isinstance(pool, dict)
+                for amount in pool.values())
+            mana_bound += sum(
+                max(0, int(amount or 0))
+                for amount in (controller.get(
+                    "phase_restricted_mana", {}) or {}).values())
+            bounds.append(mana_bound)
+        if re.search(r"pay\s+x\s+life", cost):
+            bounds.append(max(0, int(controller.get("life", 0) or 0)))
+        sacrifice = self.get_sacrifice_cost_spec()
+        if sacrifice and sacrifice.get("count") == "x":
+            bounds.append(len(self.get_sacrifice_cost_candidates(
+                game_state, controller, sacrifice["requirement"])))
+        discard = self.get_discard_cost_spec({"activation_X": 0})
+        if discard and discard.get("count_expr") == "x":
+            bounds.append(len(controller.get("hand", [])))
+        counter = re.search(
+            r"remove\s+x\s+(\w+|[+\-]\d+/[+\-]\d+)\s+counters?", cost)
+        if counter:
+            kind = counter.group(1)
+            if "/" not in kind:
+                kind = kind.upper()
+            card = game_state._safe_get_card(self.card_id)
+            bounds.append(max(0, int(
+                getattr(card, "counters", {}).get(kind, 0) or 0)))
+        return min(bounds) if bounds else 0
 
     @staticmethod
     def _as_sacrifice_occurrence(value):
@@ -393,24 +646,6 @@ class ActivatedAbility(Ability):
                  if card_id == self.card_id), None)
             source_occurrence = ((self.card_id, source_slot)
                                  if source_slot is not None else None)
-        required_types = {
-            card_type for card_type in
-            ("creature", "artifact", "enchantment", "land", "planeswalker")
-            if re.search(rf"\b{card_type}s?\b", req_lower)
-        }
-        words = set(re.findall(r"[a-z]+", req_lower))
-        generic_words = {
-            "a", "an", "another", "one", "two", "three", "four", "five",
-            "six", "seven", "eight", "nine", "ten", "or", "other", "this",
-            "it", "permanent", "permanents", "token", "tokens", "nontoken",
-            "nonland", "tapped", "untapped", "you", "control", "controls",
-        }
-        subtype_terms = words - generic_words - required_types
-        require_token = bool(re.search(r"\btoken\b", req_lower))
-        forbid_token = "nontoken" in words
-        forbid_land = "nonland" in words
-        require_tapped = "tapped" in words and "untapped" not in words
-        require_untapped = "untapped" in words
         candidates = []
         for slot, candidate_id in enumerate(battlefield):
             occurrence = (candidate_id, slot)
@@ -420,36 +655,9 @@ class ActivatedAbility(Ability):
                 continue
             if self_sacrifice and occurrence != source_occurrence:
                 continue
-            candidate = game_state._safe_get_card(candidate_id)
-            candidate_types = {
-                str(card_type).lower()
-                for card_type in getattr(candidate, "card_types", [])
-            } if candidate else set()
-            candidate_subtypes = {
-                str(subtype).lower()
-                for subtype in getattr(candidate, "subtypes", [])
-            } if candidate else set()
-            if required_types:
-                if " or " in req_lower:
-                    if not required_types.intersection(candidate_types):
-                        continue
-                elif not required_types.issubset(candidate_types):
-                    continue
-            if (not required_types and "permanent" not in words
-                    and not self_sacrifice and subtype_terms
-                    and not subtype_terms.intersection(candidate_subtypes)):
-                continue
-            is_token = bool(getattr(candidate, "is_token", False))
-            if require_token and not is_token:
-                continue
-            if forbid_token and is_token:
-                continue
-            if forbid_land and "land" in candidate_types:
-                continue
-            is_tapped = candidate_id in controller.get("tapped_permanents", set())
-            if require_tapped and not is_tapped:
-                continue
-            if require_untapped and is_tapped:
+            if not _permanent_matches_criteria(
+                    game_state, candidate_id, req_lower,
+                    controller=controller, source_id=None):
                 continue
             candidates.append(occurrence if return_occurrences else candidate_id)
         return candidates
@@ -503,6 +711,8 @@ class ActivatedAbility(Ability):
 
         sacrifice_spec = self.get_sacrifice_cost_spec()
         if sacrifice_spec:
+            sacrifice_count = self._resolve_cost_count(
+                sacrifice_spec["count"], context)
             source_occurrence = context.get("activation_source_occurrence")
             selected_values = context.get("activation_sacrifice_occurrences")
             selection_key_present = "activation_sacrifice_occurrences" in context
@@ -512,22 +722,28 @@ class ActivatedAbility(Ability):
             selected, candidates = self._normalize_sacrifice_selections(
                 game_state, controller, selected_values,
                 sacrifice_spec["requirement"], source_occurrence)
-            if len(candidates) < sacrifice_spec["count"]:
+            if len(candidates) < sacrifice_count:
                 return False
-            if selected is None or len(selected) > sacrifice_spec["count"]:
+            if selected is None or len(selected) > sacrifice_count:
                 return False
             if (selection_key_present
                     and not sacrifice_spec["self_sacrifice"]
-                    and len(selected) != sacrifice_spec["count"]):
+                    and len(selected) != sacrifice_count):
                 return False
 
-        discard_match = re.search(
-            r"discard\s+((?:a|an|one|two|three|\d+)\s+)?"
-            r"(?:\w+\s+)?cards?", cost_lower)
-        if discard_match:
-            count_word = (discard_match.group(1) or "one").strip()
-            if len(controller.get("hand", [])) < self._word_to_number(count_word):
+        discard_spec = self.get_discard_cost_spec(context)
+        if discard_spec:
+            candidates = self.get_discard_cost_candidates(
+                game_state, controller, discard_spec)
+            if len(candidates) < discard_spec["count"]:
                 return False
+            selected_discards = context.get("activation_discard_ids")
+            if selected_discards is not None:
+                if (len(selected_discards) != discard_spec["count"]
+                        or len(set(selected_discards)) != len(selected_discards)
+                        or any(card_id not in candidates
+                               for card_id in selected_discards)):
+                    return False
 
         life_match = re.search(r"pay\s+(x|\d+)\s+life", cost_lower)
         if life_match:
@@ -539,10 +755,11 @@ class ActivatedAbility(Ability):
                 return False
 
         counter_match = re.search(
-            r"remove\s+(?:(a|an|one|two|three|\d+)\s+)?"
+            r"remove\s+(?:(a|an|one|two|three|x|\d+)\s+)?"
             r"(\w+|[+\-]\d+/[+\-]\d+)\s+counters?", cost_lower)
         if counter_match:
-            count = self._word_to_number(counter_match.group(1) or "one")
+            count = self._resolve_cost_count(
+                counter_match.group(1) or "one", context)
             counter_type = counter_match.group(2)
             if "/" not in counter_type:
                 counter_type = counter_type.upper()
@@ -576,6 +793,16 @@ class ActivatedAbility(Ability):
                 preflight_context["activation_sacrifice_ids"] = choices
         if source_occurrence is not None:
             preflight_context["activation_source_occurrence"] = source_occurrence
+        sacrifice_spec = self.get_sacrifice_cost_spec()
+        if (sacrifice_spec and not sacrifice_spec["self_sacrifice"]
+                and sacrifice_choices is None):
+            # Non-self choices must come from a policy transaction. Direct
+            # callers may probe legality but cannot silently pick a permanent.
+            return False
+        discard_spec = self.get_discard_cost_spec(preflight_context)
+        if (discard_spec and not discard_spec["random"]
+                and "activation_discard_ids" not in preflight_context):
+            return False
         if not self.can_pay_cost(game_state, controller, preflight_context):
             return False
         # Use self.cost (which has Exhaust prefix removed if applicable by __init__)
@@ -640,7 +867,8 @@ class ActivatedAbility(Ability):
         sacrifice_spec = self.get_sacrifice_cost_spec()
         if sacrifice_spec:
              sac_req = sacrifice_spec["requirement"]
-             count = sacrifice_spec["count"]
+             count = self._resolve_cost_count(
+                 sacrifice_spec["count"], preflight_context)
              if (sacrifice_choices is not None
                      and not sacrifice_spec["self_sacrifice"]
                      and len(sacrifice_choices) != count):
@@ -663,12 +891,14 @@ class ActivatedAbility(Ability):
              logging.debug(f"Paid sacrifice cost ({count}x '{sac_req}').")
 
         # Discard Cost - Use cost_lower for regex
-        discard_match = re.search(r"discard\s+((?:a|an|one|two|three|\d+)\s+)?(\w+\s+)?cards?(?:\s+at random)?(?:$|,?\s*\{)", cost_lower)
-        if discard_match:
-             count_str = discard_match.group(1)
-             count = 1 if not count_str else self._word_to_number(count_str.strip())
-             is_random = "at random" in cost_lower
-             discard_paid, _ = self._pay_discard_cost_with_rollback(game_state, controller, count, is_random, rollback_steps)
+        discard_spec = self.get_discard_cost_spec(preflight_context)
+        if discard_spec:
+             count = discard_spec["count"]
+             is_random = discard_spec["random"]
+             chosen_discards = preflight_context.get("activation_discard_ids")
+             discard_paid, _ = self._pay_discard_cost_with_rollback(
+                 game_state, controller, count, rollback_steps,
+                 choices=chosen_discards, is_random=is_random)
              if not discard_paid: self._perform_rollback(game_state, controller, rollback_steps); return False
              logging.debug(f"Paid discard cost ({count} cards{' randomly' if is_random else ''}).")
 
@@ -693,11 +923,13 @@ class ActivatedAbility(Ability):
 
 
         # Remove Counters Cost - Use cost_lower for regex
-        counter_match = re.search(r"remove\s+(?:(?:a|an|one|two|three|\d+)\s+)?(\w+|[+\-]\d+/[+\-]\d+)\s+counters?(?: from.*?)?(?:$|,?\s*\{)", cost_lower)
+        counter_match = re.search(r"remove\s+(?:(?:a|an|one|two|three|x|\d+)\s+)?(\w+|[+\-]\d+/[+\-]\d+)\s+counters?(?: from.*?)?(?:$|,?\s*\{)", cost_lower)
         if counter_match:
-            count_word_match = re.search(r"remove\s+(a|an|one|two|three|\d+)", cost_lower)
+            count_word_match = re.search(r"remove\s+(a|an|one|two|three|x|\d+)", cost_lower)
             count = 1
-            if count_word_match: count = self._word_to_number(count_word_match.group(1))
+            if count_word_match:
+                count = self._resolve_cost_count(
+                    count_word_match.group(1), preflight_context)
             counter_type = counter_match.group(1)
             if '/' in counter_type and counter_type.replace('/','').replace('+','').replace('-','').isdigit(): pass
             else: counter_type = counter_type.upper()
@@ -830,21 +1062,29 @@ class ActivatedAbility(Ability):
             rollback_steps.append(("return_sacrificed_permanent", sacrifice_id, owner))
         return True, sacrifice_id
 
-    def _pay_discard_cost_with_rollback(self, game_state, controller, count, rollback_steps):
-        """Helper to handle discard cost payment and potential rollback."""
-        # Logic assumes discarding first N cards. Need choice logic if not random.
-        discarded_ids = []
-        if len(controller["hand"]) < count: return False, None # Should be checked before calling
-
-        hand_copy = controller["hand"][:] # Work on copy
+    def _pay_discard_cost_with_rollback(
+            self, game_state, controller, count, rollback_steps,
+            choices=None, is_random=False):
+        """Pay exactly the announced discard selection with rollback."""
+        if len(controller["hand"]) < count:
+            return False, None
+        if is_random:
+            hand_copy = random.sample(list(controller["hand"]), count)
+        else:
+            hand_copy = list(choices or [])
+            if (len(hand_copy) != count or len(set(hand_copy)) != count
+                    or any(card_id not in controller["hand"]
+                           for card_id in hand_copy)):
+                return False, None
         successfully_discarded = []
         failed_to_discard = False
 
         for _ in range(count):
             if hand_copy:
                 discard_id = hand_copy.pop(0) # Take from front of copy
-                # Perform discard via move_card
-                if game_state.move_card(discard_id, controller, "hand", controller, "graveyard", cause="ability_cost"):
+                if game_state.discard_card(
+                        controller, discard_id, source_id=self.card_id,
+                        cause="ability_cost"):
                     successfully_discarded.append(discard_id)
                 else:
                     # If move failed, abort cost payment immediately
@@ -857,12 +1097,12 @@ class ActivatedAbility(Ability):
         if failed_to_discard:
              # Add rollback steps for successfully discarded cards *before* the failure
              for success_id in successfully_discarded:
-                  rollback_steps.append(("return_from_graveyard_to_hand", success_id)) # Specific return
+                  rollback_steps.append(("return_discarded_to_hand", success_id))
              return False, None
         else:
              # Add rollback steps for all successfully discarded cards
              for success_id in successfully_discarded:
-                 rollback_steps.append(("return_from_graveyard_to_hand", success_id))
+                 rollback_steps.append(("return_discarded_to_hand", success_id))
              logging.debug(f"Paid discard cost ({len(successfully_discarded)} cards).")
              return True, successfully_discarded
 
@@ -876,6 +1116,12 @@ class ActivatedAbility(Ability):
                 elif action == "tap": game_state.tap_permanent(step[1], controller)
                 elif action == "return_sacrificed_permanent": game_state.move_card(step[1], step[2], "graveyard", controller, "battlefield")
                 elif action == "return_from_graveyard_to_hand": game_state.move_card(step[1], controller, "graveyard", controller, "hand")
+                elif action == "return_discarded_to_hand":
+                    owner, zone = game_state.find_card_location(step[1])
+                    if owner is controller and zone in {"graveyard", "exile"}:
+                        game_state.move_card(
+                            step[1], controller, zone, controller, "hand",
+                            cause="cost_rollback")
                 elif action == "gain_life": controller["life"] += step[1]
                 elif action == "add_counter": game_state.add_counter(step[1], step[2], step[3])
                 elif action == "refund_mana": game_state.mana_system.add_mana(controller, step[1]) # Assumes add_mana handles refunding specific details
@@ -3027,96 +3273,10 @@ class SacrificeEffect(AbilityEffect):
         self.requires_target = who == "target_player"
 
     def _type_matches(self, game_state, cid, source_id=None):
-        card = game_state._safe_get_card(cid)
-        if not card:
-            return False
-        criteria = self.permanent_type.lower().strip()
-        types = {str(value).lower() for value in getattr(card, 'card_types', [])}
-        subtypes = {str(value).lower() for value in getattr(card, 'subtypes', [])}
-        supertypes = {str(value).lower() for value in getattr(card, 'supertypes', [])}
-        words = set(re.findall(r"[a-z]+", criteria))
-        if "another" in words and cid == source_id:
-            return False
-        if "nonland" in words and "land" in types:
-            return False
-        if "nontoken" in words and getattr(card, "is_token", False):
-            return False
-        if "token" in words and "nontoken" not in words \
-                and not getattr(card, "is_token", False):
-            return False
-        controller = game_state.get_card_controller(cid)
-        if "tapped" in words and "untapped" not in words \
-                and cid not in (controller or {}).get("tapped_permanents", set()):
-            return False
-        if "untapped" in words \
-                and cid in (controller or {}).get("tapped_permanents", set()):
-            return False
-        comparison = re.search(
-            r"(mana value|power|toughness)\s+(\d+)\s+or\s+(less|greater)",
-            criteria)
-        if comparison:
-            field, raw_value, direction = comparison.groups()
-            actual = (getattr(card, "cmc", 0) if field == "mana value"
-                      else getattr(card, field, 0))
-            try:
-                actual = int(actual or 0)
-            except (TypeError, ValueError):
-                return False
-            bound = int(raw_value)
-            if direction == "less" and actual > bound:
-                return False
-            if direction == "greater" and actual < bound:
-                return False
-        color_words = {
-            "white": "W", "blue": "U", "black": "B",
-            "red": "R", "green": "G", "colorless": "C",
-        }
-        requested_colors = {
-            symbol for word, symbol in color_words.items() if word in words}
-        if requested_colors:
-            card_colors = getattr(card, "colors", []) or []
-            if isinstance(card_colors, dict):
-                present_colors = {
-                    symbol for symbol, present in card_colors.items() if present}
-            elif (isinstance(card_colors, (list, tuple))
-                    and len(card_colors) == 5
-                    and all(isinstance(value, (int, float, bool))
-                            for value in card_colors)):
-                present_colors = {
-                    symbol for symbol, present in zip("WUBRG", card_colors)
-                    if present}
-            else:
-                present_colors = {str(value).upper() for value in card_colors}
-            if "C" in requested_colors:
-                if present_colors:
-                    return False
-            elif not (requested_colors & present_colors):
-                return False
-        keyword_match = re.search(
-            r"\bwith\s+([a-z -]+?)(?:\s+and\b|$)", criteria)
-        matched_keyword = None
-        if keyword_match:
-            candidate = keyword_match.group(1).strip()
-            if (hasattr(game_state, "check_keyword")
-                    and game_state.check_keyword(cid, candidate)):
-                matched_keyword = candidate
-            elif candidate in str(getattr(card, "oracle_text", "")).lower():
-                matched_keyword = candidate
-        known = types | subtypes | supertypes
-        type_words = words - {
-            "a", "an", "another", "you", "control", "with", "without",
-            "mana", "value", "power", "toughness", "or", "less",
-            "greater", "token", "nontoken", "nonland", "tapped",
-            "untapped", "permanent", "and", "the", "named",
-            "white", "blue", "black", "red", "green", "colorless",
-        }
-        if matched_keyword:
-            type_words -= set(re.findall(r"[a-z]+", matched_keyword))
-        type_words = {word.rstrip("s") for word in type_words
-                      if not word.isdigit()}
-        if " or " in criteria and type_words:
-            return bool(type_words & known)
-        return not type_words or type_words.issubset(known)
+        return _permanent_matches_criteria(
+            game_state, cid, self.permanent_type,
+            controller=game_state.get_card_controller(cid),
+            source_id=source_id)
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         players = []
@@ -3139,6 +3299,21 @@ class SacrificeEffect(AbilityEffect):
         for player in players:
             candidates = [cid for cid in player.get("battlefield", [])
                           if self._type_matches(game_state, cid, source_id)]
+            extreme = re.search(
+                r"\b(greatest|least)\s+(power|toughness|mana value)\b",
+                self.permanent_type)
+            if candidates and extreme:
+                direction, field = extreme.groups()
+                def characteristic(card_id):
+                    card = game_state._safe_get_card(card_id)
+                    return int((getattr(card, "cmc", 0)
+                                if field == "mana value"
+                                else getattr(card, field, 0)) or 0)
+                boundary = (max if direction == "greatest" else min)(
+                    characteristic(cid) for cid in candidates)
+                candidates = [
+                    cid for cid in candidates
+                    if characteristic(cid) == boundary]
             if candidates:
                 pending.append({
                     "player_id": "p1" if player is game_state.p1 else "p2",
@@ -3507,20 +3682,26 @@ class DamageEffect(AbilityEffect):
 
 
 class KeywordChoiceGrantEffect(AbilityEffect):
-    """'Target creature gains your choice of <kw1> or <kw2>' (Manifold Mouse).
+    """Grant one policy-selected keyword from an arbitrary printed list.
 
     Resolution pauses in PHASE_CHOOSE so the controller picks the keyword;
     the chosen grant is then an ordinary layer-6 GainKeywordEffect.
     """
 
-    def __init__(self, first_keyword, second_keyword, duration="end_of_turn",
-                 condition=None):
-        self.options = [first_keyword.lower().strip(),
-                        second_keyword.lower().strip()]
+    def __init__(self, first_keyword, second_keyword=None,
+                 duration="end_of_turn", condition=None,
+                 targeting_text="target creature"):
+        raw_options = (list(first_keyword)
+                       if isinstance(first_keyword, (list, tuple, set))
+                       else [first_keyword, second_keyword])
+        self.options = list(dict.fromkeys(
+            str(keyword).lower().strip(" .,;")
+            for keyword in raw_options if keyword))
+        self.targeting_text = str(targeting_text or "target creature").strip()
         self.duration = duration
         super().__init__(
-            f"target creature gains your choice of {self.options[0]} "
-            f"or {self.options[1]}", condition)
+            f"{self.targeting_text} gains your choice of "
+            f"{', '.join(self.options)}", condition)
         self.requires_target = True
 
     def _apply_effect(self, game_state, source_id, controller, targets):
@@ -3547,6 +3728,7 @@ class KeywordChoiceGrantEffect(AbilityEffect):
             "target_id": target_ids[0],
             "source_id": source_id,
             "duration": self.duration,
+            "targeting_text": self.targeting_text,
             "resume_phase": resume_phase,
             "previous_priority_phase_before_choice": previous_priority_phase,
         }

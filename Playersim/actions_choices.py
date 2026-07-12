@@ -131,10 +131,11 @@ class ChoiceHandlersMixin:
         if (choice and choice.get('player') is player
                 and choice.get('type') in (
                     'sacrifice_effect', 'activation_sacrifice_cost',
+                    'activation_discard_cost',
                     'dig_select', 'distribute_counters', 'discard',
                     'specialize_discard', 'forced_sacrifice',
                     'resolution_choice', 'connive_discard', 'choose_x',
-                    'ward_payment', 'action_catalog')):
+                    'ward_payment', 'action_catalog', 'keyword_grant')):
             choice_options = choice.get('options', [])
             if choice.get('type') in (
                     'discard', 'specialize_discard', 'connive_discard'):
@@ -689,20 +690,17 @@ class ChoiceHandlersMixin:
         # chooser used by spells carries the absolute value back into this
         # staged activation transaction.
         has_activation_x = bool(
-            re.search(r'\{X\}', cost_str or '', re.IGNORECASE)
-            or re.search(r'pay\s+X\s+life', cost_str or '', re.IGNORECASE))
+            re.search(r'(?:\{X\}|\bX\b)', cost_str or '', re.IGNORECASE))
         if has_activation_x and 'activation_X' not in context:
             affordable_values = []
-            x_value = 0
-            while x_value <= 1000:
+            max_resource_x = ability.max_affordable_x(
+                gs, player, cost_context)
+            for x_value in range(max_resource_x + 1):
                 candidate_context = dict(cost_context)
                 candidate_context['activation_X'] = x_value
                 candidate_context['X'] = x_value
                 if ability.can_pay_cost(gs, player, candidate_context):
                     affordable_values.append(x_value)
-                    x_value += 1
-                    continue
-                break
             if not affordable_values:
                 return -0.05, False
             activation_context = dict(context)
@@ -742,18 +740,21 @@ class ChoiceHandlersMixin:
         # every selected permanent first; ``pay_cost`` then commits all cost
         # components together after the final choice.
         sacrifice_spec = ability.get_sacrifice_cost_spec()
+        sacrifice_count = (ability._resolve_cost_count(
+            sacrifice_spec["count"], cost_context)
+            if sacrifice_spec else 0)
         chosen_occurrences = list(
             context.get("activation_sacrifice_occurrences", []))
         chosen_sacrifices = list(context.get("activation_sacrifice_ids", []))
         staged_choices = chosen_occurrences or chosen_sacrifices
         if (sacrifice_spec and not sacrifice_spec["self_sacrifice"]
-                and len(staged_choices) < sacrifice_spec["count"]):
+                and len(staged_choices) < sacrifice_count):
             normalized_selected, _ = ability._normalize_sacrifice_selections(
                 gs, player, staged_choices, sacrifice_spec["requirement"],
                 ability_source_occurrence)
             if normalized_selected is None:
                 return -0.05, False
-            remaining = sacrifice_spec["count"] - len(normalized_selected)
+            remaining = sacrifice_count - len(normalized_selected)
             candidate_occurrences = ability.get_sacrifice_cost_candidates(
                 gs, player, sacrifice_spec["requirement"],
                 excluded=normalized_selected,
@@ -795,6 +796,38 @@ class ChoiceHandlersMixin:
                 f"Waiting for {remaining} sacrifice-cost choice(s) before "
                 f"activating {card.name}.")
             return 0.02, True
+
+        discard_spec = ability.get_discard_cost_spec(cost_context)
+        chosen_discards = list(context.get("activation_discard_ids", []))
+        if (discard_spec and not discard_spec["random"]
+                and len(chosen_discards) < discard_spec["count"]):
+            candidates = [
+                card_id for card_id in ability.get_discard_cost_candidates(
+                    gs, player, discard_spec)
+                if card_id not in chosen_discards]
+            remaining = discard_spec["count"] - len(chosen_discards)
+            if len(candidates) < remaining:
+                return -0.05, False
+            activation_context = dict(context)
+            activation_context.update({
+                "battlefield_idx": bf_idx, "ability_idx": ability_idx,
+                "controller_id": "p1" if player is gs.p1 else "p2",
+                "activation_source_occurrence": ability_source_occurrence,
+                "activation_discard_ids": chosen_discards,
+            })
+            gs.choice_context = {
+                "type": "activation_discard_cost", "player": player,
+                "source_id": card_id, "options": candidates,
+                "selected": chosen_discards, "remaining": remaining,
+                "activation_context": activation_context,
+                "resume_phase": gs.phase, "choice_page": 0,
+            }
+            gs.phase = gs.PHASE_CHOOSE
+            gs.priority_player = player
+            gs.priority_pass_count = 0
+            return 0.02, True
+        if discard_spec and not discard_spec["random"]:
+            cost_context["activation_discard_ids"] = chosen_discards
 
         # ActivatedAbility owns the full cost transaction. This preserves the
         # target-before-cost order while actually committing tap, sacrifice,
@@ -1467,11 +1500,13 @@ class ChoiceHandlersMixin:
                 logging.warning("Keyword-grant choice called for the wrong player.")
                 return -0.2, False
             options = ctx.get('options', [])
-            if not (0 <= param < len(options)):
+            absolute = int(ctx.get('choice_page', 0)) * 10 + int(param)
+            if not (0 <= absolute < len(options)):
                 return -0.1, False
             from .ability_types import GainKeywordEffect
             ok = GainKeywordEffect(
-                options[param], target_type="target creature",
+                options[absolute],
+                target_type="target creature",
                 duration=ctx.get('duration', 'end_of_turn')).apply(
                     gs, ctx.get('source_id'), player,
                     {"creatures": [ctx.get('target_id')]})
@@ -1479,7 +1514,7 @@ class ChoiceHandlersMixin:
             gs.phase = ctx.get('resume_phase', gs.PHASE_MAIN_PRECOMBAT)
             gs.previous_priority_phase = ctx.get(
                 'previous_priority_phase_before_choice')
-            gs.priority_player = gs._get_active_player()
+            gs.priority_player = player
             gs.priority_pass_count = 0
             return (0.05 if ok else -0.1), bool(ok)
         if (getattr(gs, 'choice_context', None)
@@ -1651,6 +1686,35 @@ class ChoiceHandlersMixin:
             activation_context['activation_sacrifice_occurrences'] = list(selected)
             activation_context['activation_sacrifice_ids'] = [
                 selected_occurrence[0] for selected_occurrence in selected]
+            resume_phase = ctx.get('resume_phase', gs.PHASE_PRIORITY)
+            gs.choice_context = None
+            gs.phase = resume_phase
+            gs.priority_player = player
+            gs.priority_pass_count = 0
+            return self._handle_activate_ability(None, activation_context)
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'activation_discard_cost'):
+            ctx = gs.choice_context
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            options = ctx.get('options', [])
+            absolute = int(ctx.get('choice_page', 0)) * 10 + int(param)
+            if (ctx.get('player') is not player
+                    or not 0 <= absolute < len(options)):
+                return -0.1, False
+            card_id = options.pop(absolute)
+            if card_id not in player.get('hand', []):
+                return -0.1, False
+            selected = ctx.setdefault('selected', [])
+            if card_id in selected:
+                return -0.1, False
+            selected.append(card_id)
+            ctx['remaining'] = max(0, int(ctx.get('remaining', 1)) - 1)
+            if ctx['remaining'] > 0:
+                ctx['options'] = options
+                ctx['choice_page'] = 0
+                return 0.02, True
+            activation_context = dict(ctx.get('activation_context', {}))
+            activation_context['activation_discard_ids'] = list(selected)
             resume_phase = ctx.get('resume_phase', gs.PHASE_PRIORITY)
             gs.choice_context = None
             gs.phase = resume_phase
@@ -2043,6 +2107,22 @@ class ChoiceHandlersMixin:
                 return self._handle_play_land(None, context=action_context)
             if handler == 'play_spell':
                 return self._handle_play_spell(None, context=action_context)
+            if handler == 'play_from_graveyard':
+                return self._handle_play_from_graveyard(
+                    None, context=action_context)
+            if handler == 'level_up_class':
+                return self._handle_level_up_class(
+                    None, action_context)
+            if handler == 'level_up_creature':
+                return self._handle_level_up_creature(
+                    None, action_context)
+            action_index = entry.get('action_index')
+            if isinstance(action_index, int):
+                action_type, action_param = self.get_action_info(action_index)
+                action_handler = self.action_handlers.get(action_type)
+                if action_handler:
+                    return action_handler(
+                        action_param, context=action_context)
             return -0.1, False
         if getattr(gs, 'choice_context', None) and gs.choice_context.get('type') == 'land_mana':
             player = gs.p1 if gs.agent_is_p1 else gs.p2

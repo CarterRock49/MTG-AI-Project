@@ -92,6 +92,7 @@ class ActionSpaceMixin:
             try:
                 valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
                 action_reasons = {} # Reset reasons for this generation
+                overflow_action_catalog = []
 
                 def set_valid_action(index, reason="", context=None):
                     # Ensures CONCEDE (12) isn't added here, handled at the end.
@@ -101,8 +102,24 @@ class ActionSpaceMixin:
                             raise RuntimeError(
                                 f"Mask attempted to expose unhandled action "
                                 f"{index} ({action_type}): {reason}")
+                        normalized_context = context or {}
+                        existing = action_reasons.get(index)
+                        if (valid_actions[index] and index >= 13 and index != 479
+                                and existing
+                                and existing.get("context", {}) != normalized_context):
+                            # One fixed action id can represent only one live
+                            # source. Preserve the first directly and route all
+                            # colliding mechanic/source contexts through the
+                            # shared paginated catalog.
+                            overflow_action_catalog.append({
+                                "label": reason or action_type,
+                                "action_index": index,
+                                "action_context": normalized_context,
+                            })
+                            return
                         valid_actions[index] = True
-                        action_reasons[index] = {"reason": reason, "context": context or {}}
+                        action_reasons[index] = {
+                            "reason": reason, "context": normalized_context}
                     elif index != 12:
                         logging.error(f"INVALID ACTION INDEX during generation: {index} bounds (0-{self.ACTION_SPACE_SIZE-1}) Reason: {reason}")
 
@@ -223,9 +240,9 @@ class ActionSpaceMixin:
                         # Only add mana abilities (and PASS already added)
                         logging.debug("Split Second active, only allowing Mana abilities and PASS.")
                         self._add_mana_ability_actions(perspective_player, valid_actions, set_valid_action)
-                        self._add_overflow_ability_catalog_action(
-                            perspective_player, set_valid_action,
-                            mana_only=True)
+                        overflow_action_catalog.extend(
+                            self._add_overflow_ability_catalog_action(
+                                perspective_player, mana_only=True))
                     else:
                         is_my_turn = (current_turn_player == perspective_player)
                         opponent_player = gs.p2 if perspective_player == gs.p1 else gs.p1
@@ -246,8 +263,9 @@ class ActionSpaceMixin:
                             self._add_instant_speed_actions(perspective_player, opponent_player, valid_actions, set_valid_action)
                             self._add_damage_prevention_actions(perspective_player, valid_actions, set_valid_action)
 
-                        self._add_overflow_ability_catalog_action(
-                            perspective_player, set_valid_action)
+                        overflow_action_catalog.extend(
+                            self._add_overflow_ability_catalog_action(
+                                perspective_player))
 
                         # Combat Actions
                         if hasattr(self, 'combat_handler') and self.combat_handler:
@@ -292,6 +310,18 @@ class ActionSpaceMixin:
                                     if cost_str and self._can_afford_cost_string(perspective_player, cost_str, context=pending_context):
                                         offspring_context = {'action_source': 'offspring_payment_opportunity'}
                                         set_valid_action(295, f"Optional: PAY_OFFSPRING_COST for {getattr(card, 'name', card_id)}", context=offspring_context)
+
+                if overflow_action_catalog:
+                    set_valid_action(
+                        479, "OPEN_OVERFLOW_ACTION_CATALOG",
+                        context={
+                            "open_action_catalog": True,
+                            "catalog_type": "overflow_action",
+                            "controller_id": (
+                                "p1" if perspective_player is gs.p1 else "p2"),
+                            "options": overflow_action_catalog,
+                            "resume_phase": gs.phase,
+                        })
 
                 # Pass is a backward-compatible alias for explicit declaration
                 # completion, but must be hidden whenever that completion would
@@ -739,11 +769,20 @@ class ActionSpaceMixin:
                         context={"page_count": page_count})
 
             elif choice_type == "keyword_grant":
-                for option_index, keyword in enumerate(context.get("options", [])[:10]):
+                options = list(context.get("options", []))
+                page_count = max(1, (len(options) + 9) // 10)
+                page = int(context.get("choice_page", 0)) % page_count
+                for option_index, keyword in enumerate(
+                        options[page * 10:(page + 1) * 10]):
                     set_valid_action(
                         353 + option_index,
                         f"CHOOSE_KEYWORD {keyword}",
                         context={"option_index": option_index})
+                if page_count > 1:
+                    set_valid_action(
+                        479,
+                        f"KEYWORD_PAGE_NEXT ({page + 1}/{page_count})",
+                        context={"page_count": page_count})
 
             elif choice_type == "saddle":
                 selected = set(context.get("selected", []))
@@ -828,6 +867,25 @@ class ActionSpaceMixin:
                     set_valid_action(
                         479,
                         f"SACRIFICE_COST_PAGE_NEXT ({page + 1}/{page_count})",
+                        context={"page_count": page_count})
+
+            elif choice_type == "activation_discard_cost":
+                candidates = list(context.get('options', []))
+                page_count = max(1, (len(candidates) + 9) // 10)
+                page = int(context.get('choice_page', 0)) % page_count
+                for option_index, card_id in enumerate(
+                        candidates[page * 10:(page + 1) * 10]):
+                    if card_id not in player.get('hand', []):
+                        continue
+                    card = gs._safe_get_card(card_id)
+                    set_valid_action(
+                        353 + option_index,
+                        f"DISCARD_ACTIVATION_COST {getattr(card, 'name', card_id)}",
+                        context={"option_index": option_index})
+                if page_count > 1:
+                    set_valid_action(
+                        479,
+                        f"DISCARD_COST_PAGE_NEXT ({page + 1}/{page_count})",
                         context={"page_count": page_count})
 
             elif choice_type == "sacrifice_effect":
@@ -1264,14 +1322,24 @@ class ActionSpaceMixin:
                  next_level = card.current_level + 1
                  cost = card.get_level_cost(next_level)
                  if self._can_afford_cost_string(player, cost):
-                     set_valid_action(253 + i, f"LEVEL_UP_CLASS {card.name} to {next_level}")
+                     set_valid_action(
+                         253 + i, f"LEVEL_UP_CLASS {card.name} to {next_level}",
+                         context={
+                             "battlefield_idx": i, "card_id": card_id,
+                             "controller_id": "p1" if player is gs.p1 else "p2",
+                         })
         # Leveler creatures (CR 711): repeatable "Level up {cost}", sorcery-speed.
         for i in range(min(len(player["battlefield"]), 5)):  # Leveler index 0-4
             card_id = player["battlefield"][i]
             card = gs._safe_get_card(card_id)
             if card and getattr(card, 'is_leveler', False) and getattr(card, 'level_up_cost', None):
                 if self._can_afford_cost_string(player, card.level_up_cost):
-                    set_valid_action(467 + i, f"LEVEL_UP_CREATURE {card.name}")
+                    set_valid_action(
+                        467 + i, f"LEVEL_UP_CREATURE {card.name}",
+                        context={
+                            "battlefield_idx": i, "card_id": card_id,
+                            "controller_id": "p1" if player is gs.p1 else "p2",
+                        })
 
     def _add_unlock_door_actions(self, player, valid_actions, set_valid_action):
         """Add actions for unlocking Room doors."""
@@ -2048,12 +2116,11 @@ class ActionSpaceMixin:
                            "controller_id": "p1" if player is gs.p1 else "p2",
                        })
 
-    def _add_overflow_ability_catalog_action(self, player, set_valid_action,
-                                             mana_only=False):
-        """Expose activated abilities that have no dedicated fixed action slot."""
+    def _add_overflow_ability_catalog_action(self, player, mana_only=False):
+        """Return legal actions that have no dedicated fixed action slot."""
         gs = self.game_state
         if not getattr(gs, "ability_handler", None):
-            return
+            return []
         if mana_only:
             from .ability_types import ManaAbility
         can_sorcery = gs._can_act_at_sorcery_speed(player)
@@ -2089,6 +2156,36 @@ class ActionSpaceMixin:
                         "label": f"Cast {getattr(card, 'name', card_id)}",
                         "handler": "play_spell", "action_context": action_context,
                     })
+            options.extend(self._overflow_graveyard_actions(player, opponent))
+            for battlefield_idx, card_id in enumerate(
+                    player.get("battlefield", [])[5:], 5):
+                card = gs._safe_get_card(card_id)
+                if not card:
+                    continue
+                action_context = {
+                    "battlefield_idx": battlefield_idx,
+                    "card_id": card_id,
+                    "controller_id": "p1" if player is gs.p1 else "p2",
+                }
+                if (getattr(card, "is_class", False)
+                        and card.can_level_up()):
+                    next_level = card.current_level + 1
+                    if self._can_afford_cost_string(
+                            player, card.get_level_cost(next_level)):
+                        options.append({
+                            "label": f"Level {card.name} to {next_level}",
+                            "handler": "level_up_class",
+                            "action_context": action_context,
+                        })
+                if (getattr(card, "is_leveler", False)
+                        and getattr(card, "level_up_cost", None)
+                        and self._can_afford_cost_string(
+                            player, card.level_up_cost)):
+                    options.append({
+                        "label": f"Level up {card.name}",
+                        "handler": "level_up_creature",
+                        "action_context": action_context,
+                    })
         for battlefield_idx, card_id in enumerate(player.get("battlefield", [])):
             card = gs._safe_get_card(card_id)
             if not card:
@@ -2117,16 +2214,102 @@ class ActionSpaceMixin:
                         "controller_id": "p1" if player is gs.p1 else "p2",
                     },
                 })
-        if options:
-            set_valid_action(
-                479, "OPEN_ACTIVATED_ABILITY_CATALOG",
-                context={
-                    "open_action_catalog": True,
-                    "catalog_type": "overflow_action",
-                    "controller_id": "p1" if player is gs.p1 else "p2",
-                    "options": options,
-                    "resume_phase": gs.phase,
-                })
+        return options
+
+    def _overflow_graveyard_actions(self, player, opponent):
+        """Return cast/play permissions beyond the six fixed graveyard slots."""
+        gs = self.game_state
+        can_sorcery = gs._can_act_at_sorcery_speed(player)
+        has_emblem = any(
+            emblem.get("kind") == "graveyard_permanents"
+            for emblem in player.get("emblems", []))
+        permanent_types = {
+            "creature", "artifact", "enchantment", "planeswalker", "battle"}
+        options = []
+        for graveyard_index, card_id in enumerate(
+                player.get("graveyard", [])[6:], 6):
+            card = gs._safe_get_card(card_id)
+            if not card:
+                continue
+            context = {"source_zone": "graveyard",
+                       "source_idx": graveyard_index}
+            if gs.has_graveyard_adventure_permission(player, card_id):
+                adventure = card.get_adventure_data() or {}
+                if ("instant" not in adventure.get("type", "").lower()
+                        and not can_sorcery):
+                    continue
+                if (self._can_afford_cost_string(
+                        player, adventure.get("cost", ""), context={})
+                        and self._targets_available_from_text(
+                            adventure.get("effect", ""), player, opponent)):
+                    context.update({"graveyard_adventure_cast": True,
+                                    "cast_as_adventure": True})
+                else:
+                    continue
+            else:
+                harmonize_cost = gs.harmonize_cost_for(player, card_id)
+                flashback_cost = gs.flashback_cost_for(player, card_id)
+                if harmonize_cost:
+                    if not can_sorcery:
+                        continue
+                    candidates = [
+                        cid for cid in player.get("battlefield", [])
+                        if cid not in player.get("tapped_permanents", set())
+                        and "creature" in getattr(
+                            gs._safe_get_card(cid), "card_types", [])]
+                    reductions = [0] + [
+                        max(0, int(getattr(
+                            gs._safe_get_card(cid), "power", 0) or 0))
+                        for cid in candidates]
+                    if not any(
+                            gs.mana_system.can_pay_mana_cost_with_lands(
+                                player,
+                                gs.mana_system.calculate_alternative_cost(
+                                    card_id, player, "harmonize", {
+                                        "harmonize_cost": harmonize_cost,
+                                        "harmonize_reduction": reduction}),
+                                {"card": card})
+                            for reduction in reductions):
+                        continue
+                    context.update({"harmonize_cast": True,
+                                    "harmonize_cost": harmonize_cost})
+                elif flashback_cost:
+                    if ("instant" not in getattr(card, "card_types", [])
+                            and not can_sorcery):
+                        continue
+                    if (not self._can_afford_cost_string(
+                            player, flashback_cost,
+                            context={"card": card,
+                                     "flashback_cost": flashback_cost})
+                            or not self._targets_available(
+                                card, player, opponent)):
+                        continue
+                    context.update({"flashback_cast": True,
+                                    "flashback_cost": flashback_cost})
+                elif has_emblem:
+                    card_types = set(getattr(card, "card_types", []))
+                    is_land = "land" in card_types
+                    if is_land:
+                        if not can_sorcery or player.get("land_played", False):
+                            continue
+                    elif (not card_types.intersection(permanent_types)
+                          or (not can_sorcery and not self._has_flash(card_id))):
+                        continue
+                    context["emblem_graveyard_cast"] = True
+                    if (not is_land
+                            and (not self._can_afford_card(
+                                player, card, context=context)
+                                 or not self._targets_available(
+                                     card, player, opponent))):
+                        continue
+                else:
+                    continue
+            options.append({
+                "label": f"Play from graveyard: {getattr(card, 'name', card_id)}",
+                "handler": "play_from_graveyard",
+                "action_context": context,
+            })
+        return options
 
     def _add_land_tapping_actions(self, player, valid_actions, set_valid_action):
         """Add actions for tapping lands for mana or effects."""

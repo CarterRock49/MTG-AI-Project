@@ -51,7 +51,7 @@ class AbilityHandler:
              logging.warning("AbilityHandler initialized without a GameState reference.")
 
 
-    def handle_class_level_up(self, class_idx):
+    def handle_class_level_up(self, class_idx, controller=None):
         """
         Handle leveling up a Class card with proper trigger processing.
         Includes mana cost payment and trigger processing.
@@ -63,7 +63,7 @@ class AbilityHandler:
             bool: True if the class was successfully leveled up.
         """
         gs = self.game_state
-        active_player = gs._get_active_player() # Use GS helper method
+        active_player = controller or gs._get_active_player()
 
         # Validate index
         if not (0 <= class_idx < len(active_player.get("battlefield", []))): # Use get
@@ -97,7 +97,8 @@ class AbilityHandler:
             # Use mana system to parse and check affordability
             try:
                 parsed_cost_dict = gs.mana_system.parse_mana_cost(level_cost_str)
-                if not gs.mana_system.can_pay_mana_cost(active_player, parsed_cost_dict):
+                if not gs.mana_system.can_pay_mana_cost_with_lands(
+                        active_player, parsed_cost_dict):
                     logging.debug(f"Cannot afford to level up {class_card.name} (Cost: {level_cost_str})")
                     return False
             except Exception as e:
