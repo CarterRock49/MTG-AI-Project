@@ -165,6 +165,7 @@ class LayerSystem:
         # this and later layers no longer exist and are skipped. Effects already
         # applied in earlier layers correctly continue to apply (CR 613.6).
         self._stripped_sources = set()
+        self._stripped_source_abilities = defaultdict(set)
 
         # 1. Initialize: Get base characteristics for ALL affected cards
         from .card import Card # Ensure Card class is available
@@ -267,7 +268,8 @@ class LayerSystem:
             if callable(effect_data.get('condition')) and not effect_data['condition'](gs): continue
             self._calculate_layer3_text(effect_data, calculated_characteristics)
             # Re-calculate inherent abilities AFTER text change for affected cards
-            target_ids = effect_data.get('affected_ids', [])
+            target_ids = self._resolved_affected_ids(
+                effect_data, calculated_characteristics)
             for target_id in target_ids:
                 if target_id in calculated_characteristics:
                     chars = calculated_characteristics[target_id]
@@ -279,6 +281,7 @@ class LayerSystem:
         sorted_layer4 = self._sort_layer_effects(4, self.layers[4])
         for _, effect_data in sorted_layer4:
             if callable(effect_data.get('condition')) and not effect_data['condition'](gs): continue
+            if self._source_effect_removed(effect_data): continue
             self._calculate_layer4_type(effect_data, calculated_characteristics)
 
         # --- Layer 5: Color ---
@@ -293,7 +296,7 @@ class LayerSystem:
             if callable(effect_data.get('condition')) and not effect_data['condition'](gs): continue
             # CR 613.8: an effect whose source has lost all abilities earlier
             # in this pass no longer exists.
-            if effect_data.get('source_id') in self._stripped_sources: continue
+            if self._source_effect_removed(effect_data): continue
             # Apply effect data to modify _granted_abilities and _removed_abilities sets
             self._calculate_layer6_abilities(effect_data, calculated_characteristics)
         # Leveler creatures (CR 711.4): band abilities are conditional on the
@@ -312,14 +315,14 @@ class LayerSystem:
         sorted_layer7a = self._sort_layer_effects(7, self.layers[7].get('a',[]), sublayer='a') # Use .get for safety
         for _, effect_data in sorted_layer7a:
             if callable(effect_data.get('condition')) and not effect_data['condition'](gs): continue
-            if effect_data.get('source_id') in self._stripped_sources: continue  # CR 613.8: source lost all abilities; effect no longer exists (skip)
+            if self._source_effect_removed(effect_data): continue
             self._calculate_layer7a_cda_and_base(effect_data, calculated_characteristics) # Use correct method
 
         # 7b: Effects setting P/T to specific values (e.g., "becomes 1/1")
         sorted_layer7b = self._sort_layer_effects(7, self.layers[7].get('b', []), sublayer='b') # Use 'b' sublayer
         for _, effect_data in sorted_layer7b:
             if callable(effect_data.get('condition')) and not effect_data['condition'](gs): continue
-            if effect_data.get('source_id') in self._stripped_sources: continue  # CR 613.8: source lost all abilities; effect no longer exists (skip)
+            if self._source_effect_removed(effect_data): continue
             self._calculate_layer7b_set_specific(effect_data, calculated_characteristics) # Use correct method
 
         # 7b (leveler): a leveler's level band SETS its P/T (CR 711.4 / 613.4c).
@@ -358,14 +361,14 @@ class LayerSystem:
         sorted_layer7d = self._sort_layer_effects(7, self.layers[7].get('c', []), sublayer='c')
         for _, effect_data in sorted_layer7d:
             if callable(effect_data.get('condition')) and not effect_data['condition'](gs): continue
-            if effect_data.get('source_id') in self._stripped_sources: continue  # CR 613.8: source lost all abilities; effect no longer exists (skip)
+            if self._source_effect_removed(effect_data): continue
             self._calculate_layer7d_modify(effect_data, calculated_characteristics) # Use correct method
 
         # 7e: P/T switching
         sorted_layer7e = self._sort_layer_effects(7, self.layers[7].get('d', []), sublayer='d')
         for _, effect_data in sorted_layer7e:
             if callable(effect_data.get('condition')) and not effect_data['condition'](gs): continue
-            if effect_data.get('source_id') in self._stripped_sources: continue  # CR 613.8: source lost all abilities; effect no longer exists (skip)
+            if self._source_effect_removed(effect_data): continue
             self._calculate_layer7e_switch(effect_data, calculated_characteristics) # Use correct method
 
 
@@ -484,7 +487,8 @@ class LayerSystem:
         # [...] (Logic remains the same)
         effect_type = effect_data.get('effect_type')
         value = effect_data.get('effect_value')
-        for target_id in effect_data.get('affected_ids', []):
+        for target_id in self._resolved_affected_ids(
+                effect_data, calculated_characteristics):
             if target_id in calculated_characteristics:
                 chars = calculated_characteristics[target_id]
                 # Only apply P/T mods if it's a creature
@@ -518,7 +522,8 @@ class LayerSystem:
     def _calculate_layer7e_switch(self, effect_data, calculated_characteristics): # Renamed from _calculate_layer7d_switch
          # [...] (Logic remains the same)
          effect_type = effect_data.get('effect_type')
-         for target_id in effect_data.get('affected_ids', []):
+         for target_id in self._resolved_affected_ids(
+                 effect_data, calculated_characteristics):
               if target_id in calculated_characteristics:
                   chars = calculated_characteristics[target_id]
                   # Only switch if it's a creature
@@ -620,7 +625,8 @@ class LayerSystem:
          value = effect_data.get('effect_value')
          source_id = effect_data.get('source_id') # Get source for Impending check
 
-         for target_id in effect_data.get('affected_ids', []):
+         for target_id in self._resolved_affected_ids(
+                 effect_data, calculated_characteristics):
              if target_id in calculated_characteristics:
                  chars = calculated_characteristics[target_id]
                  # --- ADDED: Check if creature *at this point* ---
@@ -643,7 +649,8 @@ class LayerSystem:
     def _calculate_layer7a_cda_and_base(self, effect_data, calculated_characteristics): # Renamed from _calculate_layer7a_set
          effect_type = effect_data.get('effect_type')
          value = effect_data.get('effect_value')
-         for target_id in effect_data.get('affected_ids', []):
+         for target_id in self._resolved_affected_ids(
+                 effect_data, calculated_characteristics):
              if target_id in calculated_characteristics:
                   chars = calculated_characteristics[target_id]
                   # CDA Effect: Base P/T determined by some condition
@@ -697,10 +704,13 @@ class LayerSystem:
             if ids and isinstance(ids, (list, set, tuple)):
                 affected_card_ids.update(ids)
             scope = effect_data.get('affected_scope') or {}
-            if scope.get('player') == 'controller':
-                controller = effect_data.get('controller_id')
-                if controller:
-                    affected_card_ids.update(controller.get('battlefield', []))
+            # A live declarative scope may gain or lose members after an
+            # earlier effect changes characteristics. Seed every battlefield
+            # object so the same pass can evaluate the new applicability set.
+            if scope:
+                for player in (self.game_state.p1, self.game_state.p2):
+                    if player:
+                        affected_card_ids.update(player.get('battlefield', []))
 
         for layer_num in range(1, 8):
             if layer_num == 7:
@@ -714,29 +724,184 @@ class LayerSystem:
         return affected_card_ids
 
     def _resolved_affected_ids(self, effect_data, calculated_characteristics):
-        """Resolve a live scope after earlier layers have changed card types."""
+        """Resolve a declarative live scope from characteristics at this point."""
         scope = effect_data.get('affected_scope') or {}
-        if scope.get('player') != 'controller':
+        if not scope:
             return effect_data.get('affected_ids', [])
-        controller = effect_data.get('controller_id')
-        if not controller:
+        if scope.get('player') == 'controller':
+            players = [effect_data.get('controller_id')]
+        elif scope.get('player') == 'opponent':
+            controller = effect_data.get('controller_id')
+            players = [
+                self.game_state.p2 if controller is self.game_state.p1
+                else self.game_state.p1]
+        elif scope.get('players') == 'all':
+            players = [self.game_state.p1, self.game_state.p2]
+        else:
+            return effect_data.get('affected_ids', [])
+        players = [player for player in players if player]
+        if not players:
             return []
         required_types = {
             str(card_type).lower()
             for card_type in scope.get('all_card_types', ())
         }
+        excluded_supertypes = {
+            str(supertype).lower()
+            for supertype in scope.get('excluded_supertypes', ())
+        }
+        required_subtypes = {
+            str(subtype).lower()
+            for subtype in scope.get('all_subtypes', ())
+        }
+        excluded_subtypes = {
+            str(subtype).lower()
+            for subtype in scope.get('excluded_subtypes', ())
+        }
+        any_types = {
+            str(card_type).lower()
+            for card_type in scope.get('any_card_types', ())
+        }
         result = []
-        for card_id in controller.get('battlefield', []):
-            chars = calculated_characteristics.get(card_id)
-            if not chars:
-                continue
-            live_types = {
-                str(card_type).lower()
-                for card_type in chars.get('card_types', [])
-            }
-            if required_types.issubset(live_types):
-                result.append(card_id)
+        for player in players:
+            for card_id in player.get('battlefield', []):
+                chars = calculated_characteristics.get(card_id)
+                if not chars:
+                    continue
+                live_types = {
+                    str(card_type).lower()
+                    for card_type in chars.get('card_types', [])
+                }
+                live_supertypes = {
+                    str(supertype).lower()
+                    for supertype in chars.get('supertypes', [])
+                }
+                live_subtypes = {
+                    str(subtype).lower()
+                    for subtype in chars.get('subtypes', [])
+                }
+                if (required_types.issubset(live_types)
+                        and (not any_types or not any_types.isdisjoint(live_types))
+                        and required_subtypes.issubset(live_subtypes)
+                        and excluded_subtypes.isdisjoint(live_subtypes)
+                        and excluded_supertypes.isdisjoint(live_supertypes)
+                        and self._scope_where_matches(
+                            scope.get('where'), card_id, chars, effect_data)):
+                    result.append(card_id)
         return result
+
+    @classmethod
+    def _scope_where_matches(cls, expression, card_id, chars, effect_data):
+        """Evaluate clone-safe boolean characteristic predicates for a scope.
+
+        Expressions are data, not callbacks, so lookahead clones retain the
+        exact applicability rule. Supported forms are a clause dict, a list
+        (implicit AND), or ``all``/``any``/``not`` boolean groups.
+        """
+        if not expression:
+            return True
+        if isinstance(expression, (list, tuple)):
+            return all(cls._scope_where_matches(
+                item, card_id, chars, effect_data) for item in expression)
+        if not isinstance(expression, dict):
+            return False
+        if 'all' in expression:
+            return all(cls._scope_where_matches(
+                item, card_id, chars, effect_data)
+                for item in expression.get('all', ()))
+        if 'any' in expression:
+            return any(cls._scope_where_matches(
+                item, card_id, chars, effect_data)
+                for item in expression.get('any', ()))
+        if 'not' in expression:
+            return not cls._scope_where_matches(
+                expression.get('not'), card_id, chars, effect_data)
+
+        field = expression.get('field')
+        if field == 'card_id':
+            actual = card_id
+        elif field == 'controller':
+            actual = chars.get('_controller')
+        else:
+            actual = chars.get(field)
+        expected = expression.get('value')
+        op = str(expression.get('op', 'eq')).lower()
+
+        def normalized(value):
+            if isinstance(value, str):
+                return value.lower()
+            if isinstance(value, (list, tuple, set, frozenset)):
+                return {normalized(item) for item in value}
+            return value
+
+        actual_n, expected_n = normalized(actual), normalized(expected)
+        if op == 'eq':
+            return actual_n == expected_n
+        if op == 'ne':
+            return actual_n != expected_n
+        if op in {'contains', 'not_contains'}:
+            try:
+                matched = expected_n in actual_n
+            except TypeError:
+                matched = False
+            return matched if op == 'contains' else not matched
+        if op in {'intersects', 'disjoint', 'subset', 'superset'}:
+            try:
+                left = set(actual_n)
+                right = set(expected_n)
+            except (TypeError, ValueError):
+                return False
+            if op == 'intersects':
+                return not left.isdisjoint(right)
+            if op == 'disjoint':
+                return left.isdisjoint(right)
+            if op == 'subset':
+                return left <= right
+            return left >= right
+        if op in {'lt', 'lte', 'gt', 'gte'}:
+            try:
+                return {
+                    'lt': actual_n < expected_n,
+                    'lte': actual_n <= expected_n,
+                    'gt': actual_n > expected_n,
+                    'gte': actual_n >= expected_n,
+                }[op]
+            except TypeError:
+                return False
+        if op == 'truthy':
+            return bool(actual_n)
+        if op == 'falsy':
+            return not actual_n
+        return False
+
+    @staticmethod
+    def _normalize_source_ability(value):
+        return re.sub(r"\s+", " ", str(value or "").lower().strip(" .:;—-"))
+
+    def _effect_generated_by_ability(self, effect_data, ability_name):
+        """Whether effect_data came from the specifically named ability."""
+        removed = self._normalize_source_ability(ability_name)
+        generated = self._normalize_source_ability(
+            effect_data.get('source_ability'))
+        if generated:
+            return generated == removed or generated.startswith(removed + " ")
+        # Backward-compatible inference is deliberately exact. An anthem that
+        # merely contains the word "flying" is not generated by Flying.
+        text = self._normalize_source_ability(effect_data.get('effect_text'))
+        return text == removed or text.startswith(removed + " (")
+
+    def _source_effect_removed(self, effect_data):
+        source_id = effect_data.get('source_id')
+        if source_id in self._stripped_sources:
+            return True
+        return any(
+            self._effect_generated_by_ability(effect_data, ability_name)
+            for ability_name in self._stripped_source_abilities.get(
+                source_id, ()))
+
+    def source_has_lost_all_abilities(self, card_id):
+        """Public functional gate for registered trigger/activation systems."""
+        return card_id in getattr(self, '_stripped_sources', set())
 
         
     def _sort_layer_effects(self, layer_num, effects, sublayer=None):
@@ -752,11 +917,11 @@ class LayerSystem:
         layer 6 'remove_all_abilities' whose affected set contains B's
         source_id (the Humility shape). Layer 4 'set_type' /
         'lose_all_subtypes' hitting another layer-4 effect's source is
-        ordered the same way (the Blood Moon / Urborg shape), though ability
-        stripping as a *consequence* of basic-land typing (CR 305.7) is not
-        yet modeled. Specific 'remove_ability' is not treated as an
-        existence dependency because the engine cannot yet tell which
-        ability generates which effect.
+        ordered the same way (the Blood Moon / Urborg shape). Basic-land-type
+        setting now performs the CR 305.7 ability replacement in layer 4.
+        Specific 'remove_ability' effects use source-ability metadata (with an
+        exact-text fallback), so matching generated effects disappear while
+        unrelated abilities from the same source remain active.
 
         Whether a dependency-ordered strip actually stops the dependent
         effect from applying is handled by the existence check in
@@ -767,8 +932,10 @@ class LayerSystem:
         if len(sorted_effects) < 2:
             return sorted_effects
 
-        strip_types = {6: ('remove_all_abilities',),
-                       4: ('set_type', 'lose_all_subtypes')}.get(layer_num)
+        strip_types = {
+            6: ('remove_all_abilities', 'remove_ability'),
+            4: ('set_type', 'lose_all_subtypes', 'set_basic_land_type'),
+        }.get(layer_num)
         if not strip_types:
             return sorted_effects
 
@@ -789,13 +956,20 @@ class LayerSystem:
         for a_id, a_data in sorted_effects:
             if a_data.get('effect_type') not in strip_types or not _active(a_data):
                 continue
-            a_affected = set(a_data.get('affected_ids', []))
+            a_affected = set(self._resolved_affected_ids(
+                a_data,
+                getattr(self, '_calculated_characteristics_cache', {})))
             a_source = a_data.get('source_id')
             for b_id, b_data in sorted_effects:
                 if b_id == a_id:
                     continue
                 b_source = b_data.get('source_id')
-                if b_source in a_affected and b_source != a_source:
+                removes_matching_ability = (
+                    a_data.get('effect_type') != 'remove_ability'
+                    or self._effect_generated_by_ability(
+                        b_data, a_data.get('effect_value')))
+                if (b_source in a_affected and b_source != a_source
+                        and removes_matching_ability):
                     deps[b_id].add(a_id)
         if not any(deps.values()):
             return sorted_effects
@@ -829,7 +1003,8 @@ class LayerSystem:
         source_to_copy_card = self.game_state._safe_get_card(source_to_copy_id)
         if not source_to_copy_card: return
 
-        for target_id in effect_data.get('affected_ids', []):
+        for target_id in self._resolved_affected_ids(
+                effect_data, calculated_characteristics):
             if target_id in calculated_characteristics:
                  logging.debug(f"Layer 1: Applying copy of {source_to_copy_card.name} to {target_id}")
                  # Apply copyable values based on Rule 707.2: PRINTED
@@ -867,7 +1042,8 @@ class LayerSystem:
 
     def _calculate_layer2_control(self, effect_data, calculated_characteristics):
         new_controller = effect_data.get('effect_value') # Should be player object/dict
-        for target_id in effect_data.get('affected_ids', []):
+        for target_id in self._resolved_affected_ids(
+                effect_data, calculated_characteristics):
              if target_id in calculated_characteristics:
                  # Only log the intent; actual move happens elsewhere (apply_temporary_control or permanent control change logic)
                  logging.debug(f"Layer 2: Control of {target_id} intended to change to {new_controller['name'] if new_controller else 'Unknown'}")
@@ -876,7 +1052,8 @@ class LayerSystem:
 
     def _calculate_layer3_text(self, effect_data, calculated_characteristics):
          new_text = effect_data.get('effect_value')
-         for target_id in effect_data.get('affected_ids', []):
+         for target_id in self._resolved_affected_ids(
+                 effect_data, calculated_characteristics):
               if target_id in calculated_characteristics:
                   logging.debug(f"Layer 3: Text of {target_id} changes.")
                   calculated_characteristics[target_id]['oracle_text'] = new_text # Assumes full replacement for simplicity
@@ -886,7 +1063,8 @@ class LayerSystem:
     def _calculate_layer4_type(self, effect_data, calculated_characteristics):
          effect_type = effect_data.get('effect_type')
          type_val = effect_data.get('effect_value')
-         for target_id in effect_data.get('affected_ids', []):
+         for target_id in self._resolved_affected_ids(
+                 effect_data, calculated_characteristics):
              if target_id in calculated_characteristics:
                  chars = calculated_characteristics[target_id]
                  # Ensure lists exist and make copies to modify
@@ -917,6 +1095,21 @@ class LayerSystem:
                           current_subtypes.append(type_val)
                  elif effect_type == 'set_subtype': # Non-standard, but useful
                       current_subtypes = list(type_val) if isinstance(type_val, list) else [type_val]
+                 elif effect_type == 'set_basic_land_type':
+                      # CR 305.7: setting (not adding) one or more basic land
+                      # types removes every old land subtype and all abilities
+                      # generated by rules text, then the subtype supplies its
+                      # intrinsic basic mana ability.
+                      # Setting a land subtype does not remove other card
+                      # types (an artifact land remains an artifact land).
+                      if 'land' not in current_types:
+                          current_types.append('land')
+                      current_subtypes = [str(type_val).lower()]
+                      chars['oracle_text'] = ''
+                      chars['_inherent_abilities'] = set()
+                      if not hasattr(self, '_stripped_sources'):
+                          self._stripped_sources = set()
+                      self._stripped_sources.add(target_id)
                  elif effect_type == 'remove_subtype':
                      if isinstance(type_val, list):
                          current_subtypes = [s for s in current_subtypes if s not in type_val]
@@ -948,7 +1141,8 @@ class LayerSystem:
     def _calculate_layer5_color(self, effect_data, calculated_characteristics):
          effect_type = effect_data.get('effect_type')
          color_val = effect_data.get('effect_value') # Should be [W,U,B,R,G] list
-         for target_id in effect_data.get('affected_ids', []):
+         for target_id in self._resolved_affected_ids(
+                 effect_data, calculated_characteristics):
              if target_id in calculated_characteristics:
                  chars = calculated_characteristics[target_id]
                  current_colors = chars['colors'] # Get mutable list reference
@@ -1001,6 +1195,10 @@ class LayerSystem:
                 elif effect_type == 'remove_ability':
                     chars['_removed_abilities'].add(ability_val_lower)
                     chars['_granted_abilities'].discard(ability_val_lower) # Removing takes precedence
+                    if not hasattr(self, '_stripped_source_abilities'):
+                        self._stripped_source_abilities = defaultdict(set)
+                    self._stripped_source_abilities[target_id].add(
+                        ability_val_lower)
 
                     # *** NEW: Remove specific protection/ward details ***
                     if ability_val_lower.startswith("protection from "):
@@ -1195,7 +1393,8 @@ class LayerSystem:
     def _calculate_layer7a_set(self, effect_data, calculated_characteristics):
          effect_type = effect_data.get('effect_type')
          value = effect_data.get('effect_value')
-         for target_id in effect_data.get('affected_ids', []):
+         for target_id in self._resolved_affected_ids(
+                 effect_data, calculated_characteristics):
              if target_id in calculated_characteristics:
                   chars = calculated_characteristics[target_id]
                   # CDA Effect: Base P/T determined by some condition
@@ -1262,7 +1461,8 @@ class LayerSystem:
     def _calculate_layer7c_modify(self, effect_data, calculated_characteristics):
         effect_type = effect_data.get('effect_type')
         value = effect_data.get('effect_value')
-        for target_id in effect_data.get('affected_ids', []):
+        for target_id in self._resolved_affected_ids(
+                effect_data, calculated_characteristics):
             if target_id in calculated_characteristics:
                 chars = calculated_characteristics[target_id]
                 # Only apply P/T mods if it's a creature
@@ -1286,7 +1486,8 @@ class LayerSystem:
 
     def _calculate_layer7d_switch(self, effect_data, calculated_characteristics):
          effect_type = effect_data.get('effect_type')
-         for target_id in effect_data.get('affected_ids', []):
+         for target_id in self._resolved_affected_ids(
+                 effect_data, calculated_characteristics):
               if target_id in calculated_characteristics:
                   chars = calculated_characteristics[target_id]
                   # Only switch if it's a creature
@@ -1307,6 +1508,9 @@ class LayerSystem:
                 - 'layer': Which layer the effect applies in (1-7)
                 - 'sublayer': For layer 7, which sublayer (a-d)
                 - 'affected_ids': List of card IDs affected
+                - 'affected_scope': Optional live declarative scope. It may
+                  select controller/opponent/all players, card types/subtypes,
+                  and clone-safe boolean ``where`` characteristic predicates.
                 - 'effect_type': Type of effect (e.g., 'set_pt', 'add_ability')
                 - 'effect_value': Value for the effect
                 - 'duration': How long the effect lasts ('permanent', 'end_of_turn', etc.)

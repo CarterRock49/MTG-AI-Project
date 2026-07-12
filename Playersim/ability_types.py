@@ -1687,6 +1687,64 @@ class TriggeredAbility(Ability):
 
         # --- Basic Fallback Parsing ---
         logging.debug(f"Evaluating basic condition: '{condition_text}'")
+        opponent = gs.p2 if controller == gs.p1 else gs.p1
+
+        def matching_count(player, criteria):
+            return sum(
+                1 for cid in player.get("battlefield", [])
+                if self._card_matches_criteria(
+                    gs._safe_get_card(cid), criteria.rstrip("s")))
+
+        numeric_control = re.search(
+            r"if you control (one|two|three|four|five|\d+) or more "
+            r"([\w\s-]+)$", normalized_condition)
+        if numeric_control:
+            needed = text_to_number(numeric_control.group(1))
+            if not isinstance(needed, int):
+                needed = int(numeric_control.group(1))
+            return matching_count(
+                controller, numeric_control.group(2).strip()) >= needed
+
+        no_control = re.search(
+            r"if you (?:control no|don't control (?:a|an|any))\s+"
+            r"([\w\s-]+)$", normalized_condition)
+        if no_control:
+            return matching_count(controller, no_control.group(1).strip()) == 0
+
+        opponent_no_control = re.search(
+            r"if an opponent controls no\s+([\w\s-]+)$",
+            normalized_condition)
+        if opponent_no_control:
+            return matching_count(
+                opponent, opponent_no_control.group(1).strip()) == 0
+
+        if normalized_condition in {
+                "if it's your turn", "if it is your turn",
+                "if this is your turn"}:
+            return gs._get_active_player() is controller
+        if normalized_condition in {
+                "if it's not your turn", "if it is not your turn"}:
+            return gs._get_active_player() is not controller
+        if "if you attacked this turn" in normalized_condition:
+            return any(
+                gs.get_card_controller(cid) is controller
+                for cid in getattr(gs, "attackers_this_turn", []))
+        if "if a creature died this turn" in normalized_condition:
+            return sum((getattr(gs, "creatures_died_this_turn", {}) or {}).values()) > 0
+        if "if you gained life this turn" in normalized_condition:
+            return bool(controller.get("gained_life_this_turn")
+                        or getattr(gs, "life_gained_this_turn", {}).get(
+                            "p1" if controller is gs.p1 else "p2", 0))
+        if "if you lost life this turn" in normalized_condition:
+            return bool(controller.get("lost_life_this_turn"))
+        if normalized_condition in {
+                "if you have no cards in hand", "if your hand is empty"}:
+            return not controller.get("hand", [])
+        if "if you have more cards in hand than an opponent" in normalized_condition:
+            return len(controller.get("hand", [])) > len(opponent.get("hand", []))
+        if "if you have fewer cards in hand than an opponent" in normalized_condition:
+            return len(controller.get("hand", [])) < len(opponent.get("hand", []))
+
         # Check "if you control..."
         control_match = re.search(r"if you control (?:a|an|another|\d+)?\s*([\w\s\-]+?)(?: with|$)", condition_text)
         if control_match:
@@ -1698,7 +1756,6 @@ class TriggeredAbility(Ability):
         opp_control_match = re.search(r"if an opponent controls (?:a|an|\d+)?\s*([\w\s\-]+?)(?: with|$)", condition_text)
         if opp_control_match:
             required_type = opp_control_match.group(1).strip()
-            opponent = gs.p2 if controller == gs.p1 else gs.p1
             return any(self._card_matches_criteria(gs._safe_get_card(cid), required_type)
                        for cid in opponent.get("battlefield", []))
 
@@ -1724,8 +1781,16 @@ class TriggeredAbility(Ability):
                 if isinstance(entry, tuple) and len(entry) > 1
                 and entry[1] is controller) >= 2
 
-        logging.warning(f"Could not parse trigger condition: '{condition_text}'. Assuming True.")
-        return True # Default to true if condition unparsed
+        logging.warning(
+            f"Could not parse trigger condition: '{condition_text}'. "
+            "Failing closed.")
+        fidelity = getattr(gs, "fidelity_counters", None)
+        if fidelity is not None:
+            fidelity["unparsed_effects"] += 1
+            source = gs._safe_get_card(self.card_id)
+            fidelity.setdefault("unparsed_cards", set()).add(
+                getattr(source, "name", f"card_{self.card_id}"))
+        return False
     
     def _extract_condition_clause(self, text):
         """Return the intervening 'if' clause (CR 603.4) from ability text, or None.
@@ -1812,6 +1877,12 @@ class StaticAbility(Ability):
 
     def _dynamic_affected_scope(self, effect_lower_clean):
         """Describe scopes whose membership must be recomputed each layer pass."""
+        if re.search(r"\bnonbasic lands?\b", effect_lower_clean):
+            return {
+                'players': 'all',
+                'all_card_types': ('land',),
+                'excluded_supertypes': ('basic',),
+            }
         compound_scopes = {
             r'\benchantment creatures? you control\b':
                 ('enchantment', 'creature'),
@@ -1884,6 +1955,7 @@ class StaticAbility(Ability):
                     'source_id': self.card_id,
                     'affected_ids': affected_cards, # Apply to same targets unless overridden
                     'effect_text': self.effect_text, # Store original text
+                    'source_ability': effect_lower_clean,
                     'duration': 'permanent',
                     'condition': lambda gs_check: (self.card_id in controller.get("battlefield", [])), # Standard condition
                     'controller_id': controller,
@@ -1917,6 +1989,7 @@ class StaticAbility(Ability):
                      'layer': layer,
                      'affected_ids': affected_cards,
                      'effect_text': self.effect_text,
+                     'source_ability': effect_lower_clean,
                      'duration': 'permanent',
                      'condition': lambda gs_check: (self.card_id in controller.get("battlefield", [])),
                      'controller_id': controller,
@@ -2270,6 +2343,15 @@ class StaticAbility(Ability):
 
     def _parse_layer4_effect(self, effect_lower):
         """Parse type/subtype adding/removing effects for Layer 4."""
+        basic_land_match = re.search(
+            r"\b(?:nonbasic )?lands? (?:is|are) "
+            r"(plains|island|swamp|mountain|forest)s?\b",
+            effect_lower)
+        if basic_land_match:
+            return {
+                'effect_type': 'set_basic_land_type',
+                'effect_value': basic_land_match.group(1),
+            }
         # Patterns to detect type/subtype changes
         set_type_match = re.search(r"becomes? a(?:n)? ([\w\s]+?)(?: in addition| that's still|$)", effect_lower)
         add_type_match = re.search(r"(is|are) also a(?:n)? (\w+)", effect_lower)
@@ -2345,7 +2427,12 @@ class StaticAbility(Ability):
         # Check for "becomes [type]", "is also [type]", or specific type removals
         # Use word boundaries to avoid partial matches within other words
         type_pattern = r"\b(becomes?|is also|are also)\b.*\b(artifact|creature|enchantment|land|planeswalker|battle)\b"
-        if re.search(type_pattern, cleaned_effect) or "loses all creature types" in cleaned_effect:
+        if (re.search(type_pattern, cleaned_effect)
+                or "loses all creature types" in cleaned_effect
+                or re.search(
+                    r"\b(?:nonbasic )?lands? (?:is|are) "
+                    r"(?:plains|island|swamp|mountain|forest)s?\b",
+                    cleaned_effect)):
             return 4
 
         # Layer 5: Color-changing effects
@@ -2434,6 +2521,7 @@ class StaticAbility(Ability):
 
         # Common scopes using regex for more flexibility
         scopes = {
+            r"\bnonbasic lands?\b": (None, "nonbasic_land"),
             r"\benchantment creatures? you control\b":
                 (me, ("enchantment", "creature")),
             r"\bartifact creatures? you control\b":
@@ -2490,7 +2578,13 @@ class StaticAbility(Ability):
         if not card: return False
         # Check basic type
         card_types = getattr(card, 'card_types', [])
-        if isinstance(type_scope, (tuple, list, set)):
+        if type_scope == "nonbasic_land":
+            if ("land" not in card_types
+                    or "basic" in {
+                        str(value).lower()
+                        for value in getattr(card, 'supertypes', [])}):
+                return False
+        elif isinstance(type_scope, (tuple, list, set)):
             if not all(required in card_types for required in type_scope):
                 return False
         elif type_scope != "any":
@@ -3033,6 +3127,27 @@ class DistributeCountersEffect(AbilityEffect):
             options.extend((targets or {}).get(category, []))
         options = list(dict.fromkeys(options))
         if not options:
+            return True
+        announced = getattr(self, "resolution_context", {}).get(
+            "counter_allocations")
+        if announced is not None:
+            allocations = {
+                target_id: int(announced.get(target_id, 0) or 0)
+                for target_id in options
+            }
+            if (sum(int(value or 0) for value in announced.values()) != self.count
+                    or any(count <= 0 for count in allocations.values())):
+                logging.error(
+                    "Invalid announced counter division for %s: %s",
+                    source_id, announced)
+                return False
+            # Illegal targets keep their announced share; those counters are
+            # not redistributed among the targets still legal at resolution.
+            for target_id, count in allocations.items():
+                owner, zone = game_state.find_card_location(target_id)
+                if zone == "battlefield":
+                    game_state.add_counter(
+                        target_id, self.counter_type, count)
             return True
         if len(options) > self.count:
             logging.warning(
@@ -6298,9 +6413,10 @@ class BlinkWithCounterEffect(AbilityEffect):
         if zone != "battlefield" or current_controller is not controller:
             return False
         owner = game_state._find_card_owner_fallback(target_id) or controller
+        blink_context = {}
         if not game_state.move_card(
                 target_id, controller, "battlefield", owner, "exile",
-                cause="blink"):
+                cause="blink", context=blink_context):
             return False
         # Tokens cease to exist after leaving the battlefield.
         if target_id not in owner.get("exile", []):
@@ -6309,7 +6425,23 @@ class BlinkWithCounterEffect(AbilityEffect):
                 target_id, owner, "exile", owner, "battlefield",
                 cause="blink_return"):
             return False
-        return bool(game_state.add_counter(target_id, self.counter_type, 1))
+        returned_ids = [target_id]
+        meld_partner_id = blink_context.get("_separated_meld_partner_id")
+        if meld_partner_id is not None:
+            partner_owner = game_state._find_card_owner_fallback(
+                meld_partner_id) or owner
+            if meld_partner_id in partner_owner.get("exile", []):
+                if not game_state.move_card(
+                        meld_partner_id, partner_owner, "exile",
+                        partner_owner, "battlefield", cause="blink_return",
+                        context={"meld_primary_id": target_id}):
+                    return False
+                returned_ids.append(meld_partner_id)
+        applied = False
+        for returned_id in returned_ids:
+            applied = bool(game_state.add_counter(
+                returned_id, self.counter_type, 1)) or applied
+        return applied
 
 
 class LessonDamageWithExileEffect(DamageWithExileReplacementEffect):

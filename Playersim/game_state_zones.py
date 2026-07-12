@@ -33,6 +33,9 @@ class GameStateZonesMixin:
             "toughness": getattr(card, "toughness", 0) if card else 0,
             "was_creature": "creature" in card_types,
             "was_token": bool(getattr(card, "is_token", False)) if card else False,
+            "lost_all_abilities": bool(
+                getattr(self, "layer_system", None)
+                and self.layer_system.source_has_lost_all_abilities(card_id)),
         }
 
     def _enters_battlefield_tapped(self, card, controller, card_id=None, context=None):
@@ -69,6 +72,52 @@ class GameStateZonesMixin:
             return self._get_active_player() is not controller
 
         return "enters tapped" in normalized
+
+    def _parse_own_as_enters(self, card):
+        """Return a permanent's first-entry choice and counter modifiers.
+
+        A permanent's own replacement ability functions before it is on the
+        battlefield. The ordinary ability registrar necessarily runs after the
+        move, so these self-replacements must be read from the entering object
+        during the move transaction itself.
+        """
+        if not card:
+            return None, []
+        text = (getattr(card, "oracle_text", "") or "").lower()
+        name = re.escape((getattr(card, "name", "") or "").lower())
+        subject = rf"(?:this (?:permanent|creature|land|artifact)|{name})"
+        prefix = rf"as {subject} enters(?: the battlefield)?"
+
+        choice_kind = None
+        choice_match = re.search(
+            prefix + r",?\s*choose\s+"
+            r"(a creature type|a card type|a color|an opponent)", text)
+        if choice_match:
+            choice_kind = {
+                "a creature type": "creature_type",
+                "a card type": "card_type",
+                "a color": "color",
+                "an opponent": "opponent",
+            }[choice_match.group(1)]
+
+        counters = []
+        counter_match = re.search(
+            prefix + r",?\s+with\s+"
+            r"(a|an|one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+"
+            r"((?:[+-]\d+/[+-]\d+)|[a-z][a-z0-9_-]*)\s+counters?",
+            text)
+        if counter_match:
+            count_token, counter_type = counter_match.groups()
+            words = {
+                "a": 1, "an": 1, "one": 1, "two": 2, "three": 3,
+                "four": 4, "five": 5, "six": 6, "seven": 7,
+                "eight": 8, "nine": 9, "ten": 10,
+            }
+            count = words.get(count_token, int(count_token)
+                              if count_token.isdigit() else 0)
+            if count > 0:
+                counters.append({"type": counter_type, "count": count})
+        return choice_kind, counters
 
     def _discard_player_key(self, player):
         if player == self.p1:
@@ -455,6 +504,27 @@ class GameStateZonesMixin:
             logging.debug(f"Movement of {card_name} from {actual_from_zone} to {final_destination_zone} prevented.")
             return False # Movement stopped
 
+        # A merged permanent is one object but still contains separately owned
+        # physical cards. Once it leaves the battlefield, each component must
+        # enter its owner's private zone (CR 721.3). Route the representative
+        # component correctly before emitting leave/enter events; the remaining
+        # components are separated after the representative move completes.
+        pending_mutation = (
+            getattr(self, "mutated_permanents", {}).get(card_id)
+            if actual_from_zone == "battlefield"
+            and final_destination_zone != "battlefield"
+            else None)
+        if (pending_mutation
+                and final_destination_zone in {
+                    "hand", "library", "graveyard", "exile"}):
+            owner_key = pending_mutation.get(
+                "component_owner_keys", {}).get(card_id)
+            owner = self.p1 if owner_key == "p1" else self.p2 if owner_key == "p2" else None
+            if owner is not None:
+                final_destination_player = owner
+                event_context["to_player"] = owner
+                event_context["to_zone"] = final_destination_zone
+
         earthbend_return = None
         if actual_from_zone == "battlefield" \
                 and final_destination_zone != "battlefield":
@@ -608,6 +678,13 @@ class GameStateZonesMixin:
                     and card_id in getattr(self, "melded_permanents", {})):
                 meld_info = self.melded_permanents.pop(card_id)
                 meld_partner_id = meld_info.get("partner_id")
+                # Immediate one-shot zone-change effects (blink/flicker) need
+                # to find both physical cards represented by the former melded
+                # object. Return the separated partner identity to the caller
+                # through its transaction context without retaining stale game
+                # state after an ordinary leave event.
+                if isinstance(context, dict) and meld_partner_id is not None:
+                    context["_separated_meld_partner_id"] = meld_partner_id
                 original_printed = meld_info.get("original_printed")
                 if card and original_printed:
                     card._printed = original_printed
@@ -655,6 +732,16 @@ class GameStateZonesMixin:
                     "duration": "permanent",
                 })
                 self.layer_system.apply_all_effects()
+
+            # A permanent's own "as enters" replacement applies on its first
+            # entry, before register_card_abilities can see the battlefield
+            # object. Merge it with any externally registered replacements.
+            own_choice, own_counters = self._parse_own_as_enters(card)
+            if own_choice and not event_context.get("as_enters_choice_needed"):
+                event_context["as_enters_choice_needed"] = own_choice
+                event_context["as_enters_source_id"] = card_id
+            if own_counters:
+                event_context.setdefault("enter_counters", []).extend(own_counters)
 
             # --- Standard ETB Setup ---
             final_destination_player.setdefault("entered_battlefield_this_turn", set()).add(card_id)
@@ -708,18 +795,6 @@ class GameStateZonesMixin:
                 logging.debug(f"Recorded offspring cost payment context for {card_name} ({card_id}) entering battlefield.")
             # --- End Offspring Recording ---
 
-            # "As this land enters, choose a creature type" (Cavern of Souls).
-            # Detected directly: the replacement-effect scanner only registers
-            # at battlefield entry, AFTER the ENTER replacements already ran,
-            # so a first entry could never see the choice -- and current
-            # Scryfall wording drops "the battlefield" entirely.
-            if (card and not event_context.get('as_enters_choice_needed')
-                    and re.search(
-                        r"as this (?:land|permanent|creature) enters(?: the battlefield)?, choose a creature type",
-                        (getattr(card, 'oracle_text', '') or '').lower())):
-                event_context['as_enters_choice_needed'] = 'creature_type'
-                event_context['as_enters_source_id'] = card_id
-
             # Handle "As enters" choice setup (must happen BEFORE ETB triggers)
             if event_context.get('as_enters_choice_needed'):
                  logging.debug(f"Entering CHOICE phase for 'As {card_name} enters...'")
@@ -730,32 +805,19 @@ class GameStateZonesMixin:
                      'type': f"as_enters_{event_context['as_enters_choice_needed']}",
                      'player': final_destination_player, 'card_id': card_id,
                      'source_id': event_context.get('as_enters_source_id', card_id),
-                     'resolved': False
+                     'resolved': False,
+                     'enter_context': enter_trigger_context,
                  }
-                 if event_context['as_enters_choice_needed'] == 'creature_type':
-                     self.choice_context['options'] = \
-                         self._creature_type_choice_options(final_destination_player)
+                 self.choice_context['options'] = self._as_enters_choice_options(
+                     event_context['as_enters_choice_needed'],
+                     final_destination_player)
                  self.priority_player = final_destination_player
                  self.priority_pass_count = 0
                  logging.info(f"'As enters' choice required for {card_name}. Waiting.")
             else:
                 # --- Trigger ETB Abilities (Only if no choice needed immediately) ---
-                # Add card_id to the enter trigger context now that it's fully on the BF
-                enter_trigger_context['card_id'] = card_id
-                self.trigger_ability(card_id, "ENTERS_BATTLEFIELD", enter_trigger_context)
-                if card and 'land' in getattr(card,'card_types',[]):
-                     self.trigger_ability(None, "LANDFALL", enter_trigger_context)
-                     self.trigger_ability(card_id, "LANDFALL_SELF", enter_trigger_context)
-                # CR 714.2/714.3 (July 2026 sweep): a Saga enters with one lore
-                # counter and its chapter I ability triggers. Setup seeded this
-                # ONLY during initial game setup, so a Saga cast mid-game never
-                # got a counter -- it sat inert and never advanced or
-                # sacrificed. Seed on every battlefield entry, into the same
-                # store advance_saga_counters and the SBA use (player dict).
-                if card and 'saga' in [s.lower() for s in getattr(card, 'subtypes', [])]:
-                     final_destination_player.setdefault("saga_counters", {})[card_id] = 1
-                     self.trigger_ability(card_id, "SAGA_CHAPTER", {"chapter": 1, "controller": final_destination_player})
-                     logging.debug(f"Saga {card_name} entered with lore counter 1 (chapter I).")
+                self._finish_battlefield_entry_triggers(
+                    card_id, final_destination_player, enter_trigger_context)
 
             # Handle Aura attachment *after* ETB setup (and triggers queued/resolved?) - Queue first is safer.
             if card and 'aura' in getattr(card, 'subtypes', []):
@@ -834,9 +896,15 @@ class GameStateZonesMixin:
             for component_id in mutation_info.get("components", []):
                 if component_id == card_id:
                     continue
+                owner_key = mutation_info.get(
+                    "component_owner_keys", {}).get(component_id)
+                component_destination = (
+                    self.p1 if owner_key == "p1"
+                    else self.p2 if owner_key == "p2"
+                    else final_destination_player)
                 self.move_card(
                     component_id, from_player, "stack_implicit",
-                    final_destination_player, final_destination_zone,
+                    component_destination, final_destination_zone,
                     cause="mutate_separated", context={"mutate_primary_id": card_id})
 
         # Resolve Earthbend's deterministic delayed return after the original
@@ -1525,6 +1593,11 @@ class GameStateZonesMixin:
     # Add a helper to find original owner if controller isn't readily available
     def _find_card_owner_fallback(self, card_id):
         """Fallback to find card owner based on original deck assignment or DB."""
+        owner_key = getattr(self, "card_instance_owners", {}).get(card_id)
+        if owner_key == "p1":
+            return self.p1
+        if owner_key == "p2":
+            return self.p2
         in_p1 = hasattr(self, 'original_p1_deck') and card_id in self.original_p1_deck
         in_p2 = hasattr(self, 'original_p2_deck') and card_id in self.original_p2_deck
         if in_p1 and not in_p2:

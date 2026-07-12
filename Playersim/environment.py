@@ -1023,10 +1023,17 @@ class AlphaZeroMTGEnv(gym.Env):
 
             player_key = player_idx
             opponent_key = 1 - player_key
+            canonical = self.game_state.canonical_card_id
 
-            player_played = cards_played_data.get(player_key, [])
-            player_opening = opening_hands_data.get(f'p{player_key+1}', [])
-            player_draws = draw_history_data.get(f'p{player_key+1}', {})
+            player_played = [canonical(card_id) for card_id in
+                              cards_played_data.get(player_key, [])]
+            player_opening = [canonical(card_id) for card_id in
+                               opening_hands_data.get(f'p{player_key+1}', [])]
+            player_draws = {
+                turn: [canonical(card_id) for card_id in cards]
+                for turn, cards in draw_history_data.get(
+                    f'p{player_key+1}', {}).items()
+            }
             player_plays = play_history_data.get(player_key, {})
 
             player_turn_played = {}
@@ -1034,7 +1041,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 for card_id in cards:
                     player_turn_played.setdefault(card_id, int(turn))
 
-            for card_id in set(player_deck):
+            for card_id in set(canonical(card_id) for card_id in player_deck):
                 card = self.game_state._safe_get_card(card_id)
                 if not card or not hasattr(card, 'name'): continue
 
@@ -1058,7 +1065,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 }
                 self.card_memory.update_card_performance(card_id, perf_data)
 
-            for card_id in set(opponent_deck):
+            for card_id in set(canonical(card_id) for card_id in opponent_deck):
                  card = self.game_state._safe_get_card(card_id)
                  if card and hasattr(card, 'name'):
                      self.card_memory.register_card(card_id, card.name, {
@@ -1795,7 +1802,8 @@ class AlphaZeroMTGEnv(gym.Env):
                     if opponent_mask[action_idx]:
                         return action_idx, {}
                 return None, {}
-            if choice_type in ("opening_hand", "forced_sacrifice", "as_enters_creature_type"):
+            if (choice_type in ("opening_hand", "forced_sacrifice")
+                    or choice_type.startswith("as_enters_")):
                 # First-legal-action policy for mandatory or begin-game picks.
                 for action_idx in range(353, 363):
                     if opponent_mask[action_idx]:

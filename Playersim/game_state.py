@@ -2,6 +2,7 @@ import random
 import logging
 import numpy as np
 import copy
+import types
 
 from .ability_utils import EffectFactory
 
@@ -30,7 +31,8 @@ class GameState(
 ):
 
     # (Keep existing class variables like PHASE_ constants and __slots__)
-    __slots__ = ["card_db", "max_turns", "max_hand_size", "max_battlefield", "day_night_checked_this_turn",
+    __slots__ = ["card_db", "card_instance_printings", "card_instance_owners",
+                 "max_turns", "max_hand_size", "max_battlefield", "day_night_checked_this_turn",
                  "fidelity_counters", "_sba_in_progress", "delayed_triggers",
                  "delayed_event_triggers", "copy_overrides", "plotted_cards",
                  "graveyard_adventure_permissions", "flashback_permissions",
@@ -149,6 +151,8 @@ class GameState(
     def __init__(self, card_db, max_turns=30, max_hand_size=7, max_battlefield=20):
         # ... (Keep basic param init) ...
         self.card_db = card_db
+        self.card_instance_printings = {}
+        self.card_instance_owners = {}
         self.max_turns = max_turns
         self.max_hand_size = max_hand_size
         self.max_battlefield = max_battlefield
@@ -619,8 +623,11 @@ class GameState(
                     player["phased_out_permanents"] = set()
                     # Reset mana pools
                     player["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
+                    player["snow_mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
                     player["conditional_mana"] = {}
+                    player["conditional_snow_mana"] = {}
                     player["phase_restricted_mana"] = {}
+                    player["phase_restricted_snow_mana"] = {}
 
             logging.debug("Initialized/Reset all tracking variables")
 
@@ -655,6 +662,8 @@ class GameState(
             # Ensure decks exist and are at least copy-able, with fallbacks if necessary
             p1_deck_safe = p1_deck.copy() if isinstance(p1_deck, list) else []
             p2_deck_safe = p2_deck.copy() if isinstance(p2_deck, list) else []
+            p1_deck_safe, p2_deck_safe = self._materialize_deck_instances(
+                p1_deck_safe, p2_deck_safe)
             
             # Ensure original deck references exist even if empty
             self.original_p1_deck = p1_deck_safe
@@ -735,6 +744,56 @@ class GameState(
             self.check_mulligan_state()
 
             logging.debug("GameState reset complete. Mulligan phase active. Priority initialized to P1.")
+
+    def _materialize_deck_instances(self, p1_deck, p2_deck):
+            """Give every repeated physical card a distinct runtime identity.
+
+            Input decks remain canonical registry-ID lists. Every physical
+            occurrence receives a dedicated runtime ID backed by a branch-local
+            Card copy, including the first copy of a printing; registry Card
+            objects therefore remain immutable across games/environments.
+            Runtime maps preserve canonical statistics identity and ownership.
+            """
+            previous = dict(getattr(self, "card_instance_printings", {}) or {})
+            # Callers may reset from GameState.original_*_deck, whose entries
+            # are runtime IDs. Normalize them before retiring old instances.
+            p1_deck = [previous.get(card_id, card_id) for card_id in p1_deck]
+            p2_deck = [previous.get(card_id, card_id) for card_id in p2_deck]
+            for runtime_id, printing_id in previous.items():
+                if runtime_id != printing_id:
+                    self.card_db.pop(runtime_id, None)
+            self.card_instance_printings = {}
+            self.card_instance_owners = {}
+
+            numeric_ids = [key for key in self.card_db if isinstance(key, int)]
+            next_runtime_id = max([-1] + numeric_ids) + 1
+            def materialize(deck, owner_key):
+                nonlocal next_runtime_id
+                result = []
+                for printing_id in deck:
+                    printing = self.card_db.get(printing_id)
+                    if printing is None:
+                        logging.error(
+                            "Cannot materialize missing printing %r",
+                            printing_id)
+                        result.append(printing_id)
+                        continue
+                    runtime_id = next_runtime_id
+                    next_runtime_id += 1
+                    instance = self._clone_card_object(printing, self)
+                    instance.card_id = runtime_id
+                    self.card_db[runtime_id] = instance
+                    self.card_instance_printings[runtime_id] = printing_id
+                    self.card_instance_owners[runtime_id] = owner_key
+                    result.append(runtime_id)
+                return result
+
+            return materialize(p1_deck, "p1"), materialize(p2_deck, "p2")
+
+    def canonical_card_id(self, card_id):
+        """Return a runtime card's stable registry/statistics identity."""
+        return getattr(self, "card_instance_printings", {}).get(
+            card_id, card_id)
     
     def _init_player(self, deck, player_num):
         """Initialize a player's state with a given deck and draw 7 cards for the starting hand."""
@@ -773,7 +832,9 @@ class GameState(
             "mana_pool": {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}, # Regular mana
             "snow_mana_pool": {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0},
             "conditional_mana": {}, # Restricted mana pools e.g. {'cast_creatures': {'G': 1}}
+            "conditional_snow_mana": {},
             "phase_restricted_mana": {}, # Mana that empties at phase end, not turn end
+            "phase_restricted_snow_mana": {},
             "mana_production": {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0},
             "land_played": False,
             "tapped_permanents": set(), # Store IDs of tapped permanents
@@ -913,8 +974,44 @@ class GameState(
         """
 
         logging.debug("Cloning GameState starting...")
-        # 1. Create a new instance with basic parameters (card_db is shared reference)
-        cloned_state = GameState(self.card_db, self.max_turns, self.max_hand_size, self.max_battlefield)
+        # 1. Copy the registry mapping, then isolate every card identity that
+        # can become mutable in this branch. The frozen registry records remain
+        # shared only for unreachable cards; live/zone/stack/merged cards use
+        # branch-local Card objects.
+        cloned_card_db = self.card_db.copy()
+        reachable_card_ids = set()
+        for player in (self.p1, self.p2):
+            if not player:
+                continue
+            for zone in (
+                    "library", "hand", "battlefield", "graveyard", "exile"):
+                reachable_card_ids.update(player.get(zone, []))
+        for item in getattr(self, "stack", []):
+            if isinstance(item, tuple) and len(item) > 1:
+                reachable_card_ids.add(item[1])
+        for info in getattr(self, "mutated_permanents", {}).values():
+            reachable_card_ids.update(info.get("components", []))
+        for primary_id, info in getattr(self, "melded_permanents", {}).items():
+            reachable_card_ids.update({
+                primary_id, info.get("partner_id"), info.get("result_id")})
+        for source_id, info in getattr(self, "specialized_cards", {}).items():
+            reachable_card_ids.update({source_id, info.get("variant_id")})
+        reachable_card_ids.discard(None)
+        for card_id in reachable_card_ids:
+            card = self.card_db.get(card_id)
+            if card is not None:
+                cloned_card_db[card_id] = self._clone_card_object(
+                    card, None)
+        # Construct only after replacing live objects. GameState initialization
+        # resets transient Card state, so passing the source branch's live Card
+        # objects here would itself mutate the source while making a clone.
+        cloned_state = GameState(
+            cloned_card_db, self.max_turns, self.max_hand_size,
+            self.max_battlefield)
+        for card_id in reachable_card_ids:
+            cloned_card = cloned_state.card_db.get(card_id)
+            if cloned_card is not None and hasattr(cloned_card, "game_state"):
+                cloned_card.game_state = cloned_state
 
         # --- Copy Primitive/Immutable Attributes ---
         # List all attributes expected to be simple types (int, float, bool, str, None)
@@ -951,12 +1048,6 @@ class GameState(
             # If players fail to copy, clone is likely unusable
             return None
 
-        cloned_state.delayed_triggers = [
-            copy.deepcopy(entry)
-            for entry in getattr(self, "delayed_triggers", [])
-            if isinstance(entry, dict) and entry.get("payload") is not None
-        ]
-
         # --- Deep Copy Other Mutable Top-Level Attributes ---
         # Use deepcopy for dictionaries and lists/sets that might contain mutable items or need full separation.
         # Use shallow copy (.copy() or [:]) only if absolutely sure elements are immutable (like IDs) AND no nested mutables exist.
@@ -971,6 +1062,7 @@ class GameState(
             "life_gained_this_turn", "damage_this_turn", "cards_to_graveyard_this_turn",
             "saga_counters", "battle_cards", "suspended_cards", "rebounded_cards", "phased_out_state",
             "melded_permanents", "mutated_permanents", "specialized_cards", "last_die_roll", "die_roll_history",
+            "card_instance_printings", "card_instance_owners",
             "foretold_cards", "epic_spells", "morphed_cards", "manifested_cards",
             "copy_overrides", "plotted_cards", "graveyard_adventure_permissions",
             "flashback_permissions", "earthbent_lands",
@@ -1216,6 +1308,15 @@ class GameState(
         if cloned_state.strategic_planner and hasattr(cloned_state.strategic_planner, 'strategy_memory'):
              cloned_state.strategic_planner.strategy_memory = cloned_state.strategy_memory
 
+        # Delayed callbacks are copied only after clone subsystems exist, so
+        # captured GameState/player/subsystem references can be rebound safely.
+        cloned_state.delayed_triggers = []
+        for entry in getattr(self, "delayed_triggers", []):
+            cloned_entry = self._clone_delayed_trigger_entry(
+                entry, cloned_state)
+            if cloned_entry is not None:
+                cloned_state.delayed_triggers.append(cloned_entry)
+
 
         # Re-apply layers on the clone to ensure all characteristics are correct
         # Crucial if card objects weren't deep copied or if repopulating abilities happened
@@ -1226,6 +1327,106 @@ class GameState(
 
         logging.info("GameState cloned successfully.")
         return cloned_state
+
+    @staticmethod
+    def _make_closure_cell(value):
+        """Create a Python closure cell containing value."""
+        return (lambda captured: lambda: captured)(value).__closure__[0]
+
+    @staticmethod
+    def _clone_card_object(card, cloned_state):
+        """Copy one mutable Card without recursively copying its GameState."""
+        cloned_card = copy.copy(card)
+        for key, value in getattr(card, "__dict__", {}).items():
+            if key == "game_state":
+                continue
+            try:
+                setattr(cloned_card, key, copy.deepcopy(value))
+            except Exception:
+                setattr(cloned_card, key, copy.copy(value))
+        if cloned_state is not None and hasattr(cloned_card, "game_state"):
+            cloned_card.game_state = cloned_state
+        return cloned_card
+
+    def _clone_callback_capture(self, value, cloned_state):
+        """Map a captured legacy-callback value into cloned game state."""
+        identity_map = {
+            id(self): cloned_state,
+            id(self.p1): cloned_state.p1,
+            id(self.p2): cloned_state.p2,
+        }
+        for attr in (
+                "ability_handler", "layer_system", "mana_system",
+                "replacement_effects", "targeting_system", "combat_resolver",
+                "action_handler"):
+            original = getattr(self, attr, None)
+            cloned = getattr(cloned_state, attr, None)
+            if original is not None:
+                identity_map[id(original)] = cloned
+        mapped = identity_map.get(id(value), None)
+        if id(value) in identity_map:
+            return mapped
+        try:
+            return copy.deepcopy(value)
+        except Exception:
+            return value
+
+    def _clone_legacy_callback(self, callback, cloned_state):
+        """Rebind supported legacy functions/methods to cloned state."""
+        if isinstance(callback, types.MethodType):
+            rebound_self = self._clone_callback_capture(
+                callback.__self__, cloned_state)
+            return types.MethodType(callback.__func__, rebound_self)
+        if isinstance(callback, types.FunctionType):
+            closure = callback.__closure__
+            rebound_cells = None
+            if closure:
+                rebound_cells = tuple(
+                    self._make_closure_cell(
+                        self._clone_callback_capture(cell.cell_contents,
+                                                     cloned_state))
+                    for cell in closure)
+            defaults = (
+                tuple(self._clone_callback_capture(value, cloned_state)
+                      for value in callback.__defaults__)
+                if callback.__defaults__ else None)
+            rebound = types.FunctionType(
+                callback.__code__, callback.__globals__, callback.__name__,
+                defaults, rebound_cells)
+            rebound.__kwdefaults__ = (
+                {key: self._clone_callback_capture(value, cloned_state)
+                 for key, value in callback.__kwdefaults__.items()}
+                if callback.__kwdefaults__ else None)
+            rebound.__dict__.update(copy.deepcopy(callback.__dict__))
+            return rebound
+        return None
+
+    def _clone_delayed_trigger_entry(self, entry, cloned_state):
+        """Clone one structured or legacy delayed-trigger registry entry."""
+        if isinstance(entry, dict):
+            cloned_entry = copy.deepcopy({
+                key: value for key, value in entry.items() if key != "effect"
+            })
+            effect = entry.get("effect")
+            if effect is not None:
+                cloned_effect = self._clone_legacy_callback(
+                    effect, cloned_state)
+                if cloned_effect is None:
+                    logging.error(
+                        "Cannot clone delayed trigger callable %r; registration "
+                        "should use a function/method or structured payload.",
+                        effect)
+                    return None
+                cloned_entry["effect"] = cloned_effect
+            else:
+                cloned_entry["effect"] = None
+            return cloned_entry
+        if callable(entry):
+            cloned_effect = self._clone_legacy_callback(entry, cloned_state)
+            if cloned_effect is None:
+                logging.error("Cannot clone bare delayed trigger %r", entry)
+            return cloned_effect
+        return copy.deepcopy(entry)
  
     def count_dynamic_quantity(self, expr, controller):
         """Count a "number of X you control / in your graveyard" style quantity.

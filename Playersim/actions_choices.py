@@ -617,6 +617,10 @@ class ChoiceHandlersMixin:
                     "activation_source_occurrence": ability_source_occurrence,
                 },
             }
+            distribution_spec = gs._counter_distribution_spec(effect_text)
+            if distribution_spec:
+                gs.targeting_context["counter_distribution"] = \
+                    distribution_spec
             gs.priority_player = player
             gs.priority_pass_count = 0
             logging.debug(f"Waiting for a target before paying {card.name}'s activation cost.")
@@ -841,6 +845,9 @@ class ChoiceHandlersMixin:
             "crew_cost_paid": bool(context.get('crew_cost_paid')),
             "X": int(context.get('activation_X', 0) or 0),
         }
+        if context.get("counter_allocations"):
+            stack_context["counter_allocations"] = dict(
+                context["counter_allocations"])
         gs.add_to_stack("ABILITY", card_id, player, stack_context)
         if context.get("commit_activation_targets"):
             gs.notify_targets_committed(
@@ -983,12 +990,38 @@ class ChoiceHandlersMixin:
             gs.priority_player = priority_player
             gs.priority_pass_count = 0
 
+        def begin_distribution_announcement(kind, continuation_context):
+            spec = ctx.get("counter_distribution")
+            if not spec or not committed_targets:
+                return False
+            restore_phase(player)
+            gs.targeting_context = None
+            gs.choice_context = {
+                "type": "distribute_counters", "player": player,
+                "options": list(committed_targets),
+                "remaining": int(spec.get("count", 0)),
+                "allocations": {},
+                "counter_type": spec.get("counter_type", "+1/+1"),
+                "source_id": ctx.get("source_id"),
+                "announcement_kind": kind,
+                "announcement_context": continuation_context,
+                "resume_phase": gs.phase,
+                "resume_previous_priority_phase": gs.previous_priority_phase,
+            }
+            gs.phase = gs.PHASE_CHOOSE
+            gs.priority_player = player
+            gs.priority_pass_count = 0
+            return True
+
         if ctx.get("resume_activation"):
             activation_context = dict(ctx.get("activation_context", {}))
             activation_context["activation_targets"] = categorized_targets
             activation_context["commit_activation_targets"] = True
             if targets_by_slot:
                 activation_context["targets_by_slot"] = targets_by_slot
+            if begin_distribution_announcement(
+                    "activation", activation_context):
+                return 0.02, True
             gs.targeting_context = None
             restore_phase(player)
             return self._handle_activate_ability(None, activation_context)
@@ -1000,6 +1033,8 @@ class ChoiceHandlersMixin:
                 cast_context["targets_by_slot"] = targets_by_slot
             card_id = ctx.get("source_id")
             controller = ctx.get("controller")
+            if begin_distribution_announcement("cast", cast_context):
+                return 0.02, True
             gs.targeting_context = None
             restore_phase(controller)
             success = gs.cast_spell(card_id, controller, cast_context)
@@ -1559,6 +1594,27 @@ class ChoiceHandlersMixin:
             if any(int(allocations.get(target_id, 0)) <= 0 for target_id in options):
                 logging.error("Counter distribution completed without assigning every target.")
                 return -0.1, False
+            announcement_kind = ctx.get("announcement_kind")
+            if announcement_kind:
+                continuation_context = dict(
+                    ctx.get("announcement_context", {}))
+                continuation_context["counter_allocations"] = dict(
+                    allocations)
+                source_id = ctx.get("source_id")
+                gs.choice_context = None
+                gs.phase = ctx.get("resume_phase", gs.PHASE_PRIORITY)
+                gs.previous_priority_phase = ctx.get(
+                    "resume_previous_priority_phase")
+                gs.priority_player = player
+                gs.priority_pass_count = 0
+                if announcement_kind == "cast":
+                    success = gs.cast_spell(
+                        source_id, player, continuation_context)
+                    return (0.05 if success else -0.1), bool(success)
+                if announcement_kind == "activation":
+                    return self._handle_activate_ability(
+                        None, continuation_context)
+                return -0.1, False
             for target_id, count in allocations.items():
                 if not gs.add_counter(target_id, ctx.get('counter_type', '+1/+1'), count):
                     return -0.1, False
@@ -1791,12 +1847,12 @@ class ChoiceHandlersMixin:
             gs.choice_context = None
             return 0.05, True
         if (getattr(gs, 'choice_context', None)
-                and gs.choice_context.get('type') == 'as_enters_creature_type'):
+                and gs.choice_context.get('type', '').startswith('as_enters_')):
             player = gs.p1 if gs.agent_is_p1 else gs.p2
             if gs.choice_context.get('player') is not player:
-                logging.warning("Creature-type choice called for the wrong player.")
+                logging.warning("As-enters choice called for the wrong player.")
                 return -0.2, False
-            success = gs.complete_as_enters_creature_type(param)
+            success = gs.complete_as_enters_choice(param)
             return (0.05 if success else -0.1), success
         if (getattr(gs, 'choice_context', None)
                 and gs.choice_context.get('type') == 'mockingbird_copy'):

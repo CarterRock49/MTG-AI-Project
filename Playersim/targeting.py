@@ -899,10 +899,13 @@ class TargetingSystem:
         for ids in valid_targets_now.values():
             all_valid_target_ids.update(ids)
 
-        for category, target_list in targets.items():
+        original_count = 0
+        legal_count = 0
+        for category, target_list in list(targets.items()):
             if not isinstance(target_list, list): # Ensure it's a list
                  logging.warning(f"Invalid target list format for category '{category}' in validate_targets.")
                  return False
+            original_count += len(target_list)
 
             valid_in_category = set()
             if category in ("chosen", "target", "targets"):
@@ -910,6 +913,7 @@ class TargetingSystem:
             else:
                 for alias in self._target_category_aliases(category):
                     valid_in_category.update(valid_targets_now.get(alias, []))
+            legal_targets = []
             for target_id in target_list:
                 if target_id not in valid_in_category:
                     # Log details about why the target is invalid
@@ -918,9 +922,15 @@ class TargetingSystem:
                     # target_info = self._get_target_info(target_id)
                     # requirement = self._get_requirement_for_category(card_id, category)
                     # self._is_valid_target(card_id, target_id, controller, target_info, requirement) # For debug logging inside
-                    return False
+                    continue
+                legal_targets.append(target_id)
+            targets[category] = legal_targets
+            legal_count += len(legal_targets)
 
-        return True
+        # CR 608.2b: an object is countered by the rules only when every one
+        # of its targets is illegal. Otherwise it resolves against the targets
+        # that remain legal, without rechoosing or redistributing decisions.
+        return original_count == 0 or legal_count > 0
 
     def _target_category_aliases(self, category):
         """Return accepted singular/plural aliases for target category keys."""
@@ -1068,6 +1078,9 @@ class TargetingSystem:
     def _get_card_owner_fallback(self, card_id):
         """Fallback to find card owner based on original deck assignment or DB."""
         gs = self.game_state
+        owner_key = getattr(gs, "card_instance_owners", {}).get(card_id)
+        if owner_key == "p1": return gs.p1
+        if owner_key == "p2": return gs.p2
         if hasattr(gs, 'original_p1_deck') and card_id in gs.original_p1_deck: return gs.p1
         if hasattr(gs, 'original_p2_deck') and card_id in gs.original_p2_deck: return gs.p2
         return gs.p1 # Default

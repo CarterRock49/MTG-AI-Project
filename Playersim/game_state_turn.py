@@ -6,6 +6,7 @@ all state lives on GameState itself, which composes every mixin.
 
 import logging
 import re
+import types
 
 
 class GameStateTurnMixin:
@@ -201,8 +202,11 @@ class GameStateTurnMixin:
         # --- Standard Untap Actions ---
         # Reset mana pools
         player["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
+        player["snow_mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
         player["conditional_mana"] = {}
+        player["conditional_snow_mana"] = {}
         player["phase_restricted_mana"] = {}
+        player["phase_restricted_snow_mana"] = {}
 
         # Untap permanents *that did not phase out*. Route every attempt
         # through untap_permanent so stun and other replacements apply.
@@ -492,7 +496,9 @@ class GameStateTurnMixin:
                 player["mana_pool"] = dict(empty_pool)
                 player["snow_mana_pool"] = dict(empty_pool)
                 player["conditional_mana"] = {}
+                player["conditional_snow_mana"] = {}
                 player["phase_restricted_mana"] = {}
+                player["phase_restricted_snow_mana"] = {}
 
     def _advance_phase(self):
             """
@@ -759,6 +765,13 @@ class GameStateTurnMixin:
                 legacy bare-callable producers.
         Triggers fire exactly once, then expire.
         """
+        if payload is None and effect is None:
+            raise ValueError("delayed trigger requires an effect or payload")
+        if (payload is None and not isinstance(
+                effect, (types.FunctionType, types.MethodType))):
+            raise TypeError(
+                "opaque delayed callable objects are not clone-safe; use a "
+                "function/method or structured payload")
         if not hasattr(self, 'delayed_triggers') or self.delayed_triggers is None:
             self.delayed_triggers = []
         self.delayed_triggers.append({
@@ -785,6 +798,11 @@ class GameStateTurnMixin:
             if moved:
                 self.cards_castable_from_exile.add(card_id)
             return bool(moved)
+        if payload.get("kind") == "life_gain":
+            controller = self.p1 if payload.get("controller_id") == "p1" else self.p2
+            return bool(self.gain_life(
+                controller, int(payload.get("amount", 0) or 0),
+                source_id=payload.get("source_id")))
         if payload.get("kind") != "oracle_text":
             return False
         from .ability_types import DelayedTriggerEffect

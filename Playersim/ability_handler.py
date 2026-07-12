@@ -1815,6 +1815,15 @@ class AbilityHandler:
         for card_id, ability, controller, zone_name in abilities_to_check:
              if not isinstance(ability, TriggeredAbility): continue
 
+             layer_system = getattr(gs, 'layer_system', None)
+             if (zone_name == 'battlefield' and layer_system
+                     and layer_system.source_has_lost_all_abilities(card_id)):
+                 continue
+             if (card_id == event_origin_card_id
+                     and (context.get('last_known') or {}).get(
+                         'lost_all_abilities', False)):
+                 continue
+
              source_card = gs._safe_get_card(card_id) # Fetch card for context checks
              if not source_card: continue # Card disappeared?
 
@@ -1907,6 +1916,11 @@ class AbilityHandler:
 
     def get_activated_abilities(self, card_id):
         """Get all activated abilities for a given card"""
+        layer_system = getattr(self.game_state, 'layer_system', None)
+        if (layer_system
+                and self.game_state.get_card_controller(card_id)
+                and layer_system.source_has_lost_all_abilities(card_id)):
+            return []
         card_abilities = self.registered_abilities.get(card_id, [])
         return [ability for ability in card_abilities if isinstance(ability, ActivatedAbility)]
 
@@ -1921,6 +1935,9 @@ class AbilityHandler:
                 or target_controller is controller or not gs._is_creature(target_id)):
             return False
         for source_id in controller.get("battlefield", []):
+            if (getattr(gs, 'layer_system', None)
+                    and gs.layer_system.source_has_lost_all_abilities(source_id)):
+                continue
             for ability in self.registered_abilities.get(source_id, []):
                 if (getattr(ability, "targeting_override", None) == protection
                         and getattr(ability, "scope", None) == "opponent_creatures"):

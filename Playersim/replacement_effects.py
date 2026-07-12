@@ -2214,29 +2214,17 @@ class ReplacementEffectSystem:
 
             # Create a life gain side effect (doesn't replace the damage itself)
             if damage_dealt > 0:
-                def gain_life_later():
-                    # Verify controller still exists and hasn't lost
-                    if lifelink_controller and lifelink_controller.get("life", 0) > 0:
-                        # Apply life gain replacement effects to this gain
-                        # Ensure self.apply_replacements is callable or exists
-                        gain_context = {'player': lifelink_controller, 'life_amount': damage_dealt, 'source_type': 'lifelink'}
-                        modified_gain_context, gain_replaced = self.apply_replacements("LIFE_GAIN", gain_context)
-                        final_life_gain = modified_gain_context.get('life_amount', 0)
-
-                        if final_life_gain > 0:
-                            lifelink_controller['life'] += final_life_gain
-                            logging.debug(f"Lifelink: {source_name} gained {final_life_gain} life.")
-                            # Trigger "gain life" events
-                            if hasattr(self.game_state, 'trigger_ability'):
-                                # Pass lifelink source ID and controller
-                                self.game_state.trigger_ability(lifelink_source_id, "LIFE_GAINED", {"amount": final_life_gain, "controller": lifelink_controller})
-                    else:
-                        logging.debug(f"Lifelink gain prevented for {source_name} (controller lost or invalid).")
-
-
                 # Schedule the life gain after damage event fully resolves
-                if not hasattr(self.game_state, 'delayed_triggers'): self.game_state.delayed_triggers = []
-                self.game_state.delayed_triggers.append(gain_life_later)
+                controller_id = (
+                    "p1" if lifelink_controller is self.game_state.p1 else "p2")
+                self.game_state.register_delayed_trigger(
+                    payload={
+                        "kind": "life_gain",
+                        "controller_id": controller_id,
+                        "source_id": lifelink_source_id,
+                        "amount": damage_dealt,
+                    },
+                    description=f"{source_name} lifelink gain")
             return ctx # Don't modify the damage event itself
 
         # Ensure effect_id is assigned *before* being potentially captured by the closure

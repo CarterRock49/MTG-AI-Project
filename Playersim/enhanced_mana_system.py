@@ -75,7 +75,7 @@ class EnhancedManaSystem:
         
         return snow_sources
 
-    def can_pay_snow_cost(self, player, snow_cost):
+    def can_pay_snow_cost(self, player, snow_cost, context=None):
         """
         Check if a player can pay a snow mana cost.
         
@@ -96,13 +96,31 @@ class EnhancedManaSystem:
             max(0, min(int(amount or 0),
                        int(player.get("mana_pool", {}).get(color, 0) or 0)))
             for color, amount in player.get("snow_mana_pool", {}).items())
+        available_snow += sum(
+            max(0, min(int(amount or 0), int(
+                player.get("phase_restricted_mana", {}).get(color, 0) or 0)))
+            for color, amount in player.get(
+                "phase_restricted_snow_mana", {}).items())
+        for restriction_key, provenance in player.get(
+                "conditional_snow_mana", {}).items():
+            if not self._can_use_conditional_mana(
+                    restriction_key, context or {}):
+                continue
+            restricted_pool = player.get("conditional_mana", {}).get(
+                restriction_key, {})
+            available_snow += sum(
+                max(0, min(int(amount or 0), int(
+                    restricted_pool.get(color, 0) or 0)))
+                for color, amount in provenance.items())
         available_snow += self.track_snow_sources(player)
         
         # Check if player has enough snow mana sources
         return available_snow >= snow_cost
 
     def pay_snow_cost(self, player, snow_cost, mana_pool=None,
-                      snow_pool=None, payment=None):
+                      snow_pool=None, payment=None, phase_pool=None,
+                      conditional_pool=None, phase_snow_pool=None,
+                      conditional_snow_pool=None, context=None):
         """
         Pay a snow mana cost.
         
@@ -122,6 +140,18 @@ class EnhancedManaSystem:
         payment = payment if payment is not None else {}
         payment.setdefault("snow_spent_colors", defaultdict(int))
         payment.setdefault("snow_tapped_sources", [])
+        phase_pool = phase_pool if phase_pool is not None else dict(
+            player.get("phase_restricted_mana", {}))
+        conditional_pool = conditional_pool if conditional_pool is not None else {
+            key: dict(value) for key, value in player.get(
+                "conditional_mana", {}).items()}
+        phase_snow_pool = (
+            phase_snow_pool if phase_snow_pool is not None else dict(
+                player.get("phase_restricted_snow_mana", {})))
+        conditional_snow_pool = (
+            conditional_snow_pool if conditional_snow_pool is not None else {
+                key: dict(value) for key, value in player.get(
+                    "conditional_snow_mana", {}).items()})
 
         remaining = int(snow_cost)
         # Consume already-floated snow mana first. Cap provenance against the
@@ -135,10 +165,46 @@ class EnhancedManaSystem:
             if spend:
                 mana_pool[color] -= spend
                 snow_pool[color] = available - spend
+                payment.setdefault("colors", defaultdict(int))[color] += spend
                 payment["snow_spent_colors"][color] += spend
                 remaining -= spend
             if remaining <= 0:
                 return True
+
+        for color in ('C', 'W', 'U', 'B', 'R', 'G'):
+            available = min(
+                max(0, int(phase_snow_pool.get(color, 0) or 0)),
+                max(0, int(phase_pool.get(color, 0) or 0)))
+            spend = min(remaining, available)
+            if spend:
+                phase_pool[color] -= spend
+                phase_snow_pool[color] = available - spend
+                payment.setdefault(
+                    "phase_restricted", defaultdict(int))[color] += spend
+                payment["snow_spent_colors"][color] += spend
+                remaining -= spend
+            if remaining <= 0:
+                return True
+
+        for restriction_key, provenance in conditional_snow_pool.items():
+            if not self._can_use_conditional_mana(
+                    restriction_key, context or {}):
+                continue
+            restricted_pool = conditional_pool.get(restriction_key, {})
+            for color in ('C', 'W', 'U', 'B', 'R', 'G'):
+                available = min(
+                    max(0, int(provenance.get(color, 0) or 0)),
+                    max(0, int(restricted_pool.get(color, 0) or 0)))
+                spend = min(remaining, available)
+                if spend:
+                    restricted_pool[color] -= spend
+                    provenance[color] = available - spend
+                    payment.setdefault("conditional", defaultdict(
+                        lambda: defaultdict(int)))[restriction_key][color] += spend
+                    payment["snow_spent_colors"][color] += spend
+                    remaining -= spend
+                if remaining <= 0:
+                    return True
 
         # Find untapped snow permanents. Their produced mana pays {S}
         # directly; it must not also be left in the pool.
@@ -1225,7 +1291,7 @@ class EnhancedManaSystem:
                 conditional_mana = player.get("conditional_mana", {})
                 
                 # Include phase-restricted mana
-                if hasattr(player, "phase_restricted_mana"):
+                if "phase_restricted_mana" in player:
                     for color, amount in player["phase_restricted_mana"].items():
                         if color in available_mana:
                             available_mana[color] += amount
@@ -1272,7 +1338,8 @@ class EnhancedManaSystem:
                     
             # Handle snow mana
             if parsed_cost['snow'] > 0:
-                if not self.can_pay_snow_cost(player, parsed_cost['snow']):
+                if not self.can_pay_snow_cost(
+                        player, parsed_cost['snow'], context):
                     return False
 
             # Calculate generic mana requirement
@@ -1964,7 +2031,7 @@ class EnhancedManaSystem:
         Args:
             player: The player dictionary
         """
-        if not hasattr(player, "conditional_mana"):
+        if "conditional_mana" not in player:
             return
             
         to_remove = []
@@ -1977,6 +2044,7 @@ class EnhancedManaSystem:
         # Remove empty pools
         for key in to_remove:
             del player["conditional_mana"][key]
+            player.get("conditional_snow_mana", {}).pop(key, None)
 
     def _format_payment_for_logging(self, payment):
         """Format a payment for logging."""
@@ -2166,6 +2234,11 @@ class EnhancedManaSystem:
         snow_pool = player.get("snow_mana_pool", {}).copy()
         conditional_pool = {k: v.copy() for k, v in player.get("conditional_mana", {}).items()}
         phase_pool = player.get("phase_restricted_mana", {}).copy()
+        conditional_snow_pool = {
+            key: value.copy() for key, value in player.get(
+                "conditional_snow_mana", {}).items()}
+        phase_snow_pool = player.get(
+            "phase_restricted_snow_mana", {}).copy()
 
         try:
             usable_conditional = self._get_usable_conditional_mana(conditional_pool, context)
@@ -2226,7 +2299,8 @@ class EnhancedManaSystem:
             if final_cost.get('snow', 0) > 0:
                 if not self.pay_snow_cost(
                         player, final_cost['snow'], current_pool,
-                        snow_pool, payment):
+                        snow_pool, payment, phase_pool, conditional_pool,
+                        phase_snow_pool, conditional_snow_pool, context):
                     raise ValueError("Failed to pay Snow mana cost")
                 payment['snow'] += final_cost['snow'] # Track that snow was paid
 
@@ -2264,6 +2338,18 @@ class EnhancedManaSystem:
             player["snow_mana_pool"] = snow_pool
             player["conditional_mana"] = conditional_pool
             player["phase_restricted_mana"] = phase_pool
+            for color in list(phase_snow_pool):
+                phase_snow_pool[color] = min(
+                    max(0, int(phase_snow_pool.get(color, 0) or 0)),
+                    max(0, int(phase_pool.get(color, 0) or 0)))
+            player["phase_restricted_snow_mana"] = phase_snow_pool
+            for restriction_key, provenance in conditional_snow_pool.items():
+                restricted_pool = conditional_pool.get(restriction_key, {})
+                for color in list(provenance):
+                    provenance[color] = min(
+                        max(0, int(provenance.get(color, 0) or 0)),
+                        max(0, int(restricted_pool.get(color, 0) or 0)))
+            player["conditional_snow_mana"] = conditional_snow_pool
             # Life already deducted during phyrexian check
 
             # Log payment
@@ -2712,10 +2798,14 @@ class EnhancedManaSystem:
         # Initialize conditional_mana if not exists
         if "conditional_mana" not in player:
             player["conditional_mana"] = {}
+        if "conditional_snow_mana" not in player:
+            player["conditional_snow_mana"] = {}
         
         # Initialize phase-restricted mana if needed
         if "phase_restricted_mana" not in player:
             player["phase_restricted_mana"] = {}
+        if "phase_restricted_snow_mana" not in player:
+            player["phase_restricted_snow_mana"] = {}
         
         # Step 1: Separate land conditions from mana text
         # Most land condition text appears before any mana symbols
@@ -2837,10 +2927,19 @@ class EnhancedManaSystem:
         # Add land conditions to result
         result['conditions'] = self._parse_land_conditions(mana_tokens)
         result['logs'].append(f"Processed land conditions: {result['conditions']}")
-        if source_is_snow and not restrictions and not phase_restricted:
-            provenance = player.setdefault(
-                "snow_mana_pool",
-                {symbol: 0 for symbol in self.mana_symbols})
+        if source_is_snow:
+            if restrictions:
+                restriction_key = self._get_restriction_key(restrictions)
+                provenance = player.setdefault(
+                    "conditional_snow_mana", {}).setdefault(
+                        restriction_key, {})
+            elif phase_restricted:
+                provenance = player.setdefault(
+                    "phase_restricted_snow_mana", {})
+            else:
+                provenance = player.setdefault(
+                    "snow_mana_pool",
+                    {symbol: 0 for symbol in self.mana_symbols})
             for color, amount in result['added'].items():
                 provenance[color] = provenance.get(color, 0) + int(amount or 0)
         
@@ -2874,7 +2973,7 @@ class EnhancedManaSystem:
         Args:
             player: The player dictionary
         """
-        if hasattr(player, "phase_restricted_mana"):
+        if "phase_restricted_mana" in player:
             # Log the mana being cleared
             for color, amount in player["phase_restricted_mana"].items():
                 if amount > 0:
@@ -2882,6 +2981,7 @@ class EnhancedManaSystem:
             
             # Clear the phase-restricted mana
             player["phase_restricted_mana"] = {}
+            player["phase_restricted_snow_mana"] = {}
             
     def can_pay_alternative_cost(self, player, card_id, cost_type, context=None):
         """

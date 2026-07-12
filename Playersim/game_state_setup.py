@@ -40,6 +40,7 @@ class GameStateSetupMixin:
         elif player_idx not in (0, 1):
             logging.warning(f"track_card_played: unrecognized player_idx {player_idx!r}; defaulting to 1")
             player_idx = 1
+        card_id = self.canonical_card_id(card_id)
         self.cards_played[player_idx].append(card_id)
         turn = getattr(self, 'turn', 0)
         self.play_history[player_idx].setdefault(turn, []).append(card_id)

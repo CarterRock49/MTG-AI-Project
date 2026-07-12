@@ -77,7 +77,7 @@ The project is complete when all of the following hold:
   `formats/standard/`, explicit `--format`/`--decks` configuration, and
   lineage-stamped manifests. User-supplied decks now route into isolated format
   pools automatically; policy qualification and builder feedback remain open.
-- Test gates: smoke 9/9, training 13/13, scenarios 326/326 (grown from 12),
+- Test gates: smoke 9/9, training 13/13, scenarios 346/346 (grown from 12),
   fixture harvest 15/15, production Harvest protocol 7/7, card registry
   19/19, deck ingestion 13/13, fuzz/replay configuration 6/6, deterministic
   default fuzz 8 seeds x 1,000 valid actions, and strict long fuzz 32 seeds x
@@ -1794,6 +1794,84 @@ and action-exposure infrastructure:
 
 Gates for this round: 333/333 scenarios and 63/63 repository unit tests.
 
+**Round 7.58 (July 2026)** began the severity-ranked Priority 0 integrity pass:
+* **Controller-safe permanent transfer** — temporary control now moves the
+  permanent's controller-scoped state, returns an explicit success result,
+  preserves its original controller for cleanup, and cannot move an object back
+  from a non-battlefield zone after it dies.
+* **Control-dependent effect rebinding** — live static and text-derived
+  replacement effects are rebuilt for the new controller on both the initial
+  control change and the end-of-turn return. Additional-mana replacements are
+  scenario-verified to stop applying to the old controller immediately.
+* **Last-known death attribution** — a creature that dies while stolen is
+  credited to its actual controller at last existence. This closes the separate
+  control-at-death limitation; only the broader repeated-ID object-model issue
+  remains.
+* **Generic as-enters transaction** — first-entry parsing now handles creature
+  type, color, card type, opponent, and counter choices before deferred ETB,
+  Landfall, and Saga events fire. Choices are retained in both typed stores and
+  a generic per-permanent record, and all variants use the ordinary action mask
+  and scripted-opponent path. Arbitrary card-specific consumers remain bounded
+  coverage work rather than a simulation-integrity gap.
+
+Gates for this round: 335/335 scenarios, 63/63 repository unit tests, 9/9 smoke
+stages, and 13/13 training stages.
+
+**Round 7.59 (July 2026)** continued the Priority 0 layer-integrity pass:
+* **Specific ability dependencies** — every parsed static layer effect now
+  carries source-ability identity. A specific `remove_ability` dependency can
+  suppress the matching generated effect without erasing unrelated abilities
+  from the same source; exact-text inference preserves older registrations.
+* **CR 305.7 basic land types** — setting a basic land type now removes old land
+  subtypes and rules-text abilities, supplies the intrinsic basic mana output,
+  suppresses registered activations and triggers, and restores printed state
+  when the effect ends.
+* **Blood Moon/Urborg ordering** — basic-land-type setting participates in
+  within-layer dependency sorting, so it can remove the source ability of an
+  earlier type-changing effect before that effect applies.
+* **Dynamic nonbasic-land scope** — global nonbasic-land effects recompute their
+  battlefield membership each pass, including lands that enter after the
+  effect began. Arbitrary changing applicability sets outside the structured
+  dynamic-scope vocabulary remain the narrowed Priority 0 limitation.
+
+Gates for this round: 337/337 scenarios, 63/63 repository unit tests, 9/9 smoke
+stages, and 13/13 training stages.
+
+**Round 7.60 (July 2026)** completed the broad Priority 0 closure sweep:
+* **True runtime card identity** — canonical registry IDs remain the stable
+  deck/statistics namespace, while reset materializes every repeated physical
+  card as a distinct runtime ID, mutable `Card` object, and explicit owner.
+  Targeting, counters, linked exile, control changes, and lookahead now address
+  copies independently; telemetry canonicalizes runtime plays at its boundary.
+* **Clone-safe delayed execution** — accepted structured triggers and legacy
+  function/method callbacks now survive lookahead cloning with captured game,
+  player, subsystem, closure, and default-argument references rebound to the
+  branch. Opaque callable objects are rejected at registration instead of
+  being accepted and silently dropped.
+* **Announcement-time counter divisions** — spell and activated-ability
+  divisions are chosen after targets but before costs are paid or the object
+  reaches the stack. The locked allocation survives in stack context; an
+  illegal target loses its share rather than redistributing it at resolution.
+* **Snow provenance and condition integrity** — ordinary, conditional, and
+  phase-restricted pools preserve and consume snow provenance. Common turn,
+  attack, death, life-change, control, and hand-comparison conditions are
+  explicit; unknown conditions now fail closed and raise fidelity telemetry.
+* **Live arbitrary layer scopes** — every layer handler resolves affected sets
+  from current calculated characteristics. Clone-safe declarative boolean
+  predicates (`all`/`any`/`not` plus characteristic comparisons) can gain or
+  lose members after an earlier effect in the same layer.
+* **Branch-local mutable identity** — every reachable card object and merged,
+  melded, or specialized identity ledger is isolated before clone
+  construction, preventing clone initialization and layer write-back from
+  mutating the source branch.
+* **Merged-object ownership and blink** — Mutate records each physical
+  component's owner and separates into the correct private zones. Meld rejects
+  non-owned components, and blinking a melded permanent returns both front
+  faces separately through the same transaction.
+
+Gates for this round: 346/346 scenarios, 63/63 repository unit tests, 9/9 smoke
+stages, and 13/13 training stages.
+
 ---
 
 ## Working agreements
@@ -1816,92 +1894,91 @@ do not override this ranking.
 
 ### Priority 0 — simulation integrity
 
-1. Repeated card IDs still lack true per-copy object identity, including
-   precise linked-exile ownership.
-2. Layer dependencies remain incomplete for specific `remove_ability` effects,
-   CR 305.7, and changing applicability sets.
-3. Opaque callback-based delayed triggers are excluded from lookahead clones.
-4. Counter divisions are chosen at resolution instead of being announced and
-   locked during casting or activation under CR 601.2d.
-5. Restricted mana pools do not retain snow provenance, and condition
-   evaluation still has a bounded vocabulary.
-6. Mutate uses battlefield control as an ownership approximation and retains
-   deeper merged-object identity limitations.
-7. Meld depends on locally available result objects and retains component,
-   blink, and clone-isolation limitations.
-8. Specialize depends on complete local variant families and shares the
-   repeated-ID/perpetual-identity limitation.
-9. `creatures_died_this_turn` approximates control at death from the battlefield
-   zone the object left.
-10. Generic `as enters` consumers are not fully scenario-verified.
-11. Text-derived replacements do not re-register after a pure control change,
-    so they retain the original registration controller.
+✅ No known Priority 0 simulation-integrity limitations remain.
+
+Round 7.60 retired true per-copy runtime identity, dynamic layer applicability,
+delayed-callback cloning, announcement-time counter divisions, restricted snow
+provenance, condition fail-closed behavior, Mutate ownership/clone isolation,
+Meld blink/clone isolation, and Specialize clone isolation. Missing Meld or
+Specialize family data and bounded condition/mechanic vocabularies are honestly
+classified as Priority 2 coverage; they fail closed rather than silently
+diverge.
 
 ### Priority 1 — decision and action completeness
 
-12. The fixed 480-action layout omits some activated abilities, hand objects,
+2. The fixed 480-action layout omits some activated abilities, hand objects,
     graveyard objects, and simultaneous source/target contexts.
-13. Blocker damage ordering remains scripted even though opponent trigger
+3. Blocker damage ordering remains scripted even though opponent trigger
     ordering is policy-driven.
-14. Simultaneous each-player discards are staged sequentially and use scripted
+4. Simultaneous each-player discards are staged sequentially and use scripted
     opponent choices.
-15. Ward auto-pays supported costs and cannot expose deliberate decline;
+5. Ward auto-pays supported costs and cannot expose deliberate decline;
     sacrifice and discard ward costs are unsupported.
-16. Multi-target spell copies cannot retarget only a subset of inherited
+6. Multi-target spell copies cannot retarget only a subset of inherited
     targets.
-17. Sacrifice choices support a bounded Oracle-characteristic vocabulary, and
+7. Sacrifice choices support a bounded Oracle-characteristic vocabulary, and
     direct non-policy callers retain a deterministic fallback.
-18. Nonland mana abilities lack structured choices for multi-symbol packages,
+8. Nonland mana abilities lack structured choices for multi-symbol packages,
     colorless alternatives, and independent per-mana selections.
-19. X selection retains a defensive ceiling and does not cover every nonmana
+9. X selection retains a defensive ceiling and does not cover every nonmana
     X-cost expression.
-20. Level-up exposes the legal action but has only basic policy choice around
+10. Level-up exposes the legal action but has only basic policy choice around
     whether and when to spend mana.
-21. The scripted opponent always accepts eligible opening-hand placement
+11. The scripted opponent always accepts eligible opening-hand placement
     effects.
-22. Keyword-grant choices support exactly two printed options and a bounded
+12. Keyword-grant choices support exactly two printed options and a bounded
     subtype-target template.
 
 ### Priority 2 — bounded mechanic and card fidelity
 
-23. Emblem execution is implemented only for the currently recognized Kaito
+13. Generic `as enters` transactions are verified for creature type, color,
+    card type, opponent, counters, and deferred ETB events; arbitrary effects
+    consuming those chosen values remain card-specific.
+14. Emblem execution is implemented only for the currently recognized Kaito
     and Wrenn texts.
-24. MDFC support still lacks direct nonland back-face entry and complete
+15. MDFC support still lacks direct nonland back-face entry and complete
     back-face targeting text.
-25. Adventure-half parsing and targeting remain heuristic.
-26. Generic Discover, Explore, Investigate, Endure, Connive, Suspect, Airbend,
+16. Adventure-half parsing and targeting remain heuristic.
+17. Generic Discover, Explore, Investigate, Endure, Connive, Suspect, Airbend,
     Equip, and Crew support intentionally covers bounded text families.
-27. Reflexive triggers recognize a bounded set of exact rider templates.
-28. Earthbend has bounded dynamic-X parsing and resolves its choice-free delayed
+18. Reflexive triggers recognize a bounded set of exact rider templates.
+19. Earthbend has bounded dynamic-X parsing and resolves its choice-free delayed
     return immediately after the initial zone move.
-29. Uncommon linked optional-search templates still need exact transaction
+20. Uncommon linked optional-search templates still need exact transaction
     handlers.
-30. Warp source-duration permissions remain conservatively partial.
-31. Target-conditioned pricing recognizes only the implemented condition
+21. Warp source-duration permissions remain conservatively partial.
+22. Target-conditioned pricing recognizes only the implemented condition
     vocabulary.
-32. Numeric die support omits modifiers, rerolls, ignored rolls, and generic
+23. Numeric die support omits modifiers, rerolls, ignored rolls, and generic
     result-value clauses.
-33. Attack-trigger adjective scopes and defender gating remain bounded to the
+24. Attack-trigger adjective scopes and defender gating remain bounded to the
     supported two-player vocabulary.
-34. Rare phase-beginning scopes can pass ungated.
-35. Screaming Nemesis relies on standard life-gain entry points and a single
+25. Rare phase-beginning scopes can pass ungated.
+26. Screaming Nemesis relies on standard life-gain entry points and a single
     committed reflected-damage target.
-36. ConditionalExileEffect is a single-target implementation.
-37. Obliterator uses a conservative payer fallback when the damage source has
+27. ConditionalExileEffect is a single-target implementation.
+28. Obliterator uses a conservative payer fallback when the damage source has
     left play.
-38. Cavern of Souls shares choices across repeated IDs and offers only the top
-    ten locally derived creature subtypes.
-39. Obstinate Baloth conservatively leaves an undetermined-cause discard in the
+29. Cavern of Souls offers only the top ten locally derived creature subtypes.
+30. Obstinate Baloth conservatively leaves an undetermined-cause discard in the
     graveyard.
+31. Meld requires its result printing to be present in the local card database;
+    missing `all_parts` data fails closed instead of fetching at runtime.
+32. Specialize requires all five local variant printings; incomplete families
+    are fidelity-marked unparsed and excluded from supported play.
+33. Trigger-condition parsing now fails closed but does not yet express every
+    Oracle condition template.
+34. Mutate still lacks per-component replacement choices and library-order
+    choice; commander-specific routing is outside the current formats.
 
 ### Priority 3 — operational and lineage constraints
 
-40. Strategy memory is per environment and its optional enhancement pass makes
+35. Strategy memory is per environment and its optional enhancement pass makes
     saved memory content nondeterministic.
-41. Format registries and schemas are intentionally lineage-bound, name plus
+36. Format registries and schemas are intentionally lineage-bound, name plus
     Oracle-ID based, and best-of-one only; schema growth can require a new
     policy lineage.
-42. Treasure/Beza support is scenario-verified; its retained note documents the
+37. Treasure/Beza support is scenario-verified; its retained note documents the
     exact supported path rather than an active correctness gap.
 
 ### Detailed notes (historical source order)
@@ -1910,9 +1987,13 @@ do not override this ranking.
   graveyard-permission texts used by the sample decks. Other emblem text is
   retained as a command-zone record but needs an effect implementation before
   its card can be considered supported.
-- Specific `remove_ability` is not an existence dependency in layer sorting;
-  CR 305.7 (Blood Moon ability loss) not modeled; applicability-set
-  dependencies out of scope while `affected_ids` is a static snapshot.
+- Specific `remove_ability` existence dependencies and CR 305.7 basic-land-type
+  ability loss are scenario-verified, including Blood Moon/Urborg ordering,
+  late-entering nonbasic lands, intrinsic mana, and state restoration (Round
+  7.59). Round 7.60 routes every layer handler through live membership and adds
+  clone-safe boolean characteristic predicates, including applicability changes
+  caused by an earlier effect in the same layer. Oracle text still needs to be
+  parsed into that declarative vocabulary as bounded card coverage.
 - MDFC back-face casting — v1 support added (July 2026): is_mdfc() no longer
   requires "//" in the text (two non-transform faces suffice), Card exposes
   get_face_cost/get_face_text/get_face_type_line per face, and cast_spell uses
@@ -1944,28 +2025,30 @@ do not override this ranking.
   redesign before those cards are suitable for strength comparisons. Round
   7.51 removed the Flashback collision for the first six graveyard objects;
   graveyard pagination beyond six remains open.
-- Repeated card IDs still model copies coarsely; last-moved location tracking
-  and duplicate-preserving list zones repair the known first-touch failures,
-  but true per-copy object identity remains a deeper future cleanup. Linked
-  exile therefore cannot distinguish which one of two simultaneous same-ID
-  sources owns a particular link.
-- Structured oracle-text delayed triggers are clone-safe. Opaque legacy
-  callback entries registered directly through `register_delayed_trigger`
-  remain intentionally excluded from lookahead clones because Python closures
-  cannot be rebound safely; production producers should use structured payloads.
+- Canonical registry IDs are printing/statistics identities; deck entries
+  materialize as distinct runtime IDs with separate mutable
+  `Card` objects and explicit owners (Round 7.60). Linked exile and all live
+  object state key by runtime ID, while play telemetry canonicalizes back to the
+  registry ID before persistence.
+- Structured oracle-text delayed triggers and legacy function/method callbacks
+  are clone-safe. Captured game/player/subsystem references, closure cells, and
+  default arguments rebind to the branch. Unsupported opaque callable objects
+  are rejected by `register_delayed_trigger` rather than accepted and lost.
 - Opponent trigger ordering routes through the installed policy; blocker damage
   ordering still uses the scripted/automatic path pending the next choice audit.
-- Snow provenance is tracked for the ordinary mana pool and atomic snow-source
-  payment. Restricted and phase-restricted mana pools do not yet retain snow
-  provenance. `_evaluate_condition` vocabulary remains thin beyond life totals,
-  card counts, basic control predicates, Delirium, and simple toughness checks.
+- Snow provenance is tracked and consumed for ordinary, restricted,
+  phase-restricted, and atomic-source payment. `_evaluate_condition` covers the
+  common turn, attack, death, life-change, hand-comparison, and control
+  predicates; unknown Oracle conditions fail closed and raise fidelity
+  telemetry until their bounded parser coverage is added.
 - Reflexive-trigger v1 recognizes exact "When you do" / "When that player
   does" riders when the prerequisite itself parses; generic optional sacrifice
   now exposes both the permanent choice and decline path.
-- Counter divisions are policy-selected when the effect resolves. Full CR
-  601.2d fidelity would announce and lock those divisions during casting or
-  activation. Dig selects the kept card explicitly and now follows each parsed
-  instruction's preserve, policy-selected, or random remainder order.
+- Counter divisions are policy-selected after targets and before costs during
+  casting or activation, then locked in stack context under CR 601.2d. Illegal
+  targets lose their announced shares at resolution. Dig selects the kept card
+  explicitly and follows each parsed instruction's preserve, policy-selected,
+  or random remainder order.
 - Earthbend v1 supports fixed numeric values, Beifong's last-known-power X
   expression, and the correct death/exile return destination. The choice-free
   delayed return currently resolves immediately after the initial zone move
@@ -2018,21 +2101,21 @@ do not override this ranking.
   conditions: a tapped permanent and a permanent you control. Arbitrary Oracle
   conditions that refer to target characteristics still need dedicated parsers.
 - Meld v1 requires the meld-result card object to be present in `card_db`; the
-  deck loader does not fetch a missing `all_parts` URI. Blink/return handling
-  for both component cards and clone-isolated meld identity remain deeper work.
+  deck loader does not fetch a missing `all_parts` URI, so absent result data
+  fails closed. Ownership is validated, branch identity is isolated, and blink
+  returns both front-face components as separate objects (Round 7.60).
 - Numeric die v1 supports ordinary result tables and emits die-roll events.
   Roll modifiers, rerolls/ignored rolls, and tableless "equal to the result"
   clauses remain future work. The nonnumeric planar die is intentionally out
   of scope with Planechase.
 - Specialize v1 requires all five `all_parts` variant card objects in `card_db`;
-  missing families are fidelity-marked `unparsed`. Repeated card IDs and the
-  shared `card_db` also make simultaneous copies and lookahead specialization
-  coarser than true per-object perpetual identity.
-- Mutate v1 uses battlefield control as the engine's ownership approximation.
-  Ordered components, top/bottom identity, triggers, illegal-target fallback,
-  and same-destination separation are covered; per-component replacement
-  choices, library ordering, token-on-top status, commander routing, and
-  clone-isolated merged identity remain deeper object-model work.
+  missing families are fidelity-marked `unparsed`. Lookahead specialization is
+  branch-isolated and simultaneous copies specialize independently.
+- Mutate records an explicit owner for every physical component and routes each
+  one to its owner's private zone on separation. Ordered components, top/bottom
+  identity, triggers, illegal-target fallback, token cessation, and clone
+  isolation are covered. Per-component replacement choices, library ordering,
+  and commander routing remain bounded mechanic/decision work.
 - Ward target-tax v1 snapshots obligations when targets are committed and
   supports parsed mana costs and simple "pay N life" costs by auto-paying when
   possible. Sacrifice/discard costs and letting the agent deliberately decline
@@ -2056,9 +2139,9 @@ do not override this ranking.
   threshold from the target controller's poison_counters at resolution.
 - When an Obliterator damage source left play before resolution, the forced-
   sacrifice payer falls back to the opponent of the trigger's controller.
-- Cavern of Souls v1 stores the chosen type per card ID per player (repeated
-  deck IDs share one choice), offers the top-10 creature subtypes from the
-  controller's own cards as options, and applies the uncounterable rider when
+- Cavern of Souls v1 stores the chosen type per runtime object per player,
+  offers the top-10 creature subtypes from the controller's own cards as
+  options, and applies the uncounterable rider when
   any of its restricted mana was spent on the cast. Counterspells can still
   TARGET the spell; they fizzle at resolution.
 - Treasure tokens carry their printed sacrifice-for-mana text; Beza's token is
@@ -2075,17 +2158,20 @@ do not override this ranking.
 - The keyword_grant choice v1 supports exactly two printed options and is
   made by the effect's controller. Subtype target pass-through applies only
   to "target <subtype> you control" wordings.
-- creatures_died_this_turn attributes a death to the player whose
-  battlefield the creature left (control at death approximated by zone).
+- `creatures_died_this_turn` now attributes deaths from the battlefield
+  object's last-known controller, including a permanent under temporary
+  control (Round 7.58). Round 7.60's runtime IDs remove the former repeated-copy
+  ambiguity.
 - ENTERS_BATTLEFIELD-registered replacements are now applied through the
   ENTER_BATTLEFIELD alias merge (July 2026). The revived generic "as enters"
-  path sets `as_enters_choice_needed` context flags whose downstream
-  consumers are not yet scenario-verified; Cavern of Souls keeps its
-  dedicated Round 7.20 implementation.
+  transaction is scenario-verified for creature-type, color, card-type,
+  opponent, counter, and deferred-trigger paths (Round 7.58). Arbitrary
+  card-specific effects that consume those chosen values remain bounded
+  coverage work; Cavern of Souls keeps its dedicated mana consumer.
 - Text-derived replacement registration is idempotent per card per game and
-  cleared by remove_effects_by_source (phasing rebuild); a pure CONTROL
-  change without unregistration does not re-register, keeping the original
-  registration's controller_id.
+  cleared by `remove_effects_by_source` for phasing rebuilds. Round 7.58 also
+  rebuilds controller-bound static and replacement effects after pure control
+  changes and their end-of-turn reversion.
 - strategy_memory persistence is per-env (under the env's storage
   directory). Cross-env sharing within one training run no longer happens
   implicitly; save_memory also has a 20% random "enhancement" pass, so

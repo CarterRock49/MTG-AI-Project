@@ -30,6 +30,18 @@ class GameStateStackMixin:
     def _effect_controller_from_id(self, controller_id):
         return self.p1 if controller_id == "p1" else self.p2
 
+    @staticmethod
+    def _counter_distribution_spec(effect_text):
+        """Return the cast/activation-time division declared by Oracle text."""
+        effects = EffectFactory.create_effects(effect_text or "") or []
+        for effect in effects:
+            if type(effect).__name__ == "DistributeCountersEffect":
+                return {
+                    "count": int(effect.count),
+                    "counter_type": effect.counter_type,
+                }
+        return None
+
     def _copy_stack_context(self, context):
         """Copy rule data without dragging runtime engine objects into it.
 
@@ -2015,6 +2027,11 @@ class GameStateStackMixin:
                 "cost_before_modifiers": copy_module.deepcopy(
                     cost_before_modifiers),
             }
+            distribution_spec = self._counter_distribution_spec(
+                targeting_text)
+            if distribution_spec:
+                self.targeting_context["counter_distribution"] = \
+                    distribution_spec
             if spree_target_slots:
                 self.targeting_context.update({
                     'target_slots': copy_module.deepcopy(spree_target_slots),

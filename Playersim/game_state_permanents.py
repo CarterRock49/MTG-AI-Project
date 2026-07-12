@@ -18,6 +18,83 @@ class GameStatePermanentsMixin:
     # Empty slots: preserves GameState's __slots__ semantics (no instance __dict__).
     __slots__ = ()
 
+    def _refresh_control_dependent_effects(self, card_id, controller):
+        """Rebind live static/replacement effects after control changes.
+
+        Parsed triggered/activated abilities discover their controller from the
+        battlefield when an event or action occurs. Continuous and replacement
+        effects, however, snapshot controller data when registered and must be
+        rebuilt for CR 611.2c control changes.
+        """
+        if self.layer_system:
+            self.layer_system.remove_effects_by_source(
+                card_id,
+                preserve_durations={"end_of_turn", "until_your_next_turn"})
+            abilities = getattr(
+                getattr(self, "ability_handler", None),
+                "registered_abilities", {}).get(card_id, [])
+            for ability in abilities:
+                if type(ability).__name__ == "StaticAbility":
+                    ability.apply(self)
+            self.layer_system.apply_all_effects()
+        if self.replacement_effects:
+            self.replacement_effects.remove_effects_by_source(card_id)
+            self.replacement_effects.register_card_replacement_effects(
+                card_id, controller)
+
+    def _transfer_permanent_control(self, card_id, new_controller):
+        """Move one battlefield object and its controller-scoped state."""
+        old_controller = self.get_card_controller(card_id)
+        if (old_controller is None or new_controller not in (self.p1, self.p2)
+                or old_controller is new_controller):
+            return False
+
+        try:
+            old_controller["battlefield"].remove(card_id)
+        except (KeyError, ValueError):
+            logging.warning(
+                f"Control change: card {card_id} vanished from its controller's battlefield.")
+            return False
+        new_controller.setdefault("battlefield", []).append(card_id)
+
+        # These stores describe the permanent, not the player who happened to
+        # control it when the entry was created. Preserve them across the move.
+        set_stores = (
+            "tapped_permanents", "entered_battlefield_this_turn",
+            "suspected_permanents", "regeneration_shields",
+            "activated_this_turn", "targeted_permanents_this_turn",
+        )
+        for key in set_stores:
+            old_store = old_controller.get(key)
+            if isinstance(old_store, set) and card_id in old_store:
+                old_store.discard(card_id)
+                new_controller.setdefault(key, set()).add(card_id)
+
+        dict_stores = (
+            "loyalty_counters", "damage_counters", "deathtouch_damage",
+            "saga_counters", "mutation_stacks", "chosen_creature_types",
+            "chosen_colors", "chosen_card_types", "chosen_opponents",
+            "as_enters_choices",
+        )
+        for key in dict_stores:
+            old_store = old_controller.get(key)
+            if isinstance(old_store, dict) and card_id in old_store:
+                new_controller.setdefault(key, {})[card_id] = old_store.pop(card_id)
+
+        # An Aura/Equipment keeps its attachment when its controller changes.
+        old_attachments = old_controller.get("attachments")
+        if isinstance(old_attachments, dict) and card_id in old_attachments:
+            new_controller.setdefault("attachments", {})[card_id] = \
+                old_attachments.pop(card_id)
+
+        if hasattr(self, "_last_card_locations"):
+            self._last_card_locations[card_id] = (new_controller, "battlefield")
+        self._refresh_control_dependent_effects(card_id, new_controller)
+        logging.debug(
+            f"Control change: {new_controller['name']} now controls "
+            f"{getattr(self._safe_get_card(card_id), 'name', card_id)}.")
+        return True
+
     def apply_temporary_control(self, card_id, new_controller):
         """
         Grant temporary control of a card until end of turn.
@@ -29,21 +106,23 @@ class GameStatePermanentsMixin:
         Returns:
             bool: True if the effect is applied successfully.
         """
-        original_controller = self.find_card_location(card_id)
+        original_controller = self.get_card_controller(card_id)
         if original_controller is None:
             logging.warning(f"Temporary control: Original owner not found for card {card_id}.")
+            return False
+        if original_controller is new_controller:
             return False
         # Record the original controller if not already stored
         if card_id not in self.temp_control_effects:
             self.temp_control_effects[card_id] = original_controller
-        # Remove the card from its current controller's battlefield
-        for player in [self.p1, self.p2]:
-            if card_id in player["battlefield"]:
-                player["battlefield"].remove(card_id)
-        # Add the card to the new controller's battlefield
-        new_controller["battlefield"].append(card_id)
-        logging.debug(f"Temporary control: {new_controller['name']} now controls {self._safe_get_card(card_id).name} until end of turn.")
-        return
+        if self._transfer_permanent_control(card_id, new_controller):
+            logging.debug(
+                f"Temporary control: {new_controller['name']} controls "
+                f"{self._safe_get_card(card_id).name} until end of turn.")
+            return True
+        # A failed transfer must not leave a phantom end-of-turn instruction.
+        self.temp_control_effects.pop(card_id, None)
+        return False
 
     def get_party_count(self, battlefield):
         """
@@ -106,16 +185,15 @@ class GameStatePermanentsMixin:
         This should be called at the end of the turn.
         """
         for card_id, original_controller in list(self.temp_control_effects.items()):
-            current_controller = self.find_card_location(card_id)
-            if current_controller and current_controller != original_controller:
-                # Remove from current controller's battlefield
-                if card_id in current_controller["battlefield"]:
-                    current_controller["battlefield"].remove(card_id)
-                # Return card to original controller's battlefield
-                original_controller["battlefield"].append(card_id)
-                logging.debug(f"Temporary control: Reverted control of {self._safe_get_card(card_id).name} back to {original_controller['name']}.")
+            current_controller = self.get_card_controller(card_id)
+            if current_controller and current_controller is not original_controller:
+                if self._transfer_permanent_control(card_id, original_controller):
+                    logging.debug(
+                        f"Temporary control: Reverted control of "
+                        f"{self._safe_get_card(card_id).name} back to "
+                        f"{original_controller['name']}.")
             # Remove the effect record
-            del self.temp_control_effects[card_id]
+            self.temp_control_effects.pop(card_id, None)
 
     def add_defense_counter(self, card_id, count=1):
         """
@@ -215,8 +293,8 @@ class GameStatePermanentsMixin:
             return False
         
         # Find the current controller of the target
-        target_controller = self.find_card_location(target_card_id)
-        if not target_controller or target_controller == source_controller:
+        target_controller = self.get_card_controller(target_card_id)
+        if not target_controller or target_controller is source_controller:
             return False  # Already controlled by source or not found
             
         # Apply the temporary control effect
@@ -1099,13 +1177,21 @@ class GameStatePermanentsMixin:
         if existing:
             components = list(existing.get("components", [target_id]))
             component_printed = copy.deepcopy(existing.get("component_printed", {}))
+            component_owner_keys = dict(existing.get("component_owner_keys", {}))
         else:
             components = [target_id]
             component_printed = {
                 target_id: copy.deepcopy(getattr(target_card, "_printed", {})),
             }
+            target_owner = self._find_card_owner_fallback(target_id) or player
+            component_owner_keys = {
+                target_id: "p1" if target_owner is self.p1 else "p2",
+            }
         if mutating_card_id in components:
             return False
+        mutating_owner = self._find_card_owner_fallback(mutating_card_id) or player
+        component_owner_keys[mutating_card_id] = (
+            "p1" if mutating_owner is self.p1 else "p2")
         component_printed[mutating_card_id] = copy.deepcopy(
             getattr(mutating_card, "_printed", {}))
         if mutate_on_top:
@@ -1131,6 +1217,7 @@ class GameStatePermanentsMixin:
         self.mutated_permanents[target_id] = {
             "components": components,
             "component_printed": component_printed,
+            "component_owner_keys": component_owner_keys,
             "top_card_id": components[0],
             "mutation_count": int(existing.get("mutation_count", 0)) + 1 if existing else 1,
         }
@@ -1188,6 +1275,12 @@ class GameStatePermanentsMixin:
         partner = self._safe_get_card(partner_id)
         result = self._safe_get_card(result_id)
         if not primary or not partner or not result:
+            return False
+        # A meld instruction can combine only two cards the resolving
+        # controller both owns and controls. Do not silently use current
+        # battlefield control as an ownership approximation.
+        if (self._find_card_owner_fallback(primary_id) is not controller
+                or self._find_card_owner_fallback(partner_id) is not controller):
             return False
 
         expected_partner = getattr(primary, "meld_partner_name", None)
@@ -1569,24 +1662,78 @@ class GameStatePermanentsMixin:
         ranked = sorted(counts, key=lambda s: (-counts[s], s))
         return ranked[:10]
 
-    def complete_as_enters_creature_type(self, option_index):
-        """Record the chosen creature type for the entering permanent, close
-        the choice, and fire the battlefield-entry triggers that were deferred
-        while the 'as enters' choice was pending."""
+    def _as_enters_choice_options(self, choice_kind, player):
+        """Return the bounded policy options for a parsed as-enters choice."""
+        if choice_kind == "creature_type":
+            return self._creature_type_choice_options(player)
+        if choice_kind == "color":
+            return ["W", "U", "B", "R", "G"]
+        if choice_kind == "card_type":
+            return [
+                "artifact", "battle", "creature", "enchantment", "instant",
+                "kindred", "land", "planeswalker", "sorcery",
+            ]
+        if choice_kind == "opponent":
+            return [key for key, candidate in (("p1", self.p1), ("p2", self.p2))
+                    if candidate is not None and candidate is not player]
+        return []
+
+    def _finish_battlefield_entry_triggers(self, card_id, player,
+                                           enter_context=None):
+        """Fire entry events after every mandatory as-enters choice is set."""
+        card = self._safe_get_card(card_id)
+        context = dict(enter_context or {})
+        context.update({
+            "controller": player, "to_zone": "battlefield",
+            "card_id": card_id,
+        })
+        self.trigger_ability(card_id, "ENTERS_BATTLEFIELD", context)
+        if card and "land" in getattr(card, "card_types", []):
+            self.trigger_ability(None, "LANDFALL", context)
+            self.trigger_ability(card_id, "LANDFALL_SELF", context)
+        if card and "saga" in [
+                str(subtype).lower()
+                for subtype in getattr(card, "subtypes", [])]:
+            player.setdefault("saga_counters", {})[card_id] = 1
+            self.trigger_ability(card_id, "SAGA_CHAPTER", {
+                "chapter": 1, "controller": player,
+            })
+            logging.debug(
+                f"Saga {getattr(card, 'name', card_id)} entered with lore "
+                "counter 1 (chapter I).")
+
+    def complete_as_enters_choice(self, option_index):
+        """Commit a generic as-enters choice, then release deferred events."""
         ctx = getattr(self, 'choice_context', None)
-        if not ctx or ctx.get("type") != "as_enters_creature_type":
-            logging.warning("complete_as_enters_creature_type called without context.")
+        choice_type = ctx.get("type", "") if ctx else ""
+        if not choice_type.startswith("as_enters_"):
+            logging.warning("complete_as_enters_choice called without context.")
             return False
         options = ctx.get("options", [])
         if not isinstance(option_index, int) or not (0 <= option_index < len(options)):
-            logging.warning(f"Invalid creature-type option index {option_index}.")
+            logging.warning(f"Invalid as-enters option index {option_index}.")
             return False
         player = ctx.get("player")
         card_id = ctx.get("card_id")
         chosen = options[option_index]
-        player.setdefault("chosen_creature_types", {})[card_id] = chosen
+        choice_kind = choice_type[len("as_enters_"):]
+        stores = {
+            "creature_type": "chosen_creature_types",
+            "color": "chosen_colors",
+            "card_type": "chosen_card_types",
+            "opponent": "chosen_opponents",
+        }
+        store_name = stores.get(choice_kind)
+        if not player or not store_name:
+            logging.warning(f"Unsupported as-enters choice kind {choice_kind}.")
+            return False
+        player.setdefault(store_name, {})[card_id] = chosen
+        player.setdefault("as_enters_choices", {}).setdefault(card_id, {})[
+            choice_kind] = chosen
         card = self._safe_get_card(card_id)
-        logging.debug(f"{getattr(card, 'name', card_id)}: chose creature type '{chosen}'.")
+        logging.debug(
+            f"{getattr(card, 'name', card_id)}: chose {choice_kind} '{chosen}'.")
+        enter_context = ctx.get("enter_context")
         self.choice_context = None
         if getattr(self, 'previous_priority_phase', None) is not None:
             self.phase = self.previous_priority_phase
@@ -1595,13 +1742,17 @@ class GameStatePermanentsMixin:
             self.phase = self.PHASE_PRIORITY
         self.priority_player = player
         self.priority_pass_count = 0
-        # Fire the ETB triggers move_card deferred for the pending choice.
-        enter_context = {'controller': player, 'to_zone': 'battlefield', 'card_id': card_id}
-        self.trigger_ability(card_id, "ENTERS_BATTLEFIELD", enter_context)
-        if card and 'land' in getattr(card, 'card_types', []):
-            self.trigger_ability(None, "LANDFALL", enter_context)
-            self.trigger_ability(card_id, "LANDFALL_SELF", enter_context)
+        self._finish_battlefield_entry_triggers(
+            card_id, player, enter_context)
         return True
+
+    def complete_as_enters_creature_type(self, option_index):
+        """Compatibility wrapper for the original Cavern-specific path."""
+        ctx = getattr(self, "choice_context", None)
+        if not ctx or ctx.get("type") != "as_enters_creature_type":
+            logging.warning("complete_as_enters_creature_type called without context.")
+            return False
+        return self.complete_as_enters_choice(option_index)
 
     def _register_attachment_effects(self, attach_id, target_id):
         """Register an attachment's static P/T and keyword grants on its target.

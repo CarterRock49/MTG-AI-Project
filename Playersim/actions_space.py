@@ -871,12 +871,13 @@ class ActionSpaceMixin:
                                      context={"option_index": 0})
                 set_valid_action(11, "DECLINE_SACRIFICE")
 
-            # "As enters, choose a creature type" (Cavern of Souls); mandatory.
-            elif choice_type == "as_enters_creature_type":
-                for option_index, type_name in enumerate(context.get("options", [])[:10]):
+            # Mandatory "as enters" choices are committed before ETB events.
+            elif choice_type.startswith("as_enters_"):
+                choice_label = choice_type[len("as_enters_"):].upper()
+                for option_index, option in enumerate(context.get("options", [])[:10]):
                     set_valid_action(
                         353 + option_index,
-                        f"CHOOSE_CREATURE_TYPE {type_name}",
+                        f"CHOOSE_{choice_label} {option}",
                         context={"option_index": option_index},
                     )
 

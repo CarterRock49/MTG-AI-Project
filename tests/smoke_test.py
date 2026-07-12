@@ -442,6 +442,8 @@ def check_stats_pipeline(decks, card_db):
         gs._reset_turn_tracking_variables()
         drawn_probe = gs._draw_card(agent)
         assert drawn_probe is not None, "telemetry probe could not draw"
+        opening_printing = gs.canonical_card_id(opening_probe)
+        drawn_printing = gs.canonical_card_id(drawn_probe)
         gs.track_card_played(drawn_probe, 0 if gs.agent_is_p1 else 1)
         # Drive a deterministic normal terminal through env.step. Random play is
         # intentionally covered above, but is not guaranteed to finish within a
@@ -527,8 +529,8 @@ def check_stats_pipeline(decks, card_db):
             paths["card_memory_path"], "all_cards.json.gz")
         with gzip.open(memory_path, "rt", encoding="utf-8") as memory_file:
             memory = json.load(memory_file)["cards"]
-        drawn_stats = memory[str(drawn_probe)]
-        opening_stats = memory[str(opening_probe)]
+        drawn_stats = memory[str(drawn_printing)]
+        opening_stats = memory[str(opening_printing)]
         assert drawn_stats.get("times_drawn", 0) >= 1, \
             "persisted CardMemory lost draw telemetry"
         assert drawn_stats.get("turn_played", {}).get("2", 0) >= 1, \

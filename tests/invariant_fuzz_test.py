@@ -617,10 +617,13 @@ def _run_seed(
         reset_where = f"seed {seed} episode {episode} reset ({episode_seed})"
         trace.checkpoint("reset_invariants", reset_where)
         _assert_finite_observation(env, observation, where=reset_where)
+        runtime_ids = set(getattr(
+            env.game_state, "card_instance_printings", {}))
         expected_cards = _physical_counts(
             env.game_state,
-            {card_id for card_id, card in env.card_db.items()
-             if not getattr(card, "is_token", False)},
+            runtime_ids or {
+                card_id for card_id, card in env.card_db.items()
+                if not getattr(card, "is_token", False)},
         )
         assert sum(expected_cards.values()) == 120, (
             f"{reset_where}: fixture exposed {sum(expected_cards.values())} cards, expected 120")
