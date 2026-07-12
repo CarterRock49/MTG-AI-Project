@@ -2037,19 +2037,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 141,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: the rest on the bottom of your library in any order. Put each of those cards int",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Accumulate Wisdom",
       "oracle_id": "a63eb744-71c4-447d-9372-c3a734f022c5",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "verified"
     },
     {
       "abilities_registered": 6,
@@ -3662,13 +3656,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 232,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: untap this creature",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Ward"
       ],
@@ -3676,7 +3664,7 @@
       "name": "Ambling Stormshell",
       "oracle_id": "75070eaf-c931-46e5-9aa1-b849e33580c6",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -6361,21 +6349,15 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 379,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: add an additional {g}",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Earthbend"
       ],
       "layout": "normal",
       "name": "Badgermole Cub",
       "oracle_id": "2b0afb89-0944-4861-b9c3-e909e2ac215e",
-      "replacement_effects_registered": 1,
-      "status": "unparsed"
+      "replacement_effects_registered": 2,
+      "status": "verified"
     },
     {
       "abilities_registered": 0,
@@ -6986,11 +6968,6 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: tap up to one target creature",
-          "severity": "unparsed"
-        },
-        {
-          "count": 1,
           "reason": "unparsed effect text: attach it to target creature you control",
           "severity": "unparsed"
         },
@@ -7581,13 +7558,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 446,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: earthbend x, where x is that creature's power",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Earthbend"
       ],
@@ -7595,7 +7566,7 @@
       "name": "Beifong's Bounty Hunters",
       "oracle_id": "8561b088-56b3-4732-82e9-8da1e3affd55",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "verified"
     },
     {
       "abilities_registered": 0,
@@ -13160,13 +13131,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 745,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: tap up to one target creature",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Behold"
       ],
@@ -13174,7 +13139,7 @@
       "name": "Champions of the Shoal",
       "oracle_id": "fc76ec95-f001-44df-89b2-b0f1b10c8e11",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -13259,7 +13224,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 750,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Harmonize casting is not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Harmonize"
       ],
@@ -13267,7 +13238,7 @@
       "name": "Channeled Dragonfire",
       "oracle_id": "91179937-6f55-4d1b-8f06-2efe1c8fea7a",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 1,
@@ -15309,18 +15280,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 858,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put two of those cards into your hand instead. Put the rest on the bottom of you",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed clause: where X is the number of lands you control. Put one of those cards into your han",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Kicker"
       ],
@@ -15328,7 +15288,7 @@
       "name": "Consult the Star Charts",
       "oracle_id": "e921839f-9d91-41a9-bc89-016af3c757aa",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "verified"
     },
     {
       "abilities_registered": 1,
@@ -21124,13 +21084,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1173,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: tap up to one target creature",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Reach"
       ],
@@ -21138,7 +21092,7 @@
       "name": "Dreamdew Entrancer",
       "oracle_id": "b6b2d63f-5b8c-47ee-8712-58596e0e9e94",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -21901,13 +21855,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1217,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Earthbend",
         "Landfall"
@@ -21916,7 +21864,7 @@
       "name": "Earthbender Ascension",
       "oracle_id": "f8966fd5-2926-4ba0-b7d6-cfea40cd4e05",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "observed_clean"
     },
     {
       "abilities_registered": 1,
@@ -22274,13 +22222,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1236,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: tap up to two target creatures",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flash"
       ],
@@ -22288,7 +22230,7 @@
       "name": "Eddymurk Crab",
       "oracle_id": "3c345e24-1726-45ac-91ca-e348d1e7acfe",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "verified"
     },
     {
       "abilities_registered": 2,
@@ -23852,7 +23794,7 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
+          "reason": "optional library-search decline is not policy-selectable",
           "severity": "partial"
         }
       ],
@@ -23943,11 +23885,6 @@
       "faces_audited": 1,
       "index": 1327,
       "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
-          "severity": "unparsed"
-        },
         {
           "count": 1,
           "reason": "unparsed effect text: Target creature with power 2 or less can't be blocked this turn",
@@ -24423,19 +24360,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1351,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Evolving Wilds",
       "oracle_id": "a75445d3-1303-4bb5-89ad-26ea93fecd48",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -24925,19 +24856,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1378,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Fabled Passage",
       "oracle_id": "0c85b8f7-0bd0-4680-9ec5-d4b110460a54",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "verified"
     },
     {
       "abilities_registered": 2,
@@ -25622,7 +25547,7 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: tap up to one target creature. if an opponent controls that creature",
+          "reason": "conditional target-controller rider is not enforced",
           "severity": "partial"
         }
       ],
@@ -27377,19 +27302,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1510,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: instead put two of them into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Flow State",
       "oracle_id": "e7194bca-0cf4-4a86-8b84-d2f9219a08b3",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "verified"
     },
     {
       "abilities_registered": 1,
@@ -30392,7 +30311,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1675,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Harmonize casting is not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Harmonize"
       ],
@@ -30400,7 +30325,7 @@
       "name": "Glacial Dragonhunt",
       "oracle_id": "8f976399-29a9-4eb7-844d-3d3f2fdf6ea7",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 3,
@@ -32927,7 +32852,13 @@
       "effect_probes": 3,
       "faces_audited": 2,
       "index": 1812,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "source-duration permission/restriction is not fully modeled",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Flying",
         "Haste",
@@ -32938,7 +32869,7 @@
       "name": "Gwen Stacy // Ghost-Spider",
       "oracle_id": "5f143d87-35fb-40e3-94ae-f85cfff9adb5",
       "replacement_effects_registered": 1,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 3,
@@ -33117,6 +33048,11 @@
       "issues": [
         {
           "count": 1,
+          "reason": "source-duration permission/restriction is not fully modeled",
+          "severity": "partial"
+        },
+        {
+          "count": 1,
           "reason": "unparsed clause: you may cast the exiled card during your turn by waterbending {x} rather than pa",
           "severity": "partial"
         }
@@ -33243,19 +33179,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1829,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: untap this creature. this ability triggers only once each turn",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Hardbristle Bandit",
       "oracle_id": "116eea43-4235-4608-8c6a-599e860ae2f1",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 4,
@@ -33798,7 +33728,7 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
+          "reason": "optional library-search decline is not policy-selectable",
           "severity": "partial"
         }
       ],
@@ -40340,19 +40270,13 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 2214,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: untap this creature",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Kindlespark Duo",
       "oracle_id": "980cd7d5-a511-49ab-bc52-08b71c65db76",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 7,
@@ -41244,17 +41168,12 @@
       "issues": [
         {
           "count": 1,
+          "reason": "optional library-search decline is not policy-selectable",
+          "severity": "partial"
+        },
+        {
+          "count": 1,
           "reason": "unparsed clause: destroy up to one nonbasic land that player controls. for each land destroyed th",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed clause: its controller may search their library for a basic land card",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
           "severity": "partial"
         }
       ],
@@ -41580,11 +41499,6 @@
       "faces_audited": 1,
       "index": 2276,
       "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
-          "severity": "partial"
-        },
         {
           "count": 1,
           "reason": "unparsed clause: where x is the number of shrines you control. put those cards onto the battlefie",
@@ -42626,7 +42540,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2334,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "source-duration permission/restriction is not fully modeled",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Menace"
       ],
@@ -42634,7 +42554,7 @@
       "name": "Lightning, Security Sergeant",
       "oracle_id": "e1626880-0fa3-441a-9978-b293fc87c418",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 2,
@@ -43281,13 +43201,7 @@
       "effect_probes": 2,
       "faces_audited": 2,
       "index": 2368,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: tap up to one target artifact or creature",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Craft",
         "Explore",
@@ -43298,7 +43212,7 @@
       "name": "Lodestone Needle // Guidestone Compass",
       "oracle_id": "f429ca15-c578-4c1d-a604-fd5509c92dba",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -43955,7 +43869,7 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
+          "reason": "optional library-search decline is not policy-selectable",
           "severity": "partial"
         },
         {
@@ -45103,7 +45017,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2467,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Harmonize casting is not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Harmonize"
       ],
@@ -45111,7 +45031,7 @@
       "name": "Mammoth Bellow",
       "oracle_id": "6f2e4607-bece-42ba-a2a3-5dc50f246793",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 0,
@@ -45871,19 +45791,13 @@
       "effect_probes": 2,
       "faces_audited": 2,
       "index": 2508,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: tap up to one target creature",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "split",
       "name": "Meat Locker // Drowned Diner",
       "oracle_id": "897eef47-3e99-4a5f-8a3e-ddb06bc95e9a",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -47729,13 +47643,7 @@
       "effect_probes": 2,
       "faces_audited": 2,
       "index": 2611,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Manifest",
         "Manifest dread"
@@ -47744,7 +47652,7 @@
       "name": "Moldering Gym // Weight Room",
       "oracle_id": "34d0d070-fcaf-410e-a002-012cbe104fb7",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -49405,6 +49313,11 @@
       "faces_audited": 1,
       "index": 2704,
       "issues": [
+        {
+          "count": 1,
+          "reason": "Harmonize casting is not implemented",
+          "severity": "partial"
+        },
         {
           "count": 1,
           "reason": "unparsed clause: put it onto the battlefield",
@@ -51799,13 +51712,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2833,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: This spell can't be countered. Tap up to two target creatures",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Investigate"
       ],
@@ -51813,7 +51720,7 @@
       "name": "Out Cold",
       "oracle_id": "2d16d51b-47e0-4cdc-83dd-a805ba50bd83",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -54274,6 +54181,11 @@
       "issues": [
         {
           "count": 1,
+          "reason": "source-duration permission/restriction is not fully modeled",
+          "severity": "partial"
+        },
+        {
+          "count": 1,
           "reason": "unparsed clause: tap any number of untapped creatures you control with total power 1 or greater: ",
           "severity": "partial"
         }
@@ -54569,7 +54481,7 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
+          "reason": "optional library-search decline is not policy-selectable",
           "severity": "partial"
         }
       ],
@@ -54913,19 +54825,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3002,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Proctor's Gaze",
       "oracle_id": "a7fe7621-9bb1-4d0d-8b50-c179c685d79d",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -55030,19 +54936,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3009,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Promising Vein",
       "oracle_id": "861eb7d7-7616-4620-a4fd-4b8c3bf00dd1",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "observed_clean"
     },
     {
       "abilities_registered": 1,
@@ -59440,11 +59340,6 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: Untap this creature.\"",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
           "reason": "unparsed clause: tap enchanted creature",
           "severity": "partial"
         }
@@ -59937,7 +59832,7 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
+          "reason": "Harmonize casting is not implemented",
           "severity": "partial"
         }
       ],
@@ -61981,7 +61876,7 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
+          "reason": "optional library-search decline is not policy-selectable",
           "severity": "partial"
         }
       ],
@@ -64231,19 +64126,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3514,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Shared Roots",
       "oracle_id": "9e0fd3bf-f47a-4f06-8ff1-73f6bf5d1e03",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -66098,13 +65987,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3612,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Untap this creature",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flying",
         "Ward"
@@ -66113,7 +65996,7 @@
       "name": "Sleep-Cursed Faerie",
       "oracle_id": "a17633aa-b1a7-4ae5-b051-6747975d8a2f",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -66685,7 +66568,7 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: put that card onto the battlefield tapped",
+          "reason": "optional library-search decline is not policy-selectable",
           "severity": "partial"
         }
       ],
@@ -67667,13 +67550,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3699,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: untap this creature",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Reach"
       ],
@@ -67681,7 +67558,7 @@
       "name": "Spider Manifestation",
       "oracle_id": "8281f2b9-e81b-48da-812a-8713b2adf8ab",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "verified"
     },
     {
       "abilities_registered": 2,
@@ -67879,13 +67756,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3710,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Web-slinging"
       ],
@@ -67893,7 +67764,7 @@
       "name": "Spider-Man, Brooklyn Visionary",
       "oracle_id": "2ca85872-9436-4515-af50-c13e59605627",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -68107,7 +67978,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3721,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "source-duration permission/restriction is not fully modeled",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Flash"
       ],
@@ -68115,7 +67992,7 @@
       "name": "Spider-Woman, Secret Agent",
       "oracle_id": "04e53f36-9f16-4678-9caf-9afda85f76b4",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 2,
@@ -68484,13 +68361,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3740,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: tap up to one target creature",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Offspring"
       ],
@@ -68498,7 +68369,7 @@
       "name": "Splash Lasher",
       "oracle_id": "0d0c4c91-683a-4563-a0b0-39f3c04f6307",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -70805,13 +70676,7 @@
       "effect_probes": 1,
       "faces_audited": 2,
       "index": 3863,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put that card onto the battlefield tapped",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Prepared"
       ],
@@ -70819,7 +70684,7 @@
       "name": "Studious First-Year // Rampant Growth",
       "oracle_id": "58b0c737-0a84-4f9a-b3b7-300c5de43874",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -72679,7 +72544,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3966,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Harmonize casting is not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Harmonize"
       ],
@@ -72687,7 +72558,7 @@
       "name": "Synchronized Charge",
       "oracle_id": "faa0055b-c1d2-4ce7-875f-41b4be8030bd",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 0,
@@ -73325,6 +73196,11 @@
       "issues": [
         {
           "count": 1,
+          "reason": "source-duration permission/restriction is not fully modeled",
+          "severity": "partial"
+        },
+        {
+          "count": 1,
           "reason": "unparsed clause: where x is the number of goblins you control. you choose one of those cards. tha",
           "severity": "partial"
         }
@@ -73958,19 +73834,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4039,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Tend the Sprigs",
       "oracle_id": "91363d71-eef0-48e8-9a68-8f363ff2790e",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -74119,19 +73989,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4048,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Terramorphic Expanse",
       "oracle_id": "1bd3e453-aa21-4ee6-95c2-d6d920ee8e7a",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -76282,13 +76146,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4156,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Investigate"
       ],
@@ -76296,7 +76154,7 @@
       "name": "They Went This Way",
       "oracle_id": "47951720-9584-4ca3-a73d-3d259102b2f8",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -76765,13 +76623,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 4183,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Manifest",
         "Manifest dread"
@@ -76780,7 +76632,7 @@
       "name": "Threats Around Every Corner",
       "oracle_id": "5c104ac8-738a-4a9d-a68b-5706018d2061",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -77395,11 +77247,6 @@
         {
           "count": 1,
           "reason": "unparsed clause: tap this creature",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed clause: untap this creature",
           "severity": "partial"
         }
       ],
@@ -79622,7 +79469,7 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: tap up to one target creature. it doesn't untap during its controller's untap st",
+          "reason": "source-duration permission/restriction is not fully modeled",
           "severity": "partial"
         }
       ],
@@ -79795,13 +79642,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4344,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: add an additional {c}",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flying"
       ],
@@ -79809,7 +79650,7 @@
       "name": "Ultima, Origin of Oblivion",
       "oracle_id": "baa337ce-edc6-4ee5-a898-68e9dbb4ab93",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -80329,7 +80170,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4374,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Harmonize casting is not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Harmonize"
       ],
@@ -80337,7 +80184,7 @@
       "name": "Unending Whisper",
       "oracle_id": "c5da5c31-0cf1-4393-8701-eda7880ecebc",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 1,
@@ -80647,13 +80494,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 4391,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: untap this creature",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Defender"
       ],
@@ -80661,7 +80502,7 @@
       "name": "Unruly Catapult",
       "oracle_id": "b2b0a5d0-0084-43a4-b6dc-e893ef42cdb7",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -81018,7 +80859,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4410,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Harmonize casting is not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Harmonize"
       ],
@@ -81026,7 +80873,7 @@
       "name": "Ureni's Rebuff",
       "oracle_id": "c0b7e989-8194-484c-93aa-a44df0764a77",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 4,
@@ -81123,19 +80970,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4416,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: tap up to one target creature",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Utrom Scientists",
       "oracle_id": "89793c8c-98a3-4621-ad3d-cfc5949c65da",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -82212,19 +82053,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4477,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it onto the battlefield tapped",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Vibrant Cityscape",
       "oracle_id": "6a7f3e1f-6798-4644-b64c-7765f81f0938",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -84908,7 +84743,7 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: gains haste until end of turn. Harmonize {4}{R}",
+          "reason": "Harmonize casting is not implemented",
           "severity": "partial"
         }
       ],
@@ -85368,7 +85203,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4650,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "Harmonize casting is not implemented",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Harmonize"
       ],
@@ -85376,7 +85217,7 @@
       "name": "Winternight Stories",
       "oracle_id": "d64687e4-ec37-4db2-9e60-4626c7a3b011",
       "replacement_effects_registered": 0,
-      "status": "observed_clean"
+      "status": "partial"
     },
     {
       "abilities_registered": 0,
@@ -86854,7 +86695,7 @@
   "kind": "format_card_support_ledger",
   "overrides": {
     "path": "support_overrides.json",
-    "sha256": "1a999b40ea87b7ef64439fec4249f2ac8fd86d9e7bffa8a72a165ee36b5fccd6"
+    "sha256": "4b485037914c3153280ccd2739e5e12e23816afc65e2f4b3a8ede0b87e0838d4"
   },
   "pool_snapshot": {
     "path": "standard.jsonl",
@@ -86863,63 +86704,15 @@
   },
   "ranked_cards": [
     {
-      "deck_slots": 8,
-      "decks": [
-        "Mono-Green Landfall",
-        "Selesnya Ouroboroid"
-      ],
-      "name": "Badgermole Cub",
-      "reasons": [
-        "unparsed effect text: add an additional {g}"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 7,
-      "decks": [
-        "Izzet Prowess",
-        "Izzet Spellementals"
-      ],
-      "name": "Flow State",
-      "reasons": [
-        "unparsed clause: instead put two of them into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 6,
-      "decks": [
-        "Izzet Prowess",
-        "Izzet Spellementals"
-      ],
-      "name": "Eddymurk Crab",
-      "reasons": [
-        "unparsed clause: tap up to two target creatures"
-      ],
-      "status": "partial"
-    },
-    {
       "deck_slots": 4,
       "decks": [
         "Mono-Green Landfall"
       ],
       "name": "Escape Tunnel",
       "reasons": [
-        "unparsed clause: put it onto the battlefield tapped",
         "unparsed effect text: Target creature with power 2 or less can't be blocked this turn"
       ],
       "status": "unparsed"
-    },
-    {
-      "deck_slots": 4,
-      "decks": [
-        "Jeskai Lessons"
-      ],
-      "name": "Accumulate Wisdom",
-      "reasons": [
-        "unparsed clause: the rest on the bottom of your library in any order. Put each of those cards int"
-      ],
-      "status": "partial"
     },
     {
       "deck_slots": 4,
@@ -86959,32 +86752,10 @@
       "decks": [
         "Mono-Green Landfall"
       ],
-      "name": "Earthbender Ascension",
-      "reasons": [
-        "unparsed clause: put it onto the battlefield tapped"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 4,
-      "decks": [
-        "Mono-Green Landfall"
-      ],
       "name": "Esper Origins // Summon: Esper Maduin",
       "reasons": [
         "unparsed clause: exile",
         "unparsed clause: exile it"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 4,
-      "decks": [
-        "Mono-Green Landfall"
-      ],
-      "name": "Fabled Passage",
-      "reasons": [
-        "unparsed clause: put it onto the battlefield tapped"
       ],
       "status": "partial"
     },
@@ -87011,14 +86782,14 @@
       "status": "partial"
     },
     {
-      "deck_slots": 3,
+      "deck_slots": 4,
       "decks": [
-        "4c Control"
+        "Dimir Excruciator",
+        "Izzet Spellementals"
       ],
-      "name": "Consult the Star Charts",
+      "name": "Winternight Stories",
       "reasons": [
-        "unparsed clause: put two of those cards into your hand instead. Put the rest on the bottom of you",
-        "unparsed clause: where X is the number of lands you control. Put one of those cards into your han"
+        "Harmonize casting is not implemented"
       ],
       "status": "partial"
     },
@@ -87031,17 +86802,6 @@
       "name": "Mistrise Village",
       "reasons": [
         "unparsed clause: The next spell you cast this turn can't be countered"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 3,
-      "decks": [
-        "Selesnya Ouroboroid"
-      ],
-      "name": "Spider Manifestation",
-      "reasons": [
-        "unparsed clause: untap this creature"
       ],
       "status": "partial"
     },
@@ -87096,7 +86856,7 @@
       ],
       "name": "Erode",
       "reasons": [
-        "unparsed clause: put it onto the battlefield tapped"
+        "optional library-search decline is not policy-selectable"
       ],
       "status": "partial"
     },
@@ -87141,7 +86901,7 @@
       ],
       "name": "Lumbering Worldwagon",
       "reasons": [
-        "unparsed clause: put it onto the battlefield tapped",
+        "optional library-search decline is not policy-selectable",
         "unparsed clause: tap any number of untapped creatures you control with total power 1 or greater: "
       ],
       "status": "partial"
@@ -87154,17 +86914,6 @@
       "name": "North Wind Avatar",
       "reasons": [
         "unparsed clause: you may put a card you own from outside the game into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 1,
-      "decks": [
-        "Mono-Green Landfall"
-      ],
-      "name": "Promising Vein",
-      "reasons": [
-        "unparsed clause: put it onto the battlefield tapped"
       ],
       "status": "partial"
     },
@@ -87432,7 +87181,6 @@
       "decks": [],
       "name": "Baseball Bat",
       "reasons": [
-        "unparsed clause: tap up to one target creature",
         "unparsed effect text: attach it to target creature you control",
         "unparsed effect text: attach to target creature you control. Equip only as a sorcery."
       ],
@@ -87471,15 +87219,6 @@
       "name": "Behind the Mask",
       "reasons": [
         "unparsed effect text: As an additional cost to cast this spell, you may collect evidence 6. (Exile car"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Beifong's Bounty Hunters",
-      "reasons": [
-        "unparsed effect text: earthbend x, where x is that creature's power"
       ],
       "status": "unparsed"
     },
@@ -90675,15 +90414,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Ultima, Origin of Oblivion",
-      "reasons": [
-        "unparsed effect text: add an additional {c}"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Uncharted Haven",
       "reasons": [
         "unparsed effect text: Add one mana of the chosen color"
@@ -91106,15 +90836,6 @@
       "name": "Ambitious Augmenter",
       "reasons": [
         "unparsed clause: create a 0/0 green"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Ambling Stormshell",
-      "reasons": [
-        "unparsed clause: untap this creature"
       ],
       "status": "partial"
     },
@@ -91854,15 +91575,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Champions of the Shoal",
-      "reasons": [
-        "unparsed clause: tap up to one target creature"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Chancellor of Tales",
       "reasons": [
         "unparsed clause: you may copy it. you may choose new targets for the copy"
@@ -91875,6 +91587,15 @@
       "name": "Changeling Wayfinder",
       "reasons": [
         "unparsed clause: put it into your hand"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Channeled Dragonfire",
+      "reasons": [
+        "Harmonize casting is not implemented"
       ],
       "status": "partial"
     },
@@ -92615,15 +92336,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Dreamdew Entrancer",
-      "reasons": [
-        "unparsed clause: tap up to one target creature"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Dual-Sun Technique",
       "reasons": [
         "unparsed clause: Target creature you control gains double strike until end of turn. If it has a +"
@@ -92934,15 +92646,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Evolving Wilds",
-      "reasons": [
-        "unparsed clause: put it onto the battlefield tapped"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Expedited Inheritance",
       "reasons": [
         "unparsed clause: its controller may exile that many cards from the top of their library. they may"
@@ -93064,7 +92767,7 @@
       "decks": [],
       "name": "Fear of Immobility",
       "reasons": [
-        "unparsed clause: tap up to one target creature. if an opponent controls that creature"
+        "conditional target-controller rider is not enforced"
       ],
       "status": "partial"
     },
@@ -93488,6 +93191,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Glacial Dragonhunt",
+      "reasons": [
+        "Harmonize casting is not implemented"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Gladiolus Amicitia",
       "reasons": [
         "unparsed clause: put it onto the battlefield tapped"
@@ -93737,6 +93449,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Gwen Stacy // Ghost-Spider",
+      "reasons": [
+        "source-duration permission/restriction is not fully modeled"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "H.E.R.B.I.E. Scout Unit",
       "reasons": [
         "unparsed clause: you may put a land card from your hand onto the battlefield tapped"
@@ -93748,16 +93469,8 @@
       "decks": [],
       "name": "Hama, the Bloodbender",
       "reasons": [
+        "source-duration permission/restriction is not fully modeled",
         "unparsed clause: you may cast the exiled card during your turn by waterbending {x} rather than pa"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Hardbristle Bandit",
-      "reasons": [
-        "unparsed clause: untap this creature. this ability triggers only once each turn"
       ],
       "status": "partial"
     },
@@ -93775,7 +93488,7 @@
       "decks": [],
       "name": "Heaped Harvest",
       "reasons": [
-        "unparsed clause: put it onto the battlefield tapped"
+        "optional library-search decline is not policy-selectable"
       ],
       "status": "partial"
     },
@@ -94348,15 +94061,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Kindlespark Duo",
-      "reasons": [
-        "unparsed clause: untap this creature"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Kinscaer Sentry",
       "reasons": [
         "unparsed clause: you may put a creature card with mana value x or less from your hand onto the ba"
@@ -94425,9 +94129,8 @@
       "decks": [],
       "name": "Krenko's Buzzcrusher",
       "reasons": [
-        "unparsed clause: destroy up to one nonbasic land that player controls. for each land destroyed th",
-        "unparsed clause: its controller may search their library for a basic land card",
-        "unparsed clause: put it onto the battlefield tapped"
+        "optional library-search decline is not policy-selectable",
+        "unparsed clause: destroy up to one nonbasic land that player controls. for each land destroyed th"
       ],
       "status": "partial"
     },
@@ -94457,7 +94160,6 @@
       "decks": [],
       "name": "Kyoshi Island Plaza",
       "reasons": [
-        "unparsed clause: put it onto the battlefield tapped",
         "unparsed clause: where x is the number of shrines you control. put those cards onto the battlefie"
       ],
       "status": "partial"
@@ -94524,6 +94226,15 @@
       "name": "Lifecraft Engine",
       "reasons": [
         "unparsed clause: tap any number of untapped creatures you control with total power 1 or greater: "
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Lightning, Security Sergeant",
+      "reasons": [
+        "source-duration permission/restriction is not fully modeled"
       ],
       "status": "partial"
     },
@@ -94617,15 +94328,6 @@
       "name": "Lo and Li, Twin Tutors",
       "reasons": [
         "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Lodestone Needle // Guidestone Compass",
-      "reasons": [
-        "unparsed clause: tap up to one target artifact or creature"
       ],
       "status": "partial"
     },
@@ -94760,6 +94462,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Mammoth Bellow",
+      "reasons": [
+        "Harmonize casting is not implemented"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Map the Frontier",
       "reasons": [
         "unparsed clause: put them onto the battlefield tapped"
@@ -94856,15 +94567,6 @@
       "name": "Mazemind Tome",
       "reasons": [
         "unparsed clause: exile it. if you do"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Meat Locker // Drowned Diner",
-      "reasons": [
-        "unparsed clause: tap up to one target creature"
       ],
       "status": "partial"
     },
@@ -94983,15 +94685,6 @@
       "name": "Misleading Motes",
       "reasons": [
         "unparsed clause: Target creature's owner puts it on their choice of the top or bottom of their li"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Moldering Gym // Weight Room",
-      "reasons": [
-        "unparsed clause: put it onto the battlefield tapped"
       ],
       "status": "partial"
     },
@@ -95163,6 +94856,7 @@
       "decks": [],
       "name": "Nature's Rhythm",
       "reasons": [
+        "Harmonize casting is not implemented",
         "unparsed clause: put it onto the battlefield"
       ],
       "status": "partial"
@@ -95381,15 +95075,6 @@
       "name": "Otterball Antics",
       "reasons": [
         "unparsed clause: Create a 1/1 blue"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Out Cold",
-      "reasons": [
-        "unparsed clause: This spell can't be countered. Tap up to two target creatures"
       ],
       "status": "partial"
     },
@@ -95698,6 +95383,7 @@
       "decks": [],
       "name": "Possession Engine",
       "reasons": [
+        "source-duration permission/restriction is not fully modeled",
         "unparsed clause: tap any number of untapped creatures you control with total power 1 or greater: "
       ],
       "status": "partial"
@@ -95736,7 +95422,7 @@
       "decks": [],
       "name": "Price of Freedom",
       "reasons": [
-        "unparsed clause: put it onto the battlefield tapped"
+        "optional library-search decline is not policy-selectable"
       ],
       "status": "partial"
     },
@@ -95753,15 +95439,6 @@
       "deck_slots": 0,
       "decks": [],
       "name": "Prishe's Wanderings",
-      "reasons": [
-        "unparsed clause: put it onto the battlefield tapped"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Proctor's Gaze",
       "reasons": [
         "unparsed clause: put it onto the battlefield tapped"
       ],
@@ -96102,7 +95779,6 @@
       "decks": [],
       "name": "Ringing Strike Mastery",
       "reasons": [
-        "unparsed clause: Untap this creature.\"",
         "unparsed clause: tap enchanted creature"
       ],
       "status": "partial"
@@ -96148,7 +95824,7 @@
       "decks": [],
       "name": "Roamer's Routine",
       "reasons": [
-        "unparsed clause: put it onto the battlefield tapped"
+        "Harmonize casting is not implemented"
       ],
       "status": "partial"
     },
@@ -96322,7 +95998,7 @@
       "decks": [],
       "name": "Sandworm",
       "reasons": [
-        "unparsed clause: put it onto the battlefield tapped"
+        "optional library-search decline is not policy-selectable"
       ],
       "status": "partial"
     },
@@ -96512,15 +96188,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Shared Roots",
-      "reasons": [
-        "unparsed clause: put it onto the battlefield tapped"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Shark Shredder, Killer Clone",
       "reasons": [
         "unparsed clause: put up to one target creature card from that player's graveyard onto the battlef"
@@ -96684,15 +96351,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Sleep-Cursed Faerie",
-      "reasons": [
-        "unparsed clause: Untap this creature"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Slice from the Shadows",
       "reasons": [
         "unparsed clause: This spell can't be countered. Target creature gets -X/-X until end of turn"
@@ -96750,7 +96408,7 @@
       "decks": [],
       "name": "Solemn Simulacrum",
       "reasons": [
-        "unparsed clause: put that card onto the battlefield tapped"
+        "optional library-search decline is not policy-selectable"
       ],
       "status": "partial"
     },
@@ -96876,15 +96534,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Spider-Man, Brooklyn Visionary",
-      "reasons": [
-        "unparsed clause: put it onto the battlefield tapped"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Spider-Mobile",
       "reasons": [
         "unparsed clause: tap any number of untapped creatures you control with total power 1 or greater: "
@@ -96908,6 +96557,15 @@
         "unparsed clause: it gains haste. do this only once each turn",
         "unparsed clause: you may choose new targets for the copy. if the copy is a permanent spell",
         "unparsed clause: you may copy it. if you do"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Spider-Woman, Secret Agent",
+      "reasons": [
+        "source-duration permission/restriction is not fully modeled"
       ],
       "status": "partial"
     },
@@ -96972,15 +96630,6 @@
       "name": "Spirit Water Revival",
       "reasons": [
         "unparsed clause: you have no maximum hand size for the rest of the game. Exile Spirit Water Reviv"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Splash Lasher",
-      "reasons": [
-        "unparsed clause: tap up to one target creature"
       ],
       "status": "partial"
     },
@@ -97177,15 +96826,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Studious First-Year // Rampant Growth",
-      "reasons": [
-        "unparsed clause: put that card onto the battlefield tapped"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Subterranean Schooner",
       "reasons": [
         "unparsed clause: tap any number of untapped creatures you control with total power 1 or greater: "
@@ -97304,6 +96944,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Synchronized Charge",
+      "reasons": [
+        "Harmonize casting is not implemented"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Syncopate",
       "reasons": [
         "unparsed clause: exile it instead of putting it into its owner's graveyard"
@@ -97342,6 +96991,7 @@
       "decks": [],
       "name": "Taster of Wares",
       "reasons": [
+        "source-duration permission/restriction is not fully modeled",
         "unparsed clause: where x is the number of goblins you control. you choose one of those cards. tha"
       ],
       "status": "partial"
@@ -97385,27 +97035,9 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Tend the Sprigs",
-      "reasons": [
-        "unparsed clause: put it onto the battlefield tapped"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Tenth District Hero",
       "reasons": [
         "unparsed clause: it gains \"Other creatures you control have indestructible.\""
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Terramorphic Expanse",
-      "reasons": [
-        "unparsed clause: put it onto the battlefield tapped"
       ],
       "status": "partial"
     },
@@ -97716,15 +97348,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "They Went This Way",
-      "reasons": [
-        "unparsed clause: put it onto the battlefield tapped"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Thopter Fabricator",
       "reasons": [
         "unparsed clause: tap any number of untapped creatures you control with total power 1 or greater: "
@@ -97755,15 +97378,6 @@
       "name": "Thousand-Year Storm",
       "reasons": [
         "unparsed clause: copy it for each other instant"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Threats Around Every Corner",
-      "reasons": [
-        "unparsed clause: put it onto the battlefield tapped"
       ],
       "status": "partial"
     },
@@ -97837,8 +97451,7 @@
       "decks": [],
       "name": "Tiger-Seal",
       "reasons": [
-        "unparsed clause: tap this creature",
-        "unparsed clause: untap this creature"
+        "unparsed clause: tap this creature"
       ],
       "status": "partial"
     },
@@ -98025,7 +97638,7 @@
       "decks": [],
       "name": "Ty Lee, Chi Blocker",
       "reasons": [
-        "unparsed clause: tap up to one target creature. it doesn't untap during its controller's untap st"
+        "source-duration permission/restriction is not fully modeled"
       ],
       "status": "partial"
     },
@@ -98054,6 +97667,15 @@
       "reasons": [
         "unparsed clause: return it to the battlefield tapped under its owner's control with a +1/+1 count",
         "unparsed clause: target creature gains \"When this creature dies"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Unending Whisper",
+      "reasons": [
+        "Harmonize casting is not implemented"
       ],
       "status": "partial"
     },
@@ -98101,15 +97723,6 @@
       "name": "Unrooted Ancestor",
       "reasons": [
         "unparsed clause: This creature gains indestructible until end of turn. Tap it"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Unruly Catapult",
-      "reasons": [
-        "unparsed clause: untap this creature"
       ],
       "status": "partial"
     },
@@ -98173,18 +97786,18 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Urgent Necropsy",
+      "name": "Ureni's Rebuff",
       "reasons": [
-        "unparsed clause: where X is the total mana value of the permanents this spell targets. Destroy up"
+        "Harmonize casting is not implemented"
       ],
       "status": "partial"
     },
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Utrom Scientists",
+      "name": "Urgent Necropsy",
       "reasons": [
-        "unparsed clause: tap up to one target creature"
+        "unparsed clause: where X is the total mana value of the permanents this spell targets. Destroy up"
       ],
       "status": "partial"
     },
@@ -98248,15 +97861,6 @@
       "name": "Vibrance",
       "reasons": [
         "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Vibrant Cityscape",
-      "reasons": [
-        "unparsed clause: put it onto the battlefield tapped"
       ],
       "status": "partial"
     },
@@ -98522,7 +98126,7 @@
       "decks": [],
       "name": "Wild Ride",
       "reasons": [
-        "unparsed clause: gains haste until end of turn. Harmonize {4}{R}"
+        "Harmonize casting is not implemented"
       ],
       "status": "partial"
     },
@@ -98667,29 +98271,29 @@
   ],
   "ranked_mechanics": [
     {
-      "affected_cards": 883,
-      "deck_cards": 25,
-      "deck_slots": 80,
+      "affected_cards": 854,
+      "deck_cards": 16,
+      "deck_slots": 40,
       "examples": [
-        "Badgermole Cub",
-        "Flow State",
-        "Eddymurk Crab",
-        "Accumulate Wisdom",
         "Brightglass Gearhulk",
         "Combustion Technique",
         "Daydream",
-        "Earthbender Ascension",
         "Escape Tunnel",
-        "Fabled Passage"
+        "Sage of the Skies",
+        "Starfield Shepherd",
+        "Mistrise Village",
+        "Cosmogrand Zenith",
+        "Day of Black Sun",
+        "Erode"
       ],
       "mechanic": "unclassified oracle text",
       "status_counts": {
-        "partial": 723,
-        "unparsed": 160
+        "partial": 696,
+        "unparsed": 158
       }
     },
     {
-      "affected_cards": 31,
+      "affected_cards": 30,
       "deck_cards": 1,
       "deck_slots": 4,
       "examples": [
@@ -98706,12 +98310,33 @@
       ],
       "mechanic": "layout:transform",
       "status_counts": {
-        "partial": 27,
+        "partial": 26,
         "unparsed": 4
       }
     },
     {
       "affected_cards": 10,
+      "deck_cards": 1,
+      "deck_slots": 4,
+      "examples": [
+        "Winternight Stories",
+        "Channeled Dragonfire",
+        "Glacial Dragonhunt",
+        "Mammoth Bellow",
+        "Nature's Rhythm",
+        "Roamer's Routine",
+        "Synchronized Charge",
+        "Unending Whisper",
+        "Ureni's Rebuff",
+        "Wild Ride"
+      ],
+      "mechanic": "Harmonize",
+      "status_counts": {
+        "partial": 10
+      }
+    },
+    {
+      "affected_cards": 9,
       "deck_cards": 1,
       "deck_slots": 2,
       "examples": [
@@ -98723,12 +98348,11 @@
         "Lluwen, Exchange Student // Pest Friend",
         "Sanar, Unfinished Genius // Wild Idea",
         "Skycoach Conductor // All Aboard",
-        "Strife Scholar // Awaken the Ages",
-        "Studious First-Year // Rampant Growth"
+        "Strife Scholar // Awaken the Ages"
       ],
       "mechanic": "layout:prepare",
       "status_counts": {
-        "partial": 10
+        "partial": 9
       }
     },
     {
@@ -99043,24 +98667,6 @@
       "deck_cards": 0,
       "deck_slots": 0,
       "examples": [
-        "Central Elevator // Promising Stairs",
-        "Flotsam // Jetsam",
-        "Hustle // Bustle",
-        "Meat Locker // Drowned Diner",
-        "Moldering Gym // Weight Room",
-        "Walk-In Closet // Forgotten Cellar"
-      ],
-      "mechanic": "layout:split",
-      "status_counts": {
-        "partial": 5,
-        "unparsed": 1
-      }
-    },
-    {
-      "affected_cards": 6,
-      "deck_cards": 0,
-      "deck_slots": 0,
-      "examples": [
         "Conductive Machete",
         "Cursed Windbreaker",
         "Dissection Tools",
@@ -99139,6 +98745,22 @@
       }
     },
     {
+      "affected_cards": 4,
+      "deck_cards": 0,
+      "deck_slots": 0,
+      "examples": [
+        "Central Elevator // Promising Stairs",
+        "Flotsam // Jetsam",
+        "Hustle // Bustle",
+        "Walk-In Closet // Forgotten Cellar"
+      ],
+      "mechanic": "layout:split",
+      "status_counts": {
+        "partial": 3,
+        "unparsed": 1
+      }
+    },
+    {
       "affected_cards": 3,
       "deck_cards": 0,
       "deck_slots": 0,
@@ -99186,13 +98808,13 @@
       "deck_cards": 0,
       "deck_slots": 0,
       "examples": [
-        "Beifong's Bounty Hunters",
-        "Rockalanche",
-        "The Boulder, Ready to Rumble"
+        "Eddie Brock // Venom, Lethal Protector",
+        "Gwen Stacy // Ghost-Spider",
+        "Tony Stark // The Invincible Iron Man"
       ],
-      "mechanic": "Earthbend",
+      "mechanic": "layout:modal_dfc",
       "status_counts": {
-        "unparsed": 3
+        "partial": 3
       }
     },
     {
@@ -99241,6 +98863,19 @@
       "deck_cards": 0,
       "deck_slots": 0,
       "examples": [
+        "Rockalanche",
+        "The Boulder, Ready to Rumble"
+      ],
+      "mechanic": "Earthbend",
+      "status_counts": {
+        "unparsed": 2
+      }
+    },
+    {
+      "affected_cards": 2,
+      "deck_cards": 0,
+      "deck_slots": 0,
+      "examples": [
         "Fear of Falling",
         "High-Flying Ace"
       ],
@@ -99271,19 +98906,6 @@
         "Case of the Shattered Pact"
       ],
       "mechanic": "layout:case",
-      "status_counts": {
-        "partial": 2
-      }
-    },
-    {
-      "affected_cards": 2,
-      "deck_cards": 0,
-      "deck_slots": 0,
-      "examples": [
-        "Eddie Brock // Venom, Lethal Protector",
-        "Tony Stark // The Invincible Iron Man"
-      ],
-      "mechanic": "layout:modal_dfc",
       "status_counts": {
         "partial": 2
       }
@@ -99391,18 +99013,6 @@
       "deck_cards": 0,
       "deck_slots": 0,
       "examples": [
-        "Wild Ride"
-      ],
-      "mechanic": "Harmonize",
-      "status_counts": {
-        "partial": 1
-      }
-    },
-    {
-      "affected_cards": 1,
-      "deck_cards": 0,
-      "deck_slots": 0,
-      "examples": [
         "Divine Resilience"
       ],
       "mechanic": "Kicker",
@@ -99472,16 +99082,16 @@
     }
   ],
   "schema_version": 1,
-  "sha256": "329db578f14fa416cb39f4e47c7f1d506982dad20b9d921cc88ba962dc21fac6",
+  "sha256": "03bfbcba321aba24708d1e273119b79a0cb680efc8c5e10e5cc282eb0195bf51",
   "summary": {
-    "qualified_fraction": 0.027647809442790303,
-    "static_clean_fraction": 0.7284134410888984,
+    "qualified_fraction": 0.0295618885580604,
+    "static_clean_fraction": 0.7335176520629519,
     "status_counts": {
-      "observed_clean": 78,
-      "partial": 864,
-      "unparsed": 413,
-      "unseen": 3295,
-      "verified": 52
+      "observed_clean": 79,
+      "partial": 843,
+      "unparsed": 410,
+      "unseen": 3310,
+      "verified": 60
     },
     "total": 4702
   }

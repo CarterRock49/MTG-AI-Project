@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import re
+from pathlib import Path
 import numpy as np
 
 from .ability_utils import EffectFactory
@@ -2319,15 +2320,19 @@ def load_decks_and_card_db(decks_folder, format_name=None, banned_names=None,
         decks = []
         load_errors = []
        
-        # Stable traversal keeps card IDs and seeded shuffles reproducible
-        # across filesystems and operating systems.
-        for deck_file in sorted(os.listdir(decks_folder), key=str.casefold):
-            if not deck_file.endswith('.json'):
-                continue
+        # Stable recursive traversal keeps generated metagame decks and
+        # persistent user imports in separate subdirectories without changing
+        # card IDs or seeded shuffles across platforms.
+        deck_root = Path(decks_folder)
+        deck_paths = sorted(
+            (path for path in deck_root.rglob("*.json") if path.is_file()),
+            key=lambda path: path.relative_to(deck_root).as_posix().casefold())
+        seen_deck_names = set()
+        for deck_path in deck_paths:
+            deck_file = deck_path.relative_to(deck_root).as_posix()
                
             try:
-                with open(os.path.join(decks_folder, deck_file), 'r',
-                          encoding='utf-8') as f:
+                with open(deck_path, 'r', encoding='utf-8') as f:
                     deck_data = json.load(f)
                     
                     # Hydrated corpora retain the human-readable archetype
@@ -2335,7 +2340,12 @@ def load_decks_and_card_db(decks_folder, format_name=None, banned_names=None,
                     # filename for compatibility.
                     deck_name = str(
                         deck_data.get("name")
-                        or os.path.splitext(deck_file)[0])
+                        or deck_path.stem)
+                    deck_key = deck_name.casefold()
+                    if deck_key in seen_deck_names:
+                        raise ValueError(
+                            f"Duplicate deck name {deck_name!r} ({deck_file})")
+                    seen_deck_names.add(deck_key)
                     
                     # Create a deck dictionary with name and cards
                     current_deck = {
@@ -2378,12 +2388,25 @@ def load_decks_and_card_db(decks_folder, format_name=None, banned_names=None,
                         # Get the card_id for this card
                         card_id = card_name_to_id[card_name]
                        
-                        type_line = card_data.get("type_line", "").lower()
-                        is_basic_land = 'basic' in type_line and 'land' in type_line
                         # Validate count
                         count = entry.get("count", 1)
-                        if not is_basic_land and (count < 1 or count > 4):
-                            raise ValueError(f"Invalid count {count} for {card_name} in {deck_file}")
+                        if isinstance(count, bool) or not isinstance(count, int) \
+                                or count < 1:
+                            raise ValueError(
+                                f"Invalid count {count} for {card_name} "
+                                f"in {deck_file}")
+                        from .deck_legality import (
+                            MAX_SIMULATOR_DECK_SIZE, deck_copy_limit)
+                        copy_limit = deck_copy_limit(card_db[card_id])
+                        if copy_limit is not None and count > copy_limit:
+                            raise ValueError(
+                                f"Invalid count {count} for {card_name} in "
+                                f"{deck_file} (maximum {copy_limit})")
+                        if (len(current_deck["cards"]) + count
+                                > MAX_SIMULATOR_DECK_SIZE):
+                            raise ValueError(
+                                f"Deck {deck_file} exceeds simulator safety "
+                                f"limit {MAX_SIMULATOR_DECK_SIZE}")
                        
                         # Add the card ID to the deck
                         current_deck["cards"].extend([card_id] * count)

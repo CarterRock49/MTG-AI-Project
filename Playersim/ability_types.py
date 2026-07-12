@@ -1230,6 +1230,34 @@ class TriggeredAbility(Ability):
 
         # Check if our trigger condition matches any of the patterns
         if matches_any_pattern(self.trigger_condition, event_patterns):
+            if event_type == "DIES":
+                context = context or {}
+                controlled_creature = re.search(
+                    r"\b(a|another)\s+(nonland\s+)?creature you control dies\b",
+                    self.trigger_condition, re.IGNORECASE)
+                if controlled_creature:
+                    last_known = context.get("last_known") or {}
+                    game_state = context.get("game_state")
+                    controller = context.get("controller")
+                    if game_state is None or controller is None:
+                        return False
+                    card_types = {
+                        str(card_type).lower()
+                        for card_type in last_known.get("card_types", [])}
+                    if (not last_known.get("was_creature", False)
+                            and "creature" not in card_types):
+                        return False
+                    if controlled_creature.group(2) and "land" in card_types:
+                        return False
+                    controller_key = (
+                        "p1" if controller is game_state.p1
+                        else "p2")
+                    if last_known.get("controller_key") != controller_key:
+                        return False
+                    if (controlled_creature.group(1).lower() == "another"
+                            and context.get("source_card_id")
+                            == context.get("event_card_id")):
+                        return False
             if event_type == "ENTERS_BATTLEFIELD":
                 context = context or {}
                 source_card_id = context.get("source_card_id")
@@ -1292,6 +1320,35 @@ class TriggeredAbility(Ability):
                 cast_card = context.get('game_state')._safe_get_card(context.get('cast_card_id'))
                 if not cast_card or not ({'instant', 'sorcery'} & {str(t).lower() for t in getattr(cast_card, 'card_types', [])}):
                     return False
+            if event_type == "CAST_SPELL":
+                context = context or {}
+                if (re.search(r"\byou cast\b", self.trigger_condition,
+                              re.IGNORECASE)
+                        and context.get("casting_player") is not
+                        context.get("controller")):
+                    return False
+                mana_value_match = re.search(
+                    r"spell with mana value (\d+) or greater",
+                    self.trigger_condition, re.IGNORECASE)
+                if mana_value_match:
+                    game_state = context.get("game_state")
+                    if game_state is None:
+                        return False
+                    cast_card = game_state._safe_get_card(
+                        context.get("cast_card_id",
+                                    context.get("event_card_id")))
+                    mana_value = float(
+                        getattr(cast_card, "cmc", 0) or 0) if cast_card else 0
+                    if cast_card and "X" in context:
+                        x_symbols = len(re.findall(
+                            r"\{X\}",
+                            str(getattr(cast_card, "mana_cost", "") or ""),
+                            re.IGNORECASE))
+                        mana_value += max(0, int(context.get("X", 0) or 0)) \
+                            * x_symbols
+                    if (not cast_card
+                            or mana_value < int(mana_value_match.group(1))):
+                        return False
             if event_type == "BECOMES_TARGET":
                 context = context or {}
                 target_id = context.get("target_id", context.get("event_card_id"))
@@ -1438,6 +1495,21 @@ class TriggeredAbility(Ability):
                         and gs._get_active_player() is context.get("controller")):
                     return False
 
+            once_per_turn_key = None
+            if "this ability triggers only once each turn" in self.effect:
+                context = context or {}
+                game_state = context.get("game_state")
+                if game_state is None:
+                    return False
+                once_per_turn_key = (
+                    context.get("source_card_id", self.card_id),
+                    self.trigger_condition,
+                    self.effect,
+                )
+                if game_state.once_per_turn_triggers.get(
+                        once_per_turn_key) == game_state.turn:
+                    return False
+
             # Parse for any conditional clause in the trigger text
             condition_clause = getattr(self, 'intervening_if', None) or self._extract_condition_clause(self.effect_text)
             
@@ -1450,6 +1522,10 @@ class TriggeredAbility(Ability):
             if self.additional_condition and context:
                 if not self._check_additional_condition(context):
                     return False
+
+            if once_per_turn_key is not None:
+                context["game_state"].once_per_turn_triggers[
+                    once_per_turn_key] = context["game_state"].turn
                     
             return True
                     
@@ -2378,6 +2454,13 @@ class ManaAbility(ActivatedAbility):
             effect_text = f"{cost}: {effect}"
         super().__init__(card_id, cost, effect, effect_text)
         self.mana_produced = mana_produced # Expects dict like {'G': 1, 'C': 2}
+        choice_match = re.search(
+            r"\badd\s+\{([WUBRG])\}\s+or\s+\{([WUBRG])\}",
+            effect_text, re.IGNORECASE)
+        self.available_colors = (
+            list(dict.fromkeys(symbol.upper()
+                               for symbol in choice_match.groups()))
+            if choice_match else [])
 
 
     def _format_mana(self, mana_dict):
@@ -4542,7 +4625,8 @@ class SearchLibraryEffect(AbilityEffect):
     """Effect that allows searching a library for cards."""
     def __init__(self, search_type="any", destination="hand", count=1,
                  condition=None, shuffle_required=True, enters_tapped=False,
-                 evidence_search_type=None):
+                 evidence_search_type=None, search_target_controller=False,
+                 untap_land_threshold=None):
         target_desc = "your library" # Assuming most searches target controller's library
         dest_desc = f"into {destination}" if destination != 'library' else "on top of your library" # Basic phrasing
         super().__init__(f"Search {target_desc} for {count} {search_type} card(s) and put {dest_desc}", condition)
@@ -4552,6 +4636,8 @@ class SearchLibraryEffect(AbilityEffect):
         self.shuffle_required = shuffle_required # Usually true unless effect says otherwise
         self.enters_tapped = enters_tapped  # "...onto the battlefield tapped"
         self.evidence_search_type = evidence_search_type
+        self.search_target_controller = search_target_controller
+        self.untap_land_threshold = untap_land_threshold
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         # Search usually targets controller's library unless specified otherwise
@@ -4559,6 +4645,24 @@ class SearchLibraryEffect(AbilityEffect):
         if targets and "players" in targets and targets["players"]:
             player_id = targets["players"][0]
             player_to_search = game_state.p1 if player_id == "p1" else game_state.p2
+        elif self.search_target_controller and isinstance(targets, dict):
+            target_ids = []
+            for values in targets.values():
+                if isinstance(values, list):
+                    target_ids.extend(values)
+            controller_keys = targets.get(
+                "_last_known_target_controllers", {})
+            for target_id in target_ids:
+                controller_key = controller_keys.get(target_id)
+                if controller_key in {"p1", "p2"}:
+                    player_to_search = (
+                        game_state.p1 if controller_key == "p1"
+                        else game_state.p2)
+                    break
+                owner, _ = game_state.find_card_location(target_id)
+                if owner:
+                    player_to_search = owner
+                    break
         # Add logic here if effect text specifies searching opponent's library
 
         active_search_type = self.search_type
@@ -4580,7 +4684,8 @@ class SearchLibraryEffect(AbilityEffect):
                  # Provide list of already found cards to avoid duplicates
                  found_id = game_state.search_library_and_choose(
                      player_to_search, active_search_type,
-                     ai_choice_context=ai_context, exclude_ids=found_card_ids)
+                     ai_choice_context=ai_context,
+                     exclude_ids=found_card_ids, shuffle=False)
                  if found_id:
                       found_card_ids.append(found_id)
                       num_to_find -= 1
@@ -4611,6 +4716,17 @@ class SearchLibraryEffect(AbilityEffect):
                       success_moves += 1
                       if self.enters_tapped and self.destination == "battlefield":
                           player_to_search.setdefault("tapped_permanents", set()).add(card_id)
+                      if (self.untap_land_threshold is not None
+                              and self.destination == "battlefield"):
+                          land_count = sum(
+                              1 for permanent_id in player_to_search.get(
+                                  "battlefield", [])
+                              if "land" in getattr(
+                                  game_state._safe_get_card(permanent_id),
+                                  "card_types", []))
+                          if land_count >= self.untap_land_threshold:
+                              player_to_search.setdefault(
+                                  "tapped_permanents", set()).discard(card_id)
                       logging.debug(f"Search found '{card_name}' matching '{active_search_type}', moved to {self.destination}"
                                     f"{' tapped' if self.enters_tapped and self.destination == 'battlefield' else ''}.")
                   else:
@@ -4619,14 +4735,18 @@ class SearchLibraryEffect(AbilityEffect):
                       player_to_search.setdefault("library",[]).append(card_id) # Add back to lib if move fails
 
              # Shuffle library if required (and if library was searched)
-             if self.shuffle_required and search_attempts > 1 : # Avoid shuffle if only peeked at top and took it
+             if self.shuffle_required:
                  game_state.shuffle_library(player_to_search)
         else: # Nothing found
             logging.debug(f"Search failed for '{active_search_type}' in {player_to_search['name']}'s library.")
             # Shuffle library even if search fails, if it was inspected
             if self.shuffle_required: game_state.shuffle_library(player_to_search)
 
-        return success_moves > 0
+        # Searching a hidden zone may legally find nothing. A chosen card that
+        # could not reach its instructed destination is an engine failure, not
+        # a legal miss.
+        return (not found_card_ids
+                or success_moves == len(found_card_ids))
 
 class AddManaEffect(AbilityEffect):
     """Add mana to a player's pool (rituals, and spell effects that make mana).
@@ -4723,8 +4843,19 @@ class RegenerateEffect(AbilityEffect):
 
 class TapEffect(AbilityEffect):
     """Effect that taps a permanent."""
-    def __init__(self, target_type="permanent", condition=None, scope="target"):
-        super().__init__(f"Tap {scope} {target_type}", condition)
+    def __init__(self, target_type="permanent", condition=None, scope="target",
+                 min_targets=1, max_targets=1):
+        self.min_targets = int(min_targets)
+        self.max_targets = int(max_targets)
+        if scope == "target" and self.min_targets == 0:
+            count_word = {1: "one", 2: "two", 3: "three"}.get(
+                self.max_targets, str(self.max_targets))
+            description = f"Tap up to {count_word} target {target_type}"
+        elif scope == "all_target_player":
+            description = f"Tap all {target_type} target player controls"
+        else:
+            description = f"Tap target {target_type}"
+        super().__init__(description, condition)
         self.target_type = target_type.lower()
         # scope: 'target' (a specific permanent) or 'all_target_player' (mass
         # tap of everything a target player controls). July 2026 parser expansion.
@@ -4753,6 +4884,8 @@ class TapEffect(AbilityEffect):
             for cat in cats:
                  target_ids.extend(targets.get(cat, []))
         if not target_ids:
+            if self.scope == "target" and self.min_targets == 0:
+                return True
             logging.warning(f"TapEffect failed: No targets provided/resolved in dict {targets}")
             return False
 
@@ -4776,7 +4909,7 @@ class TapEffect(AbilityEffect):
 class UntapEffect(AbilityEffect):
     """Effect that untaps a permanent."""
     def __init__(self, target_type="permanent", condition=None, scope="target"):
-        # scope: 'target' | 'all_yours' (all you control of the type).
+        # scope: 'target' | 'all_yours' | 'self'.
         self.scope = scope
         super().__init__(f"Untap {'target' if scope=='target' else 'all'} {target_type}", condition)
         self.target_type = target_type.lower()
@@ -4785,7 +4918,9 @@ class UntapEffect(AbilityEffect):
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         target_ids = []
-        if self.scope == "all_yours":
+        if self.scope == "self":
+            target_ids = [source_id]
+        elif self.scope == "all_yours":
             for cid in list(controller.get("battlefield", [])):
                 card = game_state._safe_get_card(cid)
                 if self.target_type == "permanent" or (card and self.target_type in [t.lower() for t in getattr(card, 'card_types', [])]):
@@ -4822,10 +4957,19 @@ class DigEffect(AbilityEffect):
     ("look at the top three, put one into your hand and the rest on the
     bottom") hit the no-op fallback. The controller chooses the card(s).
     """
-    def __init__(self, look=3, take=1, rest="bottom", condition=None):
+    def __init__(self, look=3, take=1, rest="bottom", condition=None,
+                 bonus_take=None, bonus_condition=None,
+                 rest_order="preserve"):
         self.look = look
         self.take = take
         self.rest = rest  # 'bottom' | 'top' | 'graveyard'
+        self.bonus_take = bonus_take
+        self.bonus_condition = bonus_condition
+        # ``preserve`` keeps the looked-at order, ``choice`` exposes a second
+        # policy choice for "in any order", and ``random`` shuffles only the
+        # remainder before placing it.  This is separate from the library's
+        # ordinary shuffle instruction: the kept cards must never participate.
+        self.rest_order = rest_order
         super().__init__(f"Look at the top {look}, put {take} into hand, rest on {rest}", condition)
         self.requires_target = False
 
@@ -4833,16 +4977,45 @@ class DigEffect(AbilityEffect):
         lib = controller.get("library", [])
         if not lib:
             return True
-        n = min(self.look, len(lib))
+        look = self.look
+        if look == "lands_you_control":
+            look = sum(
+                1 for card_id in controller.get("battlefield", [])
+                if "land" in getattr(
+                    game_state._safe_get_card(card_id), "card_types", []))
+        look = max(0, int(look))
+        n = min(look, len(lib))
         looked = lib[:n]
         del lib[:n]
-        take = min(self.take, len(looked))
+        requested_take = self.take
+        graveyard_cards = [
+            game_state._safe_get_card(card_id)
+            for card_id in controller.get("graveyard", [])]
+        if self.bonus_take is not None:
+            if self.bonus_condition == "instant_and_sorcery_in_graveyard":
+                types = {
+                    card_type for card in graveyard_cards if card
+                    for card_type in getattr(card, "card_types", [])}
+                if {"instant", "sorcery"}.issubset(types):
+                    requested_take = self.bonus_take
+            elif self.bonus_condition == "three_lessons_in_graveyard":
+                lessons = sum(
+                    1 for card in graveyard_cards if card
+                    and "lesson" in getattr(card, "subtypes", []))
+                if lessons >= 3:
+                    requested_take = self.bonus_take
+            elif self.bonus_condition == "kicked":
+                context = getattr(self, "resolution_context", {}) or {}
+                if context.get("kicked") or context.get("actual_kicker_paid"):
+                    requested_take = self.bonus_take
+        take = min(requested_take, len(looked))
         if take <= 0:
             controller["library"].extend(looked)
             return True
         game_state.choice_context = {
             "type": "dig_select", "player": controller, "options": looked,
             "remaining": take, "selected": [], "rest_destination": self.rest,
+            "rest_order": self.rest_order,
             "source_id": source_id, "resume_phase": game_state.phase,
         }
         game_state.phase = game_state.PHASE_CHOOSE
@@ -5490,10 +5663,13 @@ class EarthbendEffect(AbilityEffect):
     """Animate one controlled land permanently and add N +1/+1 counters."""
 
     def __init__(self, amount, condition=None):
-        self.amount = max(0, int(amount))
+        self.amount = (
+            amount if amount == "event_last_known_power"
+            else max(0, int(amount)))
+        amount_text = "X" if amount == "event_last_known_power" else self.amount
         super().__init__(
             f"Target land you control becomes a 0/0 creature with haste "
-            f"that's still a land. Put {self.amount} +1/+1 counters on it",
+            f"that's still a land. Put {amount_text} +1/+1 counters on it",
             condition)
         self.requires_target = True
 
@@ -5515,15 +5691,20 @@ class EarthbendEffect(AbilityEffect):
                 keywords=["haste"], self_target=True).apply(
                     game_state, land_id, controller, targets={}):
             return False
-        if self.amount:
-            game_state.add_counter(land_id, "+1/+1", self.amount)
+        amount = self.amount
+        if amount == "event_last_known_power":
+            last_known = getattr(
+                self, "resolution_context", {}).get("last_known", {})
+            amount = max(0, safe_int(last_known.get("power"), 0) or 0)
+        if amount:
+            game_state.add_counter(land_id, "+1/+1", amount)
         game_state.earthbent_lands[land_id] = {
             "controller": "p1" if controller is game_state.p1 else "p2",
             "source_id": source_id,
         }
         game_state.trigger_ability(source_id, "EARTHBEND", {
             "controller": controller, "land_id": land_id,
-            "amount": self.amount,
+            "amount": amount,
         })
         return True
 
@@ -5807,6 +5988,16 @@ class DestroyEffect(AbilityEffect):
             return False
 
         if not targets_to_destroy: return False
+
+        # Later instructions such as "Its controller may search their library"
+        # need the target's battlefield controller even after destruction has
+        # moved the object to its owner's graveyard.
+        if isinstance(targets, dict):
+            snapshots = targets.setdefault(
+                "_last_known_target_controllers", {})
+            for card_id, target_controller in targets_to_destroy:
+                snapshots[card_id] = (
+                    "p1" if target_controller is game_state.p1 else "p2")
 
         # --- Destruction ---
         destroyed_count = 0

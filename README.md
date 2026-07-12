@@ -79,6 +79,7 @@ Run these from the repository root before training or changing engine rules:
 python tests/smoke_test.py
 python tests/scenario_test.py
 python tests/train_smoke_test.py
+python tests/deck_ingest_test.py
 python tests/harvest_fixtures_test.py
 python tests/harvest_protocol_test.py
 python tests/invariant_fuzz_config_test.py
@@ -141,13 +142,47 @@ but a real promotion requires trained candidate and baseline checkpoints.
 
 ### Training an Agent
 
-The default training and Harvest corpus is the pinned representative Standard
-metagame under `formats/standard/decks`. Regenerate those simulator-ready files
-from the reviewable compact corpus and pinned card snapshot with:
+The default training and Harvest pool is rooted at `formats/standard/decks` and
+is loaded recursively. The pinned representative metagame lives under its
+`metagame/` subdirectory; user-supplied decks live separately under
+`imported/`. Regenerate only the simulator-ready metagame files from the
+reviewable compact corpus and pinned card snapshot with:
 
 ```bash
 python -m Playersim.deck_corpus --replace
 ```
+
+### Importing a deck list
+
+Supply an Arena/simple-text list (`4 Card Name`, with optional `Deck`,
+`Sideboard`, and `Maybeboard` headings) or a compact JSON list. Validate it
+without changing the pool, then import it with:
+
+```bash
+python -m Playersim.deck_ingest path/to/my_deck.txt --dry-run
+python -m Playersim.deck_ingest path/to/my_deck.txt
+```
+
+The importer resolves cards against the pinned format snapshots, enforces
+60-card constructed legality, sideboard and copy limits, and reports every
+matching format. Without an override it selects the narrowest supported match
+in `Standard -> Pioneer -> Modern` order; use `--format modern` to require a
+specific legal format. A 1,000-card simulator safety cap rejects typo-sized
+lists before counts are expanded in memory. A successful import writes a
+hydrated deck to `formats/<format>/decks/imported/`, where training and Harvest
+discover it through the recursive pool loader.
+
+Sideboard cards participate in legality checks and are retained in the imported
+JSON, but the current best-of-one runtime does not play them. The reported
+support-status slots and `--strict-support` check therefore cover the main deck;
+strict mode rejects main-deck cards whose ledger status is `unparsed`, `crash`,
+or `excluded`. Maybeboard entries are reported and ignored. `--replace` is
+required to update the same named import. If a complete frozen namespace does
+not exist, the importer can bootstrap it from that format's pinned snapshot;
+pass `--no-bootstrap-namespace` to require one to exist already.
+
+Harvest requires at least two decks in the selected pool; a first import can
+be validated and loaded immediately, but cannot form a Harvest matchup alone.
 
 Before widening a format corpus, regenerate its static support ledger:
 
@@ -159,6 +194,14 @@ python -m Playersim.support_preflight --snapshot "Format Card Lists/standard.jso
   --overrides formats/standard/support_overrides.json --format standard \
   --output formats/standard/support_ledger.json
 ```
+
+Current Standard preflight (July 11, 2026): 60 verified, 79
+observed-clean, 3,310 unseen-clean, 843 partial, and 410 unparsed cards across
+the 4,702-card pool. That is 73.3517652063% static-clean coverage and
+2.9561888558% evidence-qualified coverage. The latest regeneration also
+conservatively reclassified ten formerly clean cards as partial after surfacing
+unimplemented Harmonize and source-duration semantics; this is an evidence
+correction, not a runtime regression.
 
 ```bash
 python main.py --timesteps 1000000 --learning-rate 3e-4 --batch-size 256 --seed 20260710

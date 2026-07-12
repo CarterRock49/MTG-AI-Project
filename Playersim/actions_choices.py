@@ -5,6 +5,8 @@ all state lives on ActionHandler, which composes every mixin.
 """
 
 import logging
+import random
+import re
 from collections import defaultdict
 from .ability_types import ActivatedAbility, ManaAbility
 
@@ -13,6 +15,38 @@ class ChoiceHandlersMixin:
     """Handlers for ability activation, targeting, and player choices."""
 
     __slots__ = ()
+
+    def _add_mana_ability_output(self, player, produced, *, source_id,
+                                 source_is_tap_ability):
+        """Produce one mana-ability event through the replacement pipeline."""
+        normalized = {}
+        for symbol, raw_amount in dict(produced or {}).items():
+            try:
+                amount = int(raw_amount)
+            except (TypeError, ValueError):
+                continue
+            key = str(symbol).upper()
+            if amount > 0 and key not in {"ANY", "CHOICE"}:
+                normalized[key] = normalized.get(key, 0) + amount
+        if not normalized:
+            return
+        gs = self.game_state
+        if getattr(gs, "mana_system", None):
+            mana_string = "".join(
+                f"{{{symbol}}}" * amount
+                for symbol, amount in normalized.items())
+            gs.mana_system.add_mana_to_pool(
+                player, mana_string,
+                land_context={
+                    "card_id": source_id,
+                    "source_permanent_id": source_id,
+                    "tapped": bool(source_is_tap_ability),
+                })
+            return
+        pool = player.setdefault(
+            "mana_pool", {color: 0 for color in "WUBRGC"})
+        for symbol, amount in normalized.items():
+            pool[symbol] = pool.get(symbol, 0) + amount
 
     def _get_target_selection_candidates(self, player, context):
         """Return the exact ordered candidates represented by SELECT_TARGET.
@@ -151,6 +185,20 @@ class ChoiceHandlersMixin:
         options = list(ctx.get('options', []))
         source_zone = ctx.get('source_zone', 'library_implicit')
         destination = ctx.get('rest_destination', 'bottom')
+        rest_order = ctx.get('rest_order', 'preserve')
+
+        # "In any order" is a real strategic choice.  Reuse the paginated Dig
+        # chooser for a second stage: each selected card becomes the next card
+        # in top-to-bottom order within the top/bottom group.
+        if (rest_order == 'choice' and len(options) > 1
+                and not ctx.get('ordering_rest')):
+            ctx['ordering_rest'] = True
+            ctx['ordered_rest'] = []
+            ctx['remaining'] = len(options)
+            ctx['choice_page'] = 0
+            return False
+        if rest_order == 'random' and len(options) > 1:
+            random.shuffle(options)
 
         if destination == 'bottom':
             if source_zone == 'library_implicit':
@@ -661,16 +709,26 @@ class ChoiceHandlersMixin:
             produced = dict(getattr(ability, 'mana_produced', {}) or {})
             any_amount = int(produced.pop('any', 0) or 0)
             any_amount += int(produced.pop('choice', 0) or 0)
-            if produced:
-                gs.mana_system.add_mana(player, produced)
+            cost_text = str(getattr(ability, 'cost', '') or '').lower()
+            source_is_tap_ability = bool(
+                "{t}" in cost_text or re.search(r"\btap\b", cost_text))
             if any_amount:
                 gs.choice_context = {
                     'type': 'mana_ability_color', 'player': player,
-                    'amount': any_amount, 'options': ['W', 'U', 'B', 'R', 'G'],
+                    'amount': any_amount,
+                    'options': (getattr(ability, 'available_colors', None)
+                                or ['W', 'U', 'B', 'R', 'G']),
+                    'fixed_produced': produced,
+                    'source_permanent_id': card_id,
+                    'source_is_tap_ability': source_is_tap_ability,
                     'resume_phase': gs.phase,
                 }
                 gs.phase = gs.PHASE_CHOOSE
                 gs.priority_player = player
+            elif produced:
+                self._add_mana_ability_output(
+                    player, produced, source_id=card_id,
+                    source_is_tap_ability=source_is_tap_ability)
             return 0.1, True
         
         # ``ActivatedAbility.pay_cost`` is the single owner of Exhaust
@@ -1298,7 +1356,16 @@ class ChoiceHandlersMixin:
             options = ctx.get('options', [])
             if ctx.get('player') is not player or not (0 <= param < len(options)):
                 return -0.1, False
-            gs.mana_system.add_mana(player, {options[param]: int(ctx.get('amount', 1))})
+            produced = dict(ctx.get('fixed_produced', {}) or {})
+            color = options[param]
+            produced[color] = (
+                int(produced.get(color, 0) or 0)
+                + int(ctx.get('amount', 1)))
+            self._add_mana_ability_output(
+                player, produced,
+                source_id=ctx.get('source_permanent_id'),
+                source_is_tap_ability=ctx.get(
+                    'source_is_tap_ability', False))
             gs.phase = ctx.get('resume_phase', gs.PHASE_PRIORITY)
             gs.choice_context = None
             # Mana abilities can be activated by the non-active player. The
@@ -1413,6 +1480,19 @@ class ChoiceHandlersMixin:
             if ctx.get('player') is not player or not (0 <= absolute_param < len(options)):
                 return -0.1, False
             card_id = options[absolute_param]
+            if ctx.get('ordering_rest'):
+                options.pop(absolute_param)
+                ctx['choice_page'] = 0
+                ctx.setdefault('ordered_rest', []).append(card_id)
+                ctx['remaining'] = max(
+                    0, int(ctx.get('remaining', 1)) - 1)
+                if ctx['remaining'] > 0 and options:
+                    return 0.02, True
+                ctx['options'] = list(ctx.get('ordered_rest', []))
+                ctx['rest_order'] = 'preserve'
+                ctx['ordering_rest'] = False
+                self._finish_dig_select_choice(ctx)
+                return 0.05, True
             source_zone = ctx.get('source_zone', 'library_implicit')
             destination = ctx.get('destination', 'hand')
             if not gs.move_card(

@@ -376,6 +376,31 @@ class EffectFactory:
         if source_key == "duress":
             from .ability_types import HandSelectionEffect
             return [HandSelectionEffect(noncreature_nonland=True)]
+        if source_key == "flow state" and "look at the top three" in effect_text.lower():
+            from .ability_types import DigEffect
+            return [DigEffect(
+                look=3, take=1, rest="bottom", bonus_take=2,
+                bonus_condition="instant_and_sorcery_in_graveyard",
+                rest_order="choice")]
+        if (source_key == "accumulate wisdom"
+                and "look at the top three" in effect_text.lower()):
+            from .ability_types import DigEffect
+            return [DigEffect(
+                look=3, take=1, rest="bottom", bonus_take=3,
+                bonus_condition="three_lessons_in_graveyard",
+                rest_order="choice")]
+        if (source_key == "consult the star charts"
+                and "look at the top x" in effect_text.lower()):
+            from .ability_types import DigEffect
+            return [DigEffect(
+                look="lands_you_control", take=1, rest="bottom",
+                bonus_take=2, bonus_condition="kicked",
+                rest_order="random")]
+        if re.search(
+                r"\bearthbend x\s*,\s*where x is that creature(?:'|\u2019)s power",
+                effect_text, re.IGNORECASE):
+            from .ability_types import EarthbendEffect
+            return [EarthbendEffect("event_last_known_power")]
         if source_key == "oildeep gearhulk" and "look at target player's hand" in effect_text.lower():
             from .ability_types import HandSelectionEffect
             return [HandSelectionEffect(optional=True, rummage=True)]
@@ -434,11 +459,83 @@ class EffectFactory:
             if not effect_text.strip(". \n"):
                 return []
 
+        harmonize_lines = [
+            line for line in effect_text.splitlines()
+            if re.match(r"^\s*harmonize\b", line, re.IGNORECASE)]
+        if harmonize_lines and source_name:
+            # Harmonize casting is not implemented yet. Keep the card partial
+            # while allowing another instruction on the same spell (for
+            # example Roamer's Routine's basic-land search) to parse and run.
+            from .card_support import report_unsupported
+            report_unsupported(
+                source_name, "Harmonize casting is not implemented",
+                severity="partial")
         effect_text = "\n".join(
             line for line in effect_text.splitlines()
-            if not re.match(r"^\s*flashback\b", line, re.IGNORECASE))
+            if not re.match(
+                r"^\s*(?:flashback|harmonize)\b", line,
+                re.IGNORECASE))
+        unsupported_riders = {
+            "if an opponent controls that creature": (
+                "conditional target-controller rider is not enforced"),
+            "for as long as you control": (
+                "source-duration permission/restriction is not fully modeled"),
+        }
+        lowered_effect_text = effect_text.lower()
+        if source_name:
+            for marker, reason in unsupported_riders.items():
+                if marker in lowered_effect_text:
+                    from .card_support import report_unsupported
+                    report_unsupported(
+                        source_name, reason, severity="partial")
         if not effect_text.strip(". \n"):
             return []
+
+        # Preserve a complete basic-land search transaction before commas and
+        # "then" split its destination/shuffle/conditional untap into no-ops.
+        # Ignore reminder text (not game instructions) while preserving string
+        # offsets for prefix/suffix slicing. Modal shells must split into modes
+        # first; otherwise the prefix becomes a bogus ``Choose two — •`` effect.
+        search_surface = re.sub(
+            r"\([^()]*\)", lambda match: " " * len(match.group(0)),
+            effect_text)
+        search_transaction = (
+            None if re.match(r"^\s*choose\b", search_surface, re.IGNORECASE)
+            else re.search(
+                r"(?:(you|its controller) may\s+)?search\s+(your|their)\s+library\s+"
+                r"for\s+a\s+basic land card\s*,\s*put\s+(?:it|that card)\s+onto\s+"
+                r"the battlefield tapped\s*,\s*then shuffle",
+                search_surface, re.IGNORECASE))
+        if search_transaction:
+            prefix = effect_text[:search_transaction.start()].strip(" .,")
+            prefix = re.sub(r"\bthen\s*$", "", prefix,
+                            flags=re.IGNORECASE).strip(" .,")
+            suffix = effect_text[search_transaction.end():].strip(" .,")
+            if prefix:
+                effects.extend(EffectFactory.create_effects(
+                    prefix, targets, source_name))
+            if search_transaction.group(1) and source_name:
+                from .card_support import report_unsupported
+                report_unsupported(
+                    source_name,
+                    "optional library-search decline is not policy-selectable",
+                    severity="partial")
+            from .ability_types import SearchLibraryEffect
+            effects.append(SearchLibraryEffect(
+                search_type="basic land", destination="battlefield", count=1,
+                enters_tapped=True,
+                search_target_controller=(
+                    search_transaction.group(2).lower() == "their"),
+                untap_land_threshold=(
+                    4 if re.search(r"if you control four or more lands",
+                                   suffix, re.IGNORECASE) else None)))
+            suffix = re.sub(
+                r"^then if you control four or more lands\s*,?\s*untap that land\.?",
+                "", suffix, flags=re.IGNORECASE).strip(" .,")
+            if suffix:
+                effects.extend(EffectFactory.create_effects(
+                    suffix, targets, source_name))
+            return effects
 
         # Sample-card compound instructions whose parts share information or
         # must remain atomic at resolution.
@@ -1291,7 +1388,9 @@ class EffectFactory:
             # Ritual / add-mana SPELL effect: "Add {B}{B}{B}", "add N mana of
             # any color". (Mana ACTIVATED abilities on permanents are handled by
             # ManaAbility, not here.) July 2026 parser expansion.
-            elif re.search(r"^\s*add\s+(\{[wubrgc0-9/p]+\}|\w+ mana)", clause_lower):
+            elif re.search(
+                    r"^\s*add\s+(?:an additional\s+)?"
+                    r"(\{[wubrgc0-9/p]+\}|\w+ mana)", clause_lower):
                 mana_syms = re.findall(r"\{([wubrgc])\}", clause_lower)
                 generic = re.findall(r"\{(\d+)\}", clause_lower)
                 mana_dict = {}
@@ -1335,13 +1434,25 @@ class EffectFactory:
                 elif "land" in clause_lower: tt = "land"
                 created_effect = TapEffect(target_type=tt, scope="all_target_player")
 
-            elif re.search(r"\b(tap(?:s)?)\b\s+target", clause_lower):
+            elif re.search(
+                    r"\b(?:tap|taps)\b\s+(?:up to\s+(?:one|two|three|\d+)\s+)?target",
+                    clause_lower):
                  target_desc = EffectFactory._extract_target_description(clause_lower) or "permanent"
                  target_type = "permanent" # Refine based on desc
                  if "creature" in target_desc: target_type = "creature"
                  elif "artifact" in target_desc: target_type = "artifact"
                  elif "land" in target_desc: target_type = "land"
-                 created_effect = TapEffect(target_type=target_type)
+                 optional_match = re.search(
+                     r"\bup to\s+(one|two|three|\d+)\s+target\b",
+                     clause_lower)
+                 max_targets = (text_to_number(optional_match.group(1))
+                                if optional_match else 1)
+                 if not isinstance(max_targets, int) or max_targets < 1:
+                     max_targets = 1
+                 created_effect = TapEffect(
+                     target_type=target_type,
+                     min_targets=0 if optional_match else 1,
+                     max_targets=max_targets)
 
             # Mass untap: "untap all <type> you control".
             elif re.search(r"untap\s+all\s+(\w+)\s+you control", clause_lower):
@@ -1359,6 +1470,10 @@ class EffectFactory:
                  elif "artifact" in target_desc: target_type = "artifact"
                  elif "land" in target_desc: target_type = "land"
                  created_effect = UntapEffect(target_type=target_type)
+            elif re.search(r"\buntap\s+this\s+(?:creature|permanent|artifact|land)\b",
+                           clause_lower):
+                 target_type = "creature" if "creature" in clause_lower else "permanent"
+                 created_effect = UntapEffect(target_type=target_type, scope="self")
 
             # Add Counters
             elif re.search(r"\bput(?:s)?\b.*?\bcounter", clause_lower):
@@ -1499,7 +1614,14 @@ class EffectFactory:
                 if tm and tm.group(1) and tm.group(1) not in ("one", "a", "an"):
                     take = int(tm.group(1)) if tm.group(1).isdigit() else text_to_number(tm.group(1))
                 if not isinstance(take, int) or take <= 0: take = 1
-                created_effect = DigEffect(look=look, take=take, rest=rest)
+                rest_order = "preserve"
+                if re.search(r"\bin any order\b", clause_lower):
+                    rest_order = "choice"
+                elif re.search(r"\bin (?:a )?random order\b", clause_lower):
+                    rest_order = "random"
+                created_effect = DigEffect(
+                    look=look, take=take, rest=rest,
+                    rest_order=rest_order)
 
             # Put target permanent on top/bottom of its owner's library (tuck).
             elif re.search(r"put\s+target\s+(\w+).*on\s+(?:the\s+)?(top|bottom)\s+of\s+(?:its|their|his or her)\s+owner'?s?\s+library", clause_lower):

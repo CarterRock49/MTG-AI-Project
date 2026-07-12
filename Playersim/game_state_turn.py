@@ -348,7 +348,8 @@ class GameStateTurnMixin:
             if self.phase == self.PHASE_CHOOSE and self.choice_context:
                 choice_type = self.choice_context.get("type")
                 if choice_type == "opening_hand":
-                    # Declines the player's remaining begin-game placements.
+                    # Decline only the current begin-game placement; any other
+                    # eligible opening-hand card gets its own decision.
                     self.complete_opening_hand_choice(None)
                     return
                 if choice_type == "linked_exile" and self.choice_context.get("optional", False):

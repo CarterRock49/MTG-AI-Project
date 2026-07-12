@@ -628,6 +628,7 @@ class GameStateSetupMixin:
             "player": player,
             "options": options,
             "source_id": options[0] if options else None,
+            "declined": [],
         }
         self.priority_player = player
         self.priority_pass_count = 0
@@ -636,7 +637,7 @@ class GameStateSetupMixin:
 
     def complete_opening_hand_choice(self, option_index):
         """Apply one begin-game decision. option_index None declines the
-        player's remaining begin-game cards; an int puts that option onto the
+        current card; an int puts that option onto the
         battlefield. When a player's choice closes, the next player's choice
         opens, and after the last one the deferred first turn begins."""
         ctx = getattr(self, 'choice_context', None)
@@ -644,9 +645,14 @@ class GameStateSetupMixin:
             logging.warning("complete_opening_hand_choice called without an opening_hand context.")
             return False
         player = ctx.get("player")
-        remaining = []
-        if option_index is not None:
-            options = ctx.get("options", [])
+        options = list(ctx.get("options", []))
+        declined = ctx.setdefault("declined", [])
+        if option_index is None:
+            if not options:
+                logging.warning("Opening-hand decline had no current option.")
+                return False
+            declined.append(options[0])
+        else:
             if not isinstance(option_index, int) or not (0 <= option_index < len(options)):
                 logging.warning(f"Invalid opening-hand option index {option_index}.")
                 return False
@@ -658,7 +664,10 @@ class GameStateSetupMixin:
                                   cause="opening_hand"):
                 logging.warning(f"Could not put opening-hand card {card_id} onto the battlefield.")
                 return False
-            remaining = self._collect_opening_hand_cards(player)
+        remaining = self._collect_opening_hand_cards(player)
+        for declined_id in declined:
+            if declined_id in remaining:
+                remaining.remove(declined_id)
         if remaining:
             ctx["options"] = remaining
             ctx["source_id"] = remaining[0]

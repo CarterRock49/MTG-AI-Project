@@ -1695,6 +1695,14 @@ class AbilityHandler:
          produced = defaultdict(int) # Use defaultdict for easier counting
          mana_text_lower = mana_text.lower()
 
+         # Mutually exclusive printed outputs are a policy color choice, not
+         # cumulative production ("Add {R} or {G}" must never add both).
+         choice_clause = re.search(
+             r"\badd\s+\{([wubrg])\}\s+or\s+\{([wubrg])\}",
+             mana_text_lower)
+         if choice_clause and choice_clause.group(1) != choice_clause.group(2):
+             return {"choice": 1}
+
          # Find mana symbols like {W}, {2}, {G}, {C}, {X}, {S}, {W/P}, {G/U}, {2/B}
          # More robust regex to handle different symbols
          symbols = re.findall(r'\{([wubrgcsx\d\/p]+)\}', mana_text_lower)
@@ -2002,6 +2010,13 @@ class AbilityHandler:
         if 'effect_text' not in context_at_trigger:
             context_at_trigger['effect_text'] = getattr(ability, 'effect_text', 'Unknown Effect')
         targeting_text = getattr(ability, 'effect', context_at_trigger['effect_text'])
+        # Earthbend's target instruction is defined by the mechanic reminder
+        # text and some card parsers intentionally strip that parenthetical
+        # from the trigger effect. Targets still have to be chosen as the
+        # trigger is put on the stack (CR 603.3d), not during resolution.
+        if ("earthbend" in targeting_text.lower()
+                and "target" not in targeting_text.lower()):
+            targeting_text = "Target land you control"
         if "target" in targeting_text.lower() and not context_at_trigger.get('targets'):
             context_at_trigger['targeting_text'] = targeting_text
             context_at_trigger['target_choice_pending'] = True

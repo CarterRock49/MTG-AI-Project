@@ -138,6 +138,15 @@ class ReplacementEffectSystem:
         source_name = card.name if hasattr(card, 'name') else f"Card {card_id}"
         registered_effects = []
 
+        if re.search(
+                r"whenever you tap a (?:creature|artifact|permanent|land) "
+                r"for mana, add an additional (?:\{[^}]+\})+",
+                oracle_text, re.IGNORECASE):
+            effect_id = self._register_additional_tap_mana_effect(
+                card_id, player, oracle_text)
+            if effect_id:
+                registered_effects.append(effect_id)
+
         # Scan for standard replacement patterns ("if..would..instead")
         if "if" in oracle_text.lower() and "would" in oracle_text.lower() and "instead" in oracle_text.lower():
             effect_ids = self._register_if_would_instead_effect(card_id, player, oracle_text)
@@ -240,21 +249,18 @@ class ReplacementEffectSystem:
         match = re.search(r"(?:if|whenever)\s+you\s+tap\s+a(?:n)?\s+(\w+)\s+for\s+mana,\s+.*?(add|produce)s?\s+twice\s+that\s+much", oracle_text.lower())
         if match:
              tapped_type = match.group(1).lower() # e.g., 'permanent', 'land', 'forest'
+             controller_key = (
+                 "p1" if player is self.game_state.p1 else "p2")
 
              def condition(ctx):
                  # Check if event is mana production via tapping from player
                  if ctx.get('event_type') != 'PRODUCE_MANA': return False # Event needs to exist
-                 if ctx.get('player') != player: return False
+                 if ctx.get('player_key') != controller_key: return False
                  if not ctx.get('source_is_tap_ability', False): return False # Requires ability tapped source
 
-                 # Check if source permanent type matches
-                 source_perm_id = ctx.get('source_permanent_id')
-                 source_perm = self.game_state._safe_get_card(source_perm_id)
-                 if not source_perm: return False
-
                  if tapped_type == 'permanent': return True
-                 perm_types = getattr(source_perm, 'card_types', [])
-                 perm_subtypes = getattr(source_perm, 'subtypes', [])
+                 perm_types = ctx.get('source_card_types', [])
+                 perm_subtypes = ctx.get('source_subtypes', [])
                  if tapped_type in perm_types: return True
                  if tapped_type in perm_subtypes: return True
                  return False
@@ -280,6 +286,51 @@ class ReplacementEffectSystem:
              if effect_id: logging.debug(f"Registered Mana Doubling effect for {source_name}")
 
         return effect_id
+
+    def _register_additional_tap_mana_effect(
+            self, card_id, player, oracle_text):
+        """Register 'tap a <type> for mana, add an additional {C}...'"""
+        match = re.search(
+            r"whenever you tap a (creature|artifact|permanent|land) for mana, "
+            r"add an additional ((?:\{[^}]+\})+)",
+            oracle_text, re.IGNORECASE)
+        if not match:
+            return None
+        tapped_type = match.group(1).lower()
+        controller_key = "p1" if player is self.game_state.p1 else "p2"
+        symbols = re.findall(r"\{([^{}]+)\}", match.group(2))
+        additional = {}
+        for symbol in symbols:
+            key = symbol.upper()
+            additional[key] = additional.get(key, 0) + 1
+
+        def condition(ctx):
+            if (ctx.get("event_type") != "PRODUCE_MANA"
+                    or ctx.get("player_key") != controller_key
+                    or not ctx.get("source_is_tap_ability", False)):
+                return False
+            if tapped_type == "permanent":
+                return True
+            return (tapped_type in ctx.get("source_card_types", [])
+                    or tapped_type in ctx.get("source_subtypes", []))
+
+        def replacement(ctx):
+            produced = dict(ctx.get("mana_produced", {}) or {})
+            for color, count in additional.items():
+                produced[color] = produced.get(color, 0) + count
+            ctx["mana_produced"] = produced
+            return ctx
+
+        return self.register_effect({
+            "source_id": card_id,
+            "event_type": "PRODUCE_MANA",
+            "condition": condition,
+            "replacement": replacement,
+            "duration": "permanent",
+            "controller_id": player,
+            "description": (
+                f"Additional mana when tapping a {tapped_type} for mana"),
+        })
     
     def _register_token_creation_replacement(self, card_id, player, oracle_text):
         """Register token creation replacement effects."""

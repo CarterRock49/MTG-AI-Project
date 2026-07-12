@@ -63,6 +63,11 @@ class GameStateZonesMixin:
             other_lands = max(0, land_count - 1)
             return other_lands > 2
 
+        if re.search(
+                r"enters tapped if it(?:'|\u2019| i)s not your turn",
+                normalized):
+            return self._get_active_player() is not controller
+
         return "enters tapped" in normalized
 
     def _discard_player_key(self, player):
@@ -1092,7 +1097,9 @@ class GameStateZonesMixin:
         # Add checks for colors, CMC, P/T if needed for more complex searches
         return False
 
-    def search_library_and_choose(self, player, criteria, ai_choice_context=None, exclude_ids=None):
+    def search_library_and_choose(self, player, criteria,
+                                  ai_choice_context=None, exclude_ids=None,
+                                  shuffle=True):
         """Search library for a card matching criteria and let AI choose one.
 
         exclude_ids: ids already taken by this same search (multi-card
@@ -1114,7 +1121,8 @@ class GameStateZonesMixin:
 
         if not matches:
             logging.debug(f"Search failed: No '{criteria}' found in library.")
-            if hasattr(self, 'shuffle_library'): self.shuffle_library(player) # Shuffle even on fail
+            if shuffle and hasattr(self, 'shuffle_library'):
+                self.shuffle_library(player)  # Shuffle even on a legal miss.
             return None
 
         # AI Choice - Use CardEvaluator if available, else first match
@@ -1162,8 +1170,11 @@ class GameStateZonesMixin:
             if not success_move: chosen_id = None # Move failed
 
         # Shuffle library after search
-        if hasattr(self, 'shuffle_library'): self.shuffle_library(player)
-        else: random.shuffle(player["library"])
+        if shuffle:
+            if hasattr(self, 'shuffle_library'):
+                self.shuffle_library(player)
+            else:
+                random.shuffle(player["library"])
 
         if chosen_id:
             logging.debug(f"Search found: Moved '{self._safe_get_card(chosen_id).name}' matching '{criteria}' to {target_zone}.")

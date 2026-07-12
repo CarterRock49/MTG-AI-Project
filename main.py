@@ -1034,14 +1034,20 @@ def deck_provenance(decks, card_db, decks_dir=DECKS_DIR):
     """Identify both the loaded decks and every JSON source used to build them."""
     source_files = []
     if os.path.isdir(decks_dir):
-        for filename in sorted(os.listdir(decks_dir), key=str.casefold):
-            path = os.path.join(decks_dir, filename)
-            if filename.lower().endswith(".json") and os.path.isfile(path):
-                source_files.append({
-                    "path": os.path.relpath(path, BASE_DIR).replace(os.sep, "/"),
-                    "size_bytes": os.path.getsize(path),
-                    "sha256": sha256_file(path),
-                })
+        paths = []
+        for root, _, filenames in os.walk(decks_dir):
+            for filename in filenames:
+                if filename.lower().endswith(".json"):
+                    paths.append(os.path.join(root, filename))
+        for path in sorted(
+                paths,
+                key=lambda item: os.path.relpath(
+                    item, decks_dir).replace(os.sep, "/").casefold()):
+            source_files.append({
+                "path": os.path.relpath(path, BASE_DIR).replace(os.sep, "/"),
+                "size_bytes": os.path.getsize(path),
+                "sha256": sha256_file(path),
+            })
     loaded_decks = []
     for index, deck in enumerate(decks):
         if isinstance(deck, dict):
@@ -1073,10 +1079,12 @@ def load_training_corpus(decks_arg, format_name, format_dir_arg):
     from Playersim.card_registry import format_lineage, load_format_namespace
 
     format_name = format_name or DEFAULT_FORMAT_NAME
-    decks_dir = os.path.abspath(decks_arg) if decks_arg else DECKS_DIR
     format_dir = format_dir_arg
     if format_dir is None and format_name:
         format_dir = os.path.join(BASE_DIR, "formats", format_name)
+    decks_dir = (
+        os.path.abspath(decks_arg) if decks_arg
+        else os.path.join(BASE_DIR, "formats", format_name, "decks"))
     card_registry = feature_schema = None
     if format_dir is not None:
         card_registry, feature_schema = load_format_namespace(format_dir)
@@ -2140,7 +2148,7 @@ def main():
                              f"(default: {DEFAULT_FORMAT_NAME})")
     parser.add_argument("--decks", type=str, default=None,
                         help="Deck corpus directory "
-                             "(default: formats/standard/decks)")
+                             "(default: formats/<format>/decks)")
     parser.add_argument("--format-dir", type=str, default=None,
                         help="Explicit frozen format-namespace directory "
                              "(default: formats/<format> when --format is given)")

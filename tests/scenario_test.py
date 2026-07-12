@@ -5760,6 +5760,497 @@ def s_parser_dig():
         "the compound Dig spell did not finalize exactly once"
 
 
+@scenario("401.4 / conditional Dig", "Flow State, Accumulate Wisdom, and Consult preserve their dynamic take and remainder-order rules")
+def scenario_real_conditional_dig_spells():
+    from Playersim.ability_types import DigEffect
+    from Playersim.ability_utils import EffectFactory
+    import Playersim.actions_choices as choices_module
+
+    def stage_top(gs, player, prefix, count):
+        card_ids = []
+        for index in range(count):
+            card_id = inject_card(gs, {
+                "name": f"{prefix} {index}", "mana_cost": "{1}",
+                "type_line": "Artifact", "oracle_text": "",
+            })
+            card_ids.append(card_id)
+            gs._last_card_locations[card_id] = (player, "library")
+        player["library"][:0] = card_ids
+        return card_ids
+
+    def real_dig(gs, player, name):
+        source_id = inject_real_card(gs, player, name, "hand")
+        card = gs._safe_get_card(source_id)
+        effects = EffectFactory.create_effects(
+            card.oracle_text, source_name=card.name)
+        assert len(effects) == 1 and isinstance(effects[0], DigEffect), \
+            f"{name} did not parse to one DigEffect: {effects}"
+        return source_id, effects[0]
+
+    # Flow State without its graveyard condition keeps one, then lets the
+    # policy choose the order of the two cards placed on the bottom.
+    gs = fresh(SEED + 31)
+    player = gs.p1
+    gs.agent_is_p1 = True
+    source, effect = real_dig(gs, player, "Flow State")
+    top = stage_top(gs, player, "Flow Top", 3)
+    assert effect.apply(gs, source, player, targets={})
+    assert gs.choice_context.get("remaining") == 1 \
+        and gs.choice_context.get("rest_order") == "choice"
+    handler = get_env().action_handler
+    _, ok = handler._handle_choose_mode(
+        gs.choice_context["options"].index(top[1]), {})
+    assert ok and gs.choice_context.get("ordering_rest"), \
+        "Flow State did not expose remainder ordering after the hand choice"
+    _, ok = handler._handle_choose_mode(
+        gs.choice_context["options"].index(top[2]), {})
+    assert ok and gs.choice_context
+    _, ok = handler._handle_choose_mode(
+        gs.choice_context["options"].index(top[0]), {})
+    assert ok and gs.choice_context is None
+    assert player["library"][-2:] == [top[2], top[0]], \
+        "the policy-selected Flow State bottom order was not preserved"
+
+    # An instant and a sorcery in the graveyard change Flow State's take from
+    # one to two.
+    gs = fresh(SEED + 32)
+    player = gs.p1
+    gs.agent_is_p1 = True
+    source, effect = real_dig(gs, player, "Flow State")
+    inject_into_zone(gs, player, {
+        "name": "Flow Instant", "mana_cost": "{U}",
+        "type_line": "Instant", "oracle_text": "",
+    }, "graveyard")
+    inject_into_zone(gs, player, {
+        "name": "Flow Sorcery", "mana_cost": "{U}",
+        "type_line": "Sorcery", "oracle_text": "",
+    }, "graveyard")
+    stage_top(gs, player, "Boosted Flow Top", 3)
+    assert effect.apply(gs, source, player, targets={})
+    assert gs.choice_context.get("remaining") == 2, \
+        "Flow State ignored its instant-plus-sorcery graveyard condition"
+
+    # Accumulate Wisdom takes one below three Lessons and all three at the
+    # threshold.
+    for lesson_count, expected_take in ((2, 1), (3, 3)):
+        gs = fresh(SEED + 40 + lesson_count)
+        player = gs.p1
+        gs.agent_is_p1 = True
+        source, effect = real_dig(gs, player, "Accumulate Wisdom")
+        for index in range(lesson_count):
+            inject_into_zone(gs, player, {
+                "name": f"Graveyard Lesson {index}", "mana_cost": "{U}",
+                "type_line": "Instant - Lesson", "oracle_text": "",
+            }, "graveyard")
+        stage_top(gs, player, f"Wisdom {lesson_count} Top", 3)
+        assert effect.apply(gs, source, player, targets={})
+        assert gs.choice_context.get("remaining") == expected_take, \
+            f"Accumulate Wisdom with {lesson_count} Lessons took the wrong count"
+
+    # Consult looks at one card per controlled land, takes two when kicked,
+    # and randomizes only the remainder. Patch the shuffle to a visible,
+    # deterministic reversal for this assertion.
+    gs = fresh(SEED + 50)
+    player = gs.p1
+    gs.agent_is_p1 = True
+    source, effect = real_dig(gs, player, "Consult the Star Charts")
+    for index in range(4):
+        inject_into_zone(gs, player, {
+            "name": f"Consult Land {index}", "mana_cost": "",
+            "type_line": "Land", "oracle_text": "",
+        }, "battlefield")
+    top = stage_top(gs, player, "Consult Top", 4)
+    assert effect.apply(
+        gs, source, player, targets={}, context={"actual_kicker_paid": True})
+    assert gs.choice_context.get("options") == top \
+        and gs.choice_context.get("remaining") == 2 \
+        and gs.choice_context.get("rest_order") == "random"
+    original_shuffle = choices_module.random.shuffle
+    choices_module.random.shuffle = lambda values: values.reverse()
+    try:
+        _, ok = get_env().action_handler._handle_choose_mode(0, {})
+        assert ok
+        _, ok = get_env().action_handler._handle_choose_mode(0, {})
+        assert ok and gs.choice_context is None
+    finally:
+        choices_module.random.shuffle = original_shuffle
+    assert player["library"][-2:] == [top[3], top[2]], \
+        "Consult did not randomize exactly its unchosen remainder"
+
+
+@scenario("614 / Badgermole Cub", "tapping a creature for mana adds one green while Badgermole is present")
+def scenario_badgermole_additional_creature_mana():
+    from Playersim.ability_types import ManaAbility
+    gs = fresh(SEED + 51)
+    player = gs.p1
+    gs.agent_is_p1 = True
+    earthbend_land = inject_into_zone(gs, player, {
+        "name": "Badgermole Earthbend Target", "mana_cost": "",
+        "type_line": "Land - Forest", "oracle_text": "{T}: Add {G}.",
+    }, "battlefield")
+    land = inject_into_zone(gs, player, {
+        "name": "Badgermole Land Source", "mana_cost": "",
+        "type_line": "Land - Forest", "oracle_text": "{T}: Add {G}.",
+    }, "battlefield")
+    mana_creature = inject_into_zone(gs, player, {
+        "name": "Badgermole Creature Source", "mana_cost": "{1}",
+        "type_line": "Artifact Creature", "oracle_text": "{T}: Add {U}.",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    badgermole = inject_real_card(gs, player, "Badgermole Cub", "battlefield")
+    matching = [
+        entry for entry in gs.ability_handler.active_triggers
+        if entry[2].get("source_card_id") == badgermole]
+    assert len(matching) == 1, "Badgermole's ETB Earthbend did not trigger"
+    gs.ability_handler.process_triggered_abilities()
+    assert gs.targeting_context, "Badgermole Earthbend did not request a land"
+    valid_map = gs.targeting_system.get_valid_targets(
+        badgermole, player, gs.targeting_context["required_type"],
+        effect_text=gs.targeting_context["effect_text"])
+    valid_targets = sorted({
+        target_id for target_ids in valid_map.values()
+        for target_id in target_ids})
+    _, ok = get_env().action_handler._handle_select_target(
+        valid_targets.index(earthbend_land), {})
+    assert ok and gs.resolve_top_of_stack(), \
+        "Badgermole's Earthbend trigger failed to resolve"
+    assert gs._safe_get_card(earthbend_land).counters.get("+1/+1", 0) == 1
+    assert any(
+        effect.get("source_id") == badgermole
+        and effect.get("event_type") == "PRODUCE_MANA"
+        for effect in gs.replacement_effects.active_effects), \
+        "Badgermole did not register its mana-production replacement"
+
+    empty_pool = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
+    handler = get_env().action_handler
+    player["entered_battlefield_this_turn"].discard(mana_creature)
+    mana_abilities = gs.ability_handler.get_activated_abilities(mana_creature)
+    mana_index = next(
+        index for index, ability in enumerate(mana_abilities)
+        if isinstance(ability, ManaAbility))
+    player["mana_pool"] = dict(empty_pool)
+
+    cloned = gs.clone()
+    cloned.agent_is_p1 = True
+    cloned_player = cloned.p1
+    cloned_player["mana_pool"] = dict(empty_pool)
+    cloned_abilities = cloned.ability_handler.get_activated_abilities(
+        mana_creature)
+    cloned_mana_index = next(
+        index for index, ability in enumerate(cloned_abilities)
+        if isinstance(ability, ManaAbility))
+    _, clone_ok = cloned.action_handler._handle_activate_ability(None, {
+        "battlefield_idx": cloned_player["battlefield"].index(mana_creature),
+        "ability_idx": cloned_mana_index,
+    })
+    assert clone_ok and cloned_player["mana_pool"].get("U") == 1 \
+        and cloned_player["mana_pool"].get("G") == 1, \
+        "Badgermole's mana replacement did not survive game-state cloning"
+    assert player["mana_pool"] == empty_pool \
+        and mana_creature not in player["tapped_permanents"], \
+        "activating mana in the clone mutated the original game"
+
+    _, ok = handler._handle_activate_ability(None, {
+        "battlefield_idx": player["battlefield"].index(mana_creature),
+        "ability_idx": mana_index,
+    })
+    assert ok and mana_creature in player["tapped_permanents"], \
+        "the creature's real tap-for-mana activation failed"
+    assert player["mana_pool"].get("U") == 1 \
+        and player["mana_pool"].get("G") == 1, \
+        f"Badgermole creature mana was {player['mana_pool']}"
+
+    player["mana_pool"] = dict(empty_pool)
+    _, ok = handler._handle_tap_land_for_mana(
+        player["battlefield"].index(land))
+    assert ok and land in player["tapped_permanents"], \
+        "the comparison land's real mana activation failed"
+    assert player["mana_pool"].get("G") == 1, \
+        "Badgermole incorrectly boosted mana from a land"
+
+    assert gs.move_card(
+        badgermole, player, "battlefield", player, "graveyard")
+    assert gs.untap_permanent(mana_creature, player)
+    player["mana_pool"] = dict(empty_pool)
+    _, ok = handler._handle_activate_ability(None, {
+        "battlefield_idx": player["battlefield"].index(mana_creature),
+        "ability_idx": mana_index,
+    })
+    assert ok, "the creature's second mana activation failed"
+    assert player["mana_pool"].get("U") == 1 \
+        and player["mana_pool"].get("G") == 0, \
+        "Badgermole's mana effect remained after it left the battlefield"
+
+
+@scenario("601.2f / 614.1c / Eddymurk Crab", "graveyard spells reduce Eddymurk, off-turn entry taps it, and its ETB may tap zero to two creatures")
+def scenario_eddymurk_crab_exact_support():
+    from Playersim.ability_types import TapEffect
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 52)
+    controller, opponent = gs.p1, gs.p2
+    gs.turn = 1
+    crab = inject_real_card(gs, controller, "Eddymurk Crab", "hand")
+    for name, type_line in (
+            ("Crab Instant", "Instant"),
+            ("Crab Sorcery", "Sorcery"),
+            ("Crab Creature", "Creature")):
+        inject_into_zone(gs, controller, {
+            "name": name, "mana_cost": "{1}", "type_line": type_line,
+            "oracle_text": "", "power": 1, "toughness": 1,
+        }, "graveyard")
+    modified = gs.mana_system.apply_cost_modifiers(
+        controller, gs.mana_system.parse_mana_cost("{5}{U}{U}"), crab)
+    assert modified.get("generic") == 3 \
+        and modified.get("U") == 2, \
+        f"Eddymurk used the wrong graveyard reduction: {modified}"
+
+    assert gs.move_card(crab, controller, "hand", controller, "battlefield")
+    assert crab not in controller["tapped_permanents"], \
+        "Eddymurk entered tapped on its controller's turn"
+    gs.ability_handler.active_triggers = []
+    off_turn_crab = inject_real_card(
+        gs, controller, "Eddymurk Crab", "hand")
+    gs.turn = 2
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.previous_priority_phase = None
+    gs.priority_player = controller
+    gs.agent_is_p1 = True
+    controller["mana_pool"] = {
+        'W': 0, 'U': 2, 'B': 0, 'R': 0, 'G': 0, 'C': 3}
+    assert gs.cast_spell(off_turn_crab, controller), \
+        "Eddymurk's flash did not allow an off-turn cast"
+    paid = gs.stack[-1][3].get("final_paid_cost", {})
+    assert paid.get("generic") == 3 and paid.get("U") == 2, \
+        f"the real Eddymurk cast paid the wrong reduced cost: {paid}"
+    assert gs.resolve_top_of_stack(), "the off-turn Eddymurk cast failed"
+    assert off_turn_crab in controller["tapped_permanents"], \
+        "Eddymurk entered untapped outside its controller's turn"
+
+    effects = EffectFactory.create_effects(
+        "Tap up to two target creatures.", source_name="Eddymurk Crab")
+    assert len(effects) == 1 and isinstance(effects[0], TapEffect)
+    tap_effect = effects[0]
+    assert (tap_effect.min_targets, tap_effect.max_targets) == (0, 2)
+    first = inject_into_zone(gs, opponent, {
+        "name": "First Crab Target", "mana_cost": "{1}",
+        "type_line": "Creature", "oracle_text": "", "power": 1,
+        "toughness": 1,
+    }, "battlefield")
+    second = inject_into_zone(gs, opponent, {
+        "name": "Second Crab Target", "mana_cost": "{2}",
+        "type_line": "Creature", "oracle_text": "", "power": 2,
+        "toughness": 2,
+    }, "battlefield")
+    assert tap_effect.apply(
+        gs, crab, controller, targets={"creatures": [first, second]})
+    assert {first, second}.issubset(opponent["tapped_permanents"]), \
+        "Eddymurk did not tap both selected creatures"
+    assert tap_effect.apply(gs, crab, controller, targets={}), \
+        "Eddymurk's legal zero-target choice reported a failed resolution"
+
+
+@scenario("603.2 / Spider Manifestation", "only the controller's mana-value-four spell untaps Spider Manifestation")
+def scenario_spider_manifestation_self_untap():
+    from Playersim.ability_types import ManaAbility
+    gs = fresh(SEED + 53)
+    controller, opponent = gs.p1, gs.p2
+    gs.agent_is_p1 = True
+    spider = inject_real_card(
+        gs, controller, "Spider Manifestation", "battlefield")
+    assert gs.check_keyword(spider, "reach"), \
+        "Spider Manifestation lost its printed reach"
+    controller["entered_battlefield_this_turn"].discard(spider)
+    abilities = gs.ability_handler.get_activated_abilities(spider)
+    mana_index = next(
+        index for index, ability in enumerate(abilities)
+        if isinstance(ability, ManaAbility))
+    before = dict(controller["mana_pool"])
+    battlefield_index = controller["battlefield"].index(spider)
+    _, ok = get_env().action_handler._handle_activate_ability(
+        None, {"battlefield_idx": battlefield_index,
+               "ability_idx": mana_index})
+    assert ok and gs.choice_context \
+        and gs.choice_context.get("options") == ["R", "G"], \
+        "Spider's {R}-or-{G} mana ability did not expose only those colors"
+    _, ok = get_env().action_handler._handle_choose_mode(1, {})
+    assert ok and controller["mana_pool"].get("G", 0) \
+        == before.get("G", 0) + 1
+    assert controller["mana_pool"].get("R", 0) == before.get("R", 0), \
+        "choosing green from Spider also produced red"
+    assert spider in controller["tapped_permanents"]
+
+    colored_cost_source = inject_into_zone(gs, controller, {
+        "name": "Colored Cost Mana Source", "mana_cost": "{1}",
+        "type_line": "Creature", "power": 1, "toughness": 1,
+        "oracle_text": "{G}, {T}: Add {R} or {U}.",
+    }, "battlefield")
+    controller["entered_battlefield_this_turn"].discard(colored_cost_source)
+    colored_abilities = gs.ability_handler.get_activated_abilities(
+        colored_cost_source)
+    colored_index = next(
+        index for index, ability in enumerate(colored_abilities)
+        if isinstance(ability, ManaAbility))
+    _, ok = get_env().action_handler._handle_activate_ability(None, {
+        "battlefield_idx": controller["battlefield"].index(
+            colored_cost_source),
+        "ability_idx": colored_index,
+    })
+    assert ok and gs.choice_context.get("options") == ["R", "U"], \
+        "a colored activation cost leaked into the produced-color choices"
+    _, ok = get_env().action_handler._handle_choose_mode(1, {})
+    assert ok and controller["mana_pool"].get("U", 0) == 1
+
+    low_spell = inject_card(gs, {
+        "name": "Low Mana Value Spell", "mana_cost": "{3}", "cmc": 3,
+        "type_line": "Sorcery", "oracle_text": "",
+    })
+    gs.trigger_ability(low_spell, "CAST_SPELL", {
+        "controller": controller, "casting_player": controller,
+        "cast_card_id": low_spell,
+    })
+    assert not any(
+        context.get("source_card_id") == spider
+        for _, _, context in gs.ability_handler.active_triggers), \
+        "a mana-value-three spell triggered Spider Manifestation"
+
+    opposing_spell = inject_card(gs, {
+        "name": "Opposing Large Spell", "mana_cost": "{4}", "cmc": 4,
+        "type_line": "Sorcery", "oracle_text": "",
+    })
+    gs.trigger_ability(opposing_spell, "CAST_SPELL", {
+        "controller": opponent, "casting_player": opponent,
+        "cast_card_id": opposing_spell,
+    })
+    assert not any(
+        context.get("source_card_id") == spider
+        for _, _, context in gs.ability_handler.active_triggers), \
+        "an opponent's spell triggered Spider Manifestation"
+
+    large_spell = inject_card(gs, {
+        "name": "Friendly X Spell", "mana_cost": "{X}", "cmc": 0,
+        "type_line": "Sorcery", "oracle_text": "",
+    })
+    gs.trigger_ability(large_spell, "CAST_SPELL", {
+        "controller": controller, "casting_player": controller,
+        "cast_card_id": large_spell, "X": 4,
+    })
+    matching = [
+        entry for entry in gs.ability_handler.active_triggers
+        if entry[2].get("source_card_id") == spider]
+    assert len(matching) == 1, \
+        f"the qualifying spell queued {len(matching)} Spider triggers"
+    gs.ability_handler.process_triggered_abilities()
+    assert gs.resolve_top_of_stack(), "Spider's untap trigger failed"
+    assert spider not in controller["tapped_permanents"], \
+        "'untap this creature' did not untap Spider Manifestation itself"
+
+
+@scenario("603.2", "a printed once-per-turn trigger fires once and resets on the next turn")
+def scenario_once_per_turn_trigger_limit():
+    gs = fresh(SEED + 55)
+    controller = gs.p1
+    watcher = inject_into_zone(gs, controller, {
+        "name": "Once-Per-Turn Watcher", "mana_cost": "{1}{U}",
+        "type_line": "Creature", "power": 2, "toughness": 2,
+        "oracle_text": (
+            "Whenever you cast a spell, untap this creature. "
+            "This ability triggers only once each turn."),
+    }, "battlefield")
+    gs.tap_permanent(watcher, controller)
+
+    for index in range(2):
+        spell = inject_card(gs, {
+            "name": f"Once-Per-Turn Spell {index}", "mana_cost": "{1}",
+            "cmc": 1, "type_line": "Sorcery", "oracle_text": "",
+        })
+        gs.trigger_ability(spell, "CAST_SPELL", {
+            "controller": controller, "casting_player": controller,
+            "cast_card_id": spell,
+        })
+    matching = [
+        entry for entry in gs.ability_handler.active_triggers
+        if entry[2].get("source_card_id") == watcher]
+    assert len(matching) == 1, \
+        f"the once-per-turn watcher queued {len(matching)} first-turn triggers"
+    gs.ability_handler.process_triggered_abilities()
+    assert gs.resolve_top_of_stack()
+    assert watcher not in controller["tapped_permanents"]
+
+    gs.turn += 1
+    gs.tap_permanent(watcher, controller)
+    next_spell = inject_card(gs, {
+        "name": "Next-Turn Spell", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Sorcery", "oracle_text": "",
+    })
+    gs.trigger_ability(next_spell, "CAST_SPELL", {
+        "controller": controller, "casting_player": controller,
+        "cast_card_id": next_spell,
+    })
+    matching = [
+        entry for entry in gs.ability_handler.active_triggers
+        if entry[2].get("source_card_id") == watcher]
+    assert len(matching) == 1, \
+        "the once-per-turn watcher did not reset on the next turn"
+
+
+@scenario("701.19 / Fabled Passage", "Fabled Passage performs one atomic tapped basic-land search and applies its four-land untap rider")
+def scenario_fabled_passage_atomic_search():
+    def run_branch(seed, other_land_count, should_untap):
+        gs = fresh(seed)
+        player = gs.p1
+        gs.agent_is_p1 = True
+        gs.priority_player = player
+        passage = inject_real_card(gs, player, "Fabled Passage", "battlefield")
+        for index in range(other_land_count):
+            inject_into_zone(gs, player, {
+                "name": f"Passage Existing Land {seed} {index}",
+                "mana_cost": "", "type_line": "Land",
+                "oracle_text": "",
+            }, "battlefield")
+        basic = inject_card(gs, {
+            "name": f"Passage Basic {seed}", "mana_cost": "", "cmc": 0,
+            "type_line": "Basic Land - Forest",
+            "oracle_text": "{T}: Add {G}.",
+        })
+        filler = inject_card(gs, {
+            "name": f"Passage Nonbasic {seed}", "mana_cost": "", "cmc": 0,
+            "type_line": "Land", "oracle_text": "{T}: Add {C}.",
+        })
+        player["library"] = [basic, filler]
+        gs._last_card_locations[basic] = (player, "library")
+        gs._last_card_locations[filler] = (player, "library")
+
+        abilities = gs.ability_handler.get_activated_abilities(passage)
+        assert len(abilities) == 1 \
+            and "search your library for a basic land" in abilities[0].effect.lower()
+        battlefield_index = player["battlefield"].index(passage)
+        _, ok = get_env().action_handler._handle_activate_ability(
+            None, {"battlefield_idx": battlefield_index,
+                   "ability_idx": 0})
+        assert ok and passage in player["graveyard"] and gs.stack, \
+            "Fabled Passage did not pay its tap-and-sacrifice cost"
+        from Playersim import game_state_zones as zones_module
+        shuffle_calls = []
+        original_shuffle = zones_module.random.shuffle
+        zones_module.random.shuffle = lambda values: (
+            shuffle_calls.append(list(values)), original_shuffle(values))[1]
+        try:
+            assert gs.resolve_top_of_stack(), "Fabled Passage search failed"
+        finally:
+            zones_module.random.shuffle = original_shuffle
+        assert len(shuffle_calls) == 1, \
+            f"Fabled Passage shuffled {len(shuffle_calls)} times"
+        assert basic in player["battlefield"] and basic not in player["hand"], \
+            "the searched basic did not move directly to the battlefield"
+        is_tapped = basic in player["tapped_permanents"]
+        assert is_tapped is not should_untap, \
+            (f"Fabled Passage threshold branch was wrong with "
+             f"{other_land_count} other lands: tapped={is_tapped}")
+
+    run_branch(SEED + 54, other_land_count=2, should_untap=False)
+    run_branch(SEED + 55, other_land_count=3, should_untap=True)
+
+
 @scenario("parser: put on top", "'put target creature on top of its owner's library' removes it from the battlefield")
 def s_parser_put_on_top():
     gs = fresh()
@@ -8989,6 +9480,40 @@ def s_leyline_opening_hand_decline():
     assert not gs.mulligan_in_progress and gs.turn == 1 \
         and gs.phase == gs.PHASE_UPKEEP, \
         "the game did not proceed to turn 1 after declining"
+
+
+@scenario("103.6c", "each eligible opening-hand card gets an independent accept or decline decision")
+def s_opening_hand_choices_are_per_card():
+    gs = fresh(seed=SEED + 3)
+    controller = gs.p1
+    gs.agent_is_p1 = True
+    permission = (
+        "If this card is in your opening hand, you may begin the game with "
+        "it on the battlefield.")
+    first = inject_into_zone(gs, controller, {
+        "name": "First Opening Permission", "mana_cost": "{2}{R}{R}",
+        "type_line": "Enchantment", "oracle_text": permission,
+    }, "hand")
+    second = inject_into_zone(gs, controller, {
+        "name": "Second Opening Permission", "mana_cost": "{2}{U}{U}",
+        "type_line": "Enchantment", "oracle_text": permission,
+    }, "hand")
+    gs._opening_hand_players = []
+    gs._begin_opening_hand_choice(controller)
+    assert gs.choice_context.get("options") == [first, second]
+
+    _, ok = get_env().action_handler._handle_pass_priority(None)
+    assert ok and first in controller["hand"], \
+        "declining the first permission moved it out of hand"
+    assert gs.choice_context and gs.choice_context.get("options") == [second], \
+        "declining one card discarded the other begin-game decision"
+    _, ok = get_env().action_handler._handle_choose_mode(0, {})
+    assert ok and second in controller["battlefield"], \
+        "accepting the second begin-game permission failed"
+    assert first in controller["hand"] and first not in controller["battlefield"]
+    assert gs.choice_context is None and gs.turn == 1 \
+        and gs.phase == gs.PHASE_UPKEEP, \
+        "the first turn did not begin after the final per-card decision"
 
 
 @scenario("Screaming Nemesis / 119.6", "Screaming Nemesis reflects the damage and permanently stops the damaged player's life gain")
@@ -12288,6 +12813,92 @@ def scenario_earthbend_land_animation_and_return():
         "the earthbent land did not return tapped"
     assert "creature" not in gs._safe_get_card(land).card_types, \
         "the returned land incorrectly remained a creature"
+
+
+@scenario("603.6c / Earthbend", "Beifong uses the dying friendly nonland creature's last-known power for Earthbend X")
+def scenario_dynamic_earthbend_uses_last_known_power():
+    gs = fresh(SEED + 152)
+    controller, opponent = gs.p1, gs.p2
+    gs.agent_is_p1 = True
+    hunter = inject_real_card(
+        gs, controller, "Beifong's Bounty Hunters", "battlefield")
+    land = inject_into_zone(gs, controller, {
+        "name": "Bounty Hunter Earthbend Land", "mana_cost": "", "cmc": 0,
+        "type_line": "Basic Land - Forest", "oracle_text": "{T}: Add {G}.",
+    }, "battlefield")
+
+    opposing = inject_into_zone(gs, opponent, {
+        "name": "Opposing Death Probe", "mana_cost": "{2}{R}",
+        "type_line": "Creature", "oracle_text": "", "power": 3,
+        "toughness": 3,
+    }, "battlefield")
+    assert gs.move_card(
+        opposing, opponent, "battlefield", opponent, "graveyard")
+    assert not any(
+        context.get("source_card_id") == hunter
+        for _, _, context in gs.ability_handler.active_triggers), \
+        "an opposing creature death triggered Beifong"
+
+    land_creature = inject_into_zone(gs, controller, {
+        "name": "Land Creature Death Probe", "mana_cost": "", "cmc": 0,
+        "type_line": "Land Creature - Elemental", "oracle_text": "",
+        "power": 4, "toughness": 4,
+    }, "battlefield")
+    assert gs.move_card(
+        land_creature, controller, "battlefield", controller, "graveyard")
+    assert not any(
+        context.get("source_card_id") == hunter
+        for _, _, context in gs.ability_handler.active_triggers), \
+        "a land creature death triggered the nonland Beifong watcher"
+
+    friendly = inject_into_zone(gs, controller, {
+        "name": "Friendly Power Probe", "mana_cost": "{3}{G}",
+        "type_line": "Creature - Beast", "oracle_text": "", "power": 3,
+        "toughness": 3,
+    }, "battlefield")
+    assert gs.move_card(
+        friendly, controller, "battlefield", controller, "graveyard")
+    matching = [
+        (ability, trigger_controller, context)
+        for ability, trigger_controller, context
+        in gs.ability_handler.active_triggers
+        if context.get("source_card_id") == hunter]
+    assert len(matching) == 1, \
+        f"friendly nonland creature death queued {len(matching)} Beifong triggers"
+    assert matching[0][2].get("last_known", {}).get("power") == 3
+
+    gs.ability_handler.process_triggered_abilities()
+    assert gs.targeting_context, "dynamic Earthbend did not request its land target"
+    valid_map = gs.targeting_system.get_valid_targets(
+        hunter, controller, gs.targeting_context["required_type"],
+        effect_text=gs.targeting_context["effect_text"])
+    valid_targets = sorted({
+        target_id for target_ids in valid_map.values()
+        for target_id in target_ids})
+    _, ok = get_env().action_handler._handle_select_target(
+        valid_targets.index(land), {})
+    assert ok and gs.stack, "choosing the Earthbend land target failed"
+    assert len(gs.stack) == 1 and gs.stack[-1][1] == hunter, \
+        f"unexpected stack above dynamic Earthbend: {gs.stack}"
+    stack_context = gs.stack[-1][3]
+    assert stack_context.get("last_known", {}).get("power") == 3, \
+        f"target commitment lost Earthbend last-known data: {stack_context}"
+    parsed_effects = stack_context["ability"]._create_ability_effects(
+        stack_context["ability"].effect,
+        stack_context.get("targets"),
+        source_name="Beifong's Bounty Hunters")
+    assert len(parsed_effects) == 1 \
+        and getattr(parsed_effects[0], "amount", None) == "event_last_known_power", \
+        f"dynamic Earthbend reparsed incorrectly: {parsed_effects}"
+    assert gs.targeting_system.validate_targets(
+        hunter, stack_context.get("targets", {}), controller,
+        effect_text=stack_context.get("targeting_text")), \
+        f"dynamic Earthbend target failed validation: {stack_context}"
+    assert gs.resolve_top_of_stack(), "dynamic Earthbend trigger failed to resolve"
+    counter_count = gs._safe_get_card(land).counters.get("+1/+1", 0)
+    assert counter_count == 3, \
+        ("Earthbend X did not use the dying creature's last-known power: "
+         f"got {counter_count}, types={gs._safe_get_card(land).card_types}")
 
 
 @scenario("702.34 (Flashback)", "printed and granted flashback use distinct graveyard actions and exile after casting")

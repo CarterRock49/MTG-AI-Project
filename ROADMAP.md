@@ -16,9 +16,9 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 13/13, and 307/307, plus 15/15 fixture-
+   every delivery (currently 9/9, 13/13, and 315/315, plus 15/15 fixture-
    harvest tests, 7/7 production-protocol tests, 19/19 card-registry tests,
-   1/1 support-preflight tests, 2/2 deck-corpus tests,
+   1/1 support-preflight tests, 2/2 deck-corpus tests, 13/13 deck-ingest tests,
    6/6 fuzz/replay tests, and the deterministic 8-seed / 8,000-action
    default fuzz profile, and the strict 32-seed / 320,000-action long
    profile).
@@ -55,7 +55,13 @@ The project is complete when all of the following hold:
   own effect-parser, scenario, and manifest evidence. Format-wide quantified
   coverage remains manifest-driven. Round 7.50 statically preflighted all
   4,702 current Standard cards and now separates verified, corpus-clean,
-  unseen, partial, unparsed, crash, and explicitly excluded evidence.
+  unseen, partial, unparsed, crash, and explicitly excluded evidence. The
+  current July 11 ledger contains 60 verified, 79 observed-clean, 3,310
+  unseen-clean, 843 partial, and 410 unparsed cards: 73.3517652063% is
+  static-clean and 2.9561888558% is evidence-qualified. Ten formerly clean
+  cards were conservatively reclassified partial after the audit surfaced
+  Harmonize and source-duration omissions; this corrects evidence rather than
+  regressing implemented behavior.
 - Tier 3 (training/environment): ◐ policy plumbing and audit work are complete;
   a trained checkpoint still needs to beat scripted play before Harvest is
   promoted to policy-vs-policy.
@@ -68,12 +74,13 @@ The project is complete when all of the following hold:
 - Target-format program: ◐ milestone 1 (format foundation and lineage) is
   complete — frozen canonical registry + feature schema in
   `formats/standard/`, explicit `--format`/`--decks` configuration, and
-  lineage-stamped manifests. Standard end to end is next.
-- Test gates: smoke 9/9, training 13/13, scenarios 307/307 (grown from 12),
+  lineage-stamped manifests. User-supplied decks now route into isolated format
+  pools automatically; policy qualification and builder feedback remain open.
+- Test gates: smoke 9/9, training 13/13, scenarios 315/315 (grown from 12),
   fixture harvest 15/15, production Harvest protocol 7/7, card registry
-  18/18, fuzz/replay configuration 6/6, deterministic default fuzz 8 seeds
-  x 1,000 valid actions, and strict long fuzz 32 seeds x 10,000 valid
-  actions.
+  19/19, deck ingestion 13/13, fuzz/replay configuration 6/6, deterministic
+  default fuzz 8 seeds x 1,000 valid actions, and strict long fuzz 32 seeds x
+  10,000 valid actions.
 - **Stats collected before July 2026 are unusable** (wrong player, wrong
   winner, fictional play turns, cosmetic first strike, compounding P/T,
   dead replacement system). Wipe and re-harvest after the current engine
@@ -1322,7 +1329,7 @@ fuzz profile.
 
 ## Tier 4 — Verification & calibration
 
-1. ✅ Golden scenario harness — 305 scenarios and growing; scenario-first is a
+1. ✅ Golden scenario harness — 315 scenarios and growing; scenario-first is a
    working agreement, not a suggestion.
 2. ✅ **Property/invariant harness**: exact non-token zone/stack conservation,
    SBA fixed points, mask-valid action execution/handler coverage, declared
@@ -1387,12 +1394,16 @@ multiple environment workers; and Harvest can run isolated shards and
 paired-seat checkpoint promotion. As of Round 7.46, training and Harvest
 accept explicit format/corpus configuration, run-level manifests carry
 format/pool/corpus/registry/schema lineage, and production Harvest is no
-longer hard-coded to the audited eight decks. Still open: the scripted
-opponent remains the training baseline, no representative Modern or Pioneer
-training corpus exists, and the automatic format-aware builder/feedback
-queue is not implemented. A clean failure manifest also does not prove that
-an unseen format card was simulated faithfully; coverage must distinguish
-unseen, observed-clean, verified, partial, and excluded cards.
+longer hard-coded to the audited eight decks. Round 7.52 added user-deck
+ingress: one supplied list is legality-checked against the pinned snapshots,
+its matching format(s) are detected, and it is added to that format's isolated
+recursive deck pool. This is an input path, not the automatic deck-builder
+feedback queue. Still open: the scripted opponent remains the training
+baseline, no representative Modern or Pioneer training corpus exists, and
+builder candidates do not yet enqueue themselves. A clean failure manifest
+also does not prove that an unseen format card was simulated faithfully;
+coverage must distinguish unseen, observed-clean, verified, partial, and
+excluded cards.
 
 Phased milestones:
 
@@ -1414,11 +1425,11 @@ Phased milestones:
    English cards in the pinned Standard snapshot plus 28 retained bootstrap
    identities (4,730 registry entries total). The v2 feature schema has 259
    subtypes and feature_dim 436; the original 110 indices remain unchanged.
-2. ▢ **Standard end to end**: use the current Standard-legal sample only as a
-   bootstrap, assemble and pin a representative Standard corpus, qualify the
-   Standard policy against scripted play, promote it into a checkpoint league,
-   calibrate known matchups, and produce the first format-isolated,
-   fidelity-clean strength harvest.
+2. ◐ **Standard end to end**: the representative corpus is pinned, hydrated,
+   and can be extended with validated imports. Continue closing impact-ranked
+   support gaps, qualify the Standard policy against scripted play, promote it
+   into a checkpoint league, calibrate known matchups, and produce the first
+   format-isolated, fidelity-clean strength harvest.
 3. ▢ **Modern end to end**: assemble a separate strictly legal Modern corpus,
    triage its observed support gaps, then repeat qualification, league
    promotion, calibration, and production harvest in the Modern namespace.
@@ -1434,19 +1445,17 @@ Phased milestones:
    its training/Harvest corpus without contaminating held-out promotion or
    calibration results.
 
-**Current execution order:** with the Round 7.45 exact-source CUDA canary
-recorded and the Round 7.46 format foundation delivered (frozen canonical
-registry + feature schema, explicit format/corpus configuration, run-level
-lineage, generalized production Harvest), the next implementation milestone
-is **Standard end to end**: assemble and pin a representative Standard
-corpus (re-freezing or append-extending `formats/standard/`), qualify the
-Standard policy against scripted play, promote it into a checkpoint league,
-and calibrate known matchups. Then reuse that qualified pipeline for Modern
-and then Pioneer, and finally enable the unified automatic builder feedback
-loop. Production-size throughput profiling and calibration occur as gates in
-each format rather than as one mixed-format exercise. New fidelity failures
-discovered along that path pre-empt strength and integration work in the
-affected format.
+**Current execution order:** the format foundation, full Standard namespace,
+representative metagame corpus, recursive pool layout, and validated user-deck
+ingress now exist. Continue the impact-ranked Standard support sweep, then
+qualify the Standard policy against scripted play, promote it into a checkpoint
+league, and calibrate known matchups. Imported lists can widen the working pool
+without overwriting the pinned metagame, but builder-driven queueing remains a
+later milestone. Reuse the qualified pipeline for Modern and then Pioneer, and
+finally enable the unified automatic builder feedback loop. Production-size
+throughput profiling and calibration occur as gates in each format rather than
+as one mixed-format exercise. New fidelity failures discovered along that path
+pre-empt strength and integration work in the affected format.
 
 **Round 7.46 (July 2026)** delivered the format foundation end to end,
 scenario-first (18 new `tests/card_registry_test.py` tests plus new harvest,
@@ -1600,6 +1609,46 @@ and closed its first two impact-ranked mechanic gaps:
   Gates: 307/307 scenarios, 9/9 smoke, 13/13 training, 15/15 fixture Harvest,
   7/7 protocol, 19/19 registry, 1/1 support-preflight, and 2/2 corpus tests.
 
+**Round 7.52 (July 2026)** added format-aware deck ingress and another exact-
+card coverage slice:
+* **Automatic format routing** — `python -m Playersim.deck_ingest <list>` reads
+  Arena/simple text or JSON, resolves canonical names against the pinned card
+  lists, enforces main-deck, sideboard, copy-limit, registry, schema, and format
+  legality, reports every match, and selects Standard, then Pioneer, then
+  Modern unless `--format` requires one. Dry-run, strict-support, explicit
+  replacement, and fail-closed namespace controls are available.
+* **Separated recursive pools** — generated metagame decks live under
+  `formats/<format>/decks/metagame/`; validated user lists live under
+  `formats/<format>/decks/imported/`. Training, Harvest, corpus identity,
+  preflight frequency, provenance, and deck statistics discover both through
+  stable recursive traversal, while metagame regeneration cannot overwrite an
+  import.
+* **Eight exact cards gained scenario-backed v1 verification** — Flow State,
+  Accumulate Wisdom, and Consult the Star Charts cover conditional Dig counts
+  and printed remainder ordering;
+  Badgermole Cub covers its creature-mana replacement; Eddymurk Crab covers
+  graveyard reduction, off-turn Flash entry, and zero-to-two targets; Spider
+  Manifestation covers restricted mana choice and cast-trigger gating; Fabled
+  Passage covers its single-shuffle atomic tapped search and four-land untap
+  rider; and Beifong's Bounty Hunters covers last-known-power Earthbend X
+  within the documented Earthbend v1 semantics.
+* **Contained v1 limitations closed** — Dig remainder order now distinguishes
+  preserve, policy-selected, and random instructions; begin-game cards receive
+  independent accept/decline decisions; and Beifong's dynamic Earthbend value
+  comes from the dying creature's last-known power. Printed once-per-turn
+  triggers now enforce and reset their shared turn gate. Earthbend's
+  choice-free delayed return still resolves immediately instead of using the
+  stack.
+* **Measured and conservative coverage** — the regenerated 4,702-card ledger
+  now records 60 verified, 79 observed-clean, 3,310 unseen-clean, 843 partial,
+  and 410 unparsed cards. Versus Round 7.51, static-clean/verified coverage rose
+  from 3,425 to 3,449 cards, evidence-qualified coverage rose from 130 to 139,
+  and unparsed fell from 413 to 410. Ten formerly clean cards were deliberately
+  moved to partial after the audit exposed unimplemented Harmonize/source-
+  duration semantics; the ledger no longer hides those gaps.
+
+Gates added for this round: 315/315 scenarios and 13/13 deck-ingest tests.
+
 ---
 
 ## Working agreements
@@ -1672,12 +1721,24 @@ and closed its first two impact-ranked mechanic gaps:
   now exposes both the permanent choice and decline path.
 - Counter divisions are policy-selected when the effect resolves. Full CR
   601.2d fidelity would announce and lock those divisions during casting or
-  activation. Dig selects the kept card explicitly, but any permitted ordering
-  of multiple remainder cards still follows deterministic library order.
-- Earthbend v1 supports fixed numeric values and its correct death/exile return
-  destination. The choice-free delayed return currently resolves immediately
-  after the initial zone move rather than entering the stack, and dynamic
-  Earthbend X expressions remain unsupported.
+  activation. Dig selects the kept card explicitly and now follows each parsed
+  instruction's preserve, policy-selected, or random remainder order.
+- Earthbend v1 supports fixed numeric values, Beifong's last-known-power X
+  expression, and the correct death/exile return destination. The choice-free
+  delayed return currently resolves immediately after the initial zone move
+  rather than entering the stack; dynamic X expressions beyond the supported
+  last-known-power pattern still need dedicated parsing.
+- Nonland mana abilities expose simple one-symbol colored alternatives such as
+  `{R} or {G}`. Multi-symbol packages, colorless alternatives, and independent
+  per-mana choices still need a structured production-choice model.
+- Optional "its controller may search" land-search riders currently use the
+  correct pre-removal battlefield controller but follow an always-search legal
+  policy; declining that search is not yet exposed as a policy choice.
+- Harmonize cards can resolve their ordinary spell instructions, but the
+  graveyard alternative cast, creature-tap reduction, and post-cast exile are
+  not implemented. Source-duration wording such as "for as long as you
+  control" is also conservatively partial where the permission or restriction
+  outlives the resolving instruction.
 - Spell-copy retargeting can keep the complete inherited target set or replace
   the complete set. Changing only some targets of a multi-target spell needs a
   future slot-aware target-choice context; ordinary one-target copies are fully
@@ -1722,11 +1783,11 @@ and closed its first two impact-ranked mechanic gaps:
   and printed type (July 2026). Token/nontoken scopes are supported; other
   adjectives outside the card's type/subtype/supertype vocabulary remain
   conservative. Defender-side gating assumes two-player "attacks you".
-- Opening-hand placement v1: PASS declines ALL of that player's remaining
-  begin-game cards at once rather than per card, and the scripted opponent
-  always places every eligible card. Leyline of Resonance's second line (the
-  copy trigger on single-friendly-target spells) is NOT yet verified; only the
-  begin-game line is covered by scenarios.
+- Opening-hand placement v1 now gives each eligible card an independent accept
+  or decline decision; the scripted opponent still always places every eligible
+  card as its policy. Both Leyline of Resonance's begin-game line and its copy
+  trigger on a spell targeting exactly one friendly creature are scenario-
+  verified.
 - Screaming Nemesis v1: the reflected damage picks the first committed target,
   and the rest-of-game restriction is a player flag consulted by gain_life and
   lifelink. Effects that add life directly without those entry points would
@@ -1783,6 +1844,11 @@ and closed its first two impact-ranked mechanic gaps:
   frozen-schema subtype vocabulary that must grow requires a new schema
   version and therefore a new policy lineage; ordinary `freeze --extend`
   still accepts only width-preserving additions.
+  Round 7.52's deck importer can bootstrap a wholly missing Standard, Pioneer,
+  or Modern namespace from its pinned snapshot, but refuses a half-present
+  registry/schema pair. Imported decks are hydrated into the detected format's
+  isolated recursive pool; sideboards are retained and legality-checked but are
+  not played by the current best-of-one runtime.
 
 ---
 

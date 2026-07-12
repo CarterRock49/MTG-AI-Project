@@ -262,14 +262,15 @@ def corpus_identity(decks_directory) -> dict:
     """Hash every deck JSON plus one aggregate hash over the whole corpus."""
     directory = Path(decks_directory)
     files = []
-    for filename in sorted(os.listdir(directory), key=str.casefold):
-        path = directory / filename
-        if filename.lower().endswith(".json") and path.is_file():
-            files.append({
-                "name": filename,
-                "size_bytes": path.stat().st_size,
-                "sha256": _file_sha256(path),
-            })
+    paths = sorted(
+        (path for path in directory.rglob("*.json") if path.is_file()),
+        key=lambda path: path.relative_to(directory).as_posix().casefold())
+    for path in paths:
+        files.append({
+            "name": path.relative_to(directory).as_posix(),
+            "size_bytes": path.stat().st_size,
+            "sha256": _file_sha256(path),
+        })
     aggregate = hashlib.sha256()
     for entry in files:
         aggregate.update(f"{entry['name']}:{entry['sha256']}\n".encode("utf-8"))

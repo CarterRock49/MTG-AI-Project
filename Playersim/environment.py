@@ -100,7 +100,8 @@ class AlphaZeroMTGEnv(gym.Env):
         try:
             self.stats_tracker = DeckStatsTracker(
                 storage_path=self.deck_stats_path,
-                card_db=card_db) # BUGFIX: was constructed without the card database
+                card_db=card_db,
+                decks=decks) # BUGFIX: map the environment's active format pool
             self.has_stats_tracker = True
         except (ImportError, ModuleNotFoundError, NameError):
             logging.warning("DeckStatsTracker not available, statistics will not be recorded")

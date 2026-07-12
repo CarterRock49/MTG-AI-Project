@@ -17,8 +17,9 @@ rules behavior. "Needs card scenario" means related code exists, but the
 actual sample card has not yet proved that path end to end.
 
 This document is retained as the historical audit record for that bootstrap
-corpus. Current training and Harvest use `formats/standard/decks/`, hydrated
-from the pinned representative metagame corpus.
+corpus. Current training and Harvest load `formats/standard/decks/` recursively:
+the pinned representative corpus is hydrated into `metagame/`, while validated
+user-supplied lists are routed into the format's separate `imported/` pool.
 
 ## Closed In Round 7.12
 
@@ -621,11 +622,12 @@ branches, but these cards no longer rely on wholly unproved routing.
    (320,000/320,000). It guards card conservation, mask/handler execution,
    observation bounds and non-degradation, mask purity, SBA/layer fixed points,
    finite rewards, exact replay contexts, and phase-boundary mana clearing.
-3. **Next:** implement the shared target-format foundation: stable canonical
-   card IDs, a frozen versioned observation/action schema, explicit
-   format/corpus configuration and lineage, and generalized production
-   Harvest. Deliver the
-   format pipelines in order — Standard, then Modern, then Pioneer — before
-   enabling the unified automatic deck-builder feedback loop. Treat the
-   random-valid fixture results as plumbing/support evidence only, never as
-   card-strength statistics.
+3. ✅ The shared target-format foundation now supplies stable canonical card
+   IDs, frozen versioned feature schemas, explicit format/corpus lineage, and
+   generalized production Harvest. Standard also has a pinned representative
+   metagame and format-aware ingestion for user-supplied deck lists.
+4. **Next:** continue the impact-ranked Standard coverage sweep, then qualify
+   the Standard policy, promote it into a checkpoint league, and calibrate
+   known matchups. Deliver Modern and Pioneer afterward, before enabling the
+   automatic deck-builder feedback loop. Treat random-valid fixture results as
+   plumbing/support evidence only, never as card-strength statistics.

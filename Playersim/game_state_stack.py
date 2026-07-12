@@ -2289,7 +2289,9 @@ class GameStateStackMixin:
             # --- Pass Effect Text and Context ---
             # Use specific effect text from context if available (e.g., chosen modal effect)
             # Otherwise, fallback to card's oracle text.
-            effect_text = context.get('effect_text', getattr(card, 'oracle_text', None))
+            effect_text = (context.get('targeting_text')
+                           or context.get('effect_text',
+                                          getattr(card, 'oracle_text', None)))
 
             # Validate using TargetingSystem
             if hasattr(self.targeting_system, 'validate_targets'):

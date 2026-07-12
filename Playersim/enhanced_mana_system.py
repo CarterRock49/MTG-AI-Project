@@ -379,6 +379,25 @@ class EnhancedManaSystem:
                     'applies_to': 'generic', 'source': f'{card_name} Domain',
                 })
 
+        graveyard_spell_match = re.search(
+            r"this spell costs \{(\d+)\} less to cast for each instant and "
+            r"sorcery card in your graveyard", oracle_text)
+        if graveyard_spell_match:
+            spell_count = sum(
+                1 for graveyard_id in player.get("graveyard", [])
+                if ({"instant", "sorcery"}.intersection(
+                    str(card_type).lower()
+                    for card_type in getattr(
+                        self.game_state._safe_get_card(graveyard_id),
+                        "card_types", []))))
+            reduction = int(graveyard_spell_match.group(1)) * spell_count
+            if reduction:
+                effects.append({
+                    'type': 'reduction', 'amount': reduction,
+                    'applies_to': 'generic',
+                    'source': f'{card_name} graveyard spells',
+                })
+
         # These reductions are determined from targets chosen at CR 601.2c.
         # Casts with these phrases defer payment until that choice is committed,
         # so context['targets'] is authoritative here.
@@ -2625,8 +2644,9 @@ class EnhancedManaSystem:
 
         source_id = None
         if isinstance(land_context, dict):
-            source_id = (land_context.get('source_permanent_id')
-                         or land_context.get('card_id'))
+            source_id = land_context.get('source_permanent_id')
+            if source_id is None:
+                source_id = land_context.get('card_id')
         source_card = (self.game_state._safe_get_card(source_id)
                        if source_id is not None else None)
         source_is_snow = bool(
@@ -2651,8 +2671,14 @@ class EnhancedManaSystem:
                     _ctx = {
                         'event_type': 'PRODUCE_MANA',
                         'player': player,
+                        'player_key': (
+                            'p1' if player is self.game_state.p1 else 'p2'),
                         'source_is_tap_ability': bool(land_context.get('tapped', True)) if isinstance(land_context, dict) else True,
-                        'source_permanent_id': (land_context.get('source_permanent_id') or land_context.get('card_id')) if isinstance(land_context, dict) else None,
+                        'source_permanent_id': source_id,
+                        'source_card_types': list(
+                            getattr(source_card, 'card_types', []) or []),
+                        'source_subtypes': list(
+                            getattr(source_card, 'subtypes', []) or []),
                         'mana_produced': dict(_produced),
                     }
                     _modified, _was_replaced = re_sys.apply_replacements('PRODUCE_MANA', _ctx)

@@ -35,6 +35,7 @@ class GamePosition(Enum):
 # Format definitions
 class GameFormat(Enum):
     STANDARD = "standard"
+    PIONEER = "pioneer"
     MODERN = "modern"
     LEGACY = "legacy"
     VINTAGE = "vintage"
@@ -69,11 +70,15 @@ class DeckArchetype(Enum):
 class DeckStatsTracker:
     """Comprehensive deck statistics tracker with analytics and recommendations"""
     
-    def __init__(self, storage_path: str = "./deck_stats", card_db: Dict = None, use_compression: bool = True):
+    def __init__(self, storage_path: str = "./deck_stats",
+                 card_db: Dict = None, use_compression: bool = True,
+                 decks: List = None, decks_directory: str = None):
         # Initialize storage path
         self.base_path = storage_path
         self.use_compression = use_compression
         self.card_db = card_db or {}
+        self.source_decks = list(decks or [])
+        self.decks_directory = decks_directory
         self._ensure_directories()
         self.current_deck_name_p1 = None
         self.current_deck_name_p2 = None
@@ -110,25 +115,46 @@ class DeckStatsTracker:
                                 self.card_id_to_name[card["id"]] = card["name"]
             except Exception as e:
                 logging.error(f"Error initializing deck mapping for {file_path}: {str(e)}")
+
+        # The environment already owns the exact active corpus. Mapping those
+        # runtime decks avoids hard-coding Standard when training or Harvest
+        # is running a Pioneer, Modern, imported, or custom pool.
+        for deck in self.source_decks:
+            if not isinstance(deck, dict):
+                continue
+            deck_name = str(deck.get("name", "")).strip()
+            card_ids = list(deck.get("cards", []))
+            if not deck_name or not card_ids:
+                continue
+            deck_id = self.get_deck_fingerprint(card_ids)
+            self.deck_name_to_id[deck_name] = deck_id
+            self.deck_id_to_name[deck_id] = deck_name
             
-        # Check the pinned hydrated Standard corpus in the parent directory.
+        # Legacy/direct callers that do not supply runtime decks may still
+        # discover a configured hydrated directory (Standard by default).
         try:
             parent_dir = os.path.dirname(self.base_path)
-            decks_dir = os.path.join(
-                parent_dir, "formats", "standard", "decks")
+            decks_dir = None if self.source_decks else (
+                self.decks_directory or os.path.join(
+                    parent_dir, "formats", "standard", "decks"))
             
-            if os.path.exists(decks_dir) and os.path.isdir(decks_dir):
+            if (decks_dir and os.path.exists(decks_dir)
+                    and os.path.isdir(decks_dir)):
                 logging.info(f"Scanning for deck files in {decks_dir}")
-                deck_files = glob.glob(os.path.join(decks_dir, "*.json"))
+                deck_files = glob.glob(
+                    os.path.join(decks_dir, "**", "*.json"), recursive=True)
                 
                 for deck_file in deck_files:
                     try:
-                        # Extract deck name from filename
-                        deck_name = os.path.basename(deck_file).replace('.json', '')
-                        
                         # Read the deck file to calculate its fingerprint
-                        with open(deck_file, 'r') as f:
+                        with open(deck_file, 'r', encoding='utf-8') as f:
                             deck_data = json.load(f)
+                        deck_name = str(
+                            deck_data.get("name")
+                            if isinstance(deck_data, dict) else "").strip()
+                        if not deck_name:
+                            deck_name = os.path.basename(
+                                deck_file).replace('.json', '')
                         
                         # Extract card IDs depending on format
                         if isinstance(deck_data, list):

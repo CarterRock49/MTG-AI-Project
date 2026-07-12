@@ -78,8 +78,10 @@ def load_corpus_frequencies(decks_directory) -> tuple[Counter, dict[str, list[st
             corpus = json.load(handle)
         payloads = [(corpus_path, deck) for deck in corpus.get("decks", [])]
     else:
-        for path in sorted(corpus_path.glob("*.json"),
-                           key=lambda item: item.name.casefold()):
+        for path in sorted(
+                corpus_path.rglob("*.json"),
+                key=lambda item: item.relative_to(
+                    corpus_path).as_posix().casefold()):
             with path.open("r", encoding="utf-8") as handle:
                 payloads.append((path, json.load(handle)))
     for path, payload in payloads:

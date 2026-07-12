@@ -206,7 +206,16 @@ class HarvestFixturesTest(unittest.TestCase):
             cards[card_id] = card
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            tracker = DeckStatsTracker(storage_path=temp_dir, card_db=cards)
+            runtime_deck = {
+                "name": "Imported Pioneer Deck", "cards": [0] * 60}
+            tracker = DeckStatsTracker(
+                storage_path=temp_dir, card_db=cards,
+                decks=[runtime_deck])
+            runtime_id = tracker.get_deck_fingerprint(runtime_deck["cards"])
+            self.assertEqual(
+                tracker.deck_name_to_id["Imported Pioneer Deck"], runtime_id)
+            self.assertEqual(
+                tracker.deck_id_to_name[runtime_id], "Imported Pioneer Deck")
             for _ in range(5):
                 self.assertTrue(tracker.update_meta_with_game_result(
                     [0, 1], [0, 2], "aggro", "control", {}, 5))
@@ -452,6 +461,13 @@ class HarvestFixturesTest(unittest.TestCase):
         self.assertEqual(corpus_args.decks, Path("MyDecks"))
         self.assertEqual(corpus_args.format, "standard")
         self.assertEqual(corpus_args.format_dir, Path("formats/standard"))
+        self.assertEqual(
+            harvest.resolve_decks_directory(None, "pioneer", None),
+            harvest.PROJECT_ROOT / "formats" / "pioneer" / "decks")
+        self.assertEqual(
+            harvest.resolve_decks_directory(
+                None, "modern", Path("custom-modern")),
+            Path("custom-modern") / "decks")
 
 
 class GeneralizedCorpusTest(unittest.TestCase):

@@ -65,6 +65,7 @@ harvest_runs/
 !formats/**/metagame_corpus_*.json
 !formats/**/historical_bootstrap_cards.json
 !formats/**/decks/*.json
+!formats/**/decks/**/*.json
 
 # Other
 .env

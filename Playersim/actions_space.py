@@ -693,7 +693,7 @@ class ActionSpaceMixin:
                         context={"page_count": page_count})
 
             # CR 103.6c: begin-game battlefield placements from the opening
-            # hand (Leylines). PASS declines the player's remaining cards.
+            # hand (Leylines). PASS declines only the current card.
             elif choice_type == "opening_hand":
                 for option_index, card_id in enumerate(context.get("options", [])[:10]):
                     card = gs._safe_get_card(card_id)

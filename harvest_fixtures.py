@@ -113,6 +113,18 @@ def load_sample_decks(decks_directory: Path = DEFAULT_DECKS_DIRECTORY):
     return [by_name[name] for name in EXPECTED_SAMPLE_DECKS], card_db
 
 
+def resolve_decks_directory(decks_directory=None, format_name=None,
+                            format_dir=None) -> Path:
+    """Choose the active format's pool when no explicit corpus is supplied."""
+    if decks_directory is not None:
+        return Path(decks_directory)
+    if format_dir is not None:
+        return Path(format_dir) / "decks"
+    if format_name is not None:
+        return PROJECT_ROOT / "formats" / str(format_name) / "decks"
+    return DEFAULT_DECKS_DIRECTORY
+
+
 def load_corpus_decks(decks_directory: Path, format_name: str | None = None,
                       format_dir: Path | str | None = None):
     """Load any deck corpus strictly and return (decks, card_db, lineage).
@@ -881,8 +893,8 @@ def run_harvest(games: int, seed: int, output_directory: Path,
                 format_dir=DEFAULT_FORMAT_DIRECTORY)
         else:
             decks, card_db, lineage = load_corpus_decks(
-                Path(decks_directory) if decks_directory is not None
-                else DEFAULT_DECKS_DIRECTORY,
+                resolve_decks_directory(
+                    decks_directory, format_name, format_dir),
                 format_name=format_name, format_dir=format_dir)
         deck_names = tuple(deck.get("name") for deck in decks)
         from Playersim import environment as environment_module
@@ -1089,7 +1101,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--decks", type=Path, default=None,
-        help="deck corpus directory (default: formats/standard/decks)",
+        help="deck corpus directory (default: formats/<format>/decks)",
     )
     parser.add_argument(
         "--format", default=None,

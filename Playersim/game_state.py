@@ -47,6 +47,7 @@ class GameState(
                  "mana_system", "replacement_effects", "cards_drawn_this_turn", "cards_milled_this_turn",
                  "combat_resolver", "temp_control_effects", "abilities_activated_this_turn",
                  "card_evaluator", "spells_cast_this_turn", "_phase_history",
+                 "once_per_turn_triggers",
                  "strategic_planner", "attackers_this_turn", "creatures_died_this_turn", 'strategy_memory',
                  "_logged_card_ids", "_logged_errors", "targeting_system",
                  "_phase_action_count", "priority_player", "stats_tracker",
@@ -523,6 +524,7 @@ class GameState(
 
             # Turn-based tracking (resets each turn usually)
             self.spells_cast_this_turn = []
+            self.once_per_turn_triggers = {}
             self.attackers_this_turn = set()
             self.creatures_died_this_turn = {}
             self.damage_dealt_this_turn = {}
@@ -962,6 +964,7 @@ class GameState(
             "_ceased_token_cards",
             "impending_cards", "_offspring_cost_paid_context", "until_end_of_turn_effects",
             "temp_control_effects", "abilities_activated_this_turn", "spells_cast_this_turn",
+            "once_per_turn_triggers",
             "cards_played", "play_history", "opening_hands", "draw_history",
             "damage_dealt_this_turn", "cards_drawn_this_turn",
             "life_gained_this_turn", "damage_this_turn", "cards_to_graveyard_this_turn",
