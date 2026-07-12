@@ -141,6 +141,17 @@ but a real promotion requires trained candidate and baseline checkpoints.
 
 ### Training an Agent
 
+Before widening a format corpus, regenerate its static support ledger:
+
+```bash
+python -m Playersim.support_preflight --snapshot "Format Card Lists/standard.jsonl" \
+  --registry formats/standard/card_registry.json \
+  --decks formats/standard/metagame_corpus_2026-07-11.json \
+  --corpus-label representative-meta-2026-07-11 \
+  --overrides formats/standard/support_overrides.json --format standard \
+  --output formats/standard/support_ledger.json
+```
+
 ```bash
 python main.py --timesteps 1000000 --learning-rate 3e-4 --batch-size 256 --seed 20260710
 ```

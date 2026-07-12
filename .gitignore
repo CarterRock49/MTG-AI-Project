@@ -60,6 +60,9 @@ harvest_runs/
 # Frozen format namespaces are pinned inputs and must be versioned
 !formats/**/card_registry.json
 !formats/**/feature_schema.json
+!formats/**/support_ledger.json
+!formats/**/support_overrides.json
+!formats/**/metagame_corpus_*.json
 
 # Other
 .env

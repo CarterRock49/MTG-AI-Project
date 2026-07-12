@@ -16,8 +16,9 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 13/13, and 303/303, plus 15/15 fixture-
-   harvest tests, 7/7 production-protocol tests, 18/18 card-registry tests,
+   every delivery (currently 9/9, 13/13, and 305/305, plus 15/15 fixture-
+   harvest tests, 7/7 production-protocol tests, 19/19 card-registry tests,
+   1/1 support-preflight tests,
    6/6 fuzz/replay tests, and the deterministic 8-seed / 8,000-action
    default fuzz profile, and the strict 32-seed / 320,000-action long
    profile).
@@ -52,7 +53,9 @@ The project is complete when all of the following hold:
   high-risk partials. The generic Spree casting transaction and exact Three
   Steps Ahead effects are supported; other Spree cards remain subject to their
   own effect-parser, scenario, and manifest evidence. Format-wide quantified
-  coverage remains manifest-driven.
+  coverage remains manifest-driven. Round 7.50 statically preflighted all
+  4,702 current Standard cards and now separates verified, corpus-clean,
+  unseen, partial, unparsed, crash, and explicitly excluded evidence.
 - Tier 3 (training/environment): ◐ policy plumbing and audit work are complete;
   a trained checkpoint still needs to beat scripted play before Harvest is
   promoted to policy-vs-policy.
@@ -1319,7 +1322,7 @@ fuzz profile.
 
 ## Tier 4 — Verification & calibration
 
-1. ✅ Golden scenario harness — 303 scenarios and growing; scenario-first is a
+1. ✅ Golden scenario harness — 305 scenarios and growing; scenario-first is a
    working agreement, not a suggestion.
 2. ✅ **Property/invariant harness**: exact non-token zone/stack conservation,
    SBA fixed points, mask-valid action execution/handler coverage, declared
@@ -1546,6 +1549,28 @@ limitations and widened the frozen Standard namespace:
   the shared effect factory instead of bypassing printed costs.
 Gates: 305/305 scenarios, 9/9 smoke stages, 13/13 training stages, and
 19/19 registry tests.
+
+**Round 7.50 (July 2026)** delivered the first full-format support preflight:
+* **Every Standard card audited** — all 4,702 legal English snapshot cards are
+  constructed, every face passes through ability and replacement registration,
+  and spell, loyalty, activated, and triggered effect text is probed through
+  the shared effect factory. The run completed without audit crashes.
+* **Versioned evidence ledger** — `formats/standard/support_ledger.json` is
+  schema-versioned, self-hashed, and tied to the pool snapshot, canonical
+  registry, evidence overrides, and configured corpus. It distinguishes 52
+  scenario-verified cards, 75 metagame-corpus/static-clean cards, 3,259 unseen
+  static-clean cards, 889 partial cards, and 427 unparsed cards. No card is
+  called fully supported merely because it has never produced telemetry.
+* **Impact-ranked gaps** — unsupported cards and mechanic families are sorted
+  by configured deck copies before pool prevalence/severity. The pinned July
+  11 representative sample contains eight exact 60-card lists covering 73.8%
+  of the MTGGoldfish metagame snapshot. Its leading named gaps are Earthbend
+  (12 slots), Flashback (10), transform layouts (4), prepare layouts (2), and
+  Airbend (2), plus 71 slots of card-specific/unclassified Oracle text.
+* **Reproducible corpus boundary** — the corpus records its capture date,
+  archetype shares, source URLs, and exact lists. The ledger hashes that file
+  and labels the ranking `representative-meta-2026-07-11`; future snapshots can
+  reprioritize gaps without changing the evidence contract.
 
 ---
 

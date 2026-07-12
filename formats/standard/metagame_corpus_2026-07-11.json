@@ -1,0 +1,179 @@
+{
+  "captured_at": "2026-07-11",
+  "decks": [
+    {
+      "meta_share": 0.129,
+      "name": "Selesnya Ouroboroid",
+      "source": "https://www.mtggoldfish.com/deck/7861989",
+      "deck": [
+        {"count": 3, "card": "Abandoned Air Temple"},
+        {"count": 1, "card": "Ba Sing Se"},
+        {"count": 4, "card": "Badgermole Cub"},
+        {"count": 4, "card": "Brightglass Gearhulk"},
+        {"count": 1, "card": "Bushwhack"},
+        {"count": 6, "card": "Forest"},
+        {"count": 4, "card": "Hushwood Verge"},
+        {"count": 2, "card": "Jennifer Walters // The Sensational She-Hulk"},
+        {"count": 4, "card": "Leatherhead, Swamp Stalker"},
+        {"count": 4, "card": "Llanowar Elves"},
+        {"count": 1, "card": "Meltstrider's Resolve"},
+        {"count": 2, "card": "Multiversal Passage"},
+        {"count": 2, "card": "Ouroboroid"},
+        {"count": 4, "card": "Pawpatch Recruit"},
+        {"count": 2, "card": "Plains"},
+        {"count": 4, "card": "Practiced Offense"},
+        {"count": 2, "card": "Seam Rip"},
+        {"count": 3, "card": "Spider Manifestation"},
+        {"count": 3, "card": "Surrak, Elusive Hunter"},
+        {"count": 4, "card": "Temple Garden"}
+      ]
+    },
+    {
+      "meta_share": 0.129,
+      "name": "Jeskai Lessons",
+      "source": "https://www.mtggoldfish.com/deck/7858638",
+      "deck": [
+        {"count": 4, "card": "Abandon Attachments"},
+        {"count": 4, "card": "Accumulate Wisdom"},
+        {"count": 4, "card": "Combustion Technique"},
+        {"count": 4, "card": "Firebending Lesson"},
+        {"count": 1, "card": "Flashback"},
+        {"count": 4, "card": "Gran-Gran"},
+        {"count": 4, "card": "Great Hall of the Biblioplex"},
+        {"count": 3, "card": "Hallowed Fountain"},
+        {"count": 2, "card": "Iroh's Demonstration"},
+        {"count": 2, "card": "Island"},
+        {"count": 2, "card": "It'll Quench Ya!"},
+        {"count": 4, "card": "Jeskai Revelation"},
+        {"count": 1, "card": "Mistrise Village"},
+        {"count": 4, "card": "Riverpyre Verge"},
+        {"count": 3, "card": "Spirebluff Canal"},
+        {"count": 4, "card": "Steam Vents"},
+        {"count": 3, "card": "Stock Up"},
+        {"count": 2, "card": "Sundown Pass"},
+        {"count": 4, "card": "Tablet of Discovery"},
+        {"count": 1, "card": "Three Steps Ahead"}
+      ]
+    },
+    {
+      "meta_share": 0.123,
+      "name": "Izzet Prowess",
+      "source": "https://www.mtggoldfish.com/deck/7859084",
+      "deck": [
+        {"count": 4, "card": "Boomerang Basics"},
+        {"count": 4, "card": "Burst Lightning"},
+        {"count": 4, "card": "Colorstorm Stallion"},
+        {"count": 2, "card": "Eddymurk Crab"},
+        {"count": 4, "card": "Flow State"},
+        {"count": 1, "card": "Impractical Joke"},
+        {"count": 1, "card": "Into the Flood Maw"},
+        {"count": 7, "card": "Island"},
+        {"count": 2, "card": "Multiversal Passage"},
+        {"count": 4, "card": "Opt"},
+        {"count": 4, "card": "Riverpyre Verge"},
+        {"count": 1, "card": "Roaring Furnace // Steaming Sauna"},
+        {"count": 4, "card": "Sleight of Hand"},
+        {"count": 4, "card": "Slickshot Show-Off"},
+        {"count": 1, "card": "Spell Pierce"},
+        {"count": 4, "card": "Spirebluff Canal"},
+        {"count": 4, "card": "Steam Vents"},
+        {"count": 4, "card": "Stormchaser's Talent"},
+        {"count": 1, "card": "Vibrant Outburst"}
+      ]
+    },
+    {
+      "meta_share": 0.115,
+      "name": "4c Control",
+      "source": "https://www.mtggoldfish.com/deck/7852932",
+      "deck": [
+        {"count": 2, "card": "Abrade"}, {"count": 3, "card": "Consult the Star Charts"},
+        {"count": 1, "card": "Cori Mountain Monastery"}, {"count": 2, "card": "Day of Judgment"},
+        {"count": 2, "card": "Flashback"}, {"count": 1, "card": "Floodfarm Verge"},
+        {"count": 4, "card": "Great Hall of the Biblioplex"}, {"count": 2, "card": "Hallowed Fountain"},
+        {"count": 3, "card": "Inevitable Defeat"}, {"count": 4, "card": "Jeskai Revelation"},
+        {"count": 1, "card": "Lightning Helix"}, {"count": 2, "card": "Mistrise Village"},
+        {"count": 1, "card": "Mountain"}, {"count": 1, "card": "Multiversal Passage"},
+        {"count": 2, "card": "No More Lies"}, {"count": 1, "card": "North Wind Avatar"},
+        {"count": 1, "card": "Plains"}, {"count": 2, "card": "Riverpyre Verge"},
+        {"count": 3, "card": "Sacred Foundry"}, {"count": 2, "card": "Sear"},
+        {"count": 3, "card": "Shattered Sanctum"}, {"count": 1, "card": "Slagstorm"},
+        {"count": 2, "card": "Steam Vents"}, {"count": 4, "card": "Stock Up"},
+        {"count": 2, "card": "Stormcarved Coast"}, {"count": 4, "card": "Tablet of Discovery"},
+        {"count": 1, "card": "Three Steps Ahead"}, {"count": 1, "card": "Thunder Magic"},
+        {"count": 2, "card": "Watery Grave"}
+      ]
+    },
+    {
+      "meta_share": 0.087,
+      "name": "Izzet Spellementals",
+      "source": "https://www.mtggoldfish.com/deck/7848755",
+      "deck": [
+        {"count": 2, "card": "Boomerang Basics"}, {"count": 1, "card": "Bounce Off"},
+        {"count": 2, "card": "Burst Lightning"}, {"count": 4, "card": "Eddymurk Crab"},
+        {"count": 3, "card": "Flow State"}, {"count": 1, "card": "Hearth Elemental // Stoke Genius"},
+        {"count": 1, "card": "Impractical Joke"}, {"count": 8, "card": "Island"},
+        {"count": 4, "card": "Namor the Sub-Mariner"}, {"count": 4, "card": "Opt"},
+        {"count": 1, "card": "Prismari Charm"}, {"count": 4, "card": "Riverpyre Verge"},
+        {"count": 2, "card": "Roaring Furnace // Steaming Sauna"}, {"count": 4, "card": "Sleight of Hand"},
+        {"count": 2, "card": "Spell Pierce"}, {"count": 1, "card": "Spell Snare"},
+        {"count": 4, "card": "Spirebluff Canal"}, {"count": 1, "card": "Starting Town"},
+        {"count": 4, "card": "Steam Vents"}, {"count": 1, "card": "Stormcarved Coast"},
+        {"count": 2, "card": "Sunderflock"}, {"count": 1, "card": "Traumatic Critique"},
+        {"count": 1, "card": "Vibrant Outburst"}, {"count": 2, "card": "Winternight Stories"}
+      ]
+    },
+    {
+      "meta_share": 0.069,
+      "name": "Dimir Excruciator",
+      "source": "https://www.mtggoldfish.com/deck/7851898",
+      "deck": [
+        {"count": 3, "card": "Bitter Triumph"}, {"count": 2, "card": "Cavern of Souls"},
+        {"count": 2, "card": "Day of Black Sun"}, {"count": 1, "card": "Deadly Cover-Up"},
+        {"count": 4, "card": "Deceit"}, {"count": 3, "card": "Doomsday Excruciator"},
+        {"count": 4, "card": "Duress"}, {"count": 2, "card": "Emeritus of Ideation // Ancestral Recall"},
+        {"count": 4, "card": "Gloomlake Verge"}, {"count": 1, "card": "Hidden Lair"},
+        {"count": 1, "card": "M.O.D.O.K."}, {"count": 4, "card": "Requiting Hex"},
+        {"count": 4, "card": "Restless Reef"}, {"count": 3, "card": "Stock Up"},
+        {"count": 1, "card": "Strategic Betrayal"}, {"count": 4, "card": "Superior Spider-Man"},
+        {"count": 10, "card": "Swamp"}, {"count": 1, "card": "Temple of Deceit"},
+        {"count": 4, "card": "Watery Grave"}, {"count": 2, "card": "Winternight Stories"}
+      ]
+    },
+    {
+      "meta_share": 0.055,
+      "name": "Mono-Green Landfall",
+      "source": "https://www.mtggoldfish.com/deck/7850826",
+      "deck": [
+        {"count": 1, "card": "Archdruid's Charm"}, {"count": 3, "card": "Ba Sing Se"},
+        {"count": 4, "card": "Badgermole Cub"}, {"count": 4, "card": "Earthbender Ascension"},
+        {"count": 4, "card": "Escape Tunnel"}, {"count": 4, "card": "Esper Origins // Summon: Esper Maduin"},
+        {"count": 4, "card": "Fabled Passage"}, {"count": 14, "card": "Forest"},
+        {"count": 4, "card": "Icetill Explorer"}, {"count": 4, "card": "Llanowar Elves"},
+        {"count": 1, "card": "Lumbering Worldwagon"}, {"count": 3, "card": "Meltstrider's Resolve"},
+        {"count": 4, "card": "Mightform Harmonizer"}, {"count": 1, "card": "Promising Vein"},
+        {"count": 4, "card": "Sazh's Chocobo"}, {"count": 1, "card": "Surrak, Elusive Hunter"}
+      ]
+    },
+    {
+      "meta_share": 0.031,
+      "name": "Azorius Momo",
+      "source": "https://www.mtggoldfish.com/deck/7851900",
+      "deck": [
+        {"count": 2, "card": "Aang, Swift Savior // Aang and La, Ocean's Fury"}, {"count": 2, "card": "Abandoned Air Temple"},
+        {"count": 2, "card": "Cosmogrand Zenith"}, {"count": 4, "card": "Daydream"},
+        {"count": 2, "card": "Erode"}, {"count": 3, "card": "Floodfarm Verge"},
+        {"count": 4, "card": "Gleaming Bastion"}, {"count": 3, "card": "Haliya, Guided by Light"},
+        {"count": 4, "card": "Hallowed Fountain"}, {"count": 4, "card": "Momo, Friendly Flier"},
+        {"count": 2, "card": "Nurturing Pixie"}, {"count": 2, "card": "Parting Gust"},
+        {"count": 8, "card": "Plains"}, {"count": 2, "card": "Practiced Offense"},
+        {"count": 4, "card": "Quantum Riddler"}, {"count": 4, "card": "Sage of the Skies"},
+        {"count": 4, "card": "Springleaf Drum"}, {"count": 4, "card": "Starfield Shepherd"}
+      ]
+    }
+  ],
+  "format": "standard",
+  "kind": "representative_metagame_corpus",
+  "meta_share_total": 0.738,
+  "schema_version": 1,
+  "source": "https://www.mtggoldfish.com/metagame/standard"
+}

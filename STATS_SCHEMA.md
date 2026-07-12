@@ -142,6 +142,35 @@ current harvest run).
 
 Loader: `Playersim.card_support.CardSupportManifest.load(directory)`.
 
+### Static format support ledger (Round 7.50)
+
+`formats/<format>/support_ledger.json` is the versioned, self-hashed preflight
+companion to the runtime manifest. Generate it with:
+
+```bash
+python -m Playersim.support_preflight \
+  --snapshot "Format Card Lists/standard.jsonl" \
+  --registry formats/standard/card_registry.json \
+  --decks formats/standard/metagame_corpus_2026-07-11.json \
+  --corpus-label representative-meta-2026-07-11 \
+  --overrides formats/standard/support_overrides.json \
+  --format standard --output formats/standard/support_ledger.json
+```
+
+Every legal pool card is constructed, each face is sent through ability and
+replacement registration, and runnable effect text is probed through the
+shared effect factory. Card statuses are `verified` (explicit scenario-backed
+override), `observed_clean` (configured corpus plus clean static preflight),
+`unseen`, `partial`, `unparsed`, `crash`, or `excluded`. Static-clean is not a
+rules proof: the builder may qualify only `verified` and `observed_clean`
+cards, and should exclude `unparsed`, `crash`, and `excluded` cards.
+
+`ranked_mechanics` and `ranked_cards` sort gaps first by copies in the
+configured deck corpus, then by pool prevalence/severity. The ledger records
+the pool, registry, override, and corpus identities needed to interpret that
+ranking. The pinned representative corpus records its capture date, source
+URLs, archetype shares, and exact 60-card lists.
+
 ## Format namespaces and run lineage (added July 2026)
 
 A frozen format namespace under `formats/<format>/` pins two versioned,
