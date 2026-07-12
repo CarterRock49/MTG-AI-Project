@@ -1,130 +1,319 @@
-# MTG-RL: A Reinforcement Learning Agent for Magic: The Gathering
+# Playersim
 
-This project implements a reinforcement learning agent for two-player Magic: The Gathering. It uses Stable Baselines 3 with mask-aware PPO; the current training default plays a scripted opponent, while the Harvest protocol supports checkpoint-vs-checkpoint evaluation and promotion.
+A reinforcement-learning engine and training pipeline for two-player *Magic: The
+Gathering*.
 
-## Project Overview
+**Mission.** Train an agent to play two-player Magic well enough that its games
+yield *trustworthy* per-card and per-deck statistics, which feed a downstream
+deck-construction AI searching for the best deck per format. Every design choice
+is ranked by one question: *does it make the statistics more trustworthy for the
+deck builder?*
 
-MTG-RL simulates the core mechanics of Magic: The Gathering and uses deep reinforcement learning to train an agent that can make strategic decisions during gameplay. The agent learns card evaluation, combat decisions, resource management, and long-term planning.
+Out of scope permanently: multiplayer, Commander, Planechase, and match play
+(best-of-three is a possible late add only if a target format demands it).
 
-## Project Architecture
+The agent is trained with mask-aware PPO (Stable-Baselines3 + SB3-Contrib). The
+current training default plays a scripted opponent; the Harvest protocol supports
+checkpoint-vs-checkpoint evaluation and promotion once a checkpoint beats
+scripted play.
+
+---
+
+## Status
+
+The rules engine, statistics pipeline, format/lineage plumbing, and training and
+Harvest paths are operational and gated by a large regression suite. Rules and
+card coverage are still expanding, and **no checkpoint has yet been shown to beat
+scripted play**, so the statistics are not yet strength-grade.
+
+[ROADMAP.md](ROADMAP.md) is the authoritative status and next-work list;
+[STATS_SCHEMA.md](STATS_SCHEMA.md) is the contract for anything that consumes the
+output statistics. `DeckStats_Viewer/` is a legacy component from a much earlier
+version, does not work, and is not part of the verification gates.
+
+> **Statistics collected before July 2026 are unusable** (wrong player, wrong
+> winner, fabricated play turns, and several now-fixed stats-corrupting bugs).
+> Wipe and re-harvest with the current engine.
+
+---
+
+## How it fits together
 
 ```mermaid
-graph TD
-    A[Main System] --> B[Neural Network Architecture]
-    B --> C[Feature Extractors]
-    B --> D[Policy Networks]
-    B --> E[Training Loop]
-    B <--> F[Optuna Tuning]
-    B <--> G[Callbacks]
-    E --> H[Model Evaluation]
+flowchart LR
+    subgraph Engine["Rules engine — Playersim/"]
+        GS["GameState<br/>layers · stack · combat · SBAs"]
+        ENV["Gym environment<br/>action mask + observation"]
+        GS --- ENV
+    end
+    subgraph Data["Format namespace — formats/&lt;fmt&gt;/"]
+        REG["canonical card registry<br/>(stable card IDs)"]
+        SCH["frozen feature schema"]
+        DECKS["deck corpus<br/>(metagame + imported)"]
+        LED["support ledger"]
+    end
+    subgraph Learn["Training — main.py"]
+        POL["MaskablePPO policy<br/>FixedWindow extractor"]
+    end
+    subgraph Harvest["Harvest — harvest_*.py"]
+        HV["parallel shards<br/>+ paired-seat promotion"]
+    end
+    subgraph Stats["Statistics"]
+        LOG["game log +<br/>tracker aggregates"]
+        MAN["card support manifest"]
+    end
+    REG --> ENV
+    SCH --> ENV
+    DECKS --> ENV
+    ENV <--> POL
+    ENV --> HV
+    POL --> HV
+    HV --> LOG
+    HV --> MAN
+    LOG --> BUILD["deck builder<br/>(STATS_SCHEMA.md contract)"]
+    MAN --> BUILD
+    LED -. excludes gaps .-> BUILD
+    BUILD -. candidate decks .-> DECKS
 ```
 
-## Other Parts
+- **Rules engine** (`Playersim/`) simulates phases, the stack, the layer system,
+  combat, replacement effects, and state-based actions, and exposes the game as a
+  masked Gym environment so only legal actions are ever selectable.
+- **Format namespace** (`formats/<format>/`) pins the inputs a run depends on: a
+  canonical card registry (stable, append-only card IDs keyed by name + Scryfall
+  `oracle_id`), a frozen feature schema (fixed observation width), the deck
+  corpus, and a static support ledger. Each artifact is versioned and self-hashed
+  so adding cards cannot silently change model input width or invalidate a
+  checkpoint.
+- **Training** (`main.py`) runs mask-aware PPO, alternating the learned policy
+  between seats, and writes a full provenance manifest per run.
+- **Harvest** (`harvest_fixtures.py`, `harvest_protocol.py`) plays games to
+  produce statistics; the parallel protocol also scores checkpoint promotions.
+- **Statistics** are the product: an append-only game log, tracker aggregates,
+  card-memory records, and a card-support manifest — all consumed by the
+  downstream deck builder through the `STATS_SCHEMA.md` contract.
 
-- DeckStat_Viewer is from a far earlier version and doesn't work
+---
 
-## Current Status
+## Repository layout
 
-The engine, stats pipeline, and training smoke path are operational. Rules and
-card coverage are still expanding; [ROADMAP.md](ROADMAP.md) is the authoritative
-status and next-work list. `DeckStats_Viewer` remains a legacy component and is
-not part of the current verification gates.
+```
+main.py                     Training entry point (PPO, callbacks, provenance)
+harvest_fixtures.py         Deterministic single-process Harvest + strict artifact validation
+harvest_protocol.py         Parallel sharded Harvest and paired-seat promotion
+ROADMAP.md                  Authoritative status and next-work list
+STATS_SCHEMA.md             Output-statistics contract for the deck builder
 
+Playersim/                  The engine + tooling package
+  card.py, card_registry.py     Card model; canonical registry + frozen feature schema
+  game_state*.py, layer_system.py, combat*.py, replacement_effects.py, targeting.py
+  environment.py                Masked Gym environment
+  actions*.py, ability_*.py     Action space, casting, choices, combat, mechanics
+  deck_corpus.py, deck_ingest.py, deck_legality.py   Corpus hydration, import, legality
+  support_preflight.py, card_support.py              Full-pool coverage ledger + manifest
+  deck_stats_tracker.py, card_memory.py              Statistics aggregation
+  strategic_planner*.py, enhanced_*.py, strategy_memory.py   Heuristic evaluation/planning
 
-### Key Features
-
-- **Complete MTG Game Engine**: Implements core rules and mechanics including phases, stack resolution, combat, and state-based actions
-- **Custom Neural Network Architecture**: Specialized feature extractors and policy networks for MTG's complex state space
-- **Comprehensive Training Pipeline**: Optimized PPO implementation with custom callbacks for monitoring and logging
-- **Advanced Gameplay Systems**:
-  - Combat resolution with combat tricks and blocking strategies
-  - Mana system with proper color requirements
-  - Card synergy evaluation
-  - Heuristic multi-turn planning features
-  - Strategic memory for pattern recognition
-
-## Neural Network Architecture
-
-The model uses a custom architecture designed specifically for the structure of MTG:
-
-- **FixedWindowMTGExtractor**: Custom feature extractor that processes different observation types:
-  - Battlefield state (creatures, planeswalkers, etc.)
-  - Hand contents
-  - Game phase encoding
-  - Life totals and other game metrics
-  - Resource availability
-  
-- **FixedDimensionMaskableActorCriticPolicy**: Policy network that uses action masking to ensure only legal actions are selected.
-
-- **Gated feature block**: The current extractor applies an LSTM-shaped gated
-  transform to a length-one input. Its parameters train, but hidden state is not
-  carried between policy calls, so this is not a recurrent policy yet.
-
-## Prerequisites
-
-- Python 3.8+
-- PyTorch 1.10+
-- Stable Baselines 3
-- Gymnasium
-- Numpy, Pandas, Matplotlib (for analysis and visualization)
-
-
-## Usage
-
-### Verification
-
-Run these from the repository root before training or changing engine rules:
-
-```bash
-python tests/smoke_test.py
-python tests/scenario_test.py
-python tests/train_smoke_test.py
-python tests/deck_ingest_test.py
-python tests/harvest_fixtures_test.py
-python tests/harvest_protocol_test.py
-python tests/invariant_fuzz_config_test.py
-python tests/invariant_fuzz_test.py --profile default
+formats/standard/           Frozen Standard namespace (registry, schema, ledger, decks/)
+Format Card Lists/          Pinned per-format card-pool snapshots (<format>.jsonl)
+Mtg_Cards/                  Scryfall bulk card data
+tests/                      Regression suites (see Verification)
+MTGenv/                     Checked-in virtual environment (Windows)
 ```
 
-On Windows, the checked-out virtual environment can be used explicitly with
+---
+
+## Setup
+
+- **Python 3.11+** (developed and tested on 3.14).
+- Dependencies: `pip install -r requirements.txt`
+  (PyTorch, Stable-Baselines3 `[extra]`, SB3-Contrib, Gymnasium, Optuna,
+  TensorBoard, NumPy, Matplotlib, psutil, GPUtil).
+
+**GPU note.** The PyTorch build must match your GPU. The checked-in environment
+uses a CUDA `cu130` wheel (`torch 2.12.1+cu130`) for an RTX 5060 (`sm_120`);
+older CUDA wheels will not run that card. Pass `--cpu-only` to force CPU. When
+more than one training environment is used, rollouts run in `SubprocVecEnv`
+worker processes (Windows `spawn`).
+
+On Windows the checked-in interpreter can be used directly as
 `.\MTGenv\Scripts\python.exe` in place of `python`.
 
-### Sample-Deck Support Harvest
+---
 
-The fixture harvester rotates through all eight audited decks by default and
-requires a fresh output directory. It rejects reset fallbacks, degraded or
-out-of-space observations, mask-valid execution failures, mask-invalid
-checkpoint choices, aborted games, corrupt compressed data, and cross-file
-count mismatches, then writes `harvest_run.json` as its success marker.
+## Verification
+
+Run these from the repository root before training or changing engine rules. The
+current gate counts are tracked in [ROADMAP.md](ROADMAP.md).
+
+```bash
+python tests/smoke_test.py                    # engine end-to-end (no training stack)
+python tests/scenario_test.py                 # golden rules scenarios
+python tests/train_smoke_test.py              # PPO / SB3 integration
+python tests/card_registry_test.py            # canonical registry + feature schema
+python tests/deck_corpus_test.py              # corpus hydration
+python tests/deck_ingest_test.py              # deck import + legality
+python tests/support_preflight_test.py        # full-pool coverage ledger
+python tests/harvest_fixtures_test.py         # single-process Harvest contract
+python tests/harvest_protocol_test.py         # parallel Harvest + promotion
+python tests/invariant_fuzz_config_test.py    # invariant harness config
+python tests/invariant_fuzz_test.py --profile default   # 8 seeds x 1,000 actions
+```
+
+**Working agreement:** every engine change ships with a failing scenario written
+*first*. Untested subsystems are assumed broken — this practice has repeatedly
+surfaced phantom methods and dead/overfiring subsystems (see the ROADMAP
+appendix bug catalog).
+
+---
+
+## Formats, decks, and lineage
+
+A **format namespace** under `formats/<format>/` pins everything a run depends
+on. Freeze one from a deck corpus:
+
+```bash
+python -m Playersim.card_registry freeze --decks <corpus_dir> --format standard \
+  --output formats/standard
+```
+
+This writes `card_registry.json` (canonical card IDs) and `feature_schema.json`
+(frozen observation layout), both versioned and self-hashed. Use `--extend` to
+append new cards without renumbering existing IDs; a card that would widen the
+frozen subtype vocabulary is rejected (that requires a new schema version, and
+therefore a new checkpoint lineage).
+
+Every run-level manifest (`training_run.json`, `harvest_run.json`,
+`harvest_protocol.json`, `promotion.json`) stamps a `lineage` object recording
+the format, pool-snapshot hash, corpus hash, and registry/schema
+version + hash. **Never merge statistics whose lineage hashes differ** — they may
+disagree on card identity or on what the policy observed. See
+[STATS_SCHEMA.md](STATS_SCHEMA.md) → "Format namespaces and run lineage".
+
+### Deck pool
+
+The default training and Harvest pool is `formats/standard/decks/`, loaded
+recursively. The pinned representative metagame lives under `metagame/`;
+user-supplied decks live separately under `imported/`, so regenerating the
+metagame can never overwrite an import. Harvest needs at least two decks in the
+selected pool.
+
+Regenerate the simulator-ready metagame files from the reviewable compact corpus
+and the pinned card snapshot:
+
+```bash
+python -m Playersim.deck_corpus --replace
+```
+
+### Importing a deck list
+
+Supply an Arena/simple-text list (`4 Card Name`, with optional `Deck`,
+`Sideboard`, `Maybeboard` headings) or a compact JSON list:
+
+```bash
+python -m Playersim.deck_ingest path/to/my_deck.txt --dry-run   # validate only
+python -m Playersim.deck_ingest path/to/my_deck.txt             # import
+```
+
+The importer resolves cards against the pinned snapshots; enforces 60-card
+constructed legality, sideboard and copy limits, and a 1,000-card sanity cap;
+and reports every matching format. Without `--format` it picks the narrowest
+supported match in `Standard → Pioneer → Modern` order. A successful import
+writes a hydrated deck to `formats/<format>/decks/imported/`, where training and
+Harvest discover it through the recursive loader. `--strict-support` rejects
+main-deck cards whose ledger status is `unparsed`, `crash`, or `excluded`;
+`--replace` updates an existing named import. Sideboards are validated and
+retained but not played by the best-of-one runtime; Maybeboards are ignored.
+
+### Support ledger (coverage)
+
+Before widening a format corpus, regenerate its static support ledger, which
+classifies every card in the pool as verified, observed-clean, unseen-clean,
+`partial`, `unparsed`, or `crash` — no card is called supported merely for never
+having produced telemetry:
+
+```bash
+python -m Playersim.support_preflight \
+  --snapshot "Format Card Lists/standard.jsonl" \
+  --registry formats/standard/card_registry.json \
+  --decks formats/standard/metagame_corpus_2026-07-11.json \
+  --corpus-label representative-meta-2026-07-11 \
+  --overrides formats/standard/support_overrides.json --format standard \
+  --output formats/standard/support_ledger.json
+```
+
+The representative metagame currently has no `unparsed`/`crash` cards. Current
+full-pool coverage counts are in the ROADMAP status snapshot.
+
+---
+
+## Training
+
+```bash
+python main.py --timesteps 1000000 --learning-rate 3e-4 --batch-size 256 \
+  --seed 20260710
+```
+
+No format or deck flags are required for the pinned Standard default. Custom
+corpora are available through `--decks`, `--format`, and `--format-dir`.
+
+Training and evaluation use separate statistics directories and alternate the
+learned policy between P1 and P2 on successive episodes. Each run writes a
+`training_run.json` provenance manifest under its model directory — seed, Git
+revision and dirty state, CLI and resolved configuration, device and dependency
+inventory, deck/lineage provenance, lifecycle result, and artifact paths. A
+dirty run also stores a hashed `source_worktree.patch` beside the manifest.
+
+> **Checkpoint boundary (Round 7.49).** The full Standard namespace widened card
+> observations to 436 fields (259 subtype fields plus MDFC fields), signed live
+> power/toughness, and count/stat bounds large enough for legal boards above 20
+> permanents. Stable-Baselines validates the complete observation shape, so **do
+> not resume a checkpoint created before this change** — start fresh without
+> `--resume`. (The reward function changed materially at Round 7.37 for the same
+> reason.)
+
+### Hyperparameter optimization
+
+```bash
+python main.py --optimize-hp
+```
+
+Automatically selects 10, 25, or 50 Optuna trials based on logical CPU count.
+
+### Resuming / continuing a run
+
+```bash
+python main.py --resume models/<run>/final_model --timesteps 10000
+```
+
+(Only for lineage-compatible checkpoints — see the boundary note above.)
+
+---
+
+## Harvesting statistics
+
+### Sample-deck fixture harvest
+
+Rotates through the pinned decks, requires a fresh output directory, and rejects
+reset fallbacks, degraded/out-of-space observations, mask-valid execution
+failures, mask-invalid checkpoint choices, aborts, corrupt compressed data, and
+cross-file count mismatches before writing `harvest_run.json` as its success
+marker:
 
 ```bash
 python harvest_fixtures.py --seed 20260710 --output harvest_runs/seed_20260710
 ```
 
-This random-valid-vs-scripted run is for plumbing and support-manifest coverage;
-its win rates are not card- or deck-strength evidence.
-
-### Long-game invariant fuzzing
-
-The deterministic runner has `short` (300 actions), `default` (8,000 actions),
-and `long` (320,000 actions) profiles. A successful run creates no artifact
-directory. On failure it writes an atomic JSON payload containing the exact
-seed, actions, contexts, and state needed for replay.
-
-```bash
-python tests/invariant_fuzz_test.py --profile long --artifact-dir fuzz_failures
-python tests/invariant_fuzz_test.py --replay fuzz_failures/invariant_fuzz_seed_1701.json
-```
-
-The long profile also runs weekly and on demand through
-`.github/workflows/long-game-fuzz.yml`; failed-run replay files are retained as
-CI artifacts for 14 days.
+The default policy is random-valid vs the scripted opponent. **These records
+prove execution and telemetry coverage; their win rates are not card- or
+deck-strength evidence.** Statistical harvest begins only after a trained
+checkpoint beats scripted play.
 
 ### Parallel checkpoint harvest and promotion
 
-Production harvesting uses isolated worker directories and publishes
+Production Harvest uses isolated worker directories and publishes
 `harvest_protocol.json` only after every shard passes the strict fixture
-contract. Checkpoints are stamped by filename, size, and SHA-256 digest.
+contract. Checkpoints are stamped by filename, size, and SHA-256.
 
 ```bash
 python harvest_protocol.py harvest --games 256 --workers 4 \
@@ -137,202 +326,93 @@ python harvest_protocol.py promote --games 64 --workers 4 \
 ```
 
 Promotion evaluates the candidate in both seats and requires both the score
-threshold and a clean fidelity/severe-support manifest. The protocol is ready,
-but a real promotion requires trained candidate and baseline checkpoints.
+threshold and a clean fidelity/severe-support manifest. `--decks`/`--format`/
+`--format-dir` select the corpus. The protocol is ready; a real promotion needs
+trained candidate and baseline checkpoints.
 
-### Training an Agent
+### Long-game invariant fuzzing
 
-The default training and Harvest pool is rooted at `formats/standard/decks` and
-is loaded recursively. The pinned representative metagame lives under its
-`metagame/` subdirectory; user-supplied decks live separately under
-`imported/`. Regenerate only the simulator-ready metagame files from the
-reviewable compact corpus and pinned card snapshot with:
-
-```bash
-python -m Playersim.deck_corpus --replace
-```
-
-### Importing a deck list
-
-Supply an Arena/simple-text list (`4 Card Name`, with optional `Deck`,
-`Sideboard`, and `Maybeboard` headings) or a compact JSON list. Validate it
-without changing the pool, then import it with:
+Deterministic profiles: `short` (300 actions), `default` (8,000), `long`
+(320,000). A successful run leaves no artifact; a failure writes an atomic JSON
+payload with the exact seed, actions, contexts, and state for one-command
+replay.
 
 ```bash
-python -m Playersim.deck_ingest path/to/my_deck.txt --dry-run
-python -m Playersim.deck_ingest path/to/my_deck.txt
+python tests/invariant_fuzz_test.py --profile long --artifact-dir fuzz_failures
+python tests/invariant_fuzz_test.py --replay fuzz_failures/invariant_fuzz_seed_1701.json
 ```
 
-The importer resolves cards against the pinned format snapshots, enforces
-60-card constructed legality, sideboard and copy limits, and reports every
-matching format. Without an override it selects the narrowest supported match
-in `Standard -> Pioneer -> Modern` order; use `--format modern` to require a
-specific legal format. A 1,000-card simulator safety cap rejects typo-sized
-lists before counts are expanded in memory. A successful import writes a
-hydrated deck to `formats/<format>/decks/imported/`, where training and Harvest
-discover it through the recursive pool loader.
+The long profile also runs weekly / on demand via
+`.github/workflows/long-game-fuzz.yml`; failure replays are retained as CI
+artifacts for 14 days.
 
-Sideboard cards participate in legality checks and are retained in the imported
-JSON, but the current best-of-one runtime does not play them. The reported
-support-status slots and `--strict-support` check therefore cover the main deck;
-strict mode rejects main-deck cards whose ledger status is `unparsed`, `crash`,
-or `excluded`. Maybeboard entries are reported and ignored. `--replace` is
-required to update the same named import. If a complete frozen namespace does
-not exist, the importer can bootstrap it from that format's pinned snapshot;
-pass `--no-bootstrap-namespace` to require one to exist already.
+---
 
-Harvest requires at least two decks in the selected pool; a first import can
-be validated and loaded immediately, but cannot form a Harvest matchup alone.
+## `main.py` command-line arguments
 
-Before widening a format corpus, regenerate its static support ledger:
+| Flag | Meaning | Default |
+|---|---|---|
+| `--timesteps` | Total training timesteps | `1000000` |
+| `--seed` | Base seed (Python, NumPy, Torch, workers, evaluation) | `42` |
+| `--resume` | Path to a lineage-compatible checkpoint to continue | — |
+| `--learning-rate` | Initial learning rate | `3e-4` |
+| `--batch-size` | Batch size | `256` |
+| `--n-steps` | Rollout steps before an update | `2048` |
+| `--n-envs` | Parallel training environments (`0` = auto) | `0` |
+| `--eval-freq` / `--eval-episodes` | Periodic evaluation cadence / episodes | `10000` / `20` |
+| `--checkpoint-freq` | Checkpoint cadence (timesteps) | `50000` |
+| `--format` / `--decks` / `--format-dir` | Format legality + corpus / deck dir / frozen namespace | pinned Standard |
+| `--optimize-hp` | Run Optuna hyperparameter search | off |
+| `--record-network` / `--record-freq` | Record network parameters / cadence | off / `5000` |
+| `--cpu-only` | Force CPU even if a GPU is available | off |
+| `--debug` | Extra debugging output | off |
 
-```bash
-python -m Playersim.support_preflight --snapshot "Format Card Lists/standard.jsonl" \
-  --registry formats/standard/card_registry.json \
-  --decks formats/standard/metagame_corpus_2026-07-11.json \
-  --corpus-label representative-meta-2026-07-11 \
-  --overrides formats/standard/support_overrides.json --format standard \
-  --output formats/standard/support_ledger.json
-```
+---
 
-Current Standard preflight (July 12, 2026): 68 verified, 89
-observed-clean, 3,565 unseen-clean, 809 partial, and 171 unparsed cards across
-the 4,702-card pool. That is 79.1578051893% static-clean coverage and
-3.3390046789% evidence-qualified coverage. The representative metagame has no
-`unparsed` or `crash` cards and two acknowledged `partial` multi-face entries:
-Emeritus of Ideation and Esper Origins. Its Warp, linked-search, temporary-rule,
-outside-game, Crew, and zone-transaction paths are executable and scenario-
-guarded. Generic Equip/Crew, fixed Discover, Connive, Suspect, Explore,
-Investigate, and nonland-permanent Airbend support account for the latest
-full-pool sweep. Spell-mana-value Discover, repeated Explore, common dynamic
-Investigate counts, and Endure are also executable. Optional resolution mana
-payments and paginated spell/activated X choices now share the fixed action schema;
-unsupported nonmana payment gates and other compound/dynamic variants remain
-conservatively partial.
-
-```bash
-python main.py --timesteps 1000000 --learning-rate 3e-4 --batch-size 256 --seed 20260710
-```
-
-No format or deck flags are required for the pinned Standard default. Custom
-corpora remain available through `--decks`, `--format`, and `--format-dir`.
-
-Training and evaluation use separate statistics directories and alternate the
-learned policy between P1 and P2 on successive episodes. Each run also writes a
-`training_run.json` provenance manifest under its model directory, recording the
-seed, Git revision and dirty state, CLI and resolved configuration, device and
-runtime dependencies, deck provenance, lifecycle result, and artifact paths. A
-dirty run also stores a hashed `source_worktree.patch` beside the manifest so
-the exact tracked source delta is retained.
-
-> **Checkpoint boundary (Round 7.49):** the full Standard namespace widened
-> card observations to 436 fields (including 259 subtype fields and MDFC fields), signed
-> live power/toughness, and exact count/stat bounds large enough for legal boards
-> above 20 permanents. Stable-Baselines validates the complete observation shape
-> and bounds, so do not resume a checkpoint created before this change; start the
-> next training run without `--resume`. The frozen registry contains all 4,702
-> cards in the pinned Standard snapshot plus 28 retained bootstrap identities.
-
-### Hyperparameter Optimization
-
-```bash
-python main.py --optimize-hp
-```
-
-The optimizer selects 10, 25, or 50 trials automatically based on the available
-logical CPU count.
-
-### Testing a Trained Agent
-
-```bash
-python main.py --resume models/trained_model --timesteps 10000
-```
-
-## Command Line Arguments
-
-- `--resume`: Path to a model to resume training from
-- `--timesteps`: Total timesteps to train (default: 1000000)
-- `--eval-freq`: Evaluation frequency (default: 10000)
-- `--eval-episodes`: Episodes per periodic evaluation (default: 20)
-- `--checkpoint-freq`: Checkpoint frequency (default: 50000)
-- `--learning-rate`: Initial learning rate (default: 3e-4)
-- `--batch-size`: Batch size for training (default: 256)
-- `--n-steps`: Number of steps to collect before training (default: 2048)
-- `--n-envs`: Number of environments to run in parallel (0 = auto)
-- `--seed`: Random seed for reproducible training (default: 42)
-- `--debug`: Enable additional debugging
-- `--optimize-hp`: Run hyperparameter optimization
-- `--record-network`: Enable detailed network recording
-- `--record-freq`: Frequency for recording network parameters
-- `--cpu-only`: Force CPU training even if GPU is available
-
-## Monitoring Training
-
-The project uses TensorBoard for monitoring training progress. Various metrics are logged including:
-
-- Reward progression
-- Win rates
-- Action distributions
-- Network parameter changes
-- Resource usage (CPU/GPU/Memory)
-
-All time-series use policy timesteps as their x-axis. Terminal telemetry is
-reported both as cumulative `terminal/*_count` values and normalized
-`terminal/*_rate` values, so a single ending is not displayed as a permanent
-100% rate.
-
-To view training progress:
+## Monitoring
 
 ```bash
 tensorboard --logdir=tensorboard_logs
 ```
 
-## Customization
+Logged metrics include reward components, win/terminal rates, action
+distributions, network-parameter changes, and CPU/GPU/memory usage. All
+time-series use policy timesteps as their x-axis. Terminal telemetry is reported
+both as cumulative `terminal/*_count` and normalized `terminal/*_rate`, so a
+single ending is never shown as a permanent 100% rate.
 
-### Custom Training Configurations
+---
 
-Modify the `CustomLearningRateScheduler` and network architecture parameters in `main.py` to experiment with different learning configurations.
+## Architecture notes and honest caveats
 
-## Advanced Features
+- **FixedWindowMTGExtractor** — a custom feature extractor over the heterogeneous
+  observation (battlefield, hand, phase, life totals, resources).
+  `CompletelyFixedMTGExtractor` remains only as a load-compatibility alias.
+- **FixedDimensionMaskableActorCriticPolicy** — applies the legal-action mask so
+  the policy can never select an illegal action.
+- **Not recurrent.** The extractor's gated block applies an LSTM-shaped transform
+  to a length-one input; its parameters train, but no hidden state is carried
+  across policy calls. This is not yet a recurrent policy.
+- **Scripted opponent by default.** Training plays a scripted opponent; self-play
+  / league play is gated on a checkpoint first beating scripted play.
+- **Heuristic planning is opt-in.** Strategic-planner projections are available in
+  the observation, but training does not inject a planner-selected action by
+  default, and these features provide no cross-step memory.
 
-### Strategic Memory
-
-The agent builds a memory of effective strategies and patterns throughout training. This is implemented in `strategy_memory.py`.
-
-### Card Evaluation
-
-The `enhanced_card_evaluator.py` module provides context-aware card evaluation that considers:
-
-- Board state
-- Hand composition
-- Current game phase
-- Historical performance of the card
-
-### Multi-turn Planning
-
-The observation includes heuristic projections from the strategic-planner
-modules. Planner action recommendations are opt-in; training does not inject a
-planner-selected action by default. These features do not provide recurrent
-memory across policy calls.
+---
 
 ## License
 
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
-
-### What this means:
-
-- You are free to use, modify, and distribute this software
-- You must include the original copyright notice and license
-- You must document any significant changes made to the code
-- You must include proper attribution to this project
+Apache License 2.0 — see [LICENSE](LICENSE). You may use, modify, and distribute
+this software; retain the copyright notice and license, document significant
+changes, and attribute the project.
 
 ## Acknowledgments
 
-This project uses elements from:
-
-- [Stable Baselines 3](https://github.com/DLR-RM/stable-baselines3)
+- [Stable-Baselines3](https://github.com/DLR-RM/stable-baselines3)
 - [SB3-Contrib](https://github.com/Stable-Baselines-Team/stable-baselines3-contrib)
 - [Gymnasium](https://github.com/Farama-Foundation/Gymnasium)
+- Card data from [Scryfall](https://scryfall.com/).
 
 ## Contact
 
