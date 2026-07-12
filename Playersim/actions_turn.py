@@ -546,6 +546,13 @@ class TurnPhaseHandlersMixin:
             gs.choice_context = None
             return 0.0, True
         if (gs.phase == gs.PHASE_CHOOSE and getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'ward_payment'):
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if gs.choice_context.get('player') is not player:
+                return -0.1, False
+            success = gs.complete_ward_payment_choice(decline=True)
+            return (0.0 if success else -0.1), success
+        if (gs.phase == gs.PHASE_CHOOSE and getattr(gs, 'choice_context', None)
                 and gs.choice_context.get('type') == 'sacrifice_effect'
                 and gs.choice_context.get('optional')):
             ctx = gs.choice_context

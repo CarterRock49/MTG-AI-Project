@@ -3377,13 +3377,17 @@ def s_ward_counters_spell_when_tax_unpaid():
         "num_targets": 1,
         "source_zone": "stack_implicit",
     })
+    assert gs.resolve_top_of_stack() and gs.choice_context, \
+        "unpayable ward did not expose its decline decision"
+    assert gs.choice_context.get("type") == "ward_payment"
+    assert get_env().action_handler._handle_pass_priority(None)[1]
     assert gs.resolve_top_of_stack(), "ward-countered spell did not finish resolving"
     assert bolt in caster["graveyard"], "ward-countered spell did not go to graveyard"
     assert defender.get("damage_counters", {}).get(warded, 0) == 0, \
         "unpaid ward spell still damaged the warded creature"
 
 
-@scenario("702.21", "ward auto-pays available mana tax before the targeted spell resolves")
+@scenario("702.21", "the targeting player chooses whether to pay an available mana Ward tax")
 def s_ward_tax_paid_then_spell_resolves():
     gs = fresh()
     caster = gs.p1
@@ -3410,14 +3414,17 @@ def s_ward_tax_paid_then_spell_resolves():
         "num_targets": 1,
         "source_zone": "stack_implicit",
     })
-    assert gs.resolve_top_of_stack(), "spell with payable ward tax did not resolve"
+    assert gs.resolve_top_of_stack() and gs.choice_context, \
+        "payable Ward tax was auto-paid instead of exposed"
+    assert get_env().action_handler._handle_choose_mode(0, {})[1]
+    assert gs.resolve_top_of_stack(), "spell with paid ward tax did not resolve"
     assert caster["mana_pool"].get('C', 0) == 0, "ward tax did not consume the available generic mana"
     assert defender.get("damage_counters", {}).get(warded, 0) == 3, \
         "spell did not damage the warded creature after paying ward"
     assert bolt in caster["graveyard"], "resolved instant did not go to graveyard"
 
 
-@scenario("702.21", "ward auto-pays a simple life tax before the targeted spell resolves")
+@scenario("702.21", "the targeting player chooses whether to pay a life Ward tax")
 def s_ward_life_tax_paid_then_spell_resolves():
     gs = fresh()
     caster = gs.p1
@@ -3444,11 +3451,302 @@ def s_ward_life_tax_paid_then_spell_resolves():
         "num_targets": 1,
         "source_zone": "stack_implicit",
     })
+    assert gs.resolve_top_of_stack() and gs.choice_context
+    assert get_env().action_handler._handle_choose_mode(0, {})[1]
     assert gs.resolve_top_of_stack(), "spell with payable life ward tax did not resolve"
     assert caster["life"] == life_before - 3, "ward tax did not consume the required life"
     assert defender.get("damage_counters", {}).get(warded, 0) == 3, \
         "spell did not damage the warded creature after paying life for ward"
     assert bolt in caster["graveyard"], "resolved instant did not go to graveyard"
+
+
+@scenario("702.21 / 601.2h", "Ward exposes sacrifice and discard payments as card choices")
+def scenario_ward_nonmana_cost_choices():
+    def run(cost_text, payment_zone):
+        gs = fresh(SEED + 190 + (1 if payment_zone == "hand" else 0))
+        caster, defender = gs.p1, gs.p2
+        bolt = inject_card(gs, {
+            "name": f"{payment_zone.title()} Ward Probe", "mana_cost": "{R}",
+            "type_line": "Instant", "oracle_text": "Deal 1 damage to target creature.",
+        })
+        warded = inject_into_zone(gs, defender, {
+            "name": f"{payment_zone.title()} Ward Sentinel", "mana_cost": "{2}",
+            "type_line": "Creature - Soldier", "oracle_text": f"Ward - {cost_text}.",
+            "power": 2, "toughness": 4,
+        }, "battlefield")
+        payment = inject_into_zone(gs, caster, {
+            "name": f"Ward {payment_zone.title()} Payment", "mana_cost": "{1}",
+            "type_line": "Creature - Citizen", "oracle_text": "",
+            "power": 1, "toughness": 1,
+        }, payment_zone)
+        gs.ability_handler._parse_and_register_abilities(
+            warded, gs._safe_get_card(warded))
+        gs.layer_system.invalidate_cache(); gs.layer_system.apply_all_effects()
+        gs.add_to_stack("SPELL", bolt, caster, {
+            "targets": {"creatures": [warded]}, "requires_target": True,
+            "num_targets": 1, "source_zone": "stack_implicit",
+        })
+        assert gs.resolve_top_of_stack() and gs.choice_context
+        assert gs.choice_context.get("payment_kind") == (
+            "discard" if payment_zone == "hand" else "sacrifice")
+        assert payment in gs.choice_context.get("options", [])
+        option = gs.choice_context["options"].index(payment)
+        assert get_env().action_handler._handle_choose_mode(option, {})[1]
+        assert gs.resolve_top_of_stack()
+        assert payment in caster["graveyard"]
+        assert defender.get("damage_counters", {}).get(warded, 0) == 1
+
+    run("Sacrifice a creature", "battlefield")
+    run("Discard a card", "hand")
+
+
+@scenario("605.3 / 106.1", "any-combination mana is selected one symbol at a time")
+def scenario_nonland_mana_package_choices():
+    from Playersim.ability_types import ManaAbility
+    gs = fresh(SEED + 192)
+    player = gs.p1
+    source = inject_into_zone(gs, player, {
+        "name": "Combination Dynamo", "mana_cost": "{2}",
+        "type_line": "Artifact", "oracle_text": (
+            "{T}: Add two mana in any combination of colors."),
+    }, "battlefield")
+    produced = gs.ability_handler._parse_mana_produced(
+        "Add two mana in any combination of colors")
+    assert produced == {"any_combination": 2}
+    ability = ManaAbility(
+        source, "{T}", produced,
+        effect_text="{T}: Add two mana in any combination of colors.")
+    ability.source_card = gs._safe_get_card(source)
+    gs.ability_handler.registered_abilities[source] = [ability]
+    gs.priority_player = player
+    gs.agent_is_p1 = True
+    handler = get_env().action_handler
+    assert handler._handle_activate_ability(None, {
+        "battlefield_idx": player["battlefield"].index(source),
+        "ability_idx": 0, "controller_id": "p1",
+    })[1]
+    assert gs.choice_context.get("type") == "mana_ability_package"
+    assert handler._handle_choose_mode(
+        gs.choice_context["options"].index("W"), {})[1]
+    assert gs.choice_context and gs.choice_context.get("remaining") == 1
+    assert handler._handle_choose_mode(
+        gs.choice_context["options"].index("U"), {})[1]
+    assert gs.choice_context is None
+    assert player["mana_pool"]["W"] == 1 and player["mana_pool"]["U"] == 1
+
+
+@scenario("605.3 / 106.1b", "mana output alternatives preserve colorless and package choices")
+def scenario_nonland_mana_output_package_alternatives():
+    from Playersim.ability_types import ManaAbility
+
+    def run(effect_text, option_index, color=None):
+        gs = fresh(SEED + 198 + option_index)
+        player = gs.p1
+        source = inject_into_zone(gs, player, {
+            "name": "Alternative Dynamo", "mana_cost": "{2}",
+            "type_line": "Artifact", "oracle_text": f"{{T}}: {effect_text}.",
+        }, "battlefield")
+        produced = gs.ability_handler._parse_mana_produced(effect_text)
+        assert "output_options" in produced, produced
+        ability = ManaAbility(source, "{T}", produced,
+                               effect_text=f"{{T}}: {effect_text}.")
+        ability.source_card = gs._safe_get_card(source)
+        gs.ability_handler.registered_abilities[source] = [ability]
+        gs.priority_player = player
+        gs.agent_is_p1 = True
+        handler = get_env().action_handler
+        assert handler._handle_activate_ability(None, {
+            "battlefield_idx": player["battlefield"].index(source),
+            "ability_idx": 0, "controller_id": "p1",
+        })[1]
+        assert gs.choice_context.get("type") == "mana_ability_output"
+        assert handler._handle_choose_mode(option_index, {})[1]
+        if color:
+            assert gs.choice_context.get("type") == "mana_ability_color"
+            assert handler._handle_choose_mode(
+                gs.choice_context["options"].index(color), {})[1]
+        return player
+
+    colorless = run("Add {C} or one mana of any color", 0)
+    assert colorless["mana_pool"]["C"] == 1
+    colored = run("Add {C} or one mana of any color", 1, "U")
+    assert colored["mana_pool"]["U"] == 1 \
+        and colored["mana_pool"]["C"] == 0
+    package = run("Add {W}{W} or {U}{U}", 1)
+    assert package["mana_pool"]["U"] == 2 \
+        and package["mana_pool"]["W"] == 0
+
+
+@scenario("602.2 / action protocol", "fourth activated abilities use the paginated action catalog")
+def scenario_activated_ability_overflow_catalog():
+    from Playersim.ability_types import ActivatedAbility
+    gs = fresh(SEED + 196)
+    player = gs.p1
+    source = inject_into_zone(gs, player, {
+        "name": "Many-Mode Engine", "mana_cost": "{2}",
+        "type_line": "Artifact", "oracle_text": "",
+    }, "battlefield")
+    abilities = [
+        ActivatedAbility(source, cost="{0}", effect="Draw a card.",
+                         effect_text=f"Mode {index}: Draw a card.",
+                         activation_index=index)
+        for index in range(4)
+    ]
+    for ability in abilities:
+        ability.source_card = gs._safe_get_card(source)
+    gs.ability_handler.registered_abilities[source] = abilities
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    gs.agent_is_p1 = True
+    handler = get_env().action_handler
+    mask = handler.generate_valid_actions()
+    assert all(mask[100 + index] for index in range(3))
+    assert mask[479], "the fourth activated ability was omitted"
+    catalog_context = handler.action_reasons_with_context[479]["context"]
+    assert handler._handle_target_page_next(context=catalog_context)[1]
+    assert gs.choice_context.get("type") == "action_catalog"
+    assert gs.choice_context["options"][0]["action_context"]["ability_idx"] == 3
+    assert handler._handle_choose_mode(0, {})[1]
+    assert gs.stack and gs.stack[-1][3].get("ability_index") == 3
+
+
+@scenario("305.2 / action protocol", "hand objects beyond fixed slots use the action catalog")
+def scenario_hand_overflow_action_catalog():
+    gs = fresh(SEED + 199)
+    player = gs.p1
+    replace_hand(gs, player, [
+        {"name": f"Overflow Filler {index}", "mana_cost": "{9}",
+         "type_line": "Sorcery", "oracle_text": ""}
+        for index in range(10)
+    ])
+    land = inject_into_zone(gs, player, {
+        "name": "Overflow Catalog Land", "type_line": "Land",
+        "card_types": ["land"], "oracle_text": "{T}: Add {C}.",
+    }, "hand")
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    gs.agent_is_p1 = True
+    handler = get_env().action_handler
+    mask = handler.generate_valid_actions()
+    assert mask[479], "the eleventh hand object was omitted"
+    context = handler.action_reasons_with_context[479]["context"]
+    assert handler._handle_target_page_next(context=context)[1]
+    entry_index = next(
+        index for index, entry in enumerate(gs.choice_context["options"])
+        if entry.get("action_context", {}).get("card_id") == land)
+    assert handler._handle_choose_mode(entry_index, {})[1]
+    assert land in player["battlefield"] and land not in player["hand"]
+
+
+@scenario("702.21 / clone", "a payable Ward choice may be declined after cloning")
+def scenario_ward_decline_and_clone_isolation():
+    gs = fresh(SEED + 197)
+    caster, defender = gs.p1, gs.p2
+    spell = inject_card(gs, {
+        "name": "Clone Ward Probe", "mana_cost": "{R}",
+        "type_line": "Instant",
+        "oracle_text": "Clone Ward Probe deals 1 damage to target creature.",
+    })
+    warded = inject_into_zone(gs, defender, {
+        "name": "Clone Ward Sentinel", "mana_cost": "{1}{W}",
+        "type_line": "Creature - Soldier", "oracle_text": "Ward {2}",
+        "power": 2, "toughness": 3,
+    }, "battlefield")
+    gs.ability_handler._parse_and_register_abilities(
+        warded, gs._safe_get_card(warded))
+    gs.layer_system.invalidate_cache(); gs.layer_system.apply_all_effects()
+    caster["mana_pool"]["C"] = 2
+    gs.add_to_stack("SPELL", spell, caster, {
+        "targets": {"creatures": [warded]}, "requires_target": True,
+        "num_targets": 1, "source_zone": "stack_implicit",
+    })
+    assert gs.resolve_top_of_stack() and gs.choice_context
+    cloned = gs.clone()
+    assert cloned.choice_context.get("type") == "ward_payment"
+    assert cloned.complete_ward_payment_choice(decline=True)
+    assert cloned.resolve_top_of_stack()
+    assert spell in cloned.p1["graveyard"]
+    assert cloned.p1["mana_pool"]["C"] == 2
+    assert defender.get("damage_counters", {}).get(warded, 0) == 0
+    assert gs.choice_context.get("type") == "ward_payment"
+    assert gs.stack and spell not in caster["graveyard"]
+
+
+@scenario("701.17 / policy", "sacrifice choices honor compound type and mana-value criteria")
+def scenario_sacrifice_compound_criteria():
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 193)
+    controller, affected = gs.p1, gs.p2
+    cheap = inject_into_zone(gs, affected, {
+        "name": "Eligible Cheap Creature", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Creature - Citizen", "oracle_text": "",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    expensive = inject_into_zone(gs, affected, {
+        "name": "Ineligible Expensive Creature", "mana_cost": "{4}", "cmc": 4,
+        "type_line": "Creature - Giant", "oracle_text": "",
+        "power": 4, "toughness": 4,
+    }, "battlefield")
+    land = inject_into_zone(gs, affected, {
+        "name": "Ineligible Land", "type_line": "Land", "oracle_text": "",
+    }, "battlefield")
+    effects = EffectFactory.create_effects(
+        "Target player sacrifices a nonland permanent with mana value 2 or less.")
+    assert len(effects) == 1
+    assert effects[0].apply(
+        gs, None, controller, targets={"players": ["p2"]})
+    assert gs.choice_context.get("options") == [cheap]
+    gs.agent_is_p1 = False
+    assert get_env().action_handler._handle_choose_mode(0, {})[1]
+    assert cheap in affected["graveyard"]
+    assert expensive in affected["battlefield"] and land in affected["battlefield"]
+
+
+@scenario("707.10c / 601.2c", "a multi-target spell copy may change only one inherited target")
+def scenario_spell_copy_partial_retarget():
+    gs = fresh(SEED + 195)
+    controller, opponent = gs.p1, gs.p2
+    spell = inject_card(gs, {
+        "name": "Forked Frost", "mana_cost": "{2}{U}",
+        "type_line": "Instant",
+        "oracle_text": "Tap two target creatures.",
+    })
+    first = inject_into_zone(gs, opponent, {
+        "name": "Inherited First Target", "type_line": "Creature",
+        "oracle_text": "", "power": 1, "toughness": 1,
+    }, "battlefield")
+    second = inject_into_zone(gs, opponent, {
+        "name": "Inherited Second Target", "type_line": "Creature",
+        "oracle_text": "", "power": 2, "toughness": 2,
+    }, "battlefield")
+    replacement = inject_into_zone(gs, opponent, {
+        "name": "Replacement Target", "type_line": "Creature",
+        "oracle_text": "", "power": 3, "toughness": 3,
+    }, "battlefield")
+    original_context = {
+        "targets": {"creatures": [first, second]},
+        "targets_by_slot": [[first], [second]],
+        "requires_target": True, "num_targets": 2,
+        "min_targets": 2, "max_targets": 2,
+    }
+    gs.add_to_stack("SPELL", spell, controller, original_context)
+    copy_id = gs.copy_spell_on_stack(
+        gs.stack[0], controller, copied_by=None, allow_new_targets=True)
+    assert copy_id and gs.choice_context.get("type") == "copy_retarget_slots"
+    handler = get_env().action_handler
+    assert handler._handle_choose_mode(0, {})[1], "first target could not be kept"
+    assert handler._handle_choose_mode(1, {})[1], "second target could not enter retargeting"
+    candidates = handler._get_target_selection_candidates(
+        controller, gs.targeting_context)
+    assert replacement in candidates and first not in candidates and second not in candidates
+    assert handler._handle_select_target(candidates.index(replacement), {})[1]
+    copy_context = next(
+        item[3] for item in gs.stack
+        if item[3].get("copy_instance_id") == copy_id)
+    assert copy_context["targets"] == {"creatures": [first, replacement]}
+    assert original_context["targets"] == {"creatures": [first, second]}, \
+        "retargeting the copy mutated the original spell"
 
 
 @scenario("702.21 / 702.18", "lifelink gains life equal to damage actually dealt")
@@ -3552,6 +3850,37 @@ def s_blocker_order_single_bypass():
     assert gs.choice_context is None, "single blocker wrongly opened an ordering choice"
     assert gs.combat_damage_dealt, "combat did not resolve immediately with one blocker"
     assert gs.phase == gs.PHASE_END_OF_COMBAT
+
+
+@scenario("510.1c / self-play", "damage assignment ordering is exposed for the non-agent seat")
+def scenario_opponent_damage_assignment_order_choice():
+    gs = fresh(SEED + 194)
+    attacker_player, defender = gs.p2, gs.p1
+    attacker = inject_into_zone(gs, attacker_player, {
+        "name": "Opponent Ordering Attacker", "mana_cost": "{4}",
+        "type_line": "Creature - Giant", "oracle_text": "Trample",
+        "power": 6, "toughness": 6,
+    }, "battlefield")
+    first = inject_into_zone(gs, defender, {
+        "name": "First Ordering Blocker", "mana_cost": "{1}",
+        "type_line": "Creature - Soldier", "oracle_text": "",
+        "power": 1, "toughness": 2,
+    }, "battlefield")
+    second = inject_into_zone(gs, defender, {
+        "name": "Second Ordering Blocker", "mana_cost": "{2}",
+        "type_line": "Creature - Soldier", "oracle_text": "",
+        "power": 2, "toughness": 3,
+    }, "battlefield")
+    gs.current_attackers = [attacker]
+    gs.current_block_assignments = {attacker: [first, second]}
+    gs.phase = gs.PHASE_COMBAT_DAMAGE
+    gs.agent_is_p1 = True
+    handler = get_env().action_handler
+    assert handler.combat_handler.begin_blocker_order_choice()
+    assert gs.choice_context.get("player") is attacker_player
+    gs.agent_is_p1 = False
+    assert handler._handle_choose_mode(1, {})[1]
+    assert gs.first_strike_ordering[attacker] == [second, first]
 
 
 @scenario("stats (play history)", "the engine records the actual turn each card was played")
@@ -6937,7 +7266,7 @@ def s_multiple_discard_choices_are_sequential():
     assert gs.choice_context is None, "multi-card discard did not finish after two choices"
 
 
-@scenario("701.8a / self-play", "each-player discard queues both players and the scripted opponent chooses")
+@scenario("701.8a / self-play", "each-player discard stages both choices before simultaneous movement")
 def s_each_player_discard_queues_opponent_choice():
     gs = fresh()
     from Playersim.ability_types import DiscardEffect
@@ -6955,7 +7284,8 @@ def s_each_player_discard_queues_opponent_choice():
 
     assert DiscardEffect(1, target="each_player").apply(gs, None, p1)
     _, ok = get_env().action_handler._handle_discard_card(0)
-    assert ok and p1_card in p1["graveyard"], "first player's discard choice failed"
+    assert ok and p1_card in p1["hand"], \
+        "the first player's staged discard moved before all choices were made"
     assert gs.choice_context and gs.choice_context.get("player") == p2, \
         "the second player's discard choice was not queued"
 
@@ -6965,7 +7295,9 @@ def s_each_player_discard_queues_opponent_choice():
         p2, opponent_mask, {"phase_context": "CHOOSE"})
     assert action == 238, f"scripted opponent did not choose its available discard: {action}"
     _, ok = get_env().action_handler._handle_discard_card(action - 238)
-    assert ok and p2_card in p2["graveyard"], "scripted opponent discard failed"
+    assert ok and p1_card in p1["graveyard"] \
+        and p2_card in p2["graveyard"], \
+        "simultaneous staged discards were not committed together"
     assert gs.choice_context is None, "each-player discard did not finish after both choices"
 
 

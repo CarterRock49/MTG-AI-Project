@@ -88,8 +88,25 @@ class ChoiceHandlersMixin:
 
     def _handle_target_page_next(self, param=None, context=None, **kwargs):
         gs = self.game_state
-        ctx = getattr(gs, 'targeting_context', None)
         player = self._get_policy_player(context)
+        if (context or {}).get("open_action_catalog"):
+            if gs.priority_player is not player:
+                return -0.1, False
+            options = list((context or {}).get("options", []))
+            if not options:
+                return -0.1, False
+            gs.choice_context = {
+                "type": "action_catalog", "player": player,
+                "controller": player,
+                "catalog_type": (context or {}).get("catalog_type"),
+                "options": options, "choice_page": 0,
+                "resume_phase": (context or {}).get("resume_phase", gs.phase),
+            }
+            gs.phase = gs.PHASE_CHOOSE
+            gs.priority_player = player
+            gs.priority_pass_count = 0
+            return 0.0, True
+        ctx = getattr(gs, 'targeting_context', None)
         requested_page_count = (context or {}).get('page_count')
         if ctx and ctx.get('controller') is player:
             if requested_page_count is None:
@@ -116,7 +133,8 @@ class ChoiceHandlersMixin:
                     'sacrifice_effect', 'activation_sacrifice_cost',
                     'dig_select', 'distribute_counters', 'discard',
                     'specialize_discard', 'forced_sacrifice',
-                    'resolution_choice', 'connive_discard', 'choose_x')):
+                    'resolution_choice', 'connive_discard', 'choose_x',
+                    'ward_payment', 'action_catalog')):
             choice_options = choice.get('options', [])
             if choice.get('type') in (
                     'discard', 'specialize_discard', 'connive_discard'):
@@ -141,7 +159,6 @@ class ChoiceHandlersMixin:
         gs = self.game_state
         ctx['sacrifice_performed'] = bool(
             ctx.get('sacrifice_performed', False) or performed)
-        permanent_type = str(ctx.get('permanent_type', 'permanent')).rstrip('s')
         pending = ctx.get('pending_players', [])
         if pending:
             next_choice = pending.pop(0)
@@ -150,14 +167,7 @@ class ChoiceHandlersMixin:
             ctx['remaining'] = next_choice['remaining']
             ctx['optional'] = bool(next_choice.get('optional', False))
             ctx['choice_page'] = 0
-            ctx['options'] = [
-                cid for cid in next_player.get('battlefield', [])
-                if permanent_type == 'permanent'
-                or permanent_type in {
-                    str(t).lower()
-                    for t in getattr(gs._safe_get_card(cid), 'card_types', [])
-                }
-            ]
+            ctx['options'] = list(next_choice.get('options', []))
             gs.priority_player = next_player
             return True
 
@@ -802,12 +812,38 @@ class ChoiceHandlersMixin:
         # stack.  Variable-color production is still a player decision.
         if isinstance(ability, ManaAbility):
             produced = dict(getattr(ability, 'mana_produced', {}) or {})
+            output_options = list(produced.pop('output_options', []) or [])
             any_amount = int(produced.pop('any', 0) or 0)
             any_amount += int(produced.pop('choice', 0) or 0)
+            combination_amount = int(
+                produced.pop('any_combination', 0) or 0)
             cost_text = str(getattr(ability, 'cost', '') or '').lower()
             source_is_tap_ability = bool(
                 "{t}" in cost_text or re.search(r"\btap\b", cost_text))
-            if any_amount:
+            if output_options:
+                gs.choice_context = {
+                    'type': 'mana_ability_output', 'player': player,
+                    'options': output_options,
+                    'source_permanent_id': card_id,
+                    'source_is_tap_ability': source_is_tap_ability,
+                    'resume_phase': gs.phase,
+                }
+                gs.phase = gs.PHASE_CHOOSE
+                gs.priority_player = player
+            elif combination_amount:
+                gs.choice_context = {
+                    'type': 'mana_ability_package', 'player': player,
+                    'remaining': combination_amount,
+                    'options': (getattr(ability, 'available_colors', None)
+                                or ['W', 'U', 'B', 'R', 'G']),
+                    'allocations': {}, 'fixed_produced': produced,
+                    'source_permanent_id': card_id,
+                    'source_is_tap_ability': source_is_tap_ability,
+                    'resume_phase': gs.phase,
+                }
+                gs.phase = gs.PHASE_CHOOSE
+                gs.priority_player = player
+            elif any_amount:
                 gs.choice_context = {
                     'type': 'mana_ability_color', 'player': player,
                     'amount': any_amount,
@@ -971,6 +1007,12 @@ class ChoiceHandlersMixin:
                 "Cannot finalize targeting: the committed targets leave the "
                 "deferred spell unaffordable.")
             return -0.1, False
+
+        if ctx.get("copy_retarget_state"):
+            if len(committed_targets) != 1:
+                return -0.1, False
+            success = gs.complete_copy_retarget_slot(committed_targets[0])
+            return (0.05 if success else -0.1), success
 
         categorized_targets = defaultdict(list)
         for target_id in committed_targets:
@@ -1502,6 +1544,76 @@ class ChoiceHandlersMixin:
             gs.priority_pass_count = 0
             return 0.05, True
         if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'mana_ability_package'):
+            ctx = gs.choice_context
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            options = ctx.get('options', [])
+            if ctx.get('player') is not player or not 0 <= param < len(options):
+                return -0.1, False
+            symbol = options[param]
+            allocations = ctx.setdefault('allocations', {})
+            allocations[symbol] = int(allocations.get(symbol, 0)) + 1
+            ctx['remaining'] = int(ctx.get('remaining', 1)) - 1
+            if ctx['remaining'] > 0:
+                return 0.02, True
+            produced = dict(ctx.get('fixed_produced', {}) or {})
+            for mana_symbol, amount in allocations.items():
+                produced[mana_symbol] = int(produced.get(mana_symbol, 0)) + amount
+            self._add_mana_ability_output(
+                player, produced,
+                source_id=ctx.get('source_permanent_id'),
+                source_is_tap_ability=ctx.get('source_is_tap_ability', False))
+            gs.phase = ctx.get('resume_phase', gs.PHASE_PRIORITY)
+            gs.choice_context = None
+            gs.priority_player = player
+            gs.priority_pass_count = 0
+            return 0.05, True
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'mana_ability_output'):
+            ctx = gs.choice_context
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            options = ctx.get('options', [])
+            if ctx.get('player') is not player or not 0 <= param < len(options):
+                return -0.1, False
+            produced = dict(options[param])
+            any_amount = int(produced.pop('any', 0) or 0)
+            any_amount += int(produced.pop('choice', 0) or 0)
+            combination_amount = int(
+                produced.pop('any_combination', 0) or 0)
+            if combination_amount:
+                ctx.update({
+                    'type': 'mana_ability_package',
+                    'remaining': combination_amount,
+                    'options': ['W', 'U', 'B', 'R', 'G'],
+                    'allocations': {}, 'fixed_produced': produced,
+                })
+                return 0.02, True
+            if any_amount:
+                ctx.update({
+                    'type': 'mana_ability_color', 'amount': any_amount,
+                    'options': ['W', 'U', 'B', 'R', 'G'],
+                    'fixed_produced': produced,
+                })
+                return 0.02, True
+            self._add_mana_ability_output(
+                player, produced,
+                source_id=ctx.get('source_permanent_id'),
+                source_is_tap_ability=ctx.get(
+                    'source_is_tap_ability', False))
+            gs.phase = ctx.get('resume_phase', gs.PHASE_PRIORITY)
+            gs.choice_context = None
+            gs.priority_player = player
+            gs.priority_pass_count = 0
+            return 0.05, True
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'ward_payment'):
+            ctx = gs.choice_context
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if ctx.get('player') is not player:
+                return -0.1, False
+            success = gs.complete_ward_payment_choice(param)
+            return (0.05 if success else -0.1), success
+        if (getattr(gs, 'choice_context', None)
                 and gs.choice_context.get('type') == 'activation_sacrifice_cost'):
             ctx = gs.choice_context
             player = gs.p1 if gs.agent_is_p1 else gs.p2
@@ -1555,11 +1667,7 @@ class ChoiceHandlersMixin:
                 return -0.1, False
             card_id = options[absolute_param]
             ctx['choice_page'] = 0
-            card = gs._safe_get_card(card_id)
-            permanent_type = str(ctx.get('permanent_type', 'permanent')).rstrip('s')
-            types = {str(t).lower() for t in getattr(card, 'card_types', [])} if card else set()
-            if (card_id not in player.get('battlefield', [])
-                    or (permanent_type != 'permanent' and permanent_type not in types)):
+            if card_id not in player.get('battlefield', []):
                 return -0.1, False
             owner = gs._find_card_owner_fallback(card_id) or player
             if not gs.move_card(
@@ -1569,9 +1677,9 @@ class ChoiceHandlersMixin:
             gs.trigger_ability(card_id, 'SACRIFICED', {'controller': player})
             ctx['optional'] = False
             ctx['remaining'] = max(0, int(ctx.get('remaining', 1)) - 1)
-            remaining_candidates = [cid for cid in player.get('battlefield', [])
-                                    if permanent_type == 'permanent'
-                                    or permanent_type in {str(t).lower() for t in getattr(gs._safe_get_card(cid), 'card_types', [])}]
+            remaining_candidates = [
+                cid for cid in ctx.get('options', [])
+                if cid in player.get('battlefield', [])]
             if ctx['remaining'] > 0 and remaining_candidates:
                 ctx['options'] = remaining_candidates
                 return 0.02, True
@@ -1904,6 +2012,38 @@ class ChoiceHandlersMixin:
             return self._handle_order_triggers(param, context)
         if getattr(gs, 'choice_context', None) and gs.choice_context.get('type') == 'order_blockers':
             return self._handle_order_blockers(param, context)
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'copy_retarget_slots'):
+            if param not in (0, 1):
+                return -0.1, False
+            success = gs.choose_copy_retarget_slot(retarget=(param == 1))
+            return (0.05 if success else -0.1), success
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'action_catalog'):
+            catalog = gs.choice_context
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if catalog.get('player') is not player:
+                return -0.2, False
+            absolute = int(catalog.get('choice_page', 0)) * 10 + int(param)
+            options = catalog.get('options', [])
+            if not 0 <= absolute < len(options):
+                return -0.1, False
+            entry = options[absolute]
+            resume_phase = catalog.get('resume_phase', gs.PHASE_PRIORITY)
+            gs.choice_context = None
+            gs.phase = resume_phase
+            gs.priority_player = player
+            gs.priority_pass_count = 0
+            handler = entry.get('handler')
+            action_context = entry.get('action_context', {})
+            if handler == 'activate_ability':
+                return self._handle_activate_ability(
+                    None, action_context)
+            if handler == 'play_land':
+                return self._handle_play_land(None, context=action_context)
+            if handler == 'play_spell':
+                return self._handle_play_spell(None, context=action_context)
+            return -0.1, False
         if getattr(gs, 'choice_context', None) and gs.choice_context.get('type') == 'land_mana':
             player = gs.p1 if gs.agent_is_p1 else gs.p2
             if gs.choice_context.get('player') != player:

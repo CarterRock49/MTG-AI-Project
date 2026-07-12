@@ -1776,7 +1776,10 @@ class AlphaZeroMTGEnv(gym.Env):
                     "Scripted Opponent: No legal %s destination available.",
                     choice_type)
                 return None, {}
-            if choice_type in ("choose_mode", "land_mana"):
+            if choice_type in (
+                    "choose_mode", "land_mana", "mana_ability_color",
+                    "mana_ability_package", "mana_ability_output", "ward_payment",
+                    "copy_retarget_slots", "action_catalog"):
                 # Mandatory picks (spell modes, dual-land mana colors) expose
                 # only CHOOSE_MODE-range actions; take the first legal one.
                 for action_idx in range(353, 363):
@@ -1797,7 +1800,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 if opponent_mask[479]:
                     return 479, {}
                 return None, {}
-            if choice_type == "order_triggers":
+            if choice_type in ("order_triggers", "order_blockers"):
                 for action_idx in range(353, 363):
                     if opponent_mask[action_idx]:
                         return action_idx, {}

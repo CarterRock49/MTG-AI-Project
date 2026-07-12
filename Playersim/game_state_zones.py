@@ -209,6 +209,7 @@ class GameStateZonesMixin:
         if is_random or not entries:
             return True
 
+        simultaneous = len(entries) > 1
         first = entries.pop(0)
         chooser = self._discard_player_from_key(first["player_key"])
         resume_phase = self.phase
@@ -221,6 +222,10 @@ class GameStateZonesMixin:
             "player": chooser,
             "remaining": first["count"],
             "pending": entries,
+            "simultaneous": simultaneous,
+            "current_player_key": first["player_key"],
+            "selected_current": [],
+            "staged_discards": [],
             "source_id": source_id,
             "cause": cause,
             "resume_phase": resume_phase,
@@ -249,10 +254,23 @@ class GameStateZonesMixin:
                 context["player"] = chooser
                 context["remaining"] = remaining
                 context["pending"] = pending
+                context["current_player_key"] = entry.get("player_key")
+                context["selected_current"] = []
                 context["choice_page"] = 0
                 self.priority_player = chooser
                 self.priority_pass_count = 0
                 return True
+
+        if context.get("simultaneous"):
+            for selection in context.get("staged_discards", []):
+                player = self._discard_player_from_key(
+                    selection.get("player_key"))
+                for card_id in selection.get("card_ids", []):
+                    if not self.discard_card(
+                            player, card_id,
+                            source_id=context.get("source_id"),
+                            cause=context.get("cause", "discard")):
+                        return False
 
         return_phase = self.previous_priority_phase
         if context.get("effect_continuation") is not None:
@@ -284,10 +302,15 @@ class GameStateZonesMixin:
             return False
 
         card_id = hand[hand_index]
-        if not self.discard_card(
-                chooser, card_id, source_id=context.get("source_id"),
-                cause=context.get("cause", "discard")):
-            return False
+        if context.get("simultaneous"):
+            selected = context.setdefault("selected_current", [])
+            if card_id in selected:
+                return False
+            selected.append(card_id)
+        elif not self.discard_card(
+                    chooser, card_id, source_id=context.get("source_id"),
+                    cause=context.get("cause", "discard")):
+                return False
 
         context["remaining"] = max(0, int(context.get("remaining", 1)) - 1)
         card = self._safe_get_card(card_id)
@@ -295,10 +318,18 @@ class GameStateZonesMixin:
                 and card
                 and "creature" in getattr(card, "card_types", [])):
             context["remaining"] = 0
-        if context["remaining"] > 0 and chooser.get("hand", []):
+        available_hand = [
+            cid for cid in chooser.get("hand", [])
+            if cid not in context.get("selected_current", [])]
+        if context["remaining"] > 0 and available_hand:
             self.priority_player = chooser
             self.priority_pass_count = 0
             return True
+        if context.get("simultaneous"):
+            context.setdefault("staged_discards", []).append({
+                "player_key": context.get("current_player_key"),
+                "card_ids": list(context.get("selected_current", [])),
+            })
         return self._finish_or_advance_discard_choice()
 
     def exile_until_source_leaves(self, source_id, source_controller, card_id,

@@ -1105,6 +1105,37 @@ class GameState(
                     logging.error(f"Error copying attribute '{attr}': {e}")
                     setattr(cloned_state, attr, [] if isinstance(val, (list, set)) else {}) # Fallback empty
 
+        # ``deepcopy(stack)`` creates detached copies of the controller player
+        # dictionaries.  Those compare like players but are not either cloned
+        # seat, so zone moves during lookahead resolution can disappear into
+        # the detached dictionary.  Rebind every stack controller and the
+        # common player-valued context fields to the actual cloned seats.
+        rebound_stack = []
+        stack_player_keys = {
+            "controller", "player", "activator", "original_caster",
+            "from_player", "to_player", "player_gaining_life",
+        }
+        for item in getattr(cloned_state, "stack", []):
+            if not (isinstance(item, tuple) and len(item) >= 3):
+                rebound_stack.append(item)
+                continue
+            controller = item[2]
+            if controller == self.p1:
+                controller = cloned_state.p1
+            elif controller == self.p2:
+                controller = cloned_state.p2
+            context = item[3] if len(item) >= 4 else None
+            if isinstance(context, dict):
+                for key in stack_player_keys:
+                    value = context.get(key)
+                    if value == self.p1:
+                        context[key] = cloned_state.p1
+                    elif value == self.p2:
+                        context[key] = cloned_state.p2
+            rebound_stack.append(
+                item[:2] + (controller,) + item[3:])
+        cloned_state.stack = rebound_stack
+
         # --- Special Handling for Original Decks (Shallow list copy is fine) ---
         cloned_state.original_p1_deck = self.original_p1_deck[:] if hasattr(self,'original_p1_deck') else []
         cloned_state.original_p2_deck = self.original_p2_deck[:] if hasattr(self,'original_p2_deck') else []

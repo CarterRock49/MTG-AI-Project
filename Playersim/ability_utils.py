@@ -1559,14 +1559,22 @@ class EffectFactory:
                 created_effect = SacrificeSourceEffect(
                     permanent_type=source_sacrifice.group(1))
 
-            elif re.search(r"sacrifices?\s+(?:a|an|one|two|\d+)\s+(\w+)", clause_lower):
-                m = re.search(r"sacrifices?\s+(a|an|one|two|three|\d+)\s+(\w+)", clause_lower)
-                ptype = m.group(2) if m else "creature"
+            elif re.search(
+                    r"sacrifices?\s+(?:a|an|another|one|two|three|four|five|"
+                    r"six|seven|eight|nine|ten|\d+)\s+", clause_lower):
+                m = re.search(
+                    r"sacrifices?\s+(a|an|another|one|two|three|four|five|six|"
+                    r"seven|eight|nine|ten|\d+)\s+"
+                    r"(.+?)(?=\s*,|\s*;|\s*\.|\s+then\b|$)",
+                    clause_lower)
+                ptype = m.group(2).strip() if m else "creature"
                 cnt_raw = m.group(1) if m else "a"
-                if cnt_raw in ("a", "an", "one"): cnt = 1
+                if cnt_raw in ("a", "an", "another", "one"): cnt = 1
                 elif cnt_raw.isdigit(): cnt = int(cnt_raw)
                 else: cnt = text_to_number(cnt_raw)
                 if not isinstance(cnt, int) or cnt <= 0: cnt = 1
+                if cnt_raw == "another":
+                    ptype = f"another {ptype}"
                 if "each opponent" in clause_lower or "each other player" in clause_lower:
                     who = "each_opponent"
                 elif "each player" in clause_lower:

@@ -783,6 +783,11 @@ class GameStateStackMixin:
         )
 
         if can_retarget:
+            if target_count > 1:
+                self._begin_copy_retarget_slots(
+                    spell_id, copy_instance_id, controller, new_context,
+                    original_targets)
+                return copy_instance_id
             target_type = self._get_target_type_from_text(
                 getattr(spell, "oracle_text", ""))
             if target_type == "target" and isinstance(original_targets, dict) and len(original_targets) == 1:
@@ -822,6 +827,127 @@ class GameStateStackMixin:
                 stack_context=new_context)
 
         return copy_instance_id
+
+    @staticmethod
+    def _target_category_singular(category):
+        return {
+            "creatures": "creature", "players": "player",
+            "permanents": "permanent", "spells": "spell",
+            "lands": "land", "artifacts": "artifact",
+            "enchantments": "enchantment",
+            "planeswalkers": "planeswalker", "cards": "card",
+            "abilities": "ability", "battles": "battle",
+        }.get(category, "target")
+
+    def _begin_copy_retarget_slots(self, spell_id, copy_instance_id,
+                                   controller, stack_context,
+                                   original_targets):
+        """Ask keep/retarget independently for each inherited target."""
+        slots = []
+        existing_slots = stack_context.get("targets_by_slot") or []
+        if existing_slots:
+            for slot_targets in existing_slots:
+                for target_id in slot_targets:
+                    category = self._determine_target_category(target_id)
+                    slots.append({"target_id": target_id,
+                                  "required_type": self._target_category_singular(category)})
+        elif isinstance(original_targets, dict):
+            for category, target_ids in original_targets.items():
+                if not isinstance(target_ids, (list, tuple, set)):
+                    continue
+                for target_id in target_ids:
+                    slots.append({"target_id": target_id,
+                                  "required_type": self._target_category_singular(category)})
+        self.previous_priority_phase = self.phase
+        self.phase = self.PHASE_CHOOSE
+        self.choice_context = {
+            "type": "copy_retarget_slots", "player": controller,
+            "controller": controller, "source_id": spell_id,
+            "copy_instance_id": copy_instance_id,
+            "slots": slots, "slot_index": 0,
+            "chosen_targets": [slot["target_id"] for slot in slots],
+            "effect_text": getattr(self._safe_get_card(spell_id), "oracle_text", ""),
+        }
+        self.priority_player = controller
+        self.priority_pass_count = 0
+
+    def choose_copy_retarget_slot(self, retarget=False):
+        choice = self.choice_context
+        if not (choice and choice.get("type") == "copy_retarget_slots"):
+            return False
+        index = int(choice.get("slot_index", 0))
+        slots = choice.get("slots", [])
+        if not 0 <= index < len(slots):
+            return False
+        if retarget:
+            self.choice_context = None
+            self.phase = self.PHASE_TARGETING
+            self.targeting_context = {
+                "source_id": choice.get("source_id"),
+                "copy_instance_id": choice.get("copy_instance_id"),
+                "controller": choice.get("controller"),
+                "required_type": slots[index].get("required_type", "target"),
+                "required_count": 1, "min_targets": 1, "max_targets": 1,
+                "selected_targets": [],
+                "excluded_target_ids": list(dict.fromkeys(
+                    [slots[index].get("target_id")] + [
+                        target_id for slot_index, target_id in enumerate(
+                            choice.get("chosen_targets", []))
+                        if slot_index != index])),
+                "effect_text": choice.get("effect_text", ""),
+                "copy_retarget_state": choice,
+            }
+            return True
+        return self._advance_copy_retarget_slot(choice)
+
+    def complete_copy_retarget_slot(self, selected_target):
+        context = self.targeting_context or {}
+        choice = context.get("copy_retarget_state")
+        if not choice:
+            return False
+        index = int(choice.get("slot_index", 0))
+        choice["chosen_targets"][index] = selected_target
+        self.targeting_context = None
+        self.choice_context = choice
+        self.phase = self.PHASE_CHOOSE
+        return self._advance_copy_retarget_slot(choice)
+
+    def _advance_copy_retarget_slot(self, choice):
+        choice["slot_index"] = int(choice.get("slot_index", 0)) + 1
+        if choice["slot_index"] < len(choice.get("slots", [])):
+            self.priority_player = choice.get("player")
+            self.priority_pass_count = 0
+            return True
+        categorized = {}
+        for target_id in choice.get("chosen_targets", []):
+            category = self._determine_target_category(target_id)
+            categorized.setdefault(category, []).append(target_id)
+        committed = False
+        for index in range(len(self.stack) - 1, -1, -1):
+            item = self.stack[index]
+            if not (isinstance(item, tuple) and len(item) >= 4
+                    and item[1] == choice.get("source_id")
+                    and item[3].get("copy_instance_id") == choice.get("copy_instance_id")):
+                continue
+            stack_context = item[3]
+            stack_context["targets"] = categorized
+            stack_context["targets_by_slot"] = [
+                [target_id] for target_id in choice.get("chosen_targets", [])]
+            stack_context["needs_new_targets"] = False
+            self.stack[index] = item[:3] + (stack_context,)
+            self.notify_targets_committed(
+                choice.get("source_id"), choice.get("controller"), categorized,
+                stack_context=stack_context)
+            committed = True
+            break
+        self.choice_context = None
+        self.phase = (self.previous_priority_phase
+                      if self.previous_priority_phase is not None
+                      else self.PHASE_PRIORITY)
+        self.previous_priority_phase = None
+        self.priority_player = choice.get("controller")
+        self.priority_pass_count = 0
+        return committed
 
     def finish_optional_copy_targeting(self):
         """Keep a copied spell's inherited targets and leave its targeting choice."""
@@ -2438,9 +2564,15 @@ class GameStateStackMixin:
         return flattened
 
     def _pay_ward_costs_for_targets(self, item_type, source_id, controller, targets, context=None):
-        """Auto-pay ward costs for opposing ward permanents targeted by a stack item."""
+        """Resolve or stage policy choices for opposing Ward obligations.
+
+        Returns True when every obligation was paid, False when declined or
+        unpayable, and None when a choice was opened and resolution must pause.
+        """
         if context is None:
             context = {}
+        if context.get("ward_choice_complete"):
+            return not context.get("countered_by_ward", False)
         target_ids = self._flatten_target_ids(targets)
         if not target_ids:
             return True
@@ -2452,16 +2584,155 @@ class GameStateStackMixin:
             # stack entries that predate target-commit snapshots.
             obligations = self._collect_ward_obligations(controller, targets)
 
-        paid_costs = context.setdefault("ward_costs_paid", [])
-        for obligation in obligations:
-            target_id = obligation.get("target_id")
-            ward_cost = obligation.get("cost")
-            if not self._pay_single_ward_cost(
-                    controller, ward_cost, source_id, target_id, context):
-                context["countered_by_ward"] = True
-                context["unpaid_ward_cost"] = ward_cost
-                return False
-            paid_costs.append({"target_id": target_id, "cost": ward_cost})
+        if not obligations:
+            context["ward_choice_complete"] = True
+            return True
+        obligation = obligations[0]
+        self.choice_context = {
+            "type": "ward_payment", "player": controller,
+            "controller": controller, "source_id": source_id,
+            "stack_context": context, "stack_item_type": item_type,
+            "copy_instance_id": context.get("copy_instance_id"),
+            "obligations": obligations,
+            "obligation_index": 0,
+            "resume_phase": self.phase,
+        }
+        self._configure_ward_payment_choice(self.choice_context, obligation)
+        self.phase = self.PHASE_CHOOSE
+        self.priority_player = controller
+        self.priority_pass_count = 0
+        return None
+
+    def _ward_stack_context(self, choice):
+        """Find the live paused stack context after cloning or continuation."""
+        source_id = choice.get("source_id")
+        item_type = choice.get("stack_item_type")
+        copy_instance_id = choice.get("copy_instance_id")
+        for item in reversed(self.stack):
+            if not (isinstance(item, tuple) and len(item) >= 4
+                    and item[0] == item_type and item[1] == source_id
+                    and isinstance(item[3], dict)):
+                continue
+            if item[3].get("copy_instance_id") == copy_instance_id:
+                return item[3]
+        fallback = choice.get("stack_context")
+        return fallback if isinstance(fallback, dict) else None
+
+    def _ward_payment_spec(self, player, ward_cost, source_id, target_id, context):
+        """Return a clone-safe Ward payment kind and its concrete options."""
+        text = str(ward_cost or "").strip()
+        life = re.fullmatch(r"pay\s+(\d+)\s+life", text, re.IGNORECASE)
+        if life:
+            amount = int(life.group(1))
+            return "life", ["pay"] if player.get("life", 0) >= amount else []
+        sacrifice = re.fullmatch(
+            r"sacrifice\s+(?:a|an)\s+([a-z -]+)", text, re.IGNORECASE)
+        if sacrifice:
+            criteria = sacrifice.group(1).strip().lower()
+            options = [
+                card_id for card_id in player.get("battlefield", [])
+                if self._card_matches_ward_criteria(card_id, criteria)]
+            return "sacrifice", options
+        if re.fullmatch(r"discard\s+(?:a|one)\s+card", text, re.IGNORECASE):
+            return "discard", list(player.get("hand", []))
+        mana_text = f"{{{text}}}" if text.isdigit() else text
+        if "{" in mana_text and self.mana_system:
+            parsed = self.mana_system.parse_mana_cost(mana_text)
+            ward_context = dict(context)
+            ward_context.update({"card_id": source_id,
+                                 "ward_target_id": target_id})
+            payable = self.mana_system.can_pay_mana_cost(
+                player, parsed, ward_context)
+            return "mana", ["pay"] if payable else []
+        return "unsupported", []
+
+    def _card_matches_ward_criteria(self, card_id, criteria):
+        card = self._safe_get_card(card_id)
+        if not card:
+            return False
+        words = set(str(criteria).lower().replace("-", " ").split())
+        card_types = {str(value).lower() for value in getattr(card, "card_types", [])}
+        subtypes = {str(value).lower() for value in getattr(card, "subtypes", [])}
+        if "nonland" in words and "land" in card_types:
+            return False
+        if "nontoken" in words and getattr(card, "is_token", False):
+            return False
+        if "token" in words and "nontoken" not in words and not getattr(card, "is_token", False):
+            return False
+        ignored = {"nonland", "nontoken", "token", "permanent"}
+        required = words - ignored
+        return not required or bool(required & (card_types | subtypes))
+
+    def _configure_ward_payment_choice(self, choice, obligation):
+        player = choice["player"]
+        context = self._ward_stack_context(choice) or {}
+        choice["stack_context"] = context
+        kind, options = self._ward_payment_spec(
+            player, obligation.get("cost"), choice.get("source_id"),
+            obligation.get("target_id"), context)
+        choice.update({
+            "payment_kind": kind, "options": options,
+            "target_id": obligation.get("target_id"),
+            "ward_cost": obligation.get("cost"), "choice_page": 0,
+        })
+
+    def complete_ward_payment_choice(self, option_index=None, decline=False):
+        """Commit one Ward payment/decline and advance stacked obligations."""
+        choice = self.choice_context
+        if not (choice and choice.get("type") == "ward_payment"):
+            return False
+        player = choice.get("player")
+        stack_context = self._ward_stack_context(choice)
+        choice["stack_context"] = stack_context
+        if not player or not isinstance(stack_context, dict):
+            return False
+        if decline:
+            stack_context["countered_by_ward"] = True
+            stack_context["unpaid_ward_cost"] = choice.get("ward_cost")
+            stack_context["ward_choice_complete"] = True
+            return self._finish_ward_payment_choice(choice)
+
+        options = choice.get("options", [])
+        absolute = int(choice.get("choice_page", 0)) * 10 + int(option_index or 0)
+        if not 0 <= absolute < len(options):
+            return False
+        kind = choice.get("payment_kind")
+        paid = False
+        if kind in {"mana", "life"}:
+            paid = self._pay_single_ward_cost(
+                player, choice.get("ward_cost"), choice.get("source_id"),
+                choice.get("target_id"), stack_context)
+        elif kind == "sacrifice":
+            card_id = options[absolute]
+            owner = self._find_card_owner_fallback(card_id) or player
+            paid = self.move_card(
+                card_id, player, "battlefield", owner, "graveyard",
+                cause="ward_cost")
+        elif kind == "discard":
+            paid = self.discard_card(
+                player, options[absolute], source_id=choice.get("source_id"),
+                cause="ward_cost")
+        if not paid:
+            return False
+        stack_context.setdefault("ward_costs_paid", []).append({
+            "target_id": choice.get("target_id"),
+            "cost": choice.get("ward_cost"),
+        })
+        next_index = int(choice.get("obligation_index", 0)) + 1
+        obligations = choice.get("obligations", [])
+        if next_index < len(obligations):
+            choice["obligation_index"] = next_index
+            self._configure_ward_payment_choice(choice, obligations[next_index])
+            return True
+        stack_context["ward_choice_complete"] = True
+        return self._finish_ward_payment_choice(choice)
+
+    def _finish_ward_payment_choice(self, choice):
+        player = choice.get("player")
+        self.choice_context = None
+        self.phase = choice.get("resume_phase", self.PHASE_PRIORITY)
+        self.priority_player = player
+        self.priority_pass_count = 0
         return True
 
     def _pay_single_ward_cost(self, player, ward_cost, source_id, target_id, context):
@@ -2622,26 +2893,34 @@ class GameStateStackMixin:
                         logging.info(f"Stack Item {item_type} {card_name} fizzled: All targets invalid.")
                         # If an ability fizzles, it simply leaves the stack.
                         resolution_success = True
-                elif not self._pay_ward_costs_for_targets(item_type, item_id, controller, validation_targets, context):
-                    logging.info(f"Stack Item {item_type} {card_name} countered by unpaid ward.")
-                    if item_type == "SPELL" and not context.get("is_copy", False) and not context.get("skip_default_movement", False):
-                        self.move_card(item_id, controller, "stack_implicit", controller, "graveyard", cause="ward_countered", context=context)
-                    resolution_success = True # Countering by ward successfully finishes this stack item
                 else:
-                    # --- Proceed with resolution ---
-                    if item_type == "SPELL": resolution_success = self._resolve_spell(item_id, controller, context)
-                    elif item_type == "ABILITY" or item_type == "TRIGGER":
-                        if self.ability_handler:
-                            # Pass full context, including potentially validated/updated targets
-                            if targets_still_valid: context['targets'] = validation_targets # Update context with validated targets format
-                            resolution_success = self.ability_handler.resolve_ability(item_type, item_id, controller, context)
-                        else: resolution_success = False
-                    else: logging.warning(f"Unknown stack item type: {item_type}"); resolution_success = False
-
-                    # If resolution itself initiates a new choice phase, flag it
-                    if resolution_success and self.phase in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+                    ward_status = self._pay_ward_costs_for_targets(
+                        item_type, item_id, controller, validation_targets,
+                        context)
+                    if ward_status is None:
+                        # The top object was popped before validation. Restore
+                        # it while its controller makes the Ward decision.
+                        self.stack.append(top_item)
+                        resolution_success = True
                         new_special_phase_entered = True
-                        logging.debug(f"Resolution of {card_name} led to new special phase: {self._PHASE_NAMES.get(self.phase)}")
+                    elif not ward_status:
+                        logging.info(f"Stack Item {item_type} {card_name} countered by unpaid ward.")
+                        if item_type == "SPELL" and not context.get("is_copy", False) and not context.get("skip_default_movement", False):
+                            self.move_card(item_id, controller, "stack_implicit", controller, "graveyard", cause="ward_countered", context=context)
+                        resolution_success = True # Countering by ward successfully finishes this stack item
+                    else:
+                        # --- Proceed with resolution ---
+                        if item_type == "SPELL": resolution_success = self._resolve_spell(item_id, controller, context)
+                        elif item_type == "ABILITY" or item_type == "TRIGGER":
+                            if self.ability_handler:
+                                if targets_still_valid: context['targets'] = validation_targets
+                                resolution_success = self.ability_handler.resolve_ability(item_type, item_id, controller, context)
+                            else: resolution_success = False
+                        else: logging.warning(f"Unknown stack item type: {item_type}"); resolution_success = False
+
+                        if resolution_success and self.phase in [self.PHASE_TARGETING, self.PHASE_SACRIFICE, self.PHASE_CHOOSE]:
+                            new_special_phase_entered = True
+                            logging.debug(f"Resolution of {card_name} led to new special phase: {self._PHASE_NAMES.get(self.phase)}")
             else:
                  logging.warning(f"Invalid stack item format: {top_item}")
                  resolution_success = False

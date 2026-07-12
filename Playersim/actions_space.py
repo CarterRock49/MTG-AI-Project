@@ -223,6 +223,9 @@ class ActionSpaceMixin:
                         # Only add mana abilities (and PASS already added)
                         logging.debug("Split Second active, only allowing Mana abilities and PASS.")
                         self._add_mana_ability_actions(perspective_player, valid_actions, set_valid_action)
+                        self._add_overflow_ability_catalog_action(
+                            perspective_player, set_valid_action,
+                            mana_only=True)
                     else:
                         is_my_turn = (current_turn_player == perspective_player)
                         opponent_player = gs.p2 if perspective_player == gs.p1 else gs.p1
@@ -242,6 +245,9 @@ class ActionSpaceMixin:
                         if can_act_instant_speed:
                             self._add_instant_speed_actions(perspective_player, opponent_player, valid_actions, set_valid_action)
                             self._add_damage_prevention_actions(perspective_player, valid_actions, set_valid_action)
+
+                        self._add_overflow_ability_catalog_action(
+                            perspective_player, set_valid_action)
 
                         # Combat Actions
                         if hasattr(self, 'combat_handler') and self.combat_handler:
@@ -680,6 +686,8 @@ class ActionSpaceMixin:
                 page = int(context.get('choice_page', 0)) % page_count
                 for page_index, card_id in enumerate(
                         hand[page * 10:(page + 1) * 10]):
+                    if card_id in context.get("selected_current", []):
+                        continue
                     if (choice_type == "specialize_discard"
                             and not gs.get_specialize_discard_colors(card_id).intersection(
                                 context.get("available_colors", []))):
@@ -758,10 +766,47 @@ class ActionSpaceMixin:
                 if context.get('optional'):
                     set_valid_action(11, "DECLINE_HAND_CARD")
 
-            elif choice_type == "mana_ability_color":
+            elif choice_type in {"mana_ability_color", "mana_ability_package"}:
                 for option_index, color in enumerate(context.get('options', [])[:5]):
-                    set_valid_action(353 + option_index, f"ADD {color} MANA",
+                    remaining = int(context.get('remaining', 1))
+                    set_valid_action(353 + option_index,
+                                     f"ADD {color} MANA ({remaining} left)",
                                      context={"option_index": option_index})
+
+            elif choice_type == "mana_ability_output":
+                for option_index, package in enumerate(
+                        context.get('options', [])[:10]):
+                    label = "".join(
+                        f"{{{symbol}}}" * int(amount)
+                        for symbol, amount in package.items()
+                        if symbol not in {'any', 'choice', 'any_combination'})
+                    if package.get('any') or package.get('choice'):
+                        label += "ANY_COLOR"
+                    if package.get('any_combination'):
+                        label += "ANY_COMBINATION"
+                    set_valid_action(
+                        353 + option_index,
+                        f"CHOOSE_MANA_OUTPUT {label or package}",
+                        context={"option_index": option_index})
+
+            elif choice_type == "ward_payment":
+                options = list(context.get("options", []))
+                page_count = max(1, (len(options) + 9) // 10)
+                page = int(context.get("choice_page", 0)) % page_count
+                kind = context.get("payment_kind", "payment")
+                for option_index, option in enumerate(
+                        options[page * 10:(page + 1) * 10]):
+                    card = gs._safe_get_card(option)
+                    label = getattr(card, "name", option)
+                    set_valid_action(
+                        353 + option_index,
+                        f"PAY_WARD_{kind.upper()} {label}",
+                        context={"option_index": option_index})
+                if page_count > 1:
+                    set_valid_action(
+                        479, f"WARD_PAGE_NEXT ({page + 1}/{page_count})",
+                        context={"page_count": page_count})
+                set_valid_action(11, "DECLINE_WARD_PAYMENT")
 
             elif choice_type == "activation_sacrifice_cost":
                 # Choice construction/execution owns the option list.  Mask
@@ -786,17 +831,12 @@ class ActionSpaceMixin:
                         context={"page_count": page_count})
 
             elif choice_type == "sacrifice_effect":
-                permanent_type = str(context.get('permanent_type', 'permanent')).rstrip('s')
                 candidates = list(context.get('options', []))
                 page_count = max(1, (len(candidates) + 9) // 10)
                 page = int(context.get('choice_page', 0)) % page_count
                 for option_index, card_id in enumerate(candidates[page * 10:(page + 1) * 10]):
                     card = gs._safe_get_card(card_id)
-                    types = ({str(t).lower() for t in getattr(card, 'card_types', [])}
-                             if card else set())
-                    if (card_id not in player.get('battlefield', [])
-                            or (permanent_type != 'permanent'
-                                and permanent_type not in types)):
+                    if card_id not in player.get('battlefield', []):
                         continue
                     set_valid_action(353 + option_index,
                                      f"SACRIFICE_EFFECT {getattr(card, 'name', card_id)}",
@@ -1000,6 +1040,40 @@ class ActionSpaceMixin:
                     card = gs._safe_get_card(getattr(ability, 'card_id', None))
                     name = getattr(card, 'name', getattr(ability, 'card_id', '?'))
                     set_valid_action(353 + i, f"ORDER_TRIGGER {name} onto stack next")
+
+            elif choice_type == "copy_retarget_slots":
+                index = int(context.get("slot_index", 0))
+                slots = context.get("slots", [])
+                if 0 <= index < len(slots):
+                    target = slots[index].get("target_id")
+                    card = gs._safe_get_card(target)
+                    label = getattr(card, "name", target)
+                    set_valid_action(353, f"KEEP_COPY_TARGET {label}")
+                    # Expose retarget only if a distinct legal replacement is
+                    # available for this individual inherited target.
+                    valid = gs.targeting_system.get_valid_targets(
+                        context.get("source_id"), player,
+                        slots[index].get("required_type", "target"),
+                        effect_text=context.get("effect_text", ""))
+                    if any(candidate != target
+                           for values in valid.values() for candidate in values):
+                        set_valid_action(354, f"RETARGET_COPY_SLOT {index + 1}")
+
+            elif choice_type == "action_catalog":
+                options = list(context.get("options", []))
+                page_count = max(1, (len(options) + 9) // 10)
+                page = int(context.get("choice_page", 0)) % page_count
+                for option_index, entry in enumerate(
+                        options[page * 10:(page + 1) * 10]):
+                    set_valid_action(
+                        353 + option_index,
+                        f"CATALOG_ACTION {entry.get('label', option_index)}",
+                        context={"option_index": option_index})
+                if page_count > 1:
+                    set_valid_action(
+                        479,
+                        f"ACTION_CATALOG_PAGE_NEXT ({page + 1}/{page_count})",
+                        context={"page_count": page_count})
 
             # A resolving mutating creature spell goes over or under its target.
             elif choice_type == "mutate_position":
@@ -1973,6 +2047,86 @@ class ActionSpaceMixin:
                            "ability_idx": j,
                            "controller_id": "p1" if player is gs.p1 else "p2",
                        })
+
+    def _add_overflow_ability_catalog_action(self, player, set_valid_action,
+                                             mana_only=False):
+        """Expose activated abilities that have no dedicated fixed action slot."""
+        gs = self.game_state
+        if not getattr(gs, "ability_handler", None):
+            return
+        if mana_only:
+            from .ability_types import ManaAbility
+        can_sorcery = gs._can_act_at_sorcery_speed(player)
+        options = []
+        if not mana_only:
+            opponent = gs.p2 if player is gs.p1 else gs.p1
+            for hand_idx, card_id in enumerate(player.get("hand", [])[10:], 10):
+                card = gs._safe_get_card(card_id)
+                if not card:
+                    continue
+                controller_id = "p1" if player is gs.p1 else "p2"
+                action_context = {
+                    "hand_idx": hand_idx, "card_id": card_id,
+                    "controller_id": controller_id,
+                }
+                if (can_sorcery and not player.get("land_played", False)
+                        and "land" in getattr(card, "card_types", [])):
+                    options.append({
+                        "label": f"Play {getattr(card, 'name', card_id)}",
+                        "handler": "play_land", "action_context": action_context,
+                    })
+                    continue
+                is_instant = (
+                    "instant" in getattr(card, "card_types", [])
+                    or self._has_flash(card_id))
+                if (not is_instant and not can_sorcery):
+                    continue
+                if ("land" not in getattr(card, "card_types", [])
+                        and self._spell_cast_supported(card)
+                        and self._can_afford_card(player, card, context={})
+                        and self._targets_available(card, player, opponent)):
+                    options.append({
+                        "label": f"Cast {getattr(card, 'name', card_id)}",
+                        "handler": "play_spell", "action_context": action_context,
+                    })
+        for battlefield_idx, card_id in enumerate(player.get("battlefield", [])):
+            card = gs._safe_get_card(card_id)
+            if not card:
+                continue
+            abilities = gs.ability_handler.get_activated_abilities(card_id)
+            for ability_idx, ability in enumerate(abilities):
+                if battlefield_idx < 20 and ability_idx < 3:
+                    continue
+                if mana_only and not isinstance(ability, ManaAbility):
+                    continue
+                effect_text = getattr(ability, "effect_text", "") or ""
+                requires_sorcery = (
+                    "activate only as a sorcery" in effect_text.lower())
+                if requires_sorcery and not can_sorcery:
+                    continue
+                if not gs.ability_handler.can_activate_ability(
+                        card_id, ability_idx, player):
+                    continue
+                options.append({
+                    "label": (f"{getattr(card, 'name', card_id)} "
+                              f"ability {ability_idx}"),
+                    "handler": "activate_ability",
+                    "action_context": {
+                        "battlefield_idx": battlefield_idx,
+                        "ability_idx": ability_idx,
+                        "controller_id": "p1" if player is gs.p1 else "p2",
+                    },
+                })
+        if options:
+            set_valid_action(
+                479, "OPEN_ACTIVATED_ABILITY_CATALOG",
+                context={
+                    "open_action_catalog": True,
+                    "catalog_type": "overflow_action",
+                    "controller_id": "p1" if player is gs.p1 else "p2",
+                    "options": options,
+                    "resume_phase": gs.phase,
+                })
 
     def _add_land_tapping_actions(self, player, valid_actions, set_valid_action):
         """Add actions for tapping lands for mana or effects."""

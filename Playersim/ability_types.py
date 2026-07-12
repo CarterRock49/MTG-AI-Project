@@ -3026,14 +3026,97 @@ class SacrificeEffect(AbilityEffect):
         super().__init__(f"{who} sacrifices {count} {self.permanent_type}", condition)
         self.requires_target = who == "target_player"
 
-    def _type_matches(self, game_state, cid):
+    def _type_matches(self, game_state, cid, source_id=None):
         card = game_state._safe_get_card(cid)
         if not card:
             return False
-        if self.permanent_type in ("permanent", "permanents"):
-            return True
-        types = getattr(card, 'card_types', [])
-        return self.permanent_type.rstrip('s') in [t.lower() for t in types]
+        criteria = self.permanent_type.lower().strip()
+        types = {str(value).lower() for value in getattr(card, 'card_types', [])}
+        subtypes = {str(value).lower() for value in getattr(card, 'subtypes', [])}
+        supertypes = {str(value).lower() for value in getattr(card, 'supertypes', [])}
+        words = set(re.findall(r"[a-z]+", criteria))
+        if "another" in words and cid == source_id:
+            return False
+        if "nonland" in words and "land" in types:
+            return False
+        if "nontoken" in words and getattr(card, "is_token", False):
+            return False
+        if "token" in words and "nontoken" not in words \
+                and not getattr(card, "is_token", False):
+            return False
+        controller = game_state.get_card_controller(cid)
+        if "tapped" in words and "untapped" not in words \
+                and cid not in (controller or {}).get("tapped_permanents", set()):
+            return False
+        if "untapped" in words \
+                and cid in (controller or {}).get("tapped_permanents", set()):
+            return False
+        comparison = re.search(
+            r"(mana value|power|toughness)\s+(\d+)\s+or\s+(less|greater)",
+            criteria)
+        if comparison:
+            field, raw_value, direction = comparison.groups()
+            actual = (getattr(card, "cmc", 0) if field == "mana value"
+                      else getattr(card, field, 0))
+            try:
+                actual = int(actual or 0)
+            except (TypeError, ValueError):
+                return False
+            bound = int(raw_value)
+            if direction == "less" and actual > bound:
+                return False
+            if direction == "greater" and actual < bound:
+                return False
+        color_words = {
+            "white": "W", "blue": "U", "black": "B",
+            "red": "R", "green": "G", "colorless": "C",
+        }
+        requested_colors = {
+            symbol for word, symbol in color_words.items() if word in words}
+        if requested_colors:
+            card_colors = getattr(card, "colors", []) or []
+            if isinstance(card_colors, dict):
+                present_colors = {
+                    symbol for symbol, present in card_colors.items() if present}
+            elif (isinstance(card_colors, (list, tuple))
+                    and len(card_colors) == 5
+                    and all(isinstance(value, (int, float, bool))
+                            for value in card_colors)):
+                present_colors = {
+                    symbol for symbol, present in zip("WUBRG", card_colors)
+                    if present}
+            else:
+                present_colors = {str(value).upper() for value in card_colors}
+            if "C" in requested_colors:
+                if present_colors:
+                    return False
+            elif not (requested_colors & present_colors):
+                return False
+        keyword_match = re.search(
+            r"\bwith\s+([a-z -]+?)(?:\s+and\b|$)", criteria)
+        matched_keyword = None
+        if keyword_match:
+            candidate = keyword_match.group(1).strip()
+            if (hasattr(game_state, "check_keyword")
+                    and game_state.check_keyword(cid, candidate)):
+                matched_keyword = candidate
+            elif candidate in str(getattr(card, "oracle_text", "")).lower():
+                matched_keyword = candidate
+        known = types | subtypes | supertypes
+        type_words = words - {
+            "a", "an", "another", "you", "control", "with", "without",
+            "mana", "value", "power", "toughness", "or", "less",
+            "greater", "token", "nontoken", "nonland", "tapped",
+            "untapped", "permanent", "and", "the", "named",
+            "white", "blue", "black", "red", "green", "colorless",
+        }
+        if matched_keyword:
+            type_words -= set(re.findall(r"[a-z]+", matched_keyword))
+        type_words = {word.rstrip("s") for word in type_words
+                      if not word.isdigit()}
+        if " or " in criteria and type_words:
+            return bool(type_words & known)
+        return not type_words or type_words.issubset(known)
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         players = []
@@ -3055,7 +3138,7 @@ class SacrificeEffect(AbilityEffect):
         pending = []
         for player in players:
             candidates = [cid for cid in player.get("battlefield", [])
-                          if self._type_matches(game_state, cid)]
+                          if self._type_matches(game_state, cid, source_id)]
             if candidates:
                 pending.append({
                     "player_id": "p1" if player is game_state.p1 else "p2",

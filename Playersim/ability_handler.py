@@ -1719,6 +1719,45 @@ class AbilityHandler:
          produced = defaultdict(int) # Use defaultdict for easier counting
          mana_text_lower = mana_text.lower()
 
+         # Alternative output packages are one choice, not cumulative mana.
+         # This covers forms such as "Add {C} or one mana of any color" and
+         # "Add {W}{W} or {U}{U}" while preserving the compact two-color
+         # path below for ordinary dual lands.
+         add_clause = re.search(r"\badd\s+(.+?)(?:\.|$)", mana_text_lower)
+         alternatives = (re.split(r"\s+or\s+", add_clause.group(1))
+                         if add_clause else [])
+         if len(alternatives) > 1:
+             output_options = []
+             for alternative in alternatives:
+                 package = defaultdict(int)
+                 for symbol in re.findall(
+                         r"\{([wubrgc]|\d+)\}", alternative):
+                     if symbol.isdigit():
+                         package["C"] += int(symbol)
+                     else:
+                         package[symbol.upper()] += 1
+                 if "mana of any color" in alternative:
+                     amount_match = re.search(
+                         r"(one|two|three|four|five|\d+)\s+mana",
+                         alternative)
+                     number_words = {
+                         "one": 1, "two": 2, "three": 3,
+                         "four": 4, "five": 5,
+                     }
+                     raw = amount_match.group(1) if amount_match else "one"
+                     package["any"] += (
+                         int(raw) if raw.isdigit() else number_words[raw])
+                 output_options.append(dict(package))
+             simple_colors = [
+                 next(iter(option))
+                 for option in output_options
+                 if len(option) == 1
+                 and next(iter(option)) in "WUBRG"
+                 and next(iter(option.values())) == 1
+             ]
+             if len(simple_colors) != len(output_options):
+                 return {"output_options": output_options}
+
          # Mutually exclusive printed outputs are a policy color choice, not
          # cumulative production ("Add {R} or {G}" must never add both).
          choice_clause = re.search(

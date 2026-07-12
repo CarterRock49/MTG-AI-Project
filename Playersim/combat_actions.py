@@ -487,14 +487,13 @@ class CombatActionHandler:
         return success
 
     def begin_blocker_order_choice(self):
-        """Open an 'order_blockers' choice (CR 510.1c) if the agent's player
-        has any attacker blocked by 2+ blockers without an assignment order.
-        Returns True if a choice was opened. The scripted opponent's attackers
-        keep the toughness-ascending default (same scope cut as 603.3b:
-        an interactive opponent choice would deadlock the single-agent loop).
+        """Open an ``order_blockers`` choice under CR 510.1c.
+
+        Either seat owns this decision. The environment routes a non-agent
+        chooser through the installed opponent policy (or the explicit
+        scripted baseline), just like simultaneous trigger ordering.
         """
         gs = self.game_state
-        agent = gs.p1 if getattr(gs, 'agent_is_p1', True) else gs.p2
         if getattr(gs, 'choice_context', None):
             return False
         if not hasattr(gs, 'first_strike_ordering'):
@@ -504,19 +503,19 @@ class CombatActionHandler:
             valid = [b for b in blockers if gs.find_card_location(b)[1] == 'battlefield']
             if len(valid) < 2 or attacker_id in gs.first_strike_ordering:
                 continue
-            if gs.get_card_controller(attacker_id) is not agent:
-                # Opponent's attacker: keep the engine default order.
-                continue
             needs_order.append((attacker_id, valid))
         if not needs_order:
             return False
         first_attacker, first_blockers = needs_order[0]
+        chooser = gs.get_card_controller(first_attacker)
+        if chooser is None:
+            return False
         if gs.phase not in [gs.PHASE_CHOOSE, gs.PHASE_TARGETING, gs.PHASE_SACRIFICE]:
             gs.previous_priority_phase = gs.phase
         gs.phase = gs.PHASE_CHOOSE
         gs.choice_context = {
             'type': 'order_blockers',
-            'player': agent,
+            'player': chooser,
             'attacker_id': first_attacker,
             'pending': list(first_blockers),
             'ordered': [],
@@ -525,7 +524,7 @@ class CombatActionHandler:
             'resolved': False,
         }
         gs.priority_pass_count = 0
-        gs.priority_player = agent
+        gs.priority_player = chooser
         logging.debug(
             f"CR 510.1c: ordering choice opened for attacker {first_attacker} "
             f"({len(first_blockers)} blockers).")
