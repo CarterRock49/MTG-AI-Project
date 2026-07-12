@@ -2323,7 +2323,7 @@ class ActionSpaceMixin:
             if card and hasattr(card, 'oracle_text') and "flashback" in card.oracle_text.lower():
                 is_instant = 'instant' in getattr(card, 'card_types', [])
                 if is_sorcery_speed or is_instant: # Check timing
-                    cost_match = re.search(r"flashback (\{[^\}]+\})", card.oracle_text.lower())
+                    cost_match = re.search(r"flashback ((?:\{[^\}]+\})+)", card.oracle_text.lower())
                     if cost_match and self._can_afford_cost_string(player, cost_match.group(1)):
                         # Context needs gy_idx
                         context = {'gy_idx': i}
@@ -2451,7 +2451,7 @@ class ActionSpaceMixin:
 
     def _add_emblem_graveyard_actions(self, player, opponent, valid_actions,
                                       set_valid_action, is_sorcery_speed):
-        """Expose bounded graveyard play/cast permissions."""
+        """Expose one distinct action per visible graveyard permission."""
         has_emblem = any(
                 emblem.get("kind") == "graveyard_permanents"
                 for emblem in player.get("emblems", []))
@@ -2459,7 +2459,10 @@ class ActionSpaceMixin:
             self.game_state.has_graveyard_adventure_permission(
                 player, card_id)
             for card_id in player.get("graveyard", []))
-        if not has_emblem and not has_adventure_permission:
+        has_flashback = any(
+            self.game_state.flashback_cost_for(player, card_id)
+            for card_id in player.get("graveyard", []))
+        if not has_emblem and not has_adventure_permission and not has_flashback:
             return
         gs = self.game_state
         permanent_spell_types = {
@@ -2489,6 +2492,27 @@ class ActionSpaceMixin:
                         "source_idx": graveyard_index,
                         "graveyard_adventure_cast": True,
                         "cast_as_adventure": True,
+                    })
+                continue
+            flashback_cost = gs.flashback_cost_for(player, card_id)
+            if flashback_cost:
+                is_instant = "instant" in getattr(card, "card_types", [])
+                if not is_sorcery_speed and not is_instant:
+                    continue
+                if not self._can_afford_cost_string(
+                        player, flashback_cost,
+                        context={"card": card, "flashback_cost": flashback_cost}):
+                    continue
+                if not self._targets_available(card, player, opponent):
+                    continue
+                set_valid_action(
+                    472 + graveyard_index,
+                    f"CAST_WITH_FLASHBACK {card.name}",
+                    context={
+                        "source_zone": "graveyard",
+                        "source_idx": graveyard_index,
+                        "flashback_cast": True,
+                        "flashback_cost": flashback_cost,
                     })
                 continue
             if not has_emblem:

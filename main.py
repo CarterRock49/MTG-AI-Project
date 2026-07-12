@@ -836,7 +836,9 @@ torch.set_float32_matmul_precision('high')
 # Path Configuration
 VERSION = "ALPHA_ZERO_MTG_V3.00"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DECKS_DIR = os.path.join(BASE_DIR, "Decks")
+DEFAULT_FORMAT_NAME = "standard"
+DEFAULT_FORMAT_DIR = os.path.join(BASE_DIR, "formats", DEFAULT_FORMAT_NAME)
+DECKS_DIR = os.path.join(DEFAULT_FORMAT_DIR, "decks")
 MODEL_DIR = os.path.join(BASE_DIR, "models")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 TENSORBOARD_DIR = os.path.join(BASE_DIR, "tensorboard_logs")
@@ -1063,13 +1065,14 @@ def deck_provenance(decks, card_db, decks_dir=DECKS_DIR):
 def load_training_corpus(decks_arg, format_name, format_dir_arg):
     """Resolve corpus/format flags into (decks, card_db, decks_dir, lineage).
 
-    With no flags this is the legacy lenient ``Decks/`` load. Any explicit
-    corpus or format request loads strictly (no backup-deck fallback), and a
-    format request additionally applies the frozen ``formats/<format>``
-    canonical card registry and feature schema.
+    With no flags this loads the pinned hydrated Standard metagame corpus.
+    All training corpora load strictly (no backup-deck fallback), and a format
+    request applies the frozen ``formats/<format>`` canonical card registry
+    and feature schema.
     """
     from Playersim.card_registry import format_lineage, load_format_namespace
 
+    format_name = format_name or DEFAULT_FORMAT_NAME
     decks_dir = os.path.abspath(decks_arg) if decks_arg else DECKS_DIR
     format_dir = format_dir_arg
     if format_dir is None and format_name:
@@ -1081,12 +1084,9 @@ def load_training_corpus(decks_arg, format_name, format_dir_arg):
             "Using frozen format namespace %s (registry %s cards, "
             "feature_dim %s)", format_dir, len(card_registry["cards"]),
             feature_schema["feature_dim"])
-    # An explicitly requested corpus or format must never fall back to the
-    # loader's backup deck; legacy default loading stays lenient.
-    corpus_is_explicit = bool(decks_arg or format_name or format_dir_arg)
     decks, card_db = load_decks_and_card_db(
         decks_dir, format_name=format_name,
-        strict_legality=corpus_is_explicit,
+        strict_legality=True,
         card_registry=card_registry, feature_schema=feature_schema)
     lineage = format_lineage(
         decks_dir, format_name=format_name,
@@ -1477,7 +1477,8 @@ def objective(trial, base_seed=42):
 
     # Load decks and card database
     try:
-        decks, card_db = load_decks_and_card_db(DECKS_DIR)
+        decks, card_db, _, _ = load_training_corpus(
+            None, DEFAULT_FORMAT_NAME, None)
     except Exception as e:
         logging.error(f"Failed to load decks for optimization: {e}")
         return float('-inf')
@@ -2133,11 +2134,13 @@ def main():
     parser.add_argument("--cpu-only", action="store_true", help="Force CPU training even if GPU is available")
     parser.add_argument("--seed", type=int, default=42,
                         help="Base seed for Python, NumPy, Torch, workers, and evaluation")
-    parser.add_argument("--format", type=str, default=None,
+    parser.add_argument("--format", type=str, default=DEFAULT_FORMAT_NAME,
                         help="Enforce strict format legality and load the frozen "
-                             "formats/<format> card registry and feature schema")
+                             "formats/<format> card registry and feature schema "
+                             f"(default: {DEFAULT_FORMAT_NAME})")
     parser.add_argument("--decks", type=str, default=None,
-                        help="Deck corpus directory (default: Decks)")
+                        help="Deck corpus directory "
+                             "(default: formats/standard/decks)")
     parser.add_argument("--format-dir", type=str, default=None,
                         help="Explicit frozen format-namespace directory "
                              "(default: formats/<format> when --format is given)")

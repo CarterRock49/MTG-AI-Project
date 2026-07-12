@@ -246,7 +246,7 @@ ACTION_MEANINGS = {
     # (Class enchantments, 253-257); levelers pay a repeatable "Level up {cost}".
     **{467 + i: ("LEVEL_UP_CREATURE", i) for i in range(5)}, # 467-471
 
-    # Wrenn emblem: play/cast graveyard permanent by relative index 0-5.
+    # Graveyard permissions (Flashback, Adventure, Wrenn emblem), slots 0-5.
     **{472 + i: ("PLAY_FROM_GRAVEYARD", i) for i in range(6)}, # 472-477
     478: ("SADDLE", None), # Context={'battlefield_idx': X}
     479: ("TARGET_PAGE_NEXT", None)

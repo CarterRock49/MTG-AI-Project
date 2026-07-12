@@ -4,7 +4,8 @@ Audit date: July 2026
 
 ## Scope
 
-- 8 sample decks in `Decks/`
+- 8 historical bootstrap decks, now archived locally under
+  `archive/legacy_bootstrap_decks/`
 - 480 total deck slots
 - 110 unique cards
 - Card text, layouts, keywords, costs, choices, tokens, linked effects, and
@@ -14,6 +15,10 @@ Copy counts below are summed across all eight decks. Categories can overlap.
 "Confirmed gap" means there is no complete engine path for the relevant
 rules behavior. "Needs card scenario" means related code exists, but the
 actual sample card has not yet proved that path end to end.
+
+This document is retained as the historical audit record for that bootstrap
+corpus. Current training and Harvest use `formats/standard/decks/`, hydrated
+from the pinned representative metagame corpus.
 
 ## Closed In Round 7.12
 

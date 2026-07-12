@@ -141,6 +141,14 @@ but a real promotion requires trained candidate and baseline checkpoints.
 
 ### Training an Agent
 
+The default training and Harvest corpus is the pinned representative Standard
+metagame under `formats/standard/decks`. Regenerate those simulator-ready files
+from the reviewable compact corpus and pinned card snapshot with:
+
+```bash
+python -m Playersim.deck_corpus --replace
+```
+
 Before widening a format corpus, regenerate its static support ledger:
 
 ```bash
@@ -155,6 +163,9 @@ python -m Playersim.support_preflight --snapshot "Format Card Lists/standard.jso
 ```bash
 python main.py --timesteps 1000000 --learning-rate 3e-4 --batch-size 256 --seed 20260710
 ```
+
+No format or deck flags are required for the pinned Standard default. Custom
+corpora remain available through `--decks`, `--format`, and `--format-dir`.
 
 Training and evaluation use separate statistics directories and alternate the
 learned policy between P1 and P2 on successive episodes. Each run also writes a

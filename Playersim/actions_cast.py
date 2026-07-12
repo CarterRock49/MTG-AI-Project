@@ -145,6 +145,22 @@ class CastingHandlersMixin:
         player = self._get_policy_player(context)
         context = dict(context or {})
         source_index = context.get("source_idx", param)
+        if context.get("flashback_cast"):
+            if (not isinstance(source_index, int)
+                    or not 0 <= source_index < len(player.get("graveyard", []))):
+                return -0.15, False
+            card_id = player["graveyard"][source_index]
+            flashback_cost = gs.flashback_cost_for(player, card_id)
+            if not flashback_cost:
+                return -0.15, False
+            cast_context = dict(context)
+            cast_context.update({
+                "source_zone": "graveyard", "source_idx": source_index,
+                "flashback_cast": True, "flashback_cost": flashback_cost,
+                "use_alt_cost": "flashback",
+            })
+            success = gs.cast_spell(card_id, player, context=cast_context)
+            return (0.2, True) if success else (-0.1, False)
         if context.get("graveyard_adventure_cast"):
             if (not isinstance(source_index, int)
                     or not 0 <= source_index < len(player.get("graveyard", []))):
@@ -839,7 +855,7 @@ class CastingHandlersMixin:
             "CAST_WITH_FLASHBACK": {
                 "source_zone": "graveyard",
                 "index_key": "gy_idx",
-                "cost_pattern": r"flashback (\{[^\}]+\})",
+                "cost_pattern": r"flashback ((?:\{[^\}]+\})+)",
                 "timing_check": lambda card: True  # Flashback follows the timing of the card
             },
             "CAST_WITH_JUMP_START": {

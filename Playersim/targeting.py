@@ -272,6 +272,12 @@ class TargetingSystem:
         allowed_types = set(requirement.get("allowed_types", []))
         if allowed_types and not allowed_types.intersection(actual_types):
             return False
+        if (requirement.get("controller_is_caster")
+                and target_owner is not caster):
+            return False
+        if (requirement.get("controller_is_opponent")
+                and target_owner is caster):
+            return False
         if not valid_type: return False
 
         # 3. Protection / Hexproof / Shroud / Ward (Only for permanents, players, spells)
@@ -579,6 +585,16 @@ class TargetingSystem:
                 "allowed_types": ["creature", "enchantment", "planeswalker"],
             })
             oracle_text = re.sub(union_pattern, "", oracle_text)
+
+        graveyard_spell_card_pattern = (
+            r"target\s+instant\s+or\s+sorcery\s+card\s+in\s+your\s+graveyard")
+        if re.search(graveyard_spell_card_pattern, oracle_text):
+            requirements.append({
+                "type": "card", "zone": "graveyard",
+                "allowed_types": ["instant", "sorcery"],
+                "controller_is_caster": True,
+            })
+            oracle_text = re.sub(graveyard_spell_card_pattern, "", oracle_text)
 
         # Pattern to find "target X" phrases, excluding nested clauses
         # Matches "target [adjectives] type [restrictions]"

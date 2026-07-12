@@ -4307,6 +4307,36 @@ class GraveyardAdventurePermissionEffect(AbilityEffect):
             controller, source_id)
 
 
+class GrantFlashbackEffect(AbilityEffect):
+    """Grant a targeted instant/sorcery in your graveyard Flashback this turn."""
+
+    def __init__(self, condition=None):
+        super().__init__(
+            "Target instant or sorcery card in your graveyard gains "
+            "flashback until end of turn", condition)
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        card_ids = targets.get("cards", []) if isinstance(targets, dict) else []
+        if not card_ids:
+            return False
+        card_id = card_ids[0]
+        card = game_state._safe_get_card(card_id)
+        return game_state.grant_flashback_permission(
+            controller, card_id, getattr(card, "mana_cost", ""))
+
+
+class RuleDeclarationEffect(AbilityEffect):
+    """A recognized rules permission with no separate resolving action."""
+
+    def __init__(self, effect_text):
+        super().__init__(effect_text)
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        return True
+
+
 class ImpulseDrawEffect(AbilityEffect):
     """Exile the top N cards; the controller may play them for a duration.
 
@@ -5454,6 +5484,48 @@ class AnimateLandEffect(AbilityEffect):
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         return self.apply(game_state, source_id, controller, targets)
+
+
+class EarthbendEffect(AbilityEffect):
+    """Animate one controlled land permanently and add N +1/+1 counters."""
+
+    def __init__(self, amount, condition=None):
+        self.amount = max(0, int(amount))
+        super().__init__(
+            f"Target land you control becomes a 0/0 creature with haste "
+            f"that's still a land. Put {self.amount} +1/+1 counters on it",
+            condition)
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        land_ids = []
+        if isinstance(targets, dict):
+            land_ids.extend(targets.get("lands", []))
+            land_ids.extend(targets.get("permanents", []))
+        if not land_ids:
+            return False
+        land_id = land_ids[0]
+        land_controller, zone = game_state.find_card_location(land_id)
+        card = game_state._safe_get_card(land_id)
+        if (land_controller is not controller or zone != "battlefield"
+                or not card or "land" not in getattr(card, "card_types", [])):
+            return False
+        if not AnimateLandEffect(
+                0, 0, duration="permanent", keep_types=True,
+                keywords=["haste"], self_target=True).apply(
+                    game_state, land_id, controller, targets={}):
+            return False
+        if self.amount:
+            game_state.add_counter(land_id, "+1/+1", self.amount)
+        game_state.earthbent_lands[land_id] = {
+            "controller": "p1" if controller is game_state.p1 else "p2",
+            "source_id": source_id,
+        }
+        game_state.trigger_ability(source_id, "EARTHBEND", {
+            "controller": controller, "land_id": land_id,
+            "amount": self.amount,
+        })
+        return True
 
 
 class RevealHandEffect(AbilityEffect):

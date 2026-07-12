@@ -16,9 +16,9 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 13/13, and 305/305, plus 15/15 fixture-
+   every delivery (currently 9/9, 13/13, and 307/307, plus 15/15 fixture-
    harvest tests, 7/7 production-protocol tests, 19/19 card-registry tests,
-   1/1 support-preflight tests,
+   1/1 support-preflight tests, 2/2 deck-corpus tests,
    6/6 fuzz/replay tests, and the deterministic 8-seed / 8,000-action
    default fuzz profile, and the strict 32-seed / 320,000-action long
    profile).
@@ -69,7 +69,7 @@ The project is complete when all of the following hold:
   complete — frozen canonical registry + feature schema in
   `formats/standard/`, explicit `--format`/`--decks` configuration, and
   lineage-stamped manifests. Standard end to end is next.
-- Test gates: smoke 9/9, training 13/13, scenarios 303/303 (grown from 12),
+- Test gates: smoke 9/9, training 13/13, scenarios 307/307 (grown from 12),
   fixture harvest 15/15, production Harvest protocol 7/7, card registry
   18/18, fuzz/replay configuration 6/6, deterministic default fuzz 8 seeds
   x 1,000 valid actions, and strict long fuzz 32 seeds x 10,000 valid
@@ -1572,6 +1572,34 @@ Gates: 305/305 scenarios, 9/9 smoke stages, 13/13 training stages, and
   and labels the ranking `representative-meta-2026-07-11`; future snapshots can
   reprioritize gaps without changing the evidence contract.
 
+**Round 7.51 (July 2026)** made the representative Standard corpus executable
+and closed its first two impact-ranked mechanic gaps:
+* **Deterministic corpus hydration** — `Playersim.deck_corpus` joins the compact
+  eight-list metagame corpus against the pinned Standard JSONL snapshot, checks
+  exact 60-card counts and missing identities, and atomically writes eight
+  full-record deck files under `formats/standard/decks/`. Two tests guard
+  deterministic output and fail-closed missing-card behavior.
+* **Standard is the strict default** — training, hyperparameter optimization,
+  fixture Harvest, scenario real-card discovery, and deck-stat discovery now
+  use the hydrated corpus and frozen Standard namespace. The empty
+  `DeckLists/` staging directory was removed; the old bootstrap decks were
+  archived and their 28 rotated identities were extracted into the explicit
+  `historical_bootstrap_cards.json` scenario fixture.
+* **Earthbend** — fixed-N Earthbend selects a controlled land, makes it a 0/0
+  land creature with haste, adds the printed +1/+1 counters, and returns it
+  tapped under the Earthbend controller after death or exile. The previous
+  12-slot named Earthbend gap is gone from the regenerated ledger.
+* **Flashback** — printed and until-end-of-turn granted costs are payable from
+  the graveyard, successful casts exile after resolution, multi-symbol costs
+  parse intact, and the first six graveyard objects receive distinct executable
+  actions rather than overwriting one singleton slot. The previous 10-slot
+  named Flashback gap is gone from the regenerated ledger.
+* **Measured change** — the static ledger moved from 3,386 clean/verified cards
+  to 3,425 and from 427 unparsed cards to 413. Its current status split is 52
+  verified, 78 corpus-clean, 3,295 unseen-clean, 864 partial, and 413 unparsed.
+  Gates: 307/307 scenarios, 9/9 smoke, 13/13 training, 15/15 fixture Harvest,
+  7/7 protocol, 19/19 registry, 1/1 support-preflight, and 2/2 corpus tests.
+
 ---
 
 ## Working agreements
@@ -1621,7 +1649,9 @@ Gates: 305/305 scenarios, 9/9 smoke stages, 13/13 training stages, and
   source/target context when several equivalent pairs are legal. Every exposed
   slot is executable after the Round 7.26 audit, but full choice coverage needs
   a staged/paginated generic source-target chooser or a versioned action-space
-  redesign before those cards are suitable for strength comparisons.
+  redesign before those cards are suitable for strength comparisons. Round
+  7.51 removed the Flashback collision for the first six graveyard objects;
+  graveyard pagination beyond six remains open.
 - Repeated card IDs still model copies coarsely; last-moved location tracking
   and duplicate-preserving list zones repair the known first-touch failures,
   but true per-copy object identity remains a deeper future cleanup. Linked
@@ -1644,6 +1674,10 @@ Gates: 305/305 scenarios, 9/9 smoke stages, 13/13 training stages, and
   601.2d fidelity would announce and lock those divisions during casting or
   activation. Dig selects the kept card explicitly, but any permitted ordering
   of multiple remainder cards still follows deterministic library order.
+- Earthbend v1 supports fixed numeric values and its correct death/exile return
+  destination. The choice-free delayed return currently resolves immediately
+  after the initial zone move rather than entering the stack, and dynamic
+  Earthbend X expressions remain unsupported.
 - Spell-copy retargeting can keep the complete inherited target set or replace
   the complete set. Changing only some targets of a multi-target spell needs a
   future slot-aware target-choice context; ordinary one-target copies are fully

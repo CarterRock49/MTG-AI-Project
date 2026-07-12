@@ -98,8 +98,8 @@ def _write_valid_artifact_fixture(output: Path, version: str) -> dict:
         "result": "win",
         "terminal_reason": "life_total",
         "turn_count": 4,
-        "p1_deck": "DimirMidrange",
-        "p2_deck": "DimirSelf",
+        "p1_deck": "Selesnya Ouroboroid",
+        "p2_deck": "Jeskai Lessons",
         "agent_is_p1": True,
         "agent_version": version,
         "fidelity": {
@@ -132,21 +132,21 @@ def _write_valid_artifact_fixture(output: Path, version: str) -> dict:
         json.dumps(manifest), encoding="utf-8")
 
     decks = {
-        "DimirMidrange": {
-            "name": "DimirMidrange", "deck_id": "winner", "archetype": "midrange",
+        "Selesnya Ouroboroid": {
+            "name": "Selesnya Ouroboroid", "deck_id": "winner", "archetype": "midrange",
             "card_list": [{"id": 1, "name": "Winner Card", "count": 60}],
             "games": 1, "wins": 1, "losses": 0, "draws": 0,
             "total_turns": 4, "avg_game_length": 4.0, "win_rate": 1.0,
         },
-        "DimirSelf": {
-            "name": "DimirSelf", "deck_id": "loser", "archetype": "midrange",
+        "Jeskai Lessons": {
+            "name": "Jeskai Lessons", "deck_id": "loser", "archetype": "midrange",
             "card_list": [{"id": 2, "name": "Loser Card", "count": 60}],
             "games": 1, "wins": 0, "losses": 1, "draws": 0,
             "total_turns": 4, "avg_game_length": 4.0, "win_rate": 0.0,
         },
     }
-    for filename, data in (("winner", decks["DimirMidrange"]),
-                           ("loser", decks["DimirSelf"])):
+    for filename, data in (("winner", decks["Selesnya Ouroboroid"]),
+                           ("loser", decks["Jeskai Lessons"])):
         _write_gzip_json(output / "decks" / f"{filename}.json.gz", data)
     _write_gzip_json(
         output / "cards" / "winner_card.json.gz",

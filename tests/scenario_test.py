@@ -143,18 +143,33 @@ def inject_into_zone(gs, player, data, zone):
 _REAL_DB = None
 
 
+def _load_real_card_data():
+    """Load current Standard plus the explicit rotated bootstrap fixture."""
+    global _REAL_DB
+    if _REAL_DB is None:
+        from Playersim.card_registry import load_pool_snapshot_cards
+        snapshot = os.path.join(
+            REPO_ROOT, "Format Card Lists", "standard.jsonl")
+        cards = load_pool_snapshot_cards(snapshot, format_name="standard")
+        historical_path = os.path.join(
+            REPO_ROOT, "formats", "standard",
+            "historical_bootstrap_cards.json")
+        with open(historical_path, encoding="utf-8") as handle:
+            cards.extend(json.load(handle)["cards"])
+        _REAL_DB = {card["name"]: card for card in cards}
+    return _REAL_DB
+
+
 def inject_real_card(gs, player, card_name, zone):
     """Inject a copy of a real sample-deck card (full oracle text, faces and
     reminder text intact) so scenarios exercise the production parsing path."""
-    global _REAL_DB
-    if _REAL_DB is None:
-        from Playersim.card import load_decks_and_card_db
-        _, _REAL_DB = load_decks_and_card_db(os.path.join(REPO_ROOT, "Decks"))
+    from Playersim.card import Card
+    real_db = _load_real_card_data()
     import copy as _copy
-    source = next((c for c in _REAL_DB.values()
-                   if getattr(c, 'name', '') == card_name), None)
-    assert source is not None, f"real card not found in Decks pool: {card_name}"
-    card = _copy.deepcopy(source)
+    source = real_db.get(card_name)
+    assert source is not None, \
+        f"real card not found in hydrated Standard corpus: {card_name}"
+    card = Card(_copy.deepcopy(source))
     numeric_ids = [int(k) for k in gs.card_db.keys() if str(k).isdigit()]
     new_id = max(numeric_ids, default=-1) + 1
     gs.card_db[new_id] = card
@@ -10598,12 +10613,13 @@ def scenario_play_land_slot_six_contract():
     # pool at the exact slot that failed the strength run. This includes fast
     # lands, typed tapped lands, Restless lands, pain lands, Verges, and Cavern.
     global _REAL_DB
-    if _REAL_DB is None:
-        from Playersim.card import load_decks_and_card_db
-        _, _REAL_DB = load_decks_and_card_db(os.path.join(REPO_ROOT, "Decks"))
+    _load_real_card_data()
     real_land_names = sorted({
-        card.name for card in _REAL_DB.values()
-        if "land" in getattr(card, "type_line", "").lower()
+        card["name"] for card in _REAL_DB.values()
+        if "land" in (
+            (card.get("card_faces") or [{}])[0].get(
+                "type_line", card.get("type_line", ""))
+        ).lower()
     })
     assert real_land_names
     for offset, land_name in enumerate(real_land_names):
@@ -12242,6 +12258,78 @@ def scenario_mechanic_alias_commits_activation_cost():
                    for subtype in getattr(gs._safe_get_card(card_id), "subtypes", [])}
         for card_id in player["battlefield"]), \
         "the costed Investigate ability did not create its Clue"
+
+
+@scenario("701.XX (Earthbend)", "earthbend animates a controlled land and returns it tapped after death or exile")
+def scenario_earthbend_land_animation_and_return():
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 151)
+    controller = gs.p1
+    land = inject_into_zone(gs, controller, {
+        "name": "Earthbend Test Forest", "mana_cost": "", "cmc": 0,
+        "type_line": "Basic Land - Forest", "oracle_text": "{T}: Add {G}.",
+    }, "battlefield")
+    effects = EffectFactory.create_effects("Earthbend 2.")
+    assert len(effects) == 1 and type(effects[0]).__name__ == "EarthbendEffect"
+    assert effects[0].apply(
+        gs, None, controller, targets={"lands": [land]})
+    card = gs._safe_get_card(land)
+    assert "creature" in card.card_types, "earthbend did not animate the land"
+    assert card.counters.get("+1/+1", 0) == 2, \
+        "earthbend did not place its counters"
+    assert gs.check_keyword(land, "haste"), "earthbend did not grant haste"
+
+    assert gs.move_card(
+        land, controller, "battlefield", controller, "graveyard",
+        cause="sacrifice")
+    assert land in controller["battlefield"] and land not in controller["graveyard"], \
+        "the earthbent land did not return from the graveyard"
+    assert land in controller["tapped_permanents"], \
+        "the earthbent land did not return tapped"
+    assert "creature" not in gs._safe_get_card(land).card_types, \
+        "the returned land incorrectly remained a creature"
+
+
+@scenario("702.34 (Flashback)", "printed and granted flashback use distinct graveyard actions and exile after casting")
+def scenario_flashback_graveyard_actions_and_exile():
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 152)
+    env = get_env()
+    handler = env.action_handler
+    controller = gs.p1 if gs.agent_is_p1 else gs.p2
+    first = inject_into_zone(gs, controller, {
+        "name": "Flashback Draw", "mana_cost": "{1}{U}", "cmc": 2,
+        "type_line": "Instant", "oracle_text":
+            "Draw a card.\nFlashback {2}{U}"
+    }, "graveyard")
+    second = inject_into_zone(gs, controller, {
+        "name": "Granted Draw", "mana_cost": "{U}", "cmc": 1,
+        "type_line": "Instant", "oracle_text": "Draw a card."
+    }, "graveyard")
+    grant = EffectFactory.create_effects(
+        "Target instant or sorcery card in your graveyard gains flashback "
+        "until end of turn. The flashback cost is equal to its mana cost.")
+    assert len(grant) == 1 and grant[0].apply(
+        gs, None, controller, targets={"cards": [second]})
+    assert gs.flashback_cost_for(controller, second) == "{U}"
+
+    controller["mana_pool"] = {
+        "W": 0, "U": 2, "B": 0, "R": 0, "G": 0, "C": 3}
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = controller
+    first_index = controller["graveyard"].index(first)
+    second_index = controller["graveyard"].index(second)
+    assert first_index < 6 and second_index < 6
+    mask = handler.generate_valid_actions()
+    assert mask[472 + first_index] and mask[472 + second_index], \
+        "multiple Flashback cards overwrote one shared action slot"
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(472 + first_index)
+    assert not info.get("execution_failed"), info
+    assert gs.stack and gs.stack[-1][1] == first
+    assert gs.resolve_top_of_stack(), "the Flashback spell failed to resolve"
+    assert first in controller["exile"] and first not in controller["graveyard"], \
+        "a spell cast with Flashback did not exile after resolution"
 
 
 # ---------------------------------------------------------------------------

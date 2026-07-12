@@ -111,11 +111,11 @@ class DeckStatsTracker:
             except Exception as e:
                 logging.error(f"Error initializing deck mapping for {file_path}: {str(e)}")
             
-        # Check the Decks folder in the parent directory
+        # Check the pinned hydrated Standard corpus in the parent directory.
         try:
-            # Navigate to the parent directory of Playersim (Untitled Mtg project)
             parent_dir = os.path.dirname(self.base_path)
-            decks_dir = os.path.join(parent_dir, "Decks")
+            decks_dir = os.path.join(
+                parent_dir, "formats", "standard", "decks")
             
             if os.path.exists(decks_dir) and os.path.isdir(decks_dir):
                 logging.info(f"Scanning for deck files in {decks_dir}")
@@ -139,6 +139,21 @@ class DeckStatsTracker:
                         elif isinstance(deck_data, dict) and "cards" in deck_data:
                             # If it's a structured deck with a cards array
                             card_ids = [card.get("id") for card in deck_data["cards"] if isinstance(card, dict) and "id" in card]
+                        elif isinstance(deck_data, dict) and "deck" in deck_data:
+                            # Hydrated corpus: resolve embedded card names
+                            # through the active canonical card database.
+                            ids_by_name = {
+                                str(getattr(card, "name", "")).casefold(): card_id
+                                for card_id, card in (self.card_db or {}).items()
+                            }
+                            card_ids = []
+                            for entry in deck_data["deck"]:
+                                raw = entry.get("card", {}) if isinstance(entry, dict) else {}
+                                name = raw.get("name") if isinstance(raw, dict) else raw
+                                card_id = ids_by_name.get(str(name).casefold())
+                                if card_id is not None:
+                                    card_ids.extend(
+                                        [card_id] * max(0, int(entry.get("count", 1))))
                         else:
                             continue  # Skip if we can't extract card IDs
                         
@@ -152,7 +167,7 @@ class DeckStatsTracker:
                         logging.debug(f"Error processing deck file {deck_file}: {e}")
                         continue
         except Exception as e:
-            logging.debug(f"Error scanning Decks directory: {e}")
+            logging.debug(f"Error scanning hydrated deck directory: {e}")
         
         # Build card ID to name mapping
         if self.card_db:

@@ -359,6 +359,13 @@ class EffectFactory:
         """
         if not effect_text: return []
 
+        if re.fullmatch(
+                r"\s*cast this card from your graveyard for its flashback "
+                r"cost\.\s*then exile it\.?\s*",
+                effect_text, re.IGNORECASE):
+            from .ability_types import RuleDeclarationEffect
+            return [RuleDeclarationEffect(effect_text)]
+
         override = EffectFactory._CARD_OVERRIDES.get(
             str(source_name or "").strip().casefold())
         if override is not None:
@@ -386,6 +393,12 @@ class EffectFactory:
                 and "reveal the top card of your library" in effect_text.lower()):
             from .ability_types import CausticBroncoAttackEffect
             return [CausticBroncoAttackEffect()]
+        if re.search(
+                r"target instant or sorcery card in your graveyard gains "
+                r"flashback until end of turn",
+                effect_text, re.IGNORECASE):
+            from .ability_types import GrantFlashbackEffect
+            return [GrantFlashbackEffect()]
         if (source_key == "bushwhack"
                 and re.search(r"search your library for a basic land card",
                               effect_text, re.IGNORECASE)):
@@ -420,6 +433,12 @@ class EffectFactory:
             effect_text = "\n".join(kept_lines)
             if not effect_text.strip(". \n"):
                 return []
+
+        effect_text = "\n".join(
+            line for line in effect_text.splitlines()
+            if not re.match(r"^\s*flashback\b", line, re.IGNORECASE))
+        if not effect_text.strip(". \n"):
+            return []
 
         # Sample-card compound instructions whose parts share information or
         # must remain atomic at resolution.
@@ -802,6 +821,12 @@ class EffectFactory:
                 r"\bsacrifice\s+this\s+"
                 r"(artifact|battle|creature|enchantment|land|permanent|token)\b",
                 clause_lower)
+
+            earthbend_match = re.search(r"\bearthbend\s+(\d+)\b", clause_lower)
+            if earthbend_match:
+                from .ability_types import EarthbendEffect
+                effects.append(EarthbendEffect(int(earthbend_match.group(1))))
+                continue
 
             # --- Offspring ETB special handling ---
             if offspring_trigger_pattern.search(clause_lower):

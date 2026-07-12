@@ -881,9 +881,13 @@ class EnhancedManaSystem:
         elif alt_cost_type == "flashback":
             # Find flashback cost
             import re
-            match = re.search(r"flashback [^\(]([^\)]+)", oracle_text)
-            if match:
-                flashback_cost = match.group(1)
+            flashback_cost = (context or {}).get("flashback_cost")
+            if not flashback_cost:
+                match = re.search(
+                    r"(?:^|\n)flashback\s+((?:\{[^}]+\})+)",
+                    oracle_text, re.IGNORECASE)
+                flashback_cost = match.group(1) if match else None
+            if flashback_cost:
                 alt_cost = self.parse_mana_cost(flashback_cost)
                 logging.debug(f"Calculated flashback cost for {card.name}: {flashback_cost}")
         

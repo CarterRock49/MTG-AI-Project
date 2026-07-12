@@ -437,6 +437,25 @@ class GameStateZonesMixin:
             logging.debug(f"Movement of {card_name} from {actual_from_zone} to {final_destination_zone} prevented.")
             return False # Movement stopped
 
+        earthbend_return = None
+        if actual_from_zone == "battlefield" \
+                and final_destination_zone != "battlefield":
+            earthbend_info = getattr(self, "earthbent_lands", {}).pop(
+                card_id, None)
+            if (earthbend_info
+                    and final_destination_zone in {"graveyard", "exile"}
+                    and not getattr(card, "is_token", False)):
+                earthbend_return = earthbend_info
+
+        # Flashback's exile destination applies whether the spell resolves,
+        # fizzles, or is countered.
+        if (actual_from_zone == "stack"
+                and final_destination_zone == "graveyard"
+                and card_id in getattr(self, "flashback_cards", set())):
+            final_destination_zone = "exile"
+            event_context["to_zone"] = "exile"
+            self.flashback_cards.discard(card_id)
+
         if (final_destination_zone == "battlefield" and actual_from_zone != "battlefield"
                 and card and hasattr(self, "prepare_day_night_entry")):
             self.prepare_day_night_entry(card_id)
@@ -798,6 +817,19 @@ class GameStateZonesMixin:
                     component_id, from_player, "stack_implicit",
                     final_destination_player, final_destination_zone,
                     cause="mutate_separated", context={"mutate_primary_id": card_id})
+
+        # Resolve Earthbend's deterministic delayed return after the original
+        # dies/exile event has completed, including its zone triggers.
+        if (earthbend_return and card_id in final_destination_player.get(
+                final_destination_zone, [])):
+            return_controller = (
+                self.p1 if earthbend_return.get("controller") == "p1"
+                else self.p2)
+            self.move_card(
+                card_id, final_destination_player, final_destination_zone,
+                return_controller, "battlefield", cause="earthbend_return",
+                context={"enters_tapped": True,
+                         "source_id": earthbend_return.get("source_id")})
 
         # --- Re-check layers if moved TO battlefield and is Impending ---
         # (Already applied earlier in this block)

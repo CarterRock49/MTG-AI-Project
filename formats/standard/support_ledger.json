@@ -1573,12 +1573,7 @@
         {
           "count": 1,
           "reason": "unparsed clause: look at the top five cards of your library. you may put a creature card with man",
-          "severity": "unparsed"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed effect text: earthbend 2",
-          "severity": "unparsed"
+          "severity": "partial"
         }
       ],
       "keywords": [
@@ -1590,7 +1585,7 @@
       "name": "Aang, at the Crossroads // Aang, Destined Savior",
       "oracle_id": "96e5d4a1-e59f-4140-823f-a17e15ee5d8d",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "partial"
     },
     {
       "abilities_registered": 6,
@@ -4264,11 +4259,6 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
           "reason": "unparsed clause: Create two 2/2 red",
           "severity": "partial"
         }
@@ -4843,13 +4833,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 296,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: target instant or sorcery card in your graveyard gains flashback until end of tu",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Saddle"
       ],
@@ -4857,7 +4841,7 @@
       "name": "Archmage's Newt",
       "oracle_id": "75ffebc4-8db9-4de6-a330-e3f41cdccecc",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -5756,13 +5740,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 346,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -5770,7 +5748,7 @@
       "name": "Auron's Inspiration",
       "oracle_id": "53a4d9ee-6dfa-4a8b-a1e4-7f671a666188",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -6308,13 +6286,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 375,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: Earthbend 2. Activate only as a sorcery",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Earthbend"
       ],
@@ -6322,7 +6294,7 @@
       "name": "Ba Sing Se",
       "oracle_id": "de1ae205-ca5b-4d26-8194-ca85f1406e53",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "observed_clean"
     },
     {
       "abilities_registered": 1,
@@ -6369,13 +6341,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 378,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: earthbend 2",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Earthbend"
       ],
@@ -6383,7 +6349,7 @@
       "name": "Badgermole",
       "oracle_id": "2084a7f6-226b-4fb4-a30e-703f674d33b4",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -6399,11 +6365,6 @@
         {
           "count": 1,
           "reason": "unparsed effect text: add an additional {g}",
-          "severity": "unparsed"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed effect text: earthbend 1",
           "severity": "unparsed"
         }
       ],
@@ -8347,13 +8308,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 485,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: Earthbend 4. Activate only during your turn",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Earthbend",
         "Exhaust"
@@ -8362,7 +8317,7 @@
       "name": "Bitter Work",
       "oracle_id": "e9a24ed8-e844-4c50-b386-bc28da9989b1",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -10916,12 +10871,7 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "unparsed"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed effect text: Double target creature's power until end of turn. Flashback {4}{R}{R} (You may c",
+          "reason": "unparsed effect text: Double target creature's power until end of turn.",
           "severity": "unparsed"
         }
       ],
@@ -11030,13 +10980,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 629,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: earthbend 4",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Earthbend",
         "Trample"
@@ -11045,7 +10989,7 @@
       "name": "Bumi, Unleashed",
       "oracle_id": "1fef13d8-5da2-46a6-91ed-7a31bd46e538",
       "replacement_effects_registered": 1,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -11671,11 +11615,6 @@
       "faces_audited": 1,
       "index": 663,
       "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        },
         {
           "count": 1,
           "reason": "unparsed clause: put it into your hand",
@@ -17286,12 +17225,7 @@
         {
           "count": 1,
           "reason": "unparsed clause: where x is the number of creatures you control with +1/+1 counters on them",
-          "severity": "unparsed"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed effect text: earthbend 1, then earthbend 1",
-          "severity": "unparsed"
+          "severity": "partial"
         }
       ],
       "keywords": [
@@ -17301,7 +17235,7 @@
       "name": "Dai Li Agents",
       "oracle_id": "8c05e716-b6eb-4f95-866b-7e43a898ebe2",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "partial"
     },
     {
       "abilities_registered": 2,
@@ -17964,11 +17898,6 @@
       "faces_audited": 1,
       "index": 996,
       "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        },
         {
           "count": 1,
           "reason": "unparsed clause: return that card to the battlefield under its owner's control with a +1/+1 count",
@@ -19391,13 +19320,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 1073,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -19405,7 +19328,7 @@
       "name": "Dig Site Inventory",
       "oracle_id": "96742ebc-10a6-49e6-812a-631e5a60847d",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -21239,13 +21162,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 1175,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback",
         "Surveil"
@@ -21254,7 +21171,7 @@
       "name": "Dreams of Laguna",
       "oracle_id": "e060bf7a-f266-40b4-9772-e243dcbf965b",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -21493,13 +21410,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 1190,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -21507,7 +21418,7 @@
       "name": "Duel Tactics",
       "oracle_id": "262c5ac9-af41-42d1-a53a-8a671eedd5a6",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 4,
@@ -21840,12 +21751,7 @@
         {
           "count": 1,
           "reason": "unparsed clause: you may gain that much life. do this only once each turn",
-          "severity": "unparsed"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed effect text: earthbend 2",
-          "severity": "unparsed"
+          "severity": "partial"
         }
       ],
       "keywords": [
@@ -21855,7 +21761,7 @@
       "name": "Earth Kingdom General",
       "oracle_id": "e43c31ee-1bac-4f96-8b74-334b3238ab73",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "partial"
     },
     {
       "abilities_registered": 1,
@@ -21948,13 +21854,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1215,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: earthbend 2",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Earthbend"
       ],
@@ -21962,7 +21862,7 @@
       "name": "Earth Village Ruffians",
       "oracle_id": "0380e99c-18f9-4472-8223-bb208e5f0963",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -22025,13 +21925,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1218,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: Earthbend 4. (Target land you control becomes a 0/0 creature with haste that's s",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Earthbend"
       ],
@@ -22039,7 +21933,7 @@
       "name": "Earthbending Lesson",
       "oracle_id": "5e113f0f-4469-4276-82e1-0a804f3de444",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -22048,13 +21942,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1219,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: Earthbend 5",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Earthbend"
       ],
@@ -22062,7 +21950,7 @@
       "name": "Earthen Ally",
       "oracle_id": "913bca28-faf9-42e6-a8c0-469cd9bc0208",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -22681,13 +22569,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 1252,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -22695,7 +22577,7 @@
       "name": "Electroduplicate",
       "oracle_id": "112f2b3f-32e7-40b1-b80e-0b99184a840c",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -25528,13 +25410,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1404,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: Choose target creature. When that creature dies this turn, you earthbend 4. (Tar",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Earthbend"
       ],
@@ -25542,7 +25418,7 @@
       "name": "Fatal Fissure",
       "oracle_id": "202e45d6-8c7a-46db-85fb-634aa77b4097",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -26645,13 +26521,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 1464,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -26659,7 +26529,7 @@
       "name": "Fire Nation Attacks",
       "oracle_id": "399fba23-fc13-440b-ab67-192eede6ecab",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -27207,19 +27077,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1494,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Target instant or sorcery card in your graveyard gains flashback until end of tu",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Flashback",
       "oracle_id": "02070488-9203-4304-9392-a111d20218c5",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "observed_clean"
     },
     {
       "abilities_registered": 0,
@@ -28620,17 +28484,12 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
           "reason": "unparsed clause: put it into your hand. If this spell was cast from a graveyard",
           "severity": "partial"
         },
         {
           "count": 1,
-          "reason": "unparsed clause: put that card onto the battlefield instead. Then shuffle. Flashback {4}{W}{W}{W}",
+          "reason": "unparsed clause: put that card onto the battlefield instead. Then shuffle",
           "severity": "partial"
         }
       ],
@@ -32511,17 +32370,7 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
           "reason": "unparsed clause: Create a 2/2 red",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed clause: Tap three untapped creatures you control",
           "severity": "partial"
         }
       ],
@@ -33122,13 +32971,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 1814,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -33136,7 +32979,7 @@
       "name": "Gysahl Greens",
       "oracle_id": "eddfe7d7-6868-4b81-b46c-d0765e5210e7",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -33663,13 +33506,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1844,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: earthbend 1",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Earthbend"
       ],
@@ -33677,7 +33514,7 @@
       "name": "Haru, Hidden Talent",
       "oracle_id": "7488ce54-37c6-475c-b327-59f52f2b1424",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -37507,13 +37344,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 2054,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback",
         "Mill"
@@ -37522,7 +37353,7 @@
       "name": "Inspiration from Beyond",
       "oracle_id": "be87e410-4302-43ee-b880-56eedf2b3648",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -40459,13 +40290,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 2211,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Behold",
         "Flashback"
@@ -40474,7 +40299,7 @@
       "name": "Kindle the Inner Flame",
       "oracle_id": "c7ca6371-73bb-4717-a148-0804b8f4c1e6",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -42086,13 +41911,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 2294,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -42100,7 +41919,7 @@
       "name": "Laughing Mad",
       "oracle_id": "4f65e6a9-0d90-44b9-9b76-00814db2dbd8",
       "replacement_effects_registered": 1,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -46395,11 +46214,6 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
           "reason": "unparsed clause: Reveal the top five cards of your library. Put one of them into your hand. Then ",
           "severity": "partial"
         }
@@ -48057,13 +47871,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 2619,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -48071,7 +47879,7 @@
       "name": "Molten Note",
       "oracle_id": "8c179b8f-3a83-49d6-9e7f-9e17c293ccbb",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -49409,11 +49217,6 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
           "reason": "unparsed clause: put it into your hand",
           "severity": "partial"
         }
@@ -49948,13 +49751,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 2723,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -49962,7 +49759,7 @@
       "name": "Nibelheim Aflame",
       "oracle_id": "eab5eef8-d180-4b08-a770-6b3a1df03745",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -51963,11 +51760,6 @@
       "faces_audited": 1,
       "index": 2831,
       "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        },
         {
           "count": 1,
           "reason": "unparsed clause: Create a 1/1 blue",
@@ -54616,18 +54408,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 2974,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed clause: Put a +1/+1 counter on each creature target player controls. Target creature gai",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -54635,7 +54416,7 @@
       "name": "Practiced Offense",
       "oracle_id": "99678cc9-59c8-4358-b847-8c38ffb4a050",
       "replacement_effects_registered": 1,
-      "status": "partial"
+      "status": "observed_clean"
     },
     {
       "abilities_registered": 2,
@@ -55702,13 +55483,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 3034,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -55716,7 +55491,7 @@
       "name": "Pursue the Past",
       "oracle_id": "4384996f-aeaa-41ac-aa0e-12d72c887731",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -57080,13 +56855,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 3110,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback",
         "Mill"
@@ -57095,7 +56864,7 @@
       "name": "Random Encounter",
       "oracle_id": "324493fc-a205-4177-aa94-cf4672844c81",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -58880,13 +58649,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 3211,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -58894,7 +58657,7 @@
       "name": "Resentful Revelation",
       "oracle_id": "71d6aa12-4888-458d-9dc8-9954b247a246",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 4,
@@ -59210,13 +58973,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 3229,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -59224,7 +58981,7 @@
       "name": "Retrieve the Esper",
       "oracle_id": "9d6fdbd4-ba51-4df1-b383-9b709b36a8d7",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -59329,13 +59086,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 3235,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -59343,7 +59094,7 @@
       "name": "Revenge of the Rats",
       "oracle_id": "29e3a3d9-4839-44d0-ad48-159c01645a6a",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -59974,13 +59725,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 3269,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -59988,7 +59733,7 @@
       "name": "Rite of the Moth",
       "oracle_id": "a7fea839-d7d7-48b4-aeaf-133767532e32",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -60319,11 +60064,6 @@
       "faces_audited": 1,
       "index": 3288,
       "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "unparsed"
-        },
         {
           "count": 1,
           "reason": "unparsed effect text: Earthbend X, where X is the number of Forests you control. (Target land you cont",
@@ -61411,11 +61151,6 @@
       "faces_audited": 1,
       "index": 3346,
       "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        },
         {
           "count": 1,
           "reason": "unparsed clause: Target opponent exiles a card from their hand. If this spell was cast from a gra",
@@ -63945,13 +63680,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 3484,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -63959,7 +63688,7 @@
       "name": "Self-Reflection",
       "oracle_id": "5c68853e-4fb8-465e-b262-e6dbaf972533",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -66465,13 +66194,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3617,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: target instant or sorcery card in your graveyard gains flashback until end of tu",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Plot"
       ],
@@ -66479,7 +66202,7 @@
       "name": "Slickshot Lockpicker",
       "oracle_id": "e6e4ad3c-079d-429b-9f29-b9e42a1a236f",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -66998,17 +66721,12 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
           "reason": "unparsed clause: Exile cards from the top of your library until you exile a nonland card. You may",
           "severity": "partial"
         },
         {
           "count": 1,
-          "reason": "unparsed clause: put it into your hand. Flashback {6}{R}",
+          "reason": "unparsed clause: put it into your hand",
           "severity": "partial"
         }
       ],
@@ -67117,13 +66835,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 3652,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -67131,7 +66843,7 @@
       "name": "Sorceress's Schemes",
       "oracle_id": "945e56b9-709f-4bb3-8a6b-0a04d9202a03",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -67879,13 +67591,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3695,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: target instant or sorcery card in your graveyard gains flashback until end of tu",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flash",
         "Flying"
@@ -67894,7 +67600,7 @@
       "name": "Sphinx of Forgotten Lore",
       "oracle_id": "ddb7e868-8f1d-4d57-9ee2-ebadb17b398a",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 4,
@@ -75265,13 +74971,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 4092,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -75279,7 +74979,7 @@
       "name": "The Final Days",
       "oracle_id": "f2b88031-bfb7-46c4-abdd-3b6b5f5acfa4",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -76644,13 +76344,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 4159,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -76658,7 +76352,7 @@
       "name": "Think Twice",
       "oracle_id": "fa85c5a2-8e83-4624-a35a-a0bbf17ecbb4",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -78152,13 +77846,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 4239,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -78166,7 +77854,7 @@
       "name": "Tome Blast",
       "oracle_id": "f0163420-2f91-493c-bad4-2cd33e9856bf",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 4,
@@ -78281,13 +77969,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4245,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: earthbend 2",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Earthbend"
       ],
@@ -78295,7 +77977,7 @@
       "name": "Toph, the Blind Bandit",
       "oracle_id": "2ce20f43-9357-448f-bb40-7315feb08433",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -78304,13 +77986,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4246,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: earthbend 2",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Earthbend"
       ],
@@ -78318,7 +77994,7 @@
       "name": "Toph, the First Metalbender",
       "oracle_id": "fbfef028-b10c-4ade-9503-d9af5b0c211b",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -87194,8 +86870,7 @@
       ],
       "name": "Badgermole Cub",
       "reasons": [
-        "unparsed effect text: add an additional {g}",
-        "unparsed effect text: earthbend 1"
+        "unparsed effect text: add an additional {g}"
       ],
       "status": "unparsed"
     },
@@ -87222,31 +86897,6 @@
         "unparsed clause: tap up to two target creatures"
       ],
       "status": "partial"
-    },
-    {
-      "deck_slots": 6,
-      "decks": [
-        "Azorius Momo",
-        "Selesnya Ouroboroid"
-      ],
-      "name": "Practiced Offense",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-        "unparsed clause: Put a +1/+1 counter on each creature target player controls. Target creature gai"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 4,
-      "decks": [
-        "Mono-Green Landfall",
-        "Selesnya Ouroboroid"
-      ],
-      "name": "Ba Sing Se",
-      "reasons": [
-        "unparsed effect text: Earthbend 2. Activate only as a sorcery"
-      ],
-      "status": "unparsed"
     },
     {
       "deck_slots": 4,
@@ -87300,7 +86950,6 @@
       ],
       "name": "Daydream",
       "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
         "unparsed clause: return that card to the battlefield under its owner's control with a +1/+1 count"
       ],
       "status": "partial"
@@ -87370,18 +87019,6 @@
       "reasons": [
         "unparsed clause: put two of those cards into your hand instead. Put the rest on the bottom of you",
         "unparsed clause: where X is the number of lands you control. Put one of those cards into your han"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 3,
-      "decks": [
-        "4c Control",
-        "Jeskai Lessons"
-      ],
-      "name": "Flashback",
-      "reasons": [
-        "unparsed clause: Target instant or sorcery card in your graveyard gains flashback until end of tu"
       ],
       "status": "partial"
     },
@@ -87548,16 +87185,6 @@
       "name": "A.I.M. Scientists",
       "reasons": [
         "unparsed effect text: it connives"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Aang, at the Crossroads // Aang, Destined Savior",
-      "reasons": [
-        "unparsed clause: look at the top five cards of your library. you may put a creature card with man",
-        "unparsed effect text: earthbend 2"
       ],
       "status": "unparsed"
     },
@@ -87748,15 +87375,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Badgermole",
-      "reasons": [
-        "unparsed effect text: earthbend 2"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Balamb Garden, SeeD Academy // Balamb Garden, Airborne",
       "reasons": [
         "unparsed effect text: Activate Crew ability."
@@ -87914,15 +87532,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Bitter Work",
-      "reasons": [
-        "unparsed effect text: Earthbend 4. Activate only during your turn"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Black Mage's Rod",
       "reasons": [
         "unparsed effect text: attach to target creature you control. Equip only as a sorcery."
@@ -88036,8 +87645,7 @@
       "decks": [],
       "name": "Bulk Up",
       "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-        "unparsed effect text: Double target creature's power until end of turn. Flashback {4}{R}{R} (You may c"
+        "unparsed effect text: Double target creature's power until end of turn."
       ],
       "status": "unparsed"
     },
@@ -88047,15 +87655,6 @@
       "name": "Bumi, King of Three Trials",
       "reasons": [
         "unparsed effect text: choose up to x, where x is the number of lesson cards in your graveyard \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Bumi, Unleashed",
-      "reasons": [
-        "unparsed effect text: earthbend 4"
       ],
       "status": "unparsed"
     },
@@ -88382,16 +87981,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Dai Li Agents",
-      "reasons": [
-        "unparsed clause: where x is the number of creatures you control with +1/+1 counters on them",
-        "unparsed effect text: earthbend 1, then earthbend 1"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Daily Bugle Reporters",
       "reasons": [
         "unparsed effect text: choose one \u2014"
@@ -88603,43 +88192,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Earth Kingdom General",
-      "reasons": [
-        "unparsed clause: you may gain that much life. do this only once each turn",
-        "unparsed effect text: earthbend 2"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Earth Village Ruffians",
-      "reasons": [
-        "unparsed effect text: earthbend 2"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Earthbending Lesson",
-      "reasons": [
-        "unparsed effect text: Earthbend 4. (Target land you control becomes a 0/0 creature with haste that's s"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Earthen Ally",
-      "reasons": [
-        "unparsed effect text: Earthbend 5"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Earthrumbler",
       "reasons": [
         "unparsed effect text: Activate Crew ability."
@@ -88774,15 +88326,6 @@
       "name": "Fangkeeper's Familiar",
       "reasons": [
         "unparsed effect text: choose one \u2014"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Fatal Fissure",
-      "reasons": [
-        "unparsed effect text: Choose target creature. When that creature dies this turn, you earthbend 4. (Tar"
       ],
       "status": "unparsed"
     },
@@ -89106,15 +88649,6 @@
       "reasons": [
         "unparsed clause: put two cards from your hand on top of your library in any order",
         "unparsed effect text: This creature becomes prepared"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Haru, Hidden Talent",
-      "reasons": [
-        "unparsed effect text: earthbend 1"
       ],
       "status": "unparsed"
     },
@@ -90223,7 +89757,6 @@
       "decks": [],
       "name": "Rockalanche",
       "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
         "unparsed effect text: Earthbend X, where X is the number of Forests you control. (Target land you cont"
       ],
       "status": "unparsed"
@@ -91041,24 +90574,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Toph, the Blind Bandit",
-      "reasons": [
-        "unparsed effect text: earthbend 2"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Toph, the First Metalbender",
-      "reasons": [
-        "unparsed effect text: earthbend 2"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Tough Cookie",
       "reasons": [
         "unparsed effect text: Until end of turn, target noncreature artifact you control becomes a 4/4 artifac"
@@ -91440,6 +90955,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Aang, at the Crossroads // Aang, Destined Savior",
+      "reasons": [
+        "unparsed clause: look at the top five cards of your library. you may put a creature card with man"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Abigale, Eloquent First-Year",
       "reasons": [
         "unparsed clause: a first strike counter",
@@ -91646,7 +91170,6 @@
       "decks": [],
       "name": "Antiquities on the Loose",
       "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
         "unparsed clause: Create two 2/2 red"
       ],
       "status": "partial"
@@ -91684,15 +91207,6 @@
       "name": "Archaic's Agony",
       "reasons": [
         "unparsed clause: where X is the number of colors of mana spent to cast this spell. Exile cards fr"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Archmage's Newt",
-      "reasons": [
-        "unparsed clause: target instant or sorcery card in your graveyard gains flashback until end of tu"
       ],
       "status": "partial"
     },
@@ -91751,15 +91265,6 @@
       "name": "Aurelia's Vindicator",
       "reasons": [
         "unparsed clause: exile up to x other target creatures from the battlefield and/or creature cards "
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Auron's Inspiration",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
       ],
       "status": "partial"
     },
@@ -92224,7 +91729,6 @@
       "decks": [],
       "name": "Call the Mountain Chocobo",
       "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
         "unparsed clause: put it into your hand"
       ],
       "status": "partial"
@@ -92800,6 +92304,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Dai Li Agents",
+      "reasons": [
+        "unparsed clause: where x is the number of creatures you control with +1/+1 counters on them"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Dance of the Tumbleweeds",
       "reasons": [
         "unparsed clause: put it onto the battlefield"
@@ -92992,15 +92505,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Dig Site Inventory",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Dina's Guidance",
       "reasons": [
         "unparsed clause: put it into your hand or graveyard"
@@ -93120,27 +92624,9 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Dreams of Laguna",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Dual-Sun Technique",
       "reasons": [
         "unparsed clause: Target creature you control gains double strike until end of turn. If it has a +"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Duel Tactics",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
       ],
       "status": "partial"
     },
@@ -93159,6 +92645,15 @@
       "name": "Eager Glyphmage",
       "reasons": [
         "unparsed clause: create a 1/1 white"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Earth Kingdom General",
+      "reasons": [
+        "unparsed clause: you may gain that much life. do this only once each turn"
       ],
       "status": "partial"
     },
@@ -93259,15 +92754,6 @@
       "name": "Elder Auntie",
       "reasons": [
         "unparsed clause: create a 1/1 black"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Electroduplicate",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
       ],
       "status": "partial"
     },
@@ -93661,15 +93147,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Fire Nation Attacks",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Fire Nation Palace",
       "reasons": [
         "unparsed clause: Target creature you control gains firebending 4 until end of turn"
@@ -93858,9 +93335,8 @@
       "decks": [],
       "name": "From Father to Son",
       "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
         "unparsed clause: put it into your hand. If this spell was cast from a graveyard",
-        "unparsed clause: put that card onto the battlefield instead. Then shuffle. Flashback {4}{W}{W}{W}"
+        "unparsed clause: put that card onto the battlefield instead. Then shuffle"
       ],
       "status": "partial"
     },
@@ -94161,9 +93637,7 @@
       "decks": [],
       "name": "Group Project",
       "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
-        "unparsed clause: Create a 2/2 red",
-        "unparsed clause: Tap three untapped creatures you control"
+        "unparsed clause: Create a 2/2 red"
       ],
       "status": "partial"
     },
@@ -94257,15 +93731,6 @@
       "name": "Guru Pathik",
       "reasons": [
         "unparsed clause: put it into your hand. put the rest on the bottom of your library in a random or"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Gysahl Greens",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
       ],
       "status": "partial"
     },
@@ -94584,15 +94049,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Inspiration from Beyond",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Intimidation Tactics",
       "reasons": [
         "unparsed clause: Target opponent reveals their hand. You choose an artifact or creature card from"
@@ -94892,15 +94348,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Kindle the Inner Flame",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Kindlespark Duo",
       "reasons": [
         "unparsed clause: untap this creature"
@@ -95049,15 +94496,6 @@
       "name": "Laughing Jasper Flint",
       "reasons": [
         "unparsed clause: exile the top x cards of target opponent's library"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Laughing Mad",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
       ],
       "status": "partial"
     },
@@ -95444,7 +94882,6 @@
       "decks": [],
       "name": "Memories Returning",
       "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
         "unparsed clause: Reveal the top five cards of your library. Put one of them into your hand. Then "
       ],
       "status": "partial"
@@ -95564,15 +95001,6 @@
       "name": "Molten Man, Inferno Incarnate",
       "reasons": [
         "unparsed clause: put it onto the battlefield tapped"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Molten Note",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
       ],
       "status": "partial"
     },
@@ -95699,7 +95127,6 @@
       "decks": [],
       "name": "Mystical Teachings",
       "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
         "unparsed clause: put it into your hand"
       ],
       "status": "partial"
@@ -95782,15 +95209,6 @@
       "name": "Nexus of Becoming",
       "reasons": [
         "unparsed clause: you may exile an artifact or creature card from your hand. if you do"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Nibelheim Aflame",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
       ],
       "status": "partial"
     },
@@ -95962,7 +95380,6 @@
       "decks": [],
       "name": "Otterball Antics",
       "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
         "unparsed clause: Create a 1/1 blue"
       ],
       "status": "partial"
@@ -96389,15 +95806,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Pursue the Past",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Push the Limit",
       "reasons": [
         "unparsed clause: Return all Mount"
@@ -96474,15 +95882,6 @@
       "name": "Ral, Crackling Wit",
       "reasons": [
         "unparsed clause: Create a 1/1 blue"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Random Encounter",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
       ],
       "status": "partial"
     },
@@ -96627,15 +96026,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Resentful Revelation",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Restorative Technique",
       "reasons": [
         "unparsed clause: puts it onto the battlefield tapped",
@@ -96656,15 +96046,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Retrieve the Esper",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Return from the Wilds",
       "reasons": [
         "unparsed clause: put it onto the battlefield tapped"
@@ -96677,15 +96058,6 @@
       "name": "Return the Favor",
       "reasons": [
         "unparsed clause: or triggered ability. You may choose new targets for the copy. + {1}"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Revenge of the Rats",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
       ],
       "status": "partial"
     },
@@ -96768,15 +96140,6 @@
       "name": "Rise of the Dark Realms",
       "reasons": [
         "unparsed clause: Put all creature cards from all graveyards onto the battlefield under your contr"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Rite of the Moth",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
       ],
       "status": "partial"
     },
@@ -96886,7 +96249,6 @@
       "decks": [],
       "name": "Ruthless Negotiation",
       "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
         "unparsed clause: Target opponent exiles a card from their hand. If this spell was cast from a gra"
       ],
       "status": "partial"
@@ -97106,15 +96468,6 @@
       "name": "Seize Opportunity",
       "reasons": [
         "unparsed clause: \u2022 Exile the top two cards of your library. Until the end of your next turn"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Self-Reflection",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
       ],
       "status": "partial"
     },
@@ -97349,15 +96702,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Slickshot Lockpicker",
-      "reasons": [
-        "unparsed clause: target instant or sorcery card in your graveyard gains flashback until end of tu"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Slime Against Humanity",
       "reasons": [
         "unparsed clause: in your graveyard that are Oozes or are named Slime Against Humanity. A deck can",
@@ -97415,9 +96759,8 @@
       "decks": [],
       "name": "Solstice Revelations",
       "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it",
         "unparsed clause: Exile cards from the top of your library until you exile a nonland card. You may",
-        "unparsed clause: put it into your hand. Flashback {6}{R}"
+        "unparsed clause: put it into your hand"
       ],
       "status": "partial"
     },
@@ -97427,15 +96770,6 @@
       "name": "Songcrafter Mage",
       "reasons": [
         "unparsed clause: target instant or sorcery card in your graveyard gains harmonize until end of tu"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Sorceress's Schemes",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
       ],
       "status": "partial"
     },
@@ -97500,15 +96834,6 @@
       "name": "Spelunking",
       "reasons": [
         "unparsed clause: you may put a land card from your hand onto the battlefield. if you put a cave o"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Sphinx of Forgotten Lore",
-      "reasons": [
-        "unparsed clause: target instant or sorcery card in your graveyard gains flashback until end of tu"
       ],
       "status": "partial"
     },
@@ -98206,15 +97531,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "The Final Days",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "The Fire Nation Drill",
       "reasons": [
         "unparsed clause: Permanents your opponents control lose hexproof",
@@ -98409,15 +97725,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Think Twice",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Thopter Fabricator",
       "reasons": [
         "unparsed clause: tap any number of untapped creatures you control with total power 1 or greater: "
@@ -98561,15 +97868,6 @@
       "name": "Tomb Trawler",
       "reasons": [
         "unparsed clause: Put target card from your graveyard on the bottom of your library"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Tome Blast",
-      "reasons": [
-        "unparsed clause: Cast this card from your graveyard for its flashback cost. Then exile it"
       ],
       "status": "partial"
     },
@@ -99369,76 +98667,34 @@
   ],
   "ranked_mechanics": [
     {
-      "affected_cards": 873,
-      "deck_cards": 24,
-      "deck_slots": 71,
+      "affected_cards": 883,
+      "deck_cards": 25,
+      "deck_slots": 80,
       "examples": [
+        "Badgermole Cub",
         "Flow State",
         "Eddymurk Crab",
         "Accumulate Wisdom",
         "Brightglass Gearhulk",
         "Combustion Technique",
+        "Daydream",
         "Earthbender Ascension",
         "Escape Tunnel",
-        "Fabled Passage",
-        "Sage of the Skies",
-        "Starfield Shepherd"
+        "Fabled Passage"
       ],
       "mechanic": "unclassified oracle text",
       "status_counts": {
-        "partial": 714,
-        "unparsed": 159
+        "partial": 723,
+        "unparsed": 160
       }
     },
     {
-      "affected_cards": 18,
-      "deck_cards": 2,
-      "deck_slots": 12,
-      "examples": [
-        "Badgermole Cub",
-        "Ba Sing Se",
-        "Aang, at the Crossroads // Aang, Destined Savior",
-        "Badgermole",
-        "Beifong's Bounty Hunters",
-        "Bitter Work",
-        "Bumi, Unleashed",
-        "Dai Li Agents",
-        "Earth Kingdom General",
-        "Earth Village Ruffians"
-      ],
-      "mechanic": "Earthbend",
-      "status_counts": {
-        "unparsed": 18
-      }
-    },
-    {
-      "affected_cards": 36,
-      "deck_cards": 2,
-      "deck_slots": 10,
-      "examples": [
-        "Practiced Offense",
-        "Daydream",
-        "Antiquities on the Loose",
-        "Auron's Inspiration",
-        "Bulk Up",
-        "Call the Mountain Chocobo",
-        "Dig Site Inventory",
-        "Dreams of Laguna",
-        "Duel Tactics",
-        "Electroduplicate"
-      ],
-      "mechanic": "Flashback",
-      "status_counts": {
-        "partial": 34,
-        "unparsed": 2
-      }
-    },
-    {
-      "affected_cards": 30,
+      "affected_cards": 31,
       "deck_cards": 1,
       "deck_slots": 4,
       "examples": [
         "Esper Origins // Summon: Esper Maduin",
+        "Aang, at the Crossroads // Aang, Destined Savior",
         "Braided Net // Braided Quipu",
         "Brigid, Clachan's Heart // Brigid, Doun's Mind",
         "Clay-Fired Bricks // Cosmium Kiln",
@@ -99446,12 +98702,11 @@
         "Garland, Knight of Cornelia // Chaos, the Endless",
         "Grasping Shadows // Shadows' Lair",
         "Growing Rites of Itlimoc // Itlimoc, Cradle of the Sun",
-        "Idol of the Deep King // Sovereign's Macuahuitl",
-        "Kaslem's Stonetree // Kaslem's Strider"
+        "Idol of the Deep King // Sovereign's Macuahuitl"
       ],
       "mechanic": "layout:transform",
       "status_counts": {
-        "partial": 26,
+        "partial": 27,
         "unparsed": 4
       }
     },
@@ -99931,6 +99186,20 @@
       "deck_cards": 0,
       "deck_slots": 0,
       "examples": [
+        "Beifong's Bounty Hunters",
+        "Rockalanche",
+        "The Boulder, Ready to Rumble"
+      ],
+      "mechanic": "Earthbend",
+      "status_counts": {
+        "unparsed": 3
+      }
+    },
+    {
+      "affected_cards": 3,
+      "deck_cards": 0,
+      "deck_slots": 0,
+      "examples": [
         "Crashing Wave",
         "Foggy Swamp Visions",
         "Hama, the Bloodbender"
@@ -100098,18 +99367,6 @@
       "deck_cards": 0,
       "deck_slots": 0,
       "examples": [
-        "Sphinx of Forgotten Lore"
-      ],
-      "mechanic": "Flash",
-      "status_counts": {
-        "partial": 1
-      }
-    },
-    {
-      "affected_cards": 1,
-      "deck_cards": 0,
-      "deck_slots": 0,
-      "examples": [
         "Corpseberry Cultivator"
       ],
       "mechanic": "Forage",
@@ -100215,15 +99472,15 @@
     }
   ],
   "schema_version": 1,
-  "sha256": "eae46b1f904e0ffc95eefb1c4d248001a487012004a93e53c75b335533ea1466",
+  "sha256": "329db578f14fa416cb39f4e47c7f1d506982dad20b9d921cc88ba962dc21fac6",
   "summary": {
-    "qualified_fraction": 0.0270097830710336,
-    "static_clean_fraction": 0.7201190982560612,
+    "qualified_fraction": 0.027647809442790303,
+    "static_clean_fraction": 0.7284134410888984,
     "status_counts": {
-      "observed_clean": 75,
-      "partial": 889,
-      "unparsed": 427,
-      "unseen": 3259,
+      "observed_clean": 78,
+      "partial": 864,
+      "unparsed": 413,
+      "unseen": 3295,
       "verified": 52
     },
     "total": 4702

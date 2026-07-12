@@ -947,6 +947,10 @@ class GameStateTurnMixin:
                 self, "graveyard_adventure_permissions", [])
             if entry.get("expires_turn", self.turn) > self.turn
         ]
+        self.flashback_permissions = [
+            entry for entry in getattr(self, "flashback_permissions", [])
+            if entry.get("expires_turn", self.turn) > self.turn
+        ]
 
         # 3. "Until end of turn" and "this turn" effects end
         # --- LayerSystem handles duration removal ---

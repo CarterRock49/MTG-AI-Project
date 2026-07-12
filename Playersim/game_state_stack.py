@@ -222,7 +222,10 @@ class GameStateStackMixin:
              return "creature"
          if "target player" in text or "target opponent" in text: return "player"
          if "target spell" in text: return "spell"
-         if "target card" in text: return "card"
+         if ("target card" in text
+                 or re.search(r"target\s+(?:instant|sorcery)(?:\s+or\s+"
+                              r"(?:instant|sorcery))?\s+card", text)):
+             return "card"
          if "target artifact" in text: return "artifact"
          if "target enchantment" in text: return "enchantment"
          if "target land" in text: return "land"
@@ -1225,6 +1228,52 @@ class GameStateStackMixin:
     def _player_key_for_permission(player, p1):
         return "p1" if player is p1 else "p2"
 
+    @staticmethod
+    def _printed_flashback_cost(card):
+        text = getattr(card, "oracle_text", "") or ""
+        match = re.search(
+            r"(?:^|\n)flashback\s+((?:\{[^}]+\})+)", text,
+            re.IGNORECASE)
+        return match.group(1) if match else None
+
+    def flashback_cost_for(self, player, card_id):
+        """Return the currently legal Flashback cost for a graveyard card."""
+        if card_id not in player.get("graveyard", []):
+            return None
+        card = self._safe_get_card(card_id)
+        printed = self._printed_flashback_cost(card)
+        if printed:
+            return printed
+        for entry in getattr(self, "flashback_permissions", []):
+            if (entry.get("card_id") == card_id
+                    and entry.get("player") == self._discard_player_key(player)
+                    and entry.get("expires_turn", self.turn) >= self.turn):
+                return entry.get("cost")
+        return None
+
+    def grant_flashback_permission(self, player, card_id, cost=None):
+        """Grant one instant/sorcery card Flashback until end of turn."""
+        if card_id not in player.get("graveyard", []):
+            return False
+        card = self._safe_get_card(card_id)
+        if not card or not set(getattr(card, "card_types", [])).intersection(
+                {"instant", "sorcery"}):
+            return False
+        cost = cost or getattr(card, "mana_cost", "")
+        if not cost:
+            return False
+        key = self._discard_player_key(player)
+        self.flashback_permissions = [
+            entry for entry in getattr(self, "flashback_permissions", [])
+            if not (entry.get("card_id") == card_id
+                    and entry.get("player") == key)
+        ]
+        self.flashback_permissions.append({
+            "card_id": card_id, "cost": cost,
+            "expires_turn": self.turn, "player": key,
+        })
+        return True
+
     def grant_graveyard_adventure_permission(self, player, card_id):
         """Permit this graveyard object to be cast as its Adventure half."""
         if card_id not in player.get("graveyard", []):
@@ -1374,6 +1423,13 @@ class GameStateStackMixin:
                         player, card_id)):
                 logging.warning("Invalid graveyard Adventure cast permission.")
                 return False
+        if context.get("flashback_cast"):
+            flashback_cost = self.flashback_cost_for(player, card_id)
+            if source_zone != "graveyard" or not flashback_cost:
+                logging.warning("Invalid Flashback graveyard cast permission.")
+                return False
+            context.setdefault("flashback_cost", flashback_cost)
+            context["use_alt_cost"] = "flashback"
         source_idx = context.get("source_idx")
         source_list = None
         card_in_source = False
@@ -1964,6 +2020,8 @@ class GameStateStackMixin:
         if source_zone == "graveyard" and context.get(
                 "graveyard_adventure_cast"):
              self._consume_graveyard_adventure_permission(player, card_id)
+        if source_zone == "graveyard" and context.get("flashback_cast"):
+             self.flashback_cards.add(card_id)
 
         # --- Prepare FINAL stack context ---
         final_stack_context = context.copy()
@@ -3159,8 +3217,11 @@ class GameStateStackMixin:
         was_cast_from_hand = context.get('source_zone') == 'hand' # Need source zone info
         has_rebound = "rebound" in getattr(spell,'oracle_text','').lower()
 
-        if context.get('cast_from_zone') == 'graveyard' and "flashback" in getattr(spell,'oracle_text','').lower():
+        if (context.get("flashback_cast")
+                or (context.get('source_zone') == 'graveyard'
+                    and context.get('use_alt_cost') == 'flashback')):
             final_zone = "exile"
+            self.flashback_cards.discard(spell_id)
         # --- Adventure (CR 715.3f, July 2026 sweep) ---
         # A spell cast as its Adventure half goes to EXILE, and the owner may
         # later cast the creature from exile. cast_as_adventure was set at

@@ -2326,11 +2326,16 @@ def load_decks_and_card_db(decks_folder, format_name=None, banned_names=None,
                 continue
                
             try:
-                with open(os.path.join(decks_folder, deck_file), 'r') as f:
+                with open(os.path.join(decks_folder, deck_file), 'r',
+                          encoding='utf-8') as f:
                     deck_data = json.load(f)
                     
-                    # Extract deck name from filename (removing .json extension)
-                    deck_name = os.path.splitext(deck_file)[0]
+                    # Hydrated corpora retain the human-readable archetype
+                    # name in the payload; legacy files fall back to their
+                    # filename for compatibility.
+                    deck_name = str(
+                        deck_data.get("name")
+                        or os.path.splitext(deck_file)[0])
                     
                     # Create a deck dictionary with name and cards
                     current_deck = {

@@ -377,7 +377,7 @@ def check_hyperparameter_eval_isolation():
         return 7.0, 0.0
 
     patched = {
-        "load_decks_and_card_db": lambda _path: ([], {}),
+        "load_decks_and_card_db": lambda _path, **_kwargs: ([], {}),
         "make_vec_env": fake_make_vec_env,
         "MaskablePPO": FakeMaskablePPO,
         "evaluate_policy": fake_evaluate_policy,
@@ -711,11 +711,11 @@ def check_format_corpus_lineage():
         any_card = next(iter(card_db.values()))
         assert len(any_card.to_feature_vector()) == schema["feature_dim"]
 
-        # Legacy loading (no flags) still works and records a null format.
-        _, _, _, legacy_lineage = m.load_training_corpus(None, None, None)
-        assert legacy_lineage["format"] is None
-        assert legacy_lineage["card_registry"] is None
-        assert legacy_lineage["corpus"]["sha256"] == lineage["corpus"]["sha256"]
+        # No flags use the same strict pinned Standard lineage.
+        _, _, _, default_lineage = m.load_training_corpus(None, None, None)
+        assert default_lineage["format"] == "standard"
+        assert default_lineage["card_registry"] == lineage["card_registry"]
+        assert default_lineage["corpus"]["sha256"] == lineage["corpus"]["sha256"]
     finally:
         Card.SUBTYPE_VOCAB = saved_vocab
 

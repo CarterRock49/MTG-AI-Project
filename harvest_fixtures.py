@@ -26,7 +26,9 @@ from typing import Iterable, Sequence
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_DECKS_DIRECTORY = PROJECT_ROOT / "Decks"
+DEFAULT_FORMAT_NAME = "standard"
+DEFAULT_FORMAT_DIRECTORY = PROJECT_ROOT / "formats" / DEFAULT_FORMAT_NAME
+DEFAULT_DECKS_DIRECTORY = DEFAULT_FORMAT_DIRECTORY / "decks"
 DEFAULT_OUTPUT_DIRECTORY = PROJECT_ROOT / "harvest_fixture_output"
 DEFAULT_GAMES = 8
 DEFAULT_SEED = 42
@@ -45,14 +47,14 @@ REQUIRED_GAME_FIELDS = {
 }
 
 EXPECTED_SAMPLE_DECKS = (
-    "DimirMidrange",
-    "DimirSelf",
-    "Domain",
-    "EsperSelf",
-    "GolgariMidrange",
-    "GruulAggro",
-    "GruulProwess",
-    "RedDeckWins",
+    "Selesnya Ouroboroid",
+    "Jeskai Lessons",
+    "Izzet Prowess",
+    "4c Control",
+    "Izzet Spellementals",
+    "Dimir Excruciator",
+    "Mono-Green Landfall",
+    "Azorius Momo",
 )
 
 
@@ -98,10 +100,10 @@ def _positive_int(value: str) -> int:
 
 
 def load_sample_decks(decks_directory: Path = DEFAULT_DECKS_DIRECTORY):
-    """Load and order the audited eight-deck fixture through the project loader."""
-    from Playersim.card import load_decks_and_card_db
-
-    decks, card_db = load_decks_and_card_db(str(decks_directory))
+    """Load and order the pinned representative Standard corpus."""
+    decks, card_db, _ = load_corpus_decks(
+        decks_directory, format_name=DEFAULT_FORMAT_NAME,
+        format_dir=DEFAULT_FORMAT_DIRECTORY)
     by_name = {deck.get("name"): deck for deck in decks}
     missing = [name for name in EXPECTED_SAMPLE_DECKS if name not in by_name]
     if missing:
@@ -874,9 +876,9 @@ def run_harvest(games: int, seed: int, output_directory: Path,
         reset_manifest_for_tests()
         if decks_directory is None and format_name is None \
                 and format_dir is None:
-            decks, card_db = load_sample_decks()
-            from Playersim import card_registry as registry_module
-            lineage = registry_module.format_lineage(DEFAULT_DECKS_DIRECTORY)
+            decks, card_db, lineage = load_corpus_decks(
+                DEFAULT_DECKS_DIRECTORY, format_name=DEFAULT_FORMAT_NAME,
+                format_dir=DEFAULT_FORMAT_DIRECTORY)
         else:
             decks, card_db, lineage = load_corpus_decks(
                 Path(decks_directory) if decks_directory is not None
@@ -1087,7 +1089,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--decks", type=Path, default=None,
-        help="deck corpus directory (default: the audited eight-deck fixture)",
+        help="deck corpus directory (default: formats/standard/decks)",
     )
     parser.add_argument(
         "--format", default=None,
