@@ -529,9 +529,14 @@ class ActivatedAbility(Ability):
             if len(controller.get("hand", [])) < self._word_to_number(count_word):
                 return False
 
-        life_match = re.search(r"pay\s+(\d+)\s+life", cost_lower)
-        if life_match and controller.get("life", 0) < int(life_match.group(1)):
-            return False
+        life_match = re.search(r"pay\s+(x|\d+)\s+life", cost_lower)
+        if life_match:
+            life_amount = (int(context.get(
+                'activation_X', context.get('X', 0)) or 0)
+                if life_match.group(1) == 'x'
+                else int(life_match.group(1)))
+            if controller.get("life", 0) < life_amount:
+                return False
 
         counter_match = re.search(
             r"remove\s+(?:(a|an|one|two|three|\d+)\s+)?"
@@ -551,14 +556,17 @@ class ActivatedAbility(Ability):
                 return False
             mana_cost = "".join(f"{{{symbol}}}" for symbol in mana_symbols)
             parsed_cost = game_state.mana_system.parse_mana_cost(mana_cost)
+            mana_context = dict(context)
+            if 'activation_X' in mana_context:
+                mana_context['X'] = mana_context['activation_X']
             return game_state.mana_system.can_pay_mana_cost(
-                controller, parsed_cost, context)
+                controller, parsed_cost, mana_context)
         return True
 
     def pay_cost(self, game_state, controller, sacrifice_choices=None,
-                 source_occurrence=None):
+                 source_occurrence=None, context=None):
         """Pay the activation cost of this ability with comprehensive cost handling."""
-        preflight_context = {}
+        preflight_context = dict(context or {})
         if sacrifice_choices is not None:
             choices = list(sacrifice_choices)
             if all(self._as_sacrifice_occurrence(choice) is not None
@@ -665,9 +673,12 @@ class ActivatedAbility(Ability):
              logging.debug(f"Paid discard cost ({count} cards{' randomly' if is_random else ''}).")
 
         # Pay Life Cost - Use cost_lower for regex
-        life_match = re.search(r"pay\s+(\d+)\s+life", cost_lower)
+        life_match = re.search(r"pay\s+(x|\d+)\s+life", cost_lower)
         if life_match:
-             amount = int(life_match.group(1))
+             amount = (int(preflight_context.get(
+                 'activation_X', preflight_context.get('X', 0)) or 0)
+                 if life_match.group(1) == 'x'
+                 else int(life_match.group(1)))
              if controller["life"] < amount: # Rule: Can pay life even if it brings you to 0 or less. Only prevent if already 0 or less? Re-check 119.4. Need > 0 to pay.
                   # Corrected: Cannot pay if life is less than cost, unless an effect allows paying with life you don't have (very rare). Rule 119.4
                   logging.debug(f"Cannot pay life cost {amount}: Only have {controller['life']} life.")
@@ -724,10 +735,15 @@ class ActivatedAbility(Ability):
                 mana_cost_str = "".join(f"{{{s}}}" for s in mana_symbols) # Reconstruct from found symbols only
                 if mana_cost_str: # Ensure non-empty mana cost string
                     parsed_cost = game_state.mana_system.parse_mana_cost(mana_cost_str)
-                    can_pay_mana = game_state.mana_system.can_pay_mana_cost(controller, parsed_cost)
+                    mana_context = dict(preflight_context)
+                    if 'activation_X' in mana_context:
+                        mana_context['X'] = mana_context['activation_X']
+                    can_pay_mana = game_state.mana_system.can_pay_mana_cost(
+                        controller, parsed_cost, mana_context)
                     if can_pay_mana:
                         # --- PAY MANA ---
-                        paid_mana_details = game_state.mana_system.pay_mana_cost_get_details(controller, parsed_cost)
+                        paid_mana_details = game_state.mana_system.pay_mana_cost_get_details(
+                            controller, parsed_cost, mana_context)
                         if paid_mana_details:
                             mana_cost_paid = True
                             rollback_steps.append(("refund_mana", paid_mana_details))
@@ -1198,6 +1214,9 @@ class TriggeredAbility(Ability):
             "MUTATES": [
                 r"when(ever)?\s+.*mutates?"
             ],
+            "DISCOVER": [
+                r"when(ever)?\s+.*\bdiscover(?:s|ed)?\b"
+            ],
             "UNTAPPED": [
                 r"when(ever)?\s+.*becomes? untapped",
                 r"when(ever)?\s+.*untaps?"
@@ -1235,7 +1254,8 @@ class TriggeredAbility(Ability):
             if event_type == "DIES":
                 context = context or {}
                 controlled_creature = re.search(
-                    r"\b(a|another)\s+(nonland\s+)?creature you control dies\b",
+                    r"\b(a|another)\s+(?:(nonland|nontoken)\s+)?"
+                    r"creature you control dies\b",
                     self.trigger_condition, re.IGNORECASE)
                 if controlled_creature:
                     last_known = context.get("last_known") or {}
@@ -1249,7 +1269,11 @@ class TriggeredAbility(Ability):
                     if (not last_known.get("was_creature", False)
                             and "creature" not in card_types):
                         return False
-                    if controlled_creature.group(2) and "land" in card_types:
+                    if (controlled_creature.group(2) == 'nonland'
+                            and "land" in card_types):
+                        return False
+                    if (controlled_creature.group(2) == 'nontoken'
+                            and last_known.get('is_token', False)):
                         return False
                     controller_key = (
                         "p1" if controller is game_state.p1
@@ -1285,6 +1309,25 @@ class TriggeredAbility(Ability):
                     event_types = {str(t).lower() for t in getattr(context.get('event_card'), 'card_types', [])}
                     if ('enchantment' not in event_types
                             or context.get('event_controller', context.get('controller')) is not context.get('controller')):
+                        return False
+                controlled_entry = re.search(
+                    r"\b(another\s+)?(nontoken\s+)?creature you control "
+                    r"enters\b", self.trigger_condition, re.IGNORECASE)
+                if controlled_entry:
+                    event_card = context.get('event_card')
+                    event_types = {
+                        str(card_type).lower() for card_type in getattr(
+                            event_card, 'card_types', [])}
+                    if ('creature' not in event_types
+                            or context.get('event_controller',
+                                           context.get('controller')) is not
+                            context.get('controller')):
+                        return False
+                    if (controlled_entry.group(1)
+                            and source_card_id == event_card_id):
+                        return False
+                    if (controlled_entry.group(2)
+                            and bool(getattr(event_card, 'is_token', False))):
                         return False
             if event_type == "LEAVE_GRAVEYARD":
                 context = context or {}
@@ -1363,6 +1406,13 @@ class TriggeredAbility(Ability):
                     if (not cast_card
                             or mana_value < int(mana_value_match.group(1))):
                         return False
+            if event_type == "DISCOVER":
+                context = context or {}
+                if (re.search(r"\byou discover\b", self.trigger_condition,
+                              re.IGNORECASE)
+                        and context.get("discovering_player") is not
+                        context.get("controller")):
+                    return False
             if event_type == "BECOMES_TARGET":
                 context = context or {}
                 target_id = context.get("target_id", context.get("event_card_id"))
@@ -3967,12 +4017,55 @@ class ConniveEffect(AbilityEffect):
 
 
 class DiscoverEffect(AbilityEffect):
-    """Discover a fixed value with a cast-or-hand policy decision."""
+    """Discover a fixed or resolution-derived value."""
 
     def __init__(self, value, condition=None):
-        self.value = int(value)
+        self.value = (int(value) if isinstance(value, int)
+                      or str(value).isdigit() else str(value).lower())
         super().__init__(f"Discover {self.value}", condition)
         self.requires_target = False
+
+    def _spell_mana_value(self, game_state, card_id):
+        card = game_state._safe_get_card(card_id)
+        if not card:
+            return 0
+        value = int(float(getattr(card, 'cmc', 0) or 0))
+        for item in game_state.stack:
+            if (isinstance(item, tuple) and len(item) >= 4
+                    and item[0] == 'SPELL' and item[1] == card_id):
+                context = item[3] or {}
+                x_symbols = len(re.findall(
+                    r'\{X\}', str(getattr(card, 'mana_cost', '') or ''),
+                    re.IGNORECASE))
+                value += max(0, int(context.get('X', 0) or 0)) * x_symbols
+                break
+        return value
+
+    def _resolve_value(self, game_state, targets):
+        if isinstance(self.value, int):
+            return self.value
+        context = getattr(self, 'resolution_context', {}) or {}
+        if self.value == 'same':
+            return max(0, int(context.get('discover_value', 0) or 0))
+        if self.value == 'spell_mana_value':
+            target_ids = []
+            if isinstance(targets, dict):
+                for key in ('spells', 'chosen', 'targets'):
+                    target_ids.extend(targets.get(key, []))
+            card_id = next(iter(target_ids), None)
+            if card_id is None:
+                card_id = context.get('cast_card_id', context.get('event_card_id'))
+            return self._spell_mana_value(game_state, card_id)
+        return max(0, int((targets or {}).get(
+            'X', context.get('X', 0)) or 0))
+
+    @staticmethod
+    def finish_discover(game_state, source_id, controller, value):
+        game_state.trigger_ability(source_id, 'DISCOVER', {
+            'discovering_player': controller,
+            'discover_value': int(value),
+            'source_id': source_id,
+        })
 
     @staticmethod
     def put_rest_on_bottom(game_state, controller, card_ids):
@@ -3985,6 +4078,7 @@ class DiscoverEffect(AbilityEffect):
                     cause='discover_bottom')
 
     def _apply_effect(self, game_state, source_id, controller, targets):
+        value = self._resolve_value(game_state, targets)
         revealed = []
         discovered = None
         while controller.get('library', []):
@@ -3995,18 +4089,20 @@ class DiscoverEffect(AbilityEffect):
                     cause='discover'):
                 break
             if (card and 'land' not in getattr(card, 'card_types', [])
-                    and float(getattr(card, 'cmc', 0) or 0) <= self.value):
+                    and float(getattr(card, 'cmc', 0) or 0) <= value):
                 discovered = card_id
                 break
             revealed.append(card_id)
         if discovered is None:
             self.put_rest_on_bottom(game_state, controller, revealed)
+            self.finish_discover(game_state, source_id, controller, value)
             return True
         game_state.choice_context = {
             'type': 'resolution_choice', 'choice_kind': 'discover',
             'player': controller, 'options': [discovered], 'optional': True,
             'source_id': source_id, 'discover_card_id': discovered,
             'discover_rest': revealed,
+            'discover_value': value,
             'resume_phase': game_state.PHASE_PRIORITY,
         }
         game_state.phase = game_state.PHASE_CHOOSE
@@ -4111,10 +4207,32 @@ class TransferSuspectEffect(AbilityEffect):
 
 class InvestigateEffect(AbilityEffect):
     def __init__(self, count=1, condition=None):
-        self.count = max(1, int(count))
+        self.count = (max(1, int(count)) if str(count).isdigit()
+                      else str(count).lower())
         super().__init__(
             "Investigate" if self.count == 1
             else f"Investigate {self.count} times", condition)
+
+    def _resolve_count(self, game_state, controller, targets):
+        if isinstance(self.count, int):
+            return self.count
+        if self.count == 'opponents_more_cards':
+            return sum(
+                1 for player in (game_state.p1, game_state.p2)
+                if player is not controller
+                and len(player.get('hand', [])) > len(controller.get('hand', [])))
+        if self.count == 'target_players_creatures':
+            player_ids = (targets or {}).get('players', [])
+            players = [game_state.p1 if pid == 'p1' else game_state.p2
+                       for pid in player_ids]
+            return sum(
+                1 for player in players
+                for card_id in player.get('battlefield', [])
+                if 'creature' in getattr(
+                    game_state._safe_get_card(card_id), 'card_types', []))
+        context = getattr(self, 'resolution_context', {}) or {}
+        return max(0, int((targets or {}).get(
+            'X', context.get('X', 0)) or 0))
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         token_data = game_state.get_token_data_by_index(4) or {
@@ -4123,7 +4241,8 @@ class InvestigateEffect(AbilityEffect):
             "oracle_text": "{2}, Sacrifice this artifact: Draw a card.",
         }
         created = [game_state.create_token(controller, token_data)
-                   for _ in range(self.count)]
+                   for _ in range(self._resolve_count(
+                       game_state, controller, targets))]
         return all(card_id is not None for card_id in created)
 
 
@@ -4169,9 +4288,18 @@ class GoadEffect(AbilityEffect):
 class ExploreEffect(AbilityEffect):
     """Have the selected creature explore, deferring its nonland choice."""
 
-    def __init__(self, condition=None):
+    def __init__(self, count=1, condition=None):
         super().__init__("Target creature you control explores", condition)
+        self.count = (max(1, int(count)) if str(count).isdigit()
+                      else str(count).lower())
         self.requires_target = True
+
+    def _resolve_count(self, targets):
+        if isinstance(self.count, int):
+            return self.count
+        context = getattr(self, 'resolution_context', {}) or {}
+        return max(0, int((targets or {}).get(
+            'X', context.get('X', 0)) or 0))
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         candidates = []
@@ -4185,9 +4313,106 @@ class ExploreEffect(AbilityEffect):
             target = game_state._safe_get_card(creature_id)
             if (target_controller is controller and target_zone == "battlefield"
                     and target and "creature" in getattr(target, "card_types", [])):
-                return game_state.explore(
-                    controller, creature_id, source_id=source_id)
+                count = self._resolve_count(targets)
+                for index in range(count):
+                    active_choice = getattr(game_state, 'choice_context', None)
+                    if (active_choice and active_choice.get('type') in
+                            getattr(game_state, '_ASYNC_EFFECT_CHOICE_TYPES', ())):
+                        for _ in range(index, count):
+                            ExploreEffect().apply(
+                                game_state, source_id, controller,
+                                {'creatures': [creature_id]},
+                                context=getattr(
+                                    self, 'resolution_context', {}))
+                        return True
+                    if not game_state.explore(
+                            controller, creature_id, source_id=source_id):
+                        return False
+                return True
         return False
+
+
+class EndureEffect(AbilityEffect):
+    """Choose counters on the enduring creature or an equally sized Spirit."""
+
+    def __init__(self, value, subject_event=False,
+                 value_from_source_counters=False, condition=None):
+        self.value = (int(value) if str(value).isdigit()
+                      else str(value).lower())
+        self.subject_event = bool(subject_event)
+        self.value_from_source_counters = bool(value_from_source_counters)
+        super().__init__(f"This creature endures {self.value}", condition)
+        self.requires_target = False
+
+    def _resolve_value(self, game_state, source_id, targets):
+        if isinstance(self.value, int):
+            return self.value
+        if self.value_from_source_counters:
+            source = game_state._safe_get_card(source_id)
+            return sum(int(value or 0) for value in getattr(
+                source, 'counters', {}).values()) if source else 0
+        context = getattr(self, 'resolution_context', {}) or {}
+        return max(0, int((targets or {}).get(
+            'X', context.get('X', 0)) or 0))
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        context = getattr(self, 'resolution_context', {}) or {}
+        creature_id = (context.get('event_card_id')
+                       if self.subject_event else source_id)
+        creature_controller, zone = game_state.find_card_location(creature_id)
+        creature = game_state._safe_get_card(creature_id)
+        if (creature_controller is not controller or zone != 'battlefield'
+                or not creature
+                or 'creature' not in getattr(creature, 'card_types', [])):
+            return False
+        game_state.choice_context = {
+            'type': 'resolution_choice', 'choice_kind': 'endure',
+            'player': controller, 'options': ['counters', 'spirit'],
+            'optional': False, 'source_id': source_id,
+            'endure_creature_id': creature_id,
+            'endure_value': self._resolve_value(
+                game_state, source_id, targets),
+            'resume_phase': game_state.PHASE_PRIORITY,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = controller
+        return True
+
+
+class OptionalManaThenEffect(AbilityEffect):
+    """Expose 'you may pay {cost}; if you do, ...' during resolution."""
+
+    def __init__(self, mana_cost, followup_text, condition=None):
+        self.mana_cost = str(mana_cost).strip()
+        self.followup_text = str(followup_text).strip()
+        super().__init__(
+            f"You may pay {self.mana_cost}. If you do, {self.followup_text}",
+            condition)
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        parsed_cost = game_state.mana_system.parse_mana_cost(self.mana_cost)
+        payment_context = {
+            'card_id': source_id,
+            'optional_resolution_payment': True,
+        }
+        if not game_state.mana_system.can_pay_mana_cost_with_lands(
+                controller, parsed_cost, payment_context):
+            return True
+        game_state.choice_context = {
+            'type': 'resolution_choice',
+            'choice_kind': 'optional_mana_then',
+            'player': controller, 'options': ['pay'], 'optional': True,
+            'source_id': source_id, 'mana_cost': self.mana_cost,
+            'followup_text': self.followup_text,
+            'targets': copy.deepcopy(targets),
+            'resolution_context': copy.deepcopy(
+                getattr(self, 'resolution_context', {}) or {}),
+            'resume_phase': game_state.PHASE_PRIORITY,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = controller
+        return True
 
 
 class ShufflePermanentsIntoOwnersLibrariesEffect(AbilityEffect):

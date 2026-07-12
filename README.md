@@ -196,15 +196,19 @@ python -m Playersim.support_preflight --snapshot "Format Card Lists/standard.jso
 ```
 
 Current Standard preflight (July 12, 2026): 68 verified, 89
-observed-clean, 3,552 unseen-clean, 810 partial, and 183 unparsed cards across
-the 4,702-card pool. That is 78.8813270949% static-clean coverage and
+observed-clean, 3,565 unseen-clean, 809 partial, and 171 unparsed cards across
+the 4,702-card pool. That is 79.1578051893% static-clean coverage and
 3.3390046789% evidence-qualified coverage. The representative metagame has no
 `unparsed` or `crash` cards and two acknowledged `partial` multi-face entries:
 Emeritus of Ideation and Esper Origins. Its Warp, linked-search, temporary-rule,
 outside-game, Crew, and zone-transaction paths are executable and scenario-
 guarded. Generic Equip/Crew, fixed Discover, Connive, Suspect, Explore,
 Investigate, and nonland-permanent Airbend support account for the latest
-full-pool sweep; compound and dynamic variants remain conservatively partial.
+full-pool sweep. Spell-mana-value Discover, repeated Explore, common dynamic
+Investigate counts, and Endure are also executable. Optional resolution mana
+payments and paginated spell/activated X choices now share the fixed action schema;
+unsupported nonmana payment gates and other compound/dynamic variants remain
+conservatively partial.
 
 ```bash
 python main.py --timesteps 1000000 --learning-rate 3e-4 --batch-size 256 --seed 20260710

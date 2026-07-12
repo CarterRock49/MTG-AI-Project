@@ -4312,6 +4312,37 @@ def s_x_spell_choice_payment_and_resolution():
     assert len(player["library"]) == library_before - 2, "X=2 did not draw exactly two cards"
 
 
+@scenario("107.3 / policy pagination", "affordable X values above ten remain policy-accessible")
+def s_large_x_choice_paginates():
+    gs = fresh(SEED + 169)
+    player = gs.p1 if gs.agent_is_p1 else gs.p2
+    gs.turn = 1 if player is gs.p1 else 2
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    spell = inject_into_zone(gs, player, {
+        'name': 'Large X Probe', 'mana_cost': '{X}{U}', 'cmc': 1,
+        'type_line': 'Sorcery', 'oracle_text': 'Draw X cards.'}, 'hand')
+    player['mana_pool'] = {
+        'W': 0, 'U': 1, 'B': 0, 'R': 0, 'G': 0, 'C': 12}
+
+    assert gs.cast_spell(spell, player)
+    assert gs.choice_context.get('max_x') == 12
+    assert gs.choice_context.get('affordable_values') == list(range(13))
+    mask = get_env().action_handler.generate_valid_actions()
+    assert all(mask[index] for index in range(363, 373))
+    assert mask[479], 'large X did not expose the shared next-page action'
+    assert get_env().action_handler._handle_target_page_next(
+        context={'page_count': 2})[1]
+    assert gs.choice_context.get('choice_page') == 1
+    mask = get_env().action_handler.generate_valid_actions()
+    assert mask[363] and mask[364] and not mask[365]
+    reward, ok = get_env().action_handler._handle_choose_x(
+        1, {'x_value': 11})
+    assert ok, f'choosing paged X=11 failed with reward {reward}'
+    assert gs.stack and gs.stack[-1][3].get('X') == 11
+    assert sum(player['mana_pool'].values()) == 1
+
+
 @scenario("107.3b", "X=0 is selectable and does not become a placeholder one")
 def s_x_zero_and_fixed_number_resolution():
     gs = fresh()
@@ -13632,7 +13663,8 @@ def scenario_keyword_family_coverage_sweep():
         'Investigate X times, where X is the number of creatures you control.')
     dynamic_explore = EffectFactory.create_effects('It explores X times.')
     assert type(dynamic_investigate[0]).__name__ == 'AbilityEffect'
-    assert type(dynamic_explore[0]).__name__ == 'AbilityEffect'
+    assert type(dynamic_explore[0]).__name__ == 'ExploreEffect'
+    assert dynamic_explore[0].count == 'x'
 
     artifact = inject_into_zone(gs, opponent, {
         'name': 'Airbend Artifact Sweep', 'mana_cost': '{4}', 'cmc': 4,
@@ -13646,6 +13678,230 @@ def scenario_keyword_family_coverage_sweep():
         'Airbend target nonland permanent. Draw a card.')
     assert [type(effect).__name__ for effect in lesson_effects] == [
         'AirbendEffect', 'DrawCardEffect']
+
+
+@scenario("701.40 / 701.49 / 701.55", "dynamic Explore, Investigate, and Discover values survive policy choices and chained triggers")
+def scenario_dynamic_keyword_values_and_discover_chain():
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 167)
+    handler = get_env().action_handler
+    player, opponent = gs.p1, gs.p2
+    gs.agent_is_p1 = True
+
+    explorer = inject_into_zone(gs, player, {
+        'name': 'Dynamic Explorer', 'mana_cost': '{X}{G}', 'cmc': 1,
+        'type_line': 'Creature - Scout', 'oracle_text': '',
+        'power': 1, 'toughness': 1}, 'battlefield')
+    player['library'] = []
+    nonland = inject_into_zone(gs, player, {
+        'name': 'Explore Dynamic Nonland', 'mana_cost': '{1}', 'cmc': 1,
+        'type_line': 'Sorcery', 'oracle_text': ''}, 'library')
+    explored_land = inject_into_zone(gs, player, {
+        'name': 'Explore Dynamic Land', 'mana_cost': '', 'cmc': 0,
+        'type_line': 'Land', 'oracle_text': ''}, 'library')
+    explore_x = EffectFactory.create_effects('It explores X times.')[0]
+    assert explore_x.apply(gs, explorer, player, {}, context={'X': 2})
+    assert gs.choice_context.get('type') == 'explore'
+    assert handler._handle_scry_surveil_choice(
+        None, {}, action_index=305)[1]
+    assert nonland in player['graveyard']
+    assert explored_land in player['hand']
+    assert gs._safe_get_card(explorer).counters.get('+1/+1') == 1
+
+    opponent_extra = inject_into_zone(gs, opponent, {
+        'name': 'Investigation Hand Probe', 'mana_cost': '{1}', 'cmc': 1,
+        'type_line': 'Instant', 'oracle_text': ''}, 'hand')
+    assert opponent_extra in opponent['hand']
+    while len(opponent['hand']) <= len(player['hand']):
+        opponent['hand'].append(opponent_extra)
+    before_clues = len(player['battlefield'])
+    investigate_dynamic = EffectFactory.create_effects(
+        'Investigate once for each opponent who has more cards in hand than you.')[0]
+    assert investigate_dynamic.apply(gs, None, player, {})
+    assert len(player['battlefield']) == before_clues + 1
+    for index in range(2):
+        inject_into_zone(gs, opponent, {
+            'name': f'Investigated Creature {index}', 'mana_cost': '{1}',
+            'cmc': 1, 'type_line': 'Creature - Citizen', 'oracle_text': '',
+            'power': 1, 'toughness': 1}, 'battlefield')
+    before_target_clues = len(player['battlefield'])
+    target_investigate = EffectFactory.create_effects(
+        'Investigate X times, where X is the total number of creatures those '
+        'players control.')[0]
+    assert target_investigate.apply(
+        gs, None, player, {'players': ['p2']})
+    assert len(player['battlefield']) == before_target_clues + 2
+
+    curator = inject_into_zone(gs, player, {
+        'name': "Curator of Sun's Creation", 'mana_cost': '{3}{R}', 'cmc': 4,
+        'type_line': 'Creature - Human Artificer',
+        'oracle_text': ('Whenever you discover, discover again for the same '
+                        'value. This ability triggers only once each turn.'),
+        'power': 3, 'toughness': 3}, 'battlefield')
+    target_spell = inject_card(gs, {
+        'name': 'Countered Mana-Value Probe', 'mana_cost': '{X}{U}', 'cmc': 1,
+        'type_line': 'Instant', 'oracle_text': ''})
+    gs.stack.append(('SPELL', target_spell, opponent, {'X': 3}))
+    player['library'] = []
+    first_hit = inject_into_zone(gs, player, {
+        'name': 'First Dynamic Discover Hit', 'mana_cost': '{2}{G}', 'cmc': 3,
+        'type_line': 'Creature - Beast', 'oracle_text': '',
+        'power': 3, 'toughness': 3}, 'library')
+    second_hit = inject_into_zone(gs, player, {
+        'name': 'Repeated Discover Hit', 'mana_cost': '{3}{R}', 'cmc': 4,
+        'type_line': 'Sorcery', 'oracle_text': ''}, 'library')
+    discover_x = EffectFactory.create_effects(
+        "Discover X, where X is that spell's mana value.")[0]
+    assert discover_x.apply(
+        gs, explorer, player, {'spells': [target_spell]})
+    assert gs.choice_context.get('discover_value') == 4
+    assert handler._handle_pass_priority(None)[1]
+    assert first_hit in player['hand']
+    assert any(entry[0].card_id == curator
+               for entry in gs.ability_handler.active_triggers)
+    gs.ability_handler.process_triggered_abilities()
+    assert gs.resolve_top_of_stack()
+    assert gs.choice_context.get('choice_kind') == 'discover'
+    assert gs.choice_context.get('discover_value') == 4
+    assert handler._handle_pass_priority(None)[1]
+    assert second_hit in player['hand']
+    assert not any(entry[0].card_id == curator
+                   for entry in gs.ability_handler.active_triggers)
+
+
+@scenario("701.Endure", "Endure exposes both outcomes and resolves fixed or counter-derived values")
+def scenario_endure_policy_and_dynamic_value():
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 168)
+    handler = get_env().action_handler
+    player = gs.p1
+    gs.agent_is_p1 = True
+    enduring = inject_into_zone(gs, player, {
+        'name': 'Endure Sweep', 'mana_cost': '{3}{G}', 'cmc': 4,
+        'type_line': 'Creature - Soldier', 'oracle_text': '',
+        'power': 2, 'toughness': 2}, 'battlefield')
+
+    endure_two = EffectFactory.create_effects('This creature endures 2.')[0]
+    assert endure_two.apply(gs, enduring, player, {})
+    assert gs.choice_context.get('options') == ['counters', 'spirit']
+    assert handler._handle_choose_mode(0, {})[1]
+    assert gs._safe_get_card(enduring).counters.get('+1/+1') == 2
+
+    before_tokens = len(player['battlefield'])
+    assert endure_two.apply(gs, enduring, player, {})
+    assert handler._handle_choose_mode(1, {})[1]
+    spirits = [card_id for card_id in player['battlefield'][before_tokens:]
+               if getattr(gs._safe_get_card(card_id), 'name', '') == 'Spirit']
+    assert len(spirits) == 1
+    spirit = gs._safe_get_card(spirits[0])
+    assert spirit.power == 2 and spirit.toughness == 2
+
+    life_before = player['life']
+    compound = EffectFactory.create_effects(
+        'You lose 1 life and this creature endures 1.')
+    assert [type(effect).__name__ for effect in compound] == [
+        'LoseLifeEffect', 'EndureEffect']
+    success, pending = gs._run_effect_sequence(
+        compound, enduring, player, {})
+    assert success and pending and player['life'] == life_before - 1
+    assert handler._handle_choose_mode(0, {})[1]
+
+    player['mana_pool'] = {
+        'W': 1, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 1}
+    optional_endure = EffectFactory.create_effects(
+        'You may pay {1}{W}. If you do, this creature endures 1.')[0]
+    assert type(optional_endure).__name__ == 'OptionalManaThenEffect'
+    assert optional_endure.apply(gs, enduring, player, {})
+    assert gs.choice_context.get('choice_kind') == 'optional_mana_then'
+    assert handler._handle_choose_mode(0, {})[1]
+    assert sum(player['mana_pool'].values()) == 0
+    assert gs.choice_context.get('choice_kind') == 'endure'
+    counters_before_optional = gs._safe_get_card(
+        enduring).counters.get('+1/+1', 0)
+    assert handler._handle_choose_mode(0, {})[1]
+    assert gs._safe_get_card(enduring).counters.get('+1/+1') \
+        == counters_before_optional + 1
+
+    player['mana_pool'] = {
+        'W': 1, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 1}
+    counters_before_decline = gs._safe_get_card(
+        enduring).counters.get('+1/+1', 0)
+    assert optional_endure.apply(gs, enduring, player, {})
+    assert handler._handle_pass_priority(None)[1]
+    assert sum(player['mana_pool'].values()) == 2
+    assert gs._safe_get_card(enduring).counters.get('+1/+1') \
+        == counters_before_decline
+
+    warden = inject_into_zone(gs, player, {
+        'name': 'Warden Counter Source', 'mana_cost': '{2}{G}', 'cmc': 3,
+        'type_line': 'Creature - Hydra',
+        'oracle_text': ('Whenever another nontoken creature you control enters, '
+                        'it endures X, where X is the number of counters on '
+                        'this creature.'),
+        'power': 2, 'toughness': 2}, 'battlefield')
+    assert gs.add_counter(warden, '+1/+1', 3)
+    gs.ability_handler.active_triggers.clear()
+    assert gs.create_token(player, {
+        'name': 'Token Entry Probe', 'type_line': 'Token Creature - Spirit',
+        'card_types': ['creature'], 'subtypes': ['Spirit'],
+        'power': 1, 'toughness': 1, 'is_token': True}) is not None
+    assert not gs.ability_handler.active_triggers
+    entrant = inject_into_zone(gs, player, {
+        'name': 'Endure Event Subject', 'mana_cost': '{1}{G}', 'cmc': 2,
+        'type_line': 'Creature - Elf', 'oracle_text': '',
+        'power': 2, 'toughness': 2}, 'battlefield')
+    assert any(entry[0].card_id == warden
+               for entry in gs.ability_handler.active_triggers)
+    gs.ability_handler.process_triggered_abilities()
+    assert gs.resolve_top_of_stack()
+    assert gs.choice_context.get('endure_value') == 3
+    assert handler._handle_choose_mode(0, {})[1]
+    assert gs._safe_get_card(entrant).counters.get('+1/+1') == 3
+
+
+@scenario("602.2b / 107.3 / Endure", "activated X announces once and pays matching mana and life before resolving")
+def scenario_activated_x_mana_and_life_transaction():
+    gs = fresh(SEED + 170)
+    handler = get_env().action_handler
+    player = gs.p1
+    gs.agent_is_p1 = True
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    krumar = inject_into_zone(gs, player, {
+        'name': 'Krumar Initiate', 'mana_cost': '{1}{B}', 'cmc': 2,
+        'type_line': 'Creature - Orc Warrior',
+        'oracle_text': ('{X}{B}, {T}, Pay X life: This creature endures X. '
+                        'Activate only as a sorcery.'),
+        'power': 2, 'toughness': 2}, 'battlefield')
+    player['entered_battlefield_this_turn'].discard(krumar)
+    player['mana_pool'] = {
+        'W': 0, 'U': 0, 'B': 1, 'R': 0, 'G': 0, 'C': 12}
+    battlefield_idx = player['battlefield'].index(krumar)
+    abilities = gs.ability_handler.get_activated_abilities(krumar)
+    assert len(abilities) == 1
+
+    reward, ok = handler._handle_activate_ability(None, {
+        'battlefield_idx': battlefield_idx, 'ability_idx': 0,
+        'controller_id': 'p1'})
+    assert ok, f'activated X staging failed with reward {reward}'
+    assert gs.choice_context.get('type') == 'choose_x'
+    assert gs.choice_context.get('max_x') == 12
+    assert handler._handle_target_page_next(
+        context={'page_count': 2})[1]
+    life_before = player['life']
+    reward, ok = handler._handle_choose_x(1, {'x_value': 11})
+    assert ok, f'activated X=11 failed with reward {reward}'
+    assert krumar in player['tapped_permanents']
+    assert player['life'] == life_before - 11
+    assert sum(player['mana_pool'].values()) == 1
+    assert gs.stack and gs.stack[-1][3].get('X') == 11
+
+    assert gs.resolve_top_of_stack()
+    assert gs.choice_context.get('choice_kind') == 'endure'
+    assert gs.choice_context.get('endure_value') == 11
+    assert handler._handle_choose_mode(0, {})[1]
+    assert gs._safe_get_card(krumar).counters.get('+1/+1') == 11
 
 
 # ---------------------------------------------------------------------------

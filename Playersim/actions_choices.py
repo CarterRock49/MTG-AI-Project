@@ -116,13 +116,17 @@ class ChoiceHandlersMixin:
                     'sacrifice_effect', 'activation_sacrifice_cost',
                     'dig_select', 'distribute_counters', 'discard',
                     'specialize_discard', 'forced_sacrifice',
-                    'resolution_choice', 'connive_discard')):
+                    'resolution_choice', 'connive_discard', 'choose_x')):
             choice_options = choice.get('options', [])
             if choice.get('type') in (
                     'discard', 'specialize_discard', 'connive_discard'):
                 choice_options = choice.get('player', {}).get('hand', [])
             elif choice.get('type') == 'forced_sacrifice':
                 choice_options = choice.get('player', {}).get('battlefield', [])
+            elif choice.get('type') == 'choose_x':
+                choice_options = [
+                    value for value in choice.get('affordable_values', [])
+                    if value > 0]
             page_count = max(
                 1, int(requested_page_count)
                 if requested_page_count is not None
@@ -662,13 +666,53 @@ class ChoiceHandlersMixin:
             "activation_source_occurrence": ability_source_occurrence,
         }
         cost_context.update(context)
-        
-        # Verify costs can be paid
         cost_str = getattr(ability, 'cost', None)
         if not cost_str:
             logging.error(f"Ability for {card.name} missing 'cost' attribute")
             return -0.15, False
+
+        # Announce X before any activation cost is paid. The same paginated
+        # chooser used by spells carries the absolute value back into this
+        # staged activation transaction.
+        has_activation_x = bool(
+            re.search(r'\{X\}', cost_str or '', re.IGNORECASE)
+            or re.search(r'pay\s+X\s+life', cost_str or '', re.IGNORECASE))
+        if has_activation_x and 'activation_X' not in context:
+            affordable_values = []
+            x_value = 0
+            while x_value <= 1000:
+                candidate_context = dict(cost_context)
+                candidate_context['activation_X'] = x_value
+                candidate_context['X'] = x_value
+                if ability.can_pay_cost(gs, player, candidate_context):
+                    affordable_values.append(x_value)
+                    x_value += 1
+                    continue
+                break
+            if not affordable_values:
+                return -0.05, False
+            activation_context = dict(context)
+            activation_context.update({
+                'battlefield_idx': bf_idx, 'ability_idx': ability_idx,
+                'controller_id': 'p1' if player is gs.p1 else 'p2',
+                'activation_source_occurrence': ability_source_occurrence,
+            })
+            gs.choice_context = {
+                'type': 'choose_x', 'player': player, 'controller': player,
+                'source_id': card_id,
+                'min_x': min(affordable_values),
+                'max_x': max(affordable_values),
+                'affordable_values': affordable_values,
+                'choice_page': 0,
+                'activation_context': activation_context,
+                'resume_phase': gs.phase,
+            }
+            gs.phase = gs.PHASE_CHOOSE
+            gs.priority_player = player
+            gs.priority_pass_count = 0
+            return 0.02, True
         
+        # Verify costs can be paid
         can_pay = ability.can_pay_cost(gs, player, cost_context)
         
         if not can_pay:
@@ -743,7 +787,8 @@ class ChoiceHandlersMixin:
         # life, counter, and mana components together.
         costs_paid = ability.pay_cost(
             gs, player, sacrifice_choices=staged_choices,
-            source_occurrence=ability_source_occurrence)
+            source_occurrence=ability_source_occurrence,
+            context=cost_context)
         
         if not costs_paid:
             logging.warning(f"Failed to pay cost for {card.name} ability {ability_idx}")
@@ -794,6 +839,7 @@ class ChoiceHandlersMixin:
             "is_exhaust": is_exhaust,
             "targets": activation_targets or {},
             "crew_cost_paid": bool(context.get('crew_cost_paid')),
+            "X": int(context.get('activation_X', 0) or 0),
         }
         gs.add_to_stack("ABILITY", card_id, player, stack_context)
         if context.get("commit_activation_targets"):
@@ -1667,10 +1713,66 @@ class ChoiceHandlersMixin:
                 if not success and discovered in player.get('exile', []):
                     gs.move_card(discovered, player, 'exile', player, 'hand',
                                  cause='discover_hand')
+                DiscoverEffect.finish_discover(
+                    gs, ctx.get('source_id'), player,
+                    ctx.get('discover_value', 0))
                 # A failed optional cast falls back to the rules-defined hand
                 # destination without turning an accepted choice into a
                 # state-mutating invalid action.
                 return (0.05 if success else 0.0), True
+            elif kind == 'endure':
+                creature_id = ctx.get('endure_creature_id')
+                value = max(0, int(ctx.get('endure_value', 0) or 0))
+                if option == 'counters':
+                    if value and not gs.add_counter(
+                            creature_id, '+1/+1', value):
+                        return -0.1, False
+                elif option == 'spirit':
+                    token_data = {
+                        'name': 'Spirit',
+                        'type_line': 'Token Creature - Spirit',
+                        'card_types': ['creature'], 'subtypes': ['Spirit'],
+                        'colors': [1, 0, 0, 0, 0],
+                        'power': value, 'toughness': value,
+                        'oracle_text': '', 'is_token': True,
+                    }
+                    if gs.create_token(player, token_data) is None:
+                        return -0.1, False
+                else:
+                    return -0.1, False
+            elif kind == 'optional_mana_then':
+                from .ability_utils import EffectFactory
+                source_id = ctx.get('source_id')
+                cost = gs.mana_system.parse_mana_cost(ctx.get('mana_cost', ''))
+                payment_context = {
+                    'card_id': source_id,
+                    'optional_resolution_payment': True,
+                }
+                if not gs.mana_system.pay_mana_cost(
+                        player, cost, payment_context):
+                    return -0.1, False
+                source = gs._safe_get_card(source_id)
+                followup = EffectFactory.create_effects(
+                    ctx.get('followup_text', ''),
+                    source_name=getattr(source, 'name', None))
+                continuation = ctx.get('effect_continuation') or {}
+                effects = list(followup) + list(
+                    continuation.get('effects', []))
+                targets = continuation.get(
+                    'targets', ctx.get('targets', {}))
+                resolution_context = continuation.get(
+                    'resolution_context', ctx.get('resolution_context', {}))
+                gs.choice_context = None
+                gs.phase = ctx.get('resume_phase', gs.PHASE_PRIORITY)
+                success, pending = gs._run_effect_sequence(
+                    effects, source_id, player, targets,
+                    resolution_context,
+                    finalizer=continuation.get('finalizer'),
+                    initial_success=continuation.get('success', True))
+                if not pending:
+                    gs.priority_player = gs._get_active_player()
+                    gs.priority_pass_count = 0
+                return (0.05 if success else -0.1), bool(success)
             else:
                 return -0.1, False
             gs._resume_effect_continuation(ctx)
@@ -1862,17 +1964,30 @@ class ChoiceHandlersMixin:
             return -0.1, False
 
     def _handle_choose_x(self, param, context, **kwargs):
-        """Handles CHOOSE_X action. Param is the chosen X value (1-10)."""
+        """Handle a paginated affordable X value."""
         gs = self.game_state
         player = gs.p1 if gs.agent_is_p1 else gs.p2
 
         if not gs.choice_context or gs.choice_context.get("type") != "choose_x" or gs.choice_context.get("player") != player:
             logging.warning("CHOOSE_X called out of context.")
             return -0.2, False
-        if gs.choose_x_for_pending_spell(param):
-            logging.debug(f"Chose X={param} and resumed casting.")
+        x_value = int((context or {}).get('x_value', param))
+        activation_context = gs.choice_context.get('activation_context')
+        if activation_context is not None:
+            if x_value not in gs.choice_context.get('affordable_values', []):
+                return -0.1, False
+            resume_phase = gs.choice_context.get(
+                'resume_phase', gs.PHASE_PRIORITY)
+            activation_context = dict(activation_context)
+            activation_context['activation_X'] = x_value
+            activation_context['X'] = x_value
+            gs.choice_context = None
+            gs.phase = resume_phase
+            return self._handle_activate_ability(None, activation_context)
+        if gs.choose_x_for_pending_spell(x_value):
+            logging.debug(f"Chose X={x_value} and resumed casting.")
             return 0.05, True
-        logging.error(f"Invalid or unaffordable X choice: {param}")
+        logging.error(f"Invalid or unaffordable X choice: {x_value}")
         return -0.1, False
 
     def _handle_choose_color(self, param, context, **kwargs):

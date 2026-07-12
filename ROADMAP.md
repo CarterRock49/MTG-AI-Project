@@ -56,8 +56,8 @@ The project is complete when all of the following hold:
   coverage remains manifest-driven. Round 7.50 statically preflighted all
   4,702 current Standard cards and now separates verified, corpus-clean,
   unseen, partial, unparsed, crash, and explicitly excluded evidence. The
-  current July 12 ledger contains 68 verified, 89 observed-clean, 3,552
-  unseen-clean, 810 partial, and 183 unparsed cards: 78.8813270949% is
+  current July 12 ledger contains 68 verified, 89 observed-clean, 3,565
+  unseen-clean, 809 partial, and 171 unparsed cards: 79.1578051893% is
   static-clean and 3.3390046789% is evidence-qualified. The representative
   metagame has no unparsed or crash cards and retains two acknowledged partial
   multi-face entries: Emeritus of Ideation and Esper Origins. Round 7.55 added
@@ -1738,6 +1738,62 @@ Standard pool instead of closing cards one at a time:
 
 Gates for this round: 329/329 scenarios and 63/63 repository unit tests.
 
+**Round 7.56 (July 2026)** addressed the dynamic keyword-action limitations
+left deliberately open by the preceding family sweep:
+* **Dynamic Discover** — X can come from a targeted or triggering spell's mana
+  value, including X actually paid. Completing the action emits a controller-
+  scoped Discover event, so Curator of Sun's Creation repeats the same value and
+  its printed once-per-turn gate prevents recursion.
+* **Repeated Explore and Investigate** — Explore X preserves its remaining
+  iterations through a nonland top/graveyard policy choice. Investigate now
+  supports fixed repeats, the two-player hand-size comparison, and counts the
+  creatures controlled by selected players.
+* **Endure** — fixed and counter-derived values expose the required choice
+  between +1/+1 counters and an X/X white Spirit. Nontoken/another creature
+  trigger filters now reject token and self entries, and nontoken death watchers
+  use last-known token status.
+* **Conservative prerequisites** — Descendant of Storms and Krumar Initiate move
+  only from unparsed to partial: their Endure result is understood, but optional
+  mana payment and activated `{X}` plus X-life payment are not falsely claimed.
+  Brass's Tunnel-Grinder likewise improves to partial while its unrelated front-
+  face clauses remain open.
+* **Measured gain** — ten cards moved to unseen-clean with zero clean-card
+  regressions. The ledger now records 68 verified, 89 observed-clean, 3,562
+  unseen-clean, 811 partial, and 172 unparsed cards. Static-clean coverage rose
+  from 78.8813270949% to 79.0940025521%; evidence-qualified coverage remains
+  3.3390046789%.
+
+Gates for this round: 331/331 scenarios and 63/63 repository unit tests.
+
+**Round 7.57 (July 2026)** continued the limitations work with shared payment
+and action-exposure infrastructure:
+* **Optional resolution payments** — exact “you may pay `{cost}`; if you do”
+  instructions now expose pay and decline through the ordinary resolution-
+  choice policy. Payment uses the auto-tap planner, and the paid follow-up plus
+  any remaining resolving instructions retain their continuation/finalizer.
+  Descendant of Storms and Subway Train become fully statically clean through
+  this path.
+* **Large X pagination** — spell X affordability is no longer truncated at ten.
+  All affordable values are retained in the casting choice and exposed ten per
+  page through the existing shared page action, preserving the frozen 480-slot
+  action schema. X=0 remains the Pass alias, while page-local actions carry the
+  exact absolute X value into payment and resolution.
+* **Activated X transactions** — activated abilities now stage the same
+  paginated announcement before paying anything. The chosen value is shared by
+  `{X}` mana and “Pay X life,” committed with tap and other costs, and retained
+  in the stack context for the resolving effect. Krumar Initiate is covered end
+  to end through Endure X.
+* **Conservative improvement** — Digsite Conservator moves from unparsed to
+  partial because its optional `{4}` into Discover transaction now works, while
+  its independent four-card graveyard targeting remains explicitly open.
+* **Measured result** — three cards moved to unseen-clean and one moved from
+  unparsed to partial with zero clean-card regressions. The ledger records 68
+  verified, 89 observed-clean, 3,565 unseen-clean, 809 partial, and 171 unparsed
+  cards. Static-clean coverage is 79.1578051893%; evidence-qualified coverage
+  remains 3.3390046789%.
+
+Gates for this round: 333/333 scenarios and 63/63 repository unit tests.
+
 ---
 
 ## Working agreements
@@ -1751,6 +1807,104 @@ Gates for this round: 329/329 scenarios and 63/63 repository unit tests.
   slice, including v1 limitations, honestly stated.
 
 ## Known v1 limitations (consolidated)
+
+The order below is the canonical implementation priority. Severity is based on
+the risk of corrupting rules outcomes or training statistics first, then missing
+player decisions, bounded card/mechanic coverage, and operational constraints.
+The detailed notes afterward are retained in their historical source order and
+do not override this ranking.
+
+### Priority 0 — simulation integrity
+
+1. Repeated card IDs still lack true per-copy object identity, including
+   precise linked-exile ownership.
+2. Layer dependencies remain incomplete for specific `remove_ability` effects,
+   CR 305.7, and changing applicability sets.
+3. Opaque callback-based delayed triggers are excluded from lookahead clones.
+4. Counter divisions are chosen at resolution instead of being announced and
+   locked during casting or activation under CR 601.2d.
+5. Restricted mana pools do not retain snow provenance, and condition
+   evaluation still has a bounded vocabulary.
+6. Mutate uses battlefield control as an ownership approximation and retains
+   deeper merged-object identity limitations.
+7. Meld depends on locally available result objects and retains component,
+   blink, and clone-isolation limitations.
+8. Specialize depends on complete local variant families and shares the
+   repeated-ID/perpetual-identity limitation.
+9. `creatures_died_this_turn` approximates control at death from the battlefield
+   zone the object left.
+10. Generic `as enters` consumers are not fully scenario-verified.
+11. Text-derived replacements do not re-register after a pure control change,
+    so they retain the original registration controller.
+
+### Priority 1 — decision and action completeness
+
+12. The fixed 480-action layout omits some activated abilities, hand objects,
+    graveyard objects, and simultaneous source/target contexts.
+13. Blocker damage ordering remains scripted even though opponent trigger
+    ordering is policy-driven.
+14. Simultaneous each-player discards are staged sequentially and use scripted
+    opponent choices.
+15. Ward auto-pays supported costs and cannot expose deliberate decline;
+    sacrifice and discard ward costs are unsupported.
+16. Multi-target spell copies cannot retarget only a subset of inherited
+    targets.
+17. Sacrifice choices support a bounded Oracle-characteristic vocabulary, and
+    direct non-policy callers retain a deterministic fallback.
+18. Nonland mana abilities lack structured choices for multi-symbol packages,
+    colorless alternatives, and independent per-mana selections.
+19. X selection retains a defensive ceiling and does not cover every nonmana
+    X-cost expression.
+20. Level-up exposes the legal action but has only basic policy choice around
+    whether and when to spend mana.
+21. The scripted opponent always accepts eligible opening-hand placement
+    effects.
+22. Keyword-grant choices support exactly two printed options and a bounded
+    subtype-target template.
+
+### Priority 2 — bounded mechanic and card fidelity
+
+23. Emblem execution is implemented only for the currently recognized Kaito
+    and Wrenn texts.
+24. MDFC support still lacks direct nonland back-face entry and complete
+    back-face targeting text.
+25. Adventure-half parsing and targeting remain heuristic.
+26. Generic Discover, Explore, Investigate, Endure, Connive, Suspect, Airbend,
+    Equip, and Crew support intentionally covers bounded text families.
+27. Reflexive triggers recognize a bounded set of exact rider templates.
+28. Earthbend has bounded dynamic-X parsing and resolves its choice-free delayed
+    return immediately after the initial zone move.
+29. Uncommon linked optional-search templates still need exact transaction
+    handlers.
+30. Warp source-duration permissions remain conservatively partial.
+31. Target-conditioned pricing recognizes only the implemented condition
+    vocabulary.
+32. Numeric die support omits modifiers, rerolls, ignored rolls, and generic
+    result-value clauses.
+33. Attack-trigger adjective scopes and defender gating remain bounded to the
+    supported two-player vocabulary.
+34. Rare phase-beginning scopes can pass ungated.
+35. Screaming Nemesis relies on standard life-gain entry points and a single
+    committed reflected-damage target.
+36. ConditionalExileEffect is a single-target implementation.
+37. Obliterator uses a conservative payer fallback when the damage source has
+    left play.
+38. Cavern of Souls shares choices across repeated IDs and offers only the top
+    ten locally derived creature subtypes.
+39. Obstinate Baloth conservatively leaves an undetermined-cause discard in the
+    graveyard.
+
+### Priority 3 — operational and lineage constraints
+
+40. Strategy memory is per environment and its optional enhancement pass makes
+    saved memory content nondeterministic.
+41. Format registries and schemas are intentionally lineage-bound, name plus
+    Oracle-ID based, and best-of-one only; schema growth can require a new
+    policy lineage.
+42. Treasure/Beza support is scenario-verified; its retained note documents the
+    exact supported path rather than an active correctness gap.
+
+### Detailed notes (historical source order)
 
 - Emblem execution currently recognizes the Kaito Ninja anthem and Wrenn
   graveyard-permission texts used by the sample decks. Other emblem text is
@@ -1829,20 +1983,27 @@ Gates for this round: 329/329 scenarios and 63/63 repository unit tests.
   still
   conservatively partial where the permission or restriction outlives the
   resolving instruction.
-- Round 7.55's generic family support is deliberately bounded: Discover accepts
-  fixed numeric values; Connive covers the ordinary one-card action and simple
+- Round 7.55's generic family support is deliberately bounded. Round 7.56 added
+  spell-mana-value and repeated-same-value Discover, Explore X, hand-comparison
+  and selected-player creature-count Investigate, plus fixed/counter-derived
+  Endure. Connive covers the ordinary one-card action and simple
   optional/once-per-turn templates; Suspect covers direct, clear-all, attached,
   and transfer forms; and Airbend covers nonland permanents plus the existing
-  creature/spell path. Dynamic Discover, Explore, and Investigate counts,
-  compound keyword clauses whose other instructions do not parse, unusual
-  multi-object Suspect wording, and broader exile-cast cost modifiers remain
-  conservatively partial. Generic Equip and Crew are executable, but cards
-  with additional unsupported text remain partial on that independent text.
+  creature/spell path. Other dynamic count expressions, compound keyword
+  clauses whose
+  other instructions do not parse, unusual multi-object Suspect wording, and
+  broader exile-cast cost modifiers remain conservatively partial. Generic
+  Equip and Crew are executable, but cards with additional unsupported text
+  remain partial on that independent text.
 - Spell-copy retargeting can keep the complete inherited target set or replace
   the complete set. Changing only some targets of a multi-target spell needs a
   future slot-aware target-choice context; ordinary one-target copies are fully
   exposed now.
-- X choices are currently capped at 10 by the fixed action range.
+- X spell choices paginate beyond ten within the fixed action range. The
+  monotonic affordability walk has a defensive ceiling of 1,000. Activated
+  abilities share that staged chooser when X appears in their mana cost or a
+  “Pay X life” component; other X-dependent nonmana cost expressions remain
+  open.
 - Simultaneous each-player discards are committed sequentially, and the
   scripted opponent selects its first available legal slot/page until
   policy-vs-policy self-play lands.

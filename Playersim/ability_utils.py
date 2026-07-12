@@ -374,6 +374,13 @@ class EffectFactory:
 
         source_key = str(source_name or "").strip().casefold()
         lowered = effect_text.lower()
+        optional_mana = re.fullmatch(
+            r"\s*you may pay\s*((?:\{[^}]+\})+)\.\s*if you do,\s*(.+?)\s*",
+            effect_text, re.IGNORECASE | re.DOTALL)
+        if optional_mana:
+            from .ability_types import OptionalManaThenEffect
+            return [OptionalManaThenEffect(
+                optional_mana.group(1), optional_mana.group(2))]
         if re.fullmatch(
                 r"\s*attach(?: this equipment| it)? to target creature"
                 r"(?: you control)?(?:\. equip only as a sorcery)?\.?\s*",
@@ -396,6 +403,54 @@ class EffectFactory:
         if discover_match:
             from .ability_types import DiscoverEffect
             return [DiscoverEffect(int(discover_match.group(1)))]
+        dynamic_discover = re.fullmatch(
+            r"\s*discover\s+x,\s*where x is (?:that|the) spell's mana "
+            r"value\.?(?:\s+activate only as a sorcery\.?)?\s*",
+            lowered)
+        if dynamic_discover:
+            from .ability_types import DiscoverEffect
+            return [DiscoverEffect('spell_mana_value')]
+        if re.fullmatch(
+                r"\s*discover again for the same value\.?(?:\s+this ability "
+                r"triggers only once each turn\.?)?\s*", lowered):
+            from .ability_types import DiscoverEffect
+            return [DiscoverEffect('same')]
+        endure_with_life = re.fullmatch(
+            r"\s*you lose (?P<life>\d+) life and (?P<subject>it|this creature) "
+            r"endures? (?P<value>\d+|x)\.?\s*", lowered)
+        if endure_with_life:
+            from .ability_types import EndureEffect, LoseLifeEffect
+            return [
+                LoseLifeEffect(
+                    int(endure_with_life.group('life')),
+                    target='controller'),
+                EndureEffect(
+                    endure_with_life.group('value'),
+                    subject_event=(
+                        endure_with_life.group('subject') == 'it')),
+            ]
+        endure_match = re.fullmatch(
+            r"\s*(?P<subject>it|this creature|[\w'’ ,-]+)\s+endures?\s+"
+            r"(?P<value>\d+|x)(?P<counter_value>,\s*where x is the number "
+            r"of counters on this creature)?\.?(?:\s+activate only as a "
+            r"sorcery\.?)?\s*", lowered)
+        if endure_match:
+            from .ability_types import EndureEffect
+            return [EndureEffect(
+                endure_match.group('value'),
+                subject_event=endure_match.group('subject').strip() == 'it',
+                value_from_source_counters=bool(
+                    endure_match.group('counter_value')))]
+        if re.fullmatch(
+                r"\s*investigate once for each opponent who has more cards "
+                r"in hand than you\.?\s*", lowered):
+            from .ability_types import InvestigateEffect
+            return [InvestigateEffect(count='opponents_more_cards')]
+        if re.fullmatch(
+                r"\s*investigate x times, where x is the total number of "
+                r"creatures those players control\.?\s*", lowered):
+            from .ability_types import InvestigateEffect
+            return [InvestigateEffect(count='target_players_creatures')]
         if re.fullmatch(
                 r"\s*(?:you may have\s+)?(?:it|he|she|this creature|"
                 r"[\w'’ -]+|target(?:\s+\w+){0,3}\s+creature(?: you control)?)"
@@ -1337,6 +1392,33 @@ class EffectFactory:
                      count=2 if re.search(
                          r"\b(?:twice|two times)\b", clause_lower) else 1)
 
+            elif re.fullmatch(
+                    r"\s*investigate once for each opponent who has more "
+                    r"cards in hand than you[.!]?\s*", clause_lower):
+                 from .ability_types import InvestigateEffect
+                 created_effect = InvestigateEffect(
+                     count='opponents_more_cards')
+
+            elif re.fullmatch(
+                    r"\s*investigate x times, where x is the total number of "
+                    r"creatures those players control[.!]?\s*", clause_lower):
+                 from .ability_types import InvestigateEffect
+                 created_effect = InvestigateEffect(
+                     count='target_players_creatures')
+
+            elif re.fullmatch(
+                    r"\s*discover x,\s*where x is (?:that|the) spell's mana "
+                    r"value[.!]?\s*", clause_lower):
+                 from .ability_types import DiscoverEffect
+                 created_effect = DiscoverEffect('spell_mana_value')
+
+            elif re.fullmatch(
+                    r"\s*discover again for the same value[.!]?(?:\s+this "
+                    r"ability triggers only once each turn[.!]?)?\s*",
+                    clause_lower):
+                 from .ability_types import DiscoverEffect
+                 created_effect = DiscoverEffect('same')
+
             elif re.search(r"\bamass(?:\s+\w+)?\s+(\d+)\b", clause_lower):
                  from .ability_types import AmassEffect
                  amount_match = re.search(r"\bamass(?:\s+\w+)?\s+(\d+)\b", clause_lower)
@@ -1362,6 +1444,12 @@ class EffectFactory:
                  created_effect = ExploreEffect()
 
             # Explore
+            elif re.fullmatch(
+                    r"\s*(?:it|he|she|this creature)\s+explores x times"
+                    r"[.!]?\s*", clause_lower):
+                 from .ability_types import ExploreEffect
+                 created_effect = ExploreEffect(count='x')
+
             elif (re.search(r"\b(?:target\s+)?creature\b.*\bexplores\b",
                             clause_lower)
                   or re.fullmatch(
@@ -1369,6 +1457,19 @@ class EffectFactory:
                       clause_lower)):
                  from .ability_types import ExploreEffect
                  created_effect = ExploreEffect()
+
+            elif (endure_clause := re.fullmatch(
+                    r"\s*(?P<subject>it|this creature|[\w'’ ,-]+)\s+"
+                    r"endures?\s+(?P<value>\d+|x)(?P<counter_value>,\s*where "
+                    r"x is the number of counters on this creature)?[.!]?\s*",
+                    clause_lower)):
+                 from .ability_types import EndureEffect
+                 created_effect = EndureEffect(
+                     endure_clause.group('value'),
+                     subject_event=(
+                         endure_clause.group('subject').strip() == 'it'),
+                     value_from_source_counters=bool(
+                         endure_clause.group('counter_value')))
 
             # Additional combat phase (CR 505.5a): "After this phase, there is
             # an additional combat phase." The comma splitter usually severs

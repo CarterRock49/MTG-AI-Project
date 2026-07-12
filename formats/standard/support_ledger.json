@@ -3707,13 +3707,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 238,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: anafenza endures 2",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Endure",
         "First strike",
@@ -3723,7 +3717,7 @@
       "name": "Anafenza, Unyielding Lineage",
       "oracle_id": "659bc01c-fa60-4d00-bdad-5bca1d2a978f",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -9688,22 +9682,17 @@
         {
           "count": 1,
           "reason": "unparsed clause: draw that many cards plus one",
-          "severity": "unparsed"
+          "severity": "partial"
         },
         {
           "count": 1,
           "reason": "unparsed clause: if there are three or more bore counters on it",
-          "severity": "unparsed"
+          "severity": "partial"
         },
         {
           "count": 1,
           "reason": "unparsed clause: remove those counters",
-          "severity": "unparsed"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed effect text: discover x, where x is that spell's mana value",
-          "severity": "unparsed"
+          "severity": "partial"
         }
       ],
       "keywords": [
@@ -9714,7 +9703,7 @@
       "name": "Brass's Tunnel-Grinder // Tecutlan, the Searing Rift",
       "oracle_id": "af1553eb-4f9f-4335-9078-56649bd8d8fc",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "partial"
     },
     {
       "abilities_registered": 1,
@@ -16445,19 +16434,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 943,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: discover again for the same value. this ability triggers only once each turn",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Curator of Sun's Creation",
       "oracle_id": "0e636c98-67c7-4f02-b909-5d43e276fa41",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -18409,13 +18392,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1052,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: you may pay {1}{w}. if you do, it endures 1",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Endure"
       ],
@@ -18423,7 +18400,7 @@
       "name": "Descendant of Storms",
       "oracle_id": "ca773c52-ca64-463c-99cf-e71b59d2cff7",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -18809,12 +18786,7 @@
         {
           "count": 1,
           "reason": "unparsed clause: Exile up to four target cards from a single graveyard. Activate only as a sorcer",
-          "severity": "unparsed"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed effect text: you may pay {4}. if you do, discover 4",
-          "severity": "unparsed"
+          "severity": "partial"
         }
       ],
       "keywords": [
@@ -18824,7 +18796,7 @@
       "name": "Digsite Conservator",
       "oracle_id": "ced2ae56-988a-4c60-93d0-85a2261be72c",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "partial"
     },
     {
       "abilities_registered": 1,
@@ -20957,13 +20929,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1197,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: it endures 3",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Endure",
         "Reach"
@@ -20972,7 +20938,7 @@
       "name": "Dusyut Earthcarver",
       "oracle_id": "387b12b1-d8f5-487b-972f-5303b23eed5a",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -27226,13 +27192,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1541,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: it endures 1",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Endure"
       ],
@@ -27240,7 +27200,7 @@
       "name": "Fortress Kin-Guard",
       "oracle_id": "fa3ed0f6-e44e-433d-80d3-824de5e6135a",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -36526,13 +36486,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2059,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: it endures 2",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Endure"
       ],
@@ -36540,7 +36494,7 @@
       "name": "Inspirited Vanguard",
       "oracle_id": "db756a16-3db6-4bde-bbc2-ecee3ee9d9d3",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -37550,13 +37504,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2117,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: it explores x times",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Explore"
       ],
@@ -37564,7 +37512,7 @@
       "name": "Jadelight Spelunker",
       "oracle_id": "0a72d6cd-b4a7-4c42-90ba-a14f1733d00e",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -39286,13 +39234,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2208,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: it endures 1",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Endure",
         "Lifelink"
@@ -39301,7 +39243,7 @@
       "name": "Kin-Tree Nurturer",
       "oracle_id": "ad28a1f9-8893-4693-9464-c32ed760f6b1",
       "replacement_effects_registered": 1,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -40380,13 +40322,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2266,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: This creature endures X. Activate only as a sorcery",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Endure"
       ],
@@ -40394,7 +40330,7 @@
       "name": "Krumar Initiate",
       "oracle_id": "65a7fb13-77b9-44ea-9e0e-34daef82eb69",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -60447,13 +60383,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3386,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: it endures 2",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Endure",
         "Menace"
@@ -60462,7 +60392,7 @@
       "name": "Sandskitter Outrider",
       "oracle_id": "eae480fe-d9fe-4dbe-8b78-b65f398b0af3",
       "replacement_effects_registered": 0,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -69240,13 +69170,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 3867,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Crew"
       ],
@@ -69254,7 +69178,7 @@
       "name": "Subway Train",
       "oracle_id": "6d4472ad-3fbf-4a5d-94de-dfee04fda9c3",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -81705,13 +81629,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 4555,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: where x is the number of counters on this creature",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Endure"
       ],
@@ -81719,7 +81637,7 @@
       "name": "Warden of the Grove",
       "oracle_id": "13bf8103-3db3-4ee6-a6bb-441aabfd9e41",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -83642,13 +83560,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4664,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed effect text: investigate once for each opponent who has more cards in hand than you",
-          "severity": "unparsed"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flying",
         "Investigate",
@@ -83658,7 +83570,7 @@
       "name": "Wojek Investigator",
       "oracle_id": "ab41243d-b178-4ebe-a7ac-bea37427be99",
       "replacement_effects_registered": 1,
-      "status": "unparsed"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -84920,15 +84832,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Anafenza, Unyielding Lineage",
-      "reasons": [
-        "unparsed effect text: anafenza endures 2"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Anzrag, the Quake-Mole",
       "reasons": [
         "unparsed clause: untap each creature you control. after this phase",
@@ -85014,18 +84917,6 @@
       "name": "Brambleguard Captain",
       "reasons": [
         "unparsed effect text: target creature you control gets +x/+0 until end of turn, where x is this creatu"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Brass's Tunnel-Grinder // Tecutlan, the Searing Rift",
-      "reasons": [
-        "unparsed clause: draw that many cards plus one",
-        "unparsed clause: if there are three or more bore counters on it",
-        "unparsed clause: remove those counters",
-        "unparsed effect text: discover x, where x is that spell's mana value"
       ],
       "status": "unparsed"
     },
@@ -85185,28 +85076,9 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Descendant of Storms",
-      "reasons": [
-        "unparsed effect text: you may pay {1}{w}. if you do, it endures 1"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Destined Confrontation",
       "reasons": [
         "unparsed effect text: Each player chooses any number of creatures they control with total power 4 or l"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Digsite Conservator",
-      "reasons": [
-        "unparsed clause: Exile up to four target cards from a single graveyard. Activate only as a sorcer",
-        "unparsed effect text: you may pay {4}. if you do, discover 4"
       ],
       "status": "unparsed"
     },
@@ -85253,15 +85125,6 @@
       "reasons": [
         "unparsed clause: tap enchanted creature",
         "unparsed effect text: Shuffle enchanted creature into its owner's library"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Dusyut Earthcarver",
-      "reasons": [
-        "unparsed effect text: it endures 3"
       ],
       "status": "unparsed"
     },
@@ -85375,15 +85238,6 @@
       "name": "Flexible Waterbender",
       "reasons": [
         "unparsed effect text: This creature has base power and toughness 5/2 until end of turn"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Fortress Kin-Guard",
-      "reasons": [
-        "unparsed effect text: it endures 1"
       ],
       "status": "unparsed"
     },
@@ -85565,24 +85419,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Inspirited Vanguard",
-      "reasons": [
-        "unparsed effect text: it endures 2"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Jadelight Spelunker",
-      "reasons": [
-        "unparsed effect text: it explores x times"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Joined Researchers // Secret Rendezvous",
       "reasons": [
         "unparsed effect text: this creature becomes prepared"
@@ -85630,15 +85466,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Kin-Tree Nurturer",
-      "reasons": [
-        "unparsed effect text: it endures 1"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Kirol, History Buff // Pack a Punch",
       "reasons": [
         "unparsed effect text: kirol becomes prepared"
@@ -85670,15 +85497,6 @@
       "name": "Krotiq Nestguard",
       "reasons": [
         "unparsed effect text: This creature can attack this turn as though it didn't have defender"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Krumar Initiate",
-      "reasons": [
-        "unparsed effect text: This creature endures X. Activate only as a sorcery"
       ],
       "status": "unparsed"
     },
@@ -85988,15 +85806,6 @@
       "name": "Roxanne, Starfall Savant",
       "reasons": [
         "unparsed effect text: add one mana of any type that artifact token produced"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Sandskitter Outrider",
-      "reasons": [
-        "unparsed effect text: it endures 2"
       ],
       "status": "unparsed"
     },
@@ -86518,15 +86327,6 @@
       "name": "Winter, Cursed Rider",
       "reasons": [
         "unparsed effect text: Each other nonartifact creature gets -X/-X until end of turn"
-      ],
-      "status": "unparsed"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Wojek Investigator",
-      "reasons": [
-        "unparsed effect text: investigate once for each opponent who has more cards in hand than you"
       ],
       "status": "unparsed"
     },
@@ -87216,6 +87016,17 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Brass's Tunnel-Grinder // Tecutlan, the Searing Rift",
+      "reasons": [
+        "unparsed clause: draw that many cards plus one",
+        "unparsed clause: if there are three or more bore counters on it",
+        "unparsed clause: remove those counters"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Brave the Wilds",
       "reasons": [
         "unparsed clause: Bargain If this spell was bargained",
@@ -87882,15 +87693,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Curator of Sun's Creation",
-      "reasons": [
-        "unparsed clause: discover again for the same value. this ability triggers only once each turn"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Curious Colossus",
       "reasons": [
         "unparsed clause: each creature target opponent controls loses all abilities"
@@ -88113,6 +87915,15 @@
       "name": "Dictate of Kruphix",
       "reasons": [
         "unparsed clause: that player draws an additional card"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Digsite Conservator",
+      "reasons": [
+        "unparsed clause: Exile up to four target cards from a single graveyard. Activate only as a sorcer"
       ],
       "status": "partial"
     },
@@ -92642,15 +92453,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Subway Train",
-      "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Sudden Setback",
       "reasons": [
         "unparsed clause: The owner of target spell or nonland permanent puts it on their choice of the to"
@@ -93764,15 +93566,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Warden of the Grove",
-      "reasons": [
-        "unparsed clause: where x is the number of counters on this creature"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Water Tribe Rallier",
       "reasons": [
         "unparsed clause: put it into your hand. Put the rest on the bottom of your library in a random or"
@@ -94003,24 +93796,24 @@
   ],
   "ranked_mechanics": [
     {
-      "affected_cards": 28,
+      "affected_cards": 29,
       "deck_cards": 1,
       "deck_slots": 4,
       "examples": [
         "Esper Origins // Summon: Esper Maduin",
         "Aang, at the Crossroads // Aang, Destined Savior",
         "Braided Net // Braided Quipu",
+        "Brass's Tunnel-Grinder // Tecutlan, the Searing Rift",
         "Brigid, Clachan's Heart // Brigid, Doun's Mind",
         "Clay-Fired Bricks // Cosmium Kiln",
         "Garland, Knight of Cornelia // Chaos, the Endless",
         "Grasping Shadows // Shadows' Lair",
         "Growing Rites of Itlimoc // Itlimoc, Cradle of the Sun",
-        "Kaslem's Stonetree // Kaslem's Strider",
-        "Kefka, Court Mage // Kefka, Ruler of Ruin"
+        "Kaslem's Stonetree // Kaslem's Strider"
       ],
       "mechanic": "layout:transform",
       "status_counts": {
-        "partial": 26,
+        "partial": 27,
         "unparsed": 2
       }
     },
@@ -94045,7 +93838,7 @@
       }
     },
     {
-      "affected_cards": 786,
+      "affected_cards": 784,
       "deck_cards": 0,
       "deck_slots": 0,
       "examples": [
@@ -94062,7 +93855,7 @@
       ],
       "mechanic": "unclassified oracle text",
       "status_counts": {
-        "partial": 670,
+        "partial": 668,
         "unparsed": 116
       }
     },
@@ -94196,25 +93989,6 @@
       }
     },
     {
-      "affected_cards": 8,
-      "deck_cards": 0,
-      "deck_slots": 0,
-      "examples": [
-        "Anafenza, Unyielding Lineage",
-        "Descendant of Storms",
-        "Dusyut Earthcarver",
-        "Fortress Kin-Guard",
-        "Inspirited Vanguard",
-        "Kin-Tree Nurturer",
-        "Krumar Initiate",
-        "Sandskitter Outrider"
-      ],
-      "mechanic": "Endure",
-      "status_counts": {
-        "unparsed": 8
-      }
-    },
-    {
       "affected_cards": 6,
       "deck_cards": 0,
       "deck_slots": 0,
@@ -94230,24 +94004,6 @@
       "status_counts": {
         "partial": 2,
         "unparsed": 4
-      }
-    },
-    {
-      "affected_cards": 6,
-      "deck_cards": 0,
-      "deck_slots": 0,
-      "examples": [
-        "Homicide Investigator",
-        "Hostile Investigator",
-        "Kellan, Inquisitive Prodigy // Tail the Suspect",
-        "Teysa, Opulent Oligarch",
-        "The Chase Is On",
-        "Wojek Investigator"
-      ],
-      "mechanic": "Investigate",
-      "status_counts": {
-        "partial": 1,
-        "unparsed": 5
       }
     },
     {
@@ -94314,6 +94070,23 @@
       "mechanic": "Gift",
       "status_counts": {
         "partial": 5
+      }
+    },
+    {
+      "affected_cards": 5,
+      "deck_cards": 0,
+      "deck_slots": 0,
+      "examples": [
+        "Homicide Investigator",
+        "Hostile Investigator",
+        "Kellan, Inquisitive Prodigy // Tail the Suspect",
+        "Teysa, Opulent Oligarch",
+        "The Chase Is On"
+      ],
+      "mechanic": "Investigate",
+      "status_counts": {
+        "partial": 1,
+        "unparsed": 4
       }
     },
     {
@@ -94465,19 +94238,6 @@
       "deck_cards": 0,
       "deck_slots": 0,
       "examples": [
-        "Brass's Tunnel-Grinder // Tecutlan, the Searing Rift",
-        "Digsite Conservator"
-      ],
-      "mechanic": "Discover",
-      "status_counts": {
-        "unparsed": 2
-      }
-    },
-    {
-      "affected_cards": 2,
-      "deck_cards": 0,
-      "deck_slots": 0,
-      "examples": [
         "Rockalanche",
         "The Boulder, Ready to Rumble"
       ],
@@ -94584,18 +94344,6 @@
       "mechanic": "Delirium",
       "status_counts": {
         "partial": 1
-      }
-    },
-    {
-      "affected_cards": 1,
-      "deck_cards": 0,
-      "deck_slots": 0,
-      "examples": [
-        "Jadelight Spelunker"
-      ],
-      "mechanic": "Explore",
-      "status_counts": {
-        "unparsed": 1
       }
     },
     {
@@ -94720,15 +94468,15 @@
     }
   ],
   "schema_version": 1,
-  "sha256": "a204638bb490a7220724ef5af8d40c1480875eff784831f652c39fecb5386c4a",
+  "sha256": "3254ad0bed512d677b87c86708d879c1852ce61597dcae657f13b4a35dba82ef",
   "summary": {
     "qualified_fraction": 0.033390046788600594,
-    "static_clean_fraction": 0.7888132709485325,
+    "static_clean_fraction": 0.7915780518928116,
     "status_counts": {
       "observed_clean": 89,
-      "partial": 810,
-      "unparsed": 183,
-      "unseen": 3552,
+      "partial": 809,
+      "unparsed": 171,
+      "unseen": 3565,
       "verified": 68
     },
     "total": 4702

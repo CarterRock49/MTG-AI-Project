@@ -592,6 +592,9 @@ class TurnPhaseHandlersMixin:
                 if discovered in player.get('exile', []):
                     gs.move_card(discovered, player, 'exile', player, 'hand',
                                  cause='discover_hand')
+                DiscoverEffect.finish_discover(
+                    gs, ctx.get('source_id'), player,
+                    ctx.get('discover_value', 0))
             gs._resume_effect_continuation(ctx)
             return 0.0, True
         if (gs.phase == gs.PHASE_CHOOSE and getattr(gs, 'choice_context', None)

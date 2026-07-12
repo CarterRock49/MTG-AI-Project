@@ -1052,15 +1052,25 @@ class ActionSpaceMixin:
 
             # Choose X
             elif choice_type == "choose_x":
-                max_x = context.get("max_x", 0)
-                min_x = context.get("min_x", 0)
-                if min_x <= 0 <= max_x:
+                values = list(context.get('affordable_values', []))
+                if not values:
+                    min_x = int(context.get("min_x", 0))
+                    max_x = int(context.get("max_x", 0))
+                    values = list(range(min_x, max_x + 1))
+                if 0 in values:
                     set_valid_action(11, "CHOOSE_X_VALUE 0")
-                for i in range(min(max_x, 10)): # X value 1-10
-                    x_val = i + 1
-                    if x_val >= min_x:
-                        # FIXED: Use correct index range 363-372 for CHOOSE_X_VALUE
-                        set_valid_action(363 + i, f"CHOOSE_X_VALUE {x_val}")
+                positive_values = [value for value in values if value > 0]
+                page_count = max(1, (len(positive_values) + 9) // 10)
+                page = int(context.get('choice_page', 0)) % page_count
+                for option_index, x_value in enumerate(
+                        positive_values[page * 10:(page + 1) * 10]):
+                    set_valid_action(
+                        363 + option_index, f"CHOOSE_X_VALUE {x_value}",
+                        context={"x_value": x_value})
+                if page_count > 1:
+                    set_valid_action(
+                        479, f"CHOOSE_X_PAGE_NEXT ({page + 1}/{page_count})",
+                        context={"page_count": page_count})
 
             # Choose Color
             elif choice_type == "choose_color":

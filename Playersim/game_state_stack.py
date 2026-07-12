@@ -1747,12 +1747,19 @@ class GameStateStackMixin:
         # movement. Resume the same cast after the agent supplies the value.
         if final_cost_dict.get('X', 0) > 0 and 'X' not in context:
             affordable_values = []
-            for x_value in range(0, 11):
+            # Affordability is monotonic for the supported mana-cost model.
+            # Walk until the first unaffordable value and paginate the result;
+            # the old fixed 0-10 loop silently hid legal large-X casts.
+            x_value = 0
+            while x_value <= 1000:
                 candidate_context = dict(context)
                 candidate_context['X'] = x_value
                 if self.mana_system.can_pay_mana_cost_with_lands(
                         player, final_cost_dict, candidate_context):
                     affordable_values.append(x_value)
+                    x_value += 1
+                    continue
+                break
             if not affordable_values:
                 logging.warning(f"Cannot cast {card.name}: no affordable value of X.")
                 return False
@@ -1760,6 +1767,8 @@ class GameStateStackMixin:
                 'type': 'choose_x', 'player': player, 'controller': player,
                 'card_id': card_id, 'source_id': card_id,
                 'min_x': min(affordable_values), 'max_x': max(affordable_values),
+                'affordable_values': affordable_values,
+                'choice_page': 0,
                 'original_cast_context': dict(context),
             }
             self._begin_casting_choice(choice_context)
