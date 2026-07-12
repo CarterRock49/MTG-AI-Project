@@ -13448,6 +13448,206 @@ def scenario_closure_zone_and_crew_transactions():
     assert gs._safe_get_card(esper).counters.get('finality') == 1
 
 
+@scenario("301.5 / 702.121", "generic Equip and Crew keyword abilities pay costs, use policy choices, and resolve through the stack")
+def scenario_generic_equip_and_crew_families():
+    gs = fresh(SEED + 164)
+    handler = get_env().action_handler
+    player = gs.p1
+    gs.agent_is_p1 = True
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    equipment = inject_into_zone(gs, player, {
+        'name': 'Generic Equipment Sweep', 'mana_cost': '{1}', 'cmc': 1,
+        'type_line': 'Artifact — Equipment',
+        'oracle_text': 'Equipped creature gets +1/+1.\nEquip {1}'},
+        'battlefield')
+    creature = inject_into_zone(gs, player, {
+        'name': 'Generic Equip Target', 'mana_cost': '{2}', 'cmc': 2,
+        'type_line': 'Creature — Soldier', 'oracle_text': '',
+        'power': 2, 'toughness': 2}, 'battlefield')
+    player['mana_pool'] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 1}
+    equip_abilities = gs.ability_handler.get_activated_abilities(equipment)
+    equip_index = next(index for index, ability in enumerate(equip_abilities)
+                       if getattr(ability, 'keyword', '') == 'equip')
+    assert handler._handle_activate_ability(None, {
+        'battlefield_idx': player['battlefield'].index(equipment),
+        'ability_idx': equip_index, 'controller_id': 'p1'})[1]
+    assert gs.targeting_context
+    candidates = handler._get_target_selection_candidates(
+        player, gs.targeting_context)
+    assert creature in candidates
+    assert handler._handle_select_target(candidates.index(creature), {})[1]
+    assert gs.stack and gs.resolve_top_of_stack()
+    assert player['attachments'].get(equipment) == creature
+
+    vehicle = inject_into_zone(gs, player, {
+        'name': 'Generic Crew Sweep', 'mana_cost': '{3}', 'cmc': 3,
+        'type_line': 'Artifact — Vehicle', 'oracle_text': 'Crew 3',
+        'power': 4, 'toughness': 4}, 'battlefield')
+    helper = inject_into_zone(gs, player, {
+        'name': 'Generic Crew Helper', 'mana_cost': '{2}', 'cmc': 2,
+        'type_line': 'Creature — Pilot', 'oracle_text': '',
+        'power': 3, 'toughness': 3}, 'battlefield')
+    abilities = gs.ability_handler.get_activated_abilities(vehicle)
+    crew_index = next(index for index, ability in enumerate(abilities)
+                      if getattr(ability, 'keyword', '') == 'crew')
+    gs.priority_player = player
+    assert handler._handle_activate_ability(None, {
+        'battlefield_idx': player['battlefield'].index(vehicle),
+        'ability_idx': crew_index, 'controller_id': 'p1'})[1]
+    assert gs.choice_context.get('crew_activation')
+    assert handler._handle_choose_mode(
+        gs.choice_context['options'].index(helper), {})[1]
+    assert handler._handle_pass_priority(None)[1]
+    assert gs.stack and gs.resolve_top_of_stack()
+    assert helper in player['tapped_permanents']
+    assert vehicle in gs.crewed_vehicles \
+        and 'creature' in gs._safe_get_card(vehicle).card_types
+
+
+@scenario("701.55", "Discover reveals exactly to an eligible nonland card and exposes cast versus hand")
+def scenario_discover_cast_or_hand_family():
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 165)
+    handler = get_env().action_handler
+    player = gs.p1
+    gs.agent_is_p1 = True
+    player['library'] = []
+    land = inject_into_zone(gs, player, {
+        'name': 'Discover Miss Land', 'mana_cost': '', 'cmc': 0,
+        'type_line': 'Basic Land — Island', 'oracle_text': '{T}: Add {U}.'},
+        'library')
+    expensive = inject_into_zone(gs, player, {
+        'name': 'Discover Miss Spell', 'mana_cost': '{5}', 'cmc': 5,
+        'type_line': 'Sorcery', 'oracle_text': 'Draw a card.'}, 'library')
+    hit = inject_into_zone(gs, player, {
+        'name': 'Discover Hit', 'mana_cost': '{2}', 'cmc': 2,
+        'type_line': 'Creature — Scout', 'oracle_text': '',
+        'power': 2, 'toughness': 2}, 'library')
+    discover = EffectFactory.create_effects('Discover 3.')[0]
+    assert discover.apply(gs, None, player, {})
+    assert gs.choice_context.get('choice_kind') == 'discover'
+    assert handler._handle_choose_mode(0, {})[1]
+    assert gs.stack and gs.stack[-1][1] == hit
+    assert land in player['library'] and expensive in player['library']
+    assert gs.resolve_top_of_stack() and hit in player['battlefield']
+
+    player['library'] = []
+    second = inject_into_zone(gs, player, {
+        'name': 'Discover Hand Choice', 'mana_cost': '{1}', 'cmc': 1,
+        'type_line': 'Instant', 'oracle_text': 'Draw a card.'}, 'library')
+    assert discover.apply(gs, None, player, {})
+    assert handler._handle_pass_priority(None)[1]
+    assert second in player['hand'] and second not in player['exile']
+
+
+@scenario("701.47 / 701.49 / 701.16 / 701.67", "Connive, Suspect, Explore, Investigate, and noncreature Airbend share policy-visible generic paths")
+def scenario_keyword_family_coverage_sweep():
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 166)
+    handler = get_env().action_handler
+    player, opponent = gs.p1, gs.p2
+    gs.agent_is_p1 = True
+    conniver = inject_into_zone(gs, player, {
+        'name': 'Connive Sweep', 'mana_cost': '{2}', 'cmc': 2,
+        'type_line': 'Creature — Rogue', 'oracle_text': '',
+        'power': 2, 'toughness': 2}, 'battlefield')
+    player['library'] = []
+    drawn = inject_into_zone(gs, player, {
+        'name': 'Connive Nonland', 'mana_cost': '{1}', 'cmc': 1,
+        'type_line': 'Instant', 'oracle_text': ''}, 'library')
+    connive = EffectFactory.create_effects('It connives.')[0]
+    assert connive.apply(gs, conniver, player, {})
+    assert gs.choice_context.get('type') == 'connive_discard'
+    assert handler._handle_discard_card(
+        player['hand'].index(drawn))[1]
+    assert drawn in player['graveyard']
+    assert gs._safe_get_card(conniver).counters.get('+1/+1') == 1
+
+    player['library'] = []
+    once_drawn = inject_into_zone(gs, player, {
+        'name': 'Once Connive Nonland', 'mana_cost': '{1}', 'cmc': 1,
+        'type_line': 'Sorcery', 'oracle_text': ''}, 'library')
+    once_connive = EffectFactory.create_effects(
+        'This creature connives. Do this only once each turn.')[0]
+    assert once_connive.apply(gs, conniver, player, {})
+    assert handler._handle_discard_card(
+        player['hand'].index(once_drawn))[1]
+    counters_after_once = gs._safe_get_card(conniver).counters.get('+1/+1')
+    assert once_connive.apply(gs, conniver, player, {})
+    assert not gs.choice_context
+    assert gs._safe_get_card(conniver).counters.get('+1/+1') \
+        == counters_after_once
+
+    suspect = EffectFactory.create_effects(
+        'Suspect up to one target creature you control.')[0]
+    assert suspect.apply(gs, None, player, {'creatures': [conniver]})
+    assert conniver in player['suspected_permanents']
+    assert gs.check_keyword(conniver, 'menace')
+    attacker = inject_into_zone(gs, opponent, {
+        'name': 'Suspect Attack Probe', 'mana_cost': '{1}', 'cmc': 1,
+        'type_line': 'Creature — Soldier', 'oracle_text': '',
+        'power': 1, 'toughness': 1}, 'battlefield')
+    assert not handler._can_block(conniver, attacker)
+    clear = EffectFactory.create_effects(
+        'All suspected creatures are no longer suspected.')[0]
+    assert clear.apply(gs, None, player, {})
+    assert conniver not in player['suspected_permanents']
+
+    transfer_target = inject_into_zone(gs, player, {
+        'name': 'Suspect Transfer Target', 'mana_cost': '{1}', 'cmc': 1,
+        'type_line': 'Creature â€” Citizen', 'oracle_text': '',
+        'power': 1, 'toughness': 1}, 'battlefield')
+    assert suspect.apply(gs, None, player, {'creatures': [conniver]})
+    transfer = EffectFactory.create_effects(
+        'You may suspect one of the other creatures. If you do, this '
+        'creature is no longer suspected.')[0]
+    assert transfer.apply(gs, conniver, player, {})
+    transfer_index = gs.choice_context['options'].index(transfer_target)
+    assert handler._handle_choose_mode(transfer_index, {})[1]
+    assert transfer_target in player['suspected_permanents']
+    assert conniver not in player['suspected_permanents']
+
+    player['library'] = []
+    explored_land = inject_into_zone(gs, player, {
+        'name': 'Explore Sweep Land', 'mana_cost': '', 'cmc': 0,
+        'type_line': 'Basic Land — Forest', 'oracle_text': '{T}: Add {G}.'},
+        'library')
+    explore = EffectFactory.create_effects('It explores.')[0]
+    assert explore.apply(gs, conniver, player, {})
+    assert explored_land in player['hand']
+
+    before = len(player['battlefield'])
+    investigate = EffectFactory.create_effects('You investigate.')[0]
+    assert investigate.apply(gs, None, player, {})
+    clues = [cid for cid in player['battlefield'][before:]
+             if 'clue' in getattr(gs._safe_get_card(cid), 'subtypes', [])]
+    assert clues
+    before_twice = len(player['battlefield'])
+    investigate_twice = EffectFactory.create_effects('Investigate twice.')[0]
+    assert investigate_twice.apply(gs, None, player, {})
+    assert len(player['battlefield']) == before_twice + 2
+
+    dynamic_investigate = EffectFactory.create_effects(
+        'Investigate X times, where X is the number of creatures you control.')
+    dynamic_explore = EffectFactory.create_effects('It explores X times.')
+    assert type(dynamic_investigate[0]).__name__ == 'AbilityEffect'
+    assert type(dynamic_explore[0]).__name__ == 'AbilityEffect'
+
+    artifact = inject_into_zone(gs, opponent, {
+        'name': 'Airbend Artifact Sweep', 'mana_cost': '{4}', 'cmc': 4,
+        'type_line': 'Artifact', 'oracle_text': ''}, 'battlefield')
+    airbend = EffectFactory.create_effects(
+        'Airbend up to one target nonland permanent.')[0]
+    assert airbend.apply(gs, None, player, {'artifacts': [artifact]})
+    assert artifact in opponent['exile'] \
+        and artifact in gs.cards_castable_from_exile
+    lesson_effects = EffectFactory.create_effects(
+        'Airbend target nonland permanent. Draw a card.')
+    assert [type(effect).__name__ for effect in lesson_effects] == [
+        'AirbendEffect', 'DrawCardEffect']
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------

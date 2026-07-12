@@ -1582,6 +1582,14 @@ class TriggeredAbility(Ability):
 
         normalized_condition = str(condition_text).lower().strip(" .,;")
         last_known = context.get("last_known") or {}
+        if ("if it's not suspected" in normalized_condition
+                or "if it is not suspected" in normalized_condition):
+            return self.card_id not in controller.setdefault(
+                'suspected_permanents', set())
+        if ("if this creature is suspected" in normalized_condition
+                or "if it's suspected" in normalized_condition):
+            return self.card_id in controller.setdefault(
+                'suspected_permanents', set())
         if normalized_condition in {"if it was a creature", "it was a creature"}:
             return bool(last_known.get("was_creature", False))
 
@@ -3872,9 +3880,241 @@ class DestroyAndCreateMapsEffect(AbilityEffect):
             game_state, target_controller, self.count))
 
 
-class InvestigateEffect(AbilityEffect):
+class AttachEquipmentEffect(AbilityEffect):
+    """Attach the source Equipment to its committed controlled creature."""
+
     def __init__(self, condition=None):
-        super().__init__("Investigate", condition)
+        super().__init__("Attach this Equipment to target creature you control",
+                         condition)
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        candidates = []
+        if isinstance(targets, dict):
+            for category in ('creatures', 'permanents', 'chosen'):
+                candidates.extend(targets.get(category, []))
+        return bool(candidates and game_state.equip_permanent(
+            controller, source_id, candidates[0]))
+
+
+class ConniveEffect(AbilityEffect):
+    """Draw one, discard one by policy, then counter a nonland discard."""
+
+    def __init__(self, targeted=False, optional=False, once_each_turn=False,
+                 condition=None):
+        text = ("Target creature you control connives" if targeted
+                else "This creature connives")
+        super().__init__(text, condition)
+        self.requires_target = bool(targeted)
+        self.optional = bool(optional)
+        self.once_each_turn = bool(once_each_turn)
+
+    @staticmethod
+    def _already_used(controller, source_id, turn):
+        return controller.setdefault('connive_once_each_turn', {}).get(
+            source_id) == turn
+
+    @staticmethod
+    def _mark_used(controller, source_id, turn):
+        controller.setdefault('connive_once_each_turn', {})[source_id] = turn
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        candidates = []
+        if isinstance(targets, dict):
+            candidates.extend(targets.get('creatures', []))
+            candidates.extend(targets.get('permanents', []))
+        creature_id = candidates[0] if candidates else source_id
+        creature_controller, zone = game_state.find_card_location(creature_id)
+        card = game_state._safe_get_card(creature_id)
+        if (creature_controller is not controller or zone != 'battlefield'
+                or not card or 'creature' not in getattr(card, 'card_types', [])):
+            return False
+        if (self.once_each_turn
+                and self._already_used(controller, source_id,
+                                       game_state.turn)):
+            return True
+        if self.optional:
+            game_state.choice_context = {
+                'type': 'resolution_choice', 'choice_kind': 'connive_begin',
+                'player': controller, 'options': [creature_id],
+                'optional': True, 'source_id': source_id,
+                'connive_creature_id': creature_id,
+                'connive_once_each_turn': self.once_each_turn,
+                'resume_phase': game_state.PHASE_PRIORITY,
+            }
+            game_state.phase = game_state.PHASE_CHOOSE
+            game_state.priority_player = controller
+            return True
+        if self.once_each_turn:
+            self._mark_used(controller, source_id, game_state.turn)
+        return self.start_connive(
+            game_state, source_id, controller, creature_id)
+
+    @staticmethod
+    def start_connive(game_state, source_id, controller, creature_id):
+        game_state._draw_card(controller)
+        if not controller.get('hand', []):
+            return True
+        game_state.choice_context = {
+            'type': 'connive_discard', 'player': controller,
+            'source_id': source_id, 'creature_id': creature_id,
+            'choice_page': 0, 'resume_phase': game_state.PHASE_PRIORITY,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = controller
+        game_state.priority_pass_count = 0
+        return True
+
+
+class DiscoverEffect(AbilityEffect):
+    """Discover a fixed value with a cast-or-hand policy decision."""
+
+    def __init__(self, value, condition=None):
+        self.value = int(value)
+        super().__init__(f"Discover {self.value}", condition)
+        self.requires_target = False
+
+    @staticmethod
+    def put_rest_on_bottom(game_state, controller, card_ids):
+        rest = list(card_ids or [])
+        random.shuffle(rest)
+        for card_id in rest:
+            if card_id in controller.get('exile', []):
+                game_state.move_card(
+                    card_id, controller, 'exile', controller, 'library',
+                    cause='discover_bottom')
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        revealed = []
+        discovered = None
+        while controller.get('library', []):
+            card_id = controller['library'][0]
+            card = game_state._safe_get_card(card_id)
+            if not game_state.move_card(
+                    card_id, controller, 'library', controller, 'exile',
+                    cause='discover'):
+                break
+            if (card and 'land' not in getattr(card, 'card_types', [])
+                    and float(getattr(card, 'cmc', 0) or 0) <= self.value):
+                discovered = card_id
+                break
+            revealed.append(card_id)
+        if discovered is None:
+            self.put_rest_on_bottom(game_state, controller, revealed)
+            return True
+        game_state.choice_context = {
+            'type': 'resolution_choice', 'choice_kind': 'discover',
+            'player': controller, 'options': [discovered], 'optional': True,
+            'source_id': source_id, 'discover_card_id': discovered,
+            'discover_rest': revealed,
+            'resume_phase': game_state.PHASE_PRIORITY,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = controller
+        return True
+
+
+class SuspectEffect(AbilityEffect):
+    """Mark creatures suspected: menace plus an inability to block."""
+
+    def __init__(self, targeted=False, optional=False, clear_all=False,
+                 clear_source=False, attached=False, condition=None):
+        self.targeted = bool(targeted)
+        self.optional = bool(optional)
+        self.clear_all = bool(clear_all)
+        self.clear_source = bool(clear_source)
+        self.attached = bool(attached)
+        text = ("All suspected creatures are no longer suspected"
+                if clear_all else "Target creature becomes suspected"
+                if targeted else "This creature becomes suspected")
+        super().__init__(text, condition)
+        self.requires_target = bool(targeted)
+
+    @staticmethod
+    def _clear_one(game_state, player, card_id):
+        player.setdefault('suspected_permanents', set()).discard(card_id)
+        game_state.layer_system.remove_effects_by_source(
+            card_id, effect_description_contains='suspected:')
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        if self.clear_all:
+            for player in (game_state.p1, game_state.p2):
+                for card_id in list(player.setdefault(
+                        'suspected_permanents', set())):
+                    self._clear_one(game_state, player, card_id)
+            game_state.layer_system.apply_all_effects()
+            return True
+        candidates = []
+        if isinstance(targets, dict):
+            candidates.extend(targets.get('creatures', []))
+            candidates.extend(targets.get('permanents', []))
+        if self.attached and not candidates:
+            for player in (game_state.p1, game_state.p2):
+                attached_to = player.get('attachments', {}).get(source_id)
+                if attached_to is not None:
+                    candidates.append(attached_to)
+                    break
+        card_id = candidates[0] if candidates else source_id
+        player, zone = game_state.find_card_location(card_id)
+        card = game_state._safe_get_card(card_id)
+        if self.clear_source:
+            if player:
+                self._clear_one(game_state, player, card_id)
+                game_state.layer_system.apply_all_effects()
+            return True
+        if (not player or zone != 'battlefield' or not card
+                or 'creature' not in getattr(card, 'card_types', [])):
+            return bool(self.optional and not candidates)
+        self._clear_one(game_state, player, card_id)
+        player.setdefault('suspected_permanents', set()).add(card_id)
+        for effect_type, value in (('add_ability', 'menace'),
+                                   ('cant_block', True)):
+            game_state.layer_system.register_effect({
+                'source_id': card_id, 'layer': 6, 'affected_ids': [card_id],
+                'effect_type': effect_type, 'effect_value': value,
+                'duration': 'permanent',
+                'description': f'suspected: {effect_type}',
+            })
+        game_state.layer_system.apply_all_effects()
+        return True
+
+
+class TransferSuspectEffect(AbilityEffect):
+    """Suspect another controlled creature, then clear the source."""
+
+    def __init__(self, condition=None):
+        super().__init__(
+            "You may suspect one of the other creatures; if you do, this "
+            "creature is no longer suspected", condition)
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        if source_id not in controller.setdefault('suspected_permanents', set()):
+            return True
+        candidates = []
+        for card_id in controller.get('battlefield', []):
+            card = game_state._safe_get_card(card_id)
+            if (card_id != source_id and card
+                    and 'creature' in getattr(card, 'card_types', [])):
+                candidates.append(card_id)
+        if not candidates:
+            return True
+        game_state.choice_context = {
+            'type': 'resolution_choice', 'choice_kind': 'transfer_suspect',
+            'player': controller, 'options': candidates, 'optional': True,
+            'source_id': source_id, 'resume_phase': game_state.PHASE_PRIORITY,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = controller
+        return True
+
+
+class InvestigateEffect(AbilityEffect):
+    def __init__(self, count=1, condition=None):
+        self.count = max(1, int(count))
+        super().__init__(
+            "Investigate" if self.count == 1
+            else f"Investigate {self.count} times", condition)
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         token_data = game_state.get_token_data_by_index(4) or {
@@ -3882,7 +4122,9 @@ class InvestigateEffect(AbilityEffect):
             "card_types": ["artifact"], "subtypes": ["Clue"],
             "oracle_text": "{2}, Sacrifice this artifact: Draw a card.",
         }
-        return game_state.create_token(controller, token_data) is not None
+        created = [game_state.create_token(controller, token_data)
+                   for _ in range(self.count)]
+        return all(card_id is not None for card_id in created)
 
 
 class AmassEffect(AbilityEffect):
@@ -5746,12 +5988,13 @@ class AnimateLandEffect(AbilityEffect):
 
 
 class AirbendEffect(AbilityEffect):
-    """Exile up to one other creature or spell and grant its owner a {2} cast."""
+    """Exile the selected objects and grant each owner a {2} cast."""
 
-    def __init__(self, alternative_cost="{2}", condition=None):
-        super().__init__(
-            "airbend up to one other target creature or spell", condition)
+    def __init__(self, alternative_cost="{2}", condition=None,
+                 target_description="up to one other target creature or spell"):
+        super().__init__(f"airbend {target_description}", condition)
         self.alternative_cost = alternative_cost
+        self.target_description = target_description
         self.requires_target = True
 
     def _grant_permission(self, game_state, owner, card_id):
@@ -5763,45 +6006,51 @@ class AirbendEffect(AbilityEffect):
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         target_ids = []
-        for category in ("creatures", "spells", "creature_or_spell",
-                         "permanents", "chosen"):
+        for category in ("creatures", "artifacts", "enchantments",
+                         "planeswalkers", "battles", "spells",
+                         "creature_or_spell", "permanents", "chosen"):
             values = (targets or {}).get(category, [])
             if isinstance(values, (list, tuple, set)):
                 target_ids.extend(values)
         target_ids = list(dict.fromkeys(target_ids))
         if not target_ids:
             return True
-        target_id = target_ids[0]
-        if target_id == source_id:
-            return False
-
-        for stack_index, item in enumerate(list(game_state.stack)):
-            if not (isinstance(item, tuple) and len(item) >= 4
-                    and item[0] == "SPELL" and item[1] == target_id):
+        applied = False
+        for target_id in target_ids:
+            if target_id == source_id:
                 continue
-            _, spell_id, spell_controller, spell_context = item
-            game_state.stack.pop(stack_index)
-            game_state.last_stack_size = len(game_state.stack)
-            if spell_context.get("is_copy", False):
-                return True
+            stack_match = next((
+                (index, item) for index, item in enumerate(game_state.stack)
+                if isinstance(item, tuple) and len(item) >= 4
+                and item[0] == 'SPELL' and item[1] == target_id), None)
+            if stack_match:
+                stack_index, item = stack_match
+                _, spell_id, spell_controller, spell_context = item
+                game_state.stack.pop(stack_index)
+                game_state.last_stack_size = len(game_state.stack)
+                if spell_context.get('is_copy', False):
+                    applied = True
+                    continue
+                moved = game_state.move_card(
+                    spell_id, spell_controller, 'stack_implicit',
+                    spell_controller, 'exile', cause='airbend')
+                applied = bool(moved and self._grant_permission(
+                    game_state, spell_controller, spell_id)) or applied
+                continue
+            current_controller, zone = game_state.find_card_location(target_id)
+            card = game_state._safe_get_card(target_id)
+            if (zone != 'battlefield' or not current_controller or not card
+                    or 'land' in getattr(card, 'card_types', [])):
+                continue
+            owner = game_state._find_card_owner_fallback(target_id) \
+                or current_controller
             moved = game_state.move_card(
-                spell_id, spell_controller, "stack_implicit",
-                spell_controller, "exile", cause="airbend")
-            return bool(
+                target_id, current_controller, 'battlefield', owner, 'exile',
+                cause='airbend')
+            applied = bool(
                 moved and self._grant_permission(
-                    game_state, spell_controller, spell_id))
-
-        current_controller, zone = game_state.find_card_location(target_id)
-        card = game_state._safe_get_card(target_id)
-        if (zone != "battlefield" or not current_controller or not card
-                or "creature" not in getattr(card, "card_types", [])):
-            return False
-        owner = game_state._find_card_owner_fallback(target_id) \
-            or current_controller
-        moved = game_state.move_card(
-            target_id, current_controller, "battlefield", owner, "exile",
-            cause="airbend")
-        return bool(moved and self._grant_permission(game_state, owner, target_id))
+                    game_state, owner, target_id)) or applied
+        return applied
 
 
 class BlinkWithCounterEffect(AbilityEffect):

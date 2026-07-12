@@ -446,7 +446,8 @@ class CastingHandlersMixin:
         gs = self.game_state
         context = getattr(gs, "choice_context", None)
         if not (gs.phase == gs.PHASE_CHOOSE and context
-                and context.get("type") in ["discard", "specialize_discard"]):
+                and context.get("type") in [
+                    "discard", "specialize_discard", "connive_discard"]):
              logging.warning("DISCARD_CARD called outside a discard choice.")
              return -0.2, False
 
@@ -465,6 +466,17 @@ class CastingHandlersMixin:
         value = self.card_evaluator.evaluate_card(card_id, "discard") if self.card_evaluator else 0
         if context.get("type") == "specialize_discard":
              success = gs.choose_specialize_discard(hand_idx)
+        elif context.get("type") == "connive_discard":
+             creature_id = context.get('creature_id')
+             discarded = gs._safe_get_card(card_id)
+             success = gs.discard_card(
+                 player, card_id, source_id=context.get('source_id'),
+                 cause='connive')
+             if (success and discarded
+                     and 'land' not in getattr(discarded, 'card_types', [])):
+                 gs.add_counter(creature_id, '+1/+1', 1)
+             if success:
+                 gs._resume_effect_continuation(context)
         else:
              success = gs.choose_discard_card(hand_idx)
         reward = -0.05 - value * 0.2

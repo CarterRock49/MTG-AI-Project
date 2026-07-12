@@ -196,12 +196,15 @@ python -m Playersim.support_preflight --snapshot "Format Card Lists/standard.jso
 ```
 
 Current Standard preflight (July 12, 2026): 68 verified, 89
-observed-clean, 3,360 unseen-clean, 821 partial, and 364 unparsed cards across
-the 4,702-card pool. That is 74.7979583156% static-clean coverage and
-3.3390046789% evidence-qualified coverage. The representative metagame now has
-zero `partial`, `unparsed`, or `crash` cards. Its remaining Warp, linked-search,
-temporary-rule, outside-game, Crew, and zone-transaction gaps are executable
-and guarded by the scenario suite.
+observed-clean, 3,552 unseen-clean, 810 partial, and 183 unparsed cards across
+the 4,702-card pool. That is 78.8813270949% static-clean coverage and
+3.3390046789% evidence-qualified coverage. The representative metagame has no
+`unparsed` or `crash` cards and two acknowledged `partial` multi-face entries:
+Emeritus of Ideation and Esper Origins. Its Warp, linked-search, temporary-rule,
+outside-game, Crew, and zone-transaction paths are executable and scenario-
+guarded. Generic Equip/Crew, fixed Discover, Connive, Suspect, Explore,
+Investigate, and nonland-permanent Airbend support account for the latest
+full-pool sweep; compound and dynamic variants remain conservatively partial.
 
 ```bash
 python main.py --timesteps 1000000 --learning-rate 3e-4 --batch-size 256 --seed 20260710

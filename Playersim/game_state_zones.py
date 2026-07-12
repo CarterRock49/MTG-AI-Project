@@ -547,6 +547,7 @@ class GameStateZonesMixin:
             # Remove tracked statuses
             from_player.get("tapped_permanents", set()).discard(card_id)
             from_player.get("entered_battlefield_this_turn", set()).discard(card_id)
+            from_player.get("suspected_permanents", set()).discard(card_id)
             keys_to_remove = [key for key in self.exhaust_ability_used if key[0] == card_id]
             if keys_to_remove: logging.debug(f"Clearing exhaust state for {card_name}."); [self.exhaust_ability_used.pop(k) for k in keys_to_remove]
             # Remove attachments TO this card and attachments OF this card

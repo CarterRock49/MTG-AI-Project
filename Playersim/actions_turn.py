@@ -584,6 +584,14 @@ class TurnPhaseHandlersMixin:
                             spell_id, caster, 'stack_implicit', caster, 'exile',
                             cause='countered')
                     break
+            elif ctx.get('choice_kind') == 'discover':
+                from .ability_types import DiscoverEffect
+                discovered = ctx.get('discover_card_id')
+                DiscoverEffect.put_rest_on_bottom(
+                    gs, player, ctx.get('discover_rest', []))
+                if discovered in player.get('exile', []):
+                    gs.move_card(discovered, player, 'exile', player, 'hand',
+                                 cause='discover_hand')
             gs._resume_effect_continuation(ctx)
             return 0.0, True
         if (gs.phase == gs.PHASE_CHOOSE and getattr(gs, 'choice_context', None)

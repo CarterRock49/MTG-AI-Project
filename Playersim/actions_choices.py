@@ -116,9 +116,10 @@ class ChoiceHandlersMixin:
                     'sacrifice_effect', 'activation_sacrifice_cost',
                     'dig_select', 'distribute_counters', 'discard',
                     'specialize_discard', 'forced_sacrifice',
-                    'resolution_choice')):
+                    'resolution_choice', 'connive_discard')):
             choice_options = choice.get('options', [])
-            if choice.get('type') in ('discard', 'specialize_discard'):
+            if choice.get('type') in (
+                    'discard', 'specialize_discard', 'connive_discard'):
                 choice_options = choice.get('player', {}).get('hand', [])
             elif choice.get('type') == 'forced_sacrifice':
                 choice_options = choice.get('player', {}).get('battlefield', [])
@@ -1617,6 +1618,59 @@ class ChoiceHandlersMixin:
                 for grave_card in list(player.get('graveyard', [])):
                     gs.move_card(grave_card, player, 'graveyard', player,
                                  'exile', cause='strategic_betrayal')
+            elif kind == 'connive_begin':
+                from .ability_types import ConniveEffect
+                continuation = ctx.get('effect_continuation')
+                source_id = ctx.get('source_id')
+                creature_id = ctx.get('connive_creature_id')
+                if ctx.get('connive_once_each_turn'):
+                    if ConniveEffect._already_used(
+                            player, source_id, gs.turn):
+                        return -0.1, False
+                    ConniveEffect._mark_used(
+                        player, source_id, gs.turn)
+                gs.choice_context = None
+                if not ConniveEffect.start_connive(
+                        gs, source_id, player, creature_id):
+                    return -0.1, False
+                if continuation and gs.choice_context:
+                    gs.choice_context['effect_continuation'] = continuation
+                return 0.05, True
+            elif kind == 'transfer_suspect':
+                from .ability_types import SuspectEffect
+                source_id = ctx.get('source_id')
+                if option == source_id:
+                    return -0.1, False
+                # Resolve the selected effects now instead of queuing them
+                # behind the resolution choice currently being completed.
+                gs.choice_context = None
+                if not SuspectEffect(targeted=True).apply(
+                        gs, source_id, player, {'creatures': [option]}):
+                    return -0.1, False
+                if not SuspectEffect(clear_source=True).apply(
+                        gs, source_id, player, {}):
+                    return -0.1, False
+            elif kind == 'discover':
+                from .ability_types import DiscoverEffect
+                discovered = ctx.get('discover_card_id')
+                DiscoverEffect.put_rest_on_bottom(
+                    gs, player, ctx.get('discover_rest', []))
+                gs._resume_effect_continuation(ctx)
+                if discovered not in player.get('exile', []):
+                    return -0.1, False
+                success = gs.cast_spell(discovered, player, {
+                    'source_zone': 'exile',
+                    'source_idx': player['exile'].index(discovered),
+                    'use_alt_cost': 'plot', 'discover_cast': True,
+                    'cast_during_resolution': True,
+                })
+                if not success and discovered in player.get('exile', []):
+                    gs.move_card(discovered, player, 'exile', player, 'hand',
+                                 cause='discover_hand')
+                # A failed optional cast falls back to the rules-defined hand
+                # destination without turning an accepted choice into a
+                # state-mutating invalid action.
+                return (0.05 if success else 0.0), True
             else:
                 return -0.1, False
             gs._resume_effect_continuation(ctx)

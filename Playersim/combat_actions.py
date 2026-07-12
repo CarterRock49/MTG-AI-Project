@@ -1484,6 +1484,9 @@ class CombatActionHandler:
         gs = self.game_state
         blocker = gs._safe_get_card(blocker_id)
         blocker_controller = gs.get_card_controller(blocker_id)
+        if (blocker_controller and blocker_id in blocker_controller.get(
+                'suspected_permanents', set())):
+            return False
         if (blocker and blocker_controller
                 and "can't attack or block unless there are four or more card types" in getattr(blocker, 'oracle_text', '').lower()):
             types_found = {str(card_type).lower() for grave_id in blocker_controller.get('graveyard', [])

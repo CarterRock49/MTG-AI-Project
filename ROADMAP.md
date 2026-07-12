@@ -56,11 +56,13 @@ The project is complete when all of the following hold:
   coverage remains manifest-driven. Round 7.50 statically preflighted all
   4,702 current Standard cards and now separates verified, corpus-clean,
   unseen, partial, unparsed, crash, and explicitly excluded evidence. The
-  current July 12 ledger contains 68 verified, 89 observed-clean, 3,360
-  unseen-clean, 821 partial, and 364 unparsed cards: 74.7979583156% is
+  current July 12 ledger contains 68 verified, 89 observed-clean, 3,552
+  unseen-clean, 810 partial, and 183 unparsed cards: 78.8813270949% is
   static-clean and 3.3390046789% is evidence-qualified. The representative
-  metagame has zero partial, unparsed, or crash cards after Round 7.54 closed
-  the remaining representative-corpus mechanics and linked transactions.
+  metagame has no unparsed or crash cards and retains two acknowledged partial
+  multi-face entries: Emeritus of Ideation and Esper Origins. Round 7.55 added
+  generic full-pool coverage for eight recurring mechanic families without
+  regressing any previously clean card.
 - Tier 3 (training/environment): ◐ policy plumbing and audit work are complete;
   a trained checkpoint still needs to beat scripted play before Harvest is
   promoted to policy-vs-policy.
@@ -1709,6 +1711,33 @@ representative Standard corpus as one shared-primitives release:
 Gates for this round: 326/326 scenarios; the remaining repository gates are
 listed in the status snapshot above.
 
+**Round 7.55 (July 2026)** made a broad generic-mechanics pass over the frozen
+Standard pool instead of closing cards one at a time:
+* **Equipment and Vehicles** — ordinary Equip abilities now resolve through a
+  reusable attach effect after the existing target-and-cost transaction, while
+  generic Crew text shares the power-threshold creature chooser and layer-4
+  Vehicle animation path. The implementation covers both registry ability
+  records and generated Crew instructions.
+* **Policy-visible keyword actions** — fixed-value Discover reveals through the
+  first eligible nonland card, randomizes the rest onto the bottom, and exposes
+  cast-without-paying versus hand. Connive draws, exposes the discard, adds the
+  nonland counter, supports optional wording, and enforces printed once-per-turn
+  gates. Suspect applies menace/can't-block state, supports clearing and an
+  optional transfer choice, and cleans state on zone changes.
+* **Broader shared effects** — Explore and Investigate recognize ordinary
+  pronoun/controller templates, and Airbend accepts the supported range of
+  nonland permanent targets while preserving owner-based exile-cast permission.
+  Complex mixed clauses remain partial instead of being falsely claimed by a
+  broad keyword match.
+* **Measured full-pool gain** — 192 cards moved from partial/unparsed to
+  unseen-clean with zero clean-card regressions. The 4,702-card ledger now
+  records 68 verified, 89 observed-clean, 3,552 unseen-clean, 810 partial, and
+  183 unparsed cards. Static-clean coverage rose from 74.7979583156% to
+  78.8813270949%; evidence-qualified coverage remains 3.3390046789% until the
+  newly generic cards appear in a runtime corpus.
+
+Gates for this round: 329/329 scenarios and 63/63 repository unit tests.
+
 ---
 
 ## Working agreements
@@ -1800,6 +1829,15 @@ listed in the status snapshot above.
   still
   conservatively partial where the permission or restriction outlives the
   resolving instruction.
+- Round 7.55's generic family support is deliberately bounded: Discover accepts
+  fixed numeric values; Connive covers the ordinary one-card action and simple
+  optional/once-per-turn templates; Suspect covers direct, clear-all, attached,
+  and transfer forms; and Airbend covers nonland permanents plus the existing
+  creature/spell path. Dynamic Discover, Explore, and Investigate counts,
+  compound keyword clauses whose other instructions do not parse, unusual
+  multi-object Suspect wording, and broader exile-cast cost modifiers remain
+  conservatively partial. Generic Equip and Crew are executable, but cards
+  with additional unsupported text remain partial on that independent text.
 - Spell-copy retargeting can keep the complete inherited target set or replace
   the complete set. Changing only some targets of a multi-target spell needs a
   future slot-aware target-choice context; ordinary one-target copies are fully

@@ -21,6 +21,7 @@ class GameStateStackMixin:
     _ASYNC_EFFECT_CHOICE_TYPES = frozenset({
         "discard", "sacrifice_effect", "distribute_counters", "dig_select",
         "resolution_modal", "resolution_choice", "surveil",
+        "connive_discard",
     })
 
     def _effect_controller_id(self, controller):
@@ -2154,6 +2155,8 @@ class GameStateStackMixin:
         card = self._safe_get_card(card_id)
         if not card or not hasattr(card, 'card_types'):
             return False
+        if context.get('cast_during_resolution'):
+            return True
 
         # Timing follows the face/Adventure actually being cast. A front-face
         # type must not make an instant back face sorcery-only (or vice versa).

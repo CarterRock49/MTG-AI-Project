@@ -374,6 +374,89 @@ class EffectFactory:
 
         source_key = str(source_name or "").strip().casefold()
         lowered = effect_text.lower()
+        if re.fullmatch(
+                r"\s*attach(?: this equipment| it)? to target creature"
+                r"(?: you control)?(?:\. equip only as a sorcery)?\.?\s*",
+                lowered):
+            from .ability_types import AttachEquipmentEffect
+            return [AttachEquipmentEffect()]
+        if (re.fullmatch(r"\s*activate crew ability\.?\s*", lowered)
+                or re.fullmatch(
+                    r"tap any number of untapped creatures you control with "
+                    r"total power\s+\d+\s+or greater:\s*this vehicle becomes "
+                    r"an artifact creature until end of turn\.?",
+                    lowered)):
+            from .ability_types import CrewEffect
+            value_match = re.search(r"total power\s+(\d+)\s+or greater", lowered)
+            return [CrewEffect(
+                int(value_match.group(1)) if value_match else 0)]
+        discover_match = re.fullmatch(
+            r"\s*discover\s+(\d+)\.?(?:\s+activate only as a sorcery\.?)?\s*",
+            lowered)
+        if discover_match:
+            from .ability_types import DiscoverEffect
+            return [DiscoverEffect(int(discover_match.group(1)))]
+        if re.fullmatch(
+                r"\s*(?:you may have\s+)?(?:it|he|she|this creature|"
+                r"[\w'’ -]+|target(?:\s+\w+){0,3}\s+creature(?: you control)?)"
+                r"\s+connives?\.?(?:\s+do this only once each turn\.?)?\s*",
+                lowered):
+            from .ability_types import ConniveEffect
+            return [ConniveEffect(
+                targeted=bool(re.search(
+                    r"target\s+(?:\w+\s+){0,3}creature", lowered)),
+                optional="may" in lowered,
+                once_each_turn="once each turn" in lowered)]
+        if re.match(r"^\s*airbend\b", lowered):
+            from .ability_types import AirbendEffect
+            # Target extraction can consume a leading targeted keyword action.
+            # Preserve every later instruction by peeling only the first
+            # sentence (and its reminder text) here.
+            without_reminder = re.sub(
+                r"\s*\([^()]*\)\s*", " ", effect_text).strip()
+            instruction, separator, suffix = without_reminder.partition('.')
+            target_match = re.fullmatch(
+                r"\s*airbend\s+(.+?)\s*", instruction, re.IGNORECASE)
+            if target_match:
+                effects = [AirbendEffect(
+                    target_description=target_match.group(1).strip())]
+                if separator and suffix.strip():
+                    effects.extend(EffectFactory.create_effects(
+                        suffix.strip(), targets, source_name=source_name))
+                return effects
+        if re.match(r"^\s*suspect it\.\s+create\b", lowered):
+            from .ability_types import SuspectEffect
+            suffix = re.split(r"suspect it\.\s*", effect_text,
+                              maxsplit=1, flags=re.IGNORECASE)[1]
+            return ([SuspectEffect()]
+                    + EffectFactory.create_effects(
+                        suffix, targets, source_name=source_name))
+        if re.search(
+                r"you may suspect one of the other creatures\. if you do, "
+                r"this creature is no longer suspected", lowered):
+            from .ability_types import TransferSuspectEffect
+            return [TransferSuspectEffect()]
+        if re.fullmatch(
+                r"\s*all suspected creatures are no longer suspected\.?\s*",
+                lowered):
+            from .ability_types import SuspectEffect
+            return [SuspectEffect(clear_all=True)]
+        if re.fullmatch(
+                r"\s*(?:this creature|it)\s+is no longer suspected\.?\s*",
+                lowered):
+            from .ability_types import SuspectEffect
+            return [SuspectEffect(clear_source=True)]
+        if re.fullmatch(
+                r"\s*(?:you may\s+)?suspect(?: up to one| one)?\s+"
+                r"(?:other\s+)?(?:target\s+)?(?:enchanted\s+)?creature"
+                r"(?: you control)?\.?(?:\s*\([^)]*\))?\s*"
+                r"|\s*(?:you may\s+)?suspect it\.?(?:\s*\([^)]*\))?\s*",
+                lowered):
+            from .ability_types import SuspectEffect
+            return [SuspectEffect(
+                targeted="target" in lowered or "enchanted creature" in lowered,
+                optional="may" in lowered or "up to" in lowered,
+                attached="enchanted creature" in lowered)]
         if (source_key.startswith("esper origins")
                 and "surveil 2" in lowered):
             from .ability_types import (
@@ -1209,9 +1292,50 @@ class EffectFactory:
 
             # Keyword actions reached through ordinary spell/ability
             # resolution. Dedicated policy slots are aliases of this path.
-            elif re.fullmatch(r"investigate[.!]?", clause_lower.strip()):
+            elif re.fullmatch(
+                    r"\s*(?:you may have\s+)?(?:it|he|she|this creature|"
+                    r"[\w'’ -]+|target(?:\s+\w+){0,3}\s+creature"
+                    r"(?: you control)?)\s+connives?\.?(?:\s+do this only "
+                    r"once each turn\.?)?\s*",
+                    clause_lower):
+                 from .ability_types import ConniveEffect
+                 created_effect = ConniveEffect(
+                     targeted=bool(re.search(
+                         r"target\s+(?:\w+\s+){0,3}creature",
+                         clause_lower)),
+                     optional="may" in clause_lower,
+                     once_each_turn="once each turn" in clause_lower)
+
+            elif re.match(r"^\s*airbend\b", clause_lower):
+                 from .ability_types import AirbendEffect
+                 airbend_target = re.search(
+                     r"airbend\s+(.+?)(?:\.|$)", clause_clean,
+                     re.IGNORECASE)
+                 created_effect = AirbendEffect(
+                     target_description=(airbend_target.group(1).strip()
+                                         if airbend_target else
+                                         "up to one target creature"))
+
+            elif re.fullmatch(
+                    r"\s*(?:you may\s+)?suspect(?: up to one| one)?\s+"
+                    r"(?:other\s+)?(?:target\s+)?(?:enchanted\s+)?creature"
+                    r"(?: you control)?\.?\s*|\s*(?:you may\s+)?suspect it\.?",
+                    clause_lower):
+                 from .ability_types import SuspectEffect
+                 created_effect = SuspectEffect(
+                     targeted=("target" in clause_lower
+                               or "enchanted creature" in clause_lower),
+                     optional=("may" in clause_lower
+                               or "up to" in clause_lower),
+                     attached="enchanted creature" in clause_lower)
+
+            elif re.fullmatch(
+                    r"\s*(?:you\s+)?investigate(?:\s+(twice|two times))?"
+                    r"[.!]?\s*", clause_lower):
                  from .ability_types import InvestigateEffect
-                 created_effect = InvestigateEffect()
+                 created_effect = InvestigateEffect(
+                     count=2 if re.search(
+                         r"\b(?:twice|two times)\b", clause_lower) else 1)
 
             elif re.search(r"\bamass(?:\s+\w+)?\s+(\d+)\b", clause_lower):
                  from .ability_types import AmassEffect
@@ -1238,7 +1362,11 @@ class EffectFactory:
                  created_effect = ExploreEffect()
 
             # Explore
-            elif re.search(r"\b(?:target\s+)?creature\b.*\bexplores\b", clause_lower):
+            elif (re.search(r"\b(?:target\s+)?creature\b.*\bexplores\b",
+                            clause_lower)
+                  or re.fullmatch(
+                      r"\s*(?:it|he|she)\s+explores(?:\s+again)?[.!]?\s*",
+                      clause_lower)):
                  from .ability_types import ExploreEffect
                  created_effect = ExploreEffect()
 

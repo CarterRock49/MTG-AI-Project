@@ -673,7 +673,8 @@ class ActionSpaceMixin:
                 return
 
             # Discard -- the fixed action range exposes one ten-card page.
-            if choice_type in ["discard", "specialize_discard"]:
+            if choice_type in [
+                    "discard", "specialize_discard", "connive_discard"]:
                 hand = player.get("hand", [])
                 page_count = max(1, (len(hand) + 9) // 10)
                 page = int(context.get('choice_page', 0)) % page_count
