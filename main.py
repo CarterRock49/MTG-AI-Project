@@ -47,7 +47,7 @@ from Playersim.environment import AlphaZeroMTGEnv
 from Playersim.debug import DEBUG_MODE
 
 # Custom Feature Extractor and Policy
-class CompletelyFixedMTGExtractor(BaseFeaturesExtractor):
+class FixedWindowMTGExtractor(BaseFeaturesExtractor):
     """
     Features extractor that doesn't rely on CombinedExtractor.
     This provides full control over dimensions and network architecture.
@@ -116,7 +116,9 @@ class CompletelyFixedMTGExtractor(BaseFeaturesExtractor):
         # The input width is now computed above, so it can be built here.
         self.feature_merger = torch.nn.Linear(merged_dim, self.preprocessing_dim)
         
-        # LSTM for sequential processing
+        # Length-one gated feature transform. Hidden state is deliberately not
+        # carried between policy calls, so this is not presented as recurrent.
+        # Keep the ``lstm`` attribute name for checkpoint state_dict stability.
         self.lstm = torch.nn.LSTM(
             input_size=self.output_dim,
             hidden_size=self.output_dim,
@@ -153,7 +155,7 @@ class CompletelyFixedMTGExtractor(BaseFeaturesExtractor):
         merged_features = self.feature_merger(preprocessed_features)
         projected_features = self.final_projection(merged_features)
         
-        # Add LSTM processing
+        # Apply the length-one gated feature transform.
         sequence = projected_features.unsqueeze(1)
         hidden_state = (
             torch.zeros(1, batch_size, self.output_dim, device=projected_features.device),
@@ -167,6 +169,11 @@ class CompletelyFixedMTGExtractor(BaseFeaturesExtractor):
         result = projected_features + lstm_features
         
         return result
+
+
+# Backward-compatible import path for checkpoints/configurations serialized
+# before the active extractor received an honest non-recurrent name.
+CompletelyFixedMTGExtractor = FixedWindowMTGExtractor
 
 class FixedDimensionMaskableActorCriticPolicy(sb3_contrib.common.maskable.policies.MaskableActorCriticPolicy):
     """
@@ -272,7 +279,7 @@ class NetworkRecordingCallback(BaseCallback):
                 return f"Final Projection Layer {layer_num}"
                 
             if 'lstm' in name:
-                return "LSTM Layer for Sequential Processing"
+                return "Length-One Gated Feature Layer"
                 
         if 'mlp_extractor' in name:
             if 'policy_net' in name:
@@ -389,9 +396,9 @@ class NetworkRecordingCallback(BaseCallback):
                 if hasattr(feature_extractor, "final_projection"):
                     layers.append(("Feature Extractor", "Final Projection"))
                     
-                # Add LSTM if it exists
+                # Add the checkpoint-compatible gated feature layer if present.
                 if hasattr(feature_extractor, "lstm"):
-                    layers.append(("Feature Extractor", "LSTM Layer"))
+                    layers.append(("Feature Extractor", "Length-One Gated Layer"))
                 
                 layers.append(("Feature Extractor Output", f"Dim: {feature_extractor.output_dim}"))
             
@@ -1408,7 +1415,7 @@ class CustomLearningRateScheduler:
 def create_training_model(env, training_config, seed=None, device="auto"):
     """Construct the final MaskablePPO model from one complete config."""
     policy_kwargs = {
-        'features_extractor_class': CompletelyFixedMTGExtractor,
+        'features_extractor_class': FixedWindowMTGExtractor,
         'features_extractor_kwargs': {
             'features_dim': FEATURE_OUTPUT_DIM,
         },
@@ -1514,7 +1521,7 @@ def objective(trial, base_seed=42):
 
     # Construct policy configuration
     policy_kwargs = {
-        "features_extractor_class": CompletelyFixedMTGExtractor,
+        "features_extractor_class": FixedWindowMTGExtractor,
         "features_extractor_kwargs": {
             "features_dim": FEATURE_OUTPUT_DIM
         },

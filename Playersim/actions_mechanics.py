@@ -362,18 +362,7 @@ class MechanicsHandlersMixin:
         return reward, success # Success based on token creation
 
     def _handle_investigate(self, param, context=None, **kwargs):
-        gs = self.game_state
-        player = self._get_policy_player(context)
-
-        # Use game state helper to get token data
-        token_data = gs.get_token_data_by_index(4) # Clue index from ACTION_MEANINGS
-        if not token_data:
-            logging.warning("Clue token data not found, using fallback for Investigate.")
-            token_data = {"name": "Clue", "type_line": "Token Artifact — Clue", "card_types": ["artifact"], "subtypes": ["Clue"], "oracle_text": "{2}, Sacrifice this artifact: Draw a card."}
-
-        success = gs.create_token(player, token_data)
-        reward = 0.25 if success else -0.05
-        return reward, success # Return success flag
+        return self._handle_activate_ability(None, context or {})
 
     def _handle_foretell(self, param, context, **kwargs):
         gs = self.game_state; player = self._get_policy_player(context)
@@ -418,18 +407,7 @@ class MechanicsHandlersMixin:
             return -0.1, False
 
     def _handle_amass(self, param, context, **kwargs):
-        gs = self.game_state;
-        player = self._get_policy_player(context)
-        amount = context.get('amount', 1)
-        if not isinstance(amount, int) or amount <= 0: amount = 1
-
-        success = False
-        if hasattr(gs, 'amass') and callable(gs.amass):
-            success = gs.amass(player, amount)
-        else: logging.error("Amass function missing in GameState.")
-
-        reward = min(0.4, 0.1 * amount) if success else -0.05
-        return reward, success # Return success flag
+        return self._handle_activate_ability(None, context or {})
 
     def _handle_learn(self, param, context, **kwargs):
         gs = self.game_state
@@ -473,55 +451,13 @@ class MechanicsHandlersMixin:
         return reward, overall_success # True if draw or discard happened
 
     def _handle_venture(self, param, context, **kwargs):
-        gs = self.game_state;
-        player = self._get_policy_player(context)
-        success = False
-        if hasattr(gs, 'venture') and callable(gs.venture):
-            success = gs.venture(player)
-        else: logging.warning("Venture called but GameState.venture method not implemented.")
-
-        reward = 0.15 if success else -0.05
-        return reward, success # Return success flag
+        return self._handle_activate_ability(None, context or {})
 
     def _handle_explore(self, param, context, **kwargs):
-        gs = self.game_state
-        player = self._get_policy_player(context)
-        creature_idx = context.get('creature_idx')
-
-        if creature_idx is None: logging.warning(f"Explore context missing 'creature_idx'"); return -0.15, False
-        try: creature_idx = int(creature_idx)
-        except (ValueError, TypeError): logging.warning(f"Explore context has non-integer index: {context}"); return -0.15, False
-
-        if creature_idx >= len(player["battlefield"]): logging.warning(f"Explore index out of bounds: {creature_idx}"); return -0.15, False
-
-        card_id = player["battlefield"][creature_idx]
-        success = False
-        if hasattr(gs, 'explore') and callable(gs.explore):
-            success = gs.explore(player, card_id)
-        else: logging.error("Explore function missing in GameState.")
-
-        reward = 0.25 if success else -0.05
-        return reward, success # Return success flag
+        return self._handle_activate_ability(None, context or {})
 
     def _handle_adapt(self, param, context, **kwargs):
-        gs = self.game_state; player = self._get_policy_player(context)
-        creature_idx = context.get('creature_idx')
-        amount = context.get('amount', 1)
-
-        if creature_idx is None: logging.warning(f"Adapt context missing 'creature_idx'"); return -0.15, False
-        try: creature_idx, amount = int(creature_idx), int(amount)
-        except (ValueError, TypeError): logging.warning(f"Adapt context has non-integer index/amount: {context}"); return -0.15, False
-
-        if creature_idx >= len(player["battlefield"]): logging.warning(f"Adapt index out of bounds: {creature_idx}"); return -0.15, False
-
-        card_id = player["battlefield"][creature_idx]
-        success = False
-        if hasattr(gs, 'adapt') and callable(gs.adapt):
-            success = gs.adapt(player, card_id, amount) # GS handles cost check + logic
-        else: logging.error("Adapt function missing in GameState.")
-
-        reward = 0.1 * amount if success else -0.05
-        return reward, success # Return success flag
+        return self._handle_activate_ability(None, context or {})
 
     def _handle_mutate(self, param, context, **kwargs):
         gs = self.game_state
@@ -566,24 +502,7 @@ class MechanicsHandlersMixin:
         return (0.25 if success else -0.1), success
 
     def _handle_goad(self, param, context, **kwargs):
-        gs = self.game_state
-        player = self._get_policy_player(context)
-        target_idx = context.get('target_creature_idx') # Combined index
-
-        if target_idx is None: logging.warning(f"Goad context missing 'target_creature_idx'"); return -0.15, False
-        try: target_idx = int(target_idx)
-        except (ValueError, TypeError): logging.warning(f"Goad context has non-integer index: {context}"); return -0.15, False
-
-        target_id, target_owner = gs.get_permanent_by_combined_index(target_idx)
-        opponent = self._get_policy_opponent(context)
-        if target_id is not None and target_owner == opponent: # Can only goad opponent's creatures
-            success = False
-            if hasattr(gs, 'goad_creature'): success = gs.goad_creature(target_id)
-            else: logging.error("goad_creature method missing in GameState.")
-            return (0.25 if success else -0.05), success # Return success flag
-        else: # Target not opponent's or invalid index
-            logging.warning(f"Goad target invalid or not opponent's: {target_id}")
-            return -0.1, False
+        return self._handle_activate_ability(None, context or {})
 
     def _handle_flip_card(self, param, context, **kwargs):
         gs = self.game_state

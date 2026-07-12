@@ -136,6 +136,12 @@ class Ability:
         source_card = (getattr(self, "source_card", None)
                        or game_state._safe_get_card(self.card_id))
         source_name = getattr(source_card, "name", None)
+        if not targets and re.search(r"\bon it\b", effect_text_to_use, re.IGNORECASE):
+            for player in (game_state.p1, game_state.p2):
+                attached_to = player.get("attachments", {}).get(self.card_id)
+                if attached_to is not None:
+                    targets = {"creatures": [attached_to]}
+                    break
         effects = self._create_ability_effects(
             effect_text_to_use, targets, source_name=source_name)
         if not effects:
@@ -1320,18 +1326,42 @@ class TriggeredAbility(Ability):
             if event_type == "ATTACKS":
                 context = context or {}
                 attacker_id = context.get("attacker_id", context.get("event_card_id"))
+                gs = context.get("game_state")
+                source_id = context.get("source_card_id")
+                attachment_subject_id = None
+                if gs and source_id is not None:
+                    for player in (gs.p1, gs.p2):
+                        if source_id in player.get("attachments", {}):
+                            attachment_subject_id = player["attachments"][source_id]
+                            break
                 # "this creature/land attacks" only triggers for the attacker
                 # itself, never for other permanents that merely hear the event.
                 if (re.search(r"\bthis\s+(?:creature|permanent|land)\b.*\battacks\b",
                               self.trigger_condition, re.IGNORECASE)
-                        and context.get("source_card_id") != attacker_id):
+                        and (attachment_subject_id
+                             if attachment_subject_id is not None else source_id)
+                        != attacker_id):
                     return False
                 if ("first time each turn" in self.trigger_condition
                         and not context.get("first_attack_this_turn", False)):
                     return False
-                gs = context.get("game_state")
                 attacker_card = (gs._safe_get_card(attacker_id)
                                  if gs and attacker_id is not None else None)
+                # A trigger granted by an Aura or Equipment is scoped to the
+                # creature that source is actually attached to. Previously
+                # these wordings either over-fired for every attacker or were
+                # suppressed by the generic watcher vocabulary check.
+                if (gs and attacker_id is not None
+                        and re.search(
+                            r"\b(?:equipped|enchanted)\s+creature\s+attacks\b",
+                            self.trigger_condition, re.IGNORECASE)):
+                    attached_to = None
+                    for player in (gs.p1, gs.p2):
+                        if source_id in player.get("attachments", {}):
+                            attached_to = player["attachments"][source_id]
+                            break
+                    if attached_to != attacker_id:
+                        return False
                 # Watcher wordings ("whenever a/another <what> [you control]
                 # attacks") fire only when the attacker matches the printed
                 # scope. Before July 2026 every watcher fired on every attack,
@@ -1353,7 +1383,16 @@ class TriggeredAbility(Ability):
                         vocabulary.update(
                             str(t).lower()
                             for t in getattr(attacker_card, group, None) or [])
-                    for word in re.split(r"[\s,]+", scope):
+                    scope_words = [
+                        word for word in re.split(r"[\s,]+", scope) if word]
+                    is_token = bool(getattr(attacker_card, "is_token", False))
+                    if "nontoken" in scope_words and is_token:
+                        return False
+                    if "token" in scope_words and not is_token:
+                        return False
+                    for word in scope_words:
+                        if word in {"nontoken", "token"}:
+                            continue
                         if (word and word not in vocabulary
                                 and not (word.endswith("s") and word[:-1] in vocabulary)):
                             return False
@@ -1455,6 +1494,19 @@ class TriggeredAbility(Ability):
         last_known = context.get("last_known") or {}
         if normalized_condition in {"if it was a creature", "it was a creature"}:
             return bool(last_known.get("was_creature", False))
+
+        toughness_match = re.search(
+            r"if its toughness is (\d+) or (less|greater)",
+            normalized_condition)
+        if toughness_match:
+            subject_id = context.get("attacker_id", context.get("event_card_id"))
+            subject = gs._safe_get_card(subject_id) if subject_id is not None else None
+            if subject is None:
+                return False
+            threshold = int(toughness_match.group(1))
+            toughness = int(getattr(subject, "toughness", 0) or 0)
+            return (toughness <= threshold if toughness_match.group(2) == "less"
+                    else toughness >= threshold)
 
         # Delirium: "if there are four or more card types among cards in your
         # graveyard" counts DISTINCT card types, not cards.
@@ -3551,7 +3603,10 @@ class CreateTokenEffect(AbilityEffect):
                 token_id = game_state.create_token(target_player, token_data.copy()) # Pass copy
                 if token_id: created_token_ids.append(token_id)
 
-
+        created_context = getattr(self, "resolution_context", None)
+        if isinstance(created_context, dict) and created_token_ids:
+            created_context.setdefault("_created_object_ids", []).extend(
+                created_token_ids)
         return len(created_token_ids) > 0
 
 
@@ -3712,6 +3767,58 @@ class DestroyAndCreateMapsEffect(AbilityEffect):
             game_state, target_controller, self.count))
 
 
+class InvestigateEffect(AbilityEffect):
+    def __init__(self, condition=None):
+        super().__init__("Investigate", condition)
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        token_data = game_state.get_token_data_by_index(4) or {
+            "name": "Clue", "type_line": "Token Artifact - Clue",
+            "card_types": ["artifact"], "subtypes": ["Clue"],
+            "oracle_text": "{2}, Sacrifice this artifact: Draw a card.",
+        }
+        return game_state.create_token(controller, token_data) is not None
+
+
+class AmassEffect(AbilityEffect):
+    def __init__(self, amount=1, condition=None):
+        super().__init__(f"Amass {amount}", condition)
+        self.amount = max(1, int(amount))
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        return bool(game_state.amass(controller, self.amount))
+
+
+class VentureEffect(AbilityEffect):
+    def __init__(self, condition=None):
+        super().__init__("Venture into the dungeon", condition)
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        return bool(game_state.venture(controller))
+
+
+class AdaptEffect(AbilityEffect):
+    def __init__(self, amount=1, condition=None):
+        super().__init__(f"Adapt {amount}", condition)
+        self.amount = max(1, int(amount))
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        return bool(game_state.adapt(controller, source_id, self.amount))
+
+
+class GoadEffect(AbilityEffect):
+    def __init__(self, condition=None):
+        super().__init__("Goad target creature", condition)
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        target_ids = []
+        if isinstance(targets, dict):
+            for key in ("creatures", "permanents", "chosen"):
+                target_ids.extend(targets.get(key, []))
+        return bool(target_ids and game_state.goad_creature(target_ids[0]))
+
+
 class ExploreEffect(AbilityEffect):
     """Have the selected creature explore, deferring its nonland choice."""
 
@@ -3724,6 +3831,8 @@ class ExploreEffect(AbilityEffect):
         if isinstance(targets, dict):
             candidates.extend(targets.get("creatures", []))
             candidates.extend(targets.get("permanents", []))
+        if not candidates:
+            candidates.append(source_id)
         for creature_id in dict.fromkeys(candidates):
             target_controller, target_zone = game_state.find_card_location(creature_id)
             target = game_state._safe_get_card(creature_id)
@@ -3832,9 +3941,31 @@ class ReturnAsEnchantmentEffect(AbilityEffect):
 class CreateRoleEffect(AbilityEffect):
     """Create and attach one of the Role tokens used by the sample decks."""
     ROLE_TEXT = {
+        "cursed": (
+            "Enchant creature\n"
+            "Enchanted creature has base power and toughness 1/1."
+        ),
         "monster": (
             "Enchant creature\n"
             "Enchanted creature gets +1/+1 and has trample."
+        ),
+        "royal": (
+            "Enchant creature\n"
+            "Enchanted creature gets +1/+1 and has ward {1}."
+        ),
+        "sorcerer": (
+            "Enchant creature\n"
+            "Enchanted creature gets +1/+1.\n"
+            "Whenever enchanted creature attacks, scry 1."
+        ),
+        "young hero": (
+            "Enchant creature\n"
+            "Whenever enchanted creature attacks, if its toughness is 3 or "
+            "less, put a +1/+1 counter on it."
+        ),
+        "virtuous": (
+            "Enchant creature\n"
+            "Enchanted creature gets +1/+1 for each enchantment you control."
         ),
         "wicked": (
             "Enchant creature\n"
@@ -5162,6 +5293,25 @@ class TransformEffect(AbilityEffect):
              logging.error("TransformEffect failed: GameState lacks 'transform_card' method.")
              return False
 
+
+class SetDayNightEffect(AbilityEffect):
+    """Apply an explicit instruction that makes it day or night (CR 727.1)."""
+
+    def __init__(self, state, condition=None):
+        normalized = str(state).strip().lower()
+        if normalized not in ("day", "night"):
+            raise ValueError(f"Invalid day/night state: {state}")
+        self.state = normalized
+        super().__init__(f"It becomes {normalized}", condition)
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        changed = game_state.day_night_state != self.state
+        game_state.day_night_state = self.state
+        if changed:
+            game_state.transform_day_night_cards()
+        return True
+
 class FightEffect(AbilityEffect):
     def __init__(self, target_type="creature", condition=None):
         # Ensure effect text correctly reflects the source fighting the target
@@ -5762,10 +5912,41 @@ class AdditionalCombatPhaseEffect(AbilityEffect):
     """'After this phase, there is an additional combat phase.' (CR 505.5a)
     Registers one extra combat phase; _advance_phase consumes it instead of
     entering the postcombat main phase."""
-    def __init__(self, condition=None):
-        super().__init__("After this phase, there is an additional combat phase", condition)
+    def __init__(self, condition=None, followed_by_main=False):
+        self.followed_by_main = bool(followed_by_main)
+        text = "After this phase, there is an additional combat phase"
+        if self.followed_by_main:
+            text += " followed by an additional main phase"
+        super().__init__(text, condition)
 
     def _apply_effect(self, game_state, source_id, controller, targets):
+        if self.followed_by_main:
+            anchor = game_state.phase
+            turn_phases = {
+                game_state.PHASE_UNTAP, game_state.PHASE_UPKEEP,
+                game_state.PHASE_DRAW, game_state.PHASE_MAIN_PRECOMBAT,
+                game_state.PHASE_BEGIN_COMBAT,
+                game_state.PHASE_DECLARE_ATTACKERS,
+                game_state.PHASE_DECLARE_BLOCKERS,
+                game_state.PHASE_FIRST_STRIKE_DAMAGE,
+                game_state.PHASE_COMBAT_DAMAGE,
+                game_state.PHASE_END_OF_COMBAT,
+                game_state.PHASE_MAIN_POSTCOMBAT,
+                game_state.PHASE_END_STEP, game_state.PHASE_CLEANUP,
+            }
+            if anchor not in turn_phases:
+                anchor = (game_state.previous_priority_phase
+                          if game_state.previous_priority_phase in turn_phases
+                          else game_state._last_turn_phase)
+            if (game_state.additional_phase_anchor not in (None, anchor)
+                    or game_state.additional_phase_stage is not None):
+                logging.warning(
+                    "Cannot schedule a combat+main pair across a different "
+                    "already-running inserted phase sequence.")
+                return False
+            game_state.additional_phase_anchor = anchor
+            game_state.additional_phase_pairs_pending += 1
+            return True
         game_state.extra_combat_phases = getattr(game_state, 'extra_combat_phases', 0) + 1
         logging.debug(
             f"AdditionalCombatPhaseEffect: {game_state.extra_combat_phases} "
@@ -6150,56 +6331,27 @@ class DelayedTriggerEffect(AbilityEffect):
             flat = [tid for tl in targets.values() if isinstance(tl, list) for tid in tl]
             if len(flat) == 1:
                 bound_id = flat[0]
-        if bound_id is None:
+        rider_match = self._RIDER_RE.match(self.inner_text.lower())
+        binds_created_token = bool(
+            rider_match and rider_match.group(2).lower() == "that token")
+        if bound_id is None and not binds_created_token:
             bound_id = source_id
 
-        rider_match = self._RIDER_RE.match(self.inner_text.lower())
-        inner_text = self.inner_text
-
-        def fire():
-            if rider_match and bound_id is not None:
-                verb = rider_match.group(1).lower()
-                ctrl = gs.get_card_controller(bound_id)
-                if not ctrl:
-                    # Object left the battlefield before the trigger fired;
-                    # the rider does nothing (safe v1 approximation).
-                    logging.debug(
-                        f"Delayed rider '{verb}' skipped: object {bound_id} no longer on battlefield.")
-                    return
-                owner = gs._find_card_owner_fallback(bound_id) or ctrl
-                if verb == "exile":
-                    gs.move_card(bound_id, ctrl, "battlefield", owner, "exile",
-                                 cause="delayed_trigger")
-                elif verb == "sacrifice":
-                    gs.move_card(bound_id, ctrl, "battlefield", owner, "graveyard",
-                                 cause="sacrifice")
-                elif verb == "destroy":
-                    gs.move_card(bound_id, ctrl, "battlefield", owner, "graveyard",
-                                 cause="destroy")
-                elif verb == "return":
-                    gs.move_card(bound_id, ctrl, "battlefield", owner, "hand",
-                                 cause="delayed_trigger")
-                return
-            # General case: parse the inner clause at fire time and apply it.
-            from .ability_utils import EffectFactory
-            _src_name = getattr(gs._safe_get_card(source_id), 'name', None) if source_id is not None else None
-            inner_effects = EffectFactory.create_effects(inner_text, source_name=_src_name) or []
-            applied = False
-            for eff in inner_effects:
-                if isinstance(eff, DelayedTriggerEffect):
-                    continue  # never chain-defer
-                try:
-                    applied = bool(eff.apply(gs, source_id, controller, targets)) or applied
-                except Exception as e:
-                    logging.error(f"Delayed trigger inner effect failed: {e}")
-            if not applied:
-                try:
-                    gs.fidelity_counters["unparsed_effects"] += 1
-                except Exception:
-                    pass
-
         gs.register_delayed_trigger(
-            fire, phase=phase_const,
+            phase=phase_const,
+            payload={
+                "kind": "oracle_text",
+                "inner_text": self.inner_text,
+                "source_id": source_id,
+                "controller_id": "p1" if controller is gs.p1 else "p2",
+                "targets": copy.deepcopy(targets or {}),
+                "bound_id": bound_id,
+                # Keep this exact list reference through the rest of the
+                # resolution; clone() deep-copies it once resolution ends.
+                "created_object_ids": (
+                    getattr(self, "resolution_context", {})
+                    .setdefault("_created_object_ids", [])),
+            },
             description=f"text: {self.effect_text[:80]}")
         logging.debug(
             f"Registered text-parsed delayed trigger ({self.phase_key}): {self.inner_text[:60]}")

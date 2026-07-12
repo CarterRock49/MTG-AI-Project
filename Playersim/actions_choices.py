@@ -80,11 +80,17 @@ class ChoiceHandlersMixin:
         if (choice and choice.get('player') is player
                 and choice.get('type') in (
                     'sacrifice_effect', 'activation_sacrifice_cost',
-                    'dig_select', 'distribute_counters')):
+                    'dig_select', 'distribute_counters', 'discard',
+                    'specialize_discard', 'forced_sacrifice')):
+            choice_options = choice.get('options', [])
+            if choice.get('type') in ('discard', 'specialize_discard'):
+                choice_options = choice.get('player', {}).get('hand', [])
+            elif choice.get('type') == 'forced_sacrifice':
+                choice_options = choice.get('player', {}).get('battlefield', [])
             page_count = max(
                 1, int(requested_page_count)
                 if requested_page_count is not None
-                else (len(choice.get('options', [])) + 9) // 10)
+                else (len(choice_options) + 9) // 10)
             choice['choice_page'] = (
                 int(choice.get('choice_page', 0)) + 1) % page_count
             return 0.0, True

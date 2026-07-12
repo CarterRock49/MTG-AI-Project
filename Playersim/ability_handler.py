@@ -2432,6 +2432,23 @@ class AbilityHandler:
         if costs:
             return costs
 
+        # Ward can be granted by an attached Aura such as a Royal Role. The
+        # layer marks the target as having ward; preserve the Aura's printed
+        # payment value here instead of degrading it to ward_generic.
+        for player in (gs.p1, gs.p2):
+            for attachment_id, target_id in player.get("attachments", {}).items():
+                if target_id != card_id:
+                    continue
+                attachment = gs._safe_get_card(attachment_id)
+                attachment_text = getattr(attachment, 'oracle_text', '') or ''
+                for match in re.finditer(
+                        r"ward\s*((?:\{[WUBRGCXSPMTQA0-9/\.]+\})+|\d+|pay \d+ life)",
+                        attachment_text, re.IGNORECASE):
+                    cost = match.group(1).strip()
+                    costs.append(f"{{{cost}}}" if cost.isdigit() else cost)
+        if costs:
+            return costs
+
         text = getattr(live_card, 'oracle_text', '') or ''
         for match in re.finditer(
                 r"ward\s*(?:—|-|–|:)?\s*((?:\{[WUBRGCXSPMTQA0-9\/\.]+\})+|\d+|pay \d+ life)",

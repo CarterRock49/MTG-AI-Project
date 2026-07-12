@@ -16,7 +16,7 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 13/13, and 295/295, plus 15/15 fixture-
+   every delivery (currently 9/9, 13/13, and 303/303, plus 15/15 fixture-
    harvest tests, 7/7 production-protocol tests, 18/18 card-registry tests,
    6/6 fuzz/replay tests, and the deterministic 8-seed / 8,000-action
    default fuzz profile, and the strict 32-seed / 320,000-action long
@@ -66,7 +66,7 @@ The project is complete when all of the following hold:
   complete — frozen canonical registry + feature schema in
   `formats/standard/`, explicit `--format`/`--decks` configuration, and
   lineage-stamped manifests. Standard end to end is next.
-- Test gates: smoke 9/9, training 13/13, scenarios 295/295 (grown from 12),
+- Test gates: smoke 9/9, training 13/13, scenarios 303/303 (grown from 12),
   fixture harvest 15/15, production Harvest protocol 7/7, card registry
   18/18, fuzz/replay configuration 6/6, deterministic default fuzz 8 seeds
   x 1,000 valid actions, and strict long fuzz 32 seeds x 10,000 valid
@@ -1319,7 +1319,7 @@ fuzz profile.
 
 ## Tier 4 — Verification & calibration
 
-1. ✅ Golden scenario harness — 295 scenarios and growing; scenario-first is a
+1. ✅ Golden scenario harness — 303 scenarios and growing; scenario-first is a
    working agreement, not a suggestion.
 2. ✅ **Property/invariant harness**: exact non-token zone/stack conservation,
    SBA fixed points, mask-valid action execution/handler coverage, declared
@@ -1407,9 +1407,10 @@ Phased milestones:
    production Harvest is generalized beyond the hard-coded sample fixture
    while the no-argument fixture remains the regression gate. See
    `STATS_SCHEMA.md` "Format namespaces and run lineage" for the consumer
-   contract. `formats/standard/` is frozen from the eight-deck bootstrap
-   corpus (110 cards, feature_dim 225 — identical width to the current
-   production observation).
+   contract. `formats/standard/` now covers every one of the 4,702 legal
+   English cards in the pinned Standard snapshot plus 28 retained bootstrap
+   identities (4,730 registry entries total). The v2 feature schema has 259
+   subtypes and feature_dim 436; the original 110 indices remain unchanged.
 2. ▢ **Standard end to end**: use the current Standard-legal sample only as a
    bootstrap, assemble and pin a representative Standard corpus, qualify the
    Standard policy against scripted play, promote it into a checkpoint league,
@@ -1479,6 +1480,73 @@ Gates: 295/295 scenarios, 9/9 smoke, 13/13 training (new format-lineage
 stage), 15/15 fixture-harvest + 7/7 protocol tests, 18/18 registry tests,
 6/6 fuzz/replay configuration, and 8,000/8,000 default-fuzz actions.
 
+**Round 7.47 (July 2026)** swept the highest-value contained v1 limitations,
+scenario-first:
+* **All seven Roles** — Cursed, Monster, Royal, Sorcerer, Young Hero,
+  Virtuous, and Wicked now parse and create exact attached Aura tokens. Their
+  base/set/variable P/T, ward cost, attack-trigger scope, scry, counter, and
+  graveyard riders are guarded end to end.
+* **Explicit day/night** — "it becomes day/night" now has a dedicated parsed
+  effect and synchronizes every daybound/nightbound permanent immediately.
+* **Clone-safe text delays** — oracle-text delayed triggers use structured
+  payloads, survive lookahead cloning, fire against the cloned players/zones,
+  and neither consume nor mutate the source game's pending trigger.
+* **Attachment attack scope** — "equipped/enchanted creature attacks" triggers
+  now fire only for the object actually attached to their source.
+* **Stale limitations retired** — Herd Migration's Domain value already had an
+  exact distinct-basic-land-type guard, and Restless Anchorage cleanup now
+  explicitly asserts removal of animated type, subtype, P/T, and flying. The
+  unused duplicate `GameState.prevent_damage` / `redirect_damage` API was
+  removed; parsed prevention and redirection continue through the active
+  replacement-effect pipeline.
+Gates: 299/299 scenarios, 9/9 smoke, 13/13 training, 15/15 fixture-harvest,
+7/7 protocol, 18/18 registry, 6/6 fuzz/replay configuration, and the
+8-seed / 8,000-action deterministic default fuzz profile.
+
+**Round 7.48 (July 2026)** continued the contained limitation sweep:
+* **Created-object delayed riders** — sequenced resolutions share explicit
+  created-object identities, so "exile that token at the beginning of the next
+  end step" binds the token made earlier in the same resolution instead of the
+  spell source. The structured payload remains clone-safe and the token ceases
+  after changing zones as required.
+* **Snow payment** — unrestricted mana produced by snow permanents retains
+  snow provenance. Floated snow mana and atomically activated snow sources pay
+  `{S}` exactly once, consume the mana, leave no phantom mana behind, and no
+  longer increment fidelity telemetry. Failed transactions untap snow sources.
+* **Attack-scope adjectives** — token/nontoken watcher scopes now distinguish
+  real cards from tokens instead of conservatively suppressing both.
+* **Combat plus main insertion** — "an additional combat phase followed by an
+  additional main phase" now inserts both phases immediately after the current
+  phase, supports repeated pairs, then resumes the original turn sequence.
+* **Honest policy naming** — the active feature extractor is now
+  `FixedWindowMTGExtractor`; its length-one gated layer is explicitly described
+  as non-recurrent. `CompletelyFixedMTGExtractor` remains only as a compatibility
+  alias so older checkpoint imports and state-dict keys keep loading.
+Gates: 303/303 scenarios, 9/9 smoke, 13/13 training, 15/15 fixture-harvest,
+7/7 protocol, 18/18 registry, 6/6 fuzz/replay configuration, and the
+8-seed / 8,000-action deterministic default fuzz profile.
+
+**Round 7.49 (July 2026)** closed the remaining contained policy-identity
+limitations and widened the frozen Standard namespace:
+* **Full Standard identity pool** — `freeze-pool` reads the pinned JSONL card
+  list, filters it to English cards legal in the requested format, preserves
+  existing indices, appends missing identities, verifies complete coverage,
+  and rebuilds a versioned feature schema for the union. Standard now contains
+  all 4,702 snapshot cards plus 28 historical bootstrap cards (4,730 total,
+  feature_dim 436) without renumbering the original 110.
+* **Target identity observations** — actions 274–283 now have exact page-aligned
+  card features, canonical IDs, target kinds, controllers, and zone positions.
+  Legacy category summaries remain available for old consumers.
+* **Unbounded direct choices** — discard and forced-sacrifice decisions page
+  through hands/battlefields in groups of ten, and the scripted opponent uses
+  the same page action.
+* **Canonical mechanic activation** — Investigate, Amass, Venture, Explore,
+  Adapt, and Goad compatibility slots locate the parsed activated ability and
+  use its ordinary cost/target/stack transaction. Their effects resolve through
+  the shared effect factory instead of bypassing printed costs.
+Gates: 305/305 scenarios, 9/9 smoke stages, 13/13 training stages, and
+19/19 registry tests.
+
 ---
 
 ## Working agreements
@@ -1493,22 +1561,13 @@ stage), 15/15 fixture-harvest + 7/7 protocol tests, 18/18 registry tests,
 
 ## Known v1 limitations (consolidated)
 
-- Role support currently covers the Monster and Wicked Role definitions used by
-  the sample decks. Cursed, Royal, Sorcerer, Young Hero, and Virtuous Roles still
-  need definitions when a target deck requires them.
 - Emblem execution currently recognizes the Kaito Ninja anthem and Wrenn
   graveyard-permission texts used by the sample decks. Other emblem text is
   retained as a command-zone record but needs an effect implementation before
   its card can be considered supported.
-- Delayed-trigger pronouns referring to objects created earlier in the same
-  resolution mis-bind to the source (token-maker riders) and no-op safely.
 - Specific `remove_ability` is not an existence dependency in layer sorting;
   CR 305.7 (Blood Moon ability loss) not modeled; applicability-set
   dependencies out of scope while `affected_ids` is a static snapshot.
-- Day/night v1 covers designation establishment from daybound/nightbound
-  permanents, turn-start spell-count transitions, synchronized transforms, and
-  entry faces. Explicit spell/ability instructions that say it becomes day or
-  night still need a dedicated parsed effect.
 - MDFC back-face casting — v1 support added (July 2026): is_mdfc() no longer
   requires "//" in the text (two non-transform faces suffice), Card exposes
   get_face_cost/get_face_text/get_face_type_line per face, and cast_spell uses
@@ -1538,33 +1597,21 @@ stage), 15/15 fixture-harvest + 7/7 protocol tests, 18/18 registry tests,
   slot is executable after the Round 7.26 audit, but full choice coverage needs
   a staged/paginated generic source-target chooser or a versioned action-space
   redesign before those cards are suitable for strength comparisons.
-- Legacy singleton shortcuts for Investigate, Amass, Venture, Explore, Adapt,
-  and Goad execute their mechanic directly instead of committing the source's
-  parsed activated-ability cost through the generic transaction. Their exposed
-  masks now carry executable contexts, but cards relying on those activated
-  forms must remain out of strength harvests until the shortcuts delegate to
-  `activate_ability()` (or are removed in favor of the generic action).
-- Target-selection actions and their masks use one canonical paged ordering,
-  but the legacy `targetable_*` observation fields are category summaries rather
-  than an identity-preserving encoding of those exact ten action choices. Card
-  choice phases have aligned `choice_cards`; ordinary targeting still needs the
-  same explicit page-aligned representation for best learning quality.
-- `CompletelyFixedMTGExtractor` labels a length-one, zero-initialized LSTM as
-  sequential processing. Its gates are trainable, but hidden state is not
-  carried across policy steps, so it provides no temporal memory. Use a truly
-  recurrent mask-aware policy or rename/replace this layer before claiming a
-  recurrent agent.
 - Repeated card IDs still model copies coarsely; last-moved location tracking
   and duplicate-preserving list zones repair the known first-touch failures,
   but true per-copy object identity remains a deeper future cleanup. Linked
   exile therefore cannot distinguish which one of two simultaneous same-ID
   sources owns a particular link.
-- Clones/MCTS copies start with an empty delayed-trigger registry.
+- Structured oracle-text delayed triggers are clone-safe. Opaque legacy
+  callback entries registered directly through `register_delayed_trigger`
+  remain intentionally excluded from lookahead clones because Python closures
+  cannot be rebound safely; production producers should use structured payloads.
 - Opponent trigger ordering routes through the installed policy; blocker damage
   ordering still uses the scripted/automatic path pending the next choice audit.
-- Snow payment can double-charge (fidelity-counted); `_evaluate_condition`
-  vocabulary is thin (life totals, card counts,
-  "you control X" only).
+- Snow provenance is tracked for the ordinary mana pool and atomic snow-source
+  payment. Restricted and phase-restricted mana pools do not yet retain snow
+  provenance. `_evaluate_condition` vocabulary remains thin beyond life totals,
+  card counts, basic control predicates, Delirium, and simple toughness checks.
 - Reflexive-trigger v1 recognizes exact "When you do" / "When that player
   does" riders when the prerequisite itself parses; generic optional sacrifice
   now exposes both the permanent choice and decline path.
@@ -1577,9 +1624,9 @@ stage), 15/15 fixture-harvest + 7/7 protocol tests, 18/18 registry tests,
   future slot-aware target-choice context; ordinary one-target copies are fully
   exposed now.
 - X choices are currently capped at 10 by the fixed action range.
-- Discard choices expose only the first 10 hand slots. Simultaneous
-  each-player discards are committed sequentially, and the scripted opponent
-  selects its first available hand slot until policy-vs-policy self-play lands.
+- Simultaneous each-player discards are committed sequentially, and the
+  scripted opponent selects its first available legal slot/page until
+  policy-vs-policy self-play lands.
 - Target, Dig, counter-distribution, SacrificeEffect, and activated-cost
   sacrifice choices paginate beyond ten. Direct programmatic ability callers
   that omit explicit non-self sacrifice IDs retain a deterministic fallback;
@@ -1590,9 +1637,6 @@ stage), 15/15 fixture-harvest + 7/7 protocol tests, 18/18 registry tests,
 - Round 7.16 target-conditioned pricing recognizes the sample cards' two exact
   conditions: a tapped permanent and a permanent you control. Arbitrary Oracle
   conditions that refer to target characteristics still need dedicated parsers.
-- Domain now drives Leyline Binding's casting cost. Domain effect values such as
-  Herd Migration's token count remain unsupported until an effect can consume
-  the same distinct-basic-land-type count.
 - Meld v1 requires the meld-result card object to be present in `card_db`; the
   deck loader does not fetch a missing `all_parts` URI. Blink/return handling
   for both component cards and clone-isolated meld identity remain deeper work.
@@ -1609,8 +1653,6 @@ stage), 15/15 fixture-harvest + 7/7 protocol tests, 18/18 registry tests,
   and same-destination separation are covered; per-component replacement
   choices, library ordering, token-on-top status, commander routing, and
   clone-isolated merged identity remain deeper object-model work.
-- `prevent_damage`/`redirect_damage` in game_state_damage are a dead API
-  (no callers) — remove or wire deliberately.
 - Ward target-tax v1 snapshots obligations when targets are committed and
   supports parsed mana costs and simple "pay N life" costs by auto-paying when
   possible. Sacrifice/discard costs and letting the agent deliberately decline
@@ -1618,14 +1660,9 @@ stage), 15/15 fixture-harvest + 7/7 protocol tests, 18/18 registry tests,
 - Attack triggers fire at declare-attackers-done through one ATTACKS dispatch:
   the attacker's own abilities plus "whenever a/another <type> [you control]
   attacks" and "attacks you" watchers on other permanents, scoped by controller
-  and printed type (July 2026). Scope adjectives outside the card's
-  type/subtype/supertype vocabulary (e.g. "nontoken") conservatively suppress
-  the watcher; "equipped/enchanted creature attacks" wordings still fire
-  ungated for ANY attacker (pre-existing over-fire, now documented); and
-  defender-side gating assumes two-player "attacks you".
-- Additional combat v1 inserts combat phases only. Wordings that add "an
-  additional main phase" after the combat (Aggravated Assault style) get the
-  combat but not the extra main phase.
+  and printed type (July 2026). Token/nontoken scopes are supported; other
+  adjectives outside the card's type/subtype/supertype vocabulary remain
+  conservative. Defender-side gating assumes two-player "attacks you".
 - Opening-hand placement v1: PASS declines ALL of that player's remaining
   begin-game cards at once rather than per card, and the scripted opponent
   always places every eligible card. Leyline of Resonance's second line (the
@@ -1637,9 +1674,8 @@ stage), 15/15 fixture-harvest + 7/7 protocol tests, 18/18 registry tests,
   bypass it (the same pre-existing caveat as all life-gain replacements).
 - ConditionalExileEffect (Anoint) is single-target v1 and reads the corrupted
   threshold from the target controller's poison_counters at resolution.
-- Forced sacrifice (Obliterator) exposes only the first 10 battlefield slots
-  per pick, and when the damage source left play before resolution the payer
-  falls back to the opponent of the trigger's controller.
+- When an Obliterator damage source left play before resolution, the forced-
+  sacrifice payer falls back to the opponent of the trigger's controller.
 - Cavern of Souls v1 stores the chosen type per card ID per player (repeated
   deck IDs share one choice), offers the top-10 creature subtypes from the
   controller's own cards as options, and applies the uncounterable rider when
@@ -1648,9 +1684,6 @@ stage), 15/15 fixture-harvest + 7/7 protocol tests, 18/18 registry tests,
 - Treasure tokens carry their printed sacrifice-for-mana text; Beza's token is
   scenario-verified through registration, activation costs, color choice,
   mana production, and the CR 605 no-stack path.
-- Restless-land animation registers end-of-turn layer effects; reversion
-  rides on the existing duration cleanup rather than a per-land scenario
-  assertion.
 - Phase-beginning trigger owner gating (July 2026) covers "on your turn"
   (combat), your-upkeep/end-step/draw/precombat-main, and "an opponent's
   upkeep/end step" wordings. Rarer phase scopes ("each player's upkeep on
@@ -1677,18 +1710,20 @@ stage), 15/15 fixture-harvest + 7/7 protocol tests, 18/18 registry tests,
   directory). Cross-env sharing within one training run no longer happens
   implicitly; save_memory also has a 20% random "enhancement" pass, so
   memory file contents are not bit-deterministic (game RNG unaffected).
-- Format-foundation v1 (Round 7.46): the frozen `formats/standard/`
-  registry covers the eight-deck bootstrap corpus (110 cards), not the full
-  Standard pool snapshot; extend it (append-only) or re-freeze as the
-  corpus grows. Canonical indices are name-sorted at first freeze and
+- Format-foundation v2 (Round 7.49): the frozen `formats/standard/` registry
+  covers all 4,702 legal English cards in the pinned Standard pool snapshot
+  plus 28 historical bootstrap identities. `freeze-pool` grows the registry
+  append-only and rebuilds the feature schema for a new policy lineage;
+  the original 110 indices remain stable. Canonical indices are name-sorted
+  at first freeze and
   differ from legacy insertion-order IDs, so format-namespace runs are a
   new stats lineage and must not be mixed with pre-7.46 artifacts. Lineage
   lives in run-level manifests, not per-game `game_log.jsonl` lines.
   Registry identity matches by card name + oracle_id; per-printing
   distinctions (set/collector number) are deliberately out of scope. A
-  frozen-schema subtype vocabulary that must GROW requires a new schema
-  version and therefore a new policy lineage; `--extend` only accepts
-  width-preserving additions.
+  frozen-schema subtype vocabulary that must grow requires a new schema
+  version and therefore a new policy lineage; ordinary `freeze --extend`
+  still accepts only width-preserving additions.
 
 ---
 

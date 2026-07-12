@@ -35,7 +35,7 @@ from .card import Card
 REGISTRY_KIND = "canonical_card_registry"
 REGISTRY_SCHEMA_VERSION = 1
 FEATURE_SCHEMA_KIND = "card_feature_schema"
-FEATURE_SCHEMA_VERSION = 1
+FEATURE_SCHEMA_VERSION = 2
 
 REGISTRY_FILENAME = "card_registry.json"
 FEATURE_SCHEMA_FILENAME = "feature_schema.json"
@@ -144,7 +144,8 @@ def registry_name_to_index(registry: dict) -> dict[str, int]:
 def _verify_artifact(payload: dict, kind: str, path) -> dict:
     if payload.get("kind") != kind:
         raise ValueError(f"{path} is not a {kind} artifact")
-    if payload.get("schema_version") != 1:
+    supported_versions = ({1} if kind == REGISTRY_KIND else {1, 2})
+    if payload.get("schema_version") not in supported_versions:
         raise ValueError(
             f"{path} has unsupported schema_version "
             f"{payload.get('schema_version')!r}")
@@ -295,6 +296,38 @@ def pool_snapshot_identity(
     }
 
 
+def load_pool_snapshot_cards(snapshot_path, format_name=None) -> list[dict]:
+    """Load English, legal cards from a JSONL format-pool snapshot."""
+    cards = []
+    with open(snapshot_path, "r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            try:
+                card = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"{snapshot_path}:{line_number} is not valid JSON: {exc}") from exc
+            if not isinstance(card, dict):
+                raise ValueError(
+                    f"{snapshot_path}:{line_number} must contain a JSON object")
+            if card.get("lang", "en") != "en":
+                continue
+            if format_name:
+                legality = card.get("legalities", {}).get(format_name)
+                if legality != "legal":
+                    continue
+            cards.append(card)
+    # Validate names and Oracle identity conflicts before constructing Cards.
+    identities = _collect_identities(cards)
+    by_name = {}
+    for card in cards:
+        key = card["name"].casefold()
+        by_name.setdefault(key, card)
+    return [by_name[key] for key in sorted(
+        identities, key=lambda name: identities[name][0].casefold())]
+
+
 def registry_identity(registry: dict) -> dict:
     return {
         "schema_version": registry["schema_version"],
@@ -387,6 +420,73 @@ def freeze_format_namespace(decks_directory, output_directory,
     }
 
 
+def freeze_format_pool_namespace(
+        snapshot_path, output_directory, decks_directory=None,
+        format_name=None, lists_directory=DEFAULT_FORMAT_LISTS_DIRECTORY,
+        preserve_existing=True) -> dict:
+    """Freeze a full pool while retaining any existing canonical indices.
+
+    Deck cards are included as historical/bootstrap identities, so a rotating
+    format can widen its current pool without invalidating older checkpoints.
+    The feature schema is intentionally rebuilt at version 2 for the union.
+    """
+    from .card import load_decks_and_card_db
+
+    snapshot_path = Path(snapshot_path)
+    output = Path(output_directory)
+    registry_path = output / REGISTRY_FILENAME
+    schema_path = output / FEATURE_SCHEMA_FILENAME
+    if preserve_existing and schema_path.exists() != registry_path.exists():
+        raise FileNotFoundError(
+            f"Incomplete existing namespace in {output}; expected both "
+            f"{REGISTRY_FILENAME} and {FEATURE_SCHEMA_FILENAME}")
+    pool_data = load_pool_snapshot_cards(snapshot_path, format_name=format_name)
+    pool_cards = [Card(dict(card)) for card in pool_data]
+
+    decks = []
+    deck_db = {}
+    if decks_directory is not None:
+        decks, deck_db = load_decks_and_card_db(
+            str(decks_directory), format_name=format_name,
+            strict_legality=True)
+
+    all_cards = list(deck_db.values()) + pool_cards
+    if preserve_existing and registry_path.is_file():
+        registry = extend_registry(load_registry(registry_path), all_cards)
+    else:
+        registry = build_registry(all_cards)
+    card_db = {index: card for index, card in enumerate(all_cards)}
+    schema = build_feature_schema(card_db)
+
+    pool_names = {card["name"].casefold() for card in pool_data}
+    registry_names = {entry["name"].casefold() for entry in registry["cards"]}
+    missing = sorted(pool_names - registry_names)
+    if missing:
+        raise CanonicalRegistryError(
+            "Pool cards missing from generated registry: " + ", ".join(missing))
+
+    write_registry(registry_path, registry)
+    write_feature_schema(schema_path, schema)
+    result = {
+        "card_registry": registry_identity(registry),
+        "feature_schema": feature_schema_identity(schema),
+        "pool_cards": len(pool_names),
+        "historical_cards": len(registry_names - pool_names),
+        "decks": [deck.get("name") for deck in decks],
+        "pool_snapshot": {
+            "path": snapshot_path.name,
+            "size_bytes": snapshot_path.stat().st_size,
+            "sha256": _file_sha256(snapshot_path),
+        },
+    }
+    if decks_directory is not None:
+        result["lineage"] = format_lineage(
+            decks_directory, format_name=format_name,
+            card_registry=registry, feature_schema=schema,
+            lists_directory=lists_directory)
+    return result
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -402,15 +502,36 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="directory holding <format>.jsonl pool snapshots")
     freeze.add_argument("--extend", action="store_true",
                         help="append new corpus cards to an existing registry")
+    pool = subparsers.add_parser(
+        "freeze-pool", help="freeze a namespace from a full format JSONL pool")
+    pool.add_argument("--snapshot", required=True,
+                      help="format pool JSONL snapshot")
+    pool.add_argument("--output", required=True,
+                      help="format namespace directory to write")
+    pool.add_argument("--decks", default=None,
+                      help="optional bootstrap/historical deck corpus")
+    pool.add_argument("--format", dest="format_name", required=True,
+                      help="legality key to require (for example standard)")
+    pool.add_argument("--format-lists", default=DEFAULT_FORMAT_LISTS_DIRECTORY,
+                      help="directory holding <format>.jsonl pool snapshots")
+    pool.add_argument("--replace-indices", action="store_true",
+                      help="rebuild indices instead of preserving an existing registry")
     return parser
 
 
 def main(argv=None) -> int:
     args = _build_parser().parse_args(argv)
     try:
-        result = freeze_format_namespace(
-            args.decks, args.output, format_name=args.format_name,
-            lists_directory=args.format_lists, extend=args.extend)
+        if args.command == "freeze-pool":
+            result = freeze_format_pool_namespace(
+                args.snapshot, args.output, decks_directory=args.decks,
+                format_name=args.format_name,
+                lists_directory=args.format_lists,
+                preserve_existing=not args.replace_indices)
+        else:
+            result = freeze_format_namespace(
+                args.decks, args.output, format_name=args.format_name,
+                lists_directory=args.format_lists, extend=args.extend)
     except (OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
@@ -419,7 +540,9 @@ def main(argv=None) -> int:
         f"(registry {result['card_registry']['sha256'][:12]}, "
         f"schema {result['feature_schema']['sha256'][:12]}, "
         f"feature_dim {result['feature_schema']['feature_dim']}) "
-        f"from decks: {', '.join(result['decks'])}")
+        f"from decks: {', '.join(result['decks'])}"
+        + (f"; pool cards: {result['pool_cards']}"
+           if 'pool_cards' in result else ""))
     return 0
 
 

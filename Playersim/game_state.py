@@ -81,6 +81,8 @@ class GameState(
                  "mulligan_in_progress", "mulligan_player", "mulligan_count",
                  "bottoming_in_progress", "bottoming_player", "cards_to_bottom", "bottoming_count",
                  "_opening_hand_players", "extra_combat_phases",
+                 "additional_phase_anchor", "additional_phase_pairs_pending",
+                 "additional_phase_resume", "additional_phase_stage",
                  "spree_context", 'combat_action_handler', '_handle_level_up_class',
                  "dredge_pending",
                  "madness_trigger",
@@ -763,6 +765,7 @@ class GameState(
             "exile": [],
             "life": 20,
             "mana_pool": {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}, # Regular mana
+            "snow_mana_pool": {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0},
             "conditional_mana": {}, # Restricted mana pools e.g. {'cast_creatures': {'G': 1}}
             "phase_restricted_mana": {}, # Mana that empties at phase end, not turn end
             "mana_production": {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0},
@@ -916,11 +919,13 @@ class GameState(
             "cards_to_bottom", "bottoming_count", "split_second_active", "gravestorm_count",
             "miracle_active", "miracle_card_id", "miracle_cost",
             "progress_was_forced", "_turn_limit_checked", "_phase_action_count",
-            "terminal_reason"
+            "terminal_reason", "additional_phase_anchor",
+            "additional_phase_pairs_pending",
+            "additional_phase_resume", "additional_phase_stage"
         ]
-        # Delayed triggers hold closures over THIS state; firing them from a
-        # clone would mutate the original game. Clones start with none (v1
-        # limitation: pending delayed triggers are invisible to lookahead).
+        # Opaque legacy callbacks cannot be rebound safely. Production oracle
+        # delayed triggers use structured payloads and are copied below after
+        # player state is available.
         cloned_state.delayed_triggers = []
         cloned_state.delayed_event_triggers = copy.deepcopy(
             getattr(self, "delayed_event_triggers", []))
@@ -939,6 +944,12 @@ class GameState(
             logging.error(f"CRITICAL Error deep copying player states: {e}", exc_info=True)
             # If players fail to copy, clone is likely unusable
             return None
+
+        cloned_state.delayed_triggers = [
+            copy.deepcopy(entry)
+            for entry in getattr(self, "delayed_triggers", [])
+            if isinstance(entry, dict) and entry.get("payload") is not None
+        ]
 
         # --- Deep Copy Other Mutable Top-Level Attributes ---
         # Use deepcopy for dictionaries and lists/sets that might contain mutable items or need full separation.

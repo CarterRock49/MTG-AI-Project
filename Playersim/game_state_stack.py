@@ -77,6 +77,11 @@ class GameStateStackMixin:
         reparsed or put back on the stack.
         """
         effects = list(effects or [])
+        context = dict(context or {})
+        # A shared mutable identity list lets a delayed instruction parsed
+        # before a token-creation sentence bind "that token" after the earlier
+        # instruction has actually created it.
+        context.setdefault("_created_object_ids", [])
         success = bool(initial_success)
         for effect_index, effect in enumerate(effects):
             previous_choice = getattr(self, 'choice_context', None)

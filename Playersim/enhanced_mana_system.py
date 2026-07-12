@@ -89,13 +89,20 @@ class EnhancedManaSystem:
         if snow_cost <= 0:
             return True
             
-        # Count available snow sources
-        available_snow = self.track_snow_sources(player)
+        # Mana already produced by a snow source retains that quality even
+        # after its source is tapped (CR 106.3). Untapped snow sources can be
+        # activated atomically by the payment transaction.
+        available_snow = sum(
+            max(0, min(int(amount or 0),
+                       int(player.get("mana_pool", {}).get(color, 0) or 0)))
+            for color, amount in player.get("snow_mana_pool", {}).items())
+        available_snow += self.track_snow_sources(player)
         
         # Check if player has enough snow mana sources
         return available_snow >= snow_cost
 
-    def pay_snow_cost(self, player, snow_cost):
+    def pay_snow_cost(self, player, snow_cost, mana_pool=None,
+                      snow_pool=None, payment=None):
         """
         Pay a snow mana cost.
         
@@ -109,16 +116,37 @@ class EnhancedManaSystem:
         if snow_cost <= 0:
             return True
             
-        # Check if cost can be paid
-        if not self.can_pay_snow_cost(player, snow_cost):
-            return False
-        
-        # Find snow permanents to tap
+        mana_pool = mana_pool if mana_pool is not None else player["mana_pool"]
+        snow_pool = snow_pool if snow_pool is not None else dict(
+            player.get("snow_mana_pool", {}))
+        payment = payment if payment is not None else {}
+        payment.setdefault("snow_spent_colors", defaultdict(int))
+        payment.setdefault("snow_tapped_sources", [])
+
+        remaining = int(snow_cost)
+        # Consume already-floated snow mana first. Cap provenance against the
+        # transaction's current pool so colored/hybrid payments made earlier
+        # cannot reuse the same mana unit for {S}.
+        for color in ('C', 'W', 'U', 'B', 'R', 'G'):
+            available = min(
+                max(0, int(snow_pool.get(color, 0) or 0)),
+                max(0, int(mana_pool.get(color, 0) or 0)))
+            spend = min(remaining, available)
+            if spend:
+                mana_pool[color] -= spend
+                snow_pool[color] = available - spend
+                payment["snow_spent_colors"][color] += spend
+                remaining -= spend
+            if remaining <= 0:
+                return True
+
+        # Find untapped snow permanents. Their produced mana pays {S}
+        # directly; it must not also be left in the pool.
         gs = self.game_state
         snow_sources_tapped = 0
         
         for card_id in player["battlefield"]:
-            if snow_sources_tapped >= snow_cost:
+            if snow_sources_tapped >= remaining:
                 break
                 
             card = gs._safe_get_card(card_id)
@@ -132,26 +160,12 @@ class EnhancedManaSystem:
                 # Check if it's a land or has a mana ability
                 if 'land' in card.type_line.lower() or (hasattr(card, 'oracle_text') and 
                                                     'add' in card.oracle_text.lower()):
-                    # Tap this permanent
-                    player["tapped_permanents"].append(card_id)
+                    if not gs.tap_permanent(card_id, player):
+                        continue
                     snow_sources_tapped += 1
-                    
-                    # Add appropriate mana to pool
-                    if hasattr(card, 'oracle_text'):
-                        # Look for mana production text to determine what color to add
-                        oracle_text = card.oracle_text.lower()
-                        for color in ['w', 'u', 'b', 'r', 'g']:
-                            if f"{{{color}}}" in oracle_text:
-                                player["mana_pool"][color.upper()] += 1
-                                break
-                        else:
-                            # Default to colorless if no specific color found
-                            player["mana_pool"]["C"] += 1
-                    else:
-                        # Default to colorless if no oracle text
-                        player["mana_pool"]["C"] += 1
-        
-        return snow_sources_tapped >= snow_cost
+                    payment["snow_tapped_sources"].append(card_id)
+
+        return snow_sources_tapped >= remaining
     
     def _gather_cost_modification_effects(self, player, card, context=None):
         """
@@ -1865,7 +1879,11 @@ class EnhancedManaSystem:
         if payment['life'] > 0:
             player["life"] += payment['life']
 
-        # Refund snow mana? (Harder, involves untapping) - For now, assume snow payment succeeds if checked.
+        for source_id in payment.get('snow_tapped_sources', []):
+            if hasattr(self.game_state, 'untap_permanent'):
+                self.game_state.untap_permanent(source_id, player)
+            else:
+                player.get('tapped_permanents', set()).discard(source_id)
 
         # Untap creatures tapped for Convoke
         if payment['tapped_creatures']:
@@ -1959,6 +1977,8 @@ class EnhancedManaSystem:
             'colors': defaultdict(int), 'conditional': defaultdict(lambda: defaultdict(int)),
             'phase_restricted': defaultdict(int),
             'life': 0, 'snow': 0,
+            'snow_spent_colors': defaultdict(int),
+            'snow_tapped_sources': [],
             'tapped_creatures': [], 'exiled_cards': [],
             'sacrificed_perms': [], 'discarded_cards': [],
         }
@@ -2106,6 +2126,7 @@ class EnhancedManaSystem:
         mana_payment_successful = False
         # Use a mutable copy of the pools for the payment attempt
         current_pool = player["mana_pool"].copy()
+        snow_pool = player.get("snow_mana_pool", {}).copy()
         conditional_pool = {k: v.copy() for k, v in player.get("conditional_mana", {}).items()}
         phase_pool = player.get("phase_restricted_mana", {}).copy()
 
@@ -2166,16 +2187,9 @@ class EnhancedManaSystem:
 
             # Pay snow mana
             if final_cost.get('snow', 0) > 0:
-                # pay_snow_cost taps permanents and adds mana to pools. This needs integration.
-                # KNOWN v1 INFIDELITY: snow should be paid with mana FROM snow
-                # sources already in the pool; tapping extra sources here can
-                # double-charge. Counted in fidelity telemetry so the stats
-                # consumer can weight snow decks accordingly.
-                try:
-                    self.game_state.fidelity_counters["unparsed_effects"] += 1
-                except Exception:
-                    pass
-                if not self.pay_snow_cost(player, final_cost['snow']): # CAUTION: Modifies player state directly
+                if not self.pay_snow_cost(
+                        player, final_cost['snow'], current_pool,
+                        snow_pool, payment):
                     raise ValueError("Failed to pay Snow mana cost")
                 payment['snow'] += final_cost['snow'] # Track that snow was paid
 
@@ -2206,6 +2220,11 @@ class EnhancedManaSystem:
         if mana_payment_successful:
             # COMMIT CHANGES TO PLAYER STATE
             player["mana_pool"] = current_pool
+            for color in list(snow_pool):
+                snow_pool[color] = min(
+                    max(0, int(snow_pool.get(color, 0) or 0)),
+                    max(0, int(current_pool.get(color, 0) or 0)))
+            player["snow_mana_pool"] = snow_pool
             player["conditional_mana"] = conditional_pool
             player["phase_restricted_mana"] = phase_pool
             # Life already deducted during phyrexian check
@@ -2599,6 +2618,16 @@ class EnhancedManaSystem:
         # Skip empty strings
         if not mana_string:
             return result
+
+        source_id = None
+        if isinstance(land_context, dict):
+            source_id = (land_context.get('source_permanent_id')
+                         or land_context.get('card_id'))
+        source_card = (self.game_state._safe_get_card(source_id)
+                       if source_id is not None else None)
+        source_is_snow = bool(
+            source_card
+            and 'snow' in (getattr(source_card, 'type_line', '') or '').lower())
         
         # --- PRODUCE_MANA replacements (July 2026 triage fix) ---
         # Mana-doubling replacements registered against a 'PRODUCE_MANA' event
@@ -2764,6 +2793,12 @@ class EnhancedManaSystem:
         # Add land conditions to result
         result['conditions'] = self._parse_land_conditions(mana_tokens)
         result['logs'].append(f"Processed land conditions: {result['conditions']}")
+        if source_is_snow and not restrictions and not phase_restricted:
+            provenance = player.setdefault(
+                "snow_mana_pool",
+                {symbol: 0 for symbol in self.mana_symbols})
+            for color, amount in result['added'].items():
+                provenance[color] = provenance.get(color, 0) + int(amount or 0)
         
         return result
 

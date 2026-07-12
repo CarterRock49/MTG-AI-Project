@@ -372,7 +372,7 @@ class CastingHandlersMixin:
              logging.warning("DISCARD_CARD called by a player without choice authority.")
              return -0.2, False
 
-        hand_idx = param
+        hand_idx = int(context.get("choice_page", 0)) * 10 + param
         if not isinstance(hand_idx, int) or not 0 <= hand_idx < len(player.get("hand", [])):
              logging.warning(f"DISCARD_CARD: Invalid hand index {hand_idx}")
              return -0.2, False

@@ -47,7 +47,7 @@ not part of the current verification gates.
 
 The model uses a custom architecture designed specifically for the structure of MTG:
 
-- **CompletelyFixedMTGExtractor**: Custom feature extractor that processes different observation types:
+- **FixedWindowMTGExtractor**: Custom feature extractor that processes different observation types:
   - Battlefield state (creatures, planeswalkers, etc.)
   - Hand contents
   - Game phase encoding
@@ -56,7 +56,7 @@ The model uses a custom architecture designed specifically for the structure of 
   
 - **FixedDimensionMaskableActorCriticPolicy**: Policy network that uses action masking to ensure only legal actions are selected.
 
-- **Sequence feature block**: The current extractor applies an LSTM-shaped gated
+- **Gated feature block**: The current extractor applies an LSTM-shaped gated
   transform to a length-one input. Its parameters train, but hidden state is not
   carried between policy calls, so this is not a recurrent policy yet.
 
@@ -153,12 +153,13 @@ runtime dependencies, deck provenance, lifecycle result, and artifact paths. A
 dirty run also stores a hashed `source_worktree.patch` beside the manifest so
 the exact tracked source delta is retained.
 
-> **Checkpoint boundary (Round 7.44):** card observations now retain the full
-> 225-field pool schema (including 48 subtype fields and MDFC fields), signed
+> **Checkpoint boundary (Round 7.49):** the full Standard namespace widened
+> card observations to 436 fields (including 259 subtype fields and MDFC fields), signed
 > live power/toughness, and exact count/stat bounds large enough for legal boards
 > above 20 permanents. Stable-Baselines validates the complete observation shape
 > and bounds, so do not resume a checkpoint created before this change; start the
-> next training run without `--resume`.
+> next training run without `--resume`. The frozen registry contains all 4,702
+> cards in the pinned Standard snapshot plus 28 retained bootstrap identities.
 
 ### Hyperparameter Optimization
 

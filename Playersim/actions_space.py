@@ -38,6 +38,29 @@ class ActionSpaceMixin:
              return card.has_keyword(keyword) # Assumes card object has checker
         return False
 
+    def _mechanic_activation_context(self, player, battlefield_index, needle):
+        """Return canonical activation context for a named mechanic effect."""
+        gs = self.game_state
+        battlefield = player.get("battlefield", [])
+        if not 0 <= battlefield_index < len(battlefield):
+            return None
+        card_id = battlefield[battlefield_index]
+        if not getattr(gs, "ability_handler", None):
+            return None
+        for ability_index, ability in enumerate(
+                gs.ability_handler.get_activated_abilities(card_id)):
+            effect = getattr(
+                ability, "effect", getattr(ability, "effect_text", "")) or ""
+            if (needle in effect.lower()
+                    and gs.ability_handler.can_activate_ability(
+                        card_id, ability_index, player)):
+                return {
+                    "battlefield_idx": battlefield_index,
+                    "ability_idx": ability_index,
+                    "controller_id": "p1" if player is gs.p1 else "p2",
+                }
+        return None
+
     def _add_multiple_blocker_actions(self, player, valid_actions, set_valid_action):
         """Delegate to CombatActionHandler._add_multiple_blocker_actions"""
         if self.combat_handler:
@@ -646,9 +669,13 @@ class ActionSpaceMixin:
                 set_valid_action(11, "PASS_PRIORITY (Waiting for opponent choice)")
                 return
 
-            # Discard -- fixed action range exposes hand indices 0-9.
+            # Discard -- the fixed action range exposes one ten-card page.
             if choice_type in ["discard", "specialize_discard"]:
-                for hand_index, card_id in enumerate(player.get("hand", [])[:10]):
+                hand = player.get("hand", [])
+                page_count = max(1, (len(hand) + 9) // 10)
+                page = int(context.get('choice_page', 0)) % page_count
+                for page_index, card_id in enumerate(
+                        hand[page * 10:(page + 1) * 10]):
                     if (choice_type == "specialize_discard"
                             and not gs.get_specialize_discard_colors(card_id).intersection(
                                 context.get("available_colors", []))):
@@ -656,10 +683,14 @@ class ActionSpaceMixin:
                     card = gs._safe_get_card(card_id)
                     card_name = getattr(card, "name", card_id)
                     set_valid_action(
-                        238 + hand_index,
+                        238 + page_index,
                         f"DISCARD_CARD {card_name}",
-                        context={"hand_idx": hand_index},
+                        context={"hand_idx": page * 10 + page_index},
                     )
+                if page_count > 1:
+                    set_valid_action(
+                        479, f"DISCARD_PAGE_NEXT ({page + 1}/{page_count})",
+                        context={"page_count": page_count})
 
             # CR 103.6c: begin-game battlefield placements from the opening
             # hand (Leylines). PASS declines the player's remaining cards.
@@ -677,7 +708,11 @@ class ActionSpaceMixin:
             # Forced sacrifice (Phyrexian Obliterator): the player picks each
             # of their own permanents to sacrifice; the choice is mandatory.
             elif choice_type == "forced_sacrifice":
-                for option_index, card_id in enumerate(player.get("battlefield", [])[:10]):
+                battlefield = player.get("battlefield", [])
+                page_count = max(1, (len(battlefield) + 9) // 10)
+                page = int(context.get('choice_page', 0)) % page_count
+                for option_index, card_id in enumerate(
+                        battlefield[page * 10:(page + 1) * 10]):
                     card = gs._safe_get_card(card_id)
                     card_name = getattr(card, "name", card_id)
                     set_valid_action(
@@ -685,6 +720,11 @@ class ActionSpaceMixin:
                         f"FORCED_SACRIFICE {card_name}",
                         context={"option_index": option_index},
                     )
+                if page_count > 1:
+                    set_valid_action(
+                        479,
+                        f"FORCED_SACRIFICE_PAGE_NEXT ({page + 1}/{page_count})",
+                        context={"page_count": page_count})
 
             elif choice_type == "keyword_grant":
                 for option_index, keyword in enumerate(context.get("options", [])[:10]):
@@ -2053,13 +2093,11 @@ class ActionSpaceMixin:
         for i in range(min(len(player["battlefield"]), 20)):
             card_id = player["battlefield"][i]
             card = gs._safe_get_card(card_id)
-            if card and hasattr(card, 'oracle_text') and "investigate" in card.oracle_text.lower():
-                # Check if the card has an activated ability that causes investigation
-                investigate_pattern = re.search(r"\{[^\}]+\}:.*?investigate", getattr(card, 'oracle_text', '').lower())
-                if investigate_pattern and not card_id in player.get("tapped_permanents", set()):
-                    # Only add if we can pay the cost (simplified check)
-                    investigate_context = {'battlefield_idx': i}
-                    set_valid_action(418, f"INVESTIGATE with {card.name}", context=investigate_context)
+            activation_context = self._mechanic_activation_context(
+                player, i, "investigate")
+            if card and activation_context:
+                set_valid_action(418, f"INVESTIGATE with {card.name}",
+                                 context=activation_context)
 
         # --- Foretell (Action 419 - Sorcery speed only) ---
         if is_sorcery_speed:
@@ -2077,12 +2115,11 @@ class ActionSpaceMixin:
         for i in range(min(len(player["battlefield"]), 20)):
             card_id = player["battlefield"][i]
             card = gs._safe_get_card(card_id)
-            if card and hasattr(card, 'oracle_text') and "amass" in card.oracle_text.lower():
-                amass_pattern = re.search(r"\{[^\}]+\}:.*?amass (\d+)", getattr(card, 'oracle_text', '').lower())
-                if amass_pattern and not card_id in player.get("tapped_permanents", set()):
-                    amount = int(amass_pattern.group(1)) if amass_pattern.group(1).isdigit() else 1
-                    amass_context = {'battlefield_idx': i, 'amount': amount}
-                    set_valid_action(420, f"AMASS {amount} with {card.name}", context=amass_context)
+            activation_context = self._mechanic_activation_context(
+                player, i, "amass")
+            if card and activation_context:
+                set_valid_action(420, f"AMASS with {card.name}",
+                                 context=activation_context)
 
         # --- Learn (Action 421) ---
         # Adding this if there's a "Learn" trigger waiting for resolution
@@ -2094,11 +2131,11 @@ class ActionSpaceMixin:
         for i in range(min(len(player["battlefield"]), 20)):
             card_id = player["battlefield"][i]
             card = gs._safe_get_card(card_id)
-            if card and hasattr(card, 'oracle_text') and "venture into the dungeon" in card.oracle_text.lower():
-                venture_pattern = re.search(r"\{[^\}]+\}:.*?venture", getattr(card, 'oracle_text', '').lower())
-                if venture_pattern and not card_id in player.get("tapped_permanents", set()):
-                    venture_context = {'battlefield_idx': i}
-                    set_valid_action(422, f"VENTURE with {card.name}", context=venture_context)
+            activation_context = self._mechanic_activation_context(
+                player, i, "venture")
+            if card and activation_context:
+                set_valid_action(422, f"VENTURE with {card.name}",
+                                 context=activation_context)
 
         # --- Exert (Action 423) ---
         # Only available during combat for attackers
@@ -2118,29 +2155,22 @@ class ActionSpaceMixin:
         for i in range(min(len(player["battlefield"]), 20)):
             card_id = player["battlefield"][i]
             card = gs._safe_get_card(card_id)
-            if card and hasattr(card, 'oracle_text') and "explore" in card.oracle_text.lower():
-                explore_pattern = re.search(r"\{[^\}]+\}:.*?explore", getattr(card, 'oracle_text', '').lower())
-                if explore_pattern and not card_id in player.get("tapped_permanents", set()):
-                    explore_context = {'creature_idx': i}
-                    set_valid_action(424, f"EXPLORE with {card.name}", context=explore_context)
+            activation_context = self._mechanic_activation_context(
+                player, i, "explore")
+            if card and activation_context:
+                set_valid_action(424, f"EXPLORE with {card.name}",
+                                 context=activation_context)
 
         # --- Adapt (Action 425 - Sorcery speed) ---
         if is_sorcery_speed:
             for i in range(min(len(player["battlefield"]), 20)):
                 card_id = player["battlefield"][i]
                 card = gs._safe_get_card(card_id)
-                if card and hasattr(card, 'oracle_text') and "adapt " in card.oracle_text.lower():
-                    match = re.search(r"\{[^\}]+\}:.*?adapt (\d+)", card.oracle_text.lower())
-                    adapt_n = int(match.group(1)) if match and match.group(1).isdigit() else 1
-                    
-                    # Check if creature already has +1/+1 counters (can't adapt if it does)
-                    has_counters = False
-                    if hasattr(card, 'counters') and getattr(card, 'counters', {}).get('+1/+1', 0) > 0:
-                        has_counters = True
-                    
-                    if not has_counters and self._can_afford_card(player, card):
-                        adapt_context = {'creature_idx': i, 'amount': adapt_n}
-                        set_valid_action(425, f"ADAPT {adapt_n} for {card.name}", context=adapt_context)
+                activation_context = self._mechanic_activation_context(
+                    player, i, "adapt")
+                if card and activation_context:
+                    set_valid_action(425, f"ADAPT with {card.name}",
+                                     context=activation_context)
 
         # --- Mutate (Action 426 - Sorcery speed) ---
         if is_sorcery_speed:
@@ -2189,26 +2219,11 @@ class ActionSpaceMixin:
         for i in range(min(len(player["battlefield"]), 20)):
             card_id = player["battlefield"][i]
             card = gs._safe_get_card(card_id)
-            if card and hasattr(card, 'oracle_text') and "goad" in card.oracle_text.lower():
-                goad_pattern = re.search(r"\{[^\}]+\}:.*?goad", getattr(card, 'oracle_text', '').lower())
-                if goad_pattern and not card_id in player.get("tapped_permanents", set()):
-                    # Check if there are valid targets (opponent's creatures)
-                    opponent = gs.p2 if player == gs.p1 else gs.p1
-                    valid_targets = [
-                        ((0 if opponent is gs.p1 else len(gs.p1.get('battlefield', []))) + idx)
-                        for idx, creature_id in enumerate(opponent.get("battlefield", []))
-                        if 'creature' in getattr(gs._safe_get_card(creature_id), 'card_types', [])
-                    ]
-                    
-                    if valid_targets:
-                        # The fixed slot can carry one deterministic legal target.
-                        # Without this field the mask exposed an action that its
-                        # handler was guaranteed to reject.
-                        goad_context = {
-                            'battlefield_idx': i,
-                            'target_creature_idx': valid_targets[0],
-                        }
-                        set_valid_action(428, f"GOAD with {card.name}", context=goad_context)
+            activation_context = self._mechanic_activation_context(
+                player, i, "goad")
+            if card and activation_context:
+                set_valid_action(428, f"GOAD with {card.name}",
+                                 context=activation_context)
 
         # --- Boast (Action 429 - Only after attacking) ---
         if gs.phase >= gs.PHASE_DECLARE_ATTACKERS:  # After declare attackers phase

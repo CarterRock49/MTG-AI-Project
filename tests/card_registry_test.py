@@ -299,6 +299,47 @@ class LineageIdentityTest(SubtypeVocabGuard):
 
 
 class FreezeWorkflowTest(SubtypeVocabGuard):
+    def test_full_pool_freeze_preserves_indices_and_filters_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / "formats" / "standard"
+            old_registry = registry_module.build_registry([FOREST])
+            old_schema = registry_module.build_feature_schema(
+                {0: Card(dict(FOREST))})
+            registry_module.write_registry(
+                output / "card_registry.json", old_registry)
+            registry_module.write_feature_schema(
+                output / "feature_schema.json", old_schema)
+
+            illegal = dict(WOLF)
+            illegal["name"] = "Illegal Wolf"
+            illegal["oracle_id"] = "illegal-wolf"
+            illegal["legalities"] = {"standard": "not_legal"}
+            foreign = dict(WOLF)
+            foreign["name"] = "Foreign Wolf"
+            foreign["oracle_id"] = "foreign-wolf"
+            foreign["lang"] = "ja"
+            snapshot = root / "standard.jsonl"
+            snapshot.write_text("\n".join(
+                json.dumps(card) for card in (BEAR, WOLF, illegal, foreign)
+            ) + "\n", encoding="utf-8")
+
+            result = registry_module.freeze_format_pool_namespace(
+                snapshot, output, format_name="standard")
+            registry = registry_module.load_registry(
+                output / "card_registry.json")
+            schema = registry_module.load_feature_schema(
+                output / "feature_schema.json")
+            by_name = {entry["name"]: entry["index"]
+                       for entry in registry["cards"]}
+            self.assertEqual(by_name["Forest"], 0)
+            self.assertEqual(set(by_name), {"Forest", "Test Bear", "Arctic Wolf"})
+            self.assertEqual(result["pool_cards"], 2)
+            self.assertEqual(result["historical_cards"], 1)
+            self.assertEqual(schema["schema_version"], 2)
+            self.assertIn("bear", schema["subtype_vocab"])
+            self.assertIn("wolf", schema["subtype_vocab"])
+
     def test_freeze_writes_registry_and_schema_and_refuses_overwrite(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

@@ -807,7 +807,7 @@ def build_model(vec_env):
     import main as m
 
     policy_kwargs = {
-        "features_extractor_class": m.CompletelyFixedMTGExtractor,
+        "features_extractor_class": m.FixedWindowMTGExtractor,
         "features_extractor_kwargs": {"features_dim": m.FEATURE_OUTPUT_DIM},
         "net_arch": {"pi": [64, 32], "vf": [64, 32]},  # small for test speed
     }

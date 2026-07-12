@@ -171,6 +171,7 @@ class GameStateZonesMixin:
             "cause": cause,
             "resume_phase": resume_phase,
             "previous_priority_phase_before_choice": previous_priority_phase,
+            "choice_page": 0,
         }
         self.priority_player = chooser
         self.priority_pass_count = 0
@@ -194,6 +195,7 @@ class GameStateZonesMixin:
                 context["player"] = chooser
                 context["remaining"] = remaining
                 context["pending"] = pending
+                context["choice_page"] = 0
                 self.priority_player = chooser
                 self.priority_pass_count = 0
                 return True

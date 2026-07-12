@@ -505,6 +505,15 @@ class LayerSystem:
                             if 'power' in chars: chars['power'] += count
                             if 'toughness' in chars: chars['toughness'] += count
                             logging.debug(f"Layer 7d (Var): Modified P/T of {target_id} by +{count}/+{count} based on {count_type}. New P/T: {chars.get('power')}/{chars.get('toughness')}")
+                    elif effect_type == 'modify_pt_enchantments_controller':
+                        effect_controller = effect_data.get('controller_id')
+                        count = sum(
+                            1 for cid in (effect_controller or {}).get("battlefield", [])
+                            if "enchantment" in getattr(
+                                self.game_state._safe_get_card(cid),
+                                "card_types", []))
+                        chars['power'] = (chars.get('power') or 0) + count
+                        chars['toughness'] = (chars.get('toughness') or 0) + count
 
     def _calculate_layer7e_switch(self, effect_data, calculated_characteristics): # Renamed from _calculate_layer7d_switch
          # [...] (Logic remains the same)

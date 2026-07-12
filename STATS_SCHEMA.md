@@ -145,9 +145,12 @@ Loader: `Playersim.card_support.CardSupportManifest.load(directory)`.
 ## Format namespaces and run lineage (added July 2026)
 
 A frozen format namespace under `formats/<format>/` pins two versioned,
-self-hashed JSON artifacts (create them with
+self-hashed JSON artifacts. Freeze a deck-only namespace with
 `python -m Playersim.card_registry freeze --decks <corpus> --format <format>
---output formats/<format>`):
+--output formats/<format>`, or cover the complete pinned pool while preserving
+existing indices with `python -m Playersim.card_registry freeze-pool
+--snapshot "Format Card Lists/<format>.jsonl" --decks <corpus>
+--format <format> --output formats/<format>`:
 
 - `card_registry.json` — canonical card identities. Each card keeps one
   stable integer index (used as the engine `card_id`) plus its Scryfall

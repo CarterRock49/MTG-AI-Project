@@ -1513,6 +1513,7 @@ class GameStatePermanentsMixin:
             "player": player,
             "remaining": count,
             "source_id": source_id,
+            "choice_page": 0,
         }
         self.priority_player = player
         self.priority_pass_count = 0
@@ -1527,11 +1528,13 @@ class GameStatePermanentsMixin:
             logging.warning("complete_forced_sacrifice_choice called without context.")
             return False
         player = ctx.get("player")
-        options = player.get("battlefield", [])[:10]
-        if not isinstance(option_index, int) or not (0 <= option_index < len(options)):
+        options = player.get("battlefield", [])
+        absolute_index = int(ctx.get("choice_page", 0)) * 10 + option_index
+        if (not isinstance(option_index, int)
+                or not (0 <= absolute_index < len(options))):
             logging.warning(f"Invalid forced-sacrifice option index {option_index}.")
             return False
-        card_id = options[option_index]
+        card_id = options[absolute_index]
         if not self.move_card(card_id, player, "battlefield", player, "graveyard",
                               cause="sacrifice"):
             logging.warning(f"Forced sacrifice could not move {card_id} to the graveyard.")
@@ -1539,6 +1542,7 @@ class GameStatePermanentsMixin:
         self.trigger_ability(card_id, "SACRIFICED", {"controller": player})
         ctx["remaining"] = ctx.get("remaining", 1) - 1
         if ctx["remaining"] > 0 and player.get("battlefield"):
+            ctx["choice_page"] = 0
             return True
         self.choice_context = None
         if getattr(self, 'previous_priority_phase', None) is not None:
@@ -1620,13 +1624,32 @@ class GameStatePermanentsMixin:
         self.layer_system.remove_effects_by_source(attach_id, effect_description_contains="attachment:")
         # P/T: "gets +A/+B" or "-A/-B" (either sign per component).
         m = _re.search(r"(?:equipped|enchanted)\s+creature\s+gets\s+([+-]\d+)/([+-]\d+)", low)
-        if m:
+        if m and "for each enchantment" not in low:
             self.layer_system.register_effect({
                 'source_id': attach_id, 'layer': 7, 'sublayer': 'c',
                 'affected_ids': [target_id], 'effect_type': 'modify_pt',
                 'effect_value': (int(m.group(1)), int(m.group(2))),
                 'duration': 'until_source_leaves',
                 'description': f"attachment: {getattr(card,'name',attach_id)} P/T",
+            })
+        if "enchanted creature has base power and toughness 1/1" in low:
+            self.layer_system.register_effect({
+                'source_id': attach_id, 'layer': 7, 'sublayer': 'b',
+                'affected_ids': [target_id], 'effect_type': 'set_pt',
+                'effect_value': (1, 1), 'duration': 'until_source_leaves',
+                'description': f"attachment: {getattr(card,'name',attach_id)} base P/T",
+            })
+        if _re.search(
+                r"enchanted\s+creature\s+gets\s+\+1/\+1\s+for each "
+                r"enchantment you control", low):
+            self.layer_system.register_effect({
+                'source_id': attach_id, 'layer': 7, 'sublayer': 'c',
+                'affected_ids': [target_id],
+                'effect_type': 'modify_pt_enchantments_controller',
+                'effect_value': None,
+                'controller_id': self.get_card_controller(attach_id),
+                'duration': 'until_source_leaves',
+                'description': f"attachment: {getattr(card,'name',attach_id)} enchantment count",
             })
         # Keyword grants: "and gains flying", "has trample", etc.
         for kw in Card.ALL_KEYWORDS:

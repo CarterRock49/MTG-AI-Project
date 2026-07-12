@@ -9202,6 +9202,17 @@ def s_restless_anchorage_animates_and_attacks():
     maps = [cid for cid in player["battlefield"]
             if "map" in {s.lower() for s in getattr(gs._safe_get_card(cid), 'subtypes', [])}]
     assert len(maps) == 1, "attacking with Anchorage did not create a Map token"
+    gs.phase = gs.PHASE_CLEANUP
+    assert not gs._cleanup_step_actions(player, discard_to_max=False)
+    gs.layer_system.apply_all_effects()
+    assert card.card_types == ['land'], \
+        f"Anchorage did not revert to only a land at cleanup: {card.card_types}"
+    assert (card.power, card.toughness) == (0, 0), \
+        f"Anchorage retained animated P/T after cleanup: {card.power}/{card.toughness}"
+    assert 'bird' not in [s.lower() for s in card.subtypes], \
+        f"Anchorage retained its animated subtype after cleanup: {card.subtypes}"
+    assert card.keywords[flying_idx] == 0, \
+        "Anchorage retained flying after its animation expired"
 
 
 @scenario("Restless Cottage / 508", "attacking Restless Cottage makes a Food and exiles the chosen graveyard card")
@@ -10023,6 +10034,14 @@ def scenario_target_choice_pagination():
     assert ok
     valid_map = gs.targeting_system.get_valid_targets(source, player, "creature", effect_text="target creature")
     ordered = sorted({cid for ids in valid_map.values() for cid in ids}, key=lambda t: (isinstance(t, str), t))
+    observation = env._get_obs()
+    assert observation["target_card_mask"][0]
+    assert observation["target_card_ids"][0] == ordered[10]
+    assert observation["target_kinds"][0] == 2
+    assert np.array_equal(
+        observation["target_cards"][0],
+        env._get_card_feature(ordered[10], env._feature_dim)), \
+        "target action 274 was not aligned with its observed card identity"
     _, ok = env.action_handler._handle_select_target(0, {})
     assert ok and gs.targeting_context['selected_targets'] == [ordered[10]]
 
@@ -11809,6 +11828,420 @@ def scenario_mosswood_dreadknight_graveyard_adventure_permission():
     gs._cleanup_step_actions(controller, discard_to_max=False)
     assert not gs.has_graveyard_adventure_permission(controller, dreadknight), \
         "the until-end-of-next-turn permission survived its cleanup"
+
+
+@scenario("727.1", "explicit instructions make it day or night and synchronize daybound permanents")
+def scenario_explicit_day_night_instruction():
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 140)
+    controller = gs.p1
+    werewolf = inject_into_zone(gs, controller, {
+        "name": "Instruction Watcher", "layout": "transform",
+        "mana_cost": "{1}{G}", "type_line": "Creature - Human Werewolf",
+        "oracle_text": "Daybound", "power": "2", "toughness": "2",
+        "color_identity": ["G"],
+        "card_faces": [
+            {"name": "Instruction Watcher", "mana_cost": "{1}{G}",
+             "type_line": "Creature - Human Werewolf", "oracle_text": "Daybound",
+             "power": "2", "toughness": "2", "colors": ["G"]},
+            {"name": "Instruction Howler", "mana_cost": "",
+             "type_line": "Creature - Werewolf", "oracle_text": "Nightbound",
+             "power": "4", "toughness": "4", "colors": ["G"]},
+        ],
+    }, "battlefield")
+    card = gs._safe_get_card(werewolf)
+    night_effects = EffectFactory.create_effects("It becomes night.")
+    assert night_effects and type(night_effects[0]).__name__ == "SetDayNightEffect", \
+        f"explicit night instruction did not parse: {night_effects}"
+    assert night_effects[0].apply(gs, None, controller)
+    assert gs.day_night_state == "night" and card.current_face == 1, \
+        "explicit night instruction did not transform the daybound permanent"
+    day_effects = EffectFactory.create_effects("It becomes day.")
+    assert day_effects and day_effects[0].apply(gs, None, controller)
+    assert gs.day_night_state == "day" and card.current_face == 0, \
+        "explicit day instruction did not restore the day face"
+
+
+@scenario("603.7 / lookahead", "text delayed triggers survive cloning and fire only in the clone")
+def scenario_delayed_trigger_clone_isolation():
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 141)
+    controller = gs.p1
+    source = card_id_by_name(gs, "Thicket Brute")
+    effects = EffectFactory.create_effects(
+        "At the beginning of the next end step, you gain 2 life.")
+    assert effects and effects[0].apply(gs, source, controller)
+    before = controller["life"]
+    clone = gs.clone()
+    cloned_controller = clone.p1
+    assert clone.delayed_triggers, "lookahead clone dropped a pending delayed trigger"
+    assert clone.process_delayed_triggers(clone.PHASE_END_STEP) == 1
+    assert cloned_controller["life"] == before + 2, \
+        "the cloned delayed trigger did not affect the cloned controller"
+    assert controller["life"] == before, \
+        "firing a cloned delayed trigger mutated the source game"
+    assert gs.delayed_triggers, \
+        "firing the clone consumed the source game's delayed trigger"
+
+
+@scenario("508.1m / 603.2", "equipped-creature attack triggers fire only for the equipped attacker")
+def scenario_equipped_creature_attack_trigger_scope():
+    from Playersim.combat_integration import integrate_combat_actions
+    gs = fresh(SEED + 142)
+    combat = integrate_combat_actions(gs)
+    controller = gs.p1
+    equipped = inject_into_zone(gs, controller, {
+        "name": "Equipped Attacker", "mana_cost": "{1}{W}", "cmc": 2,
+        "type_line": "Creature - Soldier", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    other = inject_into_zone(gs, controller, {
+        "name": "Other Attacker", "mana_cost": "{1}{W}", "cmc": 2,
+        "type_line": "Creature - Soldier", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    equipment = inject_into_zone(gs, controller, {
+        "name": "Attack Bell", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Artifact - Equipment", "oracle_text": (
+            "Equipped creature gets +1/+0.\nWhenever equipped creature attacks, "
+            "you gain 2 life.\nEquip {1}"
+        ),
+    }, "battlefield")
+    assert gs.equip_permanent(controller, equipment, equipped)
+    gs.ability_handler.active_triggers = []
+    life_before = controller["life"]
+
+    gs.phase = gs.PHASE_DECLARE_ATTACKERS
+    gs.current_attackers = [other]
+    gs.current_block_assignments = {}
+    assert combat.handle_declare_attackers_done()
+    gs.ability_handler.process_triggered_abilities()
+    assert not gs.stack, "the Equipment triggered for an unequipped attacker"
+    assert controller["life"] == life_before
+
+    gs.phase = gs.PHASE_DECLARE_ATTACKERS
+    gs.current_attackers = [equipped]
+    gs.current_block_assignments = {}
+    assert combat.handle_declare_attackers_done()
+    gs.ability_handler.process_triggered_abilities()
+    assert gs.stack, "the Equipment did not trigger for its equipped attacker"
+    while gs.stack:
+        assert gs.resolve_top_of_stack()
+    assert controller["life"] == life_before + 2, \
+        "the equipped-creature trigger applied the wrong effect"
+
+
+@scenario("111.10g", "all seven Role definitions apply their printed static and attack abilities")
+def scenario_all_role_token_definitions():
+    from Playersim.ability_utils import EffectFactory
+    from Playersim.combat_integration import integrate_combat_actions
+    gs = fresh(SEED + 143)
+    combat = integrate_combat_actions(gs)
+    controller = gs.p1
+
+    def bearer(name, power=2, toughness=2):
+        return inject_into_zone(gs, controller, {
+            "name": name, "mana_cost": "{1}{G}", "cmc": 2,
+            "type_line": "Creature - Bear", "oracle_text": "",
+            "power": power, "toughness": toughness,
+        }, "battlefield")
+
+    def create_role(role_name, target):
+        effects = EffectFactory.create_effects(
+            f"Create a {role_name} Role token attached to target creature.")
+        assert effects and type(effects[0]).__name__ == "CreateRoleEffect", \
+            f"{role_name} Role did not parse: {effects}"
+        assert effects[0].apply(
+            gs, None, controller, {"creatures": [target]})
+        return next(
+            cid for cid in reversed(controller["battlefield"])
+            if getattr(gs._safe_get_card(cid), "name", "") == f"{role_name} Role")
+
+    cursed_bearer = bearer("Cursed Bearer", 4, 4)
+    create_role("Cursed", cursed_bearer)
+    cursed = gs._safe_get_card(cursed_bearer)
+    assert (cursed.power, cursed.toughness) == (1, 1), \
+        f"Cursed Role did not set base P/T to 1/1: {cursed.power}/{cursed.toughness}"
+
+    royal_bearer = bearer("Royal Bearer")
+    create_role("Royal", royal_bearer)
+    royal = gs._safe_get_card(royal_bearer)
+    assert (royal.power, royal.toughness) == (3, 3)
+    assert gs.check_keyword(royal_bearer, "ward"), \
+        "Royal Role did not grant ward"
+    assert gs.ability_handler.get_ward_costs(royal_bearer) == ["{1}"], \
+        "Royal Role did not preserve its ward {1} cost"
+
+    virtuous_bearer = bearer("Virtuous Bearer")
+    inject_into_zone(gs, controller, {
+        "name": "Virtuous Companion", "mana_cost": "{W}", "cmc": 1,
+        "type_line": "Enchantment", "oracle_text": "",
+    }, "battlefield")
+    create_role("Virtuous", virtuous_bearer)
+    virtuous = gs._safe_get_card(virtuous_bearer)
+    enchantment_count = sum(
+        "enchantment" in getattr(gs._safe_get_card(cid), "card_types", [])
+        for cid in controller["battlefield"])
+    assert (virtuous.power, virtuous.toughness) == \
+        (2 + enchantment_count, 2 + enchantment_count), \
+        "Virtuous Role did not count every enchantment its controller controls"
+
+    sorcerer_bearer = bearer("Sorcerer Bearer")
+    create_role("Sorcerer", sorcerer_bearer)
+    gs.ability_handler.active_triggers = []
+    gs.phase = gs.PHASE_DECLARE_ATTACKERS
+    gs.current_attackers = [sorcerer_bearer]
+    gs.current_block_assignments = {}
+    assert combat.handle_declare_attackers_done()
+    gs.ability_handler.process_triggered_abilities()
+    assert gs.stack, "Sorcerer Role did not trigger for its enchanted attacker"
+    assert gs.resolve_top_of_stack(), "Sorcerer Role's scry trigger did not resolve"
+    assert gs.choice_context and gs.choice_context.get("type") == "scry", \
+        "Sorcerer Role did not expose its scry choice"
+    gs.choice_context = None
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+
+    young_bearer = bearer("Young Hero Bearer", 2, 2)
+    create_role("Young Hero", young_bearer)
+    gs.ability_handler.active_triggers = []
+    gs.phase = gs.PHASE_DECLARE_ATTACKERS
+    gs.current_attackers = [young_bearer]
+    gs.current_block_assignments = {}
+    assert combat.handle_declare_attackers_done()
+    gs.ability_handler.process_triggered_abilities()
+    assert gs.stack, "Young Hero Role did not trigger at toughness 2"
+    while gs.stack:
+        assert gs.resolve_top_of_stack()
+    assert gs._safe_get_card(young_bearer).counters.get("+1/+1", 0) == 1, \
+        "Young Hero Role did not put a counter on its enchanted attacker"
+
+
+@scenario("603.7c / 608.2c", "a delayed rider binds the token created earlier in the same resolution")
+def scenario_delayed_trigger_binds_created_token():
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 144)
+    controller = gs.p1
+    source = card_id_by_name(gs, "Thicket Brute")
+    effects = EffectFactory.create_effects(
+        "Create a 1/1 white Soldier creature token. "
+        "Exile that token at the beginning of the next end step.")
+    assert len(effects) == 2, f"compound token delay parsed as {effects}"
+    success, pending = gs._run_effect_sequence(
+        effects, source, controller, context={})
+    assert success and not pending
+    soldiers = [
+        cid for cid in controller["battlefield"]
+        if getattr(gs._safe_get_card(cid), "is_token", False)
+        and "soldier" in {
+            str(subtype).lower()
+            for subtype in getattr(gs._safe_get_card(cid), "subtypes", [])
+        }
+    ]
+    assert len(soldiers) == 1, "the first instruction did not create one Soldier"
+    token = soldiers[0]
+    assert source not in controller["battlefield"], \
+        "test source unexpectedly started on the battlefield"
+    assert gs.process_delayed_triggers(gs.PHASE_END_STEP) == 1
+    assert token not in controller["battlefield"] \
+        and token in getattr(gs, "_ceased_token_cards", {}), \
+        "the delayed rider did not exile and cease the token it referred to"
+
+
+@scenario("107.4h / 106.3", "snow mana is consumed once whether floated or auto-produced")
+def scenario_snow_mana_payment_is_single_charge():
+    gs = fresh(SEED + 145)
+    player = gs.p1
+
+    def snow_forest(name):
+        return inject_into_zone(gs, player, {
+            "name": name, "mana_cost": "", "cmc": 0,
+            "type_line": "Basic Snow Land - Forest",
+            "oracle_text": "{T}: Add {G}.",
+        }, "battlefield")
+
+    floated_source = snow_forest("Floated Snow Forest")
+    gs.untap_permanent(floated_source, player)
+    assert gs.mana_system.tap_land_for_mana(player, floated_source)
+    assert player["mana_pool"].get("G", 0) == 1
+    fidelity_before = gs.fidelity_counters["unparsed_effects"]
+    paid = gs.mana_system.pay_mana_cost_get_details(
+        player, gs.mana_system.parse_mana_cost("{S}"))
+    assert paid and paid["snow_paid"] == 1, \
+        "floated mana from a snow permanent could not pay {S}"
+    assert player["mana_pool"].get("G", 0) == 0, \
+        "paying {S} did not consume the floated snow mana"
+    assert gs.fidelity_counters["unparsed_effects"] == fidelity_before, \
+        "faithful snow payment still incremented the fidelity counter"
+
+    auto_source = snow_forest("Auto Snow Forest")
+    gs.untap_permanent(auto_source, player)
+    paid = gs.mana_system.pay_mana_cost_get_details(
+        player, gs.mana_system.parse_mana_cost("{S}"))
+    assert paid and auto_source in player["tapped_permanents"], \
+        "auto-payment did not tap the snow source"
+    assert sum(player["mana_pool"].values()) == 0, \
+        "auto-paying {S} both paid the cost and left the produced mana floating"
+
+
+@scenario("508.1m", "nontoken attack watchers accept nontokens and reject tokens")
+def scenario_nontoken_attack_watcher_scope():
+    from Playersim.combat_integration import integrate_combat_actions
+    gs = fresh(SEED + 146)
+    combat = integrate_combat_actions(gs)
+    controller = gs.p1
+    watcher = inject_into_zone(gs, controller, {
+        "name": "Nontoken Watcher", "mana_cost": "{2}{W}", "cmc": 3,
+        "type_line": "Creature - Cleric", "power": 2, "toughness": 3,
+        "oracle_text": (
+            "Whenever a nontoken creature you control attacks, you gain 1 life."
+        ),
+    }, "battlefield")
+    nontoken = inject_into_zone(gs, controller, {
+        "name": "Real Attacker", "mana_cost": "{1}{W}", "cmc": 2,
+        "type_line": "Creature - Soldier", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    token = gs.create_token(controller, {
+        "name": "Soldier Token", "type_line": "Token Creature - Soldier",
+        "card_types": ["token", "creature"], "subtypes": ["Soldier"],
+        "power": 1, "toughness": 1, "oracle_text": "", "is_token": True,
+    })
+    gs.ability_handler.active_triggers = []
+
+    def queued_for(attacker):
+        gs.ability_handler.active_triggers = []
+        gs.stack.clear()
+        gs.phase = gs.PHASE_DECLARE_ATTACKERS
+        gs.current_attackers = [attacker]
+        gs.current_block_assignments = {}
+        assert combat.handle_declare_attackers_done()
+        return [ctx.get("source_card_id")
+                for _, _, ctx in gs.ability_handler.active_triggers]
+
+    assert queued_for(nontoken) == [watcher], \
+        "the nontoken watcher rejected a nontoken creature"
+    assert queued_for(token) == [], \
+        "the nontoken watcher triggered for a creature token"
+
+
+@scenario("500.8 / 505.5", "an added combat followed by a main phase resumes the normal turn afterward")
+def scenario_additional_combat_followed_by_main_phase():
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 147)
+    controller = gs.p1
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    effects = EffectFactory.create_effects(
+        "After this phase, there is an additional combat phase followed by "
+        "an additional main phase.")
+    assert len(effects) == 1 \
+        and type(effects[0]).__name__ == "AdditionalCombatPhaseEffect", effects
+    assert getattr(effects[0], "followed_by_main", False), \
+        "the parser dropped the additional-main rider"
+    assert effects[0].apply(gs, None, controller)
+
+    gs._advance_phase()
+    assert gs.phase == gs.PHASE_BEGIN_COMBAT, \
+        "the inserted combat did not immediately follow the current main phase"
+    gs.phase = gs.PHASE_END_OF_COMBAT
+    gs._advance_phase()
+    assert gs.phase == gs.PHASE_MAIN_POSTCOMBAT, \
+        "the inserted combat was not followed by its additional main phase"
+    gs._advance_phase()
+    assert gs.phase == gs.PHASE_BEGIN_COMBAT, \
+        "the normal combat phase was lost after the inserted main phase"
+    gs.phase = gs.PHASE_END_OF_COMBAT
+    gs._advance_phase()
+    assert gs.phase == gs.PHASE_MAIN_POSTCOMBAT, \
+        "the normal postcombat main phase was lost after the normal combat"
+
+
+@scenario("policy contract / pagination", "discard and forced-sacrifice choices reach objects beyond slot ten")
+def scenario_discard_and_forced_sacrifice_pagination():
+    gs = fresh(SEED + 148)
+    env = get_env()
+    handler = env.action_handler
+    player = gs.p1 if gs.agent_is_p1 else gs.p2
+    hand_ids = replace_hand(gs, player, [{
+        "name": f"Paged Hand Card {i}", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Sorcery", "oracle_text": ""
+    } for i in range(12)])
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.choice_context = None
+    assert gs.start_discard_choice([player], count=1)
+    mask = handler.generate_valid_actions()
+    assert mask[479], "a twelve-card discard choice had no next page"
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(479)
+    assert not info.get("execution_failed")
+    mask = handler.generate_valid_actions()
+    assert handler.action_reasons_with_context[238]["context"]["hand_idx"] == 10
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(238)
+    assert not info.get("execution_failed") and hand_ids[10] in player["graveyard"]
+    assert hand_ids[0] in player["hand"], "discard page rebound to the first card"
+
+    gs = fresh(SEED + 149)
+    env = get_env()
+    handler = env.action_handler
+    player = gs.p1 if gs.agent_is_p1 else gs.p2
+    for card_id in list(player.get("battlefield", [])):
+        gs.move_card(card_id, player, "battlefield", player, "graveyard")
+    permanents = [inject_into_zone(gs, player, {
+        "name": f"Paged Permanent {i}", "mana_cost": "", "cmc": 0,
+        "type_line": "Artifact", "oracle_text": ""
+    }, "battlefield") for i in range(12)]
+    gs.begin_forced_sacrifice(player, 1, None)
+    mask = handler.generate_valid_actions()
+    assert mask[479], "a twelve-permanent sacrifice choice had no next page"
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(479)
+    assert not info.get("execution_failed")
+    mask = handler.generate_valid_actions()
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(353)
+    assert not info.get("execution_failed") and permanents[10] in player["graveyard"]
+    assert permanents[0] in player["battlefield"], \
+        "forced-sacrifice page rebound to the first permanent"
+
+
+@scenario("602.2b / policy aliases", "dedicated mechanic actions commit their printed activation costs")
+def scenario_mechanic_alias_commits_activation_cost():
+    gs = fresh(SEED + 150)
+    env = get_env()
+    handler = env.action_handler
+    player = gs.p1 if gs.agent_is_p1 else gs.p2
+    source = inject_into_zone(gs, player, {
+        "name": "Costed Investigator", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Artifact Creature - Detective",
+        "power": 2, "toughness": 2,
+        "oracle_text": "{2}, {T}: Investigate."
+    }, "battlefield")
+    player.get("entered_battlefield_this_turn", set()).discard(source)
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+    gs.stack.clear()
+    player["mana_pool"] = {color: 0 for color in ("W", "U", "B", "R", "G", "C")}
+    player["mana_pool"]["C"] = 2
+    mask = handler.generate_valid_actions()
+    assert mask[418], "the affordable Investigate alias was not exposed"
+    context = handler.action_reasons_with_context[418]["context"]
+    assert context.get("ability_idx") is not None
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(418)
+    assert not info.get("execution_failed"), info
+    assert source in player["tapped_permanents"], \
+        "the Investigate alias bypassed its tap cost"
+    assert sum(player["mana_pool"].values()) == 0, \
+        "the Investigate alias bypassed its mana cost"
+    assert gs.stack and gs.stack[-1][0] == "ABILITY", \
+        "the alias resolved directly instead of using the ability stack"
+    assert gs.resolve_top_of_stack(), "the canonical Investigate effect failed"
+    assert any(
+        "clue" in {str(subtype).lower()
+                   for subtype in getattr(gs._safe_get_card(card_id), "subtypes", [])}
+        for card_id in player["battlefield"]), \
+        "the costed Investigate ability did not create its Clue"
 
 
 # ---------------------------------------------------------------------------

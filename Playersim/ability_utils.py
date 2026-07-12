@@ -746,7 +746,7 @@ class EffectFactory:
                          r'(?<=[.;])\s+then\s+|'
                          r'(?<=\.)\s+(?=(?i:put\b.*\bcounters?\s+on\s+(?:it|that\b)))|'
                          r'(?<=\.)\s+(?=(?i:untap\s+(?:it|that)\b))|'
-                         r'(?<=\.)\s+(?=(?i:create\s+(?:a|an|one)\s+(?:monster|wicked)\s+role token\b))|'
+                         r'(?<=\.)\s+(?=(?i:create\s+(?:a|an|one)\s+(?:cursed|monster|royal|sorcerer|young\s+hero|virtuous|wicked)\s+role token\b))|'
                          r'\s*—\s*|\s*\u2014\s*')
         split_text = re.sub(r'\s*\([^()]*\)\s*', ' ', effect_text).strip('. ')
         parts = re.split(split_pattern, split_text)
@@ -779,7 +779,7 @@ class EffectFactory:
             CounterSpellEffect, CreateTokenEffect, CreateRoleEffect, DestroyEffect, ExileEffect,
             DiscardEffect, MillEffect, TapEffect, UntapEffect, BuffEffect,
             SearchLibraryEffect, AddCountersEffect, ReturnToHandEffect,
-            ScryEffect, SurveilEffect, CopySpellEffect, TransformEffect, FightEffect,
+            ScryEffect, SurveilEffect, CopySpellEffect, TransformEffect, SetDayNightEffect, FightEffect,
             ImpulseDrawEffect, LoseLifeEffect, GainKeywordEffect,
             SacrificeEffect, SacrificeSourceEffect, ReanimateEffect,
             AddManaEffect, ControlEffect,
@@ -962,10 +962,10 @@ class EffectFactory:
             # Role tokens are Aura enchantments created already attached to a
             # creature, not generic 1/1 creature tokens.
             elif re.search(
-                    r"\bcreate(?:s)?\s+(?:a|an|one)\s+(monster|wicked)\s+role token\s+attached to\s+(.+)$",
+                    r"\bcreate(?:s)?\s+(?:a|an|one)\s+(cursed|monster|royal|sorcerer|young\s+hero|virtuous|wicked)\s+role token\s+attached to\s+(.+)$",
                     clause_lower):
                  role_match = re.search(
-                     r"\bcreate(?:s)?\s+(?:a|an|one)\s+(monster|wicked)\s+role token\s+attached to\s+(.+)$",
+                     r"\bcreate(?:s)?\s+(?:a|an|one)\s+(cursed|monster|royal|sorcerer|young\s+hero|virtuous|wicked)\s+role token\s+attached to\s+(.+)$",
                      clause_lower)
                  created_effect = CreateRoleEffect(
                      role_match.group(1), attachment_text=role_match.group(2).strip(". "))
@@ -992,6 +992,36 @@ class EffectFactory:
                  from .ability_types import CreateMapEffect
                  created_effect = CreateMapEffect(count=count)
 
+            # Keyword actions reached through ordinary spell/ability
+            # resolution. Dedicated policy slots are aliases of this path.
+            elif re.fullmatch(r"investigate[.!]?", clause_lower.strip()):
+                 from .ability_types import InvestigateEffect
+                 created_effect = InvestigateEffect()
+
+            elif re.search(r"\bamass(?:\s+\w+)?\s+(\d+)\b", clause_lower):
+                 from .ability_types import AmassEffect
+                 amount_match = re.search(r"\bamass(?:\s+\w+)?\s+(\d+)\b", clause_lower)
+                 created_effect = AmassEffect(int(amount_match.group(1)))
+
+            elif re.fullmatch(
+                    r"venture(?:s)?(?: into the dungeon)?[.!]?",
+                    clause_lower.strip()):
+                 from .ability_types import VentureEffect
+                 created_effect = VentureEffect()
+
+            elif re.fullmatch(r"adapt\s+(\d+)[.!]?", clause_lower.strip()):
+                 from .ability_types import AdaptEffect
+                 amount_match = re.search(r"\d+", clause_lower)
+                 created_effect = AdaptEffect(int(amount_match.group(0)))
+
+            elif re.search(r"\bgoad\s+target\s+creature\b", clause_lower):
+                 from .ability_types import GoadEffect
+                 created_effect = GoadEffect()
+
+            elif re.fullmatch(r"explore[.!]?", clause_lower.strip()):
+                 from .ability_types import ExploreEffect
+                 created_effect = ExploreEffect()
+
             # Explore
             elif re.search(r"\b(?:target\s+)?creature\b.*\bexplores\b", clause_lower):
                  from .ability_types import ExploreEffect
@@ -1003,7 +1033,9 @@ class EffectFactory:
             elif re.search(r"\ban additional combat phase\b", clause_lower) or \
                     re.search(r"\bthere is an additional combat\b", clause_lower):
                 from .ability_types import AdditionalCombatPhaseEffect
-                created_effect = AdditionalCombatPhaseEffect()
+                created_effect = AdditionalCombatPhaseEffect(
+                    followed_by_main=(
+                        "additional main phase" in effect_text.lower()))
 
             # Create Token
             elif re.search(r"\b(create(?:s)?)\b", clause_lower) and "token" in clause_lower:
@@ -1559,6 +1591,12 @@ class EffectFactory:
             # Transform
             elif re.search(r"\btransform\b", clause_lower):
                  created_effect = TransformEffect()
+
+            # Explicit day/night instructions (CR 727.1).
+            elif re.search(r"\b(?:it\s+)?becomes?\s+(day|night)\b", clause_lower):
+                 state_match = re.search(
+                     r"\b(?:it\s+)?becomes?\s+(day|night)\b", clause_lower)
+                 created_effect = SetDayNightEffect(state_match.group(1))
 
             # Fight
             elif re.search(r"\bfights?\b.*?\btarget\b", clause_lower):

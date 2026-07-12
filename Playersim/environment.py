@@ -270,6 +270,13 @@ class AlphaZeroMTGEnv(gym.Env):
             "targetable_players": spaces.Box(low=-1, high=1, shape=(2,), dtype=np.int32),
             "targetable_spells_on_stack": spaces.Box(low=-1, high=20, shape=(5,), dtype=np.int32),
             "targetable_cards_in_graveyards": spaces.Box(low=-1, high=200, shape=(10 * 2,), dtype=np.int32),
+            # Exact SELECT_TARGET page. Slot i describes action 274+i.
+            "target_cards": card_feature_space(10),
+            "target_card_mask": spaces.Box(low=0, high=1, shape=(10,), dtype=bool),
+            "target_card_ids": spaces.Box(low=-1, high=2147483647, shape=(10,), dtype=np.int64),
+            "target_kinds": spaces.Box(low=0, high=6, shape=(10,), dtype=np.int32),
+            "target_controllers": spaces.Box(low=-1, high=1, shape=(10,), dtype=np.int32),
+            "target_zone_indices": spaces.Box(low=-1, high=1000000, shape=(10,), dtype=np.int32),
             "sacrificeable_permanents": spaces.Box(low=-1, high=self.max_battlefield, shape=(self.max_battlefield,), dtype=np.int32),
             "selectable_modes": spaces.Box(low=-1, high=10, shape=(10,), dtype=np.int32),
             "selectable_colors": spaces.Box(low=-1, high=4, shape=(5,), dtype=np.int32),
@@ -1733,12 +1740,14 @@ class AlphaZeroMTGEnv(gym.Env):
             return None, {}
 
         if (phase_ctx == "CHOOSE" and getattr(gs, "choice_context", None)
-                and gs.choice_context.get("type") == "discard"):
+                and gs.choice_context.get("type") in ("discard", "specialize_discard")):
             for action_idx in range(238, 248):
                 if opponent_mask[action_idx]:
                     logging.debug(
                         f"Scripted Opponent: DISCARD_CARD (Index {action_idx - 238})")
                     return action_idx, {}
+            if opponent_mask[479]:
+                return 479, {}
             logging.warning("Scripted Opponent: No discard-card action available.")
             return None, {}
 
@@ -1795,6 +1804,8 @@ class AlphaZeroMTGEnv(gym.Env):
                         return action_idx, {}
                 if opponent_mask[11]:
                     return 11, {}
+                if opponent_mask[479]:
+                    return 479, {}
                 return None, {}
             if choice_type == "casting_additional_return":
                 for action_idx in range(353, 363):
@@ -3138,6 +3149,9 @@ class AlphaZeroMTGEnv(gym.Env):
                 obs["targetable_players"] = self._get_potential_targets_vector('player')
                 obs["targetable_spells_on_stack"] = self._get_potential_targets_vector('spell')
                 obs["targetable_cards_in_graveyards"] = self._get_potential_targets_vector('graveyard_card')
+                target_page_observation = self._get_target_page_observation(
+                    agent_player_obj)
+                obs.update(target_page_observation)
                 choice = getattr(gs, 'choice_context', None)
                 if choice and choice.get('player') is agent_player_obj:
                     all_choice_options = choice.get(
@@ -3560,6 +3574,63 @@ class AlphaZeroMTGEnv(gym.Env):
         return recs
         
     # --- Observation Helper Methods ---
+
+    def _get_target_page_observation(self, player):
+        """Describe the exact candidates bound to actions 274 through 283."""
+        gs = self.game_state
+        result = {
+            "target_cards": np.zeros((10, self._feature_dim), dtype=np.float32),
+            "target_card_mask": np.zeros(10, dtype=bool),
+            "target_card_ids": np.full(10, -1, dtype=np.int64),
+            "target_kinds": np.zeros(10, dtype=np.int32),
+            "target_controllers": np.full(10, -1, dtype=np.int32),
+            "target_zone_indices": np.full(10, -1, dtype=np.int32),
+        }
+        context = getattr(gs, "targeting_context", None)
+        if (not context or context.get("controller") is not player
+                or not getattr(self, "action_handler", None)):
+            return result
+        candidates = self.action_handler._get_target_selection_candidates(
+            player, context)
+        page = int(context.get("target_page", 0))
+        for slot, target_id in enumerate(candidates[page * 10:(page + 1) * 10]):
+            if target_id == "p1" or target_id == "p2":
+                result["target_kinds"][slot] = 1
+                result["target_controllers"][slot] = 0 if target_id == "p1" else 1
+                continue
+
+            owner = None
+            zone = None
+            zone_index = -1
+            for controller_index, candidate_owner in enumerate((gs.p1, gs.p2)):
+                for candidate_zone, kind in (
+                        ("battlefield", 2), ("graveyard", 4), ("exile", 5)):
+                    values = candidate_owner.get(candidate_zone, [])
+                    if target_id in values:
+                        owner, zone = candidate_owner, candidate_zone
+                        zone_index = values.index(target_id)
+                        result["target_kinds"][slot] = kind
+                        result["target_controllers"][slot] = controller_index
+                        break
+                if zone is not None:
+                    break
+            if zone is None:
+                for stack_index, item in enumerate(gs.stack):
+                    if (isinstance(item, tuple) and len(item) >= 3
+                            and item[1] == target_id):
+                        owner, zone, zone_index = item[2], "stack", stack_index
+                        result["target_kinds"][slot] = 3
+                        result["target_controllers"][slot] = (
+                            0 if owner is gs.p1 else 1 if owner is gs.p2 else -1)
+                        break
+            result["target_zone_indices"][slot] = zone_index
+            if isinstance(target_id, (int, np.integer)):
+                result["target_card_ids"][slot] = int(target_id)
+                if target_id in gs.card_db:
+                    result["target_cards"][slot] = self._get_card_feature(
+                        target_id, self._feature_dim)
+                    result["target_card_mask"][slot] = True
+        return result
     
     def _get_potential_targets_vector(self, target_kind):
         """Helper to get INDICES for targetable entities of a specific kind. Returns np.array of indices padded with -1."""

@@ -489,6 +489,7 @@ class GameStateTurnMixin:
                 if not player:
                     continue
                 player["mana_pool"] = dict(empty_pool)
+                player["snow_mana_pool"] = dict(empty_pool)
                 player["conditional_mana"] = {}
                 player["phase_restricted_mana"] = {}
 
@@ -559,6 +560,33 @@ class GameStateTurnMixin:
                 # Determine next phase
                 next_idx = (current_idx + 1) % len(phase_sequence)
                 next_phase_in_sequence = phase_sequence[next_idx]
+
+                # CR 500.8: a combat+main pair is inserted immediately after
+                # the phase in which the effect resolved, then the original
+                # turn sequence resumes. This differs from a bare additional
+                # combat, which is consumed after the current combat below.
+                pair_stage = getattr(self, 'additional_phase_stage', None)
+                if (pair_stage == "combat"
+                        and current_phase_for_check == self.PHASE_END_OF_COMBAT):
+                    next_phase_in_sequence = self.PHASE_MAIN_POSTCOMBAT
+                    self.additional_phase_stage = "main"
+                elif (pair_stage == "main"
+                        and current_phase_for_check == self.PHASE_MAIN_POSTCOMBAT):
+                    self.additional_phase_pairs_pending -= 1
+                    if self.additional_phase_pairs_pending > 0:
+                        next_phase_in_sequence = self.PHASE_BEGIN_COMBAT
+                        self.additional_phase_stage = "combat"
+                    else:
+                        next_phase_in_sequence = self.additional_phase_resume
+                        self.additional_phase_anchor = None
+                        self.additional_phase_resume = None
+                        self.additional_phase_stage = None
+                elif (pair_stage is None
+                        and getattr(self, 'additional_phase_pairs_pending', 0) > 0
+                        and current_phase_for_check == self.additional_phase_anchor):
+                    self.additional_phase_resume = next_phase_in_sequence
+                    next_phase_in_sequence = self.PHASE_BEGIN_COMBAT
+                    self.additional_phase_stage = "combat"
 
                 # CR 505.5a: a registered additional combat phase is entered
                 # instead of the postcombat main phase, once per registration.
@@ -687,6 +715,10 @@ class GameStateTurnMixin:
         self.attackers_this_turn = set()
         self.creatures_died_this_turn = {}
         self.extra_combat_phases = 0
+        self.additional_phase_anchor = None
+        self.additional_phase_pairs_pending = 0
+        self.additional_phase_resume = None
+        self.additional_phase_stage = None
         self.damage_dealt_this_turn = {}
         self.cards_drawn_this_turn = {'p1': 0, 'p2': 0} # Reset draw counts
         self.cards_milled_this_turn = {'p1': 0, 'p2': 0} # Reset mill counts
@@ -712,10 +744,13 @@ class GameStateTurnMixin:
                 player["pw_activations"] = {} # Reset PW activations per turn
         logging.debug(f"Turn {self.turn}: Reset turn tracking variables.")
 
-    def register_delayed_trigger(self, effect, phase=None, description=""):
+    def register_delayed_trigger(self, effect=None, phase=None, description="",
+                                 payload=None):
         """Register a delayed triggered ability (CR 603.7).
 
-        effect: zero-argument callable performing the ability's effect.
+        effect: zero-argument callable performing a legacy ability's effect.
+        payload: clone-safe structured production effect data. New engine
+                 producers should use this instead of closures.
         phase:  the phase constant at whose beginning the trigger fires
                 (e.g. self.PHASE_END_STEP for "at the beginning of the next
                 end step"). None means "as soon as the current event fully
@@ -728,8 +763,63 @@ class GameStateTurnMixin:
         self.delayed_triggers.append({
             "phase": phase,
             "effect": effect,
+            "payload": payload,
             "description": description or "delayed trigger",
         })
+
+    def _execute_delayed_trigger_payload(self, payload):
+        """Execute a clone-safe structured delayed-trigger payload."""
+        if not isinstance(payload, dict) or payload.get("kind") != "oracle_text":
+            return False
+        from .ability_types import DelayedTriggerEffect
+        from .ability_utils import EffectFactory
+
+        source_id = payload.get("source_id")
+        controller = self.p1 if payload.get("controller_id") == "p1" else self.p2
+        targets = payload.get("targets") or {}
+        bound_id = payload.get("bound_id")
+        inner_text = str(payload.get("inner_text") or "")
+        rider_match = DelayedTriggerEffect._RIDER_RE.match(inner_text.lower())
+        if (bound_id is None and rider_match
+                and rider_match.group(2).lower() == "that token"):
+            for candidate in reversed(payload.get("created_object_ids") or []):
+                card = self._safe_get_card(candidate)
+                _, zone = self.find_card_location(candidate)
+                if card and getattr(card, "is_token", False) and zone == "battlefield":
+                    bound_id = candidate
+                    break
+        if rider_match and bound_id is not None:
+            verb = rider_match.group(1).lower()
+            current_controller = self.get_card_controller(bound_id)
+            if not current_controller:
+                logging.debug(
+                    f"Delayed rider '{verb}' skipped: object {bound_id} "
+                    "is no longer on the battlefield.")
+                return True
+            owner = self._find_card_owner_fallback(bound_id) or current_controller
+            destination = "exile" if verb == "exile" else (
+                "hand" if verb == "return" else "graveyard")
+            cause = "sacrifice" if verb == "sacrifice" else (
+                "destroy" if verb == "destroy" else "delayed_trigger")
+            return bool(self.move_card(
+                bound_id, current_controller, "battlefield", owner,
+                destination, cause=cause))
+
+        source_card = self._safe_get_card(source_id) if source_id is not None else None
+        effects = EffectFactory.create_effects(
+            inner_text, source_name=getattr(source_card, "name", None)) or []
+        applied = False
+        for effect in effects:
+            if isinstance(effect, DelayedTriggerEffect):
+                continue
+            try:
+                applied = bool(effect.apply(
+                    self, source_id, controller, targets)) or applied
+            except Exception as exc:
+                logging.error(f"Delayed trigger inner effect failed: {exc}")
+        if not applied:
+            self.fidelity_counters["unparsed_effects"] += 1
+        return applied
 
     def process_delayed_triggers(self, current_phase=None):
         """Fire due delayed triggers; returns how many fired.
@@ -756,9 +846,14 @@ class GameStateTurnMixin:
             except ValueError:
                 continue  # already consumed by re-entrant processing
             effect = entry if is_bare else entry.get("effect")
+            payload = None if is_bare else entry.get("payload")
             desc = "legacy asap trigger" if is_bare else entry.get("description", "delayed trigger")
             try:
-                if callable(effect):
+                if payload is not None:
+                    self._execute_delayed_trigger_payload(payload)
+                    fired += 1
+                    logging.debug(f"Delayed trigger fired: {desc}")
+                elif callable(effect):
                     effect()
                     fired += 1
                     logging.debug(f"Delayed trigger fired: {desc}")
