@@ -442,6 +442,126 @@ class HarvestFixturesTest(unittest.TestCase):
         )
         self.assertEqual((args.games, args.seed, args.max_steps), (3, 99, 77))
         self.assertEqual(args.output, Path("somewhere"))
+        self.assertIsNone(args.decks)
+        self.assertIsNone(args.format)
+        self.assertIsNone(args.format_dir)
+        corpus_args = harvest.build_parser().parse_args(
+            ["--output", "somewhere", "--decks", "MyDecks",
+             "--format", "standard", "--format-dir", "formats/standard"]
+        )
+        self.assertEqual(corpus_args.decks, Path("MyDecks"))
+        self.assertEqual(corpus_args.format, "standard")
+        self.assertEqual(corpus_args.format_dir, Path("formats/standard"))
+
+
+class GeneralizedCorpusTest(unittest.TestCase):
+    """The production harvest accepts any deck corpus, not only the fixture."""
+
+    def setUp(self):
+        from Playersim.card import Card
+
+        self._saved_vocab = list(Card.SUBTYPE_VOCAB)
+
+    def tearDown(self):
+        from Playersim.card import Card
+
+        Card.SUBTYPE_VOCAB = self._saved_vocab
+
+    @staticmethod
+    def _write_corpus(directory: Path) -> None:
+        forest = {
+            "name": "Forest", "oracle_id": "forest-oracle-id",
+            "type_line": "Basic Land — Forest", "mana_cost": "", "cmc": 0,
+            "oracle_text": "({T}: Add {G}.)", "color_identity": ["G"],
+            "legalities": {"standard": "legal"},
+        }
+        bear = {
+            "name": "Test Bear", "oracle_id": "bear-oracle-id",
+            "type_line": "Creature — Bear", "mana_cost": "{1}{G}", "cmc": 2,
+            "power": "2", "toughness": "2", "oracle_text": "",
+            "color_identity": ["G"], "legalities": {"standard": "legal"},
+        }
+        directory.mkdir(parents=True)
+        for deck_name, entries in (
+                ("ZooDeck", [(56, forest), (4, bear)]),
+                ("MonoForest", [(60, forest)])):
+            payload = {"deck": [
+                {"count": count, "card": card} for count, card in entries
+            ]}
+            (directory / f"{deck_name}.json").write_text(
+                json.dumps(payload), encoding="utf-8")
+
+    def test_load_corpus_decks_orders_names_and_reports_lineage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            decks_dir = Path(temp) / "CustomDecks"
+            self._write_corpus(decks_dir)
+            decks, card_db, lineage = harvest.load_corpus_decks(decks_dir)
+        self.assertEqual(
+            [deck["name"] for deck in decks], ["MonoForest", "ZooDeck"])
+        self.assertTrue(card_db)
+        self.assertIsNone(lineage["format"])
+        self.assertIsNone(lineage["card_registry"])
+        self.assertEqual(lineage["corpus"]["directory"], "CustomDecks")
+        self.assertTrue(lineage["corpus"]["sha256"])
+
+    def test_load_corpus_decks_uses_frozen_format_namespace(self):
+        from Playersim import card_registry as registry_module
+
+        with tempfile.TemporaryDirectory() as temp:
+            decks_dir = Path(temp) / "CustomDecks"
+            self._write_corpus(decks_dir)
+            format_dir = Path(temp) / "formats" / "custom"
+            frozen = registry_module.freeze_format_namespace(
+                decks_dir, format_dir)
+            decks, card_db, lineage = harvest.load_corpus_decks(
+                decks_dir, format_dir=format_dir)
+            registry = registry_module.load_registry(
+                format_dir / "card_registry.json")
+        self.assertEqual(
+            lineage["card_registry"]["sha256"],
+            frozen["card_registry"]["sha256"])
+        self.assertEqual(
+            lineage["feature_schema"]["sha256"],
+            frozen["feature_schema"]["sha256"])
+        expected = {entry["name"].lower(): entry["index"]
+                    for entry in registry["cards"]}
+        for card_id, card in card_db.items():
+            self.assertEqual(card_id, expected[card.name.lower()])
+
+    def test_load_corpus_decks_requires_at_least_two_decks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            decks_dir = Path(temp) / "OneDeck"
+            self._write_corpus(decks_dir)
+            (decks_dir / "ZooDeck.json").unlink()
+            with self.assertRaisesRegex(RuntimeError, "at least two"):
+                harvest.load_corpus_decks(decks_dir)
+
+    def test_validate_artifacts_accepts_custom_deck_names(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = harvest.prepare_output_directory(Path(temp) / "run")
+            record = _write_valid_artifact_fixture(output, "fixture-test")
+            for path in (output / "game_log.jsonl",):
+                rewritten = dict(
+                    record, p1_deck="ZooDeck", p2_deck="MonoForest")
+                path.write_text(
+                    json.dumps(rewritten) + "\n", encoding="utf-8")
+            for deck_file, deck_name in (
+                    ("winner.json.gz", "ZooDeck"),
+                    ("loser.json.gz", "MonoForest")):
+                deck_path = output / "decks" / deck_file
+                with gzip.open(deck_path, "rt", encoding="utf-8") as handle:
+                    stats = json.load(handle)
+                stats["name"] = deck_name
+                _write_gzip_json(deck_path, stats)
+
+            records, _, _ = harvest._validate_artifacts(
+                output, 1, "fixture-test",
+                expected_deck_names=("ZooDeck", "MonoForest"))
+            self.assertEqual(records[0]["p1_deck"], "ZooDeck")
+
+            # The fixture default still rejects unknown deck labels.
+            with self.assertRaisesRegex(RuntimeError, "unknown deck label"):
+                harvest._validate_artifacts(output, 1, "fixture-test")
 
 
 if __name__ == "__main__":

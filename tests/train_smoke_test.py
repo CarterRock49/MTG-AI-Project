@@ -581,7 +581,7 @@ def check_main_failure_semantics():
             m.MODEL_DIR = os.path.join(tmp, "models")
             m.LOG_DIR = os.path.join(tmp, "logs")
             m.TENSORBOARD_DIR = os.path.join(tmp, "tensorboard")
-            m.load_decks_and_card_db = lambda _path: ([object()], {})
+            m.load_decks_and_card_db = lambda _path, **_kwargs: ([object()], {})
             m.DummyVecEnv = FakeVecEnv
             m.VecMonitor = lambda env: env
             m.StrictEvaluationVecEnv = lambda env: env
@@ -653,7 +653,8 @@ def check_main_failure_semantics():
 
             # Deck-loading failures happen before environments exist but still
             # must return a nonzero process status.
-            m.load_decks_and_card_db = lambda _path: (_ for _ in ()).throw(
+            m.load_decks_and_card_db = lambda _path, **_kwargs: (
+                _ for _ in ()).throw(
                 RuntimeError("synthetic deck-load failure"))
             sys.argv = ["main.py"]
             assert m.main() == 1
@@ -674,6 +675,49 @@ def check_main_failure_semantics():
             m.torch.set_num_threads = original_set_num_threads
             m.torch.cuda.is_available = original_cuda_available
             m.time.strftime = original_strftime
+
+
+@stage("format corpus flags load the frozen namespace and stamp lineage")
+def check_format_corpus_lineage():
+    import main as m
+    from Playersim.card import Card
+    from Playersim.card_registry import (
+        load_feature_schema, load_registry)
+
+    format_dir = os.path.join(REPO_ROOT, "formats", "standard")
+    registry = load_registry(os.path.join(format_dir, "card_registry.json"))
+    schema = load_feature_schema(
+        os.path.join(format_dir, "feature_schema.json"))
+    saved_vocab = list(Card.SUBTYPE_VOCAB)
+    try:
+        decks, card_db, decks_dir, lineage = m.load_training_corpus(
+            None, "standard", None)
+        assert decks_dir == m.DECKS_DIR
+        assert lineage["format"] == "standard"
+        assert lineage["card_registry"]["sha256"] == registry["sha256"]
+        assert lineage["feature_schema"]["sha256"] == schema["sha256"]
+        assert lineage["pool_snapshot"]["format"] == "standard"
+        assert lineage["corpus"]["sha256"]
+        # Canonical IDs replace insertion-order IDs across the corpus.
+        expected = {entry["name"].lower(): entry["index"]
+                    for entry in registry["cards"]}
+        assert card_db, "no cards loaded"
+        for card_id, card in card_db.items():
+            assert card_id == expected[card.name.lower()], (
+                f"{card.name} loaded with id {card_id}, registry says "
+                f"{expected[card.name.lower()]}")
+        # The frozen schema pins the exact observation feature width.
+        assert Card.SUBTYPE_VOCAB == schema["subtype_vocab"]
+        any_card = next(iter(card_db.values()))
+        assert len(any_card.to_feature_vector()) == schema["feature_dim"]
+
+        # Legacy loading (no flags) still works and records a null format.
+        _, _, _, legacy_lineage = m.load_training_corpus(None, None, None)
+        assert legacy_lineage["format"] is None
+        assert legacy_lineage["card_registry"] is None
+        assert legacy_lineage["corpus"]["sha256"] == lineage["corpus"]["sha256"]
+    finally:
+        Card.SUBTYPE_VOCAB = saved_vocab
 
 
 @stage("two-worker SubprocVecEnv reset, masks, steps, and close")
@@ -863,6 +907,7 @@ def main():
     check_hyperparameter_eval_isolation()
     check_runtime_configuration()
     check_main_failure_semantics()
+    check_format_corpus_lineage()
 
     # Reuse the fixture decks from the engine smoke test.
     from smoke_test import build_fixture_decks  # tests/ is on sys.path via cwd

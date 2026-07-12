@@ -81,6 +81,9 @@ def _run_shard(arguments: dict) -> dict:
         game_offset=arguments["offset"],
         agent_model=arguments.get("agent_model"),
         opponent_model=arguments.get("opponent_model"),
+        decks_directory=arguments.get("decks_directory"),
+        format_name=arguments.get("format_name"),
+        format_dir=arguments.get("format_dir"),
     )
     return {
         "shard": arguments["shard"],
@@ -93,6 +96,8 @@ def _run_shard(arguments: dict) -> dict:
         "records": result["records"],
         "fidelity": result["fidelity"],
         "manifest": result["manifest"],
+        "lineage": result["run_manifest"].get("lineage"),
+        "decks": result["run_manifest"].get("decks"),
     }
 
 
@@ -105,6 +110,9 @@ def run_parallel_harvest(
     max_steps: int = fixture.MAX_STEPS_PER_GAME,
     agent_model: Path | str | None = None,
     opponent_model: Path | str | None = None,
+    decks_directory: Path | str | None = None,
+    format_name: str | None = None,
+    format_dir: Path | str | None = None,
 ) -> dict:
     """Run strict isolated shards and publish one success-only root manifest."""
     shards = partition_games(games, workers)
@@ -118,6 +126,10 @@ def run_parallel_harvest(
             "output": str(output / f"shard_{shard['shard']:03d}"),
             "agent_model": str(agent_model) if agent_model else None,
             "opponent_model": str(opponent_model) if opponent_model else None,
+            "decks_directory": (
+                str(decks_directory) if decks_directory else None),
+            "format_name": format_name,
+            "format_dir": str(format_dir) if format_dir else None,
         }
         for shard in shards
     ]
@@ -142,6 +154,11 @@ def run_parallel_harvest(
         for counter in fixture.FIDELITY_COUNTERS
     }
     manifest = _merge_manifests([shard["manifest"] for shard in results])
+    # Every shard loads the same corpus; a lineage mismatch means the run is
+    # not one coherent stats scope and must not publish a root manifest.
+    lineages = [shard.get("lineage") for shard in results]
+    if any(lineage != lineages[0] for lineage in lineages[1:]):
+        raise RuntimeError("Harvest shards disagree on corpus/format lineage")
     agent_identity = fixture.checkpoint_identity(agent_model) if agent_model else None
     opponent_identity = (
         fixture.checkpoint_identity(opponent_model) if opponent_model else None)
@@ -157,6 +174,8 @@ def run_parallel_harvest(
         "games_per_second": games / elapsed,
         "agent_policy": agent_identity or {"kind": "random-valid"},
         "opponent_policy": opponent_identity or {"kind": "scripted"},
+        "lineage": lineages[0],
+        "decks": results[0].get("decks"),
         "results": dict(sorted(Counter(
             record["result"] for record in all_records).items())),
         "fidelity": fidelity,
@@ -200,6 +219,9 @@ def run_promotion(
     *,
     minimum_score: float = 0.55,
     max_steps: int = fixture.MAX_STEPS_PER_GAME,
+    decks_directory: Path | str | None = None,
+    format_name: str | None = None,
+    format_dir: Path | str | None = None,
 ) -> dict:
     """Run paired seats and issue a deterministic promotion decision."""
     if games < 2 or games % 2:
@@ -208,12 +230,19 @@ def run_promotion(
         raise ValueError("minimum_score must be between 0.5 and 1.0")
     output = fixture.prepare_output_directory(Path(output_directory))
     games_per_seat = games // 2
+    corpus_kwargs = {
+        "decks_directory": decks_directory,
+        "format_name": format_name,
+        "format_dir": format_dir,
+    }
     candidate_p1 = run_parallel_harvest(
         games_per_seat, workers, seed, output / "candidate_p1",
-        max_steps=max_steps, agent_model=candidate, opponent_model=baseline)
+        max_steps=max_steps, agent_model=candidate, opponent_model=baseline,
+        **corpus_kwargs)
     candidate_p2 = run_parallel_harvest(
         games_per_seat, workers, seed, output / "candidate_p2",
-        max_steps=max_steps, agent_model=baseline, opponent_model=candidate)
+        max_steps=max_steps, agent_model=baseline, opponent_model=candidate,
+        **corpus_kwargs)
 
     points = (
         _candidate_points(candidate_p1["records"], True)
@@ -236,6 +265,7 @@ def run_promotion(
         "schema_version": 1,
         "status": "complete",
         "protocol_version": PROTOCOL_VERSION,
+        "lineage": candidate_p1.get("protocol_manifest", {}).get("lineage"),
         "candidate": fixture.checkpoint_identity(candidate),
         "baseline": fixture.checkpoint_identity(baseline),
         "games": games,
@@ -260,6 +290,20 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _add_corpus_arguments(subparser) -> None:
+    subparser.add_argument(
+        "--decks", type=Path, default=None,
+        help="deck corpus directory (default: the audited eight-deck fixture)")
+    subparser.add_argument(
+        "--format", default=None,
+        help="enforce strict format legality and use formats/<format>'s "
+             "frozen registry and feature schema")
+    subparser.add_argument(
+        "--format-dir", type=Path, default=None,
+        help="explicit frozen format-namespace directory "
+             "(default: formats/<format> when --format is given)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -273,6 +317,7 @@ def build_parser() -> argparse.ArgumentParser:
     harvest.add_argument("--output", type=Path, required=True)
     harvest.add_argument("--agent-model", type=Path)
     harvest.add_argument("--opponent-model", type=Path)
+    _add_corpus_arguments(harvest)
 
     promote = subparsers.add_parser(
         "promote", help="benchmark a candidate against a baseline in both seats")
@@ -285,6 +330,7 @@ def build_parser() -> argparse.ArgumentParser:
     promote.add_argument("--max-steps", type=_positive_int,
                          default=fixture.MAX_STEPS_PER_GAME)
     promote.add_argument("--output", type=Path, required=True)
+    _add_corpus_arguments(promote)
     return parser
 
 
@@ -295,7 +341,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = run_parallel_harvest(
                 args.games, args.workers, args.seed, args.output,
                 max_steps=args.max_steps, agent_model=args.agent_model,
-                opponent_model=args.opponent_model)
+                opponent_model=args.opponent_model,
+                decks_directory=args.decks, format_name=args.format,
+                format_dir=args.format_dir)
             summary = result["protocol_manifest"]
             print(
                 f"Harvest complete: games={summary['games']} "
@@ -305,7 +353,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             decision = run_promotion(
                 args.candidate, args.baseline, args.games, args.workers,
                 args.seed, args.output, minimum_score=args.minimum_score,
-                max_steps=args.max_steps)
+                max_steps=args.max_steps, decks_directory=args.decks,
+                format_name=args.format, format_dir=args.format_dir)
             print(
                 f"Promotion {decision['decision']}: "
                 f"score={decision['candidate_score']:.3f} "

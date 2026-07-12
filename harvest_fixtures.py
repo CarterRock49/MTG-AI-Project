@@ -111,6 +111,41 @@ def load_sample_decks(decks_directory: Path = DEFAULT_DECKS_DIRECTORY):
     return [by_name[name] for name in EXPECTED_SAMPLE_DECKS], card_db
 
 
+def load_corpus_decks(decks_directory: Path, format_name: str | None = None,
+                      format_dir: Path | str | None = None):
+    """Load any deck corpus strictly and return (decks, card_db, lineage).
+
+    Decks are ordered by name so the seeded matchup schedule is deterministic
+    for a given corpus. When ``format_name`` is given without an explicit
+    ``format_dir``, the frozen namespace is expected at ``formats/<format>``;
+    the namespace supplies canonical card IDs and the frozen feature schema.
+    """
+    from Playersim import card_registry as registry_module
+    from Playersim.card import load_decks_and_card_db
+
+    decks_directory = Path(decks_directory)
+    if not decks_directory.is_dir():
+        raise RuntimeError(f"Deck corpus directory not found: {decks_directory}")
+    if format_dir is None and format_name is not None:
+        format_dir = PROJECT_ROOT / "formats" / format_name
+    card_registry = feature_schema = None
+    if format_dir is not None:
+        card_registry, feature_schema = registry_module.load_format_namespace(
+            format_dir)
+    decks, card_db = load_decks_and_card_db(
+        str(decks_directory), format_name=format_name, strict_legality=True,
+        card_registry=card_registry, feature_schema=feature_schema)
+    decks = sorted(decks, key=lambda deck: str(deck.get("name")).casefold())
+    if len(decks) < 2:
+        raise RuntimeError(
+            f"Harvest requires at least two decks; {decks_directory} has "
+            f"{len(decks)}")
+    lineage = registry_module.format_lineage(
+        decks_directory, format_name=format_name,
+        card_registry=card_registry, feature_schema=feature_schema)
+    return decks, card_db, lineage
+
+
 def prepare_output_directory(output_directory: Path) -> Path:
     """Create an empty artifact directory, refusing to overwrite any content."""
     output = output_directory.expanduser().resolve()
@@ -668,7 +703,10 @@ def _validate_artifacts(
     expected_matchups: Sequence[tuple[str, str]] | None = None,
     expected_decks: Sequence[dict] | None = None,
     card_db: dict | None = None,
+    expected_deck_names: Sequence[str] | None = None,
 ):
+    if expected_deck_names is None:
+        expected_deck_names = EXPECTED_SAMPLE_DECKS
     required = {
         "game log": output / "game_log.jsonl",
         "fidelity report": output / "fidelity_report.json",
@@ -701,8 +739,8 @@ def _validate_artifacts(
                 or not record.get("terminal_reason"):
             raise RuntimeError(
                 f"Game record {record_index} has an invalid terminal_reason")
-        if record.get("p1_deck") not in EXPECTED_SAMPLE_DECKS \
-                or record.get("p2_deck") not in EXPECTED_SAMPLE_DECKS:
+        if record.get("p1_deck") not in expected_deck_names \
+                or record.get("p2_deck") not in expected_deck_names:
             raise RuntimeError(f"Game record {record_index} has an unknown deck label")
         if not isinstance(record.get("agent_is_p1"), bool) \
                 or not isinstance(record.get("fidelity"), dict):
@@ -798,8 +836,16 @@ def print_summary(
 def run_harvest(games: int, seed: int, output_directory: Path,
                 max_steps: int = MAX_STEPS_PER_GAME, *, game_offset: int = 0,
                 agent_model: Path | str | None = None,
-                opponent_model: Path | str | None = None):
-    """Run fixture games and return their validated artifact data."""
+                opponent_model: Path | str | None = None,
+                decks_directory: Path | str | None = None,
+                format_name: str | None = None,
+                format_dir: Path | str | None = None):
+    """Run harvest games and return their validated artifact data.
+
+    With no corpus arguments this is the audited eight-deck fixture. Passing
+    ``decks_directory`` (and optionally ``format_name``/``format_dir``)
+    harvests any strictly loaded corpus under the same artifact contract.
+    """
     if games < 1:
         raise ValueError("games must be at least 1")
     if max_steps < 1:
@@ -826,7 +872,17 @@ def run_harvest(games: int, seed: int, output_directory: Path,
         # fresh output directory must start with a fresh in-memory manifest too.
         from Playersim.card_support import reset_manifest_for_tests
         reset_manifest_for_tests()
-        decks, card_db = load_sample_decks()
+        if decks_directory is None and format_name is None \
+                and format_dir is None:
+            decks, card_db = load_sample_decks()
+            from Playersim import card_registry as registry_module
+            lineage = registry_module.format_lineage(DEFAULT_DECKS_DIRECTORY)
+        else:
+            decks, card_db, lineage = load_corpus_decks(
+                Path(decks_directory) if decks_directory is not None
+                else DEFAULT_DECKS_DIRECTORY,
+                format_name=format_name, format_dir=format_dir)
+        deck_names = tuple(deck.get("name") for deck in decks)
         from Playersim import environment as environment_module
 
         previous_debug_action_steps = environment_module.DEBUG_ACTION_STEPS
@@ -953,7 +1009,8 @@ def run_harvest(games: int, seed: int, output_directory: Path,
 
     records, fidelity, manifest = _validate_artifacts(
         output, games, agent_version, expected_matchups=expected_matchups,
-        expected_decks=decks, card_db=card_db)
+        expected_decks=decks, card_db=card_db,
+        expected_deck_names=deck_names)
     run_manifest = {
         "schema_version": 1,
         "status": "complete",
@@ -965,7 +1022,8 @@ def run_harvest(games: int, seed: int, output_directory: Path,
         "max_steps": max_steps,
         "agent_policy": agent_identity or {"kind": "random-valid"},
         "opponent_policy": opponent_identity or {"kind": "scripted"},
-        "decks": list(EXPECTED_SAMPLE_DECKS),
+        "lineage": lineage,
+        "decks": list(deck_names),
         "matchups": [
             {"p1": p1_name, "p2": p2_name}
             for p1_name, p2_name in expected_matchups
@@ -1027,6 +1085,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--opponent-model", type=Path,
         help="optional MaskablePPO checkpoint for the environment/P2 seat",
     )
+    parser.add_argument(
+        "--decks", type=Path, default=None,
+        help="deck corpus directory (default: the audited eight-deck fixture)",
+    )
+    parser.add_argument(
+        "--format", default=None,
+        help="enforce strict format legality and use formats/<format>'s "
+             "frozen registry and feature schema",
+    )
+    parser.add_argument(
+        "--format-dir", type=Path, default=None,
+        help="explicit frozen format-namespace directory "
+             "(default: formats/<format> when --format is given)",
+    )
     return parser
 
 
@@ -1036,7 +1108,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_harvest(
             args.games, args.seed, args.output, max_steps=args.max_steps,
             game_offset=args.game_offset, agent_model=args.agent_model,
-            opponent_model=args.opponent_model)
+            opponent_model=args.opponent_model, decks_directory=args.decks,
+            format_name=args.format, format_dir=args.format_dir)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

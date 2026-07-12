@@ -56,6 +56,7 @@ class Card:
     def __init__(self, card_data):
         # Ensure card_data has all required fields with defaults
         self.name = card_data.get("name", f"Unknown Card {id(self)}")
+        self.oracle_id = card_data.get("oracle_id")
         self.legalities = {str(k).lower(): str(v).lower()
                           for k, v in (card_data.get("legalities", {}) or {}).items()}
         self.layout = card_data.get("layout", "normal")
@@ -2289,8 +2290,29 @@ class Card:
 
 # Deck loading function
 def load_decks_and_card_db(decks_folder, format_name=None, banned_names=None,
-                           restricted_names=None, strict_legality=False):
-    """Load decks from folder and build card database."""
+                           restricted_names=None, strict_legality=False,
+                           card_registry=None, feature_schema=None):
+    """Load decks from folder and build card database.
+
+    When ``card_registry`` is provided (see ``Playersim.card_registry``),
+    every card takes its stable canonical index as its ``card_id`` instead of
+    a run-local insertion-order integer; a corpus card missing from the
+    registry is always a fatal error.  When ``feature_schema`` is provided,
+    the frozen subtype vocabulary replaces the pool-derived one so the card
+    feature width cannot drift when decks are added; cards whose subtypes
+    fall outside the frozen vocabulary are also fatal.
+    """
+    from .card_registry import CanonicalRegistryError
+
+    registry_index = None
+    registry_oracle_ids = None
+    if card_registry is not None:
+        from .card_registry import registry_name_to_index
+        registry_index = registry_name_to_index(card_registry)
+        registry_oracle_ids = {
+            entry["name"].casefold(): entry.get("oracle_id")
+            for entry in card_registry["cards"]
+        }
     try:
         card_db = {}  # Change from list to dictionary
         card_name_to_id = {}
@@ -2327,8 +2349,23 @@ def load_decks_and_card_db(decks_folder, format_name=None, banned_names=None,
                        
                         # Add to card database if new
                         if card_name not in card_name_to_id:
+                            if registry_index is not None:
+                                if card_name not in registry_index:
+                                    raise CanonicalRegistryError(
+                                        f"{card_data['name']} is not in the "
+                                        f"canonical card registry ({deck_file})")
+                                registry_oracle = registry_oracle_ids.get(card_name)
+                                corpus_oracle = card_data.get("oracle_id")
+                                if registry_oracle and corpus_oracle \
+                                        and registry_oracle != corpus_oracle:
+                                    raise CanonicalRegistryError(
+                                        f"{card_data['name']} oracle_id "
+                                        f"{corpus_oracle} does not match the "
+                                        f"registry ({registry_oracle})")
+                                card_id = registry_index[card_name]
+                            else:
+                                card_id = len(card_db)
                             card = Card(card_data)
-                            card_id = len(card_db)
                             card.card_id = card_id  # Set the card_id property
                             card_db[card_id] = card  # Store in dictionary with ID as key
                             card_name_to_id[card_name] = card_id
@@ -2359,6 +2396,10 @@ def load_decks_and_card_db(decks_folder, format_name=None, banned_names=None,
                             raise ValueError("; ".join(legality_errors))
                     decks.append(current_deck)
                    
+            except CanonicalRegistryError:
+                # Registry violations are never skippable: a mis-identified
+                # card would silently poison every downstream statistic.
+                raise
             except Exception as e:
                 load_errors.append(f"{deck_file}: {e}")
                 logging.error(f"Error loading deck {deck_file}: {str(e)}")
@@ -2372,14 +2413,30 @@ def load_decks_and_card_db(decks_folder, format_name=None, banned_names=None,
             raise ValueError("No cards loaded! Check deck files and folder path.")
         
         logging.info(f"Loaded {len(decks)} decks with {len(card_db)} unique cards")
-        
-        # Build subtype vocabulary (unchanged)
-        all_subtypes = set()
-        for card_id, card in card_db.items():
-            if hasattr(card, "subtypes"):
-                all_subtypes.update(card.subtypes)
-        Card.SUBTYPE_VOCAB = sorted(all_subtypes)
-        logging.info(f"Subtype vocabulary built with {len(Card.SUBTYPE_VOCAB)} entries: {Card.SUBTYPE_VOCAB}")
+
+        if feature_schema is not None:
+            # A frozen schema pins the feature width: validate the corpus
+            # fits it, then install its exact vocabulary.
+            from .card_registry import (
+                apply_feature_schema, validate_cards_against_schema)
+            schema_errors = validate_cards_against_schema(
+                card_db, feature_schema)
+            if schema_errors:
+                raise CanonicalRegistryError(
+                    "Corpus does not fit the frozen feature schema: "
+                    + "; ".join(schema_errors))
+            apply_feature_schema(feature_schema)
+            logging.info(
+                f"Applied frozen feature schema with "
+                f"{len(Card.SUBTYPE_VOCAB)} subtype fields")
+        else:
+            # Build subtype vocabulary (unchanged)
+            all_subtypes = set()
+            for card_id, card in card_db.items():
+                if hasattr(card, "subtypes"):
+                    all_subtypes.update(card.subtypes)
+            Card.SUBTYPE_VOCAB = sorted(all_subtypes)
+            logging.info(f"Subtype vocabulary built with {len(Card.SUBTYPE_VOCAB)} entries: {Card.SUBTYPE_VOCAB}")
         
         # Compute each card's subtype vector (unchanged)
         for card_id, card in card_db.items():
@@ -2391,8 +2448,11 @@ def load_decks_and_card_db(decks_folder, format_name=None, banned_names=None,
         logging.error(f"Critical error in deck loading: {str(e)}")
         import traceback
         logging.error(traceback.format_exc())
-       
-        if strict_legality:
+
+        # A pinned registry or frozen schema must fail loudly; the backup
+        # deck fallback would silently break canonical IDs and feature width.
+        if strict_legality or card_registry is not None \
+                or feature_schema is not None:
             raise
         # Return minimal valid data
         default_deck = {

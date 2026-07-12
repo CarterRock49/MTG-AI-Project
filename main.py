@@ -708,6 +708,17 @@ class ResourceMonitorCallback(BaseCallback):
                     "Background resource sample failed: %s", monitor_error)
     
     def _on_step(self):
+        try:
+            return self._monitor_step()
+        except Exception as monitor_error:
+            # System telemetry must never take a training run down (the
+            # background sampler already swallows its own failures the same
+            # way): a deleted/rotated event file only costs metrics.
+            logging.warning(
+                "Resource monitor step failed: %s", monitor_error)
+            return True
+
+    def _monitor_step(self):
         if self.n_calls % self.monitor_freq == 0:
             step = self._tensorboard_step()
             # Monitor CPU and RAM
@@ -1040,6 +1051,40 @@ def deck_provenance(decks, card_db, decks_dir=DECKS_DIR):
         "loaded_decks": loaded_decks,
         "source_files": source_files,
     }
+
+
+def load_training_corpus(decks_arg, format_name, format_dir_arg):
+    """Resolve corpus/format flags into (decks, card_db, decks_dir, lineage).
+
+    With no flags this is the legacy lenient ``Decks/`` load. Any explicit
+    corpus or format request loads strictly (no backup-deck fallback), and a
+    format request additionally applies the frozen ``formats/<format>``
+    canonical card registry and feature schema.
+    """
+    from Playersim.card_registry import format_lineage, load_format_namespace
+
+    decks_dir = os.path.abspath(decks_arg) if decks_arg else DECKS_DIR
+    format_dir = format_dir_arg
+    if format_dir is None and format_name:
+        format_dir = os.path.join(BASE_DIR, "formats", format_name)
+    card_registry = feature_schema = None
+    if format_dir is not None:
+        card_registry, feature_schema = load_format_namespace(format_dir)
+        logging.info(
+            "Using frozen format namespace %s (registry %s cards, "
+            "feature_dim %s)", format_dir, len(card_registry["cards"]),
+            feature_schema["feature_dim"])
+    # An explicitly requested corpus or format must never fall back to the
+    # loader's backup deck; legacy default loading stays lenient.
+    corpus_is_explicit = bool(decks_arg or format_name or format_dir_arg)
+    decks, card_db = load_decks_and_card_db(
+        decks_dir, format_name=format_name,
+        strict_legality=corpus_is_explicit,
+        card_registry=card_registry, feature_schema=feature_schema)
+    lineage = format_lineage(
+        decks_dir, format_name=format_name,
+        card_registry=card_registry, feature_schema=feature_schema)
+    return decks, card_db, decks_dir, lineage
 
 
 def training_artifacts(run_model_dir, run_id):
@@ -2081,6 +2126,14 @@ def main():
     parser.add_argument("--cpu-only", action="store_true", help="Force CPU training even if GPU is available")
     parser.add_argument("--seed", type=int, default=42,
                         help="Base seed for Python, NumPy, Torch, workers, and evaluation")
+    parser.add_argument("--format", type=str, default=None,
+                        help="Enforce strict format legality and load the frozen "
+                             "formats/<format> card registry and feature schema")
+    parser.add_argument("--decks", type=str, default=None,
+                        help="Deck corpus directory (default: Decks)")
+    parser.add_argument("--format-dir", type=str, default=None,
+                        help="Explicit frozen format-namespace directory "
+                             "(default: formats/<format> when --format is given)")
     args = parser.parse_args()
     if args.resume and args.optimize_hp:
         parser.error("--resume and --optimize-hp cannot be used together")
@@ -2158,6 +2211,7 @@ def main():
         "runtime": runtime,
         "resolved": {},
         "data": None,
+        "lineage": None,
         "paths": {
             "model_directory": os.path.relpath(run_model_dir, BASE_DIR).replace(os.sep, "/"),
             "log_directory": os.path.relpath(
@@ -2188,7 +2242,9 @@ def main():
         manifest["phase"] = current_phase
         publish_manifest()
         logging.info("Loading decks and card database...")
-        decks, card_db = load_decks_and_card_db(DECKS_DIR)
+        decks, card_db, decks_dir, lineage = load_training_corpus(
+            args.decks, args.format, args.format_dir)
+        manifest["lineage"] = lineage
         logging.info(
             "Loaded %s decks with %s unique cards", len(decks), len(card_db))
 
@@ -2234,7 +2290,7 @@ def main():
             LOG_DIR, run_id, "environment_data")
         train_storage_dir = os.path.join(environment_data_dir, "train")
         eval_storage_dir = os.path.join(environment_data_dir, "eval")
-        manifest["data"] = deck_provenance(decks, card_db)
+        manifest["data"] = deck_provenance(decks, card_db, decks_dir=decks_dir)
         manifest["data"]["evaluation_decks"] = [
             (deck.get("name") if isinstance(deck, dict)
              else f"non-dict-deck-{index}")

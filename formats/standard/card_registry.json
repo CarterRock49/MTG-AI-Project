@@ -1,0 +1,557 @@
+{
+  "cards": [
+    {
+      "index": 0,
+      "name": "Adarkar Wastes",
+      "oracle_id": "d5ad26cc-2bdb-46b7-b8bf-dd099d5fa09b"
+    },
+    {
+      "index": 1,
+      "name": "Afterburner Expert",
+      "oracle_id": "b4d19e3a-c2f8-4503-bcfa-1b46bde972e5"
+    },
+    {
+      "index": 2,
+      "name": "Analyze the Pollen",
+      "oracle_id": "ec7d550b-9e13-4249-89c7-6ad43f71ea11"
+    },
+    {
+      "index": 3,
+      "name": "Anoint with Affliction",
+      "oracle_id": "402c3afe-7041-41a3-8fcd-64a060c12d4a"
+    },
+    {
+      "index": 4,
+      "name": "Beza, the Bounding Spring",
+      "oracle_id": "020de6d7-f5a2-4036-ad25-451e5977b4d4"
+    },
+    {
+      "index": 5,
+      "name": "Blooming Marsh",
+      "oracle_id": "66fa2326-1b5d-41fb-b919-83bf9f383577"
+    },
+    {
+      "index": 6,
+      "name": "Burst Lightning",
+      "oracle_id": "ac2086fe-98ee-4280-9c7c-c5c2d6548a8b"
+    },
+    {
+      "index": 7,
+      "name": "Bushwhack",
+      "oracle_id": "c61374e5-a7f6-455e-a40b-a481751b536b"
+    },
+    {
+      "index": 8,
+      "name": "Cacophony Scamp",
+      "oracle_id": "4854a41e-db49-462f-ae57-0ba4005bae75"
+    },
+    {
+      "index": 9,
+      "name": "Callous Sell-Sword // Burn Together",
+      "oracle_id": "0e7405e3-e9e6-4213-a73f-e0c01a7d6721"
+    },
+    {
+      "index": 10,
+      "name": "Caustic Bronco",
+      "oracle_id": "165bdc68-1da0-47db-a069-978fc4c04b3f"
+    },
+    {
+      "index": 11,
+      "name": "Cavern of Souls",
+      "oracle_id": "89ca686a-7c72-4d8f-9290-e89635624a83"
+    },
+    {
+      "index": 12,
+      "name": "Caves of Koilos",
+      "oracle_id": "33de01e9-ce5a-42d4-afcb-343cd54a6d80"
+    },
+    {
+      "index": 13,
+      "name": "Commercial District",
+      "oracle_id": "b33656ae-3473-4223-845f-f9147f87678b"
+    },
+    {
+      "index": 14,
+      "name": "Concealed Courtyard",
+      "oracle_id": "2d899466-b1eb-4901-b626-1f2fb09b786d"
+    },
+    {
+      "index": 15,
+      "name": "Copperline Gorge",
+      "oracle_id": "a05f641c-15c9-43dc-ae0d-1ea372fd33d5"
+    },
+    {
+      "index": 16,
+      "name": "Cut Down",
+      "oracle_id": "1b30210d-10e9-4703-8967-032063bb4f26"
+    },
+    {
+      "index": 17,
+      "name": "Darkslick Shores",
+      "oracle_id": "a2b48695-f7d7-42ce-a8a0-2a723428542a"
+    },
+    {
+      "index": 18,
+      "name": "Day of Judgment",
+      "oracle_id": "d057289d-5e28-43d5-8ff3-4a1bc723477d"
+    },
+    {
+      "index": 19,
+      "name": "Deep-Cavern Bat",
+      "oracle_id": "e46f6644-6bf1-47b1-817c-906bd3eca99f"
+    },
+    {
+      "index": 20,
+      "name": "Defiled Crypt // Cadaver Lab",
+      "oracle_id": "f97de425-c7ab-4688-8606-159370d179ee"
+    },
+    {
+      "index": 21,
+      "name": "Draconautics Engineer",
+      "oracle_id": "380d8d64-9aec-4656-b5b8-d336ebf803c8"
+    },
+    {
+      "index": 22,
+      "name": "Dredger's Insight",
+      "oracle_id": "3f21c1c6-7992-4036-ad3e-b599153e54fe"
+    },
+    {
+      "index": 23,
+      "name": "Duress",
+      "oracle_id": "33d405ea-7a9a-4970-b70f-9c05d90dd6f0"
+    },
+    {
+      "index": 24,
+      "name": "Elspeth's Smite",
+      "oracle_id": "3f404fe4-4335-4dcc-ba90-78246c4b880b"
+    },
+    {
+      "index": 25,
+      "name": "Emberheart Challenger",
+      "oracle_id": "5b4b21ed-c24e-4038-83fb-bd7f3c3426cd"
+    },
+    {
+      "index": 26,
+      "name": "Enduring Curiosity",
+      "oracle_id": "9d2460c3-8eeb-4f35-b6f6-748c478664c7"
+    },
+    {
+      "index": 27,
+      "name": "Fear of Isolation",
+      "oracle_id": "0ee28549-5909-4372-8376-34010b7b6654"
+    },
+    {
+      "index": 28,
+      "name": "Fear of Missing Out",
+      "oracle_id": "236ce592-1321-4a7c-b695-fd84496f8924"
+    },
+    {
+      "index": 29,
+      "name": "Floodfarm Verge",
+      "oracle_id": "f1e9abfb-c3c8-483e-b446-5c2afc9f6394"
+    },
+    {
+      "index": 30,
+      "name": "Floodpits Drowner",
+      "oracle_id": "43c69d19-c06c-470a-bdba-a0335ff2d655"
+    },
+    {
+      "index": 31,
+      "name": "Forest",
+      "oracle_id": "b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6"
+    },
+    {
+      "index": 32,
+      "name": "Fountainport",
+      "oracle_id": "94e8b0a9-44a1-4dce-8d44-78681ae638a1"
+    },
+    {
+      "index": 33,
+      "name": "Get Lost",
+      "oracle_id": "522dd417-364b-44ab-8ca9-fb55db5f26a6"
+    },
+    {
+      "index": 34,
+      "name": "Gix's Command",
+      "oracle_id": "9270eb03-4600-40cc-83a5-ea987d5d4978"
+    },
+    {
+      "index": 35,
+      "name": "Gloomlake Verge",
+      "oracle_id": "d71bda4c-3dee-4398-8fd0-f77d8743b887"
+    },
+    {
+      "index": 36,
+      "name": "Go for the Throat",
+      "oracle_id": "2f092562-9e17-43cd-aeb8-d0567f99363e"
+    },
+    {
+      "index": 37,
+      "name": "Harvester of Misery",
+      "oracle_id": "a0d3bb63-2977-41b2-bcc3-2488e6696cb8"
+    },
+    {
+      "index": 38,
+      "name": "Heartfire Hero",
+      "oracle_id": "49e1e202-37bf-46ed-93d1-1adb13726039"
+    },
+    {
+      "index": 39,
+      "name": "Hedge Maze",
+      "oracle_id": "ca4b6689-04ee-4227-9bdc-cb5a9590c745"
+    },
+    {
+      "index": 40,
+      "name": "Herd Migration",
+      "oracle_id": "dfdc0eab-309b-4441-a94c-930c6dde4c48"
+    },
+    {
+      "index": 41,
+      "name": "Hired Claw",
+      "oracle_id": "031cfc7d-8bda-454b-b88a-15d3f5fe47e2"
+    },
+    {
+      "index": 42,
+      "name": "Hopeless Nightmare",
+      "oracle_id": "5e63b69c-d901-4a01-8dfa-88e044856239"
+    },
+    {
+      "index": 43,
+      "name": "Hushwood Verge",
+      "oracle_id": "cce328b9-6100-417e-9ddf-808bbe3e3bc5"
+    },
+    {
+      "index": 44,
+      "name": "Inti, Seneschal of the Sun",
+      "oracle_id": "176f5ba8-6e7b-4234-a298-b6164f51656f"
+    },
+    {
+      "index": 45,
+      "name": "Island",
+      "oracle_id": "b2c6aa39-2d2a-459c-a555-fb48ba993373"
+    },
+    {
+      "index": 46,
+      "name": "Kaito, Bane of Nightmares",
+      "oracle_id": "fa43077b-5d8b-4fb1-8dda-2a9185e6715e"
+    },
+    {
+      "index": 47,
+      "name": "Karplusan Forest",
+      "oracle_id": "bd912666-f37f-4767-af6f-9e6d0fcccacf"
+    },
+    {
+      "index": 48,
+      "name": "Leyline Binding",
+      "oracle_id": "b49642f6-20bd-468d-9dac-e578f9ac3091"
+    },
+    {
+      "index": 49,
+      "name": "Leyline of Resonance",
+      "oracle_id": "f69574dd-097f-4908-9cab-344b0eb39c62"
+    },
+    {
+      "index": 50,
+      "name": "Lightning Strike",
+      "oracle_id": "f34b9bc4-7bfe-47fd-ba23-4eeeb46026eb"
+    },
+    {
+      "index": 51,
+      "name": "Llanowar Wastes",
+      "oracle_id": "32116127-cf96-4a1b-8896-a1ebc087b597"
+    },
+    {
+      "index": 52,
+      "name": "Lush Portico",
+      "oracle_id": "d51831b1-7394-456e-a1de-6787a59f5932"
+    },
+    {
+      "index": 53,
+      "name": "Maelstrom Pulse",
+      "oracle_id": "95ce305f-34bc-4d6d-b7ba-ffd4b2a25336"
+    },
+    {
+      "index": 54,
+      "name": "Manifold Mouse",
+      "oracle_id": "b254ca74-2a96-4590-91bc-650f407daf5d"
+    },
+    {
+      "index": 55,
+      "name": "Meticulous Archive",
+      "oracle_id": "ccfb8b4d-651c-418a-aa19-cb23105b3f2f"
+    },
+    {
+      "index": 56,
+      "name": "Might of the Meek",
+      "oracle_id": "19b5c94b-b4fa-41a9-b649-51c4e6f03602"
+    },
+    {
+      "index": 57,
+      "name": "Mockingbird",
+      "oracle_id": "b9df2cdf-397c-458d-89cf-911568737ffa"
+    },
+    {
+      "index": 58,
+      "name": "Monastery Swiftspear",
+      "oracle_id": "dafd2713-d1bc-474b-b390-d2ff20b5375e"
+    },
+    {
+      "index": 59,
+      "name": "Monstrous Rage",
+      "oracle_id": "646a2371-54c0-4492-ac2f-20f109d6108c"
+    },
+    {
+      "index": 60,
+      "name": "Mosswood Dreadknight // Dread Whispers",
+      "oracle_id": "5783facf-d26e-4aae-a753-b9dc553361c1"
+    },
+    {
+      "index": 61,
+      "name": "Mountain",
+      "oracle_id": "a3fb7228-e76b-4e96-a40e-20b5fed75685"
+    },
+    {
+      "index": 62,
+      "name": "Nowhere to Run",
+      "oracle_id": "da82ca96-a613-4d00-9e6b-1fece4fc23d0"
+    },
+    {
+      "index": 63,
+      "name": "Nurturing Pixie",
+      "oracle_id": "8ecd3743-7c32-41ce-9ac1-c8c855a47302"
+    },
+    {
+      "index": 64,
+      "name": "Obliterating Bolt",
+      "oracle_id": "57fe941c-a830-4570-afe2-18f93c7a7b84"
+    },
+    {
+      "index": 65,
+      "name": "Obstinate Baloth",
+      "oracle_id": "ee2ab1ab-be1e-4e56-99f2-7784f7350b41"
+    },
+    {
+      "index": 66,
+      "name": "Oildeep Gearhulk",
+      "oracle_id": "aff0740f-51d5-41c7-ac13-97c298cfd743"
+    },
+    {
+      "index": 67,
+      "name": "Optimistic Scavenger",
+      "oracle_id": "0180c67b-c5c8-4a67-9562-d51f9e7ffff5"
+    },
+    {
+      "index": 68,
+      "name": "Overlord of the Hauntwoods",
+      "oracle_id": "4669e8c7-fc37-4b97-9cb7-8d29b43d9176"
+    },
+    {
+      "index": 69,
+      "name": "Overlord of the Mistmoors",
+      "oracle_id": "7e64b1dc-a238-4bff-98ff-2bea44340568"
+    },
+    {
+      "index": 70,
+      "name": "Patchwork Beastie",
+      "oracle_id": "6cf995e9-115a-4659-bace-9fbe75898b48"
+    },
+    {
+      "index": 71,
+      "name": "Pawpatch Recruit",
+      "oracle_id": "50ab0194-c7dc-4f11-abc0-1a82393cc42e"
+    },
+    {
+      "index": 72,
+      "name": "Pest Control",
+      "oracle_id": "072db429-3838-42ba-89b6-e26cbce22af9"
+    },
+    {
+      "index": 73,
+      "name": "Phyrexian Obliterator",
+      "oracle_id": "41820f91-27cf-41c0-bb5e-9adf6845a6a4"
+    },
+    {
+      "index": 74,
+      "name": "Plains",
+      "oracle_id": "bc71ebf6-2056-41f7-be35-b2e5c34afa99"
+    },
+    {
+      "index": 75,
+      "name": "Preacher of the Schism",
+      "oracle_id": "74947e47-c4ff-4f47-9845-befa7403cbde"
+    },
+    {
+      "index": 76,
+      "name": "Questing Druid // Seek the Beast",
+      "oracle_id": "555df32f-f8e9-49af-bc4a-1194ea325a97"
+    },
+    {
+      "index": 77,
+      "name": "Restless Anchorage",
+      "oracle_id": "91320daf-f69c-4350-b0fc-4bb37a6904b1"
+    },
+    {
+      "index": 78,
+      "name": "Restless Cottage",
+      "oracle_id": "7e16595f-bdeb-422e-b99a-bfc0ed52e9f8"
+    },
+    {
+      "index": 79,
+      "name": "Restless Reef",
+      "oracle_id": "df20f85b-5f81-4ee4-8487-55d90109ac36"
+    },
+    {
+      "index": 80,
+      "name": "Restless Ridgeline",
+      "oracle_id": "4c0f4a63-586a-4dde-9621-b0dd9118b2e5"
+    },
+    {
+      "index": 81,
+      "name": "Ride's End",
+      "oracle_id": "89e209f3-c474-453f-9659-ccebfc88bc0f"
+    },
+    {
+      "index": 82,
+      "name": "Rockface Village",
+      "oracle_id": "7e103748-3f76-42ce-a063-d0256b2dce2b"
+    },
+    {
+      "index": 83,
+      "name": "Scorching Shot",
+      "oracle_id": "e13113ba-1923-493c-a48d-ca320b7adbde"
+    },
+    {
+      "index": 84,
+      "name": "Screaming Nemesis",
+      "oracle_id": "fcb7c93c-46ab-49b5-a6e0-35d73f3be8f0"
+    },
+    {
+      "index": 85,
+      "name": "Seachrome Coast",
+      "oracle_id": "9e7a240d-dc33-47ac-9f17-77fab4c1c340"
+    },
+    {
+      "index": 86,
+      "name": "Seed of Hope",
+      "oracle_id": "863d6607-912b-4186-9874-87d5473ec481"
+    },
+    {
+      "index": 87,
+      "name": "Sentinel of the Nameless City",
+      "oracle_id": "a5bbfe32-2fb9-48a0-bc8a-e9899aac1fda"
+    },
+    {
+      "index": 88,
+      "name": "Shadowy Backstreet",
+      "oracle_id": "216a2a92-9ca3-4ca3-8af7-686c13b04290"
+    },
+    {
+      "index": 89,
+      "name": "Shoot the Sheriff",
+      "oracle_id": "2038138e-2e52-41e4-90fc-443fa054c5c0"
+    },
+    {
+      "index": 90,
+      "name": "Slickshot Show-Off",
+      "oracle_id": "74c7a029-59aa-4511-8e4c-f8f167cda4e2"
+    },
+    {
+      "index": 91,
+      "name": "Snakeskin Veil",
+      "oracle_id": "1e6a24be-8281-41c1-a5ba-b68f0ef1d7b8"
+    },
+    {
+      "index": 92,
+      "name": "Soulstone Sanctuary",
+      "oracle_id": "3c0f99b8-0222-4fac-932a-eb5d77826564"
+    },
+    {
+      "index": 93,
+      "name": "Split Up",
+      "oracle_id": "2e82520a-9da3-49ae-b5c8-37e7ac8853fe"
+    },
+    {
+      "index": 94,
+      "name": "Spyglass Siren",
+      "oracle_id": "4ec9d9eb-14e2-47ea-88a2-d2394e363784"
+    },
+    {
+      "index": 95,
+      "name": "Stormchaser's Talent",
+      "oracle_id": "00c1788d-c52f-4839-9cd8-11fb86c418b6"
+    },
+    {
+      "index": 96,
+      "name": "Sunfall",
+      "oracle_id": "fb3f5097-0da0-458c-8508-60823567e2da"
+    },
+    {
+      "index": 97,
+      "name": "Swamp",
+      "oracle_id": "56719f6a-1a6c-4c0a-8d21-18f7d7350b68"
+    },
+    {
+      "index": 98,
+      "name": "The Witch's Vanity",
+      "oracle_id": "ad2793f3-a36f-4a09-a38f-eb98ce0a2b79"
+    },
+    {
+      "index": 99,
+      "name": "This Town Ain't Big Enough",
+      "oracle_id": "2550c2ae-834d-46e7-9ab4-d7bf7bfa6a78"
+    },
+    {
+      "index": 100,
+      "name": "Thornspire Verge",
+      "oracle_id": "e861bc08-4f0b-4d22-9b85-9d20227fd5b4"
+    },
+    {
+      "index": 101,
+      "name": "Three Steps Ahead",
+      "oracle_id": "282dfeaa-6243-4f92-838a-5cb54fa85184"
+    },
+    {
+      "index": 102,
+      "name": "Torch the Tower",
+      "oracle_id": "10d33e95-3e5d-447e-ba4a-acd3c33b4045"
+    },
+    {
+      "index": 103,
+      "name": "Turn Inside Out",
+      "oracle_id": "be0a3925-8e0d-4ef6-85cb-c9f5eef6b4bb"
+    },
+    {
+      "index": 104,
+      "name": "Underground River",
+      "oracle_id": "857febd9-cdd7-4f8e-a852-d88084b0cfbc"
+    },
+    {
+      "index": 105,
+      "name": "Up the Beanstalk",
+      "oracle_id": "050f5733-7c0b-4991-9a6c-7ea12ccf0ca9"
+    },
+    {
+      "index": 106,
+      "name": "Wastewood Verge",
+      "oracle_id": "c6e0574c-3e2b-4c40-b17a-05bce3d49309"
+    },
+    {
+      "index": 107,
+      "name": "Witchstalker Frenzy",
+      "oracle_id": "f46befcb-6a7f-4f5e-8634-393cbf4b3308"
+    },
+    {
+      "index": 108,
+      "name": "Wrenn and Realmbreaker",
+      "oracle_id": "4566fb92-448e-4b3f-9045-9d74323c35d1"
+    },
+    {
+      "index": 109,
+      "name": "Zur, Eternal Schemer",
+      "oracle_id": "cfc5dc9c-6f26-460b-a624-3681b8584eb3"
+    }
+  ],
+  "kind": "canonical_card_registry",
+  "schema_version": 1,
+  "sha256": "8e984de6ba897c63289676c7b4ae9345b19c4654b0cf4ed473bfab4f2988bbd7"
+}

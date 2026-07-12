@@ -57,6 +57,10 @@ harvest_runs/
 *.sqlite
 *.sqlite3
 
+# Frozen format namespaces are pinned inputs and must be versioned
+!formats/**/card_registry.json
+!formats/**/feature_schema.json
+
 # Other
 .env
 .envrc

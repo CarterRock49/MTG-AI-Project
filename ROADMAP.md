@@ -16,10 +16,11 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 12/12, and 295/295, plus 11/11 fixture-
-   harvest tests, 5/5 production-protocol tests, 6/6 fuzz/replay tests, and
-   the deterministic 8-seed / 8,000-action default fuzz profile, and the
-   strict 32-seed / 320,000-action long profile).
+   every delivery (currently 9/9, 13/13, and 295/295, plus 15/15 fixture-
+   harvest tests, 7/7 production-protocol tests, 18/18 card-registry tests,
+   6/6 fuzz/replay tests, and the deterministic 8-seed / 8,000-action
+   default fuzz profile, and the strict 32-seed / 320,000-action long
+   profile).
 2. **Zero known stats-corrupting bugs.** The silent-bug catalog (appendix)
    is closed; every fixed bug has a permanent guard scenario.
 3. **Quantified card coverage.** For each target format's card pool, the
@@ -57,13 +58,19 @@ The project is complete when all of the following hold:
   promoted to policy-vs-policy.
 - Tier 4 (verification/calibration): ◐ invariant and long-fuzz gates are green;
   the matchup calibration study remains open.
-- Tier 5 (operations/integration): ◐ Harvest orchestration is complete; strength
+- Tier 5 (operations/integration): ◐ Harvest orchestration is complete and,
+  since Round 7.46, format/corpus-configurable with full run lineage; strength
   qualification, production throughput profiling, and deck-builder integration
   remain open.
-- Test gates: smoke 9/9, training 12/12, scenarios 295/295 (grown from 12),
-  fixture harvest 11/11, production Harvest protocol 5/5, fuzz/replay
-  configuration 6/6, deterministic default fuzz 8 seeds x 1,000 valid
-  actions, and strict long fuzz 32 seeds x 10,000 valid actions.
+- Target-format program: ◐ milestone 1 (format foundation and lineage) is
+  complete — frozen canonical registry + feature schema in
+  `formats/standard/`, explicit `--format`/`--decks` configuration, and
+  lineage-stamped manifests. Standard end to end is next.
+- Test gates: smoke 9/9, training 13/13, scenarios 295/295 (grown from 12),
+  fixture harvest 15/15, production Harvest protocol 7/7, card registry
+  18/18, fuzz/replay configuration 6/6, deterministic default fuzz 8 seeds
+  x 1,000 valid actions, and strict long fuzz 32 seeds x 10,000 valid
+  actions.
 - **Stats collected before July 2026 are unusable** (wrong player, wrong
   winner, fictional play turns, cosmetic first strike, compounding P/T,
   dead replacement system). Wipe and re-harvest after the current engine
@@ -1296,6 +1303,20 @@ turn limit). Final checkpoint reload validation passed all 256 steps, including
 mask-valid prediction, finite rewards, public progress, and four short-cycle
 checks; the run emitted a debug log only, with no warning or error file.
 
+**Round 7.46 (July 2026):** telemetry hardening
+`ALPHA_ZERO_MTG_V3.00_20260711_205313` died 69 seconds in when its
+system-metrics TensorBoard event file disappeared mid-run (the
+`tensorboard_logs` directory was cleaned while the run was writing).
+`ResourceMonitorCallback._on_step` was the only telemetry path that could
+take a training run down: the one-second background sampler already swallows
+its own failures. The per-step monitor body now does the same — a lost or
+rotated event file costs metrics, never the run. Exact-seed replay
+`ALPHA_ZERO_MTG_V3.00_20260711_205741` (seed 20260715, 8 workers) then
+completed 8,192/8,192 transitions with validation passed, 14 recorded games
+(9W/5L, no draws; 1 life-total, 2 decking, 11 turn-limit terminals), and a
+debug log only. Gates: 295/295 scenarios, 9/9 smoke, and the 8-seed default
+fuzz profile.
+
 ## Tier 4 — Verification & calibration
 
 1. ✅ Golden scenario harness — 295 scenarios and growing; scenario-first is a
@@ -1360,24 +1381,35 @@ What exists today is useful foundation, not three completed format agents:
 the three format card-list snapshots exist; deck loading has format-legality
 hooks; the current eight-deck sample can bootstrap Standard; training can use
 multiple environment workers; and Harvest can run isolated shards and
-paired-seat checkpoint promotion. Training is still wired to the shared
-`Decks/` corpus and scripted opponent, fixture Harvest still assumes the
-audited eight decks, statistics do not carry explicit format/pool/corpus
-lineage, no representative Modern or Pioneer training corpus exists, and the
-automatic format-aware builder/feedback queue is not implemented. A clean
-failure manifest also does not prove that an unseen format card was simulated
-faithfully; coverage must distinguish unseen, observed-clean, verified,
-partial, and excluded cards.
+paired-seat checkpoint promotion. As of Round 7.46, training and Harvest
+accept explicit format/corpus configuration, run-level manifests carry
+format/pool/corpus/registry/schema lineage, and production Harvest is no
+longer hard-coded to the audited eight decks. Still open: the scripted
+opponent remains the training baseline, no representative Modern or Pioneer
+training corpus exists, and the automatic format-aware builder/feedback
+queue is not implemented. A clean failure manifest also does not prove that
+an unseen format card was simulated faithfully; coverage must distinguish
+unseen, observed-clean, verified, partial, and excluded cards.
 
 Phased milestones:
 
-1. ▢ **Format foundation and lineage**: add explicit `--format` and corpus
-   configuration to training and production Harvest; enforce strict legality;
-   introduce stable canonical card identities and a frozen, versioned feature
-   schema; stamp format, pool hash, corpus hash, engine/schema identity, and
-   policy/checkpoint identity into manifests and the stats contract. Generalize
-   production Harvest beyond the hard-coded sample fixture while retaining the
-   fixture as a regression gate.
+1. ✅ **Format foundation and lineage** (Round 7.46, July 2026): training
+   (`main.py`), fixture Harvest, and the parallel Harvest/promotion protocol
+   all accept explicit `--format`, `--decks`, and `--format-dir`
+   configuration with strict legality; `Playersim/card_registry.py` provides
+   the canonical card registry (stable, append-only integer indices keyed by
+   name + Scryfall oracle_id) and the frozen, versioned feature schema, both
+   self-hashed and created by `python -m Playersim.card_registry freeze`;
+   every run-level manifest (`training_run.json`, `harvest_run.json`,
+   `harvest_protocol.json`, `promotion.json`) stamps a `lineage` object with
+   format, pool-snapshot hash, corpus hash, and registry/schema
+   version+hash, alongside the existing git/policy/checkpoint identities;
+   production Harvest is generalized beyond the hard-coded sample fixture
+   while the no-argument fixture remains the regression gate. See
+   `STATS_SCHEMA.md` "Format namespaces and run lineage" for the consumer
+   contract. `formats/standard/` is frozen from the eight-deck bootstrap
+   corpus (110 cards, feature_dim 225 — identical width to the current
+   production observation).
 2. ▢ **Standard end to end**: use the current Standard-legal sample only as a
    bootstrap, assemble and pin a representative Standard corpus, qualify the
    Standard policy against scripted play, promote it into a checkpoint league,
@@ -1399,15 +1431,53 @@ Phased milestones:
    calibration results.
 
 **Current execution order:** with the Round 7.45 exact-source CUDA canary
-recorded, the next implementation milestone is the target-format foundation:
-freeze the canonical registry and feature schema, add explicit format/corpus
-configuration and lineage, and generalize production Harvest.
-Then deliver the Standard pipeline end to end, reuse that qualified pipeline
-for Modern and then Pioneer, and finally enable the unified automatic builder
-feedback loop. Production-size throughput profiling and calibration occur as
-gates in each format rather than as one mixed-format exercise. New fidelity
-failures discovered along that path pre-empt strength and integration work in
-the affected format.
+recorded and the Round 7.46 format foundation delivered (frozen canonical
+registry + feature schema, explicit format/corpus configuration, run-level
+lineage, generalized production Harvest), the next implementation milestone
+is **Standard end to end**: assemble and pin a representative Standard
+corpus (re-freezing or append-extending `formats/standard/`), qualify the
+Standard policy against scripted play, promote it into a checkpoint league,
+and calibrate known matchups. Then reuse that qualified pipeline for Modern
+and then Pioneer, and finally enable the unified automatic builder feedback
+loop. Production-size throughput profiling and calibration occur as gates in
+each format rather than as one mixed-format exercise. New fidelity failures
+discovered along that path pre-empt strength and integration work in the
+affected format.
+
+**Round 7.46 (July 2026)** delivered the format foundation end to end,
+scenario-first (18 new `tests/card_registry_test.py` tests plus new harvest,
+protocol, and training-smoke coverage):
+* **Canonical card registry** — `Playersim/card_registry.py` builds a
+  name-ordered, append-only registry keyed by card name + Scryfall
+  `oracle_id` (Card now retains `oracle_id`); the loader's optional
+  `card_registry` parameter makes those indices the engine `card_id`s, and a
+  corpus card missing from the registry (or with a conflicting oracle_id) is
+  always a fatal `CanonicalRegistryError` — never a skipped deck or backup
+  fallback.
+* **Frozen feature schema** — the exact base/cost/keyword/color/subtype/MDFC
+  layout with `feature_dim`, self-hashed and versioned. Loading under it
+  installs the frozen subtype vocabulary instead of the pool-derived one and
+  rejects out-of-vocabulary cards loudly, so adding a deck can no longer
+  silently change model input width. An engine-compat guard rejects schemas
+  whose keyword list differs from `Card.ALL_KEYWORDS`.
+* **Freeze CLI** — `python -m Playersim.card_registry freeze` writes
+  `formats/<format>/card_registry.json` + `feature_schema.json` from a
+  strictly loaded corpus; `--extend` appends new cards without renumbering
+  and refuses cards that would require a schema width change.
+* **Lineage everywhere** — `training_run.json`, `harvest_run.json`,
+  `harvest_protocol.json`, and `promotion.json` all carry
+  format/pool/corpus/registry/schema identities; parallel Harvest fails
+  before publishing if shards disagree on lineage.
+* **Generalized Harvest** — `harvest_fixtures.py` and `harvest_protocol.py`
+  accept `--decks`/`--format`/`--format-dir`; artifact validation checks
+  deck labels against the actual corpus. Verified live: a 1-game
+  `--format standard` harvest completed with zero fidelity counters, a clean
+  manifest, canonical IDs in every tracker artifact, and correct lineage;
+  the no-argument fixture run remains byte-identical in behavior and now
+  also records (null-format) lineage.
+Gates: 295/295 scenarios, 9/9 smoke, 13/13 training (new format-lineage
+stage), 15/15 fixture-harvest + 7/7 protocol tests, 18/18 registry tests,
+6/6 fuzz/replay configuration, and 8,000/8,000 default-fuzz actions.
 
 ---
 
@@ -1607,6 +1677,18 @@ the affected format.
   directory). Cross-env sharing within one training run no longer happens
   implicitly; save_memory also has a 20% random "enhancement" pass, so
   memory file contents are not bit-deterministic (game RNG unaffected).
+- Format-foundation v1 (Round 7.46): the frozen `formats/standard/`
+  registry covers the eight-deck bootstrap corpus (110 cards), not the full
+  Standard pool snapshot; extend it (append-only) or re-freeze as the
+  corpus grows. Canonical indices are name-sorted at first freeze and
+  differ from legacy insertion-order IDs, so format-namespace runs are a
+  new stats lineage and must not be mixed with pre-7.46 artifacts. Lineage
+  lives in run-level manifests, not per-game `game_log.jsonl` lines.
+  Registry identity matches by card name + oracle_id; per-printing
+  distinctions (set/collector number) are deliberately out of scope. A
+  frozen-schema subtype vocabulary that must GROW requires a new schema
+  version and therefore a new policy lineage; `--extend` only accepts
+  width-preserving additions.
 
 ---
 

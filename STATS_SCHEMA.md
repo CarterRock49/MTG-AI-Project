@@ -142,6 +142,39 @@ current harvest run).
 
 Loader: `Playersim.card_support.CardSupportManifest.load(directory)`.
 
+## Format namespaces and run lineage (added July 2026)
+
+A frozen format namespace under `formats/<format>/` pins two versioned,
+self-hashed JSON artifacts (create them with
+`python -m Playersim.card_registry freeze --decks <corpus> --format <format>
+--output formats/<format>`):
+
+- `card_registry.json` — canonical card identities. Each card keeps one
+  stable integer index (used as the engine `card_id`) plus its Scryfall
+  `oracle_id`. Extension is append-only: adding cards never renumbers
+  existing entries. Canonical indices are name-sorted at first freeze and
+  **differ from legacy insertion-order IDs**, so a format-namespace run is a
+  new stats lineage.
+- `feature_schema.json` — the frozen card feature-vector layout and
+  `feature_dim`. Loading a corpus under it keeps model input width fixed; a
+  card outside the frozen subtype vocabulary fails the load loudly.
+
+Every run-level manifest (`training_run.json`, `harvest_run.json`,
+`harvest_protocol.json`, `promotion.json`) now carries a `lineage` object:
+
+| key | meaning |
+|---|---|
+| `format` | format name, or null for format-free legacy runs |
+| `pool_snapshot` | `Format Card Lists/<format>.jsonl` identity (path, size, sha256), or null |
+| `corpus` | deck-corpus directory name, per-file sha256 list, and one aggregate sha256 |
+| `card_registry` | registry schema_version, card count, sha256, or null |
+| `feature_schema` | schema_version, feature_dim, sha256, or null |
+
+**Consumer rule:** never merge statistics whose `lineage.format`,
+`lineage.card_registry.sha256`, or `lineage.feature_schema.sha256` differ —
+they may disagree on card identity or on what the policy observed. A run with
+`lineage: null` (or missing) predates this contract.
+
 ## Fixture harvest protocol
 
 `harvest_fixtures.py` is the reproducible plumbing/support check for the audited
@@ -151,6 +184,13 @@ version, accepts only completed `win`/`loss`/`draw`/`draw_both_loss` records, an
 cross-checks the game log, cumulative fidelity totals, tracker aggregates, card
 memory, support manifest, and scheduled deck labels. `harvest_run.json` is
 written only after those checks pass.
+
+The same runner also harvests any other strictly loaded corpus:
+`--decks <dir>` selects the corpus (decks ordered by name for the seeded
+schedule), `--format <format>` additionally enforces strict format legality
+and applies the frozen `formats/<format>` registry and feature schema
+(`--format-dir` overrides the namespace location). The no-argument fixture
+form remains the regression gate.
 
 The fixture policy is random-valid against the scripted opponent. These records
 prove execution and telemetry coverage; they are not suitable for card/deck
@@ -178,6 +218,8 @@ succeeds:
 | `seed`, `games`, `workers`, `max_steps` | Deterministic schedule and safety-cap inputs. |
 | `elapsed_seconds`, `games_per_second` | Whole-run wall-clock throughput. |
 | `agent_policy`, `opponent_policy` | Policy identity. A checkpoint identity includes filename, byte size, and SHA-256; non-checkpoint fixtures use `kind`. |
+| `lineage` | Corpus/format lineage object (see "Format namespaces and run lineage"). All shards must agree or the run fails before publishing. |
+| `decks` | Ordered deck names in the harvested corpus. |
 | `results` | Aggregate completed result counts. |
 | `fidelity` | Sum of all fidelity counters across shards. |
 | `manifest_entries` | Number of merged card-support entries. |
