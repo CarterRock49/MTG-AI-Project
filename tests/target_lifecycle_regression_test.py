@@ -17,7 +17,9 @@ from Playersim.ability_types import (  # noqa: E402
     CounterSpellEffect,
     DamageEffect,
     FightEffect,
+    OutsideGameCardEffect,
     ReturnToHandEffect,
+    SearchLibraryEffect,
     StaticAbility,
 )
 from Playersim.ability_utils import EffectFactory  # noqa: E402
@@ -353,6 +355,76 @@ class TargetLifecycleRegressionTest(unittest.TestCase):
         effect_warning.assert_not_called()
         self.assertIn(aura, player["battlefield"])
         self.assertEqual(player.get("attachments", {}).get(aura), enchanted)
+
+    def test_final_target_page_cannot_cycle_back_to_the_first(self):
+        game_state, handler = self._state(203910)
+        player = game_state.p1
+        for owner in (game_state.p1, game_state.p2):
+            for card_id in list(owner.get("battlefield", [])):
+                self.assertTrue(game_state.move_card(
+                    card_id, owner, "battlefield", owner, "library"))
+
+        source = inject_into_zone(game_state, player, {
+            "name": "Paged Target Source", "mana_cost": "",
+            "type_line": "Artifact", "oracle_text": "",
+        }, "battlefield")
+        for index in range(11):
+            inject_into_zone(
+                game_state, player, creature(f"Paged Target {index}"),
+                "battlefield")
+        game_state.phase = game_state.PHASE_TARGETING
+        game_state.targeting_context = {
+            "source_id": source, "controller": player,
+            "required_type": "creature",
+            "effect_text": "tap up to two target creatures",
+            "required_count": 2, "min_targets": 0, "max_targets": 2,
+            "selected_targets": [], "target_page": 0,
+        }
+
+        first_page = handler.generate_valid_actions()
+        self.assertTrue(first_page[11])
+        self.assertTrue(first_page[479])
+        _, advanced = handler._handle_target_page_next(
+            context={"page_count": 2})
+        self.assertTrue(advanced)
+        self.assertEqual(game_state.targeting_context["target_page"], 1)
+
+        final_page = handler.generate_valid_actions()
+        self.assertTrue(final_page[11])
+        self.assertTrue(final_page[274])
+        self.assertFalse(final_page[479])
+        _, advanced = handler._handle_target_page_next(
+            context={"page_count": 2})
+        self.assertFalse(advanced)
+        self.assertEqual(game_state.targeting_context["target_page"], 1)
+
+    def test_copied_brightglass_search_has_one_faithful_effect(self):
+        text = (
+            "When this creature enters, you may search your library for up "
+            "to two artifact, creature, and/or enchantment cards with mana "
+            "value 1 or less, reveal them, put them into your hand, then "
+            "shuffle.")
+        effects = EffectFactory.create_effects(
+            text, source_name="Superior Spider-Man")
+
+        self.assertEqual(len(effects), 1)
+        self.assertIsInstance(effects[0], SearchLibraryEffect)
+        self.assertEqual(effects[0].count, 2)
+        self.assertTrue(effects[0].optional)
+        self.assertTrue(effects[0].policy_choice)
+        self.assertEqual(
+            effects[0].allowed_types,
+            {"artifact", "creature", "enchantment"})
+        self.assertEqual(effects[0].max_mana_value, 1)
+
+    def test_copied_outside_game_instruction_keeps_its_effect_type(self):
+        effects = EffectFactory.create_effects(
+            "When this creature enters, if you cast it, you may put a card "
+            "you own from outside the game into your hand.",
+            source_name="Superior Spider-Man")
+
+        self.assertEqual(len(effects), 1)
+        self.assertIsInstance(effects[0], OutsideGameCardEffect)
 
     def test_mightform_warp_declaration_does_not_register_dead_static(self):
         game_state, _ = self._state(203906)

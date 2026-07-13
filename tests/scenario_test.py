@@ -3982,12 +3982,23 @@ def s_stats_draw_result_is_canonical():
 @scenario("training reward", "position shaping is potential-based and terminal rewards are centralized")
 def s_training_reward_contract():
     gs = fresh(); env = get_env()
-    baseline = env._calculate_board_state_reward()
-    assert env._calculate_board_state_reward() == baseline, \
+    baseline = env._calculate_state_potential()
+    assert env._calculate_state_potential() == baseline, \
         "unchanged state produced a changing board potential"
+    assert env._calculate_board_state_reward() == baseline, \
+        "legacy board-potential alias diverged from the reward contract"
     gs.p2['life'] -= 1
-    assert env._calculate_board_state_reward() > baseline, \
+    improved = env._calculate_state_potential()
+    assert improved > baseline, \
         "damaging the opponent did not improve strategic potential"
+    expected = env.state_potential_scale * (
+        env.reward_discount * improved - baseline)
+    assert np.isclose(
+        env._state_potential_reward(baseline, improved), expected)
+    assert np.isclose(
+        env._state_potential_reward(baseline, improved, terminal=True),
+        -env.state_potential_scale * baseline), \
+        "terminal shaping did not zero the next-state potential"
 
     gs.phase = gs.PHASE_MAIN_PRECOMBAT
     gs.previous_priority_phase = None
@@ -3997,10 +4008,16 @@ def s_training_reward_contract():
     gs.p1['lost_game'] = True
     gs.terminal_reason = 'life_total'
     _, reward, done, truncated, info = env.step(11)
-    assert done and not truncated and reward <= -10.0, \
+    assert done and not truncated and reward < 0.0, \
         f"terminal result reward={reward}, done={done}, truncated={truncated}, info={info}"
     assert info.get('terminal_reason') == 'life_total'
-    assert info.get('reward_components', {}).get('terminal') == -10.0
+    components = info.get('reward_components', {})
+    assert components.get('terminal') == -10.0
+    assert components.get('state_change') != 0.0, \
+        "the state-change component is still disconnected"
+    assert np.isclose(reward, sum(components.values())), \
+        f"returned reward does not match its components: {components}"
+    assert info.get('reward_contract') == env.REWARD_CONTRACT_VERSION
 
 
 @scenario("scripted baseline", "the opponent develops mana, casts spells, and declares attacks")

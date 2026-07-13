@@ -278,8 +278,8 @@ full-pool coverage counts are in the ROADMAP status snapshot.
 ## Training
 
 ```bash
-python main.py --timesteps 1000000 --learning-rate 3e-4 --batch-size 256 \
-  --seed 20260710
+python main.py --timesteps 1000000 --learning-rate 1e-4 --batch-size 512 \
+  --n-steps 2048 --seed 20260713 --run-name reward-v1
 ```
 
 No format or deck flags are required for the pinned Standard default. Custom
@@ -292,14 +292,15 @@ revision and dirty state, CLI and resolved configuration, device and dependency
 inventory, deck/lineage provenance, lifecycle result, and artifact paths. A
 dirty run also stores a hashed `source_worktree.patch` beside the manifest.
 
-> **Checkpoint boundary (Round 7.62).** The full Standard namespace widened card
+> **Checkpoint boundary (Round 7.72).** The full Standard namespace widened card
 > observations to 436 fields (259 subtype fields plus MDFC fields), signed live
 > power/toughness, and count/stat bounds large enough for legal boards above 20
 > permanents. Round 7.62 also widened the declared choice-count, allocation, and
 > X-range bounds to remove the old X ceiling. Stable-Baselines validates the
-> complete observation space, so **do not resume a checkpoint created before
-> Round 7.62** — start fresh without `--resume`. (The reward function changed
-> materially at Round 7.37 for the same reason.)
+> complete observation space. Round 7.72 then replaced the overlapping/dead
+> shaping paths with one discounted state-potential reward and reduced the
+> procedural action-reward scale. **Do not resume a checkpoint created before
+> Round 7.72** — start fresh without `--resume`.
 
 ### Hyperparameter optimization
 
@@ -400,8 +401,8 @@ artifacts for 14 days.
 | `--timesteps` | Total training timesteps | `1000000` |
 | `--seed` | Base seed (Python, NumPy, Torch, workers, evaluation) | `42` |
 | `--resume` | Path to a lineage-compatible checkpoint to continue | — |
-| `--learning-rate` | Initial learning rate | `3e-4` |
-| `--batch-size` | Batch size | `256` |
+| `--learning-rate` | Initial learning rate | `1e-4` |
+| `--batch-size` | Batch size | `512` |
 | `--n-steps` | Rollout steps before an update | `2048` |
 | `--n-envs` | Parallel training environments (`0` = auto) | `0` |
 | `--eval-freq` / `--eval-episodes` | Periodic evaluation cadence / episodes | `10000` / `20` |
@@ -427,8 +428,10 @@ metrics), `system` (resource usage), and `network` (parameter recording when
 enabled). The distinct part leads the name so runs stay tellable-apart in
 TensorBoard's sidebar even when truncated.
 
-Logged metrics include reward components, win/terminal rates, action
-distributions, network-parameter changes, and CPU/GPU/memory usage. All
+Logged metrics include signed/absolute/nonzero reward components, raw action
+and state-potential diagnostics, rollout critic target/value scales, win/
+terminal rates, action distributions, network-parameter changes, and CPU/GPU/
+memory usage. All
 time-series use policy timesteps as their x-axis. Terminal telemetry is reported
 both as cumulative `terminal/*_count` and normalized `terminal/*_rate`, so a
 single ending is never shown as a permanent 100% rate.

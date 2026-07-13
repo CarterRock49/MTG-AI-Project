@@ -124,8 +124,10 @@ class ChoiceHandlersMixin:
                 page_count = max(1, (len(candidates) + 9) // 10)
             else:
                 page_count = max(1, int(requested_page_count))
-            ctx['target_page'] = (
-                int(ctx.get('target_page', 0)) + 1) % page_count
+            current_page = int(ctx.get('target_page', 0))
+            if current_page + 1 >= page_count:
+                return -0.1, False
+            ctx['target_page'] = current_page + 1
             return 0.0, True
         choice = getattr(gs, 'choice_context', None)
         if (choice and choice.get('player') is player

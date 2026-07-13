@@ -1351,11 +1351,20 @@ def build_training_config(args, optuna_params=None):
         'gamma': 0.995,
         'gae_lambda': 0.95,
         'clip_range': 0.2,
+        'clip_range_vf': 0.2,
         'ent_coef': 0.01,
+        'vf_coef': 0.5,
+        'target_kl': 0.02,
         'net_arch': NETWORK_ARCHITECTURES['medium'],
-        'n_epochs': 5,
+        'n_epochs': 3,
         'max_grad_norm': 0.5,
         'activation_fn': ACTIVATION_FUNCTIONS['relu'],
+        'action_reward_scale':
+            AlphaZeroMTGEnv.DEFAULT_ACTION_REWARD_SCALE,
+        'state_potential_scale':
+            AlphaZeroMTGEnv.DEFAULT_STATE_POTENTIAL_SCALE,
+        'reward_contract_version':
+            AlphaZeroMTGEnv.REWARD_CONTRACT_VERSION,
     }
     if not optuna_params:
         return config
@@ -1387,7 +1396,12 @@ def build_training_config(args, optuna_params=None):
 
 
 def make_masked_mtg_env(decks, card_db, storage_root, *, agent_is_p1=True,
-                        alternate_agent_seat=False, subtype_vocab=None):
+                        alternate_agent_seat=False, subtype_vocab=None,
+                        reward_discount=AlphaZeroMTGEnv.DEFAULT_REWARD_DISCOUNT,
+                        action_reward_scale=
+                            AlphaZeroMTGEnv.DEFAULT_ACTION_REWARD_SCALE,
+                        state_potential_scale=
+                            AlphaZeroMTGEnv.DEFAULT_STATE_POTENTIAL_SCALE):
     """Create an environment whose generated statistics stay in one scope."""
     os.makedirs(storage_root, exist_ok=True)
     return ActionMasker(
@@ -1399,6 +1413,9 @@ def make_masked_mtg_env(decks, card_db, storage_root, *, agent_is_p1=True,
             agent_is_p1=agent_is_p1,
             alternate_agent_seat=alternate_agent_seat,
             subtype_vocab=subtype_vocab,
+            reward_discount=reward_discount,
+            action_reward_scale=action_reward_scale,
+            state_potential_scale=state_potential_scale,
         ),
         action_mask_fn='action_mask',
     )
@@ -1454,7 +1471,10 @@ def create_training_model(env, training_config, seed=None, device="auto",
         gamma=training_config['gamma'],
         gae_lambda=training_config['gae_lambda'],
         clip_range=training_config['clip_range'],
+        clip_range_vf=training_config['clip_range_vf'],
         ent_coef=training_config['ent_coef'],
+        vf_coef=training_config['vf_coef'],
+        target_kl=training_config['target_kl'],
         max_grad_norm=training_config['max_grad_norm'],
         verbose=1,
         n_epochs=training_config['n_epochs'],
@@ -1470,9 +1490,9 @@ def objective(trial, base_seed=42):
     set_random_seed(trial_seed)
 
     # Core hyperparameters
-    learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
+    learning_rate = trial.suggest_float('learning_rate', 1e-5, 3e-4, log=True)
     n_steps = trial.suggest_categorical('n_steps', [1024, 2048, 4096])
-    batch_size = trial.suggest_categorical('batch_size', [64, 128, 256])
+    batch_size = trial.suggest_categorical('batch_size', [128, 256, 512])
     
     # Discount factors
     gamma = 1.0 - trial.suggest_float('gamma_complement', 0.0001, 0.1, log=True)
@@ -1487,7 +1507,7 @@ def objective(trial, base_seed=42):
     net_arch = NETWORK_ARCHITECTURES[policy_neurons]
     
     # Optimization parameters
-    n_epochs = trial.suggest_int('n_epochs', 3, 10)
+    n_epochs = trial.suggest_int('n_epochs', 2, 5)
     max_grad_norm = trial.suggest_float('max_grad_norm', 0.3, 0.9)
     
     # Activation function
@@ -1519,7 +1539,8 @@ def objective(trial, base_seed=42):
             decks, card_db, storage,
             agent_is_p1=(env_index % 2 == 0),
             alternate_agent_seat=True,
-            subtype_vocab=format_subtype_vocab)
+            subtype_vocab=format_subtype_vocab,
+            reward_discount=gamma)
 
     def make_eval_env():
         nonlocal eval_env_index
@@ -1530,7 +1551,8 @@ def objective(trial, base_seed=42):
             decks, card_db, storage,
             agent_is_p1=(env_index % 2 == 0),
             alternate_agent_seat=True,
-            subtype_vocab=format_subtype_vocab)
+            subtype_vocab=format_subtype_vocab,
+            reward_discount=gamma)
 
     # Evaluation must not step the training VecEnv. Doing so leaves PPO's
     # cached ``_last_obs`` out of sync with the environment before the next
@@ -1564,7 +1586,10 @@ def objective(trial, base_seed=42):
             gamma=gamma,
             gae_lambda=gae_lambda,
             clip_range=clip_range,
+            clip_range_vf=0.2,
             ent_coef=ent_coef,
+            vf_coef=0.5,
+            target_kl=0.02,
             policy_kwargs=policy_kwargs,
             verbose=0,
             tensorboard_log=TENSORBOARD_DIR,
@@ -1921,11 +1946,27 @@ class RewardComponentsCallback(BaseCallback):
     def _on_step(self):
         infos = list(self.locals.get("infos", ()) or ())
         dones = self.locals.get("dones")
+        transition_rewards = self.locals.get("rewards")
+        if transition_rewards is not None:
+            for value in np.asarray(transition_rewards).reshape(-1):
+                if np.isfinite(value):
+                    numeric = float(value)
+                    self.logger.record_mean("reward/total", numeric)
+                    self.logger.record_mean("reward/total_abs", abs(numeric))
         self._transition_total += len(infos)
         for index, info in enumerate(infos):
             for name, value in (info.get("reward_components") or {}).items():
                 if np.isfinite(value):
-                    self.logger.record_mean(f"reward/{name}", float(value))
+                    numeric = float(value)
+                    self.logger.record_mean(f"reward/{name}", numeric)
+                    self.logger.record_mean(
+                        f"reward/{name}_abs", abs(numeric))
+                    self.logger.record_mean(
+                        f"reward/{name}_nonzero", float(numeric != 0.0))
+            for name, value in (info.get("reward_diagnostics") or {}).items():
+                if np.isfinite(value):
+                    self.logger.record_mean(
+                        f"reward_diagnostic/{name}", float(value))
             reason = info.get("terminal_reason")
             is_done = dones is None or index >= len(dones) or bool(dones[index])
             if reason and is_done:
@@ -1942,6 +1983,46 @@ class RewardComponentsCallback(BaseCallback):
             self.logger.record(f"terminal/{reason}_count", count)
             self.logger.record(f"terminal/{reason}_rate", count / denominator)
         return True
+
+
+class CriticDiagnosticsCallback(BaseCallback):
+    """Log rollout target scale and value-fit quality before each PPO update."""
+
+    def __init__(self):
+        super().__init__(verbose=0)
+
+    def _on_step(self):
+        return True
+
+    def _on_rollout_end(self):
+        buffer = getattr(self.model, "rollout_buffer", None)
+        if buffer is None:
+            return
+        values = np.asarray(buffer.values, dtype=np.float64).reshape(-1)
+        returns = np.asarray(buffer.returns, dtype=np.float64).reshape(-1)
+        advantages = np.asarray(
+            buffer.advantages, dtype=np.float64).reshape(-1)
+        rewards = np.asarray(buffer.rewards, dtype=np.float64).reshape(-1)
+        for name, samples in (
+                ("reward", rewards),
+                ("return", returns),
+                ("value", values),
+                ("advantage", advantages)):
+            finite = samples[np.isfinite(samples)]
+            if not finite.size:
+                continue
+            self.logger.record(f"critic/{name}_mean", float(np.mean(finite)))
+            self.logger.record(f"critic/{name}_std", float(np.std(finite)))
+            self.logger.record(
+                f"critic/{name}_abs_max", float(np.max(np.abs(finite))))
+        valid = np.isfinite(values) & np.isfinite(returns)
+        if np.any(valid):
+            target_variance = float(np.var(returns[valid]))
+            if target_variance > 0.0:
+                explained = 1.0 - float(np.var(
+                    returns[valid] - values[valid])) / target_variance
+                self.logger.record(
+                    "critic/rollout_explained_variance", explained)
 
 
 class PhaseTimingCallback(BaseCallback):
@@ -2028,6 +2109,7 @@ def create_callbacks(eval_env, run_id, args, num_train_envs=1,
         ))
     callbacks.append(resource_callback)
     callbacks.append(RewardComponentsCallback())
+    callbacks.append(CriticDiagnosticsCallback())
     callbacks.append(PhaseTimingCallback())
     callbacks.append(StrictTrainingFidelityCallback())
     return callbacks
@@ -2152,8 +2234,8 @@ def main():
     parser.add_argument("--eval-episodes", type=int, default=20,
                         help="Episodes per periodic evaluation")
     parser.add_argument("--checkpoint-freq", type=int, default=50000, help="Checkpoint frequency")
-    parser.add_argument("--learning-rate", type=float, default=3e-4, help="Initial learning rate")
-    parser.add_argument("--batch-size", type=int, default=256, help="Batch size for training")  # Reduced for CPU
+    parser.add_argument("--learning-rate", type=float, default=1e-4, help="Initial learning rate")
+    parser.add_argument("--batch-size", type=int, default=512, help="Batch size for training")
     parser.add_argument("--n-steps", type=int, default=2048, help="Number of steps to collect before training")  # Reduced for CPU
     parser.add_argument("--n-envs", type=int, default=0, help="Number of environments to run in parallel (0 = auto)")
     parser.add_argument("--debug", action="store_true", help="Enable additional debugging")
@@ -2394,7 +2476,12 @@ def main():
                     os.path.join(train_storage_dir, f"env_{idx}"),
                     agent_is_p1=(idx % 2 == 0),
                     alternate_agent_seat=True,
-                    subtype_vocab=run_subtype_vocab)
+                    subtype_vocab=run_subtype_vocab,
+                    reward_discount=training_config['gamma'],
+                    action_reward_scale=training_config[
+                        'action_reward_scale'],
+                    state_potential_scale=training_config[
+                        'state_potential_scale'])
             return _init
 
         env_fns = [make_env_factory(index) for index in range(num_envs)]
@@ -2419,7 +2506,12 @@ def main():
                     os.path.join(eval_storage_dir, f"env_{idx}"),
                     agent_is_p1=(idx % 2 == 0),
                     alternate_agent_seat=True,
-                    subtype_vocab=run_subtype_vocab)
+                    subtype_vocab=run_subtype_vocab,
+                    reward_discount=training_config['gamma'],
+                    action_reward_scale=training_config[
+                        'action_reward_scale'],
+                    state_potential_scale=training_config[
+                        'state_potential_scale'])
             return _init
 
         eval_env_fns = [

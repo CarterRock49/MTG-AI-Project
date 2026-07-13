@@ -297,16 +297,30 @@ def check_mask_aware_evaluation():
             rewards.model = SimpleNamespace(logger=fake_logger)
             rewards.locals = {
                 "infos": [
-                    {"terminal_reason": "life_total"},
+                    {
+                        "terminal_reason": "life_total",
+                        "reward_components": {
+                            "action": 0.002,
+                            "state_change": -0.25,
+                            "terminal": -10.0,
+                        },
+                        "reward_diagnostics": {"action_raw": 0.02},
+                    },
                     {"terminal_reason": "decking"}, {}, {},
                 ],
                 "dones": np.array([True, True, False, False]),
+                "rewards": np.array([-10.248, 0.0, 0.1, -0.1]),
             }
             assert rewards._on_step()
             assert metrics["terminal/any_count"] == 2
             assert metrics["terminal/any_rate"] == 0.5
             assert metrics["terminal/life_total_rate"] == 0.25
             assert metrics["terminal/decking_rate"] == 0.25
+            assert metrics["reward/state_change"] == -0.25
+            assert metrics["reward/state_change_abs"] == 0.25
+            assert metrics["reward/state_change_nonzero"] == 1.0
+            assert metrics["reward_diagnostic/action_raw"] == 0.02
+            assert metrics["reward/total_abs"] == 0.1
             rewards.locals = {
                 "infos": [{}, {}, {}, {}],
                 "dones": np.array([False, False, False, False]),
@@ -315,6 +329,20 @@ def check_mask_aware_evaluation():
             assert metrics["terminal/any_rate"] == 0.25
             assert metrics["terminal/life_total_rate"] == 0.125
             assert metrics["terminal/decking_rate"] == 0.125
+
+            critic = m.CriticDiagnosticsCallback()
+            critic.model = SimpleNamespace(
+                logger=fake_logger,
+                rollout_buffer=SimpleNamespace(
+                    values=np.array([0.0, 1.0, 2.0]),
+                    returns=np.array([0.0, 1.0, 3.0]),
+                    advantages=np.array([0.0, 0.0, 1.0]),
+                    rewards=np.array([0.0, 0.1, 1.0]),
+                ),
+            )
+            critic._on_rollout_end()
+            assert metrics["critic/return_abs_max"] == 3.0
+            assert np.isfinite(metrics["critic/rollout_explained_variance"])
 
             resources = m.ResourceMonitorCallback(
                 os.path.join(tmp, "resource_metrics"))
@@ -451,11 +479,17 @@ def check_runtime_configuration():
         "gamma": 0.98,
         "gae_lambda": 0.987,
         "clip_range": 0.17,
+        "clip_range_vf": 0.2,
         "ent_coef": 0.004,
+        "vf_coef": 0.5,
+        "target_kl": 0.02,
         "net_arch": m.NETWORK_ARCHITECTURES["large"],
         "n_epochs": 9,
         "max_grad_norm": 0.77,
         "activation_fn": torch.nn.Tanh,
+        "action_reward_scale": 0.1,
+        "state_potential_scale": 0.25,
+        "reward_contract_version": "discounted-state-potential-v1",
     }
 
     try:
@@ -484,7 +518,8 @@ def check_runtime_configuration():
     assert captured["learning_rate"].initial_lr == optimized["learning_rate"]
     for key in (
         "n_steps", "batch_size", "gamma", "gae_lambda", "clip_range",
-        "ent_coef", "n_epochs", "max_grad_norm",
+        "clip_range_vf", "ent_coef", "vf_coef", "target_kl", "n_epochs",
+        "max_grad_norm",
     ):
         assert captured[key] == config[key]
     assert captured["policy_kwargs"]["net_arch"] == config["net_arch"]
@@ -523,6 +558,9 @@ def check_runtime_configuration():
     assert environment_calls[0][2]["alternate_agent_seat"] is False
     assert environment_calls[1][2]["agent_is_p1"] is False
     assert environment_calls[1][2]["alternate_agent_seat"] is True
+    assert environment_calls[0][2]["reward_discount"] == 0.995
+    assert environment_calls[0][2]["action_reward_scale"] == 0.1
+    assert environment_calls[0][2]["state_potential_scale"] == 0.25
 
 
 @stage("training failures are nonzero and never saved as final")

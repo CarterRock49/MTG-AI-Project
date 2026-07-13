@@ -1399,7 +1399,10 @@ class ActionSpaceMixin:
                                        if target_card and hasattr(target_card, 'name')
                                        else target_id)
                     set_valid_action(274 + i, f"SELECT_TARGET ({i}): {target_name} for {source_name}")
-                if page_count > 1:
+                # TARGET_PAGE_NEXT is a one-way policy action.  Keeping it
+                # legal on the final page lets a deterministic policy cycle
+                # between pages forever without selecting or finishing.
+                if page + 1 < page_count:
                     set_valid_action(
                         479, f"TARGET_PAGE_NEXT ({page + 1}/{page_count})",
                         context={"page_count": page_count})

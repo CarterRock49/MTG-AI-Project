@@ -58,9 +58,10 @@ The project is complete when all of the following hold:
   74.1% static-clean, 3.4% evidence-qualified. The static-clean fraction
   dropped in 7.64 as an honesty correction: 321 previously silent
   unclassified clauses are now reported instead of passing as clean.
-- Tier 3 (training/environment): ◐ policy plumbing, audit work, and the explicit
-  paired-seat scripted qualification gate are complete; a trained checkpoint
-  still needs to pass it before Harvest is promoted to policy-vs-policy.
+- Tier 3 (training/environment): ◐ policy plumbing, audit work, the explicit
+  paired-seat scripted qualification gate, and the Round 7.72 reward/critic
+  stabilization are complete; a fresh trained checkpoint still needs to pass
+  qualification before Harvest is promoted to policy-vs-policy.
 - Tier 4 (verification/calibration): ◐ invariant and long-fuzz gates are green;
   the matchup calibration study remains open.
 - Tier 5 (operations/integration): ◐ Harvest orchestration and the fail-closed
@@ -74,7 +75,7 @@ The project is complete when all of the following hold:
   pools automatically; passing policy qualification and builder feedback remain
   open.
 - Test gates: smoke 9/9, training 13/13, scenarios 365/365 (grown from 12),
-  95/95 focused regression tests, 196/196 discovered unit tests,
+  108/108 focused regression tests, 201/201 discovered unit tests,
   fixture harvest 16/16, production Harvest protocol 16/16, card registry
   19/19, deck ingestion 13/13, fuzz/replay configuration 6/6, deterministic
   default fuzz 8 seeds x 1,000 valid actions, and strict long fuzz 32 seeds x
@@ -239,10 +240,13 @@ Phased milestones:
    preflight and paired-seat evaluation queue without contaminating held-out
    promotion or calibration results.
 
-**Current execution order:** continue the impact-ranked Standard support
-sweep, then qualify the Standard policy against scripted play, promote it into
-a checkpoint league, and calibrate known matchups. Imported lists can widen
-the working pool without overwriting the pinned metagame; builder-driven
+**Current execution order:** launch a fresh Round 7.72 Standard candidate and
+inspect its first 100k steps for nonzero `reward/state_change_nonzero`, bounded
+return/value scales, and a critic explained-variance trend that is not
+persistently negative. Continue the impact-ranked Standard support sweep while
+that run proceeds, then qualify the candidate against scripted play, promote it
+into a checkpoint league, and calibrate known matchups. Imported lists can
+widen the working pool without overwriting the pinned metagame; builder-driven
 queueing is a later milestone. Reuse the qualified pipeline for Modern, then
 Pioneer, then enable the unified builder feedback loop. Throughput profiling
 and calibration are per-format gates, and new fidelity failures pre-empt
@@ -388,6 +392,24 @@ training failure and its warning set into engine fixes:
   permanent guard scenarios for the multi-block no-op, self-cast trigger
   scope, and Room door costs.
 
+**7.71–7.72 — failed-run lifecycle and learning-signal repair.** The July 13
+failure logs were converted into engine and training-contract fixes:
+
+- **7.71** — the final action-479 target page is one-way and cannot wrap back
+  into a stale selection transaction; copied Brightglass Gearhulk and North
+  Wind Avatar text now reaches the same semantic effect paths as the original
+  spells. The focused target-lifecycle suite is green at 13/13.
+- **7.72** — repaired the disconnected `reward/state_change` signal. The
+  environment now has one bounded state potential and pays discounted shaping
+  `0.25 * (gamma * Phi(next) - Phi(current))`, with the next potential zeroed
+  at terminal states. Direct handler/action heuristics are scaled to 10% so
+  procedural actions cannot dominate game results. The PPO baseline is now
+  learning rate `1e-4`, batch size `512`, three update epochs, value clipping
+  `0.2`, and target KL `0.02`; TensorBoard records absolute/nonzero reward
+  components plus rollout return/value/advantage scales and pre-update critic
+  explained variance. Training smoke is 13/13 and rules scenarios are 365/365.
+  **This is a reward-contract boundary: do not resume pre-7.72 checkpoints.**
+
 ---
 
 ## Working agreements
@@ -509,8 +531,9 @@ pending the next choice audit (attacker-side assignment order is exposed).
     snapshot but refuses a half-present registry/schema pair; sideboards are
     retained and legality-checked but not played by the Bo1 runtime.
     Checkpoint-resume boundaries: pre-7.37 (reward rebuild), pre-7.44
-    (observation space), pre-7.62 (X/count bounds) checkpoints must not be
-    resumed; pre-7.46 stats artifacts must not be mixed with
+    (observation space), pre-7.62 (X/count bounds), and pre-7.72 (discounted
+    state-potential reward contract and critic baseline) checkpoints must not
+    be resumed; pre-7.46 stats artifacts must not be mixed with
     format-namespace lineages.
 38. Treasure/Beza support is scenario-verified through registration,
     activation costs, color choice, mana production, and the CR 605

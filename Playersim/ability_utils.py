@@ -679,8 +679,12 @@ class EffectFactory:
         if source_key == "deadly cover-up" and "destroy all creatures" in lowered:
             from .ability_types import DeadlyCoverUpEffect
             return [DeadlyCoverUpEffect()]
-        if (source_key == "north wind avatar"
-                and "outside the game" in lowered):
+        # Copiable oracle text must keep working when the resolving object's
+        # name changes (for example, Superior Spider-Man entering as a copy of
+        # North Wind Avatar).
+        if re.search(
+                r"card you own from outside the game into your hand",
+                lowered):
             from .ability_types import OutsideGameCardEffect
             return [OutsideGameCardEffect()]
         if source_key == "strategic betrayal" and "their graveyard" in lowered:
@@ -721,8 +725,14 @@ class EffectFactory:
             if modes:
                 from .ability_types import ResolutionModalEffect
                 return [ResolutionModalEffect(modes, source_name=source_name)]
-        if (source_key == "brightglass gearhulk"
-                and "search your library" in lowered):
+        # This instruction can belong to another object after a copy effect
+        # (notably Superior Spider-Man), so recognize its oracle shape rather
+        # than keying the implementation to Brightglass Gearhulk's name.
+        if ("search your library" in lowered
+                and re.search(
+                    r"artifact\s*,\s*creature\s*,\s*and/or\s+enchantment "
+                    r"cards? with mana value 1 or less",
+                    lowered)):
             from .ability_types import SearchLibraryEffect
             return [SearchLibraryEffect(
                 search_type="any", destination="hand", count=2,

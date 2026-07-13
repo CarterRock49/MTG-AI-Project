@@ -39,11 +39,18 @@ class AlphaZeroMTGEnv(gym.Env):
     Updated for improved reward shaping, richer observations, modularity, and detailed logging.
     """
     ACTION_SPACE_SIZE = 480 # Moved constant here
+    REWARD_CONTRACT_VERSION = "discounted-state-potential-v1"
+    DEFAULT_REWARD_DISCOUNT = 0.995
+    DEFAULT_ACTION_REWARD_SCALE = 0.10
+    DEFAULT_STATE_POTENTIAL_SCALE = 0.25
 
     def __init__(self, decks, card_db, max_turns=30, max_hand_size=7, max_battlefield=20,
                  deck_stats_path="./deck_stats", card_memory_path="./card_memory",
                  planner_recommendations=False, agent_is_p1=True,
-                 alternate_agent_seat=False, subtype_vocab=None):
+                 alternate_agent_seat=False, subtype_vocab=None,
+                 reward_discount=DEFAULT_REWARD_DISCOUNT,
+                 action_reward_scale=DEFAULT_ACTION_REWARD_SCALE,
+                 state_potential_scale=DEFAULT_STATE_POTENTIAL_SCALE):
         logging.info("Initializing AlphaZeroMTGEnv...")
         super().__init__()
         self.decks = decks
@@ -59,6 +66,18 @@ class AlphaZeroMTGEnv(gym.Env):
                               "unparsed_effects": 0, "unparsed_cards": {}}
         self.max_turns = max_turns
         self.max_hand_size = max_hand_size
+        self.reward_discount = float(reward_discount)
+        self.action_reward_scale = float(action_reward_scale)
+        self.state_potential_scale = float(state_potential_scale)
+        if not 0.0 <= self.reward_discount <= 1.0:
+            raise ValueError("reward_discount must be between 0 and 1")
+        if (not math.isfinite(self.action_reward_scale)
+                or self.action_reward_scale < 0.0):
+            raise ValueError("action_reward_scale must be finite and nonnegative")
+        if (not math.isfinite(self.state_potential_scale)
+                or self.state_potential_scale < 0.0):
+            raise ValueError(
+                "state_potential_scale must be finite and nonnegative")
         # The rules hand limit is seven, but the public action map exposes hand
         # slots 0-7 for casting and 0-9 for mandatory discards.  Keep the rules
         # limit on GameState while observing every directly actionable hand slot.
@@ -1323,19 +1342,9 @@ class AlphaZeroMTGEnv(gym.Env):
         # Store initial agent perspective
         initial_agent_is_p1 = gs.agent_is_p1
 
-        # --- Get initial state for reward calculation ---
-        agent_player_obj = gs.p1 if gs.agent_is_p1 else gs.p2
-        opp_player_obj = gs.p2 if gs.agent_is_p1 else gs.p1
-        prev_state_for_reward = {}
-        if agent_player_obj and opp_player_obj: # Check players exist
-            prev_state_for_reward = {
-                "my_life": agent_player_obj.get("life", 0), "opp_life": opp_player_obj.get("life", 0),
-                "my_hand": len(agent_player_obj.get("hand", [])), "opp_hand": len(opp_player_obj.get("hand", [])),
-                "my_board": len(agent_player_obj.get("battlefield", [])), "opp_board": len(opp_player_obj.get("battlefield", [])),
-                "my_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) or 0 for cid in agent_player_obj.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
-                "opp_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) or 0 for cid in opp_player_obj.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
-            }
-        previous_board_potential = self._calculate_board_state_reward()
+        # Potential-based shaping is computed from the learned agent's fixed
+        # perspective across the complete agent + scripted-opponent transition.
+        previous_state_potential = self._calculate_state_potential()
 
         # --- Initialize Info Dict ---
         env_info = {
@@ -1550,37 +1559,32 @@ class AlphaZeroMTGEnv(gym.Env):
                         "Could not persist step-limit replay: %s", replay_error)
 
 
-            # --- 5. Final State Calculations (After agent + opponent simulation) ---
-            step_reward = reward # Start with agent action's direct reward (if any)
-            current_state_for_reward = {}
-            if agent_player_obj and opp_player_obj: # Recalculate state AFTER opponent sim
-                current_state_for_reward = {
-                    "my_life": agent_player_obj.get("life", 0), "opp_life": opp_player_obj.get("life", 0),
-                    "my_hand": len(agent_player_obj.get("hand", [])), "opp_hand": len(opp_player_obj.get("hand", [])),
-                    "my_board": len(agent_player_obj.get("battlefield", [])), "opp_board": len(opp_player_obj.get("battlefield", [])),
-                    "my_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) or 0 for cid in agent_player_obj.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
-                    "opp_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) or 0 for cid in opp_player_obj.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
-                }
-
-            # Add state change reward comparing initial state to final state of the step
-            if hasattr(self, '_add_state_change_rewards') and prev_state_for_reward and current_state_for_reward:
-                 state_change_reward = self._add_state_change_rewards(0.0, prev_state_for_reward, current_state_for_reward)
-                 step_reward += state_change_reward
-                 env_info["state_change_reward"] = state_change_reward
-
-            # Potential-based shaping pays only for improving the position.
-            # Re-awarding the absolute board score every action let a policy
-            # farm reward by preserving a board and passing indefinitely.
-            current_board_potential = self._calculate_board_state_reward()
-            board_reward = current_board_potential - previous_board_potential
-            step_reward += board_reward
-            env_info["board_state_reward"] = board_reward
-            env_info["board_state_potential"] = current_board_potential
-
-            # --- 6. Check Final Game End Conditions ---
+            # --- 5. Check Final Game End Conditions ---
             if not done:
                  game_ended_by_check = self._check_game_end_conditions(env_info)
                  done = done or game_ended_by_check
+
+            # Direct action heuristics are retained as a weak tie-breaker, not
+            # the main objective. Their previous scale made longer games pay
+            # more regardless of result and produced unnecessarily large value
+            # targets for the critic.
+            raw_action_reward = float(reward)
+            action_reward = self.action_reward_scale * raw_action_reward
+
+            current_state_potential = self._calculate_state_potential()
+            state_change_reward = self._state_potential_reward(
+                previous_state_potential,
+                current_state_potential,
+                terminal=bool(done or truncated),
+            )
+            step_reward = action_reward + state_change_reward
+            env_info["state_change_reward"] = state_change_reward
+            env_info["state_potential"] = current_state_potential
+            # Compatibility names for analysis scripts written against the old
+            # board-potential implementation. These are diagnostics, not extra
+            # reward components.
+            env_info["board_state_reward"] = state_change_reward
+            env_info["board_state_potential"] = current_state_potential
 
             terminal_reward = 0.0
             if done:
@@ -1598,11 +1602,16 @@ class AlphaZeroMTGEnv(gym.Env):
                 step_reward += terminal_reward
 
             env_info["reward_components"] = {
-                "action": float(reward),
-                "state_change": float(env_info.get("state_change_reward", 0.0)),
-                "board_potential": float(board_reward),
+                "action": float(action_reward),
+                "state_change": float(state_change_reward),
                 "terminal": float(terminal_reward),
             }
+            env_info["reward_diagnostics"] = {
+                "action_raw": raw_action_reward,
+                "state_potential": float(current_state_potential),
+                "state_potential_previous": float(previous_state_potential),
+            }
+            env_info["reward_contract"] = self.REWARD_CONTRACT_VERSION
 
             # --- 7. Get Final Observation and Mask for the AGENT ---
             # *** Ensure perspective is set to agent BEFORE getting obs and mask ***
@@ -2462,8 +2471,8 @@ class AlphaZeroMTGEnv(gym.Env):
             logging.warning(f"Error getting strategic recommendation: {e}")
             return None
 
-    def _calculate_board_state_reward(self):
-        """Bounded strategic potential used only through state differences."""
+    def _calculate_state_potential(self):
+        """Return the bounded strategic potential for the agent's position."""
         gs = self.game_state
         me = gs.p1 if gs.agent_is_p1 else gs.p2
         opp = gs.p2 if gs.agent_is_p1 else gs.p1
@@ -2498,6 +2507,16 @@ class AlphaZeroMTGEnv(gym.Env):
         return float(np.clip(
             life_component + board_component + card_component + damage_progress,
             -2.0, 2.0))
+
+    def _state_potential_reward(self, previous, current, terminal=False):
+        """Return discounted potential shaping without changing optimal policy."""
+        next_potential = 0.0 if terminal else float(current)
+        return float(self.state_potential_scale * (
+            self.reward_discount * next_potential - float(previous)))
+
+    def _calculate_board_state_reward(self):
+        """Compatibility alias for the state potential used by older tooling."""
+        return self._calculate_state_potential()
 
     def _legacy_absolute_board_state_reward(self):
         """Calculate a sophisticated MTG-specific board state reward with emphasis on early wins"""
