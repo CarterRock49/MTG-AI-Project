@@ -5,6 +5,7 @@ all state lives on MTGStrategicPlanner, which composes every mixin.
 """
 
 import logging
+import math
 import re
 
 
@@ -566,19 +567,24 @@ class CardEvaluationMixin:
                             type_value += type_config.get('ultimate_potential', 0)
         
         # Mana cost considerations
+        card_cmc = 0.0
         if hasattr(card, 'cmc'):
+            try:
+                card_cmc = float(getattr(card, 'cmc', 0) or 0)
+            except (TypeError, ValueError):
+                card_cmc = 0.0
             # More sophisticated mana curve evaluation
-            if card.cmc <= 2:
+            if card_cmc <= 2:
                 mana_value += 0.5  # Early game efficiency
-            elif card.cmc <= 4:
+            elif card_cmc <= 4:
                 mana_value += 0.4  # Mid-game impact
-            elif card.cmc <= 6:
+            elif card_cmc <= 6:
                 mana_value += 0.3  # Late game power
             else:
                 mana_value += 0.2  # Very late game bombs
             
             # Discount for uncastable cards
-            mana_value *= max(0.2, 1.0 - (card.cmc * 0.05))
+            mana_value *= max(0.2, 1.0 - (card_cmc * 0.05))
         
         # Ability and effect evaluation
         if hasattr(card, 'oracle_text'):
@@ -606,10 +612,19 @@ class CardEvaluationMixin:
                 ability_value += 0.3  # Potential for complex interactions
         
         # Creature-specific evaluation
-        if hasattr(card, 'power') and hasattr(card, 'toughness'):
+        if 'creature' in getattr(card, 'card_types', []):
+            try:
+                power = float(card.power)
+                toughness = float(card.toughness)
+                stats_are_finite = (
+                    math.isfinite(power) and math.isfinite(toughness))
+            except (TypeError, ValueError):
+                stats_are_finite = False
+            if not stats_are_finite:
+                power = toughness = 0.0
             # Power to mana cost efficiency
-            power_efficiency = card.power / max(1, card.cmc)
-            toughness_efficiency = card.toughness / max(1, card.cmc)
+            power_efficiency = power / max(1.0, card_cmc)
+            toughness_efficiency = toughness / max(1.0, card_cmc)
             
             base_value += min(power_efficiency, 1.0) * 0.3
             base_value += min(toughness_efficiency, 1.0) * 0.2
@@ -863,7 +878,8 @@ class CardEvaluationMixin:
                     context_value += 0.1
         
         # Special cases - land drops
-        if 'land' in card.card_types and not me["land_played"]:
+        if ('land' in card.card_types
+                and gs.can_play_land_this_turn(me)):
             # Essential to make land drops
             lands_in_play = sum(1 for cid in me["battlefield"] 
                             if gs._safe_get_card(cid) and 'land' in gs._safe_get_card(cid).card_types)
@@ -2087,4 +2103,4 @@ class CardEvaluationMixin:
             value *= (0.5 + card.performance_rating)
         
         return value
-
+

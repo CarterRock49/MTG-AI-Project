@@ -1016,6 +1016,38 @@ class AbilityHandler:
         text_lower = clause_text.lower().strip()
         text_lower_stripped = text_lower.rstrip('.').strip() # Used for certain checks
 
+        # Summon: Esper Maduin's chapter headings are triggered abilities,
+        # even though they do not use ordinary ``when/whenever/at`` grammar.
+        # They used to be discarded by the declaration filter below, so its
+        # lore counters advanced without instructions reaching the stack.
+        # Keep this exact-card gate until the wider Saga family (including
+        # shared chapter headings) has matching runtime evidence.
+        chapter_match = (
+            re.match(
+                r"^\s*([IVX]+)\s+[^A-Za-z0-9{]+\s*(.+?)\s*$",
+                clause_text, re.IGNORECASE | re.DOTALL)
+            if str(getattr(card, "name", "")).casefold()
+            == "summon: esper maduin" else None)
+        if chapter_match:
+            roman = chapter_match.group(1).upper()
+            total = 0
+            previous = 0
+            for symbol in reversed(roman):
+                value = {"I": 1, "V": 5, "X": 10}.get(symbol, 0)
+                total += -value if value < previous else value
+                previous = max(previous, value)
+            effect_text = chapter_match.group(2).strip().rstrip('.').strip()
+            if total > 0 and effect_text:
+                ability = TriggeredAbility(
+                    card_id=card_id,
+                    trigger_condition=f"saga chapter {total}",
+                    effect=effect_text,
+                    effect_text=clause_text.strip())
+                ability.saga_chapter = total
+                setattr(ability, 'source_card', card)
+                abilities_found.append(ability)
+                return abilities_found
+
         # Rules-changing static abilities such as Nowhere to Run are neither
         # layer-6 ability removal nor ordinary action effects. Keep them as
         # live battlefield markers for target legality and ward triggering.
@@ -1049,6 +1081,7 @@ class AbilityHandler:
             r"^\s*saddle\s+\d+\s*$",
             r"^\s*plot\s*(?:\{[^}]+\})+\s*$",
             r"^\s*you may have this creature enter as a copy of\b",
+            r"^\s*mind swap\s*[â€”\u2014-]\s*you may have .* enter as a copy of\b",
             r"^\s*domain\b", r"^\s*as an additional cost", r"^\s*collect evidence\s+\d+",
             r"^\s*[ivx]+\s*[—\u2014-]", r"^\s*Split second\b",
         ]
@@ -1061,6 +1094,30 @@ class AbilityHandler:
             r"^\s*if a spell or ability an opponent controls causes you to discard this card",
             # Handled by ETB-counter replacement registration.
             r"^\s*this (?:creature|permanent|artifact|enchantment) enters(?: the battlefield)? with .*counter",
+            r"^\s*[\w' ,.-]+ enters(?: the battlefield)? with .*counter",
+            # Conditional replacements are registered by ReplacementEffectSystem.
+            r"^\s*as long as .*\bif .*\bwould .*\binstead\b",
+            # Dedicated rules/cost paths read these live declarations from
+            # their battlefield source.  They are not layer effects.
+            r"^\s*noncreature spells you cast cost \{\d+\} less to cast as long as there are \w+ or more lesson cards in your graveyard\s*$",
+            r"^\s*this spell costs \{x\} less to cast, where x is the greatest mana value among elementals you control\s*$",
+            r"^\s*this spell costs \{x\} less to cast, where x is the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an adventure\s*$",
+            r"^\s*this spell costs \{\d+\} less to cast for each instant and sorcery card in your graveyard\s*$",
+            r"^\s*the first non-lemur creature spell with flying you cast during each of your turns costs \{1\} less to cast\s*$",
+            r"^\s*this creature enters tapped if it(?:'|\u2019)s not your turn\s*$",
+            r"^\s*warp\s+(?:\{[^}]+\})+\s*$",
+            r"^\s*you may play an additional land on each of your turns\s*$",
+            r"^\s*you may play lands from your graveyard\s*$",
+            r"^\s*your opponents can(?:'|\u2019)t cast spells during your turn\s*$",
+            # Stack counter legality and the as-enters type transaction own
+            # these declarations; neither is a continuous layer effect.
+            r"^\s*this spell can(?:'|\u2019)t be countered\s*$",
+            r"^\s*this land is the chosen type\s*$",
+            # Both keywords are already registered from card metadata.
+            r"^\s*flying\s*,\s*ward\s+(?:\{[^}]+\}|\d+)\s*$",
+            # Prepare state and its virtual exile copy are maintained by the
+            # zone/casting transaction, not by a continuous layer.
+            r"^\s*this (?:creature|permanent) enters prepared\s*$",
         ]
         if any(re.match(pattern, text_lower_stripped, re.IGNORECASE) for pattern in replacement_or_non_ability_patterns):
             # logging.debug(f"Skipping clause '{clause_text}' as likely Replacement/Non-functional Ability.")
@@ -1159,7 +1216,10 @@ class AbilityHandler:
         is_likely_triggered = False
         trigger_match = re.match(r'^\s*(When|Whenever|At\sthe\sbeginning\sof)\b', clause_text.strip(), re.IGNORECASE)
         etb_match = re.match(r"^\s*(?:(?:this|that)\s+(?:permanent|creature)\s+)?enters?\s+the\s+battlefield\b", text_lower_stripped, re.IGNORECASE)
-        triggering_keywords_at_start = ['Valiant', 'Eerie', 'Prowess', 'Riot', 'Delirium']
+        triggering_keywords_at_start = [
+            'Valiant', 'Eerie', 'Prowess', 'Riot', 'Delirium',
+            'Landfall', 'Opus',
+        ]
         keyword_trigger_match = re.match(rf"^\s*({'|'.join(triggering_keywords_at_start)})\s*[—\u2014-]?\s*(?:When|Whenever|At)\b", clause_text.strip(), re.IGNORECASE)
 
         if trigger_match or etb_match or keyword_trigger_match:
@@ -1209,6 +1269,21 @@ class AbilityHandler:
         if not abilities_found and not is_inst_sorc and not is_adventure_effect and \
            clause_text.strip() and not clause_text.strip().startswith("(") and is_permanent_type:
             logging.warning(f"Could not classify ability clause for {card.name}: '{clause_text}'")
+            fidelity = getattr(self.game_state, "fidelity_counters", None)
+            if fidelity is not None:
+                fidelity["unparsed_effects"] = (
+                    fidelity.get("unparsed_effects", 0) + 1)
+                fidelity.setdefault("unparsed_cards", set()).add(card.name)
+            try:
+                from .card_support import report_unsupported
+                report_unsupported(
+                    card.name,
+                    f"unclassified ability clause: {clause_text[:80]}",
+                    severity="unparsed")
+            except Exception:
+                logging.debug(
+                    "Could not persist unclassified support evidence for %s.",
+                    card.name, exc_info=True)
 
         return abilities_found
             
@@ -1265,16 +1340,45 @@ class AbilityHandler:
         # effect. Attachment legality reads the printed text directly.
         if keyword_lower == "enchant":
             return True
+        # These ability/action words are implemented by their Oracle-text
+        # transaction. Scryfall also lists them in ``keywords``; they do not
+        # create an independent battlefield ability.
+        if keyword_lower in {
+                "scry", "landfall", "opus", "mind swap", "double"}:
+            return True
+        if keyword_lower == "evoke":
+            cost_str = None
+            for source_text in (
+                    full_text, getattr(card, "oracle_text", "") or ""):
+                match = re.search(
+                    r"(?:^|\n)evoke\s+((?:\{[^}]+\})+)",
+                    str(source_text), re.IGNORECASE)
+                if match:
+                    cost_str = match.group(1)
+                    break
+
+            def was_evoked(trigger_context):
+                return str((trigger_context or {}).get(
+                    "use_alt_cost", "")).lower() == "evoke"
+
+            ability = TriggeredAbility(
+                card_id,
+                trigger_condition="when this creature enters",
+                effect="sacrifice this creature",
+                effect_text=(
+                    "When this creature enters, sacrifice it if its evoke "
+                    "cost was paid."),
+                additional_condition=was_evoked)
+            ability.keyword = "evoke"
+            ability.keyword_cost = cost_str
+            setattr(ability, "source_card", card)
+            abilities_list.append(ability)
+            return True
         if keyword_lower == "warp":
-            # Warp's printed alternate cast, delayed exile, and later
-            # exile-cast permission are not yet a runtime transaction. Keep
-            # cards with Warp conservatively partial even when their other
-            # instructions have exact support.
-            from .card_support import report_unsupported
-            report_unsupported(
-                getattr(card, "name", str(card_id)),
-                "Warp casting and delayed exile are not implemented",
-                severity="partial")
+            # Card parses the cost and the casting pipeline owns Warp's hand
+            # cast, delayed exile, and exile permission. It is a declaration,
+            # not an independent battlefield ability or layer effect.
+            return True
 
         current_value = None
         is_parametrized_keyword = False
@@ -1992,6 +2096,11 @@ class AbilityHandler:
             if not ability.can_pay_cost(self.game_state, controller):
                 return False
 
+            timing_text = (getattr(ability, "effect_text", "") or "").lower()
+            if ("activate only during your turn" in timing_text
+                    and self.game_state._get_active_player() is not controller):
+                return False
+
             # CR 602.2b: a required target must exist before an ability can be
             # activated.  The execution handler already enforced this, but
             # the mask-side predicate checked costs only, exposing Floodpits
@@ -2115,6 +2224,8 @@ class AbilityHandler:
             gs.priority_pass_count = 0
             return True
         targeting_text = getattr(ability, 'effect', context_at_trigger['effect_text'])
+        requires_target = bool(getattr(
+            ability, 'requires_target', "target" in targeting_text.lower()))
         # Earthbend's target instruction is defined by the mechanic reminder
         # text and some card parsers intentionally strip that parenthetical
         # from the trigger effect. Targets still have to be chosen as the
@@ -2122,7 +2233,26 @@ class AbilityHandler:
         if ("earthbend" in targeting_text.lower()
                 and "target" not in targeting_text.lower()):
             targeting_text = "Target land you control"
-        if "target" in targeting_text.lower() and not context_at_trigger.get('targets'):
+            requires_target = True
+        # A zone/event context can carry the targets of the spell or ability
+        # that caused this trigger. They are event data, never the triggered
+        # ability's own targets (CR 603.3d). This separation is required even
+        # for a nontargeted trigger: otherwise Namor's cast trigger inherits a
+        # Spell Snare/Bounce Off target, validates it as though Namor targeted
+        # it, and mutates the physical spell's target payload.
+        if context_at_trigger.get('event_type'):
+            if context_at_trigger.get('targets'):
+                context_at_trigger['event_targets'] = \
+                    copy.deepcopy(context_at_trigger['targets'])
+            for inherited_key in (
+                    'targets', 'targets_by_slot', 'target_slots',
+                    'instruction_target_slots', 'spree_target_slots',
+                    'required_count', 'min_targets', 'max_targets',
+                    'num_targets', 'targeting_text',
+                    'target_choice_pending'):
+                context_at_trigger.pop(inherited_key, None)
+        if (requires_target and "target" in targeting_text.lower()
+                and not context_at_trigger.get('targets')):
             context_at_trigger['targeting_text'] = targeting_text
             context_at_trigger['target_choice_pending'] = True
         gs.add_to_stack("TRIGGER", ability.card_id, controller, context_at_trigger)
@@ -2159,13 +2289,73 @@ class AbilityHandler:
                 "mode_choice_pending": False,
             })
             gs.stack[stack_index] = item[:3] + (context,)
+            parent_order = choice.get("parent_order_triggers")
+            if parent_order:
+                # Choosing a modal trigger's mode is nested inside CR 603.3b
+                # ordering when that trigger was one of several simultaneous
+                # triggers.  Restore the mutated parent instead of resuming
+                # the raw CHOOSE phase with no context.
+                gs.choice_context = parent_order
+                gs.phase = gs.PHASE_CHOOSE
+                gs.priority_player = parent_order.get("player", item[2])
+                gs.priority_pass_count = 0
+                self._continue_trigger_order(parent_order)
+                return True
+
+            resume_phase = gs._normalized_choice_resume_phase(
+                choice.get("resume_phase", gs.PHASE_PRIORITY))
             gs.choice_context = None
-            gs.phase = choice.get("resume_phase", gs.PHASE_PRIORITY)
-            gs.previous_priority_phase = None
+            gs.phase = resume_phase
+            if (resume_phase == gs.PHASE_PRIORITY
+                    and gs.previous_priority_phase not in gs._TURN_PHASES
+                    and gs._last_turn_phase in gs._TURN_PHASES):
+                gs.previous_priority_phase = gs._last_turn_phase
             gs.priority_player = controller = item[2]
             gs.priority_pass_count = 0
+            gs.start_pending_stack_target_choice()
             return True
         return False
+
+    def _continue_trigger_order(self, context):
+        """Continue or finish one preserved simultaneous-trigger ordering.
+
+        A modal trigger can open its own policy choice while it is being put
+        onto the stack.  The ordering context must survive that child choice,
+        including when the modal trigger is the final auto-stacked entry.
+        """
+        gs = self.game_state
+        pending = context.get("pending", [])
+
+        # Once only one trigger remains its relative position is forced.  It
+        # can itself open a nested mode choice, so detect the context change
+        # before finalizing the parent batch.
+        if len(pending) == 1:
+            ability, controller, trigger_context = pending.pop(0)
+            gs.choice_context = context
+            self._push_trigger_to_stack(
+                ability, controller, trigger_context)
+            if gs.choice_context is not context:
+                child = gs.choice_context
+                if child and child.get("type") == "trigger_mode":
+                    child["parent_order_triggers"] = context
+                return True
+
+        if pending:
+            gs.choice_context = context
+            gs.phase = gs.PHASE_CHOOSE
+            gs.priority_player = context.get("player")
+            gs.priority_pass_count = 0
+            return True
+
+        next_batch = context.get("next_batch") or []
+        gs.choice_context = None
+        # The stack is now non-empty: players receive priority (CR 117.3c).
+        # Keep previous_priority_phase as the underlying turn-phase anchor.
+        gs.phase = gs.PHASE_PRIORITY
+        self._stack_trigger_batch_with_choice(next_batch)
+        if not getattr(gs, "choice_context", None):
+            gs.start_pending_stack_target_choice()
+        return True
 
     def _stack_trigger_batch_with_choice(self, batch, next_batch=None):
         """Stack one player's simultaneous triggers (CR 603.3b).
@@ -2192,8 +2382,14 @@ class AbilityHandler:
             return
 
         # Enter the ordering choice (same pattern as scry/surveil).
-        if gs.phase not in [gs.PHASE_CHOOSE, gs.PHASE_TARGETING, gs.PHASE_SACRIFICE]:
-            gs.previous_priority_phase = gs.phase
+        if gs.phase not in [gs.PHASE_CHOOSE, gs.PHASE_TARGETING,
+                            gs.PHASE_SACRIFICE]:
+            # PHASE_PRIORITY is itself a transient wrapper. Preserve an
+            # existing real turn-phase anchor instead of replacing it with
+            # another wrapper while opening the ordering choice.
+            if (gs.phase != gs.PHASE_PRIORITY
+                    or gs.previous_priority_phase not in gs._TURN_PHASES):
+                gs.previous_priority_phase = gs.phase
         gs.phase = gs.PHASE_CHOOSE
         gs.choice_context = {
             'type': 'order_triggers',
@@ -2226,23 +2422,12 @@ class AbilityHandler:
 
         ability, controller, trig_ctx = pending.pop(index)
         self._push_trigger_to_stack(ability, controller, trig_ctx)
-        if len(pending) == 1:
-            ability, controller, trig_ctx = pending.pop(0)
-            self._push_trigger_to_stack(ability, controller, trig_ctx)
-
-        if not pending:
-            next_batch = ctx.get('next_batch') or []
-            gs.choice_context = None
-            # The stack is now non-empty: players receive priority (CR 117.3c),
-            # matching add_to_stack's own convention for non-choice phases.
-            # previous_priority_phase keeps the phase saved on choice entry, so
-            # the game returns there once the stack empties.
-            gs.phase = gs.PHASE_PRIORITY
-            self._stack_trigger_batch_with_choice(next_batch)
-            if not (getattr(gs, 'choice_context', None)
-                    and gs.choice_context.get('type') == 'order_triggers'):
-                gs.start_pending_stack_target_choice()
-        return True
+        if gs.choice_context is not ctx:
+            child = gs.choice_context
+            if child and child.get("type") == "trigger_mode":
+                child["parent_order_triggers"] = ctx
+            return True
+        return self._continue_trigger_order(ctx)
 
     def resolve_ability(self, ability_type, card_id, controller, context=None):
         """
@@ -2332,16 +2517,21 @@ class AbilityHandler:
                 context.get("targeting_text")
                 or getattr(ability, 'effect', ability_effect_text))
             valid_targets = True
-            parsed_min_targets, _ = (
-                gs._target_bounds_from_text(ability_targeting_text)
-                if "target" in ability_targeting_text.lower()
-                else (0, 0))
             committed_target_count = len(gs._flatten_target_ids(
                 targets_on_stack if isinstance(targets_on_stack, dict) else {}))
             requires_target = (
                 getattr(ability, 'requires_target', False)
-                or parsed_min_targets > 0
+                or bool(context.get("targeting_text"))
                 or committed_target_count > 0)
+            # Trigger text can contain a later reflexive "When you do"
+            # ability whose target does not belong to the parent trigger.
+            # TriggeredAbility.requires_target has already scoped that marker
+            # to the parent instruction, so do not re-infer a target here from
+            # the full nested text and incorrectly fizzle the parent.
+            parsed_min_targets, _ = (
+                gs._target_bounds_from_text(ability_targeting_text)
+                if requires_target and "target" in ability_targeting_text.lower()
+                else (0, 0))
 
             if parsed_min_targets > committed_target_count:
                 # A mandatory targeted object should have entered the target

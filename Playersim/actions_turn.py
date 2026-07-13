@@ -542,9 +542,25 @@ class TurnPhaseHandlersMixin:
                 and gs.choice_context.get('type') == 'hand_selection'
                 and gs.choice_context.get('optional')):
             ctx = gs.choice_context
-            gs.phase = ctx.get('resume_phase', gs.PHASE_MAIN_PRECOMBAT)
-            gs.choice_context = None
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if ctx.get('player') is not player:
+                return -0.1, False
+            if ctx.get('effect_continuation'):
+                gs._resume_effect_continuation(ctx)
+            else:
+                gs.phase = ctx.get(
+                    'resume_phase', gs.PHASE_MAIN_PRECOMBAT)
+                gs.choice_context = None
+                gs.priority_player = player
+                gs.priority_pass_count = 0
             return 0.0, True
+        if (gs.phase == gs.PHASE_CHOOSE and getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'prepared_payment'):
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if gs.choice_context.get('player') is not player:
+                return -0.1, False
+            success = gs.decline_prepared_payment()
+            return (0.0 if success else -0.1), success
         if (gs.phase == gs.PHASE_CHOOSE and getattr(gs, 'choice_context', None)
                 and gs.choice_context.get('type') == 'ward_payment'):
             player = gs.p1 if gs.agent_is_p1 else gs.p2
@@ -577,6 +593,9 @@ class TurnPhaseHandlersMixin:
             player = gs.p1 if gs.agent_is_p1 else gs.p2
             if ctx.get('player') is not player:
                 return -0.1, False
+            if ctx.get('choice_kind') == 'superior_spider_copy':
+                success = gs.complete_superior_spider_copy_choice(None)
+                return (0.0 if success else -0.1), bool(success)
             if ctx.get('choice_kind') == 'counter_unless_pay':
                 target_id = ctx.get('target_spell_id')
                 for index, item in enumerate(list(gs.stack)):

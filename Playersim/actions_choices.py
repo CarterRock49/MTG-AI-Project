@@ -135,6 +135,8 @@ class ChoiceHandlersMixin:
                     'dig_select', 'distribute_counters', 'discard',
                     'specialize_discard', 'forced_sacrifice',
                     'resolution_choice', 'connive_discard', 'choose_x',
+                    'hand_selection', 'prepared_source',
+                    'prepared_payment',
                     'ward_payment', 'action_catalog', 'keyword_grant')):
             choice_options = choice.get('options', [])
             if choice.get('type') in (
@@ -593,6 +595,13 @@ class ChoiceHandlersMixin:
         requires_sorcery = "activate only as a sorcery" in getattr(ability, 'effect_text', '').lower()
         if requires_sorcery and not gs._can_act_at_sorcery_speed(player):
             logging.debug(f"Cannot activate sorcery-speed ability now for {card.name}")
+            return -0.05, False
+        requires_own_turn = (
+            "activate only during your turn" in
+            getattr(ability, 'effect_text', '').lower())
+        if requires_own_turn and gs._get_active_player() is not player:
+            logging.debug(
+                f"Cannot activate own-turn-only ability now for {card.name}")
             return -0.05, False
 
         effect_text = getattr(ability, 'effect', getattr(ability, 'effect_text', 'Unknown Effect'))
@@ -1541,9 +1550,11 @@ class ChoiceHandlersMixin:
             ctx = gs.choice_context
             player = gs.p1 if gs.agent_is_p1 else gs.p2
             options = ctx.get('options', [])
-            if ctx.get('player') is not player or not (0 <= param < len(options)):
+            absolute_param = int(ctx.get('choice_page', 0)) * 10 + param
+            if (ctx.get('player') is not player
+                    or not (0 <= absolute_param < len(options))):
                 return -0.1, False
-            card_id = options[param]
+            card_id = options[absolute_param]
             target_player = ctx['target_player']
             if card_id not in target_player.get('hand', []):
                 return -0.1, False
@@ -1551,8 +1562,14 @@ class ChoiceHandlersMixin:
                 return -0.1, False
             if ctx.get('rummage'):
                 gs._draw_phase(target_player)
-            gs.phase = ctx.get('resume_phase', gs.PHASE_MAIN_PRECOMBAT)
-            gs.choice_context = None
+            if ctx.get('effect_continuation'):
+                gs._resume_effect_continuation(ctx)
+            else:
+                gs.phase = ctx.get(
+                    'resume_phase', gs.PHASE_MAIN_PRECOMBAT)
+                gs.choice_context = None
+                gs.priority_player = player
+                gs.priority_pass_count = 0
             return 0.05, True
         if (getattr(gs, 'choice_context', None)
                 and gs.choice_context.get('type') == 'mana_ability_color'):
@@ -1851,7 +1868,45 @@ class ChoiceHandlersMixin:
                 return -0.1, False
             option = options[absolute_param]
             kind = ctx.get('choice_kind')
-            if kind == 'counter_unless_pay':
+            if kind == 'superior_spider_copy':
+                success = gs.complete_superior_spider_copy_choice(
+                    absolute_param)
+                return (0.05 if success else -0.1), bool(success)
+            if kind == 'remove_counter':
+                source_id = ctx.get('source_id')
+                source = gs._safe_get_card(source_id)
+                count = max(1, int(ctx.get('counter_count', 1) or 1))
+                counters = getattr(source, 'counters', {}) if source else {}
+                if (source_id not in player.get('battlefield', [])
+                        or int(counters.get(option, 0) or 0) < count):
+                    return -0.1, False
+                if not gs.add_counter(source_id, option, -count):
+                    return -0.1, False
+                followup = ctx.get('reflexive_followup')
+                if followup:
+                    from .ability_types import TriggeredAbility
+                    trigger = TriggeredAbility(
+                        followup['source_id'],
+                        trigger_condition=followup['trigger_condition'],
+                        effect=followup['trigger_effect_text'],
+                        effect_text=(
+                            f"{followup['trigger_condition'].capitalize()}, "
+                            f"{followup['trigger_effect_text']}."))
+                    trigger._is_reflexive_trigger = True
+                    trigger_context = {
+                        'ability': trigger,
+                        'source_id': followup['source_id'],
+                        'effect_text': followup['trigger_effect_text'],
+                        'is_reflexive_trigger': True,
+                        'reflexive_prerequisite': (
+                            followup['prerequisite_text']),
+                    }
+                    followup_controller = (
+                        gs.p1 if followup['controller_id'] == 'p1'
+                        else gs.p2)
+                    gs.ability_handler.active_triggers.append(
+                        (trigger, followup_controller, trigger_context))
+            elif kind == 'counter_unless_pay':
                 cost = gs.mana_system.parse_mana_cost(ctx.get('cost', '{0}'))
                 if not gs.mana_system.can_pay_mana_cost_with_lands(player, cost):
                     return -0.1, False
@@ -2001,6 +2056,37 @@ class ChoiceHandlersMixin:
                     gs.priority_player = gs._get_active_player()
                     gs.priority_pass_count = 0
                 return (0.05 if success else -0.1), bool(success)
+            elif kind == 'optional_discard_then':
+                from .ability_utils import EffectFactory
+                source_id = ctx.get('source_id')
+                if option not in player.get('hand', []):
+                    return -0.1, False
+                if not gs.discard_card(
+                        player, option, source_id=source_id,
+                        cause='discard'):
+                    return -0.1, False
+                source = gs._safe_get_card(source_id)
+                followup = EffectFactory.create_effects(
+                    ctx.get('followup_text', ''),
+                    source_name=getattr(source, 'name', None))
+                continuation = ctx.get('effect_continuation') or {}
+                effects = list(followup) + list(
+                    continuation.get('effects', []))
+                targets = continuation.get(
+                    'targets', ctx.get('targets', {}))
+                resolution_context = continuation.get(
+                    'resolution_context', ctx.get('resolution_context', {}))
+                gs.choice_context = None
+                gs.phase = ctx.get('resume_phase', gs.PHASE_PRIORITY)
+                success, pending = gs._run_effect_sequence(
+                    effects, source_id, player, targets,
+                    resolution_context,
+                    finalizer=continuation.get('finalizer'),
+                    initial_success=continuation.get('success', True))
+                if not pending:
+                    gs.priority_player = gs._get_active_player()
+                    gs.priority_pass_count = 0
+                return (0.05 if success else -0.1), bool(success)
             else:
                 return -0.1, False
             gs._resume_effect_continuation(ctx)
@@ -2049,6 +2135,35 @@ class ChoiceHandlersMixin:
                 logging.warning("Manifest dread choice called for the wrong player.")
                 return -0.2, False
             success = gs.complete_manifest_dread_choice(param)
+            return (0.05 if success else -0.1), success
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'prepared_source'):
+            choice = gs.choice_context
+            player = self._get_policy_player(choice)
+            if choice.get('player') is not player:
+                return -0.2, False
+            absolute = int(choice.get('choice_page', 0)) * 10 + int(param)
+            options = choice.get('options', [])
+            if not 0 <= absolute < len(options):
+                return -0.1, False
+            source_id = options[absolute]
+            resume_phase = choice.get('resume_phase', gs.PHASE_PRIORITY)
+            gs.choice_context = None
+            gs.phase = resume_phase
+            gs.priority_player = player
+            gs.priority_pass_count = 0
+            return self._handle_prepared_cast(
+                None, context={
+                    'source_id': source_id,
+                    'controller_id': 'p1' if player is gs.p1 else 'p2',
+                })
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'prepared_payment'):
+            choice = gs.choice_context
+            player = self._get_policy_player(choice)
+            if choice.get('player') is not player:
+                return -0.2, False
+            success = gs.choose_prepared_payment_card(param)
             return (0.05 if success else -0.1), success
         casting_choice = getattr(gs, 'choice_context', None)
         if casting_choice and casting_choice.get('type') in (

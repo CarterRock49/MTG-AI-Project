@@ -8,8 +8,9 @@ import copy as copy_module
 import logging
 from .ability_utils import EffectFactory
 import re
-from .ability_types import TriggeredAbility
+from .ability_types import BoundExileTriggeredAbility, TriggeredAbility
 from .card import Card
+from .targeting import aura_cast_targeting_text
 
 
 class GameStateStackMixin:
@@ -20,8 +21,8 @@ class GameStateStackMixin:
 
     _ASYNC_EFFECT_CHOICE_TYPES = frozenset({
         "discard", "sacrifice_effect", "distribute_counters", "dig_select",
-        "resolution_modal", "resolution_choice", "surveil",
-        "connive_discard",
+        "resolution_modal", "resolution_choice", "scry", "surveil",
+        "connive_discard", "hand_selection", "prepared_payment",
     })
 
     def _effect_controller_id(self, controller):
@@ -33,7 +34,17 @@ class GameStateStackMixin:
     @staticmethod
     def _counter_distribution_spec(effect_text):
         """Return the cast/activation-time division declared by Oracle text."""
-        effects = EffectFactory.create_effects(effect_text or "") or []
+        effect_text = str(effect_text or "")
+        # This probe exists only for "distribute/put counters" instructions.
+        # Feeding ordinary targeting metadata such as an Aura's synthesized
+        # ``target creature you control`` through EffectFactory creates a
+        # generic no-op effect and a false parser warning during every cast.
+        if not (re.search(r"\b(?:put|distribute)\b", effect_text,
+                          re.IGNORECASE)
+                and re.search(r"\bcounters?\b", effect_text,
+                              re.IGNORECASE)):
+            return None
+        effects = EffectFactory.create_effects(effect_text) or []
         for effect in effects:
             if type(effect).__name__ == "DistributeCountersEffect":
                 return {
@@ -172,10 +183,14 @@ class GameStateStackMixin:
     def _resume_effect_continuation(self, completed_choice):
         """Resume the parsed effect sequence after an async choice completes."""
         continuation = (completed_choice or {}).get('effect_continuation')
-        resume_phase = (completed_choice or {}).get(
-            'resume_phase', self.PHASE_PRIORITY)
+        resume_phase = self._normalized_choice_resume_phase(
+            (completed_choice or {}).get('resume_phase', self.PHASE_PRIORITY))
         self.choice_context = None
         self.phase = resume_phase
+        if (resume_phase == self.PHASE_PRIORITY
+                and self.previous_priority_phase not in self._TURN_PHASES
+                and self._last_turn_phase in self._TURN_PHASES):
+            self.previous_priority_phase = self._last_turn_phase
 
         if not continuation:
             self.priority_player = self._get_active_player()
@@ -229,14 +244,24 @@ class GameStateStackMixin:
              return "creature_or_vehicle"
          if "target creature or spell" in text:
              return "creature_or_spell"
+         if ("target spell or permanent" in text
+                 or "target permanent or spell" in text):
+             return "spell_or_permanent"
          if "target artifact or creature" in text:
              return "permanent"
+         if "target artifact or enchantment" in text:
+             return "artifact_or_enchantment"
          if "target creature or planeswalker" in text:
              return "permanent"
-         if ("target creature" in text
-                 or re.search(r"\btarget(?:\s+[a-z-]+){1,4}\s+creatures?\b", text)):
+         if "target creature" in text:
              return "creature"
          if "target player" in text or "target opponent" in text: return "player"
+         # Keep this looser adjective form after explicit player targets. It
+         # must not reinterpret "target opponent exiles a creature" as though
+         # the creature were targeted.
+         if re.search(
+                 r"\btarget(?:\s+[a-z-]+){1,4}\s+creatures?\b", text):
+             return "creature"
          if "target spell" in text: return "spell"
          if ("target card" in text
                  or re.search(r"target\s+(?:instant|sorcery)(?:\s+or\s+"
@@ -479,14 +504,17 @@ class GameStateStackMixin:
             return 1, maximum
         counted = re.search(r"\btarget\s+(two|three|four|five)\b", text)
         if not counted:
-            counted = re.search(r"\b(?:up to\s+)?(two|three|four|five)\s+target\b", text)
+            counted = re.search(
+                r"\b(?:up to\s+)?(two|three|four|five)\s+"
+                r"(?:other\s+)?target\b", text)
         if counted:
             maximum = word_counts[counted.group(1)]
         else:
             maximum = max(1, target_designator_count(text))
         if "up to" in text:
             mandatory_text = re.sub(
-                r"\bup to\s+(?:one|two|three|four|five|\d+)\s+target\b",
+                r"\bup to\s+(?:one|two|three|four|five|\d+)\s+"
+                r"(?:other\s+)?target\b",
                 "", text)
             minimum = target_designator_count(mandatory_text)
         else:
@@ -550,6 +578,135 @@ class GameStateStackMixin:
                 'max_targets': max_targets,
             })
         return slots
+
+    @staticmethod
+    def _ordinary_instruction_segments(effect_text):
+        """Split plain resolving instructions without severing target riders.
+
+        This is deliberately narrower than a general Oracle-text sentence
+        parser.  It exists for ordinary spells whose printed instructions own
+        separate target choices, for example ``... any target. Tap up to one
+        target creature.``  A following sentence that refers back to the
+        previous target remains attached to that instruction.
+        """
+        # Parenthetical Oracle text is reminder text, not a resolving
+        # instruction.  Remove it before sentence splitting so periods inside
+        # Flashback/Gift reminders cannot manufacture extra instructions.
+        instruction_text = re.sub(
+            r"\([^()]*\)", " ", str(effect_text or "")).strip()
+        raw_segments = re.split(
+            r"(?<=[.;])\s+|\n+", instruction_text)
+        segments = []
+        linked_reference = re.compile(
+            r"^(?:then\s+)?(?:it|that\s+(?:card|creature|player|permanent|"
+            r"spell)|the\s+target|those\s+(?:cards|creatures|players|"
+            r"permanents))\b",
+            re.IGNORECASE)
+        for raw_segment in raw_segments:
+            segment = raw_segment.strip()
+            if not segment:
+                continue
+            if segments and linked_reference.match(segment):
+                segments[-1] = f"{segments[-1]} {segment}"
+            else:
+                segments.append(segment)
+        return segments
+
+    @staticmethod
+    def _is_nonresolving_spell_instruction(instruction):
+        """Whether a segment describes casting permission/cost, not effects."""
+        return bool(re.match(
+            r"^(?:flashback|buyback|kicker|multikicker|rebound|retrace|"
+            r"jump-start|aftermath|overload|surge|spree|gift)\b",
+            str(instruction or "").strip(), re.IGNORECASE))
+
+    def _ordinary_target_instructions(self, effect_text):
+        """Return resolving instructions that announce ordinary targets.
+
+        Conditional replacement branches describe an alternative target set,
+        not another target chosen alongside the default instruction.  Until a
+        mechanic-specific announcement selects such a branch (Gift, Bargain,
+        and similar choices), the ordinary cast path represents the printed
+        default branch.
+        """
+        slots = []
+        for instruction_index, instruction in enumerate(
+                self._ordinary_instruction_segments(effect_text)):
+            # Oracle's targeting noun is the standalone word "target".
+            # Cost/condition text such as "if it targets a permanent" only
+            # describes the spell after targets are chosen and must not create
+            # another announcement slot.
+            if not re.search(r"\btarget\b", instruction, re.IGNORECASE):
+                continue
+            # Conditional/replacement branches do not announce another target
+            # alongside the base instruction.  Their target requirement is
+            # selected by the mechanic's own casting path (Gift, Bargain,
+            # "if ... instead", and similar alternatives).
+            if re.match(r"^(?:if|unless|otherwise|instead)\b", instruction,
+                        re.IGNORECASE):
+                continue
+            # A fight instruction can announce two creatures with opposing
+            # controller restrictions in one sentence.  They are distinct
+            # target roles, not an undifferentiated two-creature pool: the
+            # first creature is the fighter and the second is what it fights.
+            two_target_fight = re.search(
+                r"\btarget creature you control fights target creature "
+                r"(?:you (?:don['\u2019]?t|do not) control|an opponent controls)\b",
+                instruction, re.IGNORECASE)
+            if two_target_fight:
+                slots.extend([
+                    {
+                        "instruction_index": instruction_index,
+                        "target_role": "fighter",
+                        "required_type": "creature",
+                        "effect_text": "target creature you control",
+                        "required_count": 1, "min_targets": 1,
+                        "max_targets": 1,
+                    },
+                    {
+                        "instruction_index": instruction_index,
+                        "target_role": "fight_opponent",
+                        "required_type": "creature",
+                        "effect_text": "target creature you don't control",
+                        "required_count": 1, "min_targets": 1,
+                        "max_targets": 1,
+                    },
+                ])
+                continue
+            min_targets, max_targets = self._target_bounds_from_text(
+                instruction)
+            slots.append({
+                "instruction_index": instruction_index,
+                "required_type": self._get_target_type_from_text(instruction),
+                "effect_text": instruction,
+                "required_count": max_targets,
+                "min_targets": min_targets,
+                "max_targets": max_targets,
+            })
+        return slots
+
+    def _ordinary_target_slots(self, effect_text):
+        """Return independent target slots for a multi-instruction spell.
+
+        The legacy single target map remains appropriate when only one target
+        role exists. Slot mode is enabled for independent instructions and
+        for one instruction that announces multiple restricted roles, such as
+        Bushwhack's friendly fighter and opposing fight target.
+        """
+        slots = self._ordinary_target_instructions(effect_text)
+        return slots if len(slots) > 1 else []
+
+    def _ordinary_single_targeting_text(self, effect_text):
+        """Narrow a one-target spell to its active targeting instruction.
+
+        Target bounds and legality must not inspect an unselected conditional
+        ``instead`` branch.  Multi-instruction spells keep their slot model;
+        unrecognized/conditional-only text fails back to the legacy parser.
+        """
+        instructions = self._ordinary_target_instructions(effect_text)
+        if len(instructions) == 1:
+            return instructions[0].get('effect_text', effect_text)
+        return effect_text
 
     def _categorize_targets_for_slot(self, slot, target_ids):
         """Categorize targets using the announced slot, not shared card IDs."""
@@ -635,6 +792,19 @@ class GameStateStackMixin:
         candidate_modes = selected + [mode_index]
         targeting_text = " ".join(modes[index] for index in candidate_modes)
         if "target" not in targeting_text.lower():
+            return True
+        target_slots = self._ordinary_target_slots(targeting_text)
+        if target_slots:
+            for slot in target_slots:
+                valid_map = self.targeting_system.get_valid_targets(
+                    card_id, controller,
+                    slot.get("required_type", "target"),
+                    effect_text=slot.get("effect_text", ""))
+                valid_ids = {
+                    target_id for ids in valid_map.values()
+                    for target_id in ids}
+                if len(valid_ids) < int(slot.get("min_targets", 0)):
+                    return False
             return True
         target_type = self._get_target_type_from_text(targeting_text)
         minimum, _ = self._target_bounds_from_text(targeting_text)
@@ -845,19 +1015,36 @@ class GameStateStackMixin:
         """Ask keep/retarget independently for each inherited target."""
         slots = []
         existing_slots = stack_context.get("targets_by_slot") or []
+        slot_definitions = (
+            stack_context.get("spree_target_slots")
+            if stack_context.get("is_spree") else
+            stack_context.get("instruction_target_slots")) or []
         if existing_slots:
-            for slot_targets in existing_slots:
+            for slot_index, slot_targets in enumerate(existing_slots):
+                definition = (slot_definitions[slot_index]
+                              if slot_index < len(slot_definitions) else {})
                 for target_id in slot_targets:
                     category = self._determine_target_category(target_id)
-                    slots.append({"target_id": target_id,
-                                  "required_type": self._target_category_singular(category)})
+                    slots.append({
+                        "target_id": target_id,
+                        "stack_slot_index": slot_index,
+                        "required_type": definition.get(
+                            "required_type",
+                            self._target_category_singular(category)),
+                        "effect_text": definition.get("effect_text", ""),
+                        "target_role": definition.get("target_role"),
+                    })
         elif isinstance(original_targets, dict):
             for category, target_ids in original_targets.items():
                 if not isinstance(target_ids, (list, tuple, set)):
                     continue
                 for target_id in target_ids:
-                    slots.append({"target_id": target_id,
-                                  "required_type": self._target_category_singular(category)})
+                    slots.append({
+                        "target_id": target_id,
+                        "stack_slot_index": len(slots),
+                        "required_type": self._target_category_singular(
+                            category),
+                    })
         self.previous_priority_phase = self.phase
         self.phase = self.PHASE_CHOOSE
         self.choice_context = {
@@ -866,6 +1053,7 @@ class GameStateStackMixin:
             "copy_instance_id": copy_instance_id,
             "slots": slots, "slot_index": 0,
             "chosen_targets": [slot["target_id"] for slot in slots],
+            "target_slot_count": len(existing_slots) if existing_slots else len(slots),
             "effect_text": getattr(self._safe_get_card(spell_id), "oracle_text", ""),
         }
         self.priority_player = controller
@@ -894,7 +1082,9 @@ class GameStateStackMixin:
                         target_id for slot_index, target_id in enumerate(
                             choice.get("chosen_targets", []))
                         if slot_index != index])),
-                "effect_text": choice.get("effect_text", ""),
+                "effect_text": (slots[index].get("effect_text")
+                                or choice.get("effect_text", "")),
+                "target_role": slots[index].get("target_role"),
                 "copy_retarget_state": choice,
             }
             return True
@@ -931,8 +1121,16 @@ class GameStateStackMixin:
                 continue
             stack_context = item[3]
             stack_context["targets"] = categorized
-            stack_context["targets_by_slot"] = [
-                [target_id] for target_id in choice.get("chosen_targets", [])]
+            rebuilt_slots = [
+                [] for _ in range(int(choice.get(
+                    "target_slot_count", len(choice.get("slots", [])))))]
+            for retarget_slot, target_id in zip(
+                    choice.get("slots", []),
+                    choice.get("chosen_targets", [])):
+                slot_index = int(retarget_slot.get("stack_slot_index", 0))
+                if 0 <= slot_index < len(rebuilt_slots):
+                    rebuilt_slots[slot_index].append(target_id)
+            stack_context["targets_by_slot"] = rebuilt_slots
             stack_context["needs_new_targets"] = False
             self.stack[index] = item[:3] + (stack_context,)
             self.notify_targets_committed(
@@ -1205,6 +1403,135 @@ class GameStateStackMixin:
                 card.reset_to_printed()
             controller.setdefault("graveyard", []).append(card_id)
         return success
+
+    def _superior_spider_copy_options(self):
+        """Creature cards in either graveyard, in stable policy order."""
+        options = []
+        for player in (self.p1, self.p2):
+            for card_id in player.get("graveyard", []):
+                card = self._safe_get_card(card_id)
+                if (card and "creature" in {
+                        str(card_type).lower() for card_type in getattr(
+                            card, "card_types", [])}):
+                    options.append(card_id)
+        return options
+
+    def _apply_superior_spider_copy_identity(self, card_id, target_id):
+        """Apply Mind Swap's layer-1 copy and its printed exceptions."""
+        card = self._safe_get_card(card_id)
+        target = self._safe_get_card(target_id)
+        if not card or not target:
+            return False
+        _, target_zone = self.find_card_location(target_id)
+        if (target_zone != "graveyard"
+                or "creature" not in {
+                    str(card_type).lower() for card_type in getattr(
+                        target, "card_types", [])}):
+            return False
+
+        original_printed = copy_module.deepcopy(
+            getattr(card, "_printed", {}))
+        copied = copy_module.deepcopy(getattr(target, "_printed", {}))
+        if not copied:
+            target.snapshot_printed()
+            copied = copy_module.deepcopy(target._printed)
+
+        copied["name"] = "Superior Spider-Man"
+        copied["power"] = 4
+        copied["toughness"] = 4
+        subtypes = list(copied.get("subtypes", []) or [])
+        present = {str(subtype).lower() for subtype in subtypes}
+        for subtype in ("Spider", "Human", "Hero"):
+            if subtype.lower() not in present:
+                subtypes.append(subtype)
+                present.add(subtype.lower())
+        copied["subtypes"] = subtypes
+        copied["type_line"] = self._build_type_line({
+            "supertypes": copied.get("supertypes", []),
+            "card_types": copied.get("card_types", []),
+            "subtypes": subtypes,
+        })
+
+        self.copy_overrides[card_id] = {
+            "original_printed": original_printed,
+            "copied_from": target_id,
+            "copy_kind": "mind_swap",
+        }
+        card._printed = copied
+        card.reset_to_printed()
+        return True
+
+    def _queue_superior_spider_exile_trigger(self, source_id, controller,
+                                              bound_card_id):
+        bound_owner, _ = self.find_card_location(bound_card_id)
+        trigger = BoundExileTriggeredAbility(
+            source_id, bound_card_id, bound_zone="graveyard",
+            bound_zone_generation=getattr(
+                self._safe_get_card(bound_card_id),
+                "_zone_change_generation", None),
+            bound_owner_id=(
+                "p1" if bound_owner is self.p1 else
+                "p2" if bound_owner is self.p2 else None))
+        trigger_context = {
+            "ability": trigger,
+            "source_id": source_id,
+            "effect_text": trigger.effect,
+            "is_reflexive_trigger": True,
+            "reflexive_prerequisite": "Mind Swap copy replacement",
+            "bound_object_id": bound_card_id,
+            "bound_zone": "graveyard",
+        }
+        self.ability_handler.active_triggers.append(
+            (trigger, controller, trigger_context))
+
+    def complete_superior_spider_copy_choice(self, option_index=None):
+        """Commit or decline Mind Swap, then finish the creature's entry."""
+        choice = getattr(self, "choice_context", None)
+        if not (self.phase == self.PHASE_CHOOSE and choice
+                and choice.get("type") == "resolution_choice"
+                and choice.get("choice_kind") == "superior_spider_copy"):
+            return False
+        controller = choice.get("controller") or choice.get("player")
+        card_id = choice.get("card_id")
+        options = list(choice.get("options", []))
+        selected_id = None
+        if option_index is not None:
+            if (not isinstance(option_index, int)
+                    or not 0 <= option_index < len(options)):
+                return False
+            selected_id = options[option_index]
+            if selected_id not in self._superior_spider_copy_options():
+                return False
+            if not self._apply_superior_spider_copy_identity(
+                    card_id, selected_id):
+                return False
+
+        context = dict(choice.get("resolution_context", {}))
+        context.update({
+            "superior_spider_copy_choice_complete": True,
+            "superior_spider_copied_from": selected_id,
+        })
+        self.choice_context = None
+        self.phase = choice.get("resume_phase", self.PHASE_PRIORITY)
+        if self.phase in self._TURN_PHASES:
+            self.previous_priority_phase = None
+        self.priority_player = controller
+        self.priority_pass_count = 0
+        success = self.move_card(
+            card_id, controller, "stack_implicit", controller, "battlefield",
+            cause="spell_resolution", context=context)
+        if success and selected_id is not None:
+            self._queue_superior_spider_exile_trigger(
+                card_id, controller, selected_id)
+        elif not success:
+            override = self.copy_overrides.pop(card_id, None)
+            card = self._safe_get_card(card_id)
+            if card and override and override.get("original_printed"):
+                card._printed = copy_module.deepcopy(
+                    override["original_printed"])
+                card.reset_to_printed()
+            controller.setdefault("graveyard", []).append(card_id)
+        return bool(success)
 
     @staticmethod
     def _bargain_options(player, card_lookup):
@@ -1531,6 +1858,148 @@ class GameStateStackMixin:
         })
         return True
 
+    @staticmethod
+    def _prepare_spell_face(card):
+        """Return the castable spell face of a Prepare-layout card."""
+        if (not card or getattr(card, "layout", "") != "prepare"
+                or not getattr(card, "faces", None)
+                or len(card.faces) < 2):
+            return None
+        face = dict(card.faces[1] or {})
+        type_line = str(face.get("type_line", "")).lower()
+        if not any(card_type in type_line for card_type in ("instant", "sorcery")):
+            return None
+        return face
+
+    def can_cast_prepared_copy(self, source_id, player):
+        """Whether ``player`` can cast a prepared permanent's spell-face copy."""
+        card = self._safe_get_card(source_id)
+        face = self._prepare_spell_face(card)
+        if (not face or source_id not in player.get("battlefield", [])
+                or source_id not in self.prepared_cards):
+            return False
+        context = {
+            "prepared_copy": True,
+            "prepared_source_id": source_id,
+            "prepared_face": face,
+            "source_zone": "prepared_exile",
+            "is_copy": True,
+            "skip_default_movement": True,
+            "effect_text": face.get("oracle_text", ""),
+        }
+        if not self._can_cast_now(source_id, player, context=context):
+            return False
+
+        effect_text = str(face.get("oracle_text", "") or "")
+        for slot in self._ordinary_target_slots(effect_text):
+            minimum = int(slot.get("min_targets", 0))
+            if minimum <= 0:
+                continue
+            valid = self.targeting_system.get_valid_targets(
+                source_id, player, slot.get("required_type", "target"),
+                effect_text=slot.get("effect_text", effect_text))
+            valid_ids = {
+                target_id for target_ids in valid.values()
+                for target_id in target_ids
+            }
+            if len(valid_ids) < minimum:
+                return False
+
+        # Use the spell face as the object being costed so type-restricted mana,
+        # taxes, and reductions see an instant/sorcery rather than the creature.
+        context["card"] = Card(face)
+        parsed_cost = self.mana_system.parse_mana_cost(
+            face.get("mana_cost", ""))
+        final_cost = self.mana_system.apply_cost_modifiers(
+            player, parsed_cost, source_id, context)
+        return self.mana_system.can_pay_mana_cost_with_lands(
+            player, final_cost, context)
+
+    def cast_prepared_copy(self, source_id, player):
+        """Start casting a prepared permanent's spell face as a copy."""
+        if not self.can_cast_prepared_copy(source_id, player):
+            return False
+        face = self._prepare_spell_face(self._safe_get_card(source_id))
+        return self.cast_spell(source_id, player, {
+            "prepared_copy": True,
+            "prepared_source_id": source_id,
+            "prepared_source_generation": getattr(
+                self._safe_get_card(source_id), "_zone_change_generation", 0),
+            "prepared_face": face,
+            "source_zone": "prepared_exile",
+            "is_copy": True,
+            "skip_default_movement": True,
+            "effect_text": face.get("oracle_text", ""),
+        })
+
+    def choose_prepared_payment_card(self, option_index):
+        """Stage one graveyard occurrence; commit all eight atomically."""
+        choice = getattr(self, "choice_context", None)
+        if not choice or choice.get("type") != "prepared_payment":
+            return False
+        page = int(choice.get("choice_page", 0))
+        absolute = page * 10 + int(option_index)
+        options = choice.get("options", [])
+        if not 0 <= absolute < len(options):
+            return False
+        choice.setdefault("selected_cards", []).append(options.pop(absolute))
+        choice["choice_page"] = 0
+        if len(choice["selected_cards"]) < int(
+                choice.get("required_count", 8)):
+            return True
+
+        controller = choice.get("player")
+        source_id = choice.get("source_id")
+        source = self._safe_get_card(source_id)
+        source_controller, source_zone = self.find_card_location(source_id)
+        valid_source = (
+            source_controller is controller and source_zone == "battlefield"
+            and source_id not in self.prepared_cards
+            and getattr(source, "_zone_change_generation", 0)
+            == choice.get("source_generation"))
+        remaining = list(controller.get("graveyard", []))
+        for card_id in choice["selected_cards"]:
+            if card_id not in remaining:
+                valid_source = False
+                break
+            remaining.remove(card_id)
+        if not valid_source:
+            return self.decline_prepared_payment()
+
+        for card_id in choice["selected_cards"]:
+            if not self.move_card(
+                    card_id, controller, "graveyard", controller, "exile",
+                    cause="prepare", context={"source_id": source_id}):
+                logging.error(
+                    "Prepared payment failed after its graveyard snapshot "
+                    "was validated for source %s.", source_id)
+                return False
+        self.prepared_cards.add(source_id)
+        if choice.get("effect_continuation"):
+            self._resume_effect_continuation(choice)
+        else:
+            self.choice_context = None
+            self.phase = self._normalized_choice_resume_phase(
+                choice.get("resume_phase"))
+            self.priority_player = self._get_active_player()
+            self.priority_pass_count = 0
+        return True
+
+    def decline_prepared_payment(self):
+        """Decline Prepare without moving any staged graveyard cards."""
+        choice = getattr(self, "choice_context", None)
+        if not (choice and choice.get("type") == "prepared_payment"):
+            return False
+        if choice.get("effect_continuation"):
+            self._resume_effect_continuation(choice)
+        else:
+            self.choice_context = None
+            self.phase = self._normalized_choice_resume_phase(
+                choice.get("resume_phase"))
+            self.priority_player = self._get_active_player()
+            self.priority_pass_count = 0
+        return True
+
     def get_exile_cast_options(self, player):
         """Return deterministic ordinary and Plot casting permissions in exile."""
         options = []
@@ -1585,6 +2054,27 @@ class GameStateStackMixin:
         if not card:
              logging.error(f"Cannot cast spell: Invalid card_id {card_id}")
              return False
+        if context.get("prepared_copy"):
+            prepared_face = self._prepare_spell_face(card)
+            expected_generation = context.get("prepared_source_generation")
+            if (not prepared_face
+                    or card_id not in player.get("battlefield", [])
+                    or card_id not in self.prepared_cards
+                    or (expected_generation is not None
+                        and expected_generation != getattr(
+                            card, "_zone_change_generation", 0))):
+                logging.warning(
+                    "Prepared copy cast lost its live prepared source %s.",
+                    card_id)
+                return False
+            context["prepared_face"] = prepared_face
+            context["effect_text"] = prepared_face.get("oracle_text", "")
+            context["source_zone"] = "prepared_exile"
+            context["is_copy"] = True
+            context["skip_default_movement"] = True
+            # Mana restrictions and modifiers must see the copied spell face,
+            # not the creature permanent that created it.
+            context["card"] = Card(prepared_face)
         # The mana system's conditional-pool checks ("spend this mana only to
         # cast...") identify the spell from context['card']; without it every
         # cast ignored conditional mana during affordability/payment. Only the
@@ -1642,7 +2132,7 @@ class GameStateStackMixin:
         if source_zone == "command":
             source_list = player.get(source_zone)
             if isinstance(source_list, (list, set)) and card_id in source_list: card_in_source = True
-        elif source_zone in ["stack_implicit", "library_implicit", "hand_implicit", "nonexistent_zone"]: card_in_source = True; source_list = []
+        elif source_zone in ["stack_implicit", "library_implicit", "hand_implicit", "nonexistent_zone", "prepared_exile"]: card_in_source = True; source_list = []
         else:
              source_list = player.get(source_zone)
              if source_list is not None:
@@ -1678,8 +2168,38 @@ class GameStateStackMixin:
                  str(mode.get('effect', '') or '')
                  for mode in card.spree_modes]
              min_modes, max_modes = 1, len(modal_modes)
-        elif self.ability_handler and hasattr(self.ability_handler, '_parse_modal_text'):
-             modal_modes, min_modes, max_modes = self.ability_handler._parse_modal_text(getattr(card, 'oracle_text', ''))
+        else:
+             # CR 601.2b announces modes of the spell being cast, not modes
+             # embedded in an ability of a permanent spell.  Parsing the full
+             # text of every card made Cosmogrand Zenith's
+             # ``Whenever ... choose one`` trigger look like creature-spell
+             # modes.  Resolution then ran the chosen trigger instruction but
+             # never put the popped creature spell onto the battlefield.
+             modal_spell_type = getattr(card, 'type_line', '') or ''
+             modal_spell_text = getattr(card, 'oracle_text', '') or ''
+             if context.get('prepared_copy'):
+                  prepared_face = context.get('prepared_face', {})
+                  modal_spell_type = prepared_face.get(
+                      'type_line', '') or modal_spell_type
+                  modal_spell_text = prepared_face.get(
+                      'oracle_text', '') or ''
+             elif (context.get('cast_as_back_face')
+                     and hasattr(card, 'get_face_type_line')):
+                  modal_spell_type = (
+                      card.get_face_type_line(1) or modal_spell_type)
+                  modal_spell_text = card.get_face_text(1) or ''
+             elif (context.get('cast_as_adventure')
+                   and hasattr(card, 'get_adventure_data')):
+                  adventure = card.get_adventure_data() or {}
+                  modal_spell_type = adventure.get('type', '') or ''
+                  modal_spell_text = adventure.get('effect', '') or ''
+             has_spell_instructions = any(
+                 card_type in modal_spell_type.lower()
+                 for card_type in ('instant', 'sorcery'))
+             if (has_spell_instructions and self.ability_handler
+                     and hasattr(self.ability_handler, '_parse_modal_text')):
+                  modal_modes, min_modes, max_modes = \
+                      self.ability_handler._parse_modal_text(modal_spell_text)
              if modal_modes: is_modal_spell = True
 
         # Modes are chosen before targets and costs are determined (CR 601.2b).
@@ -1703,7 +2223,7 @@ class GameStateStackMixin:
                  'is_spree': is_spree_spell,
                  'mode_costs': ([mode.get('cost', '') for mode in card.spree_modes]
                                 if is_spree_spell else []),
-                 'original_cast_context': dict(context),
+                 'original_cast_context': self._copy_stack_context(context),
                  'resolved': False,
              }
              self._begin_casting_choice(choice_context)
@@ -1750,7 +2270,13 @@ class GameStateStackMixin:
 
         # --- 4. Calculate Final Cost (Mana & Non-Mana) ---
         # Parse base cost if applicable
-        if cast_for_impending:
+        if context.get('prepared_copy'):
+             prepared_face = context.get('prepared_face', {})
+             base_cost_str = prepared_face.get('mana_cost', '')
+             context['effect_text'] = prepared_face.get('oracle_text', '')
+             final_cost_dict = self.mana_system.parse_mana_cost(
+                 base_cost_str)
+        elif cast_for_impending:
             # Impending replaces the normal cost with another printed mana
             # cost. Parse that cost before modifiers/payment; treating it like
             # a non-mana alternative left an empty dict and could become either
@@ -1825,18 +2351,25 @@ class GameStateStackMixin:
         up_to_N = False
         explicit_effect_text = context.get('effect_text')
         spell_types = set(getattr(card, 'card_types', []) or [])
+        aura_target_text = aura_cast_targeting_text(card)
         # Printed targets in a permanent's triggered/activated abilities are
         # not targets of the permanent spell itself.  Alternate casts such as
         # Mutate provide their actual spell text explicitly; instants and
         # sorceries use their printed resolving instructions.
         if explicit_effect_text is not None:
             targeting_text = explicit_effect_text
+        elif aura_target_text:
+            targeting_text = aura_target_text
+            # Resolution must validate the same Enchant restriction announced
+            # during casting, not a later targeted ability printed on the Aura.
+            context['targeting_text'] = targeting_text
         elif spell_types.intersection({'instant', 'sorcery'}):
             targeting_text = getattr(card, 'oracle_text', '')
         else:
             targeting_text = ''
         selected_modes = []
         spree_target_slots = []
+        instruction_target_slots = []
         if is_modal_spell:
             selected_modes = context.get(
                 'selected_spree_modes' if is_spree_spell else 'selected_modes',
@@ -1862,14 +2395,39 @@ class GameStateStackMixin:
                 int(slot.get('min_targets', 0)) == 0
                 for slot in spree_target_slots)
         else:
-            targeting_text_lower = targeting_text.lower()
-            requires_target = "target" in targeting_text_lower
-            parsed_min, parsed_max = (
-                self._target_bounds_from_text(targeting_text)
-                if requires_target else (0, 0))
-            num_targets = parsed_max
-            up_to_N = parsed_min == 0
-            min_targets = parsed_min
+            instruction_target_slots = self._ordinary_target_slots(
+                targeting_text)
+            if instruction_target_slots:
+                context['instruction_target_slots'] = copy_module.deepcopy(
+                    instruction_target_slots)
+                requires_target = True
+                min_targets = sum(
+                    int(slot.get('min_targets', 0))
+                    for slot in instruction_target_slots)
+                num_targets = sum(
+                    int(slot.get('max_targets', 0))
+                    for slot in instruction_target_slots)
+                up_to_N = any(
+                    int(slot.get('min_targets', 0)) == 0
+                    for slot in instruction_target_slots)
+            else:
+                active_targeting_text = \
+                    self._ordinary_single_targeting_text(targeting_text)
+                if active_targeting_text != targeting_text:
+                    targeting_text = active_targeting_text
+                    # Resolution-time target validation must use the same
+                    # announced branch that casting and the action mask used.
+                    context['targeting_text'] = targeting_text
+                targeting_text_lower = targeting_text.lower()
+                requires_target = "target" in targeting_text_lower
+                parsed_min, parsed_max = (
+                    self._target_bounds_from_text(targeting_text)
+                    if requires_target else (0, 0))
+                num_targets = parsed_max
+                up_to_N = parsed_min == 0
+                min_targets = parsed_min
+        casting_target_slots = (
+            spree_target_slots or instruction_target_slots)
         targets_committed = (
             "targets" in context and isinstance(context.get("targets"), dict))
         target_selection_pending = False
@@ -1967,26 +2525,26 @@ class GameStateStackMixin:
             if not self.targeting_system:
                 logging.warning("Cannot check target availability: TargetingSystem missing.")
                 return False
-            if spree_target_slots:
-                target_type = spree_target_slots[0].get(
+            if casting_target_slots:
+                target_type = casting_target_slots[0].get(
                     'required_type', 'target')
                 if targets_committed:
                     targets_by_slot = context.get('targets_by_slot')
                     if (not isinstance(targets_by_slot, list)
-                            or len(targets_by_slot) != len(spree_target_slots)):
+                            or len(targets_by_slot) != len(casting_target_slots)):
                         logging.warning(
-                            f"Cannot cast {card.name}: Spree target slots are "
+                            f"Cannot cast {card.name}: target slots are "
                             "missing or incomplete.")
                         return False
                     for slot, slot_targets in zip(
-                            spree_target_slots, targets_by_slot):
+                            casting_target_slots, targets_by_slot):
                         slot_targets = list(slot_targets or [])
                         slot_min = int(slot.get('min_targets', 0))
                         slot_max = int(slot.get('max_targets', 0))
                         if not slot_min <= len(slot_targets) <= slot_max:
                             logging.warning(
-                                f"Cannot cast {card.name}: Spree mode "
-                                f"{slot.get('mode_index')} chose "
+                                f"Cannot cast {card.name}: target instruction "
+                                f"{slot.get('mode_index', slot.get('instruction_index'))} chose "
                                 f"{len(slot_targets)} targets, expected "
                                 f"{slot_min}-{slot_max}.")
                             return False
@@ -2004,10 +2562,11 @@ class GameStateStackMixin:
                                 for target_id in slot_targets):
                             logging.warning(
                                 f"Cannot cast {card.name}: chosen target for "
-                                f"Spree mode {slot.get('mode_index')} is illegal.")
+                                f"instruction {slot.get('mode_index', slot.get('instruction_index'))} "
+                                "is illegal.")
                             return False
                 else:
-                    for slot in spree_target_slots:
+                    for slot in casting_target_slots:
                         valid_targets_map = self.targeting_system.get_valid_targets(
                             card_id, player,
                             slot.get('required_type', 'target'),
@@ -2021,7 +2580,7 @@ class GameStateStackMixin:
                                 slot.get('min_targets', 0)):
                             logging.warning(
                                 f"Cannot cast {card.name}: no legal target for "
-                                f"Spree mode {slot.get('mode_index')}.")
+                                f"instruction {slot.get('mode_index', slot.get('instruction_index'))}.")
                             return False
                     target_selection_pending = True
             else:
@@ -2151,7 +2710,7 @@ class GameStateStackMixin:
             targeting_return_previous_priority_phase = \
                 self.previous_priority_phase
             first_target_slot = (
-                spree_target_slots[0] if spree_target_slots else None)
+                casting_target_slots[0] if casting_target_slots else None)
             self.phase = self.PHASE_TARGETING
             self.targeting_context = {
                 "source_id": card_id, "controller": player,
@@ -2172,7 +2731,7 @@ class GameStateStackMixin:
                     first_target_slot.get('effect_text', '')
                     if first_target_slot else targeting_text),
                 "resume_cast": True,
-                "original_cast_context": dict(context),
+                "original_cast_context": self._copy_stack_context(context),
                 "targeting_return_phase": targeting_return_phase,
                 "targeting_return_previous_priority_phase":
                     targeting_return_previous_priority_phase,
@@ -2186,9 +2745,9 @@ class GameStateStackMixin:
             if distribution_spec:
                 self.targeting_context["counter_distribution"] = \
                     distribution_spec
-            if spree_target_slots:
+            if casting_target_slots:
                 self.targeting_context.update({
-                    'target_slots': copy_module.deepcopy(spree_target_slots),
+                    'target_slots': copy_module.deepcopy(casting_target_slots),
                     'target_slot_index': 0,
                     'targets_by_slot': [],
                 })
@@ -2247,7 +2806,7 @@ class GameStateStackMixin:
                  if isinstance(source_list_live, list): source_list_live.remove(card_id)
                  elif isinstance(source_list_live, set): source_list_live.discard(card_id)
                  removed = True
-        elif source_zone in ["stack_implicit", "library_implicit", "hand_implicit", "nonexistent_zone"]: removed = True
+        elif source_zone in ["stack_implicit", "library_implicit", "hand_implicit", "nonexistent_zone", "prepared_exile"]: removed = True
 
         if not removed:
              logging.error(f"CRITICAL: Could not remove {card.name} from {source_zone} after paying costs.")
@@ -2272,16 +2831,49 @@ class GameStateStackMixin:
              self.flashback_cards.add(card_id)
         if source_zone == "graveyard" and context.get("harmonize_cast"):
              self.flashback_cards.add(card_id)
+        if context.get("prepared_copy"):
+             # Casting the virtual copy from exile makes the source permanent
+             # unprepared; the permanent itself never changes zones.
+             self.prepared_cards.discard(card_id)
 
         # --- Prepare FINAL stack context ---
         final_stack_context = context.copy()
+        # Runtime Card objects link back to GameState and thread locks. Every
+        # rule-relevant cast characteristic is serialized elsewhere in context.
+        final_stack_context.pop("card", None)
         final_stack_context["source_zone"] = source_zone
+        # Preserve cast provenance through permanent resolution and its ETB
+        # event.  Zone movement later rewrites ``source_zone`` to the trigger
+        # source's current zone, so that field alone cannot answer intervening
+        # conditions such as Sunderflock's "if you cast it".
+        final_stack_context["was_cast"] = True
+        final_stack_context["cast_controller_id"] = (
+            "p1" if player is self.p1 else "p2")
         final_stack_context["final_paid_cost"] = final_cost_dict
         final_stack_context["final_paid_details"] = paid_mana_details
         final_stack_context["requires_target"] = requires_target
         final_stack_context["num_targets"] = num_targets
         final_stack_context["min_targets"] = min_targets
         final_stack_context["max_targets"] = num_targets
+        casting_card = context.get("card")
+        if not hasattr(casting_card, "card_types"):
+            casting_card = card
+        (cast_card_types, cast_card_subtypes,
+         cast_card_has_flying) = \
+            self.mana_system.spell_characteristics_for_cast(
+                casting_card, context)
+        final_stack_context["cast_card_types"] = sorted(cast_card_types)
+        final_stack_context["cast_card_subtypes"] = sorted(
+            cast_card_subtypes)
+        final_stack_context["cast_card_has_flying"] = bool(
+            cast_card_has_flying)
+        if context.get("prepared_copy"):
+             prepared_type_line = str(
+                 context.get("prepared_face", {}).get("type_line", ""))
+             final_stack_context["cast_card_types"] = [
+                 card_type for card_type in ("instant", "sorcery")
+                 if card_type in prepared_type_line.lower()
+             ]
         if player.pop('next_spell_uncounterable', False):
             final_stack_context['cant_be_countered'] = True
         final_stack_context.pop('pay_offspring', None) # Clear intent flag
@@ -2307,12 +2899,25 @@ class GameStateStackMixin:
         if not hasattr(self, 'spells_cast_this_turn'): self.spells_cast_this_turn = []
         self.spells_cast_this_turn.append((card_id, player, final_stack_context)) # Include context
 
-        cast_trigger_context = {'cast_card_id': card_id, 'card_id': card_id,
-                                'controller': player, 'casting_player': player,
-                                **final_stack_context}
+        # Cast triggers receive event data, not ownership of the spell's live
+        # stack context.  A shallow expansion aliases nested target payloads;
+        # resolution validation of a nontargeted cast trigger (for example
+        # Namor) could then clear the actual Spell Snare/Bounce Off targets.
+        # Copy declarative values before adding the live player references.
+        cast_trigger_context = self._copy_stack_context(final_stack_context)
+        cast_trigger_context.update({
+            'cast_card_id': card_id,
+            'card_id': card_id,
+            'controller': player,
+            'casting_player': player,
+        })
         self.trigger_ability(None, "CAST_SPELL", cast_trigger_context)
-        if 'creature' in getattr(card, 'card_types',[]): self.trigger_ability(None, "CAST_CREATURE_SPELL", cast_trigger_context)
-        elif 'instant' in getattr(card, 'card_types',[]) or 'sorcery' in getattr(card, 'card_types',[]): self.trigger_ability(None, "CAST_NONCREATURE_SPELL", cast_trigger_context)
+        cast_card_types = set(final_stack_context.get(
+            "cast_card_types", getattr(card, 'card_types', [])))
+        if 'creature' in cast_card_types:
+             self.trigger_ability(None, "CAST_CREATURE_SPELL", cast_trigger_context)
+        elif cast_card_types.intersection({'instant', 'sorcery'}):
+             self.trigger_ability(None, "CAST_NONCREATURE_SPELL", cast_trigger_context)
 
         # Clear pending context if this cast matches it
         if getattr(self, 'pending_spell_context', None) and self.pending_spell_context.get('card_id') == card_id:
@@ -2335,6 +2940,13 @@ class GameStateStackMixin:
         card = self._safe_get_card(card_id)
         if not card or not hasattr(card, 'card_types'):
             return False
+        # Jennifer Walters / Sensational She-Hulk.  This is a turn rule, not
+        # a continuous-effect layer: while the source controller is active,
+        # their opponents cannot cast even if an effect grants permission to
+        # cast during another spell's resolution.
+        active_player = self._get_active_player()
+        if not self.can_player_cast_spells(player):
+            return False
         if context.get('cast_during_resolution'):
             return True
 
@@ -2343,7 +2955,12 @@ class GameStateStackMixin:
         type_line = getattr(card, 'type_line', '') or ''
         oracle_text = getattr(card, 'oracle_text', '') or ''
         use_printed_card_types = True
-        if context.get('cast_as_back_face') and hasattr(card, 'get_face_type_line'):
+        if context.get('prepared_copy'):
+            prepared_face = context.get('prepared_face', {})
+            type_line = prepared_face.get('type_line', '') or type_line
+            oracle_text = prepared_face.get('oracle_text', '') or ''
+            use_printed_card_types = False
+        elif context.get('cast_as_back_face') and hasattr(card, 'get_face_type_line'):
             type_line = card.get_face_type_line(1) or type_line
             oracle_text = card.get_face_text(1) or ''
             use_printed_card_types = False
@@ -2360,7 +2977,6 @@ class GameStateStackMixin:
         has_flash = 'flash' in oracle_text.lower()
 
         # Check if player has priority
-        active_player = self._get_active_player()
         has_priority = (player == active_player and self.priority_pass_count == 0) or self.priority_player == player
         if not has_priority:
             return False
@@ -2372,6 +2988,70 @@ class GameStateStackMixin:
         if is_instant or has_flash:
             return True
         return self._can_act_at_sorcery_speed(player)
+
+    def _rules_text_source_is_active(self, card_id):
+        """Whether a battlefield object's printed rules text is operative."""
+        return not (
+            getattr(self, "layer_system", None)
+            and self.layer_system.source_has_lost_all_abilities(card_id))
+
+    def can_player_cast_spells(self, player):
+        """Return False under a live "opponents can't cast" turn rule."""
+        active_player = self._get_active_player()
+        if player is active_player or active_player is None:
+            return True
+        for permanent_id in active_player.get("battlefield", []):
+            if not self._rules_text_source_is_active(permanent_id):
+                continue
+            permanent = self._safe_get_card(permanent_id)
+            text = str(getattr(permanent, "oracle_text", "") or "").lower()
+            if re.search(
+                    r"\byour opponents can(?:'|\u2019)t cast spells during "
+                    r"your turn\b", text):
+                return False
+        return True
+
+    def land_play_limit(self, controller):
+        """Current number of land plays allowed this turn."""
+        additional = 0
+        for permanent_id in controller.get("battlefield", []):
+            if not self._rules_text_source_is_active(permanent_id):
+                continue
+            permanent = self._safe_get_card(permanent_id)
+            text = str(getattr(permanent, "oracle_text", "") or "").lower()
+            if re.search(
+                    r"\byou may play an additional land on each of your turns\b",
+                    text):
+                additional += 1
+        return 1 + additional
+
+    def lands_played_this_turn(self, controller):
+        """Return the canonical land-play count with old-state fallback."""
+        if "lands_played_this_turn" in controller:
+            return max(0, int(controller.get("lands_played_this_turn", 0) or 0))
+        return 1 if controller.get("land_played", False) else 0
+
+    def can_play_land_this_turn(self, controller):
+        return self.lands_played_this_turn(controller) < self.land_play_limit(
+            controller)
+
+    def can_play_lands_from_graveyard(self, controller):
+        """Whether a live controlled permanent grants this zone permission."""
+        for permanent_id in controller.get("battlefield", []):
+            if not self._rules_text_source_is_active(permanent_id):
+                continue
+            permanent = self._safe_get_card(permanent_id)
+            text = str(getattr(permanent, "oracle_text", "") or "").lower()
+            if re.search(r"\byou may play lands from your graveyard\b", text):
+                return True
+        return False
+
+    def _record_land_play(self, controller):
+        count = self.lands_played_this_turn(controller) + 1
+        controller["lands_played_this_turn"] = count
+        # Retain the legacy observation/planner flag. Rules legality uses the
+        # count and current limit above.
+        controller["land_played"] = count > 0
 
     def play_land(self, card_id, controller, play_back_face=False,
                   source_zone="hand", permission=None):
@@ -2392,12 +3072,15 @@ class GameStateStackMixin:
                 logging.warning(f"Land {card_id} not found in {source_zone}")
                 return False
             if source_zone == "graveyard":
-                has_permission = (
+                has_emblem_permission = (
                     permission == "graveyard_permanents"
                     and any(
                         emblem.get("kind") == "graveyard_permanents"
                         for emblem in controller.get("emblems", [])))
-                if not has_permission:
+                has_permanent_permission = (
+                    permission == "controlled_permanent"
+                    and self.can_play_lands_from_graveyard(controller))
+                if not (has_emblem_permission or has_permanent_permission):
                     logging.warning("No effect permits this graveyard land play.")
                     return False
             
@@ -2424,7 +3107,7 @@ class GameStateStackMixin:
                 return False
             
             # Check if player has already played a land this turn
-            if controller.get("land_played", False):
+            if not self.can_play_land_this_turn(controller):
                 logging.warning(f"Player has already played a land this turn")
                 return False
             
@@ -2460,7 +3143,7 @@ class GameStateStackMixin:
             
             if result:
                 # Mark that player has played a land this turn
-                controller["land_played"] = True
+                self._record_land_play(controller)
                 
                 # Track the land play for statistics
                 player_idx = 0 if controller == self.p1 else 1
@@ -2493,18 +3176,23 @@ class GameStateStackMixin:
         """Checks if the targets selected for a spell/ability are still valid upon resolution."""
         if context is None: context = {} # Ensure context is dict
 
-        # Each chosen Spree mode owns its target slot.  An invalid target skips
-        # only that mode; the whole spell fizzles only when it originally had
-        # targets and every one of them is now illegal (CR 608.2b, 702.172).
-        spree_slots = context.get('spree_target_slots') or []
-        spree_targets = context.get('targets_by_slot') or []
-        if context.get('is_spree') and spree_slots:
-            if len(spree_targets) != len(spree_slots):
+        # Independent instructions (including each chosen Spree mode) own
+        # independent target slots.  An invalid target skips only its
+        # instruction; the whole spell fizzles only when it originally had
+        # targets and every one of them is now illegal (CR 608.2b).
+        target_slots = (
+            context.get('spree_target_slots')
+            if context.get('is_spree') else
+            context.get('instruction_target_slots')) or []
+        slot_targets = context.get('targets_by_slot') or []
+        if target_slots:
+            if len(slot_targets) != len(target_slots):
                 return False
             filtered_slots = []
+            lifecycle_slots = []
             original_target_count = 0
             legal_target_count = 0
-            for slot, selected_ids in zip(spree_slots, spree_targets):
+            for slot, selected_ids in zip(target_slots, slot_targets):
                 selected_ids = list(selected_ids or [])
                 original_target_count += len(selected_ids)
                 valid_map = self.targeting_system.get_valid_targets(
@@ -2521,11 +3209,18 @@ class GameStateStackMixin:
                     if target_id in valid_ids]
                 filtered_slots.append(legal_ids)
                 legal_target_count += len(legal_ids)
+                lifecycle_slots.append({
+                    "instruction_index": slot.get("instruction_index"),
+                    "mode_index": slot.get("mode_index"),
+                    "min_targets": int(slot.get("min_targets", 0)),
+                    "original_target_count": len(selected_ids),
+                    "legal_target_count": len(legal_ids),
+                })
 
             categorized_targets = {}
-            for slot, slot_targets in zip(spree_slots, filtered_slots):
+            for slot, selected_ids in zip(target_slots, filtered_slots):
                 for category, target_ids in self._categorize_targets_for_slot(
-                        slot, slot_targets).items():
+                        slot, selected_ids).items():
                     categorized_targets.setdefault(category, []).extend(
                         target_ids)
             context['targets_by_slot'] = filtered_slots
@@ -2533,6 +3228,12 @@ class GameStateStackMixin:
             if isinstance(targets, dict):
                 targets.clear()
                 targets.update(categorized_targets)
+            context['_target_resolution_lifecycle'] = {
+                "validated": True,
+                "original_target_count": original_target_count,
+                "legal_target_count": legal_target_count,
+                "slots": lifecycle_slots,
+            }
             return original_target_count == 0 or legal_target_count > 0
 
         # Use TargetingSystem if available
@@ -2549,7 +3250,15 @@ class GameStateStackMixin:
 
             # Validate using TargetingSystem
             if hasattr(self.targeting_system, 'validate_targets'):
+                original_target_count = len(self._flatten_target_ids(targets))
                 is_valid = self.targeting_system.validate_targets(source_id, targets, controller, effect_text=effect_text)
+                legal_target_count = len(self._flatten_target_ids(targets))
+                context['_target_resolution_lifecycle'] = {
+                    "validated": True,
+                    "original_target_count": original_target_count,
+                    "legal_target_count": legal_target_count,
+                    "slots": [],
+                }
                 if not is_valid:
                      logging.debug(f"Target validation failed for {getattr(card,'name',source_id)} using TargetingSystem.validate_targets.")
                 return is_valid
@@ -3195,7 +3904,10 @@ class GameStateStackMixin:
         # --- NON-MODAL SPELL RESOLUTION ---
         else:
             # Handle different card types (calls helpers which use move_card)
-            if context.get('cast_as_adventure'):
+            if context.get('prepared_copy'):
+                 success = self._resolve_instant_sorcery_spell(
+                     spell_id, controller, context)
+            elif context.get('cast_as_adventure'):
                  success = self._resolve_instant_sorcery_spell(
                      spell_id, controller, context)
             elif 'creature' in card_types:
@@ -3277,6 +3989,52 @@ class GameStateStackMixin:
             effects, spell_id, controller, {}, context=context,
             finalizer=finalizer, initial_success=parsed_all_modes)
         return True if pending else success
+
+    def _ordinary_instruction_effects(self, spell, resolving_text, context):
+        """Parse ordinary instructions and bind each one to its own targets."""
+        slots = list(context.get('instruction_target_slots', []) or [])
+        targets_by_slot = list(context.get('targets_by_slot', []) or [])
+        slot_by_instruction = {
+            int(slot.get('instruction_index')): (slot_index, slot)
+            for slot_index, slot in enumerate(slots)
+            if slot.get('instruction_index') is not None
+        }
+        effects = []
+        parsed_all = True
+        for instruction_index, instruction in enumerate(
+                self._ordinary_instruction_segments(resolving_text)):
+            if self._is_nonresolving_spell_instruction(instruction):
+                continue
+            slot_entry = slot_by_instruction.get(instruction_index)
+            instruction_targets = {}
+            if slot_entry:
+                slot_index, slot = slot_entry
+                selected_ids = (
+                    list(targets_by_slot[slot_index] or [])
+                    if slot_index < len(targets_by_slot) else [])
+                instruction_targets = self._categorize_targets_for_slot(
+                    slot, selected_ids)
+                # An instruction whose mandatory targets all became illegal
+                # does nothing.  An optional zero-target instruction still
+                # resolves (TapEffect, for example, treats that as success).
+                if (int(slot.get('min_targets', 0)) > 0
+                        and not selected_ids):
+                    continue
+            instruction_effects = EffectFactory.create_effects(
+                instruction, instruction_targets,
+                source_name=getattr(spell, 'name', None))
+            if not instruction_effects:
+                parsed_all = False
+                logging.warning(
+                    "No effects parsed for instruction %s of %s.",
+                    instruction_index, getattr(spell, 'name', 'spell'))
+                continue
+            for effect in instruction_effects:
+                effect._bound_targets = copy_module.deepcopy(
+                    instruction_targets)
+                effect._instruction_index = instruction_index
+                effects.append(effect)
+        return effects, parsed_all
 
     def _finish_modal_spell_resolution(self, spell_id, controller, context,
                                        effects_succeeded=True):
@@ -3420,6 +4178,35 @@ class GameStateStackMixin:
             return token_id is not None
         else:
             oracle_text = getattr(spell, "oracle_text", "")
+            is_superior_spider = (
+                getattr(spell, "name", "").casefold()
+                == "superior spider-man"
+                and "copy of any creature card in a graveyard"
+                in oracle_text.casefold()
+                and not context.get(
+                    "superior_spider_copy_choice_complete"))
+            if is_superior_spider:
+                options = self._superior_spider_copy_options()
+                if options:
+                    resume_phase = self._normalized_choice_resume_phase(
+                        self.previous_priority_phase)
+                    self.phase = self.PHASE_CHOOSE
+                    self.choice_context = {
+                        "type": "resolution_choice",
+                        "choice_kind": "superior_spider_copy",
+                        "player": controller,
+                        "controller": controller,
+                        "card_id": spell_id,
+                        "source_id": spell_id,
+                        "options": options,
+                        "choice_page": 0,
+                        "resolution_context": dict(context),
+                        "optional": True,
+                        "resume_phase": resume_phase,
+                    }
+                    self.priority_player = controller
+                    self.priority_pass_count = 0
+                    return True
             is_mockingbird = (
                 getattr(spell, "name", "").lower() == "mockingbird"
                 and "amount of mana spent to cast this creature" in oracle_text.lower()
@@ -3504,8 +4291,11 @@ class GameStateStackMixin:
         else:
             # Handle Aura attachment targeting specifically during resolution if needed
             if 'aura' in getattr(spell, 'subtypes', []):
-                 # Targets should be in context['targets']['chosen'] from targeting phase
-                 chosen_targets = context.get('targets',{}).get('chosen', [])
+                 # Target commitment categorizes the chosen object by its live
+                 # type (usually ``creatures``), so preserve that announced
+                 # Aura target by flattening the categorized target map.
+                 chosen_targets = self._flatten_target_ids(
+                     context.get('targets', {}))
                  if not chosen_targets:
                       logging.warning(f"Aura {spell.name} resolving without target, fizzling to graveyard.")
                       controller["graveyard"].append(spell_id)
@@ -3584,12 +4374,16 @@ class GameStateStackMixin:
         # half is an instant/sorcery -- honor the flag rather than rejecting
         # it on the creature type (July 2026 sweep).
         if not spell or not (any(t in getattr(spell, 'card_types', []) for t in valid_types)
-                             or context.get('cast_as_adventure')):
+                             or context.get('cast_as_adventure')
+                             or context.get('prepared_copy')):
              logging.warning(f"Attempted to resolve {spell_id} as instant/sorcery, but type is invalid.")
              if not context.get("is_copy", False): controller["graveyard"].append(spell_id)
              return False
 
-        spell_name = getattr(spell, 'name', f"Spell {spell_id}")
+        prepared_face = context.get('prepared_face', {})
+        spell_name = (prepared_face.get('name')
+                      if context.get('prepared_copy') else None) \
+            or getattr(spell, 'name', f"Spell {spell_id}")
         logging.debug(f"Resolving Instant/Sorcery: {spell_name}")
 
         # Apply effects using AbilityHandler or EffectFactory
@@ -3602,11 +4396,18 @@ class GameStateStackMixin:
                     'effect', '')
             if resolving_text is None:
                 resolving_text = getattr(spell, 'oracle_text', '')
-            effects = EffectFactory.create_effects(
-                resolving_text, effect_targets,
-                source_name=getattr(spell, 'name', None))
+            if context.get('instruction_target_slots'):
+                effects, parsed_all_instructions = \
+                    self._ordinary_instruction_effects(
+                        spell, resolving_text, context)
+            else:
+                parsed_all_instructions = True
+                effects = EffectFactory.create_effects(
+                    resolving_text, effect_targets,
+                    source_name=spell_name)
         else:
             logging.warning("No ability handler found to resolve instant/sorcery effects.")
+            parsed_all_instructions = False
 
         finalizer = {
             'kind': 'instant_sorcery', 'source_id': spell_id,
@@ -3615,7 +4416,8 @@ class GameStateStackMixin:
         }
         success, pending = self._run_effect_sequence(
             effects, spell_id, controller, effect_targets,
-            context=context, finalizer=finalizer)
+            context=context, finalizer=finalizer,
+            initial_success=parsed_all_instructions)
         return True if pending else success
 
     def _finish_instant_sorcery_resolution(self, spell_id, controller, context=None):

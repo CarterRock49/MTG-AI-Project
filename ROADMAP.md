@@ -16,8 +16,8 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 13/13, and 361/361, plus 15/15 fixture-
-   harvest tests, 7/7 production-protocol tests, 19/19 card-registry tests,
+   every delivery (currently 9/9, 13/13, and 364/364, plus 16/16 fixture-
+   harvest tests, 16/16 production-protocol tests, 19/19 card-registry tests,
    1/1 support-preflight tests, 2/2 deck-corpus tests, 13/13 deck-ingest tests,
    6/6 fuzz/replay tests, and the deterministic 8-seed / 8,000-action
    default fuzz profile, and the strict 32-seed / 320,000-action long
@@ -49,36 +49,52 @@ The project is complete when all of the following hold:
   across all six training workers.
 - Tier 1 (rules correctness): ✅ complete — all seven items plus the P1
   placeholder triage delivered; see appendix for the bug catalog.
-- Tier 2 (card coverage): ◐ the audited eight-deck sample has no unknown
-  high-risk partials. The generic Spree casting transaction and exact Three
-  Steps Ahead effects are supported; other Spree cards remain subject to their
-  own effect-parser, scenario, and manifest evidence. Format-wide quantified
-  coverage remains manifest-driven. Round 7.50 statically preflighted all
+- Tier 2 (card coverage): ◐ the support ledger reports no partial, unparsed,
+  or crash cards in the audited representative metagame. Round 7.68 promoted
+  M.O.D.O.K. through exact registration, activation, timing, Connive, and
+  continuous-effect evidence. Round 7.67 closed the corpus's
+  final partial, Esper Origins, through the real Flashback-to-Saga transaction,
+  all three chapters, finality cleanup, and focused execution evidence. Round
+  7.65 runtime-verified Emeritus
+  of Ideation's full Prepared transaction, including its spell-face copy and
+  exact re-prepare payment. Other Prepared cards remain classified by their
+  own spell/effect text rather than inheriting that verification. Round 7.64
+  reconciled runtime classification diagnostics with static ledger evidence,
+  promoted all nine warning-path cards through focused execution tests, and
+  now records unclassified permanent clauses as support issues instead of
+  silently calling them clean. The generic Spree casting transaction and exact
+  Three Steps Ahead effects are supported; other Spree cards remain
+  subject to their own effect-parser, scenario, and manifest evidence.
+  Format-wide quantified coverage remains manifest-driven. Round 7.50
+  statically preflighted all
   4,702 current Standard cards and now separates verified, corpus-clean,
   unseen, partial, unparsed, crash, and explicitly excluded evidence. The
-  current July 12 ledger contains 68 verified, 89 observed-clean, 3,565
-  unseen-clean, 809 partial, and 171 unparsed cards: 79.2% is
-  static-clean and 3.3% is evidence-qualified. The representative
-  metagame has no unparsed or crash cards and retains two acknowledged partial
-  multi-face entries: Emeritus of Ideation and Esper Origins. Round 7.55 added
+  current July 12 ledger contains 86 verified, 73 observed-clean, 3,327
+  unseen-clean, 788 partial, and 428 unparsed cards: 74.1386643981% is
+  static-clean and 3.3815397703% is evidence-qualified. The lower static-clean fraction
+  is an evidence correction: 321 previously silent unclassified clauses are
+  now reported honestly. Round 7.55 added
   generic full-pool coverage for eight recurring mechanic families without
   regressing any previously clean card.
-- Tier 3 (training/environment): ◐ policy plumbing and audit work are complete;
-  a trained checkpoint still needs to beat scripted play before Harvest is
-  promoted to policy-vs-policy.
+- Tier 3 (training/environment): ◐ policy plumbing, audit work, and the explicit
+  paired-seat scripted qualification gate are complete; a trained checkpoint
+  still needs to pass it before Harvest is promoted to policy-vs-policy.
 - Tier 4 (verification/calibration): ◐ invariant and long-fuzz gates are green;
   the matchup calibration study remains open.
-- Tier 5 (operations/integration): ◐ Harvest orchestration is complete and,
-  since Round 7.46, format/corpus-configurable with full run lineage; strength
-  qualification, production throughput profiling, and deck-builder integration
-  remain open.
+- Tier 5 (operations/integration): ◐ Harvest orchestration and the fail-closed
+  strength-qualification protocol are complete and, since Round 7.46,
+  format/corpus-configurable with full run lineage; running a production-scale
+  candidate, throughput profiling, and deck-builder integration remain open.
 - Target-format program: ◐ milestone 1 (format foundation and lineage) is
   complete — frozen canonical registry + feature schema in
   `formats/standard/`, explicit `--format`/`--decks` configuration, and
   lineage-stamped manifests. User-supplied decks now route into isolated format
-  pools automatically; policy qualification and builder feedback remain open.
-- Test gates: smoke 9/9, training 13/13, scenarios 361/361 (grown from 12),
-  fixture harvest 15/15, production Harvest protocol 7/7, card registry
+  pools automatically; passing policy qualification and builder feedback remain
+  open.
+- Test gates: smoke 9/9, training 13/13, scenarios 364/364 (grown from 12),
+  95/95 focused regression tests, 195/195 discovered unit tests,
+  fixture harvest 16/16, production Harvest
+  protocol 16/16, card registry
   19/19, deck ingestion 13/13, fuzz/replay configuration 6/6, deterministic
   default fuzz 8 seeds x 1,000 valid actions, and strict long fuzz 32 seeds x
   10,000 valid actions.
@@ -151,8 +167,11 @@ Remaining Tier 2 work:
    their deterministic fast path.
 2. ◐ **Opponent policy**: checkpoint/self-play policies install through
    `set_opponent_policy()`, receive their own observation and legal mask, and
-   fall back safely when predicting an illegal action. Remaining: train a
-   checkpoint that beats scripted play, then promote harvest to policy-vs-policy.
+   fall back safely when predicting an illegal action. `harvest_protocol.py
+   qualify` now measures the candidate from both seats, requires a 55% score by
+   default, and fails closed on any fidelity or checkpoint-provenance mismatch.
+   Remaining: train a checkpoint that passes that gate, then promote Harvest to
+   policy-vs-policy.
 3. ✅ **Hidden-information audit**: `observation_for()` enforces a player
    perspective; changing unseen opponent hand identities and library order
    leaves every observation field unchanged. Face-down masking is also guarded.
@@ -237,12 +256,14 @@ guard:
    measured hot paths.
 2. ✅ **Harvest protocol**: `harvest_fixtures.py` supplies strict deterministic
    shards and `harvest_protocol.py` supplies parallel operation, checkpoint
-   loading/identity, aggregate success-only manifests, paired-seat candidate
-   scoring, and promotion gates. The protocol is complete and regression-
-   tested. The 20,480-transition CUDA canary now proves checkpoint loading from
-   training through Harvest, but it is intentionally only a pipeline candidate.
-   Operational next step: train a longer strength candidate, freeze a baseline
-   checkpoint, then run the first paired-seat promotion and calibration study.
+   loading/identity, aggregate success-only manifests, paired-seat scripted
+   qualification, candidate scoring, and checkpoint promotion gates. The
+   protocol is complete and regression-tested. The 20,480-transition CUDA
+   canary and Round 7.67 qualification smoke prove checkpoint loading from
+   training through Harvest, but that checkpoint failed the strength gate.
+   Operational next step: train a longer strength candidate, pass scripted
+   qualification, freeze a baseline checkpoint, then run the first paired-seat
+   promotion and calibration study.
 3. ▢ **Deck-builder contract**: `STATS_SCHEMA.md` + support manifest are the
    full interface; the builder's exclusion logic and confidence weighting
    consume them directly.
@@ -706,7 +727,207 @@ stages, and 13/13 training stages.
 
 Gates for this round: 361/361 scenarios, 63/63 repository unit tests, 9/9 smoke
 stages, 13/13 training stages, and the deterministic 8-seed / 8,000-action
-default invariant fuzz profile.
+default invariant fuzz profile. The strict 32-seed / 320,000-action profile
+also completed without a failure artifact.
+
+**Round 7.63 (July 2026)** completed a production-readiness integrity sweep:
+* **Mana payment integrity** — hybrid, snow, Phyrexian, generic, restricted,
+  and conditional mana now share exact affordability, auto-tap, payment, and
+  refund accounting instead of double-counting or losing provenance.
+* **Target and response contracts** — independent instruction target slots,
+  conditional target branches, response catalog entries, prevention text,
+  stack-spell/permanent target unions, and resolution-time revalidation now
+  preserve mask-to-execution parity.
+* **Choice and spell lifecycle integrity** — optional discard is one gated
+  continuation; nested choices normalize their resume phase; Scry pauses later
+  instructions and finalization; creature triggers are no longer mistaken for
+  spell modes; stack spells return to hand as one physical object.
+* **Schema and numeric stability** — Windows-spawn workers receive the exact
+  frozen subtype schema, while symbolic/missing card values remain finite
+  throughout observations, deck statistics, evaluation, threats, and search.
+* **Continuous-effect coverage** — subtype-count characteristic-defining
+  abilities and the newly observed mass-damage/counter scopes use their live
+  game objects rather than phantom targets or placeholder printed values.
+
+Gates for this round: 363/363 scenarios, 63/63 established repository tests,
+40/40 focused regression tests, 9/9 smoke stages, 13/13 training stages, and
+the deterministic 8-seed / 8,000-action default invariant fuzz profile. The
+six-worker Windows-spawn canary `ALPHA_ZERO_MTG_V3.00_20260712_185338`
+completed 12,288 rollout steps, saved and reloaded its model, then passed 256
+fresh-environment validation steps with finite rewards, valid masks, public
+progress, and no short cycle.
+
+**Round 7.64 (July 2026)** reconciled runtime warnings with support evidence
+and closed the former Priority 2 ledger-mismatch limitation:
+* **Faithful warning-card execution** — Opt now resolves Scry before Draw on
+  the real spell path; Deceit exposes and pays Evoke, gates its colored ETBs by
+  actual mana spent, preserves optional bounce targeting, and provides its
+  nonland hand choice; Quantum Riddler replaces a draw batch exactly once.
+* **Permanent mechanic coverage** — Landfall is controller/type gated for
+  Earthbender Ascension, Mightform Harmonizer, and Sazh's Chocobo. Earthbender's
+  threshold reflexive rider, Mightform's live-power doubling, Leatherhead's
+  keyword counter and remove-counter reflexive trigger, and Colorstorm's Opus
+  mana threshold all execute through ordinary targets and choices.
+* **Mind Swap lifecycle** — Superior Spider-Man chooses from either graveyard
+  before entry, applies its exact copy exceptions, queues a non-target bound
+  exile trigger, remains correct through MCTS cloning and out-and-back zone
+  moves, paginates, and restores its printed identity on leave.
+* **Evidence integrity** — unclassified permanent clauses now advance fidelity
+  counters and the support manifest. The regenerated 4,702-card ledger records
+  77 verified, 80 observed-clean, 3,278 unseen-clean, 775 partial, and 492
+  unparsed cards. The static-clean fraction is 73.0540195661% and the
+  evidence-qualified fraction is 3.3390046789%; the increased unparsed count is
+  the intended correction of previously false-clean static evidence.
+
+Gates for this round: 363/363 scenarios, 130/130 discovered unit tests, 9/9
+smoke stages, 13/13 training-stack stages, and the deterministic 8-seed /
+8,000-action default invariant fuzz profile.
+
+**Round 7.65 (July 2026)** converted the 19:51 training canary's warning set
+into executable rules and quieter diagnostics:
+* **Prepared end to end** — Prepare-layout cards are creatures outside their
+  virtual spell copy; entering prepared creates one castable exile copy, action
+  451 pays the spell face's normal cost and obeys its timing and targets,
+  casting unprepares the source, and resolution never moves the permanent.
+  Emeritus of Ideation can select exactly eight graveyard occurrences
+  atomically to re-prepare; entry, staged payment, copied-spell stack state,
+  and departure all survive or clean up across MCTS cloning.
+* **Canary card rules** — Gran-Gran proves its three-Lesson/noncreature
+  reduction; Sunderflock prices from the greatest controlled Elemental, carries
+  cast provenance into its ETB, and bounces only non-Elementals; Icetill
+  Explorer grants stacked land plays and deep graveyard-land actions through
+  the overflow catalog, with observation/planner parity and source-leave
+  revocation; the Jennifer Walters spell lock is enforced in masks and cast
+  execution.
+* **Target and entry transactions** — Aura casts derive their mandatory target
+  from `Enchant` text independently of later ETB targets, fixing Meltstrider's
+  Resolve. Target-opponent reveal, empty sweepers, and already-departed bounce
+  targets no longer fall into generic warning paths. Multiversal Passage now
+  chooses and applies a basic land type, then independently pays 2 life or
+  enters tapped; life-loss triggers, departure cleanup, and the mid-choice
+  clone are guarded.
+* **Operational signal** — verified rule declarations no longer register dead
+  layer abilities (including Warp, Eddymurk, uncounterable, Prepared, and
+  chosen-type text). Quiet subprocess workers stop writing a duplicate
+  `mtg_debug_*` copy of their warning/error stream; explicit debug mode still
+  restores the full worker debug file.
+* **Measured evidence** — Emeritus of Ideation, Icetill Explorer, Multiversal
+  Passage, and Sunderflock are runtime-verified. The regenerated 4,702-card
+  ledger records 81 verified, 77 observed-clean, 3,278 unseen-clean, 774
+  partial, and 492 unparsed cards: 73.0752871119% static-clean and
+  3.3602722246% evidence-qualified.
+
+Gates for this round: 364/364 scenarios, 144/144 discovered unit tests, 9/9
+smoke stages, 13/13 training-stack stages, the new 4/4 Aura-warning, 7/7
+canary-rules, and 3/3 Prepared suites, plus the deterministic 8-seed /
+8,000-action default invariant fuzz profile.
+
+**Round 7.66 (July 2026)** closed the 20:39 training warnings, then used
+successive deterministic canaries to expose and remove the underlying target
+alias rather than suppressing its diagnostics:
+* **Canary card fidelity** — Hearth Elemental counts the instant/sorcery/
+  Adventure graveyard union exactly once per card and never discounts Stoke
+  Genius; Momo reduces only the first eligible non-Lemur flying creature spell
+  on each of its controller's turns; and Doomsday Excruciator's cast-only ETB
+  preserves each library's bottom six while exiling the rest face down.
+* **Targets remain transactions** — mandatory empty target payloads fail unless
+  resolution validation proves a committed target became illegal. Optional
+  fight/bounce and empty mass sets remain legal no-ops. Cast-trigger event
+  targets are deep-copied and separated from the triggered ability's targets,
+  so Namor can no longer clear Spell Snare or Bounce Off's physical stack
+  context. Bushwhack now announces independent friendly-fighter and opposing-
+  creature roles, including copied-spell retargeting.
+* **Hidden exile stays hidden** — face-down exile identities are removed from
+  card features, deck composition, opponent-hand inference, candidate ranking,
+  restricted targeting, and raw target IDs. Per-owner occurrence counts survive
+  cloning and keep repeated hidden IDs masked until every occurrence leaves.
+* **Measured evidence** — Doomsday Excruciator, Hearth Elemental // Stoke
+  Genius, and Momo, Friendly Flier are promoted through focused real-card
+  execution. The regenerated 4,702-card ledger records 84 verified, 74
+  observed-clean, 3,278 unseen-clean, 774 partial, and 492 unparsed cards:
+  73.0752871119% static-clean and 3.3602722246% evidence-qualified.
+* **Operational signal** — the final six-worker, 3,072-step deterministic
+  canary (`ALPHA_ZERO_MTG_V3.00_20260712_213007`) completed, reloaded its
+  checkpoint successfully, and produced zero warning/error records. Quiet
+  workers produced no duplicate warning or debug files.
+
+Gates for this round: 364/364 scenarios, 174/174 discovered unit tests, 9/9
+smoke stages, 13/13 training-stack stages, the new 10/10 target-lifecycle, 4/4
+Hearth, 8/8 Doomsday, 4/4 Momo, and 4/4 Bushwhack suites, plus the
+deterministic 8-seed / 8,000-action default invariant fuzz profile.
+
+**Round 7.67 (July 2026)** closed the representative Standard corpus and made
+policy strength a concrete, auditable gate:
+* **Esper Origins fidelity** — a graveyard cast now resolves Surveil 2 and the
+  life gain before performing the exile-to-transformed-battlefield transaction
+  with a finality counter. Summon: Esper Maduin registers its exact three Saga
+  chapters: permanent reveal-to-hand, `{G}{G}`, and the other-creature +2/+2
+  and trample snapshot through end of turn. Chapter III completion routes the
+  Saga through finality exile and removes stale lore state. Normal hand casts,
+  nonpermanent reveals, parser surfaces, and the full Flashback lifecycle have
+  focused real-card guards.
+* **Scripted qualification gate** — `harvest_protocol.py qualify` runs equal
+  candidate-as-P1 and candidate-as-P2 legs, counts draws as half a point, uses
+  a 55% default threshold, and requires zero fidelity counters and no severe
+  support entries. The atomic `qualification.json` records checkpoint identity,
+  corpus lineage, outcomes, score, threshold, and decision; invalid protocols
+  publish no decision. Worker-stamped identities, post-worker hashes, persisted
+  record seats, and the candidate's seat-relative results are all validated.
+* **Measured evidence** — Esper Origins is promoted with four representative-
+  corpus copies and zero issues. The regenerated 4,702-card ledger records 85
+  verified, 74 observed-clean, 3,278 unseen-clean, 773 partial, and 492
+  unparsed cards: 73.0965546576% static-clean and 3.3815397703% evidence-
+  qualified. No representative-corpus card is partial, unparsed, or crash.
+* **Operational proof** — the latest 113,437,514-byte checkpoint completed the
+  two-game paired-seat qualification smoke with clean fidelity and stable,
+  worker-validated identity evidence. It lost both games, so the new gate
+  correctly published a
+  valid rejection rather than treating pipeline health as proof of strength.
+
+Gates for this round: 364/364 scenarios, 188/188 discovered unit tests, 9/9
+smoke stages, 13/13 training-stack stages, 16/16 fixture-Harvest tests, 16/16
+production-protocol tests, 4/4 Esper Origins tests, 19/19 card-registry tests,
+1/1 support-preflight test, 2/2 deck-corpus tests, 13/13 deck-ingest tests,
+6/6 fuzz/replay tests, and the deterministic 8-seed / 8,000-action default
+invariant fuzz profile.
+
+**Round 7.68 (July 2026)** converted the 22:25 training failure and warning
+set into permanent lifecycle and real-card guards:
+* **Nested trigger choices remain transactional** — choosing Cosmogrand
+  Zenith's modal trigger while ordering simultaneous triggers now preserves
+  the parent `order_triggers` context. Both explicitly choosing the modal
+  trigger early and auto-stacking it last resume the remaining order, finish
+  any waiting APNAP batch, and put every trigger on the stack exactly once.
+  Standalone modal choices normalize an invalid `CHOOSE` resume back to
+  priority without losing the underlying turn phase.
+* **Orphan wrappers cannot trap a policy** — action generation and opponent
+  routing fall through to the live priority player when a transient
+  `CHOOSE` phase has no context, instead of presenting the learned seat with
+  an inert NO_OP forever. Strict-cycle diagnostics now always include recent
+  actions and compact stack provenance.
+* **M.O.D.O.K. is runtime-verified** — ability-word punctuation no longer
+  hides its Pay 3 life activation; the dotted-name Connive instruction and
+  own-turn restriction are enforced by mask, handler, and direct execution.
+  Resolution draws, discards, and adds the nonland-discard counter, while
+  Designed Only for Killing remains an opponent-only -1/-1 effect. Legal
+  empty nontargeted group-counter instructions now resolve silently; missing
+  mandatory targets still fail and warn.
+* **Measured evidence** — the regenerated 4,702-card ledger records 86
+  verified, 73 observed-clean, 3,327 unseen-clean, 788 partial, and 428
+  unparsed cards: 74.1386643981% static-clean and 3.3815397703% evidence-
+  qualified. All 120 distinct cards in the representative corpus remain
+  verified or observed-clean; none is partial, unparsed, or crash.
+* **Exact-seed operational proof** — the six-worker canary
+  (`ALPHA_ZERO_MTG_V3.00_20260712_225422`) reused failing seed `20260713`,
+  completed all 3,072 requested timesteps (512 per environment), and passed
+  post-save checkpoint reload validation. Its mean episode length reached
+  451, beyond the original failure at episode step 435, and it created no new
+  warning or error log.
+
+Gates for this round: 364/364 scenarios, 195/195 discovered unit tests, 9/9
+smoke stages, 13/13 training-stack stages, the 7/7 choice-context and 3/3
+M.O.D.O.K. warning-regression suites, and the deterministic exact-seed
+six-worker training canary above.
 
 ---
 
@@ -754,15 +975,18 @@ not hidden policy decisions.
 ### Priority 2 — bounded mechanic and card fidelity
 
 13. Generic `as enters` transactions are verified for creature type, color,
-    card type, opponent, counters, and deferred ETB events; arbitrary effects
-    consuming those chosen values remain card-specific.
+    card type, basic land type, opponent, counters, chained life payment, and
+    deferred ETB events; arbitrary effects consuming those chosen values remain
+    card-specific.
 14. Emblem execution is implemented only for the currently recognized Kaito
     and Wrenn texts.
 15. MDFC support still lacks direct nonland back-face entry and complete
-    back-face targeting text.
+    back-face targeting text. Prepare layouts are now classified separately and
+    their virtual spell-copy lifecycle is verified.
 16. Adventure-half parsing and targeting remain heuristic.
 17. Generic Discover, Explore, Investigate, Endure, Connive, Suspect, Airbend,
-    Equip, and Crew support intentionally covers bounded text families.
+    Equip, Crew, and the individual effects printed on Prepare spell faces
+    intentionally cover bounded text families.
 18. Reflexive triggers recognize a bounded set of exact rider templates.
 19. Earthbend has bounded dynamic-X parsing and resolves its choice-free delayed
     return immediately after the initial zone move.
@@ -795,16 +1019,29 @@ not hidden policy decisions.
     fail closed.
 34. Mutate still lacks per-component replacement choices and library-order
     choice; commander-specific routing is outside the current formats.
+35. Face-down exile is hidden across observation, inference, and targeting,
+    with per-owner counts for repeated hidden IDs. A legacy state containing a
+    visible and a hidden exile occurrence that share one numeric ID cannot
+    distinguish those occurrences perfectly; production runtime objects have
+    unique IDs, and legacy ambiguity fails closed by hiding both.
+The former runtime/ledger mismatch item is retired in Round 7.64. Opt,
+Deceit, Leatherhead, Colorstorm Stallion, Superior Spider-Man, Earthbender
+Ascension, Mightform Harmonizer, Sazh's Chocobo, and Quantum Riddler are now
+focused-runtime verified, while future unclassified clauses become explicit
+ledger issues instead of false-clean evidence.
+The former representative-corpus Esper Origins partial is retired in Round
+7.67; its exact transform-Saga path is focused-runtime verified. This does not
+generalize Saga chapter support to unrelated cards without their own evidence.
 
 ### Priority 3 — operational and lineage constraints
 
-35. Strategy memory is per environment and its optional enhancement pass makes
+36. Strategy memory is per environment and its optional enhancement pass makes
     saved memory content nondeterministic.
-36. Format registries and schemas are intentionally lineage-bound, name plus
+37. Format registries and schemas are intentionally lineage-bound, name plus
     Oracle-ID based, and best-of-one only; schema growth can require a new
     policy lineage. Round 7.62's widened X/count observation bounds likewise
     require a fresh policy rather than resuming an older checkpoint.
-37. Treasure/Beza support is scenario-verified; its retained note documents the
+38. Treasure/Beza support is scenario-verified; its retained note documents the
     exact supported path rather than an active correctness gap.
 
 ### Detailed notes (historical source order)

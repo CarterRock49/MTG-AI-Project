@@ -59,7 +59,8 @@ def test_artifact_paths():
     }
 
 
-def _make_subproc_masked_env(decks, card_db, storage_root, worker_index):
+def _make_subproc_masked_env(
+        decks, card_db, storage_root, worker_index, subtype_vocab):
     """Top-level factory target so Windows ``spawn`` can import it safely."""
     import main as m
 
@@ -69,6 +70,7 @@ def _make_subproc_masked_env(decks, card_db, storage_root, worker_index):
         os.path.join(storage_root, f"env_{worker_index}"),
         agent_is_p1=(worker_index % 2 == 0),
         alternate_agent_seat=True,
+        subtype_vocab=subtype_vocab,
     )
 
 
@@ -526,16 +528,20 @@ def check_runtime_configuration():
 @stage("training failures are nonzero and never saved as final")
 def check_main_failure_semantics():
     import main as m
+    from Playersim.card import Card
 
     saved_paths = []
     made_vec_envs = []
     assigned_seeds = []
     parent_seeds = []
+    environment_vocabularies = []
+    frozen_vocab = ("format-schema-alpha", "format-schema-omega")
 
     class FakeVecEnv:
-        def __init__(self, _factories):
+        def __init__(self, factories):
             self.closed = False
             made_vec_envs.append(self)
+            self.envs = [factory() for factory in factories]
 
         def env_method(self, *_args, **_kwargs):
             pass
@@ -568,6 +574,7 @@ def check_main_failure_semantics():
         "MODEL_DIR", "LOG_DIR", "TENSORBOARD_DIR",
         "load_decks_and_card_db", "DummyVecEnv", "VecMonitor",
         "StrictEvaluationVecEnv",
+        "make_masked_mtg_env",
         "create_callbacks", "create_training_model", "MaskablePPO",
         "record_network_architecture", "set_random_seed", "safe_cpu_count",
     )
@@ -575,13 +582,25 @@ def check_main_failure_semantics():
     original_set_num_threads = m.torch.set_num_threads
     original_cuda_available = m.torch.cuda.is_available
     original_strftime = m.time.strftime
+    original_subtype_vocab = list(Card.SUBTYPE_VOCAB)
 
     with tempfile.TemporaryDirectory() as tmp:
         try:
             m.MODEL_DIR = os.path.join(tmp, "models")
             m.LOG_DIR = os.path.join(tmp, "logs")
             m.TENSORBOARD_DIR = os.path.join(tmp, "tensorboard")
-            m.load_decks_and_card_db = lambda _path, **_kwargs: ([object()], {})
+            def fake_load_decks(_path, **_kwargs):
+                Card.SUBTYPE_VOCAB = list(frozen_vocab)
+                return [object()], {}
+
+            def fake_make_masked_env(
+                    _decks, _card_db, _storage_root, **kwargs):
+                environment_vocabularies.append(
+                    tuple(kwargs.get("subtype_vocab") or ()))
+                return object()
+
+            m.load_decks_and_card_db = fake_load_decks
+            m.make_masked_mtg_env = fake_make_masked_env
             m.DummyVecEnv = FakeVecEnv
             m.VecMonitor = lambda env: env
             m.StrictEvaluationVecEnv = lambda env: env
@@ -668,6 +687,11 @@ def check_main_failure_semantics():
             assert parent_seeds == [42, 1234, 42, 42]
             assert assigned_seeds == [
                 42, 1000042, 1234, 1001234, 42, 1000042]
+            assert environment_vocabularies
+            assert all(
+                vocab == frozen_vocab for vocab in environment_vocabularies), (
+                    "main did not pass the frozen format vocabulary to every "
+                    "training and validation environment")
         finally:
             sys.argv = original_argv
             for name, original in originals.items():
@@ -675,6 +699,7 @@ def check_main_failure_semantics():
             m.torch.set_num_threads = original_set_num_threads
             m.torch.cuda.is_available = original_cuda_available
             m.time.strftime = original_strftime
+            Card.SUBTYPE_VOCAB = original_subtype_vocab
 
 
 @stage("format corpus flags load the frozen namespace and stamp lineage")
@@ -725,8 +750,16 @@ def check_subproc_vec_env(deck_folder):
     from sb3_contrib.common.maskable.utils import get_action_masks
     from stable_baselines3.common.vec_env import SubprocVecEnv
     from Playersim.card import load_decks_and_card_db
+    from Playersim.card import Card
 
     decks, card_db = load_decks_and_card_db(deck_folder)
+    # Frozen schemas contain the complete format vocabulary, including columns
+    # absent from this particular deck corpus.  That final sentinel reproduces
+    # the production parent/Windows-spawn vocabulary difference.
+    subtype_vocab = tuple(Card.SUBTYPE_VOCAB) + (
+        "schema-only-subproc-smoke-subtype",)
+    expected_feature_dim = (
+        4 + 6 + len(Card.ALL_KEYWORDS) + 5 + len(subtype_vocab) + 3)
     vec_env = None
 
     # Keep every file a worker may produce outside the project tree. Closing
@@ -740,6 +773,7 @@ def check_subproc_vec_env(deck_folder):
                 card_db,
                 storage_root,
                 worker_index,
+                subtype_vocab,
             )
             for worker_index in range(2)
         ]
@@ -748,6 +782,10 @@ def check_subproc_vec_env(deck_folder):
             # even when this smoke test is run on another operating system.
             vec_env = SubprocVecEnv(factories, start_method="spawn")
             assert vec_env.num_envs == 2
+            assert vec_env.observation_space.spaces["my_hand"].shape == (
+                10, expected_feature_dim), (
+                    "spawned worker rebuilt the corpus vocabulary instead of "
+                    "using the frozen feature schema")
 
             assigned_seeds = vec_env.seed(20260710)
             assert assigned_seeds == [20260710, 20260711]
@@ -788,17 +826,25 @@ def check_subproc_vec_env(deck_folder):
 def build_vec_env(deck_folder):
     from stable_baselines3.common.vec_env import DummyVecEnv
     from sb3_contrib.common.wrappers import ActionMasker
-    from Playersim.card import load_decks_and_card_db
+    from Playersim.card import Card, load_decks_and_card_db
     from Playersim.environment import AlphaZeroMTGEnv
 
     decks, card_db = load_decks_and_card_db(deck_folder)
+    subtype_vocab = tuple(Card.SUBTYPE_VOCAB) + (
+        "schema-only-save-load-smoke-subtype",)
 
-    def make_env():
+    def make_schema_env():
         return ActionMasker(
-            AlphaZeroMTGEnv(decks, card_db, **test_artifact_paths()),
+            AlphaZeroMTGEnv(
+                decks, card_db, subtype_vocab=subtype_vocab,
+                **test_artifact_paths()),
             action_mask_fn="action_mask")
 
-    return DummyVecEnv([make_env])
+    vec_env = DummyVecEnv([make_schema_env])
+    vec_env.run_subtype_vocab = subtype_vocab
+    vec_env.run_decks = decks
+    vec_env.run_card_db = card_db
+    return vec_env
 
 
 @stage("construct MaskablePPO with custom extractor/policy")
@@ -884,17 +930,43 @@ def short_train(model):
     model.learn(total_timesteps=128, progress_bar=False)
 
 
-@stage("save -> load -> predict round-trip")
+@stage("schema-pinned save -> fresh validation env -> load -> predict")
 def save_load_roundtrip(model, vec_env):
     from sb3_contrib.ppo_mask import MaskablePPO
+    from stable_baselines3.common.vec_env import DummyVecEnv
+    from Playersim.card import Card
+    import main as m
+
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "roundtrip_model")
         model.save(path)
-        loaded = MaskablePPO.load(path, env=vec_env)
-        obs = vec_env.reset()
-        masks = np.stack(vec_env.env_method("action_mask"))
-        action, _ = loaded.predict(obs, action_masks=masks, deterministic=True)
-        assert action is not None and len(action) == 1
+        run_vocab = tuple(vec_env.run_subtype_vocab)
+        saved_global_vocab = list(Card.SUBTYPE_VOCAB)
+        validation_env = None
+        try:
+            # Mimic a fresh spawned process whose global vocabulary contains
+            # only corpus subtypes, not the schema-wide sentinel column.
+            Card.SUBTYPE_VOCAB = list(run_vocab[:-1])
+
+            def make_validation_env():
+                return m.make_masked_mtg_env(
+                    vec_env.run_decks,
+                    vec_env.run_card_db,
+                    os.path.join(tmp, "validation_env"),
+                    subtype_vocab=run_vocab)
+
+            validation_env = DummyVecEnv([make_validation_env])
+            assert validation_env.observation_space == vec_env.observation_space
+            loaded = MaskablePPO.load(path, env=validation_env)
+            obs = validation_env.reset()
+            masks = np.stack(validation_env.env_method("action_mask"))
+            action, _ = loaded.predict(
+                obs, action_masks=masks, deterministic=True)
+            assert action is not None and len(action) == 1
+        finally:
+            if validation_env is not None:
+                validation_env.close()
+            Card.SUBTYPE_VOCAB = saved_global_vocab
 
 
 def main():

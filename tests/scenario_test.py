@@ -10969,6 +10969,103 @@ def s_generic_as_enters_choices_and_counters():
         "an as-enters counter replacement was not applied on the first entry"
 
 
+@scenario("614.12 / 305.7", "Multiversal Passage chooses a basic type, then independently pays life or enters tapped")
+def s_multiversal_passage_chained_entry_choice():
+    def enter_passage(seed, pay_life):
+        gs = fresh(seed=seed)
+        player = gs.p1
+        passage = inject_into_zone(gs, player, {
+            "name": "Multiversal Passage", "mana_cost": "", "cmc": 0,
+            "type_line": "Land", "card_types": ["land"], "subtypes": [],
+            "oracle_text": (
+                "As this land enters, choose a basic land type. Then you may "
+                "pay 2 life. If you don't, it enters tapped.\n"
+                "This land is the chosen type."),
+        }, "battlefield")
+        assert gs.choice_context \
+            and gs.choice_context.get("type") == "as_enters_basic_land_type", \
+            "the basic-land-type replacement choice was not exposed"
+        assert passage not in player.get("tapped_permanents", set()), \
+            "the conditional tapped clause was applied before its life choice"
+        assert gs.complete_as_enters_choice(
+            gs.choice_context["options"].index("island"))
+        assert gs.choice_context \
+            and gs.choice_context.get("type") == "as_enters_pay_life", \
+            "the life payment did not follow the basic-land-type choice"
+        choice = "pay_2_life" if pay_life else "decline"
+        assert gs.complete_as_enters_choice(
+            gs.choice_context["options"].index(choice))
+        return gs, player, passage
+
+    paid_gs, paid_player, paid_passage = enter_passage(SEED + 40, True)
+    paid_card = paid_gs._safe_get_card(paid_passage)
+    assert paid_player["life"] == 18, "paying for Passage did not cost 2 life"
+    assert paid_player.get("lost_life_this_turn"), \
+        "the as-enters payment was not recorded as life loss"
+    assert paid_passage not in paid_player.get("tapped_permanents", set()), \
+        "a paid Passage entered tapped"
+    assert getattr(paid_card, "subtypes", []) == ["island"], \
+        "Passage did not become exactly the chosen basic land type"
+    mana_options = paid_gs.mana_system._land_mana_options(
+        paid_player, paid_card)
+    assert [option["symbol"] for option in mana_options] == ["U"], \
+        "the chosen Island type did not grant intrinsic blue mana"
+
+    _, declined_player, declined_passage = enter_passage(SEED + 41, False)
+    assert declined_player["life"] == 20, "declining Passage incorrectly cost life"
+    assert declined_passage in declined_player.get("tapped_permanents", set()), \
+        "declining Passage did not make it enter tapped"
+
+    # The chained transaction must remain live inside an MCTS clone. Entry
+    # contexts previously retained a Card -> GameState -> RLock reference and
+    # clone() silently discarded the entire pending choice.
+    clone_source = fresh(seed=SEED + 43)
+    clone_player = clone_source.p1
+    clone_passage = inject_into_zone(clone_source, clone_player, {
+        "name": "Multiversal Passage", "mana_cost": "", "cmc": 0,
+        "type_line": "Land", "card_types": ["land"], "subtypes": [],
+        "oracle_text": (
+            "As this land enters, choose a basic land type. Then you may "
+            "pay 2 life. If you don't, it enters tapped.\n"
+            "This land is the chosen type."),
+    }, "battlefield")
+    assert clone_source.complete_as_enters_choice(
+        clone_source.choice_context["options"].index("forest"))
+    cloned = clone_source.clone()
+    assert cloned is not None and cloned.choice_context \
+        and cloned.choice_context.get("type") == "as_enters_pay_life", \
+        "cloning discarded Passage's deferred life-payment choice"
+    assert cloned.complete_as_enters_choice(
+        cloned.choice_context["options"].index("pay_2_life"))
+    assert cloned.p1["life"] == 18 \
+        and clone_passage not in cloned.p1.get("tapped_permanents", set())
+
+    assert paid_gs.move_card(
+        paid_passage, paid_player, "battlefield", paid_player, "graveyard")
+    assert paid_passage not in paid_player.get(
+        "chosen_basic_land_types", {})
+    assert paid_passage not in paid_player.get("as_enters_choices", {}), \
+        "a departed permanent retained stale as-enters choices"
+
+    # The same replacement transaction applies to ordinary two-color lands
+    # without Passage's preceding type choice.
+    dual_gs = fresh(seed=SEED + 42)
+    dual_player = dual_gs.p1
+    dual = inject_into_zone(dual_gs, dual_player, {
+        "name": "Watery Grave Test", "mana_cost": "", "cmc": 0,
+        "type_line": "Land - Island Swamp", "card_types": ["land"],
+        "subtypes": ["island", "swamp"],
+        "oracle_text": (
+            "As this land enters, you may pay 2 life. If you don't, it enters tapped."),
+    }, "battlefield")
+    assert dual_gs.choice_context \
+        and dual_gs.choice_context.get("type") == "as_enters_pay_life", \
+        "an ordinary life-payment land skipped its replacement choice"
+    assert dual_gs.complete_as_enters_choice(
+        dual_gs.choice_context["options"].index("decline"))
+    assert dual in dual_player.get("tapped_permanents", set())
+
+
 @scenario("Cavern of Souls / 614.12 / 106.6", "Cavern of Souls chooses a type, restricts its mana, and makes matching spells uncounterable")
 def s_cavern_of_souls_chosen_type_mana():
     from Playersim.ability_types import CounterSpellEffect
@@ -11679,6 +11776,9 @@ def scenario_action_mask_is_pure_for_paged_choices():
             ('as_enters_creature_type', ['avatar', 'horror', 'wizard']),
             ('as_enters_color', ['W', 'U', 'B', 'R', 'G']),
             ('as_enters_card_type', ['artifact', 'creature', 'land']),
+            ('as_enters_basic_land_type',
+             ['plains', 'island', 'swamp', 'mountain', 'forest']),
+            ('as_enters_pay_life', ['pay_2_life', 'decline']),
             ('as_enters_opponent', ['p2']),
             ('mana_ability_color', ['W', 'U', 'B', 'R', 'G']),
             ('player_selection', ['p1', 'p2'])):
@@ -15301,6 +15401,137 @@ def scenario_keyword_grant_arbitrary_options_and_subtype():
         context={"page_count": 2})[1]
     assert get_env().action_handler._handle_choose_mode(0, {})[1]
     assert gs.check_keyword(mouse, "double strike")
+
+
+@scenario("115.1 / policy contract", "Strategic Betrayal targets only the opponent even when they control no creature")
+def scenario_strategic_betrayal_cast_target_matches_mask():
+    gs = fresh(SEED + 209)
+    env = get_env()
+    controller, opponent = gs.p1, gs.p2
+
+    for card_id in list(controller.get("hand", [])):
+        assert gs.move_card(
+            card_id, controller, "hand", controller, "library")
+    for card_id in list(opponent.get("battlefield", [])):
+        card = gs._safe_get_card(card_id)
+        if card and "creature" in getattr(card, "card_types", []):
+            owner = gs._find_card_owner_fallback(card_id) or opponent
+            assert gs.move_card(
+                card_id, opponent, "battlefield", owner, "graveyard")
+
+    betrayal = inject_real_card(
+        gs, controller, "Strategic Betrayal", "hand")
+    grave_card = inject_into_zone(gs, opponent, {
+        "name": "Betrayal Graveyard Probe", "mana_cost": "{1}",
+        "type_line": "Instant", "oracle_text": "",
+    }, "graveyard")
+    controller["mana_pool"] = {
+        "W": 0, "U": 0, "B": 2, "R": 0, "G": 0, "C": 0}
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = controller
+    gs.agent_is_p1 = True
+
+    mask = env.action_handler.generate_valid_actions()
+    assert mask[20], "Strategic Betrayal was absent from the legal-action mask"
+    play_context = env.action_handler.action_reasons_with_context[20]["context"]
+    reward, ok = env.action_handler._handle_play_spell(
+        None, context=play_context)
+    assert ok, f"mask-valid Strategic Betrayal failed to start casting: {reward}"
+    assert gs.phase == gs.PHASE_TARGETING and gs.targeting_context
+    assert gs.targeting_context.get("required_type") == "player", \
+        "the nontarget creature instruction was misclassified as a target"
+
+    candidates = env.action_handler._get_target_selection_candidates(
+        controller, gs.targeting_context)
+    assert candidates == ["p2"], \
+        f"Strategic Betrayal exposed the wrong target set: {candidates}"
+    reward, ok = env.action_handler._handle_select_target(0, {})
+    assert ok, f"selecting Strategic Betrayal's opponent failed: {reward}"
+    assert gs.stack and gs.stack[-1][1] == betrayal
+    assert gs.resolve_top_of_stack()
+    assert grave_card in opponent["exile"], \
+        "Strategic Betrayal did not exile the graveyard without a creature"
+
+
+@scenario("observation protocol / planner", "missing planner estimates produce finite zero metrics")
+def scenario_multi_turn_plan_metrics_tolerate_missing_estimates():
+    env = get_env()
+    gs = fresh(SEED + 210)
+    gs.agent_is_p1 = True
+    controller = gs.p1
+    for card_id in list(controller.get("hand", [])):
+        assert gs.move_card(
+            card_id, controller, "hand", controller, "library")
+    noncreature = inject_real_card(
+        gs, controller, "Strategic Betrayal", "hand")
+    symbolic = inject_into_zone(gs, controller, {
+        "name": "Symbolic Planner Creature", "mana_cost": "{2}",
+        "cmc": 2, "type_line": "Creature - Shapeshifter",
+        "oracle_text": "", "power": "*", "toughness": "*",
+    }, "hand")
+    board_symbolic = inject_into_zone(gs, gs.p2, {
+        "name": "Symbolic Battlefield Creature", "mana_cost": "{2}",
+        "cmc": 2, "type_line": "Creature - Shapeshifter",
+        "oracle_text": "", "power": "*", "toughness": "*",
+    }, "battlefield")
+
+    for card_id in (noncreature, symbolic):
+        score = env.strategic_planner.evaluate_card_for_sequence(
+            gs._safe_get_card(card_id))
+        assert np.isfinite(score), \
+            f"planner returned a nonfinite score for {card_id}: {score}"
+    plan = env.strategic_planner.plan_multi_turn_sequence(depth=2)
+    assert len(plan) == 2
+    assert all(np.isfinite(float(turn["expected_mana"])) for turn in plan)
+
+    # Unknown printed P/T is valid for characteristic-defined creatures.  It
+    # must not degrade training observations or any strategic evaluator while
+    # the card is in hand or before its live CDA has been calculated.
+    from unittest.mock import patch
+    with patch("Playersim.strategy_memory.logging.error") as memory_error, \
+            patch("Playersim.environment.logging.error") as env_error, \
+            patch("Playersim.enhanced_card_evaluator.logging.error") as eval_error:
+        pattern = env.strategy_memory.extract_strategy_pattern(
+            gs, detailed=True)
+        position = env._calculate_position_advantage()
+        analysis = env.strategic_planner.analyze_game_state()
+        threats = env.strategic_planner.assess_threats()
+        card_value = env.card_evaluator.evaluate_card(symbolic, "general")
+        board_value = env.card_evaluator.evaluate_card(
+            board_symbolic, "general")
+        observation = env._get_obs()
+    memory_error.assert_not_called()
+    env_error.assert_not_called()
+    eval_error.assert_not_called()
+    assert pattern is not None
+    assert np.isfinite(float(position))
+    assert np.isfinite(float(analysis["position"]["score"]))
+    assert all(np.isfinite(float(item["threat_level"])) for item in threats)
+    assert np.isfinite(float(card_value)) and np.isfinite(float(board_value))
+    assert env.observation_space.contains(observation)
+
+    original_planner = env.strategic_planner
+
+    class MissingEstimatePlanner:
+        @staticmethod
+        def plan_multi_turn_sequence(depth=2):
+            assert depth == 2
+            return [
+                {"plays": None, "land_play": None, "expected_mana": None},
+                {"plays": [], "land_play": None,
+                 "expected_mana": float("nan")},
+            ]
+
+    try:
+        env.strategic_planner = MissingEstimatePlanner()
+        with patch("Playersim.environment.logging.warning") as warning:
+            metrics = env._get_multi_turn_plan_metrics()
+        warning.assert_not_called()
+    finally:
+        env.strategic_planner = original_planner
+
+    assert metrics.shape == (6,) and np.isfinite(metrics).all()
+    assert metrics.tolist() == [0.0] * 6
 
 
 # ---------------------------------------------------------------------------

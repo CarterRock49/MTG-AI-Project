@@ -1,6 +1,15 @@
 import logging
+import math
 import numpy as np
 from typing import Dict, List, Any, Tuple
+
+
+def _finite_number(value, default=0.0):
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
 
 class EnhancedCardEvaluator:
     """Advanced card evaluation system for Magic: The Gathering."""
@@ -181,11 +190,14 @@ class EnhancedCardEvaluator:
             # Apply aggression adjustment
             aggression_level = context_details.get("aggression_level", 0.5)
             if hasattr(card, 'card_types') and 'creature' in card.card_types and hasattr(card, 'power'):
+                card_power = _finite_number(card.power)
+                card_toughness = _finite_number(
+                    getattr(card, 'toughness', 0))
                 # More aggressive strategy values offensive creatures higher
-                if card.power > 2:
+                if card_power > 2:
                     total_value *= 1.0 + (aggression_level - 0.5) * 0.4
                 # Less aggressive strategy values defensive creatures higher
-                elif hasattr(card, 'toughness') and card.toughness > card.power + 1:
+                elif card_toughness > card_power + 1:
                     total_value *= 1.0 - (aggression_level - 0.5) * 0.2
             
             # Store in cache
@@ -244,23 +256,24 @@ class EnhancedCardEvaluator:
         value = 0.0
         
         # Value based on mana cost - refined curve
+        cmc = _finite_number(getattr(card, 'cmc', 0))
         if hasattr(card, 'cmc'):
             # Cards with CMC 2-4 are generally most valuable
-            if 2 <= card.cmc <= 4:
-                value += card.cmc * 0.8
-            elif card.cmc < 2:
+            if 2 <= cmc <= 4:
+                value += cmc * 0.8
+            elif cmc < 2:
                 # Low cost cards - higher value for 1-drops than 0-drops
-                if card.cmc == 1:
+                if cmc == 1:
                     value += 0.9
                 else:  # 0-cost cards
                     value += 0.5
             else:
                 # Diminishing returns for high CMC, but still valuable
                 # More granular scaling for high cost cards
-                if card.cmc <= 6:
-                    value += 4.0 + (card.cmc - 4) * 0.5  # 5 CMC = 4.5, 6 CMC = 5.0
+                if cmc <= 6:
+                    value += 4.0 + (cmc - 4) * 0.5  # 5 CMC = 4.5, 6 CMC = 5.0
                 else:
-                    value += 5.0 + (card.cmc - 6) * 0.3  # Slower increase beyond 6 CMC
+                    value += 5.0 + (cmc - 6) * 0.3  # Slower increase beyond 6 CMC
         
         # Value based on card type - with refined weights
         if hasattr(card, 'card_types'):
@@ -275,8 +288,8 @@ class EnhancedCardEvaluator:
         if hasattr(card, 'card_types') and 'creature' in card.card_types:
             if hasattr(card, 'power') and hasattr(card, 'toughness'):
                 # Basic stats value
-                power = card.power
-                toughness = card.toughness
+                power = _finite_number(card.power)
+                toughness = _finite_number(card.toughness)
                 
                 # Different formulas for different creature profiles
                 if power >= 2 * toughness:  # Glass cannon
@@ -287,8 +300,8 @@ class EnhancedCardEvaluator:
                     stats_value = (power + toughness) / 2
                 
                 # Additional value for efficient stat-to-cost ratio
-                if hasattr(card, 'cmc') and card.cmc > 0:
-                    efficiency = (power + toughness) / card.cmc
+                if cmc > 0:
+                    efficiency = (power + toughness) / cmc
                     if efficiency > 2:  # Very efficient
                         stats_value *= 1.3
                     elif efficiency > 1:  # Good efficiency
@@ -522,6 +535,9 @@ class EnhancedCardEvaluator:
         # Only creatures can attack
         if not hasattr(card, 'card_types') or 'creature' not in card.card_types:
             return -5.0  # Strong negative to prevent non-creatures from attacking
+
+        card_power = _finite_number(getattr(card, 'power', 0))
+        card_toughness = _finite_number(getattr(card, 'toughness', 0))
         
         # Can't attack if tapped or has summoning sickness
         if (card_id in me["tapped_permanents"] or
@@ -530,8 +546,7 @@ class EnhancedCardEvaluator:
             return -5.0
         
         # Basic attack value based on power
-        if hasattr(card, 'power'):
-            value += card.power * 0.5
+        value += card_power * 0.5
         
         # Factor: Opponent's blockers
         potential_blockers = [
@@ -570,7 +585,10 @@ class EnhancedCardEvaluator:
                     continue
                     
                 # Blocker can kill attacker without dying
-                if blocker.power >= card.toughness and blocker.toughness > card.power:
+                blocker_power = _finite_number(blocker.power)
+                blocker_toughness = _finite_number(blocker.toughness)
+                if (blocker_power >= card_toughness
+                        and blocker_toughness > card_power):
                     unfavorable_blocks += 1
             
             # Severe penalty for unfavorable blocks
@@ -585,7 +603,10 @@ class EnhancedCardEvaluator:
                     continue
                     
                 # Attacker can kill blocker without dying
-                if card.power >= blocker.toughness and card.toughness > blocker.power:
+                blocker_power = _finite_number(blocker.power)
+                blocker_toughness = _finite_number(blocker.toughness)
+                if (card_power >= blocker_toughness
+                        and card_toughness > blocker_power):
                     favorable_blocks += 1
             
             # Bonus for favorable blocks
@@ -612,7 +633,7 @@ class EnhancedCardEvaluator:
                 value += 0.3
         
         # Factor: Life totals
-        if opp["life"] <= card.power:
+        if opp["life"] <= card_power:
             # Could be lethal!
             value += 2.0
         elif opp["life"] <= 5:
@@ -642,6 +663,9 @@ class EnhancedCardEvaluator:
         # Only creatures can block
         if not hasattr(card, 'card_types') or 'creature' not in card.card_types:
             return -5.0  # Strong negative to prevent non-creatures from blocking
+
+        card_power = _finite_number(getattr(card, 'power', 0))
+        card_toughness = _finite_number(getattr(card, 'toughness', 0))
         
         # Can't block if tapped
         if card_id in me["tapped_permanents"]:
@@ -652,8 +676,7 @@ class EnhancedCardEvaluator:
             value += 0.5  # Defender is actually good for blocking
         
         # Basic block value based on toughness
-        if hasattr(card, 'toughness'):
-            value += card.toughness * 0.4
+        value += card_toughness * 0.4
         
         # No reason to evaluate further if no attackers
         if not gs.current_attackers:
@@ -672,10 +695,12 @@ class EnhancedCardEvaluator:
             block_value = 0.0
             
             # Check if blocker can survive
-            blocker_survives = card.toughness > attacker.power
+            attacker_power = _finite_number(attacker.power)
+            attacker_toughness = _finite_number(attacker.toughness)
+            blocker_survives = card_toughness > attacker_power
             
             # Check if blocker can kill attacker
-            kills_attacker = card.power >= attacker.toughness
+            kills_attacker = card_power >= attacker_toughness
             
             # Determine block quality
             if kills_attacker and blocker_survives:
@@ -699,7 +724,7 @@ class EnhancedCardEvaluator:
                 block_value = -0.2
                 
                 # Exception: high power attacker worth chump blocking
-                if hasattr(attacker, 'power') and attacker.power >= 4:
+                if attacker_power >= 4:
                     block_value = 0.4  # Worth chump blocking a big threat
             
             # Special abilities consideration
@@ -831,7 +856,8 @@ class EnhancedCardEvaluator:
                 
                 # Higher value for powerful creatures
                 if hasattr(card, 'power') and hasattr(card, 'toughness'):
-                    if card.power + card.toughness >= 7:
+                    if (_finite_number(card.power)
+                            + _finite_number(card.toughness) >= 7):
                         value += 0.3
             
             # Instants have high value (flexible)

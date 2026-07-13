@@ -2069,7 +2069,7 @@ class Card:
         # multiple card_faces for them.
         if getattr(self, "layout", "normal") in {
                 "adventure", "split", "aftermath", "flip", "meld",
-                "transform", "reversible_card"}:
+                "transform", "reversible_card", "prepare"}:
             return False
         if not self.faces:
             return False

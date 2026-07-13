@@ -71,6 +71,14 @@ class GameStateZonesMixin:
                 normalized):
             return self._get_active_player() is not controller
 
+        # Shockland-style payment clauses and Multiversal Passage defer the
+        # tapped decision until their entry choice has been made.  Treating
+        # the words "enters tapped" as unconditional here tapped the land
+        # before the player could pay life.
+        if ("you may pay 2 life" in normalized
+                and "if you don't, it enters tapped" in normalized):
+            return False
+
         return "enters tapped" in normalized
 
     def _parse_own_as_enters(self, card):
@@ -84,27 +92,44 @@ class GameStateZonesMixin:
         if not card:
             return None, []
         text = (getattr(card, "oracle_text", "") or "").lower()
-        name = re.escape((getattr(card, "name", "") or "").lower())
-        subject = rf"(?:this (?:permanent|creature|land|artifact)|{name})"
+        printed_name = (getattr(card, "name", "") or "").lower()
+        short_name = printed_name.split(",", 1)[0].strip()
+        named_subjects = [re.escape(printed_name)]
+        if short_name and short_name != printed_name:
+            named_subjects.append(re.escape(short_name))
+        name_pattern = "|".join(named_subjects)
+        subject = (
+            rf"(?:this (?:permanent|creature|land|artifact)|{name_pattern})")
         prefix = rf"as {subject} enters(?: the battlefield)?"
 
         choice_kind = None
         choice_match = re.search(
             prefix + r",?\s*choose\s+"
-            r"(a creature type|a card type|a color|an opponent)", text)
+            r"(a creature type|a card type|a basic land type|a color|an opponent)", text)
         if choice_match:
             choice_kind = {
                 "a creature type": "creature_type",
                 "a card type": "card_type",
+                "a basic land type": "basic_land_type",
                 "a color": "color",
                 "an opponent": "opponent",
             }[choice_match.group(1)]
+        elif re.search(
+                prefix + r",?\s*you may pay 2 life\.\s*if you don(?:'|\u2019)t, "
+                r"(?:this (?:permanent|land)|it) enters tapped", text):
+            choice_kind = "pay_life"
 
         counters = []
+        # "Enters with" is itself a replacement effect (CR 614.1c); it does
+        # not use the word "as" in current Oracle templating.  Read the
+        # entering object's named form too, including gendered self-pronouns
+        # such as Leatherhead's "on her".
+        counter_prefix = rf"(?:as\s+)?{subject} enters(?: the battlefield)?"
         counter_match = re.search(
-            prefix + r",?\s+with\s+"
+            counter_prefix + r",?\s+with\s+"
             r"(a|an|one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+"
-            r"((?:[+-]\d+/[+-]\d+)|[a-z][a-z0-9_-]*)\s+counters?",
+            r"((?:[+-]\d+/[+-]\d+)|[a-z][a-z0-9_-]*)\s+counters?"
+            r"(?:\s+on\s+(?:it|him|her))?(?=\s*(?:[.\n]|$))",
             text)
         if counter_match:
             count_token, counter_type = counter_match.groups()
@@ -626,6 +651,13 @@ class GameStateZonesMixin:
             self._consume_plot_permission(from_player, card_id)
             getattr(self, "cards_castable_from_exile", set()).discard(card_id)
             getattr(self, "exile_alternative_costs", {}).pop(card_id, None)
+        if actual_from_zone == "exile" and final_destination_zone != "exile":
+            # Face-down identity is a property of this exile-zone object, not
+            # of the physical card in its next zone.
+            if hasattr(self, "clear_face_down_exile"):
+                self.clear_face_down_exile(from_player, card_id)
+            else:
+                getattr(self, "face_down_exile_cards", set()).discard(card_id)
 
 
         meld_partner_id = None
@@ -634,6 +666,7 @@ class GameStateZonesMixin:
         # --- 2. LTB Cleanup/Triggers (Only if removed from battlefield) ---
         # ... (Keep existing LTB logic) ...
         if actual_from_zone == "battlefield" and from_player:
+            self.prepared_cards.discard(card_id)
             for player in (self.p1, self.p2):
                 if player:
                     player.get("targeted_permanents_this_turn", set()).discard(card_id)
@@ -649,6 +682,17 @@ class GameStateZonesMixin:
             from_player.get("tapped_permanents", set()).discard(card_id)
             from_player.get("entered_battlefield_this_turn", set()).discard(card_id)
             from_player.get("suspected_permanents", set()).discard(card_id)
+            # "As enters" choices belong to that battlefield object. They do
+            # not follow the card through a zone change; a later entry makes a
+            # new choice. Control changes use _transfer_permanent_control and
+            # deliberately migrate these stores instead of clearing them.
+            for choice_store in (
+                    "chosen_creature_types", "chosen_colors",
+                    "chosen_card_types", "chosen_basic_land_types",
+                    "chosen_opponents", "as_enters_choices"):
+                store = from_player.get(choice_store)
+                if isinstance(store, dict):
+                    store.pop(card_id, None)
             keys_to_remove = [key for key in self.exhaust_ability_used if key[0] == card_id]
             if keys_to_remove: logging.debug(f"Clearing exhaust state for {card_name}."); [self.exhaust_ability_used.pop(k) for k in keys_to_remove]
             # Remove attachments TO this card and attachments OF this card
@@ -661,6 +705,7 @@ class GameStateZonesMixin:
             if hasattr(from_player, 'loyalty_counters'): from_player['loyalty_counters'].pop(card_id, None)
             if hasattr(from_player, 'damage_counters'): from_player['damage_counters'].pop(card_id, None)
             if hasattr(from_player, 'deathtouch_damage'): from_player.get('deathtouch_damage', {}).pop(card_id, None)
+            from_player.get('saga_counters', {}).pop(card_id, None)
             # Clear counters stored on game state dicts
             if hasattr(self, 'saga_counters'): self.saga_counters.pop(card_id, None)
             if hasattr(self, 'battle_cards'): self.battle_cards.pop(card_id, None)
@@ -736,8 +781,18 @@ class GameStateZonesMixin:
              destination_list[card_id] = True # Example for dict zone
         else:
              logging.error(f"Dest zone '{final_destination_zone}' not list/set/dict."); return False
+        if (final_destination_zone == "exile"
+                and event_context.get("face_down_exile", False)):
+            if hasattr(self, "mark_face_down_exile"):
+                self.mark_face_down_exile(
+                    final_destination_player, card_id)
+            else:
+                self.face_down_exile_cards.add(card_id)
         if hasattr(self, "_last_card_locations"):
              self._last_card_locations[card_id] = (final_destination_player, final_destination_zone)
+        if card:
+             card._zone_change_generation = int(getattr(
+                 card, "_zone_change_generation", 0) or 0) + 1
         logging.debug(f"Moved {card_name} from {from_player['name'] if from_player else actual_from_zone} to {final_destination_player['name']}'s {final_destination_zone}")
 
         # --- 4. Trigger ENTER Abilities & Handle ETB Effects ---
@@ -745,6 +800,12 @@ class GameStateZonesMixin:
         enter_trigger_context = {'controller': final_destination_player, 'from_zone': actual_from_zone, 'to_zone': final_destination_zone, 'cause': cause, **event_context } # Pass merged context
 
         if final_destination_zone == "battlefield":
+            if (card and getattr(card, "layout", "") == "prepare"
+                    and re.search(r"\benters prepared\b",
+                                  getattr(card, "oracle_text", ""),
+                                  re.IGNORECASE)):
+                self.prepared_cards.add(card_id)
+
             if event_context.get("return_as_enchantment") and self.layer_system:
                 self.layer_system.register_effect({
                     "source_id": card_id,
@@ -837,7 +898,12 @@ class GameStateZonesMixin:
                      'player': final_destination_player, 'card_id': card_id,
                      'source_id': event_context.get('as_enters_source_id', card_id),
                      'resolved': False,
-                     'enter_context': enter_trigger_context,
+                     # Casting/move contexts may contain live Card objects
+                     # linked to this GameState and its thread locks. Keep only
+                     # declarative event data so MCTS can clone between chained
+                     # entry choices without dropping the transaction.
+                     'enter_context': self._copy_stack_context(
+                         enter_trigger_context),
                  }
                  self.choice_context['options'] = self._as_enters_choice_options(
                      event_context['as_enters_choice_needed'],

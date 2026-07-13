@@ -86,6 +86,34 @@ class CastingHandlersMixin:
         reward = 0.25 if success else -0.1
         return reward, success
 
+    def _handle_prepared_cast(self, param=None, context=None, **kwargs):
+        """Cast the virtual exile copy created by a prepared permanent."""
+        gs = self.game_state
+        context = dict(context or {})
+        player = self._get_policy_player(context)
+        source_id = context.get("source_id")
+        options = [
+            card_id for card_id in context.get("options", [])
+            if gs.can_cast_prepared_copy(card_id, player)
+        ]
+        if source_id is None and len(options) == 1:
+            source_id = options[0]
+        if source_id is None and len(options) > 1:
+            gs.choice_context = {
+                "type": "prepared_source", "player": player,
+                "controller": player, "options": options,
+                "choice_page": 0, "resume_phase": gs.phase,
+            }
+            gs.phase = gs.PHASE_CHOOSE
+            gs.priority_player = player
+            gs.priority_pass_count = 0
+            return 0.0, True
+        if source_id is None or not gs.can_cast_prepared_copy(
+                source_id, player):
+            return -0.1, False
+        success = gs.cast_prepared_copy(source_id, player)
+        return (0.2, True) if success else (-0.1, False)
+
     def _handle_play_land(self, param, **kwargs):
         gs = self.game_state
         context = kwargs.get('context', {})
@@ -227,9 +255,13 @@ class CastingHandlersMixin:
             })
             success = gs.cast_spell(card_id, player, context=cast_context)
             return (0.2, True) if success else (-0.1, False)
-        if not any(
+        has_emblem_permission = any(
                 emblem.get("kind") == "graveyard_permanents"
-                for emblem in player.get("emblems", [])):
+                for emblem in player.get("emblems", []))
+        has_permanent_land_permission = bool(
+            context.get("controlled_permanent_land_play")
+            and gs.can_play_lands_from_graveyard(player))
+        if not (has_emblem_permission or has_permanent_land_permission):
             return -0.15, False
         if (not isinstance(source_index, int)
                 or not 0 <= source_index < len(player.get("graveyard", []))):
@@ -242,8 +274,12 @@ class CastingHandlersMixin:
         if "land" in card_types:
             success = gs.play_land(
                 card_id, player, source_zone="graveyard",
-                permission="graveyard_permanents")
+                permission=("controlled_permanent"
+                            if has_permanent_land_permission
+                            else "graveyard_permanents"))
             return (0.2, True) if success else (-0.1, False)
+        if not has_emblem_permission:
+            return -0.1, False
         if not card_types.intersection(
                 {"creature", "artifact", "enchantment", "planeswalker", "battle"}):
             return -0.1, False
@@ -969,8 +1005,16 @@ class CastingHandlersMixin:
                 "index_key": "hand_idx",
                 "cost_pattern": r"emerge (\{[^\}]+\})",
                 "requires_sacrifice": True,
-                "timing_check": lambda card: 'sorcery' in getattr(card, 'card_types', []) or 
+                "timing_check": lambda card: 'sorcery' in getattr(card, 'card_types', []) or
                                         not ('instant' in getattr(card, 'card_types', []))
+            },
+            "CAST_FOR_EVOKE": {
+                "source_zone": "hand",
+                "index_key": "hand_idx",
+                "cost_pattern": r"(?:^|\n)evoke\s+((?:\{[^}]+\})+)",
+                # Evoke changes the cost, not the spell's timing. cast_spell
+                # remains the final timing authority after mask generation.
+                "timing_check": lambda card: True,
             },
             "CAST_FOR_DELVE": {
                 "source_zone": "hand",
@@ -1173,13 +1217,13 @@ class CastingHandlersMixin:
                 if 'land' not in card.type_line:
                     logging.debug(f"Invalid action: {card.name} is not a land")
                     return 0  # Invalid action: not a land
-                if player["land_played"]:
+                if not gs.can_play_land_this_turn(player):
                     logging.debug(f"Invalid action: already played a land this turn")
                     return 0  # Already played a land this turn
                 
                 player["battlefield"].append(card_id)
                 player["hand"].pop(hand_idx)
-                player["land_played"] = True
+                gs._record_land_play(player)
                 for idx, color in enumerate(['W', 'U', 'B', 'R', 'G']):
                     player["mana_production"][color] += card.colors[idx]
                 return 0.1  # Reduced reward for playing a land

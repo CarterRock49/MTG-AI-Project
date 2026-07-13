@@ -4,6 +4,7 @@ import json
 import random
 import logging
 import re
+import math
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
@@ -23,6 +24,14 @@ from collections import defaultdict
 from .deck_stats_tracker import DeckStatsTracker
 from .card_memory import CardMemory
 from .ability_types import ManaAbility
+
+
+def _card_number(card, attribute, default=0.0):
+    try:
+        value = float(getattr(card, attribute, default) or 0)
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) else default
     
 class AlphaZeroMTGEnv(gym.Env):
     """
@@ -34,7 +43,7 @@ class AlphaZeroMTGEnv(gym.Env):
     def __init__(self, decks, card_db, max_turns=30, max_hand_size=7, max_battlefield=20,
                  deck_stats_path="./deck_stats", card_memory_path="./card_memory",
                  planner_recommendations=False, agent_is_p1=True,
-                 alternate_agent_seat=False):
+                 alternate_agent_seat=False, subtype_vocab=None):
         logging.info("Initializing AlphaZeroMTGEnv...")
         super().__init__()
         self.decks = decks
@@ -82,7 +91,14 @@ class AlphaZeroMTGEnv(gym.Env):
         # every production vector (225 fields for the current pool).  Capture
         # this environment's vocabulary and build vectors against it so later
         # test/database loads cannot mutate the policy schema underneath us.
-        subtype_vocab = tuple(Card.SUBTYPE_VOCAB)
+        if subtype_vocab is None:
+            subtype_vocab = tuple(Card.SUBTYPE_VOCAB)
+        else:
+            # A frozen format schema may intentionally contain subtype columns
+            # not represented by the selected deck corpus.  Carry that exact
+            # ordered vocabulary into spawned workers instead of rebuilding it
+            # from only their cards.
+            subtype_vocab = tuple(subtype_vocab)
         if not subtype_vocab:
             subtype_vocab = tuple(sorted({
                 str(subtype).lower()
@@ -1224,53 +1240,56 @@ class AlphaZeroMTGEnv(gym.Env):
                 "raw_valid_targets": raw_targets,
                 "selection_candidates": list(candidates),
             }
-            stack_summary = []
-            live_stack = list(getattr(gs, "stack", ()) or ())
-            if len(live_stack) > 32:
-                stack_indices = list(range(8)) + list(
-                    range(len(live_stack) - 24, len(live_stack)))
-                diagnostic["stack_summary_omitted"] = len(live_stack) - 32
-            else:
-                stack_indices = list(range(len(live_stack)))
-            for stack_index in stack_indices:
-                item = live_stack[stack_index]
-                if not (isinstance(item, tuple) and len(item) >= 3):
-                    stack_summary.append({
-                        "index": stack_index,
-                        "item_type": type(item).__name__,
-                    })
-                    continue
-                item_context = (
-                    item[3] if len(item) > 3 and isinstance(item[3], dict)
-                    else {})
-                ability = item_context.get("ability")
-                item_card = gs._safe_get_card(item[1])
+        # Stack provenance is useful for every policy-cycle failure, not only
+        # failures that happen to have an active targeting context.
+        stack_summary = []
+        live_stack = list(getattr(gs, "stack", ()) or ())
+        if len(live_stack) > 32:
+            stack_indices = list(range(8)) + list(
+                range(len(live_stack) - 24, len(live_stack)))
+            diagnostic["stack_summary_omitted"] = len(live_stack) - 32
+        else:
+            stack_indices = list(range(len(live_stack)))
+        for stack_index in stack_indices:
+            item = live_stack[stack_index]
+            if not (isinstance(item, tuple) and len(item) >= 3):
                 stack_summary.append({
                     "index": stack_index,
-                    "item_type": str(item[0]),
-                    "source_id": item[1],
-                    "source_name": getattr(item_card, "name", None),
-                    "context_keys": sorted(str(key) for key in item_context),
-                    "target_choice_pending": bool(
-                        item_context.get("target_choice_pending")),
-                    "target_instance_id": item_context.get(
-                        "target_instance_id"),
-                    "targeting_text": item_context.get("targeting_text"),
-                    "effect_text": item_context.get("effect_text"),
-                    "ability_type": type(ability).__name__
-                    if ability is not None else None,
-                    "trigger_condition": getattr(
-                        ability, "trigger_condition", None),
-                    "ability_effect": getattr(ability, "effect", None),
+                    "item_type": type(item).__name__,
                 })
-            diagnostic["stack"] = stack_summary
+                continue
+            item_context = (
+                item[3] if len(item) > 3 and isinstance(item[3], dict)
+                else {})
+            ability = item_context.get("ability")
+            item_card = gs._safe_get_card(item[1])
+            stack_summary.append({
+                "index": stack_index,
+                "item_type": str(item[0]),
+                "source_id": item[1],
+                "source_name": getattr(item_card, "name", None),
+                "context_keys": sorted(str(key) for key in item_context),
+                "target_choice_pending": bool(
+                    item_context.get("target_choice_pending")),
+                "target_instance_id": item_context.get(
+                    "target_instance_id"),
+                "targeting_text": item_context.get("targeting_text"),
+                "effect_text": item_context.get("effect_text"),
+                "ability_type": type(ability).__name__
+                if ability is not None else None,
+                "trigger_condition": getattr(
+                    ability, "trigger_condition", None),
+                "ability_effect": getattr(ability, "effect", None),
+            })
+        diagnostic["stack"] = stack_summary
         mask_error = getattr(self.action_handler, "last_mask_error", None)
         if mask_error:
             diagnostic["last_mask_error"] = str(mask_error)
+        recent_actions = [
+            int(action) for action in self.current_episode_actions[-32:]]
         if recent_action is not None:
-            diagnostic["recent_actions"] = (
-                [int(action) for action in self.current_episode_actions[-31:]]
-                + [int(recent_action)])
+            recent_actions = recent_actions[-31:] + [int(recent_action)]
+        diagnostic["recent_actions"] = recent_actions
         if valid_mask is not None:
             diagnostic["valid_actions"] = np.flatnonzero(valid_mask).tolist()
         return diagnostic
@@ -1693,9 +1712,14 @@ class AlphaZeroMTGEnv(gym.Env):
                     if acting_player == opponent_player_obj:
                         return opponent_player_obj, {
                             "phase_context": gs._PHASE_NAMES.get(gs.phase)}
-                # A special choice always belongs to exactly one policy. If it
-                # is not the opponent's, return control to the learned seat.
-                return None, None
+                    # A real special choice always belongs to exactly one
+                    # policy. If it is not the opponent's, return control to
+                    # the learned seat.
+                    return None, None
+                # A transient phase with no matching context is an orphaned
+                # wrapper, not a choice owned by the learned seat. Fall
+                # through to ordinary priority routing so a future lifecycle
+                # bug cannot strand the policy on NO_OP.
 
             # Priority Check (Outside Mulligan/Choice)
             priority_target = getattr(gs, 'priority_player', None)
@@ -2475,16 +2499,16 @@ class AlphaZeroMTGEnv(gym.Env):
         for cid in my_creatures:
             card = gs._safe_get_card(cid)
             if card and hasattr(card, 'power') and hasattr(card, 'toughness'):
-                my_power += card.power
-                my_toughness += card.toughness
+                my_power += _card_number(card, 'power')
+                my_toughness += _card_number(card, 'toughness')
                 
         opp_power = 0
         opp_toughness = 0
         for cid in opp_creatures:
             card = gs._safe_get_card(cid)
             if card and hasattr(card, 'power') and hasattr(card, 'toughness'):
-                opp_power += card.power
-                opp_toughness += card.toughness
+                opp_power += _card_number(card, 'power')
+                opp_toughness += _card_number(card, 'toughness')
 
         my_creature_count = len(my_creatures)
         opp_creature_count = len(opp_creatures)
@@ -2608,7 +2632,9 @@ class AlphaZeroMTGEnv(gym.Env):
             
         else:  # Late game
             # Late game: big threats and life totals matter more
-            high_power_count = sum(1 for cid in my_creatures if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'power') and gs._safe_get_card(cid).power >= 4)
+            high_power_count = sum(
+                1 for cid in my_creatures if gs._safe_get_card(cid)
+                and _card_number(gs._safe_get_card(cid), 'power') >= 4)
             if high_power_count > 0:
                 board_reward += 0.015 * high_power_count  # Increased
                 
@@ -2715,10 +2741,18 @@ class AlphaZeroMTGEnv(gym.Env):
                         hasattr(gs._safe_get_card(cid), 'card_types') and 'creature' in gs._safe_get_card(cid).card_types]
         
         # Power/toughness advantage
-        my_power = sum(gs._safe_get_card(cid).power for cid in my_creatures if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'power'))
-        my_toughness = sum(gs._safe_get_card(cid).toughness for cid in my_creatures if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'toughness'))
-        opp_power = sum(gs._safe_get_card(cid).power for cid in opp_creatures if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'power'))
-        opp_toughness = sum(gs._safe_get_card(cid).toughness for cid in opp_creatures if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'toughness'))
+        my_power = sum(
+            _card_number(gs._safe_get_card(cid), 'power')
+            for cid in my_creatures if gs._safe_get_card(cid))
+        my_toughness = sum(
+            _card_number(gs._safe_get_card(cid), 'toughness')
+            for cid in my_creatures if gs._safe_get_card(cid))
+        opp_power = sum(
+            _card_number(gs._safe_get_card(cid), 'power')
+            for cid in opp_creatures if gs._safe_get_card(cid))
+        opp_toughness = sum(
+            _card_number(gs._safe_get_card(cid), 'toughness')
+            for cid in opp_creatures if gs._safe_get_card(cid))
         
         total_stats = max(1, my_power + my_toughness + opp_power + opp_toughness)
         board_advantage = (my_power + my_toughness - opp_power - opp_toughness) / total_stats
@@ -2730,7 +2764,9 @@ class AlphaZeroMTGEnv(gym.Env):
         # Add more type checking to avoid attribute errors
         valid_hand_cards = [gs._safe_get_card(cid) for cid in me["hand"] 
                             if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'cmc')]
-        my_hand_quality = np.mean([card.cmc for card in valid_hand_cards]) if valid_hand_cards else 0
+        my_hand_quality = np.mean([
+            _card_number(card, 'cmc') for card in valid_hand_cards
+        ]) if valid_hand_cards else 0
         opp_hand_quality = 3.0  # Assume average CMC for opponent's hand
         hand_quality_advantage = (my_hand_quality - opp_hand_quality) / max(1, my_hand_quality + opp_hand_quality)
         
@@ -2793,6 +2829,12 @@ class AlphaZeroMTGEnv(gym.Env):
         for zone in ["battlefield", "graveyard", "exile"]:
             if opp and zone in opp: # Ensure player and zone exist
                 for card_id in opp[zone]:
+                    if (zone == "exile"
+                            and hasattr(gs, "is_face_down_exile_card")
+                            and gs.is_face_down_exile_card(card_id, opp)):
+                        # This public-zone object has no visible identity. Its
+                        # real types/colors must not shape hand inference.
+                        continue
                     known_deck_cards.add(card_id)
 
         # Count cards by type in opponent's visible cards to infer deck strategy
@@ -2827,6 +2869,12 @@ class AlphaZeroMTGEnv(gym.Env):
         if isinstance(gs.card_db, dict):
             for card_id, card in gs.card_db.items():
                 if card_id in known_deck_cards: continue # Skip known cards
+                if (hasattr(gs, "is_face_down_exile_card")
+                        and gs.is_face_down_exile_card(card_id)):
+                    # The physical opaque object is publicly in exile, so it
+                    # is not a possible opponent-hand object either. Do not let
+                    # its hidden characteristics affect candidate ranking.
+                    continue
                 weight = self._calculate_card_likelihood(card, color_count, visible_creatures, visible_instants, visible_artifacts)
                 likely_cards.append((card_id, weight))
         else:
@@ -2857,6 +2905,9 @@ class AlphaZeroMTGEnv(gym.Env):
         If the card ID is invalid, returns a zero vector.
         """
         try:
+            if (hasattr(self.game_state, "is_face_down_exile_card")
+                    and self.game_state.is_face_down_exile_card(card_id)):
+                return np.zeros(feature_dim, dtype=np.float32)
             # Use _safe_get_card instead of direct access
             card = self.game_state._safe_get_card(card_id)
             if not card or not hasattr(card, 'to_feature_vector'):
@@ -3682,11 +3733,17 @@ class AlphaZeroMTGEnv(gym.Env):
                             0 if owner is gs.p1 else 1 if owner is gs.p2 else -1)
                         break
             result["target_zone_indices"][slot] = zone_index
+            hidden_exile = bool(
+                zone == "exile"
+                and hasattr(gs, "is_face_down_exile_card")
+                and gs.is_face_down_exile_card(target_id, owner))
             if isinstance(target_id, (int, np.integer)):
-                result["target_card_ids"][slot] = int(target_id)
+                if not hidden_exile:
+                    result["target_card_ids"][slot] = int(target_id)
                 if target_id in gs.card_db:
-                    result["target_cards"][slot] = self._get_card_feature(
-                        target_id, self._feature_dim)
+                    if not hidden_exile:
+                        result["target_cards"][slot] = self._get_card_feature(
+                            target_id, self._feature_dim)
                     result["target_card_mask"][slot] = True
         return result
     
@@ -3984,8 +4041,8 @@ class AlphaZeroMTGEnv(gym.Env):
              # LayerSystem should have been applied before calling _get_obs
              if card and 'creature' in getattr(card, 'card_types', []):
                  count += 1
-                 power += getattr(card, 'power', 0) or 0 # Ensure non-None value
-                 toughness += getattr(card, 'toughness', 0) or 0 # Ensure non-None value
+                 power += _card_number(card, 'power')
+                 toughness += _card_number(card, 'toughness')
         return {"count": count, "power": power, "toughness": toughness} # Return dict
 
     def _get_hand_card_types(self, hand_ids):
@@ -4030,8 +4087,10 @@ class AlphaZeroMTGEnv(gym.Env):
                 can_afford = self._can_afford_card(player, card)
 
                 if is_land:
-                    # Lands can only be played at sorcery speed, 1 per turn
-                    if not player.get("land_played", False) and can_play_sorcery:
+                    # Use the live land-play allowance so additional-land
+                    # permissions stay visible to the observation.
+                    if (gs.can_play_land_this_turn(player)
+                            and can_play_sorcery):
                         playable[i] = 1.0
                 elif can_afford:
                     # Spells need correct timing
@@ -4175,7 +4234,14 @@ class AlphaZeroMTGEnv(gym.Env):
         """Estimate deck composition based on known cards."""
         composition = np.zeros(6, dtype=np.float32)
         gs = self.game_state
-        known_cards = player.get("hand", []) + player.get("battlefield", []) + player.get("graveyard", []) + player.get("exile", [])
+        visible_exile = [
+            card_id for card_id in player.get("exile", [])
+            if not (hasattr(gs, "is_face_down_exile_card")
+                    and gs.is_face_down_exile_card(card_id, player))]
+        known_cards = (player.get("hand", [])
+                       + player.get("battlefield", [])
+                       + player.get("graveyard", [])
+                       + visible_exile)
         total_known = len(known_cards)
         if total_known == 0: return composition
 
@@ -4362,17 +4428,38 @@ class AlphaZeroMTGEnv(gym.Env):
     def _get_multi_turn_plan_metrics(self):
         """Convert strategic planner's multi-turn plan to metrics."""
         metrics = np.zeros(6, dtype=np.float32)
+
+        def normalized_count(values, denominator):
+            try:
+                count = len(values or [])
+            except TypeError:
+                count = 0
+            return min(1.0, max(0.0, count / denominator))
+
+        def normalized_number(value, denominator):
+            try:
+                number = float(value or 0)
+            except (TypeError, ValueError):
+                return 0.0
+            if not np.isfinite(number):
+                return 0.0
+            return min(1.0, max(0.0, number / denominator))
+
         if self.strategic_planner and hasattr(self.strategic_planner, 'plan_multi_turn_sequence'):
             try:
                 plan = self.strategic_planner.plan_multi_turn_sequence(depth=2)
                 if plan:
-                    metrics[0] = min(1.0, len(plan[0].get('plays',[])) / 3.0) # Plays this turn
+                    metrics[0] = normalized_count(
+                        plan[0].get('plays'), 3.0) # Plays this turn
                     metrics[1] = float(plan[0].get('land_play') is not None) # Land this turn
-                    metrics[2] = min(1.0, plan[0].get('expected_mana', 0) / 10.0) # Mana this turn
+                    metrics[2] = normalized_number(
+                        plan[0].get('expected_mana'), 10.0) # Mana this turn
                     if len(plan) > 1:
-                         metrics[3] = min(1.0, len(plan[1].get('plays',[])) / 3.0) # Plays next turn
+                         metrics[3] = normalized_count(
+                             plan[1].get('plays'), 3.0) # Plays next turn
                          metrics[4] = float(plan[1].get('land_play') is not None) # Land next turn
-                         metrics[5] = min(1.0, plan[1].get('expected_mana', 0) / 10.0) # Mana next turn
+                         metrics[5] = normalized_number(
+                             plan[1].get('expected_mana'), 10.0) # Mana next turn
             except Exception as plan_e:
                  logging.warning(f"Error getting multi-turn plan metrics: {plan_e}")
         return metrics
@@ -4474,7 +4561,7 @@ class AlphaZeroMTGEnv(gym.Env):
                     logging.warning(f"Error evaluating single attacker {card_id}: {atk_eval_e}")
                     # Fallback value based on power?
                     card = gs._safe_get_card(card_id)
-                    values[i] = getattr(card, 'power', 0) * 0.5 if card else 0.0
+                    values[i] = _card_number(card, 'power') * 0.5
         return values
 
     def _phase_to_onehot(self, phase):

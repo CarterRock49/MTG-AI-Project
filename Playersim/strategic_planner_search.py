@@ -5,8 +5,16 @@ all state lives on MTGStrategicPlanner, which composes every mixin.
 """
 
 import logging
+import math
 import numpy as np
 import random
+
+def _card_number(card, attribute, default=0.0):
+    try:
+        value = float(getattr(card, attribute, default) or 0)
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) else default
 
 
 class MCTSNode:
@@ -118,8 +126,8 @@ class SearchDecisionMixin:
         my_creatures = [cid for cid in me["battlefield"] if gs._safe_get_card(cid) and 'creature' in gs._safe_get_card(cid).card_types]
         opp_creatures = [cid for cid in opp["battlefield"] if gs._safe_get_card(cid) and 'creature' in gs._safe_get_card(cid).card_types]
         
-        my_power = sum(gs._safe_get_card(cid).power for cid in my_creatures if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'power'))
-        opp_power = sum(gs._safe_get_card(cid).power for cid in opp_creatures if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'power'))
+        my_power = sum(_card_number(gs._safe_get_card(cid), 'power') for cid in my_creatures if gs._safe_get_card(cid))
+        opp_power = sum(_card_number(gs._safe_get_card(cid), 'power') for cid in opp_creatures if gs._safe_get_card(cid))
         
         life_diff = me["life"] - opp["life"]
         card_diff = len(me["hand"]) - len(opp["hand"])
@@ -457,7 +465,7 @@ class SearchDecisionMixin:
         
         # Add land plays if we haven't played a land yet
         me = gs.p1 if gs.agent_is_p1 else gs.p2
-        if not me["land_played"]:
+        if gs.can_play_land_this_turn(me):
             land_plays = [a for a, _ in action_evaluations 
                         if gs.action_handler.get_action_info(a)[0] == "PLAY_CARD" and 
                         hasattr(gs._safe_get_card(gs.action_handler.get_action_info(a)[1]), 'type_line') and
@@ -1136,7 +1144,7 @@ class SearchDecisionMixin:
             high_priority_actions = []
 
             # Check land play
-            if not me.get("land_played", False): # Safe get
+            if gs.can_play_land_this_turn(me):
                  for action_idx in valid_actions:
                      # Use the verified handler instance
                      action_type, param = action_handler.get_action_info(action_idx)
@@ -1167,11 +1175,11 @@ class SearchDecisionMixin:
                     if isinstance(param, int) and param < len(me.get('battlefield',[])):
                         attacker_id = me['battlefield'][param]
                         att_card = gs._safe_get_card(attacker_id)
-                        my_power = getattr(att_card,'power',0) if att_card else 0
+                        my_power = _card_number(att_card, 'power')
                     elif isinstance(param, list): # If param is list of IDs
                         for att_id in param:
                             att_card = gs._safe_get_card(att_id)
-                            my_power += getattr(att_card,'power',0) if att_card else 0
+                            my_power += _card_number(att_card, 'power')
                     else: # Invalid param for attacker
                         continue
 
@@ -1734,7 +1742,9 @@ class SearchDecisionMixin:
             # Land plays have high priority if land hasn't been played
             if action_type == "PLAY_CARD":
                 card = gs._safe_get_card(param)
-                if card and hasattr(card, 'type_line') and 'land' in card.type_line and not me["land_played"]:
+                if (card and hasattr(card, 'type_line')
+                        and 'land' in card.type_line
+                        and gs.can_play_land_this_turn(me)):
                     priority = 100
                 elif card and hasattr(card, 'cmc'):
                     # Prioritize cheap spells
@@ -1770,4 +1780,4 @@ class SearchDecisionMixin:
         # Select action with highest priority
         action_priorities.sort(key=lambda x: x[1], reverse=True)
         return action_priorities[0][0]
-
+

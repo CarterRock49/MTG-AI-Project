@@ -251,6 +251,24 @@ def check_regressions():
             assert remaining == expected, \
                 f"{family} retention kept {len(remaining)} files: {remaining}"
 
+    # Quiet subprocess workers must not create a second warning/error stream
+    # under a misleading mtg_debug_* filename. Explicit --debug restores it.
+    import main as training_main
+    original_debug_level = debug_module.debug_handler.level
+    original_root_level = logging.getLogger().level
+    original_handler_levels = {
+        handler: handler.level for handler in logging.getLogger().handlers}
+    try:
+        training_main.configure_runtime_logging(debug=False, worker=True)
+        assert debug_module.debug_handler.level > logging.CRITICAL
+        training_main.configure_runtime_logging(debug=True, worker=True)
+        assert debug_module.debug_handler.level == logging.DEBUG
+    finally:
+        debug_module.debug_handler.setLevel(original_debug_level)
+        logging.getLogger().setLevel(original_root_level)
+        for handler, level in original_handler_levels.items():
+            handler.setLevel(level)
+
     from Playersim.strategic_planner import MTGStrategicPlanner, MCTSNode  # noqa: F401
     sp_mro = {c.__name__ for c in MTGStrategicPlanner.__mro__}
     for expected in ("ArchetypeAnalysisMixin", "CardEvaluationMixin",

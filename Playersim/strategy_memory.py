@@ -6,6 +6,15 @@ import os
 import time
 import math
 
+
+def _card_stat(card, attribute):
+    """Return a finite numeric card characteristic for strategy features."""
+    try:
+        value = float(getattr(card, attribute, 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return value if math.isfinite(value) else 0.0
+
 class StrategyMemory:
     """Memory system to record successful action sequences and game patterns."""
     
@@ -504,25 +513,21 @@ class StrategyMemory:
                         'creature' in gs._safe_get_card(cid).card_types]
             
             # Calculate power and toughness
-            my_power = sum(gs._safe_get_card(cid).power 
-                        for cid in my_creatures 
-                        if gs._safe_get_card(cid) and 
-                        hasattr(gs._safe_get_card(cid), 'power'))
+            my_power = sum(
+                _card_stat(gs._safe_get_card(cid), 'power')
+                for cid in my_creatures if gs._safe_get_card(cid))
             
-            my_toughness = sum(gs._safe_get_card(cid).toughness 
-                            for cid in my_creatures 
-                            if gs._safe_get_card(cid) and 
-                            hasattr(gs._safe_get_card(cid), 'toughness'))
+            my_toughness = sum(
+                _card_stat(gs._safe_get_card(cid), 'toughness')
+                for cid in my_creatures if gs._safe_get_card(cid))
             
-            opp_power = sum(gs._safe_get_card(cid).power 
-                        for cid in opp_creatures 
-                        if gs._safe_get_card(cid) and 
-                        hasattr(gs._safe_get_card(cid), 'power'))
+            opp_power = sum(
+                _card_stat(gs._safe_get_card(cid), 'power')
+                for cid in opp_creatures if gs._safe_get_card(cid))
             
-            opp_toughness = sum(gs._safe_get_card(cid).toughness 
-                            for cid in opp_creatures 
-                            if gs._safe_get_card(cid) and 
-                            hasattr(gs._safe_get_card(cid), 'toughness'))
+            opp_toughness = sum(
+                _card_stat(gs._safe_get_card(cid), 'toughness')
+                for cid in opp_creatures if gs._safe_get_card(cid))
             
             # Advantage abstractions
             power_advantage_category = 0
@@ -640,18 +645,18 @@ class StrategyMemory:
                     have_combat_trick = True
                     
                 # Check for big threats
-                if ('creature' in getattr(card, 'card_types', []) and 
-                    hasattr(card, 'power') and card.power >= 4):
+                if ('creature' in getattr(card, 'card_types', []) and
+                        _card_stat(card, 'power') >= 4):
                     have_big_threat = True
             
             # Threat level on board
             threat_level = 0
             
             # Check if opponent has threatening creatures
-            threatening_creatures = sum(1 for cid in opp_creatures 
-                                    if gs._safe_get_card(cid) and 
-                                    hasattr(gs._safe_get_card(cid), 'power') and 
-                                    gs._safe_get_card(cid).power >= 3)
+            threatening_creatures = sum(
+                1 for cid in opp_creatures
+                if gs._safe_get_card(cid)
+                and _card_stat(gs._safe_get_card(cid), 'power') >= 3)
             
             if threatening_creatures >= 2:
                 threat_level = 2  # High threat
@@ -659,10 +664,9 @@ class StrategyMemory:
                 threat_level = 1  # Moderate threat
                 
             # Check if opponent can kill us soon
-            potential_damage = sum(gs._safe_get_card(cid).power 
-                                for cid in opp_creatures 
-                                if gs._safe_get_card(cid) and 
-                                hasattr(gs._safe_get_card(cid), 'power'))
+            potential_damage = sum(
+                _card_stat(gs._safe_get_card(cid), 'power')
+                for cid in opp_creatures if gs._safe_get_card(cid))
             
             if potential_damage >= me["life"]:
                 threat_level = 3  # Critical threat - lethal on board

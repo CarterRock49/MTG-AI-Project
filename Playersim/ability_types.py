@@ -429,6 +429,16 @@ class ActivatedAbility(Ability):
                 logging.debug(f"_parse_cost_effect_strict: Parsed Separator Cost='{cost_part}', Effect='{effect_part}'")
                 return cost_part, effect_part
             else:
+                # Named abilities can put an ability word before the actual
+                # activation (``Mental Organism -- Pay 3 life: ...``). The
+                # first dash is descriptive punctuation, not the cost/effect
+                # separator. Retry only a suffix that independently parses as
+                # a complete activated ability.
+                if ":" not in separator:
+                    named_cost, named_effect = (
+                        ActivatedAbility._parse_cost_effect_strict(effect_part))
+                    if named_cost is not None and named_effect is not None:
+                        return named_cost, named_effect
                 # A colon strongly signals a malformed activation. A dash is
                 # also ordinary ability-word punctuation (Valiant —, Eerie —)
                 # and should not flood every reset with warnings.
@@ -686,6 +696,10 @@ class ActivatedAbility(Ability):
     def can_pay_cost(self, game_state, controller, context=None):
         """Preflight every supported activation-cost component without mutation."""
         context = context or {}
+        timing_text = str(self.effect_text or "").lower()
+        if ("activate only during your turn" in timing_text
+                and game_state._get_active_player() is not controller):
+            return False
         cost_text = str(self.cost or "")
         cost_lower = cost_text.lower()
 
@@ -1336,7 +1350,13 @@ class TriggeredAbility(Ability):
         # Targeting belongs to the parsed instruction, not necessarily the
         # reconstructed full trigger text.  AbilityHandler uses this marker as
         # a defensive resolution contract after targets have been chosen.
-        self.requires_target = "target" in self.effect
+        # A reflexive ``When you do`` sentence is a distinct triggered
+        # ability.  Its target is chosen only after the prerequisite happens,
+        # not when the parent trigger is put on the stack (CR 603.12).
+        parent_effect = re.split(
+            r"\bwhen (?:you do|that player does)\b", self.effect,
+            maxsplit=1, flags=re.IGNORECASE)[0]
+        self.requires_target = "target" in parent_effect.lower()
 
         # Store original text if not provided
         if not effect_text:
@@ -1474,6 +1494,9 @@ class TriggeredAbility(Ability):
             "DAMAGED": [
                 r"when(ever)?\s+.*is dealt damage",
                 r"when(ever)?\s+a source deals damage to"
+            ],
+            "SAGA_CHAPTER": [
+                r"saga chapter \d+"
             ]
         }
         
@@ -1497,6 +1520,30 @@ class TriggeredAbility(Ability):
 
         # Check if our trigger condition matches any of the patterns
         if matches_any_pattern(self.trigger_condition, event_patterns):
+            if (event_type == "SAGA_CHAPTER"
+                    and int((context or {}).get("chapter", 0) or 0)
+                    != int(getattr(self, "saga_chapter", 0) or 0)):
+                return False
+            if event_type == "DEALS_DAMAGE":
+                context = context or {}
+                source_card_id = context.get("source_card_id", self.card_id)
+                event_card_id = context.get("event_card_id")
+                source_card = context.get("source_card")
+                source_name = str(
+                    getattr(source_card, "name", "") or "").lower()
+                short_name = source_name.split(",")[0].strip()
+                names_source = bool(
+                    re.search(r"\bthis\s+(?:creature|permanent)\b.*\bdeals\b",
+                              self.trigger_condition, re.IGNORECASE)
+                    or (short_name and re.search(
+                        rf"^\s*whenever\s+{re.escape(short_name)}\s+deals\b",
+                        self.trigger_condition, re.IGNORECASE)))
+                if names_source and source_card_id != event_card_id:
+                    return False
+                if ("combat damage to a player" in self.trigger_condition
+                        and (not context.get("to_player")
+                             or int(context.get("damage_amount", 0) or 0) <= 0)):
+                    return False
             if event_type == "DIES":
                 context = context or {}
                 controlled_creature = re.search(
@@ -1541,7 +1588,8 @@ class TriggeredAbility(Ability):
                 # ("When Beza enters" on Beza, the Bounding Spring).
                 short_name = re.escape(full_name.split(",")[0].strip())
                 self_entry = bool(
-                    re.search(r"\bthis\s+(?:creature|permanent|card)\b.*\benters\b",
+                    re.search(r"\bthis\s+(?:artifact|aura|battle|creature|"
+                              r"enchantment|land|permanent|card)\b.*\benters\b",
                               self.trigger_condition, re.IGNORECASE)
                     or (source_name and re.search(
                         rf"^\s*when(?:ever)?\s+{source_name}\s+enters\b",
@@ -1551,6 +1599,16 @@ class TriggeredAbility(Ability):
                         self.trigger_condition, re.IGNORECASE)))
                 if self_entry and source_card_id != event_card_id:
                     return False
+                if "a land you control enters" in self.trigger_condition:
+                    event_card = context.get("event_card")
+                    event_types = {
+                        str(card_type).lower() for card_type in getattr(
+                            event_card, "card_types", [])}
+                    if ("land" not in event_types
+                            or context.get(
+                                "event_controller", context.get("controller"))
+                            is not context.get("controller")):
+                        return False
                 if "an enchantment you control enters" in self.trigger_condition:
                     event_types = {str(t).lower() for t in getattr(context.get('event_card'), 'card_types', [])}
                     if ('enchantment' not in event_types
@@ -1609,7 +1667,10 @@ class TriggeredAbility(Ability):
                 if not isinstance(target, int) or context.get('game_state').get_card_controller(target) is not context.get('controller'):
                     return False
                 cast_card = context.get('game_state')._safe_get_card(context.get('cast_card_id'))
-                if not cast_card or not ({'instant', 'sorcery'} & {str(t).lower() for t in getattr(cast_card, 'card_types', [])}):
+                cast_types = {
+                    str(card_type).lower() for card_type in context.get(
+                        'cast_card_types', getattr(cast_card, 'card_types', []))}
+                if not cast_card or not ({'instant', 'sorcery'} & cast_types):
                     return False
             if event_type == "CAST_SPELL":
                 context = context or {}
@@ -1629,6 +1690,16 @@ class TriggeredAbility(Ability):
                         if isinstance(entry, tuple) and len(entry) > 1
                         and entry[1] is trigger_controller)
                     if cast_count != 2:
+                        return False
+                if "instant or sorcery spell" in self.trigger_condition:
+                    game_state = context.get("game_state")
+                    cast_card = (game_state._safe_get_card(
+                        context.get("cast_card_id")) if game_state else None)
+                    cast_types = {
+                        str(card_type).lower() for card_type in context.get(
+                            "cast_card_types", getattr(
+                                cast_card, "card_types", []))}
+                    if not cast_types.intersection({"instant", "sorcery"}):
                         return False
                 mana_value_match = re.search(
                     r"spell with mana value (\d+) or greater",
@@ -1888,6 +1959,47 @@ class TriggeredAbility(Ability):
                 'suspected_permanents', set())
         if normalized_condition in {"if it was a creature", "it was a creature"}:
             return bool(last_known.get("was_creature", False))
+        if normalized_condition in {"if you cast it", "you cast it"}:
+            controller_id = "p1" if controller is gs.p1 else "p2"
+            return bool(
+                context.get("was_cast")
+                and context.get("cast_controller_id") == controller_id)
+        if normalized_condition in {"if it was cast", "it was cast"}:
+            # Unlike "if you cast it", this wording asks only whether the
+            # entering object came from a completed cast transaction.  The
+            # stack captures that provenance before the permanent moves, so a
+            # card put directly onto the battlefield does not qualify.
+            return bool(context.get("was_cast"))
+
+        source_counter_match = re.fullmatch(
+            r"if it has (\w+|\d+) or more ([\w+/-]+) counters? on it",
+            normalized_condition, re.IGNORECASE)
+        if source_counter_match:
+            threshold = text_to_number(source_counter_match.group(1))
+            if not isinstance(threshold, int):
+                threshold = int(source_counter_match.group(1))
+            source = gs._safe_get_card(self.card_id)
+            return bool(source and int(getattr(
+                source, 'counters', {}).get(
+                    source_counter_match.group(2).lower(), 0) or 0)
+                >= threshold)
+
+        mana_spent_match = re.fullmatch(
+            r"if\s+((?:\{[wubrgc]\})+)\s+was spent to cast it",
+            normalized_condition, re.IGNORECASE)
+        if mana_spent_match:
+            required = {}
+            for symbol in re.findall(r"\{([wubrgc])\}",
+                                     mana_spent_match.group(1),
+                                     re.IGNORECASE):
+                symbol = symbol.upper()
+                required[symbol] = required.get(symbol, 0) + 1
+            details = context.get("final_paid_details", {})
+            spent = (details.get("spent_specific", {})
+                     if isinstance(details, dict) else {})
+            return all(
+                int(spent.get(symbol, 0) or 0) >= count
+                for symbol, count in required.items())
 
         toughness_match = re.search(
             r"if its toughness is (\d+) or (less|greater)",
@@ -2083,6 +2195,59 @@ class TriggeredAbility(Ability):
             return False  # Fizzle convention: resolves, does nothing
         return super()._resolve_ability_implementation(
             game_state, controller, targets, resolution_context=context)
+
+
+class BoundExileTriggeredAbility(TriggeredAbility):
+    """A reflexive trigger that exiles one previously chosen zone object.
+
+    ``that card`` in Mind Swap is not a target.  Binding the physical card at
+    creation time preserves that distinction and lets the trigger resolve as
+    a no-op if the card has left its expected zone in response.
+    """
+
+    def __init__(self, source_id, bound_card_id, bound_zone="graveyard",
+                 bound_zone_generation=None, bound_owner_id=None):
+        super().__init__(
+            source_id,
+            trigger_condition="when you do",
+            effect="exile that card",
+            effect_text="When you do, exile that card.")
+        self.bound_card_id = bound_card_id
+        self.bound_zone = str(bound_zone or "graveyard").lower()
+        self.bound_zone_generation = bound_zone_generation
+        self.bound_owner_id = bound_owner_id
+        self.requires_target = False
+        self._is_reflexive_trigger = True
+
+    def resolve_with_targets(self, game_state, controller, targets=None,
+                             context=None):
+        bound_card = game_state._safe_get_card(self.bound_card_id)
+        current_generation = getattr(
+            bound_card, "_zone_change_generation", None)
+        if (self.bound_zone_generation is not None
+                and current_generation != self.bound_zone_generation):
+            logging.debug(
+                "Bound exile resolved after %s changed zones.",
+                self.bound_card_id)
+            return True
+        if self.bound_owner_id == "p1":
+            owner = game_state.p1
+        elif self.bound_owner_id == "p2":
+            owner = game_state.p2
+        else:
+            owner = next(
+                (player for player in (game_state.p1, game_state.p2)
+                 if self.bound_card_id in player.get(self.bound_zone, [])),
+                None)
+        if (owner is None
+                or self.bound_card_id not in owner.get(self.bound_zone, [])):
+            logging.debug(
+                "Bound exile resolved with %s no longer in %s.",
+                self.bound_card_id, self.bound_zone)
+            return True
+        return bool(game_state.move_card(
+            self.bound_card_id, owner, self.bound_zone, owner, "exile",
+            cause="reflexive_exile", context={"source_id": self.card_id}))
 
 
 class StaticAbility(Ability):
@@ -2397,6 +2562,16 @@ class StaticAbility(Ability):
              elif "number of creatures you control" in effect_lower: cda_type = 'creature_count_self'
              elif ("power is equal to the number of lands you control"
                    in effect_lower): cda_type = 'land_count_power_self'
+             else:
+                 subtype_count = re.search(
+                     r"\bpower is equal to the number of\s+"
+                     r"([a-z][\w'-]*)\s+you control\b",
+                     effect_lower)
+                 if subtype_count:
+                     cda_type = {
+                         'kind': 'subtype_count_power_self',
+                         'subtype': subtype_count.group(1).lower(),
+                     }
              # Add more common CDA types
              logging.debug(f"Registering Layer 7a CDA effect: {cda_type}")
              return {'sublayer': 'a', 'effect_type': 'set_pt_cda', 'effect_value': cda_type} # Pass CDA type identifier
@@ -2765,6 +2940,16 @@ class StaticAbility(Ability):
         me = controller
         opp = game_state.p2 if me == game_state.p1 else game_state.p1
 
+        # The controlled objects named inside a characteristic-defining
+        # ability are the things being counted, not the things being modified.
+        # For example, "Namor's power is equal to the number of Merfolk you
+        # control" affects Namor alone; the generic "you control" scope below
+        # must not turn every controlled permanent into a variable-power object.
+        if re.search(
+                r"(?:power and toughness are each equal to|"
+                r"power is equal to|toughness is equal to)", effect_lower):
+            return [self.card_id]
+
         # Common scopes using regex for more flexibility
         scopes = {
             r"\bnonbasic lands?\b": (None, "nonbasic_land"),
@@ -3007,6 +3192,24 @@ class AbilityEffect:
             game_state.priority_pass_count = 0
             return True
 
+        # An explicit empty target set is not interchangeable with a target
+        # that became illegal during resolution.  Direct effect callers must
+        # either provide a mandatory target or carry the validation snapshot
+        # produced by GameStateStackMixin._validate_targets_on_resolution.
+        # Optional ``up to`` instructions remain legal with zero selections.
+        if (self.requires_target and targets_were_supplied
+                and not self._contains_target_id(effective_targets)
+                and not self._allows_empty_target_set(self.resolution_context)):
+            source = game_state._safe_get_card(source_id)
+            source_name = getattr(source, "name", source_id)
+            logging.warning(
+                "Mandatory targeted effect %s from %s (%s) received an empty "
+                "target set without a validated post-commit invalidation "
+                "context: %s",
+                type(self).__name__, source_name, source_id,
+                self.effect_text)
+            return False
+
         # Call the implementation-specific effect application
         try:
             result = self._apply_effect(game_state, source_id, controller, effective_targets) # Pass resolved targets
@@ -3030,6 +3233,72 @@ class AbilityEffect:
                                         f"crash in effect '{self.effect_text[:60]}': {type(e).__name__}: {e}",
                                         "crash")
              return False
+
+    @staticmethod
+    def _contains_target_id(targets):
+        """Whether a target payload contains an actual object/player id."""
+        if not isinstance(targets, dict):
+            return bool(targets)
+        for key, value in targets.items():
+            if key == "X":
+                continue
+            if isinstance(value, (list, tuple, set)):
+                if any(target_id is not None for target_id in value):
+                    return True
+            elif value is not None:
+                return True
+        return False
+
+    def _allows_empty_target_set(self, context):
+        """Recognize optional zero targets or a proven resolution fizzle."""
+        context = context if isinstance(context, dict) else {}
+        if bool(getattr(self, "optional", False)):
+            return True
+        min_targets = getattr(self, "min_targets", None)
+        if min_targets is not None and int(min_targets) == 0:
+            return True
+
+        # Simple targeted stack objects retain their announced lower bound.
+        if ("min_targets" in context
+                and int(context.get("min_targets", 1) or 0) == 0):
+            return True
+
+        slots = (context.get("spree_target_slots")
+                 if context.get("is_spree") else
+                 context.get("instruction_target_slots")) or []
+        slot_kind = ("mode_index" if hasattr(self, "_spree_mode_index")
+                     else "instruction_index")
+        effect_slot = (getattr(self, "_spree_mode_index", None)
+                       if slot_kind == "mode_index" else
+                       getattr(self, "_instruction_index", None))
+        matching_slots = [
+            slot for slot in slots
+            if effect_slot is not None and slot.get(slot_kind) == effect_slot]
+        if not matching_slots and effect_slot is None and len(slots) == 1:
+            matching_slots = list(slots)
+        if matching_slots and all(
+                int(slot.get("min_targets", 0)) == 0
+                for slot in matching_slots):
+            return True
+
+        lifecycle = context.get("_target_resolution_lifecycle", {})
+        if not isinstance(lifecycle, dict) or not lifecycle.get("validated"):
+            return False
+        lifecycle_slots = lifecycle.get("slots", []) or []
+        matching_lifecycle = [
+            slot for slot in lifecycle_slots
+            if effect_slot is not None and slot.get(slot_kind) == effect_slot]
+        if (not matching_lifecycle and effect_slot is None
+                and len(lifecycle_slots) == 1):
+            matching_lifecycle = list(lifecycle_slots)
+        if matching_lifecycle:
+            return all(
+                int(slot.get("original_target_count", 0)) > 0
+                and int(slot.get("legal_target_count", 0)) == 0
+                for slot in matching_lifecycle)
+        return (
+            int(lifecycle.get("original_target_count", 0)) > 0
+            and int(lifecycle.get("legal_target_count", 0)) == 0)
 
     @staticmethod
     def _report_support_issue(game_state, source_id, reason, severity):
@@ -3166,23 +3435,21 @@ class DrawCardEffect(AbilityEffect):
         for p in target_players:
             num_drawn = 0
             success_player = True
-            # Use effective_count
-            for _ in range(effective_count):
-                if hasattr(game_state, '_draw_card'):
+            if hasattr(game_state, '_draw_cards'):
+                num_drawn = len(game_state._draw_cards(p, effective_count))
+                # Decking is a rules-defined result, not an engine failure.
+                # A replacement such as Dredge may also produce zero actual
+                # draws while legally consuming the instruction.
+            elif hasattr(game_state, '_draw_card'):
+                for _ in range(effective_count):
                     drawn_card_id = game_state._draw_card(p)
                     if drawn_card_id is not None:
                         # Numeric card ID 0 is a valid card, not a failed draw.
                         num_drawn += 1
                     elif p.get("attempted_draw_from_empty", False):
-                        # The draw instruction completed with the normal
-                        # rules-defined decking loss.  Stop this batch without
-                        # labeling the resolving effect as an engine failure.
                         break
-                    else:
-                        # A replacement such as Dredge can consume a draw and
-                        # intentionally return no drawn card.
-                        continue
-                else: # Fallback
+            else: # Fallback
+                for _ in range(effective_count):
                     if p["library"]: p["hand"].append(p["library"].pop(0)); num_drawn += 1
                     else: p["attempted_draw_from_empty"] = True; success_player = False; break
             logging.debug(f"DrawCardEffect: Player {p['name']} drew {num_drawn} card(s).")
@@ -3589,8 +3856,11 @@ class DamageEffect(AbilityEffect):
         # --- Target Collection Logic (remains the same) ---
         if self.requires_target:
             if not targets or not any(v for v in targets.values()):
-                 logging.warning(f"DamageEffect requires targets, but none found in dict: {targets}")
-                 return False
+                 # Cast/activation legality owns the mandatory-target check.
+                 # At resolution an explicit empty set means every committed
+                 # target became illegal (or an up-to-N instruction chose
+                 # zero), both of which are successful rules no-ops.
+                 return True
             relevant_categories = set()
             if self.target_type == "any target": relevant_categories = {"creatures", "players", "planeswalkers", "battles"}
             elif self.target_type == "creature": relevant_categories = {"creatures"}
@@ -3612,13 +3882,32 @@ class DamageEffect(AbilityEffect):
              opponent = game_state.p2 if controller == game_state.p1 else game_state.p1
              opp_id = "p2" if opponent == game_state.p2 else "p1"
              targets_to_damage.append(opp_id)
+        elif "each creature your opponents control" in self.target_type:
+             opponent = game_state.p2 if controller == game_state.p1 else game_state.p1
+             targets_to_damage.extend(
+                 card_id for card_id in opponent.get("battlefield", [])
+                 if game_state._is_creature(card_id))
+        elif "each creature you control" in self.target_type:
+             targets_to_damage.extend(
+                 card_id for card_id in controller.get("battlefield", [])
+                 if game_state._is_creature(card_id))
         elif "each creature" in self.target_type:
              targets_to_damage.extend(game_state.get_all_creatures()) # Assumes GS helper exists
         elif "each player" in self.target_type:
              targets_to_damage.extend(["p1", "p2"])
 
         if not targets_to_damage:
-             logging.warning(f"DamageEffect: No valid targets collected for '{self.effect_text}'. Provided: {targets}")
+             # A nontargeted instruction such as "deal 3 damage to each
+             # creature" legally does nothing when its affected set is empty.
+             # It still resolved successfully and should not poison training
+             # diagnostics as an engine failure.
+             if not self.requires_target:
+                 return True
+             source = game_state._safe_get_card(source_id)
+             source_name = getattr(source, 'name', source_id)
+             logging.warning(
+                 f"DamageEffect from {source_name}: No valid targets "
+                 f"collected for '{self.effect_text}'. Provided: {targets}")
              return False
 
         # --- Damage Application Logic (uses effective_amount, otherwise remains the same) ---
@@ -3883,8 +4172,12 @@ class DamageWithExileReplacementEffect(AbilityEffect):
 class AddCountersEffect(AbilityEffect):
     """Effect that adds counters to permanents or players."""
     def __init__(self, counter_type, count=1, target_type="creature", condition=None):
-        count_str = "X" if count == 'x' else str(count) # Represent X in description
-        super().__init__(f"Put {count_str} {counter_type} counter(s) on target {target_type}", condition)
+        count_str = ("X" if count == 'x' else "its power"
+                     if count == "source_power" else str(count))
+        target_prefix = "target " if "target" in str(target_type).lower() else ""
+        super().__init__(
+            f"Put {count_str} {counter_type} counter(s) on "
+            f"{target_prefix}{target_type}", condition)
         self.counter_type = counter_type.replace('_','/') # Allow P/T format storage
         # Store original count which might be 'x' or a number
         self.base_count = count
@@ -3898,6 +4191,10 @@ class AddCountersEffect(AbilityEffect):
         if self.base_count == 'x' and has_chosen_x:
             effective_count = x_value
             logging.debug(f"AddCountersEffect: Using X={x_value} for counter count.")
+        elif self.base_count == "source_power":
+            source = game_state._safe_get_card(source_id)
+            effective_count = max(
+                0, safe_int(getattr(source, "power", 0), 0) or 0)
         else:
             effective_count = text_to_number(self.base_count) # Use original base count
         # --- End X Cost Handling ---
@@ -3925,6 +4222,20 @@ class AddCountersEffect(AbilityEffect):
                  if cat in relevant_categories:
                      targets_to_affect.extend(id_list)
         elif "self" == self.target_type: targets_to_affect.append(source_id)
+        elif self.target_type in {
+                "each creature you control",
+                "each tapped creature you control"}:
+            tapped_only = "tapped" in self.target_type
+            targets_to_affect.extend(
+                card_id for card_id in controller.get("battlefield", [])
+                if game_state._is_creature(card_id)
+                and (not tapped_only
+                     or card_id in controller.get("tapped_permanents", set())))
+        elif "each creature your opponents control" == self.target_type:
+            opponent = game_state.p2 if controller == game_state.p1 else game_state.p1
+            targets_to_affect.extend(
+                card_id for card_id in opponent.get("battlefield", [])
+                if game_state._is_creature(card_id))
         elif "each creature" == self.target_type: targets_to_affect.extend(game_state.get_all_creatures())
         elif "each opponent" == self.target_type:
             opponent = game_state.p2 if controller == game_state.p1 else game_state.p1
@@ -3932,6 +4243,10 @@ class AddCountersEffect(AbilityEffect):
             targets_to_affect.append(opp_id)
 
         if not targets_to_affect:
+            # Nontargeted aggregate instructions legally resolve when their
+            # affected set is empty. Mandatory targeted effects still fail.
+            if not self.requires_target:
+                return True
             logging.warning(f"AddCountersEffect: No valid targets collected for '{self.effect_text}'. Targets: {targets}")
             return False
 
@@ -3967,6 +4282,51 @@ class AddCountersEffect(AbilityEffect):
                       success_count += 1
 
         return success_count > 0
+
+
+class RemoveCounterEffect(AbilityEffect):
+    """Remove a counter from the source, exposing type and decline choices."""
+
+    def __init__(self, counter_type=None, count=1, optional=False,
+                 condition=None):
+        self.counter_type = (
+            str(counter_type).lower() if counter_type else None)
+        self.count = max(1, int(count))
+        self.optional = bool(optional)
+        counter_text = self.counter_type or "a counter"
+        super().__init__(
+            f"{'You may remove' if optional else 'Remove'} "
+            f"{counter_text} from this permanent", condition)
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        source = game_state._safe_get_card(source_id)
+        counters = getattr(source, "counters", {}) if source else {}
+        options = [
+            counter_type for counter_type, amount in sorted(counters.items())
+            if int(amount or 0) >= self.count]
+        if self.counter_type:
+            options = [
+                counter_type for counter_type in options
+                if str(counter_type).lower() == self.counter_type]
+        if not options:
+            return True if self.optional else False
+        game_state.choice_context = {
+            "type": "resolution_choice",
+            "choice_kind": "remove_counter",
+            "player": controller,
+            "controller": controller,
+            "source_id": source_id,
+            "options": options,
+            "counter_count": self.count,
+            "optional": self.optional,
+            "resume_phase": game_state.phase,
+            "choice_page": 0,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = controller
+        game_state.priority_pass_count = 0
+        return True
 
 
 class CreateTokenEffect(AbilityEffect):
@@ -4668,11 +5028,12 @@ class GoadEffect(AbilityEffect):
 class ExploreEffect(AbilityEffect):
     """Have the selected creature explore, deferring its nonland choice."""
 
-    def __init__(self, count=1, condition=None):
-        super().__init__("Target creature you control explores", condition)
+    def __init__(self, count=1, condition=None, targeted=False):
+        subject = "Target creature you control" if targeted else "This creature"
+        super().__init__(f"{subject} explores", condition)
         self.count = (max(1, int(count)) if str(count).isdigit()
                       else str(count).lower())
-        self.requires_target = True
+        self.requires_target = bool(targeted)
 
     def _resolve_count(self, targets):
         if isinstance(self.count, int):
@@ -4759,6 +5120,43 @@ class EndureEffect(AbilityEffect):
         return True
 
 
+class PrepareFromGraveyardEffect(AbilityEffect):
+    """Optionally exile an exact number of cards to prepare the source."""
+
+    def __init__(self, count=8, condition=None):
+        self.count = max(1, int(count))
+        super().__init__(
+            f"You may exile {self.count} cards from your graveyard. "
+            "If you do, this creature becomes prepared.", condition)
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        source_controller, source_zone = game_state.find_card_location(
+            source_id)
+        # A permanent cannot become prepared while it is already prepared.
+        if (source_controller is not controller
+                or source_zone != "battlefield"
+                or source_id in game_state.prepared_cards):
+            return True
+        options = list(controller.get("graveyard", []))
+        if len(options) < self.count:
+            return True
+        source = game_state._safe_get_card(source_id)
+        game_state.choice_context = {
+            "type": "prepared_payment", "player": controller,
+            "controller": controller, "source_id": source_id,
+            "source_generation": getattr(
+                source, "_zone_change_generation", 0),
+            "required_count": self.count, "options": options,
+            "selected_cards": [], "choice_page": 0,
+            "optional": True, "resume_phase": game_state.PHASE_PRIORITY,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = controller
+        game_state.priority_pass_count = 0
+        return True
+
+
 class OptionalManaThenEffect(AbilityEffect):
     """Expose 'you may pay {cost}; if you do, ...' during resolution."""
 
@@ -4792,6 +5190,52 @@ class OptionalManaThenEffect(AbilityEffect):
         }
         game_state.phase = game_state.PHASE_CHOOSE
         game_state.priority_player = controller
+        return True
+
+
+class OptionalDiscardThenEffect(AbilityEffect):
+    """Expose ``you may discard a card; if you do, ...`` as one choice.
+
+    The selected hand object is both the accept decision and the discard
+    selection.  Keeping the follow-up inside the same effect prevents generic
+    clause splitting from drawing unconditionally when the discard is
+    declined or cannot be performed.
+    """
+
+    def __init__(self, followup_text, condition=None):
+        self.followup_text = str(followup_text or '').strip()
+        super().__init__(
+            f"You may discard a card. If you do, {self.followup_text}",
+            condition)
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        options = list(controller.get('hand', []))
+        if not options:
+            return True
+        # Resolution contexts commonly retain the live Card object used by
+        # mana payment.  Cards own locks and other engine state that cannot be
+        # deep-copied into a choice continuation.  Use the stack's established
+        # declarative copier, which omits runtime objects and preserves each
+        # serializable rule field independently.
+        resolution_context = game_state._copy_stack_context(
+            getattr(self, 'resolution_context', {}) or {})
+        game_state.choice_context = {
+            'type': 'resolution_choice',
+            'choice_kind': 'optional_discard_then',
+            'player': controller,
+            'options': options,
+            'optional': True,
+            'source_id': source_id,
+            'followup_text': self.followup_text,
+            'targets': copy.deepcopy(targets),
+            'resolution_context': resolution_context,
+            'resume_phase': game_state.PHASE_PRIORITY,
+            'choice_page': 0,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = controller
+        game_state.priority_pass_count = 0
         return True
 
 
@@ -4990,12 +5434,15 @@ class CreateRoleEffect(AbilityEffect):
 class ReturnToHandEffect(AbilityEffect):
     """Effect that returns cards to their owner's hand."""
     def __init__(self, target_type="permanent", zone="battlefield", condition=None,
-                 scope="target", min_targets=1, max_targets=1):
+                 scope="target", min_targets=1, max_targets=1,
+                 excluded_subtypes=None):
         target_type_str = str(target_type).lower() if target_type is not None else "permanent"
         zone_str = str(zone).lower() if zone is not None else "battlefield"
         # scope: 'target' | 'all' (all matching permanents) | 'all_yours'
         # (all you control). July 2026 parser expansion for mass bounce.
         self.scope = scope
+        self.excluded_subtypes = {
+            str(subtype).lower() for subtype in (excluded_subtypes or set())}
         self.min_targets = int(min_targets)
         self.max_targets = int(max_targets)
         if scope == "target" and self.min_targets == 0:
@@ -5012,6 +5459,7 @@ class ReturnToHandEffect(AbilityEffect):
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         returned_count = 0
+        resolved_noop = False
         target_ids_to_process = []
 
         # --- Target Collection (Improved) ---
@@ -5020,6 +5468,10 @@ class ReturnToHandEffect(AbilityEffect):
         elif "artifact" == self.target_type: relevant_categories.add("artifacts")
         # ... add other specific types ...
         elif "permanent" == self.target_type: relevant_categories.update(["permanents", "creatures", "artifacts", "enchantments", "planeswalkers", "lands", "battles"])
+        elif "spell or permanent" == self.target_type:
+            relevant_categories.update([
+                "spells", "permanents", "creatures", "artifacts",
+                "enchantments", "planeswalkers", "lands", "battles"])
         elif "card" == self.target_type: relevant_categories.add("cards") # Assumes target dict might have 'cards' key for GY/Exile targets
         else: relevant_categories.add(self.target_type + "s") # Pluralize fallback
 
@@ -5030,23 +5482,53 @@ class ReturnToHandEffect(AbilityEffect):
                 if not p: continue
                 for cid in list(p.get("battlefield", [])):
                     card = game_state._safe_get_card(cid)
+                    card_subtypes = {
+                        str(subtype).lower() for subtype in getattr(
+                            card, 'subtypes', [])} if card else set()
+                    if self.excluded_subtypes.intersection(card_subtypes):
+                        continue
                     if self.target_type in ("permanent",) or (card and self.target_type in [t.lower() for t in getattr(card, 'card_types', [])]):
                         target_ids_to_process.append(cid)
         elif self.requires_target:
             if not targets or not any(v for v in targets.values()):
-                if self.min_targets == 0:
-                    return True
-                logging.warning(f"ReturnToHandEffect requires targets, none provided/resolved: {targets}")
-                return False
+                return True
             for category in relevant_categories:
                  target_ids_to_process.extend(targets.get(category, []))
 
         if not target_ids_to_process:
-             logging.warning(f"ReturnToHandEffect: No valid target IDs collected for '{self.effect_text}'. Targets: {targets}")
-             return False
+             # Empty mass sets and targets filtered out by resolution
+             # validation both resolve without moving anything.
+             return True
 
+        spell_target_ids = set((targets or {}).get("spells", []))
         # Process unique targets
         for target_id in set(target_ids_to_process):
+            if target_id in spell_target_ids:
+                stack_match = next((
+                    (index, item)
+                    for index, item in enumerate(game_state.stack)
+                    if isinstance(item, tuple) and len(item) >= 4
+                    and item[0] == "SPELL" and item[1] == target_id), None)
+                if not stack_match:
+                    logging.warning(
+                        f"ReturnToHandEffect: Target spell {target_id} "
+                        "was not found on the stack.")
+                    continue
+                stack_index, stack_item = stack_match
+                _, spell_id, spell_controller, spell_context = stack_item
+                game_state.stack.pop(stack_index)
+                game_state.last_stack_size = len(game_state.stack)
+                if spell_context.get("is_copy", False):
+                    returned_count += 1
+                    continue
+                owner = (game_state._find_card_owner_fallback(spell_id)
+                         or spell_controller)
+                if game_state.move_card(
+                        spell_id, spell_controller, "stack_implicit", owner,
+                        "hand", cause="return_to_hand",
+                        context={"source_id": source_id}):
+                    returned_count += 1
+                continue
             # A repeated deck ID can have one physical occurrence in a
             # graveyard and another on the battlefield.  For an effect whose
             # declared source zone is the battlefield, resolve the targeted
@@ -5059,7 +5541,14 @@ class ReturnToHandEffect(AbilityEffect):
             else:
                 location_info = game_state.find_card_location(target_id)
             if not location_info:
-                 logging.warning(f"ReturnToHandEffect: Could not find location for target {target_id}.")
+                 # A previously legal object can leave its expected zone
+                 # before a later instruction reaches it.  The instruction
+                 # then does nothing; that is a successful rules no-op, not a
+                 # runtime warning or an effect-sequence failure.
+                 logging.debug(
+                     f"ReturnToHandEffect: Target {target_id} already left "
+                     f"the expected zone.")
+                 resolved_noop = True
                  continue
 
             target_owner, current_zone = location_info
@@ -5074,9 +5563,13 @@ class ReturnToHandEffect(AbilityEffect):
                  returned_count += 1
                  # Logging handled within move_card
             else:
-                 logging.warning(f"ReturnToHandEffect: Failed to move {target_id} to hand from {current_zone}.")
+                 source = game_state._safe_get_card(source_id)
+                 source_name = getattr(source, 'name', source_id)
+                 logging.warning(
+                     f"ReturnToHandEffect from {source_name}: Failed to "
+                     f"move {target_id} to hand from {current_zone}.")
 
-        return returned_count > 0
+        return returned_count > 0 or resolved_noop
 
 
 class ReturnThenAddCounterEffect(AbilityEffect):
@@ -5092,6 +5585,8 @@ class ReturnThenAddCounterEffect(AbilityEffect):
         self.counter_type = str(counter_type or "+1/+1")
         self.count = max(1, int(count))
         super().__init__(effect_text, condition)
+        self.min_targets = 0
+        self.max_targets = 1
         self.requires_target = True
 
     def _apply_effect(self, game_state, source_id, controller, targets):
@@ -5138,10 +5633,10 @@ class CounterSpellEffect(AbilityEffect):
     def _apply_effect(self, game_state, source_id, controller, targets):
         target_ids = targets.get("spells", []) # Expect targets in 'spells' list
         if not target_ids:
-            logging.warning(f"CounterSpellEffect failed: No spell target provided in targets {targets}")
-            return False
+            return True
 
         countered_count = 0
+        target_left_stack = False
         # Typically counters one target, but handle list in case of "Counter up to two..."
         for target_id in target_ids:
             # Find the spell on the stack
@@ -5154,7 +5649,10 @@ class CounterSpellEffect(AbilityEffect):
                       break
 
             if not target_item:
-                logging.warning(f"CounterSpellEffect: Target spell {target_id} not found on stack.")
+                logging.debug(
+                    "CounterSpellEffect: target spell %s already left the "
+                    "stack before resolution.", target_id)
+                target_left_stack = True
                 continue # Try next target if any
 
             spell_type, spell_id, spell_caster, spell_context = target_item
@@ -5189,7 +5687,10 @@ class CounterSpellEffect(AbilityEffect):
             break # Default: Counter first valid target
 
         # Check SBAs? Unlikely needed here, main loop handles post-resolution checks.
-        return countered_count > 0
+        # A target leaving the stack is a successful rules no-op. Preserve
+        # the historical False result when a present target cannot actually
+        # be countered (for example Cavern of Souls).
+        return countered_count > 0 or target_left_stack
 
 class DiscardEffect(AbilityEffect):
     """Effect that causes players to discard cards."""
@@ -6361,6 +6862,50 @@ class CreateTokenCopyOfTargetEffect(AbilityEffect):
             return False
         return game_state.create_token_copy(target, controller) is not None
 
+
+class CreateTokenCopyOfSourceEffect(AbilityEffect):
+    """Create a token from the source permanent's copyable values."""
+
+    def __init__(self, condition=None):
+        super().__init__(
+            "Create a token that's a copy of this creature", condition)
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        source = game_state._safe_get_card(source_id)
+        if (not source
+                or source_id not in controller.get("battlefield", [])
+                or "creature" not in getattr(source, "card_types", [])):
+            return False
+        return game_state.create_token_copy(source, controller) is not None
+
+
+class ManaSpentConditionalEffect(AbilityEffect):
+    """Apply a nested effect only when a spell used enough actual mana."""
+
+    def __init__(self, minimum, nested_effect, condition=None):
+        self.minimum = max(0, int(minimum))
+        self.nested_effect = nested_effect
+        super().__init__(
+            f"If {self.minimum} or more mana was spent, "
+            f"{nested_effect.effect_text}", condition)
+        self.requires_target = bool(
+            getattr(nested_effect, "requires_target", False))
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        details = (getattr(self, "resolution_context", {}) or {}).get(
+            "final_paid_details", {})
+        spent = (details.get("spent_specific", {})
+                 if isinstance(details, dict) else {})
+        total = 0
+        for amount in spent.values() if isinstance(spent, dict) else ():
+            total += max(0, safe_int(amount, 0) or 0)
+        if total < self.minimum:
+            return True
+        return self.nested_effect.apply(
+            game_state, source_id, controller, targets,
+            context=getattr(self, "resolution_context", {}))
+
 class MeldEffect(AbilityEffect):
     """Exile a named meld pair and return the combined result."""
     def __init__(self, result_name=None, condition=None):
@@ -6449,29 +6994,63 @@ class SetDayNightEffect(AbilityEffect):
         return True
 
 class FightEffect(AbilityEffect):
-    def __init__(self, target_type="creature", condition=None):
+    def __init__(self, target_type="creature", condition=None,
+                 fighter="source", optional=False):
         # Ensure effect text correctly reflects the source fighting the target
-        super().__init__(f"This creature fights target {target_type}", condition)
+        description = (
+            "Target creature you control fights target creature you don't control"
+            if fighter == "target_pair"
+            else f"This creature fights target {target_type}")
+        super().__init__(description, condition)
         self.target_type = target_type # Usually creature
+        self.fighter = fighter
+        self.optional = bool(optional)
         self.requires_target = True
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         fighter1_id = source_id # The source of the fight effect
+        if self.fighter == "enchanted_creature":
+            fighter1_id = controller.get("attachments", {}).get(source_id)
         fighter2_id = None
 
-        # Expect target in creature list (most common) or permanents list
-        target_candidates = targets.get("creatures", []) + targets.get("permanents", [])
-        if target_candidates:
+        if self.fighter == "target_pair":
+            role_targets = {}
+            context = getattr(self, "resolution_context", {}) or {}
+            slots = list(context.get("instruction_target_slots", []) or [])
+            targets_by_slot = list(context.get("targets_by_slot", []) or [])
+            for slot_index, slot in enumerate(slots):
+                role = slot.get("target_role")
+                selected = (list(targets_by_slot[slot_index] or [])
+                            if slot_index < len(targets_by_slot) else [])
+                if role and selected:
+                    role_targets[role] = selected[0]
+            fighter1_id = role_targets.get("fighter")
+            fighter2_id = role_targets.get("fight_opponent")
+            if fighter1_id is None or fighter2_id is None:
+                # Direct EffectFactory callers can still supply the two
+                # targets in Oracle order without a casting context.
+                ordered = list(targets.get("creatures", [])) + list(
+                    targets.get("permanents", []))
+                if len(ordered) >= 2:
+                    fighter1_id, fighter2_id = ordered[:2]
+            # A fight cannot occur after either one of its two targets becomes
+            # illegal. The spell itself may still resolve when the other
+            # target remains legal (CR 608.2b), so this is a successful no-op.
+            if fighter1_id is None or fighter2_id is None:
+                return True
+
+        # Source/enchanted-creature fights use the ordinary target payload.
+        if self.fighter != "target_pair":
+            target_candidates = (targets.get("creatures", [])
+                                 + targets.get("permanents", []))
+            if not target_candidates:
+                return True
             # Filter out the source if it was accidentally targeted
             possible_targets = [tid for tid in target_candidates if tid != fighter1_id]
             if possible_targets:
                 fighter2_id = possible_targets[0] # Assume first valid target
             else:
-                 logging.warning(f"FightEffect from {fighter1_id}: No valid target provided other than self. Targets: {targets}")
-                 return False
-        else:
-             logging.warning(f"FightEffect from {fighter1_id}: No target creature/permanent provided. Targets: {targets}")
-             return False
+                return True
 
         fighter1 = game_state._safe_get_card(fighter1_id)
         fighter2 = game_state._safe_get_card(fighter2_id)
@@ -6861,9 +7440,14 @@ class RevealHandEffect(AbilityEffect):
 
 class HandSelectionEffect(AbilityEffect):
     """Expose a target hand's legal cards to the choosing policy."""
-    def __init__(self, noncreature_nonland=False, optional=False, rummage=False):
+    def __init__(self, noncreature_nonland=False, optional=False, rummage=False,
+                 excluded_types=None):
         super().__init__("Choose a card from target player's hand")
         self.noncreature_nonland = noncreature_nonland
+        self.excluded_types = {
+            str(card_type).lower() for card_type in (excluded_types or ())}
+        if noncreature_nonland:
+            self.excluded_types.update({"creature", "land"})
         self.optional = optional
         self.rummage = rummage
         self.requires_target = True
@@ -6878,15 +7462,16 @@ class HandSelectionEffect(AbilityEffect):
         for card_id in target_player.get('hand', []):
             card = game_state._safe_get_card(card_id)
             types = {str(t).lower() for t in getattr(card, 'card_types', [])} if card else set()
-            if self.noncreature_nonland and ({'creature', 'land'} & types):
+            if self.excluded_types.intersection(types):
                 continue
             legal.append(card_id)
         if not legal:
             return True
         game_state.choice_context = {
             'type': 'hand_selection', 'player': controller, 'target_player': target_player,
-            'source_id': source_id, 'options': legal[:10], 'optional': self.optional,
+            'source_id': source_id, 'options': legal, 'optional': self.optional,
             'rummage': self.rummage, 'resume_phase': game_state.phase,
+            'choice_page': 0,
         }
         game_state.phase = game_state.PHASE_CHOOSE
         game_state.priority_player = controller
@@ -7016,6 +7601,87 @@ class BuffEffect(AbilityEffect):
         logging.warning("BuffEffect._apply_effect called directly. Buffs should be registered via LayerSystem.")
         # Re-register for safety?
         return self.apply(game_state, source_id, controller, targets)
+
+
+class DoublePowerEffect(AbilityEffect):
+    """Double one creature's live power by granting +X/+0 for the duration."""
+
+    def __init__(self, duration="end_of_turn", condition=None):
+        self.duration = duration
+        super().__init__(
+            "Double the power of target creature you control until end of turn",
+            condition)
+        self.requires_target = True
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        target_ids = list((targets or {}).get("creatures", []))
+        if not target_ids:
+            target_ids = list((targets or {}).get("permanents", []))
+        if not target_ids:
+            return False
+        target_id = target_ids[0]
+        if (game_state.get_card_controller(target_id) is not controller
+                or not game_state._is_creature(target_id)):
+            return False
+        live_power = None
+        if getattr(game_state, "layer_system", None):
+            live_power = game_state.layer_system.get_characteristic(
+                target_id, "power")
+        if live_power is None:
+            live_power = getattr(
+                game_state._safe_get_card(target_id), "power", 0)
+        power = max(0, safe_int(live_power, 0) or 0)
+        if power == 0:
+            return True
+        return BuffEffect(
+            power, 0, target_type="target creature",
+            duration=self.duration).apply(
+                game_state, source_id, controller,
+                {"creatures": [target_id]},
+                context=getattr(self, "resolution_context", {}))
+
+
+class SourceCounterThresholdRewardEffect(AbilityEffect):
+    """Gate a targeted counter/keyword rider on the source's counters."""
+
+    def __init__(self, source_counter_type, threshold,
+                 added_counter_type="+1/+1", keyword="trample",
+                 condition=None):
+        self.source_counter_type = str(source_counter_type).lower()
+        self.threshold = max(0, int(threshold))
+        self.added_counter_type = added_counter_type
+        self.keyword = keyword
+        super().__init__(
+            f"If this permanent has {self.threshold} or more "
+            f"{self.source_counter_type} counters, put a "
+            f"{self.added_counter_type} counter on target creature you "
+            f"control. It gains {self.keyword} until end of turn", condition)
+        self.requires_target = True
+
+    def _threshold_met(self, game_state, source_id):
+        source = game_state._safe_get_card(source_id)
+        return bool(source and int(getattr(
+            source, "counters", {}).get(self.source_counter_type, 0) or 0)
+            >= self.threshold)
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        if not self._threshold_met(game_state, source_id):
+            return True
+        target_ids = list((targets or {}).get("creatures", []))
+        if not target_ids:
+            return False
+        target_id = target_ids[0]
+        if game_state.get_card_controller(target_id) is not controller:
+            return False
+        if not game_state.add_counter(
+                target_id, self.added_counter_type, 1):
+            return False
+        return GainKeywordEffect(
+            self.keyword, target_type="target creature",
+            duration="end_of_turn").apply(
+                game_state, source_id, controller,
+                {"creatures": [target_id]},
+                context=getattr(self, "resolution_context", {}))
 
 
 class TurnInsideOutEffect(AbilityEffect):
@@ -7357,6 +8023,75 @@ class EsperGraveyardTransformEffect(AbilityEffect):
         return bool(moved)
 
 
+class EsperSagaRevealPermanentEffect(AbilityEffect):
+    """Resolve Summon: Esper Maduin's linked chapter-I instruction."""
+
+    def __init__(self):
+        super().__init__(
+            "Reveal the top card of your library; if it is a permanent, "
+            "put it into your hand")
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        if not controller or not controller.get("library"):
+            return True
+        card_id = controller["library"][0]
+        card = game_state._safe_get_card(card_id)
+        permanent_types = {
+            "artifact", "battle", "creature", "enchantment", "land",
+            "planeswalker",
+        }
+        card_types = {
+            str(card_type).lower()
+            for card_type in getattr(card, "card_types", [])
+        } if card else set()
+        if not card_types.intersection(permanent_types):
+            # Revealing does not otherwise change the card's position.
+            return True
+        return bool(game_state.move_card(
+            card_id, controller, "library", controller, "hand",
+            cause="esper_maduin_chapter_one"))
+
+
+class EsperSagaChapterThreeEffect(AbilityEffect):
+    """Snapshot Maduin's other creatures, grant the EOT anthem, sacrifice."""
+
+    def __init__(self):
+        super().__init__(
+            "Other creatures you control get +2/+2 and gain trample until "
+            "end of turn")
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        affected = [
+            card_id for card_id in controller.get("battlefield", [])
+            if card_id != source_id and game_state._is_creature(card_id)
+        ]
+        success = True
+        if affected:
+            bound_targets = {"creatures": affected}
+            success = bool(BuffEffect(
+                2, 2, target_type="target creature",
+                duration="end_of_turn").apply(
+                    game_state, source_id, controller, bound_targets,
+                    context=getattr(self, "resolution_context", {})))
+            success = bool(GainKeywordEffect(
+                "trample", target_type="target creature",
+                duration="end_of_turn").apply(
+                    game_state, source_id, controller, bound_targets,
+                    context=getattr(self, "resolution_context", {}))) \
+                and success
+
+        # A Saga is sacrificed after its final chapter ability leaves the
+        # stack. For this creature Saga the finality counter replaces that
+        # graveyard move with exile; move_card owns that replacement.
+        if source_id in controller.get("battlefield", []):
+            success = bool(game_state.move_card(
+                source_id, controller, "battlefield", controller,
+                "graveyard", cause="saga_completed")) and success
+        return success
+
+
 class DestroyEffect(AbilityEffect):
     """Effect that destroys permanents."""
     def __init__(self, target_type="permanent", condition=None):
@@ -7387,6 +8122,10 @@ class DestroyEffect(AbilityEffect):
             if self.target_type == "creature": cats = ["creatures"]
             elif self.target_type == "artifact": cats = ["artifacts"]
             elif self.target_type == "enchantment": cats = ["enchantments"]
+            elif self.target_type == "artifact_or_enchantment":
+                cats = [
+                    "artifacts", "enchantments",
+                    "artifact_or_enchantment", "chosen", "permanents"]
             elif self.target_type == "land": cats = ["lands"]
             elif self.target_type == "planeswalker": cats = ["planeswalkers"]
             elif self.target_type == "permanent": cats = ["creatures", "artifacts", "enchantments", "lands", "planeswalkers", "battles", "permanents"]
@@ -7461,6 +8200,42 @@ class DestroyEffect(AbilityEffect):
         # SBAs handled by main loop
         return destroyed_count > 0
     
+class ExileLibrariesExceptBottomEffect(AbilityEffect):
+    """Exile every card above the bottom N cards of each library face down."""
+
+    def __init__(self, keep_count=6, face_down=True, condition=None):
+        self.keep_count = max(0, int(keep_count))
+        self.face_down = bool(face_down)
+        super().__init__(
+            "Each player exiles all but the bottom "
+            f"{self.keep_count} cards of their library"
+            + (" face down" if self.face_down else ""),
+            condition)
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        for player in (game_state.p1, game_state.p2):
+            if not player:
+                continue
+            library = player.get("library", [])
+            # Library index zero is the top throughout the engine. Snapshot
+            # the prefix before moving anything so the retained suffix keeps
+            # its exact top-to-bottom order.
+            cutoff = max(0, len(library) - self.keep_count)
+            cards_to_exile = list(library[:cutoff])
+            for card_id in cards_to_exile:
+                game_state.move_card(
+                    card_id, player, "library", player, "exile",
+                    cause="exile_library_except_bottom",
+                    context={
+                        "source_id": source_id,
+                        "face_down_exile": self.face_down,
+                    })
+        # An empty library, a library of six or fewer cards, or a replacement
+        # that changes an individual move still resolves this instruction.
+        return True
+
+
 class ExileEffect(AbilityEffect):
     """Effect that exiles permanents or cards from zones."""
     def __init__(self, target_type="permanent", zone="battlefield", condition=None):
@@ -7897,8 +8672,8 @@ class ReflexiveTriggerEffect(AbilityEffect):
         for effect in prerequisite_effects:
             if not effect.apply(game_state, source_id, controller, targets):
                 completed = False
+            choice = getattr(game_state, 'choice_context', None)
             if isinstance(effect, SacrificeEffect):
-                choice = getattr(game_state, 'choice_context', None)
                 if choice and choice.get('type') == 'sacrifice_effect':
                     choice['reflexive_followup'] = {
                         'source_id': source_id,
@@ -7911,11 +8686,37 @@ class ReflexiveTriggerEffect(AbilityEffect):
                 # Sacrificing nothing does not satisfy "when you do" even
                 # though the parent instruction itself resolves normally.
                 completed = False
+            elif (isinstance(effect, RemoveCounterEffect)
+                  and choice and choice.get('type') == 'resolution_choice'
+                  and choice.get('choice_kind') == 'remove_counter'):
+                choice['reflexive_followup'] = {
+                    'source_id': source_id,
+                    'controller_id': (
+                        'p1' if controller is game_state.p1 else 'p2'),
+                    'trigger_condition': self.trigger_condition,
+                    'trigger_effect_text': self.trigger_effect_text,
+                    'prerequisite_text': self.prerequisite_text,
+                }
+                return True
         if not completed:
             logging.debug(
                 f"Reflexive trigger not created; prerequisite did not happen: "
                 f"{self.prerequisite_text}")
             return True
+
+        threshold_match = re.search(
+            r"^if it has (\w+|\d+) or more ([\w+/-]+) counters? on it",
+            self.trigger_effect_text, re.IGNORECASE)
+        if threshold_match:
+            threshold = text_to_number(threshold_match.group(1))
+            if not isinstance(threshold, int):
+                threshold = int(threshold_match.group(1))
+            source = game_state._safe_get_card(source_id)
+            counter_type = threshold_match.group(2).lower()
+            if (not source or int(getattr(
+                    source, 'counters', {}).get(counter_type, 0) or 0)
+                    < threshold):
+                return True
 
         trigger = TriggeredAbility(
             source_id,

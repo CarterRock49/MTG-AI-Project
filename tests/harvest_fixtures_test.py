@@ -424,6 +424,110 @@ class HarvestFixturesTest(unittest.TestCase):
                         harvest.run_harvest(1, 17, output, max_steps=2)
                 self.assertFalse((output / "harvest_run.json").exists())
 
+    def test_run_harvest_plumbs_p2_seat_and_publishes_it(self):
+        from Playersim.environment import AlphaZeroMTGEnv as RealEnvironment
+
+        class FakeState:
+            _consecutive_no_ops = 0
+            stack = []
+            turn = 1
+            phase = 1
+            priority_player = None
+            agent_is_p1 = False
+            terminal_reason = "state_based_result"
+            fidelity_counters = {
+                "unimplemented_action": 0, "unparsed_mana": 0,
+                "unparsed_modal": 0, "unparsed_effects": 0,
+                "unparsed_cards": set(),
+            }
+
+        class SuccessfulEnvironment:
+            constructed_agent_is_p1 = None
+
+            def __init__(self, decks, card_db, **kwargs):
+                self.decks = decks
+                self.game_state = FakeState()
+                self._game_result_recorded = False
+                self._game_result = None
+                self.last_observation_error = None
+                self.last_observation_traceback = None
+                self.action_handler = None
+                self._fidelity_agg = {
+                    "games_recorded": 0, "unimplemented_action": 0,
+                    "unparsed_mana": 0, "unparsed_modal": 0,
+                    "unparsed_effects": 0, "unparsed_cards": {},
+                }
+                self.output = Path(kwargs["deck_stats_path"])
+                self.stats_tracker = type(
+                    "Tracker", (), {"base_path": str(self.output)})()
+                type(self).constructed_agent_is_p1 = kwargs.get("agent_is_p1")
+
+            def set_agent_version(self, version):
+                self.agent_version = version
+
+            def reset(self, seed=None):
+                p1, p2 = self.decks._pair
+                self.current_deck_name_p1 = p1["name"]
+                self.current_deck_name_p2 = p2["name"]
+                self.game_state = FakeState()
+                self._game_result_recorded = False
+                self._game_result = None
+                return {}, {}
+
+            def action_mask(self):
+                mask = np.zeros(480, dtype=bool)
+                mask[11] = True
+                return mask
+
+            def step(self, action):
+                self._game_result_recorded = True
+                # Environment results are relative to the external agent, so
+                # this remains a candidate win even when that agent is P2.
+                self._game_result = "win"
+                # Exercise the production record/fidelity writer instead of
+                # handing the artifact validator a synthesized record.
+                RealEnvironment._write_stats_artifacts(self)
+                return {}, 1.0, True, False, {"game_result": "win"}
+
+            def close(self):
+                self.output.mkdir(parents=True, exist_ok=True)
+                (self.output / "card_support_manifest.json").write_text(
+                    "{}\n", encoding="utf-8")
+
+            @staticmethod
+            def _terminal_reason(info=None):
+                return "state_based_result"
+
+        decks = [{"name": name, "cards": [0] * 60}
+                 for name in harvest.EXPECTED_SAMPLE_DECKS]
+        lineage = {"format": "standard", "corpus": {"sha256": "abc"}}
+        with tempfile.TemporaryDirectory() as temp, \
+                mock.patch.object(
+                    harvest, "load_corpus_decks",
+                    return_value=(decks, {}, lineage)), \
+                mock.patch.object(
+                    harvest, "_validate_tracker_artifacts"), \
+                mock.patch(
+                    "Playersim.card_support.reset_manifest_for_tests"), \
+                mock.patch(
+                    "Playersim.environment.AlphaZeroMTGEnv",
+                    SuccessfulEnvironment):
+            output = Path(temp) / "run"
+            result = harvest.run_harvest(
+                1, 17, output, max_steps=2, agent_is_p1=False)
+            saved = json.loads(
+                (output / "harvest_run.json").read_text(encoding="utf-8"))
+            persisted = json.loads(
+                (output / "game_log.jsonl").read_text(encoding="utf-8"))
+
+        self.assertIs(SuccessfulEnvironment.constructed_agent_is_p1, False)
+        self.assertEqual(result["records"][0]["result"], "win")
+        self.assertIs(result["records"][0]["agent_is_p1"], False)
+        self.assertIs(persisted["agent_is_p1"], False)
+        self.assertEqual(persisted["agent_version"], result["agent_version"])
+        self.assertEqual(result["run_manifest"]["agent_seat"], "p2")
+        self.assertEqual(saved["agent_seat"], "p2")
+
     def test_summary_is_compact_and_manifest_ranked(self):
         records = [{"result": "loss"}, {"result": "win"}]
         fidelity = {

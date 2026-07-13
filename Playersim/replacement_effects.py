@@ -138,6 +138,17 @@ class ReplacementEffectSystem:
         source_name = card.name if hasattr(card, 'name') else f"Card {card_id}"
         registered_effects = []
 
+        low_hand_draw_bonus = re.search(
+            r"as long as you have one or fewer cards in hand,\s*"
+            r"if you would draw one or more cards,\s*you draw that many "
+            r"cards plus one instead",
+            oracle_text, re.IGNORECASE)
+        if low_hand_draw_bonus:
+            effect_id = self._register_low_hand_draw_bonus(
+                card_id, player, oracle_text)
+            if effect_id:
+                registered_effects.append(effect_id)
+
         if re.search(
                 r"whenever you tap a (?:creature|artifact|permanent|land) "
                 r"for mana, add an additional (?:\{[^}]+\})+",
@@ -148,7 +159,10 @@ class ReplacementEffectSystem:
                 registered_effects.append(effect_id)
 
         # Scan for standard replacement patterns ("if..would..instead")
-        if "if" in oracle_text.lower() and "would" in oracle_text.lower() and "instead" in oracle_text.lower():
+        if (not low_hand_draw_bonus
+                and "if" in oracle_text.lower()
+                and "would" in oracle_text.lower()
+                and "instead" in oracle_text.lower()):
             effect_ids = self._register_if_would_instead_effect(card_id, player, oracle_text)
             registered_effects.extend(effect_ids)
 
@@ -237,6 +251,37 @@ class ReplacementEffectSystem:
                  registered_effects.append(effect_id)
 
         return registered_effects
+
+    def _register_low_hand_draw_bonus(self, card_id, player, oracle_text):
+        """Register Quantum Riddler's conditional batch draw replacement."""
+        source = self.game_state._safe_get_card(card_id)
+        source_name = getattr(source, "name", card_id)
+
+        def condition(context):
+            _, source_zone = self.game_state.find_card_location(card_id)
+            return (bool(context.get("draw_batch"))
+                    and context.get("player") is player
+                    and source_zone == "battlefield"
+                    and len(player.get("hand", [])) <= 1
+                    and int(context.get("draw_count", 0) or 0) > 0)
+
+        def replacement(context):
+            context["draw_count"] = int(
+                context.get("draw_count", 0) or 0) + 1
+            return context
+
+        return self.register_effect({
+            "source_id": card_id,
+            "event_type": "DRAW",
+            "condition": condition,
+            "replacement": replacement,
+            "duration": "permanent",
+            "controller_id": player,
+            "draw_batch_modifier": True,
+            "description": (
+                f"{source_name}: draw that many cards plus one while "
+                "holding one or fewer cards"),
+        })
     
     def _register_mana_doubling_effect(self, card_id, player, oracle_text):
         """Register mana doubling effects (simplified)."""
@@ -468,6 +513,12 @@ class ReplacementEffectSystem:
             if event_type == 'ENTER_BATTLEFIELD':
                 applicable_effects = list(applicable_effects) + \
                     self.effect_index.get('ENTERS_BATTLEFIELD', [])
+            if event_type == 'DRAW':
+                is_batch = bool(event_context.get('draw_batch', False))
+                applicable_effects = [
+                    effect for effect in applicable_effects
+                    if bool(effect.get('draw_batch_modifier', False))
+                    == is_batch]
 
             # --- Madness Check (Specific logic before standard replacements) ---
             # If discard event, card exists, and has Madness:

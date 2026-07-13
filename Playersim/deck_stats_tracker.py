@@ -20,6 +20,21 @@ def _deck_seat_share(appearances: int, total_games: int) -> float:
     """Probability that a randomly selected deck seat has an appearance."""
     return appearances / (2 * total_games) if total_games else 0.0
 
+
+def _finite_card_number(card, attribute: str, default: float = 0.0) -> float:
+    """Read a finite numeric card characteristic for aggregate analytics.
+
+    Printed variable characteristics such as ``*`` are represented as
+    ``None`` until rules context supplies a value. Deck-level archetype
+    scoring has no such context, so unknown/non-finite P/T or mana value is a
+    neutral zero rather than an exception or NaN contaminating every score.
+    """
+    try:
+        value = float(getattr(card, attribute, default))
+    except (TypeError, ValueError, OverflowError):
+        return float(default)
+    return value if math.isfinite(value) else float(default)
+
 # Game stage definitions
 class GameStage(Enum):
     EARLY = "early"  # Turns 1-3
@@ -678,14 +693,15 @@ class DeckStatsTracker:
                         
                         # Track creature stats
                         if hasattr(card, 'power') and hasattr(card, 'toughness'):
+                            power = _finite_card_number(card, 'power')
                             creature_count += count
-                            total_power += card.power * count
+                            total_power += power * count
                             
-                            if card.power >= 4:
+                            if power >= 4:
                                 big_creatures += count
                         
                         # Track cheap creatures
-                        if hasattr(card, 'cmc') and card.cmc <= 2:
+                        if _finite_card_number(card, 'cmc') <= 2:
                             cheap_creatures += count
                         
                     elif 'instant' in card.card_types or 'sorcery' in card.card_types:
@@ -737,7 +753,8 @@ class DeckStatsTracker:
                 
                 # CMC tracking
                 if hasattr(card, 'cmc'):
-                    total_cmc += card.cmc * count
+                    total_cmc += _finite_card_number(
+                        card, 'cmc') * count
                 
                 # Combo piece detection
                 if hasattr(card, 'oracle_text') and any(combo_term in card.oracle_text.lower() 

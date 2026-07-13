@@ -149,6 +149,34 @@ current gate counts are tracked in [ROADMAP.md](ROADMAP.md).
 ```bash
 python tests/smoke_test.py                    # engine end-to-end (no training stack)
 python tests/scenario_test.py                 # golden rules scenarios
+python tests/layer_system_test.py             # continuous-effect/CDA regressions
+python tests/multi_instruction_target_test.py # independent spell target slots
+python tests/gift_target_parity_test.py        # conditional target/mask parity
+python tests/action_catalog_test.py           # overflow response dispatch
+python tests/mana_payment_test.py              # hybrid/snow/Phyrexian payment
+python tests/mana_auto_tap_test.py             # restricted auto-tap parity
+python tests/optional_discard_test.py          # optional discard continuations
+python tests/deck_stats_numeric_test.py        # symbolic-stat analytics
+python tests/strategic_planner_numeric_test.py # finite planner estimates
+python tests/choice_context_test.py            # nested trigger/choice continuation
+python tests/modok_warning_regression_test.py  # M.O.D.O.K. activation + warning paths
+python tests/evoke_casting_test.py              # Evoke action/cost exposure
+python tests/deceit_real_card_test.py           # colored ETBs + Evoke sequencing
+python tests/landfall_runtime_test.py           # real Landfall gates/effects
+python tests/leatherhead_colorstorm_test.py     # reflexive/Opus real-card paths
+python tests/quantum_riddler_test.py             # batch draw replacements
+python tests/superior_spider_man_test.py         # Mind Swap copy/exile lifecycle
+python tests/prepared_test.py                    # Prepared copy/payment lifecycle
+python tests/log_rules_runtime_test.py           # canary cost/land/cast-lock rules
+python tests/aura_warning_regression_test.py     # Aura targets + warning no-ops
+python tests/target_lifecycle_regression_test.py # legal-target/fizzle boundary
+python tests/hearth_elemental_test.py             # graveyard-union cost reduction
+python tests/doomsday_excruciator_test.py         # cast-only hidden exile lifecycle
+python tests/momo_cost_reduction_test.py           # first eligible flying spell cost
+python tests/bushwhack_fight_test.py               # role-aware two-creature fight
+python tests/canary_effect_binding_test.py     # production-card effect binding
+python tests/esper_origins_test.py             # Flashback-to-Saga real-card path
+python tests/stack_integrity_test.py           # spell lifecycle/finalization
 python tests/train_smoke_test.py              # PPO / SB3 integration
 python tests/card_registry_test.py            # canonical registry + feature schema
 python tests/deck_corpus_test.py              # corpus hydration
@@ -310,13 +338,17 @@ prove execution and telemetry coverage; their win rates are not card- or
 deck-strength evidence.** Statistical harvest begins only after a trained
 checkpoint beats scripted play.
 
-### Parallel checkpoint harvest and promotion
+### Checkpoint qualification, parallel harvest, and promotion
 
 Production Harvest uses isolated worker directories and publishes
 `harvest_protocol.json` only after every shard passes the strict fixture
 contract. Checkpoints are stamped by filename, size, and SHA-256.
 
 ```bash
+python harvest_protocol.py qualify --games 64 --workers 4 \
+  --candidate models/candidate.zip --minimum-score 0.55 \
+  --output harvest_runs/qualification_001
+
 python harvest_protocol.py harvest --games 256 --workers 4 \
   --agent-model models/candidate.zip --opponent-model models/champion.zip \
   --output harvest_runs/candidate
@@ -325,6 +357,18 @@ python harvest_protocol.py promote --games 64 --workers 4 \
   --candidate models/candidate.zip --baseline models/champion.zip \
   --minimum-score 0.55 --output harvest_runs/promotion_001
 ```
+
+Qualification pairs the candidate against the scripted policy from both seats.
+It writes an atomic `qualification.json` after both strict legs validate, counts
+draws as half a point, and passes only at the default 55% score threshold with
+zero fidelity counters and no `unparsed`/`crash` support entries. A completed
+failed gate is recorded for audit and returns a nonzero command status; an
+invalid or incomplete protocol never publishes the qualification manifest.
+Every persisted game seat and worker-stamped checkpoint identity must agree,
+and the checkpoint is re-hashed before publication so a changed candidate fails
+closed.
+The command exits `0` for a pass, `2` for a valid completed rejection, and `1`
+for an invalid or incomplete protocol.
 
 Promotion evaluates the candidate in both seats and requires both the score
 threshold and a clean fidelity/severe-support manifest. `--decks`/`--format`/

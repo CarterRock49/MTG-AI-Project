@@ -225,7 +225,7 @@ ACTION_MEANINGS = {
     448: ("AFTERMATH_CAST", None), # Context={'gy_idx':X}
     449: ("FLIP_CARD", None), # Context={'battlefield_idx':X}
     450: ("EQUIP", None), # Context={'equip_identifier':X, 'target_identifier':Y}
-    451: ("NO_OP", None), # UNEQUIP removed (rarely a direct action)
+    451: ("PREPARED_CAST", None), # Cast a prepared permanent's spell-face copy
     452: ("NO_OP", None), # ATTACH_AURA removed (happens on resolution)
     453: ("FORTIFY", None), # Context={'fort_identifier':X, 'target_identifier':Y}
     454: ("RECONFIGURE", None), # Context={'card_identifier':X, 'target_identifier':Y (optional)}
@@ -373,6 +373,7 @@ class ActionHandler(
                 "CAST_FROM_EXILE": self._handle_cast_from_exile,
                 "PLOT_CARD": self._handle_plot_card,
                 "PLAY_FROM_GRAVEYARD": self._handle_play_from_graveyard,
+                "PREPARED_CAST": self._handle_prepared_cast,
                 # Combat
                 "ATTACK": self._handle_attack,
                 "BLOCK": self._handle_block,
@@ -423,6 +424,7 @@ class ActionHandler(
                 "CAST_WITH_OVERLOAD": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_WITH_OVERLOAD", context=context, **k), # Index 402
                 "CAST_FOR_EMERGE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_EMERGE", context=context, **k), # Index 403
                 "CAST_FOR_DELVE": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_DELVE", context=context, **k), # Index 404
+                "EVOKE_CAST": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="CAST_FOR_EVOKE", context=context, **k), # Index 221
                 "AFTERMATH_CAST": lambda p=None, context=None, **k: self._handle_alternative_casting(p, action_type="AFTERMATH_CAST", context=context, **k), # Index 448
                 # Informational Flags
                 "PAY_KICKER": self._handle_pay_kicker, # Index 405/406

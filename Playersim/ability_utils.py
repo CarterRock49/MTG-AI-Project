@@ -2,6 +2,29 @@
 import logging
 import re
 
+
+def has_damage_prevention_instruction(effect_text):
+    """Return whether Oracle text contains an affirmative prevention clause.
+
+    Substring checks cannot distinguish ``Prevent all damage`` from
+    ``Damage can't be prevented``.  Besides exposing the latter through the
+    PREVENT_DAMAGE action, that inversion used to build a prevention effect
+    for cards whose actual instruction makes damage unpreventable.
+    """
+    for clause in re.split(r"[.\n;]+", str(effect_text or '').lower()):
+        if 'damage' not in clause or not re.search(
+                r"\bprevent(?:s|ed|ing)?\b", clause):
+            continue
+        if re.search(
+                r"\b(?:can(?:not|['’]t)|could(?: not|n['’]t)|may not)"
+                r"\s+be\s+"
+                r"prevented\b|\b(?:is|are|was|were)(?: not|n't)\s+"
+                r"prevented\b",
+                clause):
+            continue
+        return True
+    return False
+
 def is_beneficial_effect(effect_text):
     # (Keep existing implementation)
     """
@@ -365,6 +388,14 @@ class EffectFactory:
                 effect_text, re.IGNORECASE):
             from .ability_types import RuleDeclarationEffect
             return [RuleDeclarationEffect(effect_text)]
+        if re.fullmatch(
+                r"\s*cast from graveyard\s*,\s*then exile\.?\s*",
+                effect_text, re.IGNORECASE):
+            # Compact virtual text synthesized by ActivatedAbility for a
+            # Flashback declaration. Casting and exile replacement are owned
+            # by the graveyard-cast transaction, not an executable effect.
+            from .ability_types import RuleDeclarationEffect
+            return [RuleDeclarationEffect(effect_text)]
 
         override = EffectFactory._CARD_OVERRIDES.get(
             str(source_name or "").strip().casefold())
@@ -374,6 +405,95 @@ class EffectFactory:
 
         source_key = str(source_name or "").strip().casefold()
         lowered = effect_text.lower()
+        if re.fullmatch(
+                r"\s*each player exiles all but the bottom six cards of "
+                r"their library face down\.?\s*", lowered):
+            from .ability_types import ExileLibrariesExceptBottomEffect
+            return [ExileLibrariesExceptBottomEffect(
+                keep_count=6, face_down=True)]
+        # Scry is an instruction keyword, and reminder text must not prevent
+        # the following Draw instruction from becoming a separate sequenced
+        # effect (Opt and the same simple template).
+        sequence_surface = re.sub(
+            r"\([^()]*\)", " ", effect_text, flags=re.DOTALL)
+        sequence_surface = re.sub(r"\s+", " ", sequence_surface).strip()
+        scry_draw = re.fullmatch(
+            r"scry\s+(\d+|x)\s*\.\s*draw\s+"
+            r"(a|an|one|two|three|four|five|\d+)\s+cards?\s*\.?",
+            sequence_surface, re.IGNORECASE)
+        if scry_draw:
+            from .ability_types import DrawCardEffect, ScryEffect
+            scry_count = (scry_draw.group(1).lower()
+                          if scry_draw.group(1).lower() == "x"
+                          else int(scry_draw.group(1)))
+            draw_word = scry_draw.group(2).lower()
+            draw_count = (int(draw_word) if draw_word.isdigit()
+                          else text_to_number(draw_word))
+            return [ScryEffect(scry_count), DrawCardEffect(draw_count)]
+
+        if (source_key == "deceit"
+                and "target opponent reveals their hand" in lowered
+                and "choose a nonland card" in lowered):
+            from .ability_types import HandSelectionEffect
+            return [HandSelectionEffect(excluded_types={"land"})]
+
+        if (source_key == "colorstorm stallion"
+                and re.search(r"this creature gets \+1/\+1 until end of turn",
+                              lowered)
+                and re.search(r"five or more mana was spent", lowered)):
+            from .ability_types import (
+                BuffEffect, CreateTokenCopyOfSourceEffect,
+                ManaSpentConditionalEffect)
+            return [
+                BuffEffect(1, 1, target_type="self",
+                           duration="end_of_turn"),
+                ManaSpentConditionalEffect(
+                    5, CreateTokenCopyOfSourceEffect()),
+            ]
+
+        quest_reward = re.fullmatch(
+            r"\s*if it has (\w+|\d+) or more quest counters on it,\s*"
+            r"put a \+1/\+1 counter on target creature you control\.\s*"
+            r"it gains trample until end of turn\.?\s*",
+            lowered, re.IGNORECASE)
+        if quest_reward:
+            from .ability_types import SourceCounterThresholdRewardEffect
+            threshold = text_to_number(quest_reward.group(1))
+            if not isinstance(threshold, int):
+                threshold = int(quest_reward.group(1))
+            return [SourceCounterThresholdRewardEffect("quest", threshold)]
+
+        quest_resolution = re.fullmatch(
+            r"\s*put a \+1/\+1 counter on target creature you control\.\s*"
+            r"it gains trample until end of turn\.?\s*",
+            lowered, re.IGNORECASE)
+        if quest_resolution:
+            from .ability_types import AddCountersEffect, GainKeywordEffect
+            return [
+                AddCountersEffect(
+                    "+1/+1", 1,
+                    target_type="target creature you control"),
+                GainKeywordEffect(
+                    "trample", target_type="target creature",
+                    duration="end_of_turn"),
+            ]
+
+        remove_counter = re.fullmatch(
+            r"\s*(you may )?remove\s+(?:a|an|one)\s+"
+            r"(?:(\w+|[+\-]\d+/[+\-]\d+)\s+)?counter\s+from\s+"
+            r"(?:this (?:creature|permanent)|it|him|her)\.?\s*",
+            lowered, re.IGNORECASE)
+        if remove_counter:
+            from .ability_types import RemoveCounterEffect
+            return [RemoveCounterEffect(
+                counter_type=remove_counter.group(2),
+                optional=bool(remove_counter.group(1)))]
+
+        if re.fullmatch(
+                r"\s*double the power of target creature you control "
+                r"until end of turn\.?\s*", lowered):
+            from .ability_types import DoublePowerEffect
+            return [DoublePowerEffect()]
         optional_mana = re.fullmatch(
             r"\s*you may pay\s*((?:\{[^}]+\})+)\.\s*if you do,\s*(.+?)\s*",
             effect_text, re.IGNORECASE | re.DOTALL)
@@ -381,6 +501,13 @@ class EffectFactory:
             from .ability_types import OptionalManaThenEffect
             return [OptionalManaThenEffect(
                 optional_mana.group(1), optional_mana.group(2))]
+        optional_discard = re.fullmatch(
+            r"\s*you may discard\s+(?:a|one)\s+card\s*\.\s*"
+            r"if you do,\s*(.+?)\s*",
+            effect_text, re.IGNORECASE | re.DOTALL)
+        if optional_discard:
+            from .ability_types import OptionalDiscardThenEffect
+            return [OptionalDiscardThenEffect(optional_discard.group(1))]
         if re.fullmatch(
                 r"\s*attach(?: this equipment| it)? to target creature"
                 r"(?: you control)?(?:\. equip only as a sorcery)?\.?\s*",
@@ -453,8 +580,9 @@ class EffectFactory:
             return [InvestigateEffect(count='target_players_creatures')]
         if re.fullmatch(
                 r"\s*(?:you may have\s+)?(?:it|he|she|this creature|"
-                r"[\w'’ -]+|target(?:\s+\w+){0,3}\s+creature(?: you control)?)"
-                r"\s+connives?\.?(?:\s+do this only once each turn\.?)?\s*",
+                r"[\w.'’ -]+|target(?:\s+\w+){0,3}\s+creature(?: you control)?)"
+                r"\s+connives?\.?(?:\s+(?:do this only once each turn|"
+                r"activate only during your turn)\.?)?\s*",
                 lowered):
             from .ability_types import ConniveEffect
             return [ConniveEffect(
@@ -518,6 +646,19 @@ class EffectFactory:
                 SurveilEffect, GainLifeEffect, EsperGraveyardTransformEffect)
             return [SurveilEffect(2), GainLifeEffect(2),
                     EsperGraveyardTransformEffect()]
+        if (source_key.startswith("esper origins")
+                or source_key == "summon: esper maduin"):
+            if ("reveal the top card of your library" in lowered
+                    and "if it's a permanent card" in lowered):
+                from .ability_types import EsperSagaRevealPermanentEffect
+                return [EsperSagaRevealPermanentEffect()]
+            if re.fullmatch(r"\s*add\s*\{g\}\{g\}\.?\s*", lowered):
+                from .ability_types import AddManaEffect
+                return [AddManaEffect(mana_dict={"G": 2})]
+            if ("other creatures you control get +2/+2" in lowered
+                    and "gain trample until end of turn" in lowered):
+                from .ability_types import EsperSagaChapterThreeEffect
+                return [EsperSagaChapterThreeEffect()]
         if (source_key == "mistrise village"
                 and "next spell you cast this turn can't be countered" in lowered):
             from .ability_types import GrantNextSpellUncounterableEffect
@@ -815,6 +956,24 @@ class EffectFactory:
                                    effect_text, re.IGNORECASE))
             return [ReflectDamageEffect(no_life_gain_rider=rider)]
 
+        # Ouroboroid-style mass counters derive X from the source's current
+        # power.  The generic comma splitter severs the ``where X`` rider,
+        # which otherwise degrades both the amount and the mass-effect scope.
+        source_power_counters = re.search(
+            r"put x\s+([+\-]\d+/[+\-]\d+|[a-z]+)\s+counters?\s+on\s+"
+            r"each\s+(tapped\s+)?creature\s+you control\s*,\s*where x is\s+"
+            r"this creature['’]s power",
+            effect_text, re.IGNORECASE)
+        if source_power_counters:
+            from .ability_types import AddCountersEffect
+            target_type = (
+                "each tapped creature you control"
+                if source_power_counters.group(2)
+                else "each creature you control")
+            return [AddCountersEffect(
+                source_power_counters.group(1), "source_power",
+                target_type=target_type)]
+
         # "that source's controller sacrifices that many permanents"
         # (Phyrexian Obliterator): the count and paying player come from the
         # triggering damage event.
@@ -947,6 +1106,17 @@ class EffectFactory:
                 int(die_match.group(1)), outcomes,
                 pre_result_text=common_text, full_text=effect_text))
             return effects
+
+        prepare_match = re.fullmatch(
+            r"\s*you may exile (\w+|\d+) cards from your graveyard\.\s*"
+            r"if you do,\s*this (?:creature|permanent) becomes prepared\.?\s*",
+            effect_text, re.IGNORECASE | re.DOTALL)
+        if prepare_match:
+            from .ability_types import PrepareFromGraveyardEffect
+            raw_count = prepare_match.group(1)
+            count = (int(raw_count) if raw_count.isdigit()
+                     else text_to_number(raw_count))
+            return [PrepareFromGraveyardEffect(count)]
 
         # CR 603.12: preserve the prerequisite and its "when you do" rider as
         # one gated effect before generic sentence/clause splitting.
@@ -1198,7 +1368,7 @@ class EffectFactory:
                 expr = cem.group(1).strip() if cem else "creatures you control"
                 td = EffectFactory._extract_target_description(clause_lower) or "controller"
                 ts = "controller"
-                if "target player" in td: ts = "target_player"
+                if "target player" in clause_lower: ts = "target_player"
                 elif "each player" in clause_lower: ts = "each_player"
                 created_effect = DrawCardEffect(1, target=ts, count_expr=expr)
                 effects.append(created_effect)
@@ -1212,9 +1382,9 @@ class EffectFactory:
                 count = 'x' if count_str == 'x' else text_to_number(count_str)
                 target_desc = EffectFactory._extract_target_description(clause_lower) or "controller"
                 target_specifier = "controller"
-                if "target player" in target_desc: target_specifier = "target_player"
-                elif "opponent" in target_desc: target_specifier = "opponent"
-                elif "each player" in target_desc: target_specifier = "each_player"
+                if "target player" in clause_lower: target_specifier = "target_player"
+                elif "opponent" in clause_lower: target_specifier = "opponent"
+                elif "each player" in clause_lower: target_specifier = "each_player"
                 created_effect = DrawCardEffect(count, target=target_specifier) # Pass 'x' or number
 
             # Variable life gain: "gain life equal to the number of X".
@@ -1235,7 +1405,7 @@ class EffectFactory:
                 created_effect = ShuffleGraveyardEffect(who=who)
 
             # Damage prevention (fog / prevention shields).
-            elif "prevent" in clause_lower and "damage" in clause_lower:
+            elif has_damage_prevention_instruction(clause_lower):
                 combat_only = "combat damage" in clause_lower
                 amount = None
                 nm = re.search(r"prevent the next\s+(\d+|x)\s+damage", clause_lower)
@@ -1271,7 +1441,16 @@ class EffectFactory:
                     amount = "source_last_known_power"
                 target_desc = EffectFactory._extract_target_description(clause_lower) or "any target" # Changed default
                 target_type = "any target" # Default
-                if "creature or player" in target_desc or "any target" in target_desc: target_type="any target"
+                if re.search(
+                        r"\beach creatures? your opponents? control\b",
+                        clause_lower):
+                    target_type = "each creature your opponents control"
+                elif re.search(
+                        r"\beach creatures? you control\b", clause_lower):
+                    target_type = "each creature you control"
+                elif re.search(r"\beach creatures?\b", clause_lower):
+                    target_type = "each creature"
+                elif "creature or player" in target_desc or "any target" in target_desc: target_type="any target"
                 elif "each opponent" in target_desc: target_type="each opponent"
                 elif "each creature" in target_desc: target_type="each creature"
                 elif "each player" in target_desc: target_type="each player"
@@ -1287,7 +1466,9 @@ class EffectFactory:
                  target_type = "permanent"
                  # Normalize the target description slightly for easier checks
                  norm_target_desc = target_desc.replace('-',' ')
-                 if "creature" in norm_target_desc: target_type = "creature"
+                 if "artifact or enchantment" in norm_target_desc:
+                     target_type = "artifact_or_enchantment"
+                 elif "creature" in norm_target_desc: target_type = "creature"
                  elif "artifact" in norm_target_desc: target_type = "artifact"
                  elif "enchantment" in norm_target_desc: target_type = "enchantment"
                  elif "land" in norm_target_desc: target_type = "land"
@@ -1373,9 +1554,10 @@ class EffectFactory:
             # resolution. Dedicated policy slots are aliases of this path.
             elif re.fullmatch(
                     r"\s*(?:you may have\s+)?(?:it|he|she|this creature|"
-                    r"[\w'’ -]+|target(?:\s+\w+){0,3}\s+creature"
+                    r"[\w.'’ -]+|target(?:\s+\w+){0,3}\s+creature"
                     r"(?: you control)?)\s+connives?\.?(?:\s+do this only "
-                    r"once each turn\.?)?\s*",
+                    r"once each turn\.?)?(?:\s+activate only during your "
+                    r"turn\.?)?\s*",
                     clause_lower):
                  from .ability_types import ConniveEffect
                  created_effect = ConniveEffect(
@@ -1480,7 +1662,8 @@ class EffectFactory:
                       r"\s*(?:it|he|she)\s+explores(?:\s+again)?[.!]?\s*",
                       clause_lower)):
                  from .ability_types import ExploreEffect
-                 created_effect = ExploreEffect()
+                 created_effect = ExploreEffect(
+                     targeted="target" in clause_lower)
 
             elif (endure_clause := re.fullmatch(
                     r"\s*(?P<subject>it|this creature|[\w'’ ,-]+)\s+"
@@ -1716,8 +1899,8 @@ class EffectFactory:
                 keep = "still a land" in clause_lower or "in addition" in clause_lower
                 created_effect = AnimateLandEffect(power=p, toughness=t, duration=duration, keep_types=keep)
 
-            # Reveal hand: "target player reveals their hand".
-            elif re.search(r"(target player|each player|you)\s+reveals?\s+(their|his or her|your)\s+hand", clause_lower) \
+            # Reveal hand: "target player/opponent reveals their hand".
+            elif re.search(r"(target player|target opponent|each player|you)\s+reveals?\s+(their|his or her|your)\s+hand", clause_lower) \
                     and "you choose" not in clause_lower and "discards" not in clause_lower:
                 who = "target_player"
                 if "each player" in clause_lower: who = "each_player"
@@ -1735,7 +1918,9 @@ class EffectFactory:
                     # Refine target_type based on target_desc (also check the
                     # clause itself: adjectives like "attacking" make the
                     # extracted description drop the "creature" noun).
-                    if ("target creature" in target_desc
+                    if re.search(r"\bthis creature gets\b", clause_lower):
+                        target_type = "self"
+                    elif ("target creature" in target_desc
                             or ("target" in clause_lower and "creature" in target_desc)
                             or re.search(r"\btarget\s+(?:[\w-]+\s+){0,3}creature\b", clause_lower)):
                         target_type = "target creature"
@@ -1869,8 +2054,9 @@ class EffectFactory:
                      elif "permanent" in target_desc: target_type = "target permanent"
                      else: target_type = "target permanent" # Fallback if type unclear but target specified
                  # Handle "each" targets
+                 elif re.search(r"\b(each|all)\s+tapped creatures? you control\b", clause_lower): target_type = "each tapped creature you control"
                  elif re.search(r"\b(each|all)\s+creatures? you control\b", clause_lower): target_type = "each creature you control"
-                 elif re.search(r"\b(each|all)\s+creatures? opponent controls\b", clause_lower): target_type = "each creature opponent controls"
+                 elif re.search(r"\b(each|all)\s+creatures? (?:an opponent|your opponents?) controls?\b", clause_lower): target_type = "each creature your opponents control"
                  elif re.search(r"\b(each|all)\s+creatures?\b", clause_lower): target_type = "each creature"
                  elif re.search(r"\b(each|all)\s+opponents?\b", clause_lower): target_type = "each opponent"
                  elif re.search(r"\b(each|all)\s+players?\b", clause_lower): target_type = "each player"
@@ -1956,7 +2142,15 @@ class EffectFactory:
                 elif "enchantment" in clause_lower: tt = "enchantment"
                 elif "land" in clause_lower: tt = "land"
                 sc = "all_yours" if "you control" in clause_lower else "all"
-                created_effect = ReturnToHandEffect(target_type=tt, zone="battlefield", scope=sc)
+                excluded_subtypes = set()
+                non_subtype = re.search(
+                    r"return\s+all\s+non-([\w-]+)\s+creatures?",
+                    clause_lower)
+                if non_subtype:
+                    excluded_subtypes.add(non_subtype.group(1).lower())
+                created_effect = ReturnToHandEffect(
+                    target_type=tt, zone="battlefield", scope=sc,
+                    excluded_subtypes=excluded_subtypes)
 
             # Dig: "look at the top N cards ... put one into your hand ... rest
             # on the bottom/top".
@@ -2002,18 +2196,33 @@ class EffectFactory:
                 target_desc = EffectFactory._extract_target_description(clause_lower) or "permanent"
                 target_type = "permanent"
                 zone = "battlefield" # Default zone
-                if "target card" in target_desc: target_type = "card" # Could be from GY etc.
-                elif "target creature" in target_desc: target_type = "creature"
-                elif "target artifact" in target_desc: target_type = "artifact"
-                elif "target enchantment" in target_desc: target_type = "enchantment"
-                elif "target land" in target_desc: target_type = "land"
-                elif "target planeswalker" in target_desc: target_type = "planeswalker"
+                normalized_target = target_desc.replace('-', ' ')
+                if re.search(
+                        r"target\s+(?:spell\s+or\s+permanent|"
+                        r"permanent\s+or\s+spell)", clause_lower):
+                    target_type = "spell or permanent"
+                    zone = "any"
+                elif re.search(
+                        r"target\s+(?:[a-z-]+\s+)*permanents?\b",
+                        clause_lower):
+                    target_type = "permanent"
+                elif "card" in normalized_target: target_type = "card" # Could be from GY etc.
+                elif "creature" in normalized_target: target_type = "creature"
+                elif "artifact" in normalized_target: target_type = "artifact"
+                elif "enchantment" in normalized_target: target_type = "enchantment"
+                elif "planeswalker" in normalized_target: target_type = "planeswalker"
+                # Test the noun before the substring ``land``: a nonland
+                # permanent is still a permanent, not a land.  This Town's
+                # mixed creature/enchantment targets rely on that distinction.
+                elif "permanent" in normalized_target: target_type = "permanent"
+                elif "land" in normalized_target: target_type = "land"
                 # Check originating zone
                 if "from your graveyard" in clause_lower: zone = "graveyard"; target_type="card"
                 elif "from exile" in clause_lower: zone = "exile"; target_type="card"
                 # Add other zones
                 optional_match = re.search(
-                    r"\bup to\s+(one|two|three|\d+)\s+target\b", clause_lower)
+                    r"\bup to\s+(one|two|three|\d+)\s+"
+                    r"(?:other\s+)?target\b", clause_lower)
                 min_targets = 0 if optional_match else 1
                 max_targets = (text_to_number(optional_match.group(1))
                                if optional_match else 1)
@@ -2114,7 +2323,21 @@ class EffectFactory:
                       desc = match_target.group(1).strip()
                       if "creature" in desc: target_type="creature"
                       # Add other types if creatures can fight non-creatures (rare)
-                 created_effect = FightEffect(target_type=target_type)
+                 if re.search(
+                         r"\btarget creature you control fights target creature "
+                         r"(?:you (?:don['\u2019]?t|do not) control|an opponent controls)\b",
+                         clause_lower):
+                      fighter = "target_pair"
+                 else:
+                      fighter = ("enchanted_creature"
+                                 if re.search(
+                                     r"\benchanted creature fights?\b",
+                                     clause_lower)
+                                 else "source")
+                 created_effect = FightEffect(
+                     target_type=target_type, fighter=fighter,
+                     optional=("may" in clause_lower
+                               or "up to" in clause_lower))
 
             # --- Fallback and Effect Addition ---
             if created_effect:

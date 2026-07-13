@@ -851,6 +851,7 @@ def run_harvest(games: int, seed: int, output_directory: Path,
                 max_steps: int = MAX_STEPS_PER_GAME, *, game_offset: int = 0,
                 agent_model: Path | str | None = None,
                 opponent_model: Path | str | None = None,
+                agent_is_p1: bool = True,
                 decks_directory: Path | str | None = None,
                 format_name: str | None = None,
                 format_dir: Path | str | None = None):
@@ -867,6 +868,8 @@ def run_harvest(games: int, seed: int, output_directory: Path,
     if isinstance(game_offset, bool) or not isinstance(game_offset, int) \
             or game_offset < 0:
         raise ValueError("game_offset must be a non-negative integer")
+    if not isinstance(agent_is_p1, bool):
+        raise ValueError("agent_is_p1 must be a boolean")
 
     output = prepare_output_directory(Path(output_directory))
     agent_identity = checkpoint_identity(agent_model) if agent_model else None
@@ -913,6 +916,7 @@ def run_harvest(games: int, seed: int, output_directory: Path,
             card_db,
             deck_stats_path=str(output),
             card_memory_path=str(output / "card_memory"),
+            agent_is_p1=agent_is_p1,
         )
         env.set_agent_version(agent_version)
         if opponent_policy is not None:
@@ -1034,6 +1038,7 @@ def run_harvest(games: int, seed: int, output_directory: Path,
         "games": games,
         "game_offset": game_offset,
         "max_steps": max_steps,
+        "agent_seat": "p1" if agent_is_p1 else "p2",
         "agent_policy": agent_identity or {"kind": "random-valid"},
         "opponent_policy": opponent_identity or {"kind": "scripted"},
         "lineage": lineage,

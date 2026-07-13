@@ -5,7 +5,16 @@ all state lives on MTGStrategicPlanner, which composes every mixin.
 """
 
 import logging
+import math
 import numpy as np
+
+
+def _card_number(card, attribute, default=0.0):
+    try:
+        value = float(getattr(card, attribute, default) or 0)
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) else default
 
 
 class ThreatSynergyMixin:
@@ -32,11 +41,19 @@ class ThreatSynergyMixin:
         my_creatures = [cid for cid in me["battlefield"] if gs._safe_get_card(cid) and 'creature' in gs._safe_get_card(cid).card_types]
         opp_creatures = [cid for cid in opp["battlefield"] if gs._safe_get_card(cid) and 'creature' in gs._safe_get_card(cid).card_types]
         
-        my_power = sum(gs._safe_get_card(cid).power for cid in my_creatures if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'power'))
-        my_toughness = sum(gs._safe_get_card(cid).toughness for cid in my_creatures if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'toughness'))
+        my_power = sum(
+            _card_number(gs._safe_get_card(cid), 'power')
+            for cid in my_creatures if gs._safe_get_card(cid))
+        my_toughness = sum(
+            _card_number(gs._safe_get_card(cid), 'toughness')
+            for cid in my_creatures if gs._safe_get_card(cid))
         
-        opp_power = sum(gs._safe_get_card(cid).power for cid in opp_creatures if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'power'))
-        opp_toughness = sum(gs._safe_get_card(cid).toughness for cid in opp_creatures if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'toughness'))
+        opp_power = sum(
+            _card_number(gs._safe_get_card(cid), 'power')
+            for cid in opp_creatures if gs._safe_get_card(cid))
+        opp_toughness = sum(
+            _card_number(gs._safe_get_card(cid), 'toughness')
+            for cid in opp_creatures if gs._safe_get_card(cid))
         
         # Resource analysis
         my_lands = [cid for cid in me["battlefield"] if gs._safe_get_card(cid) and 'land' in gs._safe_get_card(cid).card_types]
@@ -205,7 +222,7 @@ class ThreatSynergyMixin:
                 if 'creature' in card.card_types:
                     # Power-based threat
                     if hasattr(card, 'power'):
-                        power = card.power
+                        power = _card_number(card, 'power')
                         threat_level += power * 0.7
                         
                         # High power creatures are more threatening

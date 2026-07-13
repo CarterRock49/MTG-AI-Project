@@ -35,6 +35,7 @@ class GameState(
                  "max_turns", "max_hand_size", "max_battlefield", "day_night_checked_this_turn",
                  "fidelity_counters", "_sba_in_progress", "delayed_triggers",
                  "delayed_event_triggers", "copy_overrides", "plotted_cards",
+                 "prepared_cards",
                  "graveyard_adventure_permissions", "flashback_permissions",
                  "earthbent_lands",
                  "phase_history", "stack", "priority_pass_count", "last_stack_size",
@@ -60,7 +61,7 @@ class GameState(
                  "adventure_cards", "saga_counters", "mdfc_cards", "battle_cards", 'battle_attack_targets',
                  "melded_permanents", "mutated_permanents", "specialized_cards",
                  "last_die_roll", "die_roll_history",
-                 "cards_castable_from_exile", "exile_alternative_costs", "impulse_until_eot", "cast_as_back_face", 'planeswalker_attack_targets',
+                 "cards_castable_from_exile", "exile_alternative_costs", "impulse_until_eot", "cast_as_back_face", "face_down_exile_cards", "face_down_exile_counts", 'planeswalker_attack_targets',
                  # Additional slots for various tracking variables
                  "phased_out", 'original_p1_deck',
                  "suspended_cards",
@@ -147,6 +148,31 @@ class GameState(
             self._last_turn_phase = value
 
     phase = property(_get_phase, _set_phase)
+
+    def _normalized_choice_resume_phase(self, requested_phase=None):
+        """Return a non-choice phase that can legally resume game progress.
+
+        Nested asynchronous effects may open their next choice before the
+        previous choice has restored its phase.  Such a child used to capture
+        ``PHASE_CHOOSE`` as its own ``resume_phase``; clearing the last context
+        then stranded the game in CHOOSE with nobody able to act.  A pending
+        stack always resumes in the priority wrapper.  Otherwise prefer the
+        requested real/priority phase and fall back to the saved turn phase.
+        """
+        legal_turn_phases = self._TURN_PHASES
+        previous = getattr(self, "previous_priority_phase", None)
+        last_turn = getattr(self, "_last_turn_phase", None)
+        if getattr(self, "stack", None):
+            return self.PHASE_PRIORITY
+        if requested_phase == self.PHASE_PRIORITY:
+            return self.PHASE_PRIORITY
+        if requested_phase in legal_turn_phases:
+            return requested_phase
+        if previous in legal_turn_phases:
+            return previous
+        if last_turn in legal_turn_phases:
+            return last_turn
+        return self.PHASE_PRIORITY
 
     def __init__(self, card_db, max_turns=30, max_hand_size=7, max_battlefield=20):
         # ... (Keep basic param init) ...
@@ -493,6 +519,13 @@ class GameState(
             self.specialized_cards = {} # Card ID -> perpetual specialized identity data
             self.suspended_cards = {} # {card_id: {'player': P, 'counters': N, 'cost': STR}}
             self.rebounded_cards = {} # {card_id: {'owner': P, 'turn_exiled': T}}
+            # Public exile contains these objects, but their printed
+            # identities are hidden from every policy observation.
+            self.face_down_exile_cards = set()
+            # Runtime deck objects normally have unique IDs. Keep occurrence
+            # counts as well so legacy/manual repeated-ID zones do not reveal a
+            # second hidden occurrence when only one leaves exile.
+            self.face_down_exile_counts = {}
             self.madness_cast_available = None # {card_id: {'player': P, 'cost': STR}} - holds ONE opportunity
             self.madness_trigger = None # Used internally during discard resolution
             self.miracle_card_id = None
@@ -584,6 +617,9 @@ class GameState(
             self.exile_alternative_costs = {}
             self.impulse_until_eot = set() # impulse-drawn cards whose play permission expires at end of turn
             self.cast_as_back_face = set()
+            # Prepare-layout permanents whose spell face can currently be cast
+            # as a copy. This is object state, not a Card characteristic.
+            self.prepared_cards = set()
 
             # Other state tracking
             self.mdfc_cards = set() # Tracks MDFCs on battlefield/stack?
@@ -593,6 +629,7 @@ class GameState(
             for player in [self.p1, self.p2]:
                 if player:
                     player["land_played"] = False
+                    player["lands_played_this_turn"] = 0
                     player["entered_battlefield_this_turn"] = set()
                     player["activated_this_turn"] = set()
                     player["targeted_permanents_this_turn"] = set()
@@ -837,6 +874,7 @@ class GameState(
             "phase_restricted_snow_mana": {},
             "mana_production": {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0},
             "land_played": False,
+            "lands_played_this_turn": 0,
             "tapped_permanents": set(), # Store IDs of tapped permanents
             "damage_counters": {}, # Track damage marked on creatures {card_id: amount}
             "plus_counters": defaultdict(int), # Track +1/+1 counters {card_id: count} - DEPRECATED, use card.counters
@@ -1066,13 +1104,14 @@ class GameState(
             "foretold_cards", "epic_spells", "morphed_cards", "manifested_cards",
             "copy_overrides", "plotted_cards", "graveyard_adventure_permissions",
             "flashback_permissions", "earthbent_lands",
+            "face_down_exile_counts",
             "planeswalker_attack_targets", "battle_attack_targets", "planeswalker_protectors",
             "mulligan_count", "mulligan_data" # Dicts need deepcopy
             # Contexts will be handled separately due to player references
         ]
         mutable_attrs_copy = [ # Attributes safe for shallow copy (typically sets/lists of IDs/primitives)
             "current_attackers", "attackers_this_turn", "adventure_cards", "mdfc_cards",
-            "cards_castable_from_exile", "exile_alternative_costs", "cast_as_back_face", "phased_out", "kicked_cards",
+            "cards_castable_from_exile", "exile_alternative_costs", "cast_as_back_face", "face_down_exile_cards", "prepared_cards", "phased_out", "kicked_cards",
             "evoked_cards", "blitz_cards", "dash_cards", "unearthed_cards", "jump_start_cards",
             "buyback_cards", "flashback_cards", "exile_at_end_of_combat", "haste_until_eot",
             "banding_creatures", "crewed_vehicles", "boast_activated", "forecast_used",
@@ -1553,6 +1592,40 @@ class GameState(
         if not card:
             return False
         return 'creature' in [t.lower() for t in getattr(card, 'card_types', [])]
+
+    def _face_down_exile_key(self, player, card_id):
+        player_key = (
+            "p1" if player is self.p1 else
+            "p2" if player is self.p2 else None)
+        return player_key, card_id
+
+    def mark_face_down_exile(self, player, card_id):
+        """Record one hidden occurrence in a player's public exile zone."""
+        key = self._face_down_exile_key(player, card_id)
+        self.face_down_exile_counts[key] = int(
+            self.face_down_exile_counts.get(key, 0) or 0) + 1
+        self.face_down_exile_cards.add(card_id)
+
+    def clear_face_down_exile(self, player, card_id):
+        """Consume one hidden occurrence when that exile object changes zone."""
+        key = self._face_down_exile_key(player, card_id)
+        remaining = int(self.face_down_exile_counts.get(key, 0) or 0) - 1
+        if remaining > 0:
+            self.face_down_exile_counts[key] = remaining
+        else:
+            self.face_down_exile_counts.pop(key, None)
+        if not any(
+                count > 0 and tracked_id == card_id
+                for (_, tracked_id), count
+                in self.face_down_exile_counts.items()):
+            self.face_down_exile_cards.discard(card_id)
+
+    def is_face_down_exile_card(self, card_id, player=None):
+        """Whether an exile occurrence's printed identity is unavailable."""
+        if player is None:
+            return card_id in self.face_down_exile_cards
+        return int(self.face_down_exile_counts.get(
+            self._face_down_exile_key(player, card_id), 0) or 0) > 0
 
     def _safe_get_card(self, card_id, default_value=None):
         """Safely get a card with proper error handling and type checking"""

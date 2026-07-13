@@ -7,6 +7,27 @@ import numpy as np
 from .card import Card # Need Card for keyword checks etc.
 from .ability_utils import is_beneficial_effect # Import helper
 
+
+def aura_cast_targeting_text(card_or_text):
+    """Return the one target announced by an Aura's ``Enchant`` ability.
+
+    Aura spells target even though Oracle's Enchant line does not use the
+    word ``target``.  Keeping this conversion in the targeting module gives
+    action availability and the live cast transaction one canonical target
+    surface, without exposing targets from the Aura's triggered abilities.
+    """
+    oracle_text = (
+        card_or_text if isinstance(card_or_text, str)
+        else getattr(card_or_text, "oracle_text", "")) or ""
+    enchant_match = re.search(
+        r"^\s*enchant\s+([^\n.]+)", oracle_text,
+        re.IGNORECASE | re.MULTILINE)
+    if not enchant_match:
+        return ""
+    restriction = enchant_match.group(1).strip()
+    return f"target {restriction}" if restriction else ""
+
+
 class TargetingSystem:
     """
     Enhanced system for handling targeting in Magic: The Gathering.
@@ -18,6 +39,26 @@ class TargetingSystem:
         self.game_state = game_state
         # Add reference to ability_handler if needed for centralized keyword checks
         self.ability_handler = getattr(game_state, 'ability_handler', None)
+
+    @staticmethod
+    def _hidden_exile_matches_requirement(requirement):
+        """Whether an opaque exile object can satisfy a public restriction.
+
+        A face-down exiled object is still a card, so an unrestricted target
+        card in exile may select it. Type, color, subtype, name, mana-value,
+        and similar identity restrictions fail closed because this engine has
+        no explicit permission metadata allowing a player to look at it.
+        """
+        requirement = requirement or {}
+        if str(requirement.get("type", "target")).lower() != "card":
+            return False
+        public_keys = {
+            "type", "zone", "controller_is_caster",
+            "controller_is_opponent", "opponent_only",
+        }
+        return not any(
+            key not in public_keys and bool(value)
+            for key, value in requirement.items())
 
     def check_keyword(self, card_id, keyword):
          card = self.game_state._safe_get_card(card_id)
@@ -47,7 +88,9 @@ class TargetingSystem:
         valid_targets = {
             "creature": [], "player": [], "permanent": [], "spell": [],
             "land": [], "artifact": [], "enchantment": [], "planeswalker": [],
+            "artifact_or_enchantment": [],
             "creature_or_vehicle": [], "creature_or_spell": [],
+            "spell_or_permanent": [],
             "card": [], # For graveyard/exile etc.
             "ability": [], # For targeting abilities on stack
             "other": [] # Fallback
@@ -94,6 +137,13 @@ class TargetingSystem:
             for target_id, target_obj_or_owner, current_zone in target_sources:
                 # Skip if zone doesn't match (unless zone isn't specified in req)
                 if required_zone and current_zone != required_zone:
+                    continue
+                if (current_zone == "exile"
+                        and hasattr(gs, "is_face_down_exile_card")
+                        and gs.is_face_down_exile_card(
+                            target_id, target_obj_or_owner)
+                        and not self._hidden_exile_matches_requirement(
+                            requirement)):
                     continue
 
                 target_object = None
@@ -220,14 +270,20 @@ class TargetingSystem:
             battlefield_types = {
                 "creature", "permanent", "land", "artifact",
                 "enchantment", "planeswalker", "battle",
+                "artifact_or_enchantment",
                 "creature_or_vehicle",
                 "creature_or_spell",
+                "spell_or_permanent",
             }
             if (target_type in battlefield_types
-                    and target_type != "creature_or_spell"
+                    and target_type not in {
+                        "creature_or_spell", "spell_or_permanent"}
                     and target_zone != "battlefield"):
                 return False
             if (target_type == "creature_or_spell"
+                    and target_zone not in {"battlefield", "stack"}):
+                return False
+            if (target_type == "spell_or_permanent"
                     and target_zone not in {"battlefield", "stack"}):
                 return False
             if target_type in {"spell", "ability"} and target_zone != "stack":
@@ -270,12 +326,21 @@ class TargetingSystem:
         elif target_type == "card" and isinstance(target_obj, Card): valid_type = True # Targeting a card in specific zone
         elif target_type in actual_types: valid_type = True
         elif target_type == "permanent" and any(t in actual_types for t in ["creature", "artifact", "enchantment", "land", "planeswalker"]): valid_type = True
+        elif target_type == "artifact_or_enchantment":
+             valid_type = bool({"artifact", "enchantment"}.intersection(actual_types))
         elif target_type == "creature_or_vehicle":
              valid_type = "creature" in actual_types or "vehicle" in actual_types
         elif target_type == "creature_or_spell":
              valid_type = (
                  (target_zone == "battlefield" and "creature" in actual_types)
                  or (target_zone == "stack" and "spell" in actual_types))
+        elif target_type == "spell_or_permanent":
+             valid_type = (
+                 (target_zone == "stack" and "spell" in actual_types)
+                 or (target_zone == "battlefield" and any(
+                     card_type in actual_types for card_type in {
+                         "creature", "artifact", "enchantment", "land",
+                         "planeswalker", "battle"})))
         elif (target_type == "spell" and target_zone == "stack"
                 and isinstance(target_obj, tuple)
                 and target_obj[0] == "SPELL"):
@@ -519,6 +584,21 @@ class TargetingSystem:
             oracle_text = re.sub(
                 artifact_creature_pattern, "", oracle_text)
 
+        artifact_enchantment_pattern = (
+            r"target\s+artifact\s+or\s+enchantment"
+            r"(?:\s+(you control|an opponent controls|that player controls))?")
+        for union_match in list(re.finditer(
+                artifact_enchantment_pattern, oracle_text)):
+            requirement = {"type": "artifact_or_enchantment"}
+            control_text = union_match.group(1)
+            if control_text == "you control":
+                requirement["controller_is_caster"] = True
+            elif control_text:
+                requirement["controller_is_opponent"] = True
+            requirements.append(requirement)
+        oracle_text = re.sub(
+            artifact_enchantment_pattern, "", oracle_text)
+
         creature_vehicle_pattern = r"target\s+creature\s+or\s+vehicle"
         if re.search(creature_vehicle_pattern, oracle_text):
             requirements.append({"type": "creature_or_vehicle"})
@@ -528,6 +608,13 @@ class TargetingSystem:
         if re.search(creature_spell_pattern, oracle_text):
             requirements.append({"type": "creature_or_spell"})
             oracle_text = re.sub(creature_spell_pattern, "", oracle_text)
+
+        spell_permanent_pattern = (
+            r"target\s+(?:spell\s+or\s+permanent|"
+            r"permanent\s+or\s+spell)")
+        if re.search(spell_permanent_pattern, oracle_text):
+            requirements.append({"type": "spell_or_permanent"})
+            oracle_text = re.sub(spell_permanent_pattern, "", oracle_text)
 
         creature_planeswalker_pattern = r"target\s+creature\s+or\s+planeswalker"
         if re.search(creature_planeswalker_pattern, oracle_text):
@@ -939,6 +1026,7 @@ class TargetingSystem:
             "creature": "creatures", "player": "players", "permanent": "permanents",
             "spell": "spells", "ability": "abilities", "land": "lands",
             "artifact": "artifacts", "enchantment": "enchantments",
+            "artifact_or_enchantment": "artifact_or_enchantment",
             "planeswalker": "planeswalkers", "card": "cards", "battle": "battles",
         }
         plural_to_singular = {v: k for k, v in singular_to_plural.items()}

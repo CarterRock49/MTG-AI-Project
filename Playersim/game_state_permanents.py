@@ -74,7 +74,7 @@ class GameStatePermanentsMixin:
             "loyalty_counters", "damage_counters", "deathtouch_damage",
             "saga_counters", "mutation_stacks", "chosen_creature_types",
             "chosen_colors", "chosen_card_types", "chosen_opponents",
-            "as_enters_choices",
+            "chosen_basic_land_types", "as_enters_choices",
         )
         for key in dict_stores:
             old_store = old_controller.get(key)
@@ -814,6 +814,21 @@ class GameStatePermanentsMixin:
             return False
 
         keyword_lower = keyword.lower()
+
+        # Official keyword counters grant their named ability for as long as
+        # the counter remains.  Keep the central check authoritative so
+        # targeting, combat, and policy masks all observe the same live state.
+        counter_count = int(
+            getattr(card, 'counters', {}).get(keyword_lower, 0) or 0)
+        if counter_count > 0:
+            lost_all = bool(
+                self.layer_system
+                and self.layer_system.source_has_lost_all_abilities(card_id))
+            if not lost_all:
+                keyword_names = {
+                    str(value).lower() for value in Card.ALL_KEYWORDS}
+                if keyword_lower in keyword_names:
+                    return True
 
         # 1. Prefer Layer System Results (on the live card object)
         # The LayerSystem updates the card object directly with the final 'keywords' array.
@@ -1673,6 +1688,11 @@ class GameStatePermanentsMixin:
                 "artifact", "battle", "creature", "enchantment", "instant",
                 "kindred", "land", "planeswalker", "sorcery",
             ]
+        if choice_kind == "basic_land_type":
+            return ["plains", "island", "swamp", "mountain", "forest"]
+        if choice_kind == "pay_life":
+            return (["pay_2_life", "decline"]
+                    if int(player.get("life", 0)) >= 2 else ["decline"])
         if choice_kind == "opponent":
             return [key for key, candidate in (("p1", self.p1), ("p2", self.p2))
                     if candidate is not None and candidate is not player]
@@ -1717,10 +1737,51 @@ class GameStatePermanentsMixin:
         card_id = ctx.get("card_id")
         chosen = options[option_index]
         choice_kind = choice_type[len("as_enters_"):]
+
+        # The second half of a Multiversal Passage entry is a real optional
+        # life payment, not an unconditional tapped-entry sentence.  It shares
+        # the as-enters choice channel so the first choice and the payment are
+        # atomic with respect to deferred ETB/landfall triggers.
+        if choice_kind == "pay_life":
+            player = ctx.get("player")
+            card_id = ctx.get("card_id")
+            if not player or chosen not in ("pay_2_life", "decline"):
+                logging.warning("Invalid as-enters life-payment choice.")
+                return False
+            if chosen == "pay_2_life":
+                if int(player.get("life", 0)) < 2:
+                    logging.warning("Cannot pay 2 life for as-enters choice.")
+                    return False
+                player["life"] -= 2
+                player["lost_life_this_turn"] = True
+                self.trigger_ability(card_id, "LOSE_LIFE", {
+                    "player": player, "amount": 2,
+                    "source_id": card_id, "cause": "cost",
+                })
+            else:
+                player.setdefault("tapped_permanents", set()).add(card_id)
+            enter_context = ctx.get("enter_context")
+            card = self._safe_get_card(card_id)
+            logging.debug(
+                f"{getattr(card, 'name', card_id)}: "
+                f"{'paid 2 life' if chosen == 'pay_2_life' else 'entered tapped'}.")
+            self.choice_context = None
+            if getattr(self, 'previous_priority_phase', None) is not None:
+                self.phase = self.previous_priority_phase
+                self.previous_priority_phase = None
+            else:
+                self.phase = self.PHASE_PRIORITY
+            self.priority_player = player
+            self.priority_pass_count = 0
+            self._finish_battlefield_entry_triggers(
+                card_id, player, enter_context)
+            return True
+
         stores = {
             "creature_type": "chosen_creature_types",
             "color": "chosen_colors",
             "card_type": "chosen_card_types",
+            "basic_land_type": "chosen_basic_land_types",
             "opponent": "chosen_opponents",
         }
         store_name = stores.get(choice_kind)
@@ -1734,6 +1795,40 @@ class GameStatePermanentsMixin:
         logging.debug(
             f"{getattr(card, 'name', card_id)}: chose {choice_kind} '{chosen}'.")
         enter_context = ctx.get("enter_context")
+
+        # Capture the printed continuation before CR 305.7 strips the live
+        # land's rules text in layer 4.
+        oracle_text = (getattr(card, "oracle_text", "") or "").lower()
+        if choice_kind == "basic_land_type" and self.layer_system:
+            # Setting a basic land type is CR 305.7, rather than merely adding
+            # a decorative subtype: it supplies that type's intrinsic mana
+            # ability and replaces the land's rules-text abilities.
+            self.layer_system.register_effect({
+                "source_id": card_id,
+                "layer": 4,
+                "affected_ids": [card_id],
+                "effect_type": "set_basic_land_type",
+                "effect_value": chosen,
+                "duration": "permanent",
+            })
+            self.layer_system.apply_all_effects()
+
+        if (choice_kind == "basic_land_type"
+                and "then you may pay 2 life" in oracle_text
+                and "if you don't, it enters tapped" in oracle_text):
+            # The layer application above intentionally removes the land's
+            # printed rules text, so detect this continuation from the card
+            # text captured before clearing/replacing the choice context.
+            can_pay = int(player.get("life", 0)) >= 2
+            ctx["type"] = "as_enters_pay_life"
+            ctx["options"] = (["pay_2_life", "decline"]
+                              if can_pay else ["decline"])
+            self.choice_context = ctx
+            self.phase = self.PHASE_CHOOSE
+            self.priority_player = player
+            self.priority_pass_count = 0
+            return True
+
         self.choice_context = None
         if getattr(self, 'previous_priority_phase', None) is not None:
             self.phase = self.previous_priority_phase

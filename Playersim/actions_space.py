@@ -8,7 +8,9 @@ import logging
 import re
 import numpy as np
 from .card import Card
+from .ability_utils import has_damage_prevention_instruction
 from .debug import debug_log_valid_actions 
+from .targeting import aura_cast_targeting_text
 
 
 class ActionSpaceMixin:
@@ -111,11 +113,22 @@ class ActionSpaceMixin:
                             # source. Preserve the first directly and route all
                             # colliding mechanic/source contexts through the
                             # shared paginated catalog.
-                            overflow_action_catalog.append({
+                            overflow_entry = {
                                 "label": reason or action_type,
                                 "action_index": index,
                                 "action_context": normalized_context,
-                            })
+                            }
+                            # Multiple mask helpers may discover the same
+                            # legal action (response helpers and general
+                            # prevention helpers overlap, for example). A
+                            # catalog entry represents a unique dispatch
+                            # context, not the number of discovery paths.
+                            if not any(
+                                    entry.get("action_index") == index
+                                    and entry.get("action_context", {}) ==
+                                    normalized_context
+                                    for entry in overflow_action_catalog):
+                                overflow_action_catalog.append(overflow_entry)
                             return
                         valid_actions[index] = True
                         action_reasons[index] = {
@@ -180,29 +193,45 @@ class ActionSpaceMixin:
                     context = getattr(gs, 'targeting_context', None) or \
                             getattr(gs, 'sacrifice_context', None) or \
                             getattr(gs, 'choice_context', None)
-                    
-                    acting_player = context.get('controller') or context.get('player') if context else None
 
-                    if acting_player == perspective_player:
-                        if gs.phase == gs.PHASE_TARGETING: 
-                            self._add_targeting_actions(perspective_player, valid_actions, set_valid_action)
+                    if context:
+                        acting_player = (context.get('controller')
+                                         or context.get('player'))
 
-                        elif gs.phase == gs.PHASE_SACRIFICE: 
-                            self._add_sacrifice_actions(perspective_player, valid_actions, set_valid_action)
-                            
-                        elif gs.phase == gs.PHASE_CHOOSE: 
-                            self._add_special_choice_actions(perspective_player, valid_actions, set_valid_action)
-                    else:
-                        set_valid_action(224, f"NO_OP (Waiting for opponent in {special_phase_name})")
+                        if acting_player == perspective_player:
+                            if gs.phase == gs.PHASE_TARGETING:
+                                self._add_targeting_actions(
+                                    perspective_player, valid_actions,
+                                    set_valid_action)
 
-                    # If valid actions found (or NO_OP added), return
-                    if np.sum(valid_actions) > 0:
-                        self.action_reasons_with_context = action_reasons
+                            elif gs.phase == gs.PHASE_SACRIFICE:
+                                self._add_sacrifice_actions(
+                                    perspective_player, valid_actions,
+                                    set_valid_action)
+
+                            elif gs.phase == gs.PHASE_CHOOSE:
+                                self._add_special_choice_actions(
+                                    perspective_player, valid_actions,
+                                    set_valid_action)
+                        else:
+                            set_valid_action(
+                                224,
+                                f"NO_OP (Waiting for opponent in "
+                                f"{special_phase_name})")
+
+                        # If valid actions found (or NO_OP added), return.
+                        if np.sum(valid_actions) > 0:
+                            self.action_reasons_with_context = action_reasons
+                            return valid_actions
+
+                        # Fallback if a live context generated no actions.
+                        set_valid_action(
+                            224, f"NO_OP (Fallback {special_phase_name})")
                         return valid_actions
-                    
-                    # Fallback if no actions generated (prevent crash)
-                    set_valid_action(224, f"NO_OP (Fallback {special_phase_name})")
-                    return valid_actions
+                    # No context means the transient wrapper is orphaned.
+                    # Continue into ordinary priority generation; PASS then
+                    # resolves a pending stack or lets _advance_phase restore
+                    # the underlying turn phase.
 
                 # --- 4. Regular Game Play & State Integrity Check ---
                 
@@ -448,7 +477,7 @@ class ActionSpaceMixin:
         """Adds actions performable only at sorcery speed. (Updated for Offspring/Impending)"""
         gs = self.game_state
         # --- Play Land ---
-        if not player.get("land_played", False): # Use .get for safety
+        if gs.can_play_land_this_turn(player):
             for i in range(min(len(player["hand"]), 10)):
                 try:
                     card_id = player["hand"][i]
@@ -491,6 +520,8 @@ class ActionSpaceMixin:
                 if not card or not hasattr(card, 'type_line') or not hasattr(card, 'card_types'): continue
 
                 # Determine if card is typically sorcery speed
+                if not gs.can_player_cast_spells(player):
+                    continue
                 is_sorcery_speed_type = 'land' not in card.type_line.lower() and not ('instant' in card.card_types or self._has_flash(card_id))
 
                 if is_sorcery_speed_type:
@@ -557,6 +588,7 @@ class ActionSpaceMixin:
         # --- Other Sorcery-speed Actions ---
         self._add_plot_actions(player, valid_actions, set_valid_action)
         self._add_warp_actions(player, valid_actions, set_valid_action)
+        self._add_prepared_cast_action(player, valid_actions, set_valid_action)
         self._add_ability_activation_actions(player, valid_actions, set_valid_action, is_sorcery_speed=True)
         # PW abilities handled by _add_planeswalker_actions
         if hasattr(self, 'combat_handler') and self.combat_handler:
@@ -588,6 +620,8 @@ class ActionSpaceMixin:
                 card = gs._safe_get_card(card_id)
                 if not card or not hasattr(card, 'type_line') or not hasattr(card, 'card_types'): continue
 
+                if not gs.can_player_cast_spells(player):
+                    continue
                 is_instant_speed = 'instant' in card.card_types or self._has_flash(card_id)
 
                 if (is_instant_speed and 'land' not in card.type_line.lower()
@@ -654,6 +688,7 @@ class ActionSpaceMixin:
         # --- Other instant speed actions (no changes needed) ---
         self._add_warp_actions(player, valid_actions, set_valid_action,
                                require_instant_speed=True)
+        self._add_prepared_cast_action(player, valid_actions, set_valid_action)
         self._add_morph_actions(player, valid_actions, set_valid_action)
         self._add_ability_activation_actions(player, valid_actions, set_valid_action, is_sorcery_speed=False)
         self._add_land_tapping_actions(player, valid_actions, set_valid_action)
@@ -675,7 +710,10 @@ class ActionSpaceMixin:
 
         if hasattr(gs, 'targeting_system') and gs.targeting_system:
             try:
-                valid_targets = gs.targeting_system.get_valid_targets(card_id, caster)
+                target_type = gs._get_target_type_from_text(oracle_text)
+                valid_targets = gs.targeting_system.get_valid_targets(
+                    card_id, caster, target_type,
+                    effect_text=oracle_text)
                 return any(targets for targets in valid_targets.values())
             except Exception as e: return True
         else: return True
@@ -797,13 +835,59 @@ class ActionSpaceMixin:
                     set_valid_action(11, "FINISH_SADDLE")
 
             elif choice_type == "hand_selection":
-                for option_index, card_id in enumerate(context.get("options", [])[:10]):
+                options = context.get("options", [])
+                page_count = max(1, (len(options) + 9) // 10)
+                page = int(context.get('choice_page', 0)) % page_count
+                for option_index, card_id in enumerate(
+                        options[page * 10:(page + 1) * 10]):
                     card = gs._safe_get_card(card_id)
                     set_valid_action(353 + option_index,
                                      f"CHOOSE_HAND_CARD {getattr(card, 'name', card_id)}",
                                      context={"option_index": option_index})
+                if page_count > 1:
+                    set_valid_action(
+                        479, f"HAND_PAGE_NEXT ({page + 1}/{page_count})",
+                        context={"page_count": page_count})
                 if context.get('optional'):
                     set_valid_action(11, "DECLINE_HAND_CARD")
+
+            elif choice_type == "prepared_source":
+                options = list(context.get("options", []))
+                page_count = max(1, (len(options) + 9) // 10)
+                page = int(context.get("choice_page", 0)) % page_count
+                for option_index, card_id in enumerate(
+                        options[page * 10:(page + 1) * 10]):
+                    face = gs._prepare_spell_face(gs._safe_get_card(card_id)) or {}
+                    set_valid_action(
+                        353 + option_index,
+                        f"PREPARED_CAST {face.get('name', card_id)}",
+                        context={"option_index": option_index})
+                if page_count > 1:
+                    set_valid_action(
+                        479,
+                        f"PREPARED_SOURCE_PAGE_NEXT ({page + 1}/{page_count})",
+                        context={"page_count": page_count})
+
+            elif choice_type == "prepared_payment":
+                options = list(context.get("options", []))
+                page_count = max(1, (len(options) + 9) // 10)
+                page = int(context.get("choice_page", 0)) % page_count
+                selected = len(context.get("selected_cards", []))
+                required = int(context.get("required_count", 8))
+                for option_index, card_id in enumerate(
+                        options[page * 10:(page + 1) * 10]):
+                    card = gs._safe_get_card(card_id)
+                    set_valid_action(
+                        353 + option_index,
+                        f"PREPARE_EXILE {getattr(card, 'name', card_id)} "
+                        f"({selected + 1}/{required})",
+                        context={"option_index": option_index})
+                if page_count > 1:
+                    set_valid_action(
+                        479,
+                        f"PREPARE_PAYMENT_PAGE_NEXT ({page + 1}/{page_count})",
+                        context={"page_count": page_count})
+                set_valid_action(11, "DECLINE_PREPARE_PAYMENT")
 
             elif choice_type in {"mana_ability_color", "mana_ability_package"}:
                 for option_index, color in enumerate(context.get('options', [])[:5]):
@@ -835,7 +919,11 @@ class ActionSpaceMixin:
                 kind = context.get("payment_kind", "payment")
                 for option_index, option in enumerate(
                         options[page * 10:(page + 1) * 10]):
-                    card = gs._safe_get_card(option)
+                    # Ward choices may be declarative tokens such as ``pay``
+                    # rather than card IDs.  Looking those up through
+                    # ``_safe_get_card`` emits a false missing-card warning.
+                    card = (gs.card_db.get(option)
+                            if isinstance(option, (int, str)) else None)
                     label = getattr(card, "name", option)
                     set_valid_action(
                         353 + option_index,
@@ -949,7 +1037,11 @@ class ActionSpaceMixin:
                 page = int(context.get('choice_page', 0)) % page_count
                 for option_index, option in enumerate(
                         options[page * 10:(page + 1) * 10]):
-                    card = gs._safe_get_card(option)
+                    # Resolution choices also contain symbolic options
+                    # (``pay``, ``counters``, ``spirit``).  Only resolve an
+                    # option as a card when it is actually present in card_db.
+                    card = (gs.card_db.get(option)
+                            if isinstance(option, (int, str)) else None)
                     label = getattr(card, 'name', option)
                     set_valid_action(
                         353 + option_index,
@@ -1463,9 +1555,40 @@ class ActionSpaceMixin:
             battle_card = gs._safe_get_card(battle_id)
             set_valid_action(462 + battle_idx_rel, f"ATTACK_BATTLE {battle_card.name}")
 
+    def _can_use_specialized_response_cast(self, card_id, player, card):
+        """Whether a response shortcut may cast without announcement steps.
+
+        The 430-434 handlers pass response-specific target context directly to
+        ``cast_spell``.  Modal and Spree cards must announce modes first, so
+        they must use the ordinary PLAY_SPELL flow instead of these shortcuts.
+        """
+        gs = self.game_state
+        cast_context = {
+            'source_zone': 'hand',
+            'hand_idx': (player.get('hand', []).index(card_id)
+                         if card_id in player.get('hand', []) else None),
+        }
+        if not gs._can_cast_now(card_id, player, context=cast_context):
+            return False
+        if getattr(card, 'is_spree', False):
+            return False
+        parser = getattr(getattr(gs, 'ability_handler', None),
+                         '_parse_modal_text', None)
+        if parser:
+            try:
+                modes, _, _ = parser(getattr(card, 'oracle_text', ''))
+                if modes:
+                    return False
+            except Exception:
+                # A parser error is not permission to bypass announcement.
+                return False
+        return True
+
     def _add_response_actions(self, player, valid_actions, set_valid_action):
         """Add actions for responding to stack (counters, etc.)."""
         gs = self.game_state
+        if not gs.can_player_cast_spells(player):
+            return
         if not gs.stack: return
 
         stack_has_opponent_spell = any(isinstance(item, tuple) and item[0] == "SPELL" and item[2] != player for item in gs.stack)
@@ -1477,7 +1600,9 @@ class ActionSpaceMixin:
                 card_id = player["hand"][i]
                 card = gs._safe_get_card(card_id)
                 if card and hasattr(card, 'oracle_text') and "counter target spell" in card.oracle_text.lower():
-                    if self._can_afford_card(player, card):
+                    if (self._can_use_specialized_response_cast(
+                            card_id, player, card)
+                            and self._can_afford_card(player, card)):
                         # Create context with hand_idx and any targets needed in handler
                         counter_context = {'hand_idx': i}
                         # Find a valid target spell to include in context
@@ -1494,7 +1619,9 @@ class ActionSpaceMixin:
                 card = gs._safe_get_card(card_id)
                 if card and hasattr(card, 'oracle_text') and ("counter target ability" in card.oracle_text.lower() or 
                                                             "counter target activated ability" in card.oracle_text.lower()):
-                    if self._can_afford_card(player, card):
+                    if (self._can_use_specialized_response_cast(
+                            card_id, player, card)
+                            and self._can_afford_card(player, card)):
                         # Include necessary context for handler
                         counter_ability_context = {'hand_idx': i}
                         # Find a valid target ability to include in context
@@ -1512,8 +1639,11 @@ class ActionSpaceMixin:
             for i in range(min(len(player["hand"]), 8)):
                 card_id = player["hand"][i]
                 card = gs._safe_get_card(card_id)
-                if card and hasattr(card, 'oracle_text') and "prevent" in card.oracle_text.lower() and "damage" in card.oracle_text.lower():
-                    if self._can_afford_card(player, card):
+                if (card and hasattr(card, 'oracle_text')
+                        and has_damage_prevention_instruction(card.oracle_text)
+                        and self._can_use_specialized_response_cast(
+                            card_id, player, card)
+                        and self._can_afford_card(player, card)):
                         prevent_context = {'hand_idx': i}
                         # Find damage source if applicable
                         for stack_idx, item in enumerate(gs.stack):
@@ -1529,7 +1659,9 @@ class ActionSpaceMixin:
                 card_id = player["hand"][i]
                 card = gs._safe_get_card(card_id)
                 if card and hasattr(card, 'oracle_text') and "redirect" in card.oracle_text.lower() and "damage" in card.oracle_text.lower():
-                    if self._can_afford_card(player, card):
+                    if (self._can_use_specialized_response_cast(
+                            card_id, player, card)
+                            and self._can_afford_card(player, card)):
                         redirect_context = {'hand_idx': i}
                         set_valid_action(433, f"REDIRECT_DAMAGE with {card.name}", context=redirect_context)
 
@@ -1541,7 +1673,9 @@ class ActionSpaceMixin:
                 card_id = player["hand"][i]
                 card = gs._safe_get_card(card_id)
                 if card and hasattr(card, 'oracle_text') and "counter target triggered ability" in card.oracle_text.lower():
-                    if self._can_afford_card(player, card):
+                    if (self._can_use_specialized_response_cast(
+                            card_id, player, card)
+                            and self._can_afford_card(player, card)):
                         stifle_context = {'hand_idx': i}
                         # Find a valid target trigger to include in context
                         for stack_idx, item in enumerate(gs.stack):
@@ -1955,6 +2089,7 @@ class ActionSpaceMixin:
         """Check affordability using ManaSystem, handling dict or Card object."""
         gs = self.game_state
         if context is None: context = {}
+        else: context = dict(context)
         if not hasattr(gs, 'mana_system') or not gs.mana_system:
             return sum(player.get("mana_pool", {}).values()) > 0 # Basic check
 
@@ -1964,6 +2099,10 @@ class ActionSpaceMixin:
         elif isinstance(card_or_data, Card):
             cost_str = getattr(card_or_data, 'mana_cost', '')
             card_id = getattr(card_or_data, 'card_id', None)
+            # Conditional mana restrictions inspect the spell object. The
+            # live cast installs it before payment; the mask probe must carry
+            # the same context or it hides casts payable with restricted mana.
+            context.setdefault('card', card_or_data)
         else:
             return False # Invalid input
 
@@ -2061,8 +2200,11 @@ class ActionSpaceMixin:
         if getattr(card, 'is_spree', False):
             return True
         card_id = getattr(card, 'card_id', None)
-        if card_id is None or not hasattr(card, 'oracle_text') or 'target' not in card.oracle_text.lower():
+        if card_id is None or not hasattr(card, 'oracle_text'):
             return True # No target needed or cannot check
+        aura_target_text = aura_cast_targeting_text(card)
+        if not aura_target_text and 'target' not in card.oracle_text.lower():
+            return True # No target needed.
         # Permanent spells other than Auras do not choose targets on cast
         # (CR 601.2c); 'target' in their text belongs to triggered/activated
         # abilities or reminder text and must not block casting them.
@@ -2071,13 +2213,48 @@ class ActionSpaceMixin:
             subtypes = [str(s).lower() for s in getattr(card, 'subtypes', [])]
             if 'aura' not in subtypes:
                 return True
-        if gs._target_bounds_from_text(card.oracle_text)[0] == 0:
-            return True
-
         if hasattr(gs, 'targeting_system') and gs.targeting_system:
             try:
-                valid_targets = gs.targeting_system.get_valid_targets(card_id, caster)
-                return any(targets for targets in valid_targets.values())
+                if aura_target_text:
+                    target_type = gs._get_target_type_from_text(
+                        aura_target_text)
+                    valid_targets = gs.targeting_system.get_valid_targets(
+                        card_id, caster, target_type,
+                        effect_text=aura_target_text)
+                    return any(valid_targets.values())
+                target_slots = gs._ordinary_target_slots(card.oracle_text)
+                if target_slots:
+                    for slot in target_slots:
+                        minimum = int(slot.get('min_targets', 0))
+                        if minimum == 0:
+                            continue
+                        valid_targets = gs.targeting_system.get_valid_targets(
+                            card_id, caster,
+                            slot.get('required_type', 'target'),
+                            effect_text=slot.get('effect_text', ''))
+                        valid_ids = {
+                            target_id
+                            for target_ids in valid_targets.values()
+                            for target_id in target_ids
+                        }
+                        if len(valid_ids) < minimum:
+                            return False
+                    return True
+                targeting_text = gs._ordinary_single_targeting_text(
+                    card.oracle_text)
+                minimum, _ = gs._target_bounds_from_text(targeting_text)
+                if minimum == 0:
+                    return True
+                target_type = gs._get_target_type_from_text(targeting_text)
+                valid_targets = gs.targeting_system.get_valid_targets(
+                    card_id, caster, target_type,
+                    effect_text=targeting_text)
+                valid_ids = {
+                    target_id
+                    for target_ids in valid_targets.values()
+                    for target_id in target_ids
+                }
+                return len(valid_ids) >= minimum
             except Exception as e:
                  logging.warning(f"Error checking targets with TargetingSystem for {card.name}: {e}")
                  return True # Assume targets exist on error
@@ -2136,7 +2313,7 @@ class ActionSpaceMixin:
                     "hand_idx": hand_idx, "card_id": card_id,
                     "controller_id": controller_id,
                 }
-                if (can_sorcery and not player.get("land_played", False)
+                if (can_sorcery and gs.can_play_land_this_turn(player)
                         and "land" in getattr(card, "card_types", [])):
                     options.append({
                         "label": f"Play {getattr(card, 'name', card_id)}",
@@ -2223,6 +2400,8 @@ class ActionSpaceMixin:
         has_emblem = any(
             emblem.get("kind") == "graveyard_permanents"
             for emblem in player.get("emblems", []))
+        has_land_permission = gs.can_play_lands_from_graveyard(player)
+        casting_allowed = gs.can_player_cast_spells(player)
         permanent_types = {
             "creature", "artifact", "enchantment", "planeswalker", "battle"}
         options = []
@@ -2230,6 +2409,9 @@ class ActionSpaceMixin:
                 player.get("graveyard", [])[6:], 6):
             card = gs._safe_get_card(card_id)
             if not card:
+                continue
+            if ("land" not in getattr(card, "card_types", [])
+                    and not casting_allowed):
                 continue
             context = {"source_zone": "graveyard",
                        "source_idx": graveyard_index}
@@ -2286,16 +2468,21 @@ class ActionSpaceMixin:
                         continue
                     context.update({"flashback_cast": True,
                                     "flashback_cost": flashback_cost})
-                elif has_emblem:
+                elif has_emblem or has_land_permission:
                     card_types = set(getattr(card, "card_types", []))
                     is_land = "land" in card_types
                     if is_land:
-                        if not can_sorcery or player.get("land_played", False):
+                        if (not can_sorcery
+                                or not gs.can_play_land_this_turn(player)):
                             continue
-                    elif (not card_types.intersection(permanent_types)
+                    elif (not has_emblem
+                          or not card_types.intersection(permanent_types)
                           or (not can_sorcery and not self._has_flash(card_id))):
                         continue
-                    context["emblem_graveyard_cast"] = True
+                    if is_land and has_land_permission:
+                        context["controlled_permanent_land_play"] = True
+                    else:
+                        context["emblem_graveyard_cast"] = True
                     if (not is_land
                             and (not self._can_afford_card(
                                 player, card, context=context)
@@ -2331,6 +2518,8 @@ class ActionSpaceMixin:
     def _add_exile_casting_actions(self, player, valid_actions, set_valid_action):
         """Add actions for casting spells from exile."""
         gs = self.game_state
+        if not gs.can_player_cast_spells(player):
+            return
 
         for i, option in enumerate(gs.get_exile_cast_options(player)[:8]):
             card = gs._safe_get_card(option["card_id"])
@@ -2368,6 +2557,8 @@ class ActionSpaceMixin:
     def _add_warp_actions(self, player, valid_actions, set_valid_action,
                           require_instant_speed=False):
         """Expose Warp using Plot's mutually exclusive hand-indexed slots."""
+        if not self.game_state.can_player_cast_spells(player):
+            return
         action_indices = [296, 297, 298, 309, 310, 311, 312, 313]
         for hand_index, card_id in enumerate(player.get("hand", [])[:8]):
             card = self.game_state._safe_get_card(card_id)
@@ -2381,6 +2572,34 @@ class ActionSpaceMixin:
                 set_valid_action(
                     action_indices[hand_index], f"WARP_CAST {card.name}",
                     context={"hand_idx": hand_index, "warp_cast": True})
+
+    def _add_prepared_cast_action(self, player, valid_actions,
+                                  set_valid_action):
+        """Expose virtual spell copies made by prepared permanents."""
+        gs = self.game_state
+        if not gs.can_player_cast_spells(player):
+            return
+        options = [
+            card_id for card_id in player.get("battlefield", [])
+            if card_id in getattr(gs, "prepared_cards", set())
+            and gs.can_cast_prepared_copy(card_id, player)
+        ]
+        if not options:
+            return
+        labels = [
+            (gs._prepare_spell_face(gs._safe_get_card(card_id)) or {})
+            .get("name", card_id)
+            for card_id in options
+        ]
+        context = {
+            "options": options,
+            "controller_id": "p1" if player is gs.p1 else "p2",
+        }
+        if len(options) == 1:
+            context["source_id"] = options[0]
+        set_valid_action(
+            451, "PREPARED_CAST " + ", ".join(map(str, labels)),
+            context=context)
 
     def _add_token_copy_actions(self, player, valid_actions, set_valid_action):
         """Add actions for token creation and copying."""
@@ -2723,6 +2942,40 @@ class ActionSpaceMixin:
     def _add_alternative_casting_actions(self, player, valid_actions, set_valid_action, is_sorcery_speed):
         """Add actions for alternative casting costs."""
         gs = self.game_state
+        if not gs.can_player_cast_spells(player):
+            return
+        # Evoke changes only the cost, so it follows the card's normal timing.
+        # Action 221 carries the selected hand slot in generated context; if
+        # multiple Evoke cards are legal, set_valid_action's shared catalog
+        # preserves the additional distinct contexts.
+        for i in range(min(len(player.get("hand", [])), 8)):
+            card_id = player["hand"][i]
+            card = gs._safe_get_card(card_id)
+            if (not card or not hasattr(card, "oracle_text")
+                    or not re.search(
+                        r"(?:^|\n)evoke\s+(?:\{[^}]+\})+",
+                        card.oracle_text, re.IGNORECASE)):
+                continue
+            if not is_sorcery_speed and not self._has_flash(card_id):
+                continue
+            cast_context = {
+                "hand_idx": i,
+                "source_zone": "hand",
+                "use_alt_cost": "evoke",
+                "card": card,
+            }
+            evoke_cost = gs.mana_system.calculate_alternative_cost(
+                card_id, player, "evoke", cast_context)
+            if evoke_cost is None:
+                continue
+            final_cost = gs.mana_system.apply_cost_modifiers(
+                player, evoke_cost, card_id, cast_context)
+            if gs.mana_system.can_pay_mana_cost_with_lands(
+                    player, final_cost, cast_context):
+                set_valid_action(
+                    221, f"EVOKE_CAST {card.name}",
+                    context={"hand_idx": i})
+
         # Flashback
         for i in range(min(len(player.get("graveyard",[])), 6)):
             card_id = player["graveyard"][i]
@@ -2862,6 +3115,8 @@ class ActionSpaceMixin:
         has_emblem = any(
                 emblem.get("kind") == "graveyard_permanents"
                 for emblem in player.get("emblems", []))
+        has_land_permission = self.game_state.can_play_lands_from_graveyard(
+            player)
         has_adventure_permission = any(
             self.game_state.has_graveyard_adventure_permission(
                 player, card_id)
@@ -2872,16 +3127,21 @@ class ActionSpaceMixin:
         has_harmonize = any(
             self.game_state.harmonize_cost_for(player, card_id)
             for card_id in player.get("graveyard", []))
-        if (not has_emblem and not has_adventure_permission
+        if (not has_emblem and not has_land_permission
+                and not has_adventure_permission
                 and not has_flashback and not has_harmonize):
             return
         gs = self.game_state
+        casting_allowed = gs.can_player_cast_spells(player)
         permanent_spell_types = {
             "creature", "artifact", "enchantment", "planeswalker", "battle"
         }
         for graveyard_index, card_id in enumerate(player.get("graveyard", [])[:6]):
             card = gs._safe_get_card(card_id)
             if not card:
+                continue
+            if ("land" not in getattr(card, "card_types", [])
+                    and not casting_allowed):
                 continue
             if gs.has_graveyard_adventure_permission(player, card_id):
                 adventure = card.get_adventure_data() or {}
@@ -2961,22 +3221,26 @@ class ActionSpaceMixin:
                         "flashback_cost": flashback_cost,
                     })
                 continue
-            if not has_emblem:
-                continue
             card_types = set(getattr(card, "card_types", []))
             is_land = "land" in card_types
             if is_land:
-                if not is_sorcery_speed or player.get("land_played", False):
+                if (not (has_emblem or has_land_permission)
+                        or not is_sorcery_speed
+                        or not gs.can_play_land_this_turn(player)):
                     continue
-            elif not card_types.intersection(permanent_spell_types):
+            elif (not has_emblem
+                  or not card_types.intersection(permanent_spell_types)):
                 continue
             elif not is_sorcery_speed and not self._has_flash(card_id):
                 continue
             cast_context = {
                 "source_zone": "graveyard",
                 "source_idx": graveyard_index,
-                "emblem_graveyard_cast": True,
             }
+            if is_land and has_land_permission:
+                cast_context["controlled_permanent_land_play"] = True
+            else:
+                cast_context["emblem_graveyard_cast"] = True
             if not is_land:
                 if not self._can_afford_card(player, card, context=cast_context):
                     continue
@@ -3083,6 +3347,8 @@ class ActionSpaceMixin:
     def _add_split_card_actions(self, player, valid_actions, set_valid_action):
         """Add actions for split cards."""
         gs = self.game_state
+        if not gs.can_player_cast_spells(player):
+            return
         
         for idx, card_id in enumerate(player["hand"][:8]):  # Limit to first 8
             card = gs._safe_get_card(card_id)
@@ -3155,38 +3421,48 @@ class ActionSpaceMixin:
     def _add_damage_prevention_actions(self, player, valid_actions, set_valid_action):
         """Add actions for preventing or redirecting damage."""
         gs = self.game_state
+        if not gs.can_player_cast_spells(player):
+            return
         
         # Check if damage is being dealt (only relevant in combat or with damage effects on stack)
         is_damage_being_dealt = gs.phase in [gs.PHASE_COMBAT_DAMAGE, gs.PHASE_FIRST_STRIKE_DAMAGE]
-        
-        if is_damage_being_dealt or gs.stack:
-            # Check for prevention effects in hand
-            for idx, card_id in enumerate(player["hand"][:8]):  # Limit to first 8
-                card = gs._safe_get_card(card_id)
-                if card and hasattr(card, 'oracle_text'):
-                    if "prevent" in card.oracle_text.lower() and "damage" in card.oracle_text.lower():
-                        # Check if we can afford it
-                        can_afford = False
-                        if hasattr(gs, 'mana_system'):
-                            can_afford = gs.mana_system.can_pay_mana_cost(player, card.mana_cost if hasattr(card, 'mana_cost') else "")
-                        else:
-                            can_afford = sum(player["mana_pool"].values()) > 0
-                        
-                        if can_afford:
-                            set_valid_action(
-                                432, f"PREVENT_DAMAGE with {card.name}",
-                                context={'hand_idx': idx})
-                    
-                    if "redirect" in card.oracle_text.lower() and "damage" in card.oracle_text.lower():
-                        # Check if we can afford it
-                        can_afford = False
-                        if hasattr(gs, 'mana_system'):
-                            can_afford = gs.mana_system.can_pay_mana_cost(player, card.mana_cost if hasattr(card, 'mana_cost') else "")
-                        else:
-                            can_afford = sum(player["mana_pool"].values()) > 0
-                        
-                        if can_afford:
-                            set_valid_action(
-                                433, f"REDIRECT_DAMAGE with {card.name}",
-                                context={'hand_idx': idx})
+        # Stack responses are already enumerated by _add_response_actions.
+        # Keep this helper for the no-stack combat-damage window only, avoiding
+        # duplicate routes to the same response in the overflow catalog.
+        if not is_damage_being_dealt or gs.stack:
+            return
+
+        # Check for prevention effects in hand.
+        for idx, card_id in enumerate(player["hand"][:8]):  # Limit to first 8
+            card = gs._safe_get_card(card_id)
+            if not card or not hasattr(card, 'oracle_text'):
+                continue
+            if (has_damage_prevention_instruction(card.oracle_text)
+                    and self._can_use_specialized_response_cast(
+                        card_id, player, card)):
+                if hasattr(gs, 'mana_system'):
+                    can_afford = gs.mana_system.can_pay_mana_cost(
+                        player, card.mana_cost
+                        if hasattr(card, 'mana_cost') else "")
+                else:
+                    can_afford = sum(player["mana_pool"].values()) > 0
+                if can_afford:
+                    set_valid_action(
+                        432, f"PREVENT_DAMAGE with {card.name}",
+                        context={'hand_idx': idx})
+
+            if ("redirect" in card.oracle_text.lower()
+                    and "damage" in card.oracle_text.lower()
+                    and self._can_use_specialized_response_cast(
+                        card_id, player, card)):
+                if hasattr(gs, 'mana_system'):
+                    can_afford = gs.mana_system.can_pay_mana_cost(
+                        player, card.mana_cost
+                        if hasattr(card, 'mana_cost') else "")
+                else:
+                    can_afford = sum(player["mana_pool"].values()) > 0
+                if can_afford:
+                    set_valid_action(
+                        433, f"REDIRECT_DAMAGE with {card.name}",
+                        context={'hand_idx': idx})
 

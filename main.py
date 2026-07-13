@@ -42,7 +42,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 
 # Import MTG Environment Components
-from Playersim.card import load_decks_and_card_db
+from Playersim.card import Card, load_decks_and_card_db
 from Playersim.environment import AlphaZeroMTGEnv
 from Playersim.debug import DEBUG_MODE
 
@@ -808,6 +808,13 @@ def configure_runtime_logging(*, debug=False, worker=False):
     environment_module.DEBUG_MODE = bool(debug)
     environment_module.DEBUG_ACTION_STEPS = bool(debug)
 
+    # A non-debug worker emits only WARNING+, so its catch-all debug handler
+    # otherwise produces a byte-for-byte duplicate of the warning file (and a
+    # second copy of every error).  Keep the dedicated warning/error files and
+    # create a worker debug file only when debug logging was requested.
+    debug_module.debug_handler.setLevel(
+        logging.DEBUG if (debug or not worker) else logging.CRITICAL + 1)
+
     level = logging.DEBUG if debug else (logging.WARNING if worker else logging.INFO)
     console_level = logging.DEBUG if debug else (
         logging.ERROR if worker else logging.INFO)
@@ -1379,7 +1386,7 @@ def build_training_config(args, optuna_params=None):
 
 
 def make_masked_mtg_env(decks, card_db, storage_root, *, agent_is_p1=True,
-                        alternate_agent_seat=False):
+                        alternate_agent_seat=False, subtype_vocab=None):
     """Create an environment whose generated statistics stay in one scope."""
     os.makedirs(storage_root, exist_ok=True)
     return ActionMasker(
@@ -1390,6 +1397,7 @@ def make_masked_mtg_env(decks, card_db, storage_root, *, agent_is_p1=True,
             card_memory_path=os.path.join(storage_root, 'card_memory'),
             agent_is_p1=agent_is_p1,
             alternate_agent_seat=alternate_agent_seat,
+            subtype_vocab=subtype_vocab,
         ),
         action_mask_fn='action_mask',
     )
@@ -1490,6 +1498,7 @@ def objective(trial, base_seed=42):
     except Exception as e:
         logging.error(f"Failed to load decks for optimization: {e}")
         return float('-inf')
+    format_subtype_vocab = tuple(Card.SUBTYPE_VOCAB)
 
     # Create environments (fewer environments for hyperparameter optimization).
     # Training and evaluation statistics must not feed the same trackers.
@@ -1506,7 +1515,8 @@ def objective(trial, base_seed=42):
         return make_masked_mtg_env(
             decks, card_db, storage,
             agent_is_p1=(env_index % 2 == 0),
-            alternate_agent_seat=True)
+            alternate_agent_seat=True,
+            subtype_vocab=format_subtype_vocab)
 
     def make_eval_env():
         nonlocal eval_env_index
@@ -1516,7 +1526,8 @@ def objective(trial, base_seed=42):
         return make_masked_mtg_env(
             decks, card_db, storage,
             agent_is_p1=(env_index % 2 == 0),
-            alternate_agent_seat=True)
+            alternate_agent_seat=True,
+            subtype_vocab=format_subtype_vocab)
 
     # Evaluation must not step the training VecEnv. Doing so leaves PPO's
     # cached ``_last_obs`` out of sync with the environment before the next
@@ -2262,6 +2273,7 @@ def main():
         logging.info("Loading decks and card database...")
         decks, card_db, decks_dir, lineage = load_training_corpus(
             args.decks, args.format, args.format_dir)
+        run_subtype_vocab = tuple(Card.SUBTYPE_VOCAB)
         manifest["lineage"] = lineage
         logging.info(
             "Loaded %s decks with %s unique cards", len(decks), len(card_db))
@@ -2353,7 +2365,8 @@ def main():
                     decks, card_db,
                     os.path.join(train_storage_dir, f"env_{idx}"),
                     agent_is_p1=(idx % 2 == 0),
-                    alternate_agent_seat=True)
+                    alternate_agent_seat=True,
+                    subtype_vocab=run_subtype_vocab)
             return _init
 
         env_fns = [make_env_factory(index) for index in range(num_envs)]
@@ -2377,7 +2390,8 @@ def main():
                     eval_decks, card_db,
                     os.path.join(eval_storage_dir, f"env_{idx}"),
                     agent_is_p1=(idx % 2 == 0),
-                    alternate_agent_seat=True)
+                    alternate_agent_seat=True,
+                    subtype_vocab=run_subtype_vocab)
             return _init
 
         eval_env_fns = [

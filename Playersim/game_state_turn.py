@@ -223,6 +223,7 @@ class GameStateTurnMixin:
 
         player["entered_battlefield_this_turn"] = set() # Clear sickness status
         player["land_played"] = False
+        player["lands_played_this_turn"] = 0
         player["damage_counters"] = {} # Damage removed in Cleanup usually, but safe reset here? Rule 514.2. Okay.
         logging.debug(f"Untap Phase for {player['name']} complete.")
 
@@ -231,7 +232,52 @@ class GameStateTurnMixin:
         self._draw_card(player)
 
     def _draw_card(self, player):
-        """Draw one card through the canonical replacement/telemetry path."""
+        """Draw one card through the canonical batch/telemetry path."""
+        drawn_cards = self._draw_cards(player, 1)
+        return drawn_cards[0] if drawn_cards else None
+
+    def _draw_cards(self, player, count):
+        """Draw one or more cards as one draw instruction.
+
+        Effects such as Quantum Riddler replace ``draw one or more`` as a
+        batch, adding one card to the instruction rather than to every card
+        drawn.  The resulting draws are still performed individually so
+        single-card replacements such as Dredge retain their existing hook.
+        """
+        if not player:
+            return []
+        try:
+            requested_count = max(0, int(count))
+        except (TypeError, ValueError):
+            return []
+        if requested_count <= 0:
+            return []
+
+        draw_context = {
+            "player": player,
+            "draw_count": requested_count,
+            "card_id": (player.get("library") or [None])[0],
+            "draw_batch": True,
+        }
+        modified_context, _ = self.apply_replacement_effect(
+            "DRAW", draw_context)
+        modified_context = modified_context or draw_context
+        final_count = max(0, int(modified_context.get(
+            "draw_count", requested_count) or 0))
+        if modified_context.get("prevented", False):
+            final_count = 0
+
+        drawn_cards = []
+        for _ in range(final_count):
+            drawn_card_id = self._draw_one_card(player)
+            if drawn_card_id is not None:
+                drawn_cards.append(drawn_card_id)
+            elif player.get("attempted_draw_from_empty", False):
+                break
+        return drawn_cards
+
+    def _draw_one_card(self, player):
+        """Perform one resulting draw, including single-draw replacements."""
         if not player or not player.get("library"):
             if player:
                 player["attempted_draw_from_empty"] = True
@@ -249,6 +295,7 @@ class GameStateTurnMixin:
             "player": player,
             "draw_count": 1,
             "card_id": player["library"][0],
+            "draw_batch": False,
         }
         modified_context, was_replaced = self.apply_replacement_effect(
             "DRAW", draw_context)
@@ -744,6 +791,7 @@ class GameStateTurnMixin:
         for player in [self.p1, self.p2]:
             if player:
                 player["land_played"] = False
+                player["lands_played_this_turn"] = 0
                 player["entered_battlefield_this_turn"] = set()
                 player["activated_this_turn"] = set()
                 player["targeted_permanents_this_turn"] = set()

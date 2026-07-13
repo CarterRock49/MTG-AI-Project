@@ -555,6 +555,16 @@ class LayerSystem:
              elif "number of creatures you control" in effect_lower: cda_type = 'creature_count_self'
              elif ("power is equal to the number of lands you control"
                    in effect_lower): cda_type = 'land_count_power_self'
+             else:
+                 subtype_count = re.search(
+                     r"\bpower is equal to the number of\s+"
+                     r"([a-z][\w'-]*)\s+you control\b",
+                     effect_lower)
+                 if subtype_count:
+                     cda_type = {
+                         'kind': 'subtype_count_power_self',
+                         'subtype': subtype_count.group(1).lower(),
+                     }
              # Add more common CDA types
              logging.debug(f"Registering Layer 7a CDA effect: {cda_type}")
              return {'sublayer': 'a', 'effect_type': 'set_pt_cda', 'effect_value': cda_type} # Pass CDA type identifier
@@ -645,7 +655,31 @@ class LayerSystem:
                      chars['power'], chars['toughness'] = p, t
                      logging.debug(f"Layer 7b: Set specific P/T of {target_id} to {p}/{t}")
                           
-        
+    @staticmethod
+    def _counted_subtype_name_matches(count_name, actual_subtype):
+         """Match the plural Oracle count name to a permanent's subtype.
+
+         Oracle normally pluralizes the subtype in phrases such as "the
+         number of Knights you control", while type lines store ``Knight``.
+         A few creature subtypes have irregular plurals and Merfolk is
+         invariant, so a bare trailing-``s`` removal is not sufficient.
+         """
+         count_name = str(count_name or '').lower()
+         actual = str(actual_subtype or '').lower()
+         if not count_name or not actual:
+             return False
+         aliases = {actual, f"{actual}s"}
+         if actual.endswith('f'):
+             aliases.add(f"{actual[:-1]}ves")
+         elif actual.endswith('fe'):
+             aliases.add(f"{actual[:-2]}ves")
+         aliases.add({
+             'mouse': 'mice',
+             'ox': 'oxen',
+         }.get(actual, ''))
+         return count_name in aliases
+
+
     def _calculate_layer7a_cda_and_base(self, effect_data, calculated_characteristics): # Renamed from _calculate_layer7a_set
          effect_type = effect_data.get('effect_type')
          value = effect_data.get('effect_value')
@@ -686,6 +720,37 @@ class LayerSystem:
                                 logging.debug(
                                     "Layer 7a (CDA): Set base power of %s from land count (%s)",
                                     target_id, count)
+                      elif (isinstance(cda_type, dict)
+                            and cda_type.get('kind') ==
+                            'subtype_count_power_self'):
+                           controller = chars.get('_controller')
+                           subtype = str(cda_type.get('subtype', '')).lower()
+                           if controller and subtype:
+                                count = 0
+                                for card_id in controller.get('battlefield', []):
+                                    counted_chars = calculated_characteristics.get(
+                                        card_id)
+                                    if counted_chars is not None:
+                                        subtypes = counted_chars.get(
+                                            'subtypes', [])
+                                    else:
+                                        counted_card = self.game_state._safe_get_card(
+                                            card_id)
+                                        subtypes = getattr(
+                                            counted_card, 'subtypes', [])
+                                    if any(
+                                            self._counted_subtype_name_matches(
+                                                subtype, value)
+                                            for value in (subtypes or [])):
+                                        count += 1
+                                # This CDA defines power only. Keep the
+                                # creature's printed toughness intact.
+                                chars['_base_power'] = count
+                                chars['power'] = count
+                                logging.debug(
+                                    "Layer 7a (CDA): Set base power of %s "
+                                    "from controlled %s count (%s)",
+                                    target_id, subtype, count)
                       # Add more CDA calculations
                   # Set Base P/T (from copy effects, etc.)
                   elif effect_type == 'set_base_pt' and isinstance(value, (tuple, list)) and len(value)==2:

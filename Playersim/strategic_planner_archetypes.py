@@ -5,7 +5,17 @@ all state lives on MTGStrategicPlanner, which composes every mixin.
 """
 
 import logging
+import math
 import numpy as np
+
+
+def _card_number(card, attribute, default=0.0):
+    """Return a finite numeric characteristic for strategic estimates."""
+    try:
+        value = float(getattr(card, attribute, default) or 0)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return value if math.isfinite(value) else default
 
 
 class ArchetypeAnalysisMixin:
@@ -127,7 +137,7 @@ class ArchetypeAnalysisMixin:
                     continue
                     
                 # Base power
-                creature_power = card.power
+                creature_power = _card_number(card, 'power')
                 
                 # Check for evasion (flying, unblockable, etc.)
                 has_evasion = False
@@ -157,9 +167,10 @@ class ArchetypeAnalysisMixin:
             if len(opp_creatures) < len(my_creatures):
                 # Add non-evasive creatures that can get through
                 effective_power += max(0, my_power - evasive_power - 
-                                    sum(gs._safe_get_card(cid).toughness 
-                                        for cid in opp_creatures 
-                                        if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'toughness')))
+                                    sum(_card_number(
+                                        gs._safe_get_card(cid), 'toughness')
+                                        for cid in opp_creatures
+                                        if gs._safe_get_card(cid)))
             
             # Calculate turns to win through combat
             if effective_power > 0:
@@ -432,8 +443,9 @@ class ArchetypeAnalysisMixin:
                     
                     # Track creature power/toughness for archetype analysis
                     if hasattr(card, 'power') and hasattr(card, 'toughness'):
-                        creature_power_sum += card.power
-                        creature_toughness_sum += card.toughness
+                        creature_power_sum += _card_number(card, 'power')
+                        creature_toughness_sum += _card_number(
+                            card, 'toughness')
                         creature_count_with_stats += 1
                         
                     # Track creature types for tribal detection
@@ -458,9 +470,10 @@ class ArchetypeAnalysisMixin:
             
             # Mana curve analysis
             if hasattr(card, 'cmc'):
-                if card.cmc <= 2:
+                cmc = _card_number(card, 'cmc')
+                if cmc <= 2:
                     low_cmc_count += 1
-                elif 3 <= card.cmc <= 4:
+                elif 3 <= cmc <= 4:
                     mid_cmc_count += 1
                 else:
                     high_cmc_count += 1
@@ -722,19 +735,20 @@ class ArchetypeAnalysisMixin:
         # Assess combat damage win condition
         if len(my_creatures) > 0:
             total_power = sum(
-                gs._safe_get_card(cid).power 
-                for cid in my_creatures 
-                if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'power')
-            )
+                _card_number(gs._safe_get_card(cid), 'power')
+                for cid in my_creatures
+                if gs._safe_get_card(cid))
             
             # Account for potential blocking
             if len(opp_creatures) > 0:
-                blocked_power = min(total_power, sum(gs._safe_get_card(cid).toughness for cid in opp_creatures if gs._safe_get_card(cid) and hasattr(gs._safe_get_card(cid), 'toughness')))
+                blocked_power = min(total_power, sum(
+                    _card_number(gs._safe_get_card(cid), 'toughness')
+                    for cid in opp_creatures if gs._safe_get_card(cid)))
                 effective_power = max(0, total_power - blocked_power)
                 
                 # Adjust for evasion (flying, trample, etc.)
                 evasive_power = sum(
-                    gs._safe_get_card(cid).power 
+                    _card_number(gs._safe_get_card(cid), 'power')
                     for cid in my_creatures 
                     if gs._safe_get_card(cid) and 
                     hasattr(gs._safe_get_card(cid), 'power') and 
@@ -1025,7 +1039,7 @@ class ArchetypeAnalysisMixin:
             
             # Build mana curve
             if hasattr(card, 'cmc'):
-                cmc = card.cmc
+                cmc = _card_number(card, 'cmc')
                 if cmc <= 6:
                     mana_curve[cmc] += 1
                 else:
@@ -1625,7 +1639,7 @@ class ArchetypeAnalysisMixin:
             # Basic threat assessment
             if hasattr(card, 'card_types') and 'creature' in card.card_types:
                 if hasattr(card, 'power'):
-                    threat_level += card.power * 0.5
+                    threat_level += _card_number(card, 'power') * 0.5
             
             if hasattr(card, 'card_types') and 'planeswalker' in card.card_types:
                 threat_level += 4  # Planeswalkers are high threats
@@ -1653,4 +1667,4 @@ class ArchetypeAnalysisMixin:
         goals["threat_assessment"] = threats[:3]  # Top 3 threats
         
         return goals
-
+

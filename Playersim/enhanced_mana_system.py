@@ -250,13 +250,15 @@ class EnhancedManaSystem:
         
         # Check for effects from player's own permanents
         for permanent_id in player["battlefield"]:
-            perm_effects = self._get_cost_effects_from_permanent(permanent_id, player, card, True)
+            perm_effects = self._get_cost_effects_from_permanent(
+                permanent_id, player, card, True, context=context)
             effects.extend(perm_effects)
         
         # Check for effects from opponent's permanents
         opponent = gs.p2 if player == gs.p1 else gs.p1
         for permanent_id in opponent["battlefield"]:
-            perm_effects = self._get_cost_effects_from_permanent(permanent_id, opponent, card, False)
+            perm_effects = self._get_cost_effects_from_permanent(
+                permanent_id, opponent, card, False, context=context)
             effects.extend(perm_effects)
         
         # Add effects from card itself (e.g., affinity, convoke)
@@ -265,7 +267,97 @@ class EnhancedManaSystem:
         
         return effects
 
-    def _get_cost_effects_from_permanent(self, permanent_id, controller, target_card, is_controller):
+    def spell_characteristics_for_cast(self, card, context=None):
+        """Return the announced spell's types, subtypes, and Flying status.
+
+        Cost modifiers inspect the spell face being cast, which can differ
+        from the physical card's front face for Adventures, MDFCs, and
+        prepared copies.  The same helper snapshots successful casts so a
+        later first-spell check never depends on a card's current zone/face.
+        """
+        context = context or {}
+        snap_types = context.get("cast_card_types")
+        snap_subtypes = context.get("cast_card_subtypes")
+        snap_flying = context.get("cast_card_has_flying")
+        if (snap_types is not None and snap_subtypes is not None
+                and snap_flying is not None):
+            return (
+                {str(card_type).lower() for card_type in snap_types},
+                {str(subtype).lower() for subtype in snap_subtypes},
+                bool(snap_flying),
+            )
+
+        face = None
+        if context.get("prepared_copy"):
+            face = context.get("prepared_face") or None
+        elif context.get("cast_as_back_face"):
+            faces = list(getattr(card, "faces", []) or [])
+            face = faces[1] if len(faces) > 1 else None
+        elif (context.get("cast_as_adventure")
+              and hasattr(card, "get_adventure_data")):
+            adventure = card.get_adventure_data() or {}
+            if adventure:
+                face = {
+                    "type_line": adventure.get("type", ""),
+                    "oracle_text": adventure.get("effect", ""),
+                }
+
+        type_line = str(
+            (face or {}).get("type_line", "")
+            or getattr(card, "type_line", "") or "")
+        oracle_text = str(
+            (face or {}).get("oracle_text", "")
+            or getattr(card, "oracle_text", "") or "")
+        split_type = re.split(r"\s+[\u2014-]\s+", type_line.lower(),
+                              maxsplit=1)
+        main_type_text = split_type[0]
+        card_types = {
+            card_type for card_type in self.ALL_CARD_TYPES
+            if re.search(rf"\b{re.escape(card_type)}\b", main_type_text)}
+        subtypes = ({
+            subtype.strip(" ,./").lower()
+            for subtype in split_type[1].split()
+            if subtype.strip(" ,./")}
+            if len(split_type) > 1 else set())
+        if face is None:
+            card_types = {
+                str(card_type).lower() for card_type in getattr(
+                    card, "card_types", card_types)} or card_types
+            subtypes = {
+                str(subtype).lower() for subtype in getattr(
+                    card, "subtypes", subtypes)} or subtypes
+
+        has_flying = False
+        intrinsic_keywords = getattr(
+            type(card), "intrinsic_keyword_names", None)
+        if callable(intrinsic_keywords):
+            has_flying = "flying" in intrinsic_keywords(oracle_text)
+        else:
+            has_flying = bool(re.search(
+                r"(?im)^\s*flying(?:\s*[,.;]|\s*$)", oracle_text))
+        if face is None:
+            keyword_vocabulary = list(
+                getattr(type(card), "ALL_KEYWORDS", []) or [])
+            keywords = getattr(card, "keywords", [])
+            if "flying" in keyword_vocabulary:
+                flying_index = keyword_vocabulary.index("flying")
+                if flying_index < len(keywords):
+                    has_flying = has_flying or bool(keywords[flying_index])
+        return card_types, subtypes, has_flying
+
+    def _is_momo_eligible_spell(self, card, context=None):
+        if not card:
+            return False
+        card_types, subtypes, has_flying = \
+            self.spell_characteristics_for_cast(card, context)
+        return bool(
+            "creature" in card_types
+            and "lemur" not in subtypes
+            and has_flying)
+
+    def _get_cost_effects_from_permanent(
+            self, permanent_id, controller, target_card, is_controller,
+            context=None):
         """
         Extract cost modification effects from a permanent. (Enhanced Parsing & Validation)
 
@@ -285,6 +377,10 @@ class EnhancedManaSystem:
         # Ensure necessary objects and attributes exist
         if not permanent or not hasattr(permanent, 'oracle_text') or not target_card:
             return effects
+        if (getattr(gs, "layer_system", None)
+                and gs.layer_system.source_has_lost_all_abilities(
+                    permanent_id)):
+            return effects
 
         # Get info for conditional checks - use getattr for safety
         oracle_text = getattr(permanent, 'oracle_text', '').lower()
@@ -292,6 +388,64 @@ class EnhancedManaSystem:
         target_card_subtypes = getattr(target_card, 'subtypes', [])
         target_card_colors = getattr(target_card, 'colors', [0, 0, 0, 0, 0]) # Default to colorless if missing
         perm_name = getattr(permanent, 'name', f"Card {permanent_id}")
+
+        momo_reduction = re.search(
+            r"the first non-lemur creature spell with flying you cast during "
+            r"each of your turns costs \{1\} less to cast", oracle_text)
+        if momo_reduction:
+            # This exact declaration has restrictions that the generic
+            # qualifier parser cannot represent.  Handle it atomically and
+            # return so the broad parser cannot add a duplicate reduction.
+            if (not is_controller
+                    or gs._get_active_player() is not controller
+                    or not self._is_momo_eligible_spell(
+                        target_card, context=context)):
+                return effects
+            already_cast = any(
+                isinstance(entry, tuple) and len(entry) >= 2
+                and entry[1] is controller
+                and self._is_momo_eligible_spell(
+                    gs._safe_get_card(entry[0]),
+                    context=(entry[2] if len(entry) > 2
+                             and isinstance(entry[2], dict) else {}))
+                for entry in getattr(gs, "spells_cast_this_turn", []))
+            if not already_cast:
+                effects.append({
+                    'type': 'reduction', 'amount': 1,
+                    'applies_to': 'generic', 'source': perm_name,
+                })
+            return effects
+
+        # Conditional battlefield reductions must prove their condition
+        # before the otherwise-generic cost-modifier parser sees them.  In
+        # particular, Gran-Gran's ``Noncreature spells ...`` line used to
+        # discount every matching spell even with no Lessons in the
+        # graveyard because the trailing ``as long as`` clause was ignored.
+        lesson_threshold = re.search(
+            r"noncreature spells you cast cost \{(\d+)\} less to cast "
+            r"as long as there are (\w+|\d+) or more lesson cards in your "
+            r"graveyard", oracle_text)
+        if lesson_threshold:
+            if "creature" in {
+                    str(card_type).lower()
+                    for card_type in target_card_types}:
+                return effects
+            threshold_token = lesson_threshold.group(2)
+            number_words = {
+                "one": 1, "two": 2, "three": 3, "four": 4,
+                "five": 5, "six": 6, "seven": 7, "eight": 8,
+                "nine": 9, "ten": 10,
+            }
+            threshold = (int(threshold_token)
+                         if threshold_token.isdigit()
+                         else number_words.get(threshold_token, 0))
+            lesson_count = sum(
+                1 for graveyard_id in controller.get("graveyard", [])
+                if "lesson" in {
+                    str(subtype).lower() for subtype in getattr(
+                        gs._safe_get_card(graveyard_id), "subtypes", [])})
+            if lesson_count < threshold:
+                return effects
 
         # --- Regex to find cost modifications ---
         # Pattern: "(Qualifier) spells (Scope)? cost {Amount} (less|more)"
@@ -464,6 +618,58 @@ class EnhancedManaSystem:
                     'source': f'{card_name} graveyard spells',
                 })
 
+        # Hearth Elemental counts a union of three card qualities.  In
+        # particular, an adventurer is still eligible while its creature face
+        # is the card's active graveyard characteristic, and a card matching
+        # more than one quality contributes only once.
+        hearth_reduction = re.search(
+            r"this spell costs \{x\} less to cast, where x is the number of "
+            r"cards in your graveyard that are instant cards, sorcery cards, "
+            r"and/or have an adventure", oracle_text)
+        if hearth_reduction and not context.get("cast_as_adventure"):
+            eligible_cards = 0
+            for graveyard_id in player.get("graveyard", []):
+                graveyard_card = self.game_state._safe_get_card(graveyard_id)
+                if not graveyard_card:
+                    continue
+                card_types = {
+                    str(card_type).lower() for card_type in getattr(
+                        graveyard_card, "card_types", [])}
+                has_adventure = getattr(graveyard_card, "has_adventure", None)
+                if ({"instant", "sorcery"}.intersection(card_types)
+                        or (callable(has_adventure) and has_adventure())):
+                    eligible_cards += 1
+            if eligible_cards:
+                effects.append({
+                    'type': 'reduction', 'amount': eligible_cards,
+                    'applies_to': 'generic',
+                    'source': f'{card_name} graveyard card types',
+                })
+
+        # Sunderflock and the same template use a characteristic of the
+        # caster's battlefield to define X; X is not a mana symbol in the
+        # printed cost.  Only the greatest single mana value is subtracted.
+        elemental_reduction = re.search(
+            r"this spell costs \{x\} less to cast, where x is the greatest "
+            r"mana value among elementals you control", oracle_text)
+        if elemental_reduction:
+            greatest_mana_value = max((
+                max(0, int(getattr(
+                    self.game_state._safe_get_card(permanent_id),
+                    "cmc", 0) or 0))
+                for permanent_id in player.get("battlefield", [])
+                if "elemental" in {
+                    str(subtype).lower() for subtype in getattr(
+                        self.game_state._safe_get_card(permanent_id),
+                        "subtypes", [])}
+            ), default=0)
+            if greatest_mana_value:
+                effects.append({
+                    'type': 'reduction', 'amount': greatest_mana_value,
+                    'applies_to': 'generic',
+                    'source': f'{card_name} controlled Elementals',
+                })
+
         # These reductions are determined from targets chosen at CR 601.2c.
         # Casts with these phrases defer payment until that choice is committed,
         # so context['targets'] is authoritative here.
@@ -625,7 +831,9 @@ class EnhancedManaSystem:
     def apply_cost_modifiers(self, player, cost, card_id, context=None):
         """Apply cost modifiers, now accepting context."""
         gs = self.game_state
-        card = (gs._safe_get_card(card_id)
+        context_card = (context or {}).get("card")
+        card = (context_card if hasattr(context_card, "card_types")
+                else gs._safe_get_card(card_id)
                 if card_id is not None else None)
 
         modified_cost = self._normalize_mana_cost(cost)
@@ -1098,9 +1306,13 @@ class EnhancedManaSystem:
                 logging.debug(f"Calculated prowl cost for {card.name}: {prowl_cost}")
                 
         elif alt_cost_type == "evoke":
-            # Find evoke cost
+            # Evoke is printed as its own Oracle line.  The legacy pattern
+            # consumed the first ``{`` before capturing, turning
+            # ``{U/B}{U/B}`` into the malformed ``U/B}{U/B}``.
             import re
-            match = re.search(r"evoke [^\(]([^\)]+)", oracle_text)
+            match = re.search(
+                r"(?:^|\n)evoke\s+((?:\{[^}]+\})+)",
+                oracle_text, re.IGNORECASE)
             if match:
                 evoke_cost = match.group(1)
                 alt_cost = self.parse_mana_cost(evoke_cost)
@@ -1190,46 +1402,13 @@ class EnhancedManaSystem:
         if not card:
             return usable_mana
         
-        # Check each restriction type against the context
+        # Keep affordability, planning, and live payment on one restriction
+        # predicate. The former duplicated only a subset of the latter (for
+        # example it omitted instant/sorcery restrictions), which made a land
+        # produce usable conditional mana that the next affordability check
+        # immediately ignored.
         for restriction_key, mana_pool in conditional_mana.items():
-            can_use = False
-            
-            if restriction_key.startswith("cast_only:"):
-                target_type = restriction_key[10:]  # Extract the target type
-
-                # Chosen-type restriction (Cavern of Souls): require the
-                # recorded creature type, not just any creature.
-                chosen_type_match = re.search(r"chosen type \((\w+)\)", target_type.lower())
-                if chosen_type_match:
-                    required_subtype = chosen_type_match.group(1).lower()
-                    if ('creature' in getattr(card, 'card_types', [])
-                            and required_subtype in [str(s).lower() for s in getattr(card, 'subtypes', [])]):
-                        can_use = True
-                # Check if card matches the restriction
-                elif "creature" in target_type and hasattr(card, 'card_types') and 'creature' in card.card_types:
-                    can_use = True
-                elif "dragon" in target_type and hasattr(card, 'subtypes') and 'dragon' in card.subtypes:
-                    can_use = True
-                elif "artifact" in target_type and hasattr(card, 'card_types') and 'artifact' in card.card_types:
-                    can_use = True
-                elif "spell" in target_type:  # Generic "spell" restriction
-                    can_use = True
-            
-            elif restriction_key.startswith("spend_only:"):
-                target_type = restriction_key[11:]  # Extract the target type
-                
-                # Check if context matches the restriction
-                if "activated abilities" in target_type and context.get('is_ability', False):
-                    can_use = True
-                elif "activated abilities of creatures" in target_type and context.get('is_ability', False):
-                    ability_source = context.get('ability_source')
-                    if ability_source:
-                        ability_card = self.game_state._safe_get_card(ability_source)
-                        if ability_card and hasattr(ability_card, 'card_types') and 'creature' in ability_card.card_types:
-                            can_use = True
-            
-            # Add mana from pools that can be used
-            if can_use:
+            if self._can_use_conditional_mana(restriction_key, context):
                 for color, amount in mana_pool.items():
                     usable_mana[color] += amount
         
@@ -1314,32 +1493,77 @@ class EnhancedManaSystem:
                     return False
                 available_mana[color] -= parsed_cost[color]
 
-            # Handle hybrid mana
-            for hybrid_pair in parsed_cost['hybrid']:
-                # Check if any option is available
-                can_pay_hybrid = False
-                for color in hybrid_pair:
-                    if available_mana.get(color, 0) > 0:
-                        can_pay_hybrid = True
-                        break
-                if not can_pay_hybrid:
+            # Handle standard hybrid mana with one global assignment. Greedy
+            # per-pip choice can reject a payable overlap such as
+            # {U/R}{U/W} with U+R, while availability-only checks let one unit
+            # also pay a later generic pip. The plan both reserves every unit
+            # and backtracks across overlapping options.
+            hybrid_pairs = parsed_cost['hybrid']
+            standard_hybrid = all(
+                all(color in self.mana_symbols for color in pair)
+                for pair in hybrid_pairs)
+            if standard_hybrid:
+                hybrid_plan = self._plan_standard_hybrid_colors(
+                    hybrid_pairs, available_mana)
+                if hybrid_plan is None:
                     return False
+                for chosen_color in hybrid_plan:
+                    available_mana[chosen_color] -= 1
+            else:
+                # Legacy two-hybrid handling currently supports only its
+                # colored alternative. Still reserve that unit so it cannot
+                # be counted again as generic mana.
+                for hybrid_pair in hybrid_pairs:
+                    chosen_color = next(
+                        (color for color in hybrid_pair
+                         if color in self.mana_symbols
+                         and available_mana.get(color, 0) > 0), None)
+                    if chosen_color is None:
+                        return False
+                    available_mana[chosen_color] -= 1
 
-            # Handle Phyrexian mana
+            # Handle Phyrexian mana. Mana is reserved per pip and life is
+            # checked in aggregate; testing each pip against the same life
+            # total let three life cover any number of {C/P} symbols.
+            phyrexian_life_required = 0
             for phyrexian_color in parsed_cost['phyrexian']:
-                # Can pay with either 1 mana of the specified color or 2 life
                 if available_mana.get(phyrexian_color, 0) > 0:
                     available_mana[phyrexian_color] -= 1
-                elif player["life"] >= 2:
-                    # We check if the player has enough life, but we don't deduct it here
-                    pass
                 else:
-                    return False  # Can't pay with either mana or life
+                    phyrexian_life_required += 2
+            if player["life"] < phyrexian_life_required:
+                return False
                     
             # Handle snow mana
             if parsed_cost['snow'] > 0:
-                if not self.can_pay_snow_cost(
-                        player, parsed_cost['snow'], context):
+                remaining_snow = int(parsed_cost['snow'])
+                snow_by_color = {
+                    color: min(
+                        available_mana.get(color, 0),
+                        int(player.get("snow_mana_pool", {}).get(
+                            color, 0) or 0)
+                        + int(player.get(
+                            "phase_restricted_snow_mana", {}).get(
+                                color, 0) or 0)
+                        + sum(
+                            int(provenance.get(color, 0) or 0)
+                            for restriction_key, provenance in player.get(
+                                "conditional_snow_mana", {}).items()
+                            if self._can_use_conditional_mana(
+                                restriction_key, context or {})))
+                    for color in ('C', 'W', 'U', 'B', 'R', 'G')
+                }
+                # Reserve already-floated snow mana so generic payment cannot
+                # count the same unit again. Non-snow costs above have already
+                # reduced available_mana, so provenance is capped to what is
+                # left in the transaction.
+                for color in ('C', 'W', 'U', 'B', 'R', 'G'):
+                    spend = min(remaining_snow, snow_by_color[color])
+                    available_mana[color] -= spend
+                    remaining_snow -= spend
+                    if remaining_snow <= 0:
+                        break
+                if remaining_snow > self.track_snow_sources(player):
                     return False
 
             # Calculate generic mana requirement
@@ -1415,9 +1639,20 @@ class EnhancedManaSystem:
                       if isinstance(cost, dict)
                       else self.parse_mana_cost(cost))
 
+            # Every already-produced unit is a distinct source. Preserve pool
+            # provenance by including phase mana separately and only including
+            # conditional mana whose restriction accepts this exact context.
+            # The returned plan still contains land taps only; live payment
+            # consumes these pools in its regular -> phase -> conditional order.
             pool_units = []
-            for color in ('W', 'U', 'B', 'R', 'G', 'C'):
-                pool_units.extend([color] * player["mana_pool"].get(color, 0))
+            for mana_pool in (
+                    player.get("mana_pool", {}),
+                    player.get("phase_restricted_mana", {}),
+                    self._get_usable_conditional_mana(
+                        player.get("conditional_mana", {}), context)):
+                for color in ('W', 'U', 'B', 'R', 'G', 'C'):
+                    pool_units.extend(
+                        [color] * max(0, int(mana_pool.get(color, 0) or 0)))
 
             lands = []
             seen_land_ids = set(exclude_ids or ())
@@ -1431,8 +1666,22 @@ class EnhancedManaSystem:
                 if (not card or 'land' not in
                         (getattr(card, 'type_line', '') or '').lower()):
                     continue
-                options = [o for o in self._land_mana_options(player, card)
-                           if not o.get("restriction")]
+                options = []
+                for option in self._land_mana_options(player, card):
+                    restriction = str(option.get("restriction", "") or "")
+                    if restriction:
+                        parsed_restriction = self._parse_mana_restrictions(
+                            restriction.lower())
+                        if not parsed_restriction:
+                            # Fail closed for a restriction the mana system
+                            # cannot represent faithfully.
+                            continue
+                        restriction_key = self._get_restriction_key(
+                            parsed_restriction)
+                        if not self._can_use_conditional_mana(
+                                restriction_key, context):
+                            continue
+                    options.append(option)
                 if options:
                     options.sort(key=lambda o: int(o.get("damage", 0) or 0))
                     lands.append((card_id, options))
@@ -1878,7 +2127,14 @@ class EnhancedManaSystem:
                         and required_subtype in [str(s).lower() for s in getattr(card, 'subtypes', [])])
 
             # Card type restrictions
-            if "creature" in target_type and (hasattr(card, 'card_types') and 'creature' in card.card_types):
+            if ("noncreature" in target_type
+                    and hasattr(card, 'card_types')
+                    and 'creature' not in card.card_types):
+                return True
+            if ("noncreature" not in target_type
+                    and "creature" in target_type
+                    and (hasattr(card, 'card_types')
+                         and 'creature' in card.card_types)):
                 return True
             elif "instant" in target_type and (hasattr(card, 'card_types') and 'instant' in card.card_types):
                 return True
@@ -1915,7 +2171,7 @@ class EnhancedManaSystem:
                     return True
                     
             # Generic spell type
-            if "spell" in target_type:
+            if re.fullmatch(r"(?:a |any )?spells?", target_type.strip()):
                 return True
                 
         elif restriction_key.startswith("spend_only:"):
@@ -1960,23 +2216,12 @@ class EnhancedManaSystem:
         """
         logging.debug(f"Refunding payment: {payment}")
 
-        # Refund regular mana
-        for color, amount in payment['colors'].items():
-            if amount > 0:
-                player["mana_pool"][color] = player["mana_pool"].get(color, 0) + amount
-
-        # Refund conditional mana
-        for restriction_key, colors in payment['conditional'].items():
-            if restriction_key not in player.get("conditional_mana", {}):
-                player["conditional_mana"][restriction_key] = {}
-            for color, amount in colors.items():
-                if amount > 0:
-                    player["conditional_mana"][restriction_key][color] = player["conditional_mana"][restriction_key].get(color, 0) + amount
-
-        # Refund phase-restricted mana
-        for color, amount in payment['phase_restricted'].items():
-             if amount > 0:
-                  player["phase_restricted_mana"][color] = player["phase_restricted_mana"].get(color, 0) + amount
+        # Mana payment operates on copies of every pool and commits those
+        # copies only after the full transaction succeeds. On failure the
+        # live pools were never debited, so adding tracked spends here mints
+        # mana (a failed {1}{S} payment turned one snow U into two U). Only
+        # costs mutated live below -- life, tapped permanents and moved cards
+        # -- require an explicit rollback.
 
 
         # Refund life paid for Phyrexian mana
@@ -2467,8 +2712,102 @@ class EnhancedManaSystem:
 
         return amount
     
+    def _plan_standard_hybrid_colors(self, hybrid_pairs, available_mana):
+        """Assign one available colored unit to every standard hybrid pip.
+
+        Returns colors in the original pip order, or ``None`` when no complete
+        assignment exists. This small backtracking matcher is shared by the
+        affordability and live-payment paths so their decisions cannot drift.
+        """
+        pairs = [tuple(str(color).upper() for color in pair)
+                 for pair in hybrid_pairs]
+        if not pairs:
+            return []
+        if any(any(color not in self.mana_symbols for color in pair)
+               for pair in pairs):
+            return None
+        remaining = {
+            color: max(0, int(available_mana.get(color, 0) or 0))
+            for color in self.mana_symbols
+        }
+        result = [None] * len(pairs)
+        # Most constrained pips first sharply bounds the search while result
+        # remains indexed in printed order for deterministic payment tracking.
+        order = sorted(
+            range(len(pairs)),
+            key=lambda index: (
+                sum(remaining.get(color, 0) > 0
+                    for color in pairs[index]),
+                len(pairs[index]), index))
+
+        def assign(position):
+            if position >= len(order):
+                return True
+            pair_index = order[position]
+            options = sorted(
+                dict.fromkeys(pairs[pair_index]),
+                key=lambda color: (-remaining.get(color, 0), color))
+            for color in options:
+                if remaining.get(color, 0) <= 0:
+                    continue
+                remaining[color] -= 1
+                result[pair_index] = color
+                if assign(position + 1):
+                    return True
+                result[pair_index] = None
+                remaining[color] += 1
+            return False
+
+        return result if assign(0) else None
+
     def _pay_hybrid_mana_with_all_pools(self, player, hybrid_pairs, payment, current_pool, phase_pool, conditional_pool, usable_conditional, context):
         """Helper to pay hybrid costs using all available mana pools."""
+        standard_hybrid = all(
+            all(color in self.mana_symbols for color in pair)
+            for pair in hybrid_pairs)
+        if standard_hybrid:
+            conditional_available = {
+                color: sum(
+                    restricted_pool.get(color, 0)
+                    for restriction_key, restricted_pool
+                    in conditional_pool.items()
+                    if self._can_use_conditional_mana(
+                        restriction_key, context))
+                for color in self.mana_symbols
+            }
+            available = {
+                color: (current_pool.get(color, 0)
+                        + phase_pool.get(color, 0)
+                        + conditional_available.get(color, 0))
+                for color in self.mana_symbols
+            }
+            hybrid_plan = self._plan_standard_hybrid_colors(
+                hybrid_pairs, available)
+            if hybrid_plan is None:
+                return False
+            for color in hybrid_plan:
+                if current_pool.get(color, 0) > 0:
+                    current_pool[color] -= 1
+                    payment['colors'][color] += 1
+                    continue
+                if phase_pool.get(color, 0) > 0:
+                    phase_pool[color] -= 1
+                    payment['phase_restricted'][color] += 1
+                    continue
+                paid = False
+                for restriction_key, restricted_pool in conditional_pool.items():
+                    if (self._can_use_conditional_mana(
+                            restriction_key, context)
+                            and restricted_pool.get(color, 0) > 0):
+                        restricted_pool[color] -= 1
+                        payment['conditional'][restriction_key][color] += 1
+                        paid = True
+                        break
+                if not paid:
+                    return False
+            return True
+
+        # Legacy two-hybrid handling: only the colored alternative is modeled.
         for hybrid_pair in hybrid_pairs:
             paid_hybrid = False
             # Define pool preferences (Regular > Phase > Conditional)
