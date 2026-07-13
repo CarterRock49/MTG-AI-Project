@@ -7180,6 +7180,11 @@ class AirbendEffect(AbilityEffect):
         self.alternative_cost = alternative_cost
         self.target_description = target_description
         self.requires_target = True
+        # 'Airbend up to one ...' resolves legally with zero selections;
+        # without the explicit bound an empty target set is misreported as a
+        # mandatory-target fizzle.
+        if "up to" in str(target_description).lower():
+            self.min_targets = 0
 
     def _grant_permission(self, game_state, owner, card_id):
         if not owner or card_id not in owner.get("exile", []):

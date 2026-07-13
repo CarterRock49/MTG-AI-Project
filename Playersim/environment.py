@@ -4277,7 +4277,12 @@ class AlphaZeroMTGEnv(gym.Env):
                 threat_map = {t['card_id']: t['level'] for t in threat_list}
                 for i, card_id in enumerate(opp_bf_ids):
                     if i >= self.max_battlefield: break
-                    threats[i] = threat_map.get(card_id, 0.0) / 10.0 # Normalize
+                    # Threat levels are open-ended (power-based scores can
+                    # exceed 100 with doubling effects); saturate at the
+                    # declared observation bound instead of tripping the
+                    # degraded-observation guard.
+                    threats[i] = min(
+                        10.0, threat_map.get(card_id, 0.0) / 10.0)
             except Exception as e:
                 logging.warning(f"Error getting threat assessment from planner: {e}")
                 # Return zeros on error

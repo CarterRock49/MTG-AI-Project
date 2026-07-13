@@ -1248,7 +1248,8 @@ class CardEvaluationMixin:
         
         # Check if ability exists
         activated_abilities = gs.ability_handler.get_activated_abilities(card_id)
-        if ability_idx < 0 or ability_idx >= len(activated_abilities):
+        if (not isinstance(ability_idx, int) or ability_idx < 0
+                or ability_idx >= len(activated_abilities)):
             return -1.0, "Invalid ability index"
         
         ability = activated_abilities[ability_idx]

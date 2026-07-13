@@ -575,7 +575,11 @@ class ChoiceHandlersMixin:
             return -0.15, False
         
         ability = activated_abilities[ability_idx]
-        internal_idx = getattr(ability, 'activation_index', ability_idx)
+        # activation_index may exist but hold None (keyword-built abilities);
+        # a None index corrupts stack contexts and evaluator calls downstream.
+        internal_idx = getattr(ability, 'activation_index', None)
+        if internal_idx is None:
+            internal_idx = ability_idx
         
         # Check if ability is exhausted
         is_exhaust = getattr(ability, 'is_exhaust', False)
@@ -658,10 +662,11 @@ class ChoiceHandlersMixin:
                 and 'creature' in getattr(
                     gs._safe_get_card(cid), 'card_types', [])]
             required_power = int(getattr(ability, 'crew_power', 0) or 0)
-            available_power = sum(
-                max(0, int(getattr(gs._safe_get_card(cid), 'power', 0) or 0))
-                for cid in options)
-            if available_power < required_power:
+            if not gs.ability_handler.crew_cost_payable(
+                    card_id, ability, player):
+                logging.debug(
+                    f"Cannot crew {card.name}: untapped creature power below "
+                    f"{required_power}.")
                 return -0.05, False
             gs.choice_context = {
                 'type': 'saddle', 'crew': True, 'crew_activation': True,

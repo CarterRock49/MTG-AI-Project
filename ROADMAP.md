@@ -16,7 +16,7 @@ and match-play (Bo3 is a possible late add only if target formats demand it).
 The project is complete when all of the following hold:
 
 1. **Green gates, always.** Smoke, training, and scenario suites pass on
-   every delivery (currently 9/9, 13/13, and 364/364, plus 16/16 fixture-
+   every delivery (currently 9/9, 13/13, and 365/365, plus 16/16 fixture-
    harvest tests, 16/16 production-protocol tests, 19/19 card-registry tests,
    1/1 support-preflight tests, 2/2 deck-corpus tests, 13/13 deck-ingest tests,
    6/6 fuzz/replay tests, and the deterministic 8-seed / 8,000-action
@@ -91,7 +91,7 @@ The project is complete when all of the following hold:
   lineage-stamped manifests. User-supplied decks now route into isolated format
   pools automatically; passing policy qualification and builder feedback remain
   open.
-- Test gates: smoke 9/9, training 13/13, scenarios 364/364 (grown from 12),
+- Test gates: smoke 9/9, training 13/13, scenarios 365/365 (grown from 12),
   95/95 focused regression tests, 195/195 discovered unit tests,
   fixture harvest 16/16, production Harvest
   protocol 16/16, card registry
@@ -928,6 +928,37 @@ Gates for this round: 364/364 scenarios, 195/195 discovered unit tests, 9/9
 smoke stages, 13/13 training-stack stages, the 7/7 choice-context and 3/3
 M.O.D.O.K. warning-regression suites, and the deterministic exact-seed
 six-worker training canary above.
+
+**Round 7.69 (July 2026)** converted the 23:27 training failure and its
+warning set into shared-predicate and observation-bound guards:
+* **Crew legality is one predicate** — the action mask and the activation
+  handler now share `AbilityHandler.crew_cost_payable`. Crew registers with a
+  `{0}` mana cost, so the mask's cost preflight always passed while the
+  handler still required untapped creatures with enough total power; once the
+  agent had crewed Lumbering Worldwagon twice and tapped out its board, the
+  next activation was mask-valid but failed execution, aborting strict
+  evaluation. A permanent CR 702.121c scenario asserts mask/handler agreement
+  in both directions.
+* **Keyword abilities carry integer indices** — keyword-built activated
+  abilities can hold `activation_index=None`, which leaked into stack
+  contexts and raised `NoneType < int` inside post-activation strategic
+  evaluation. Activation now falls back to the live ability index, and the
+  evaluator rejects non-integer indices outright.
+* **Optional airbend selections resolve** — 'airbend up to one …' records a
+  zero minimum target bound, so an empty selection resolves silently instead
+  of being misreported as a mandatory-target fizzle.
+* **Observations saturate at their declared bounds** — threat scores are
+  open-ended (power-doubling effects pushed one past 100), overflowing the
+  `threat_assessment` feature's declared bound of 10 and tripping the
+  degraded-observation guard. The producer now saturates at the bound.
+* **Verified fixed by the midnight commit** — the 22:25 orphaned-`CHOOSE`
+  policy cycle (Round 7.68's fall-through) and the M.O.D.O.K. layer and
+  empty group-counter warnings were re-verified clean on the current tree
+  before this round's fixes were layered on top.
+
+Gates for this round: 365/365 scenarios (one new crew mask/execution guard),
+9/9 smoke stages, and the deterministic 8-seed / 8,000-action default
+invariant fuzz profile.
 
 ---
 

@@ -15534,6 +15534,48 @@ def scenario_multi_turn_plan_metrics_tolerate_missing_estimates():
     assert metrics.tolist() == [0.0] * 6
 
 
+@scenario("702.121c / policy protocol",
+          "crew legality tracks untapped creature power in mask and handler")
+def s_crew_mask_matches_execution():
+    gs = fresh()
+    me = gs.p1 if gs.agent_is_p1 else gs.p2
+    vehicle = inject_real_card(gs, me, "Lumbering Worldwagon", "battlefield")
+    abilities = gs.ability_handler.get_activated_abilities(vehicle)
+    crew_idx = next(
+        (i for i, ability in enumerate(abilities)
+         if getattr(ability, "keyword", "") == "crew"), None)
+    assert crew_idx is not None, "crew keyword did not register as activated"
+
+    # With every creature tapped, the mask predicate must refuse crew.  The
+    # execution handler already refused it, and the training loop treats a
+    # mask-valid action that fails execution as a fidelity crash.
+    for cid in list(me["battlefield"]):
+        card = gs._safe_get_card(cid)
+        if cid != vehicle and 'creature' in getattr(card, 'card_types', []):
+            me.setdefault('tapped_permanents', set()).add(cid)
+    assert not gs.ability_handler.can_activate_ability(vehicle, crew_idx, me), \
+        "crew stayed mask-valid without untapped creature power"
+
+    # An untapped creature with enough power restores both legality and the
+    # staged crew chooser transaction.
+    crew_body = inject_real_card(gs, me, "Llanowar Elves", "battlefield")
+    me.get('entered_battlefield_this_turn', set()).discard(crew_body)
+    assert gs.ability_handler.can_activate_ability(vehicle, crew_idx, me), \
+        "crew not activatable despite available creature power"
+    gs.priority_player = me
+    handler = get_env().action_handler
+    _, ok = handler._handle_activate_ability(
+        None, {"battlefield_idx": me["battlefield"].index(vehicle),
+               "ability_idx": crew_idx,
+               "controller_id": "p1" if me is gs.p1 else "p2"})
+    assert ok, "handler refused a crew activation the mask allowed"
+
+    # Keyword-built abilities can carry activation_index=None; the strategic
+    # evaluator must degrade to its invalid-index result instead of raising.
+    value, _ = gs.strategic_planner.evaluate_ability_activation(vehicle, None)
+    assert value == -1.0, "evaluator did not reject a None ability index"
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------

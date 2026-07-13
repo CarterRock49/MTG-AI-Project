@@ -2088,12 +2088,41 @@ class AbilityHandler:
                     return True
         return False
     
+    def crew_cost_payable(self, card_id, ability, controller):
+        """Check untapped-creature total power against a crew requirement.
+
+        Crew's real cost lives outside the parsed mana cost string (the
+        ability is registered with cost '{0}'), so both the action mask and
+        the execution handler must share this predicate or they diverge.
+        """
+        gs = self.game_state
+        required_power = int(getattr(ability, 'crew_power', 0) or 0)
+        if required_power <= 0:
+            return True
+        available_power = 0
+        for cid in controller.get('battlefield', []):
+            if cid == card_id or cid in controller.get(
+                    'tapped_permanents', set()):
+                continue
+            card = gs._safe_get_card(cid)
+            if 'creature' not in getattr(card, 'card_types', []):
+                continue
+            available_power += max(0, int(getattr(card, 'power', 0) or 0))
+            if available_power >= required_power:
+                return True
+        return available_power >= required_power
+
     def can_activate_ability(self, card_id, ability_index, controller):
         """Check if a specific activated ability can be activated"""
         activated_abilities = self.get_activated_abilities(card_id)
         if 0 <= ability_index < len(activated_abilities):
             ability = activated_abilities[ability_index]
             if not ability.can_pay_cost(self.game_state, controller):
+                return False
+
+            if (getattr(ability, 'keyword', '').lower() == 'crew'
+                    and not self.crew_cost_payable(
+                        card_id, ability, controller)):
                 return False
 
             timing_text = (getattr(ability, "effect_text", "") or "").lower()
