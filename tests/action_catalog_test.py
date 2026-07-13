@@ -130,6 +130,123 @@ class OverflowActionCatalogTest(unittest.TestCase):
             for card_id in game_state.p2["hand"])
         self.assertEqual((before, after), (2, 1))
 
+    def _granted_flashback_spree_state(self, filler_count=0):
+        """Three Steps Ahead in the graveyard with granted Flashback.
+
+        ``filler_count`` pads the graveyard so the Spree card can sit past
+        the six fixed PLAY_FROM_GRAVEYARD slots and route through the
+        overflow catalog instead.
+        """
+        three_steps = _spell(
+            "Three Steps Ahead", "Instant", "{U}",
+            "Spree (Choose one or more additional costs.)\n"
+            "+ {1}{U} — Counter target spell.\n"
+            "+ {3} — Create a token that's a copy of target artifact or "
+            "creature you control.\n"
+            "+ {2} — Draw two cards, then discard a card.")
+        incoming = _spell(
+            "Incoming Spell", "Instant", "{R}",
+            "Incoming Spell deals 2 damage to any target.")
+        filler = _spell(
+            "Filler Ritual", "Sorcery", "{R}",
+            "You gain 1 life.")
+        game_state = GameState({0: three_steps, 1: incoming, 2: filler})
+        game_state.reset([1], [0] + [2] * filler_count, seed=17)
+        game_state.mulligan_in_progress = False
+        game_state.bottoming_in_progress = False
+        game_state.phase = game_state.PHASE_PRIORITY
+        game_state.previous_priority_phase = None
+        game_state.agent_is_p1 = False
+        game_state.priority_player = game_state.p2
+        game_state.priority_pass_count = 0
+
+        incoming_id = game_state.p1["hand"][0]
+        game_state.stack = [
+            ("SPELL", incoming_id, game_state.p1, {"source_zone": "hand"})
+        ]
+        spree_id = next(
+            card_id for card_id in game_state.p2["hand"]
+            if game_state._safe_get_card(card_id).name == "Three Steps Ahead")
+        filler_ids = [
+            card_id for card_id in game_state.p2["hand"]
+            if game_state._safe_get_card(card_id).name == "Filler Ritual"]
+        for card_id in filler_ids + [spree_id]:
+            game_state.p2["hand"].remove(card_id)
+            game_state.p2["graveyard"].append(card_id)
+        self.assertTrue(game_state.grant_flashback_permission(
+            game_state.p2, spree_id))
+        handler = ActionHandler(game_state)
+        game_state.action_handler = handler
+        return game_state, handler, spree_id
+
+    def test_granted_flashback_spree_requires_affordable_mode(self):
+        game_state, handler, spree_id = self._granted_flashback_spree_state()
+        action_index = 472 + game_state.p2["graveyard"].index(spree_id)
+
+        # Flashback cost ({U}) alone is payable, but no mode cost is.
+        game_state.p2["mana_pool"]["U"] = 1
+        valid = handler.generate_valid_actions()
+        self.assertFalse(
+            valid[action_index],
+            "Mask offered a Spree flashback cast with no affordable mode")
+
+        game_state.p2["mana_pool"]["U"] = 6
+        valid = handler.generate_valid_actions()
+        self.assertTrue(valid[action_index])
+        handler.current_valid_actions = valid
+        _, _, _, info = handler.apply_action(action_index)
+        self.assertFalse(info.get("execution_failed", False), info)
+        self.assertEqual(game_state.choice_context.get("type"), "choose_mode")
+        self.assertTrue(game_state.choice_context.get("is_spree"))
+
+        # Mode selectability must price against the flashback base cost:
+        # counter ({1}{U}) and draw ({2}) are payable, the copy mode has no
+        # legal target on an empty battlefield.
+        choose_mask = handler.generate_valid_actions()
+        self.assertTrue(choose_mask[353])
+        self.assertFalse(choose_mask[354])
+        self.assertTrue(choose_mask[355])
+        handler.current_valid_actions = choose_mask
+        _, _, _, mode_info = handler.apply_action(355)
+        self.assertFalse(mode_info.get("execution_failed", False), mode_info)
+
+    def test_overflow_catalog_gates_unaffordable_spree_flashback(self):
+        game_state, handler, spree_id = self._granted_flashback_spree_state(
+            filler_count=6)
+        self.assertEqual(game_state.p2["graveyard"].index(spree_id), 6)
+        label = "Play from graveyard: Three Steps Ahead"
+
+        game_state.p2["mana_pool"]["U"] = 1
+        handler.generate_valid_actions()
+        options = handler.action_reasons_with_context.get(
+            479, {}).get("context", {}).get("options", [])
+        self.assertNotIn(label, [entry.get("label") for entry in options],
+                         "Catalog offered a Spree flashback cast with no "
+                         "affordable mode")
+
+        game_state.p2["mana_pool"]["U"] = 6
+        valid = handler.generate_valid_actions()
+        options = handler.action_reasons_with_context.get(
+            479, {}).get("context", {}).get("options", [])
+        self.assertIn(label, [entry.get("label") for entry in options])
+
+        # Replay the failing sequence from the 2026-07-13 run: open the
+        # catalog (479), then pick the graveyard cast (353).
+        self.assertTrue(valid[479])
+        handler.current_valid_actions = valid
+        _, _, _, open_info = handler.apply_action(479)
+        self.assertFalse(open_info.get("execution_failed", False), open_info)
+        self.assertEqual(game_state.choice_context.get("type"),
+                         "action_catalog")
+        choose_mask = handler.generate_valid_actions()
+        self.assertTrue(choose_mask[353])
+        handler.current_valid_actions = choose_mask
+        _, _, _, choose_info = handler.apply_action(353)
+        self.assertFalse(choose_info.get("execution_failed", False),
+                         choose_info)
+        self.assertEqual(game_state.choice_context.get("type"), "choose_mode")
+        self.assertTrue(game_state.choice_context.get("is_spree"))
+
     def test_spree_counter_uses_mode_announcement_not_counter_shortcut(self):
         three_steps = _spell(
             "Three Steps Ahead", "Instant", "{U}",

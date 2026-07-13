@@ -2163,6 +2163,22 @@ class ActionSpaceMixin:
             logging.warning(f"Error checking mana cost string '{cost_string}': {e}")
             return False
 
+    def _spree_alt_cast_payable(self, player, card_id, card, context):
+        """Whether an alternative-cost cast of a Spree spell can be announced.
+
+        Announcing a Spree spell adds at least one mode cost on top of the
+        base or alternative cost (CR 702.172a), and targets are checked per
+        chosen mode.  Mask sites that only verified the flashback/harmonize
+        cost offered casts that cast_spell then refused, which strict
+        evaluation fidelity treats as fatal (Three Steps Ahead, 2026-07-13).
+        """
+        gs = self.game_state
+        return any(
+            gs.spree_mode_is_selectable(
+                card_id, player, [], mode_index, context=context)
+            for mode_index in range(len(
+                getattr(card, 'spree_modes', []) or [])))
+
     def _has_flash(self, card_id):
         """Check if card has flash keyword."""
         card = self.game_state._safe_get_card(card_id)
@@ -2443,7 +2459,17 @@ class ActionSpaceMixin:
                         max(0, int(getattr(
                             gs._safe_get_card(cid), "power", 0) or 0))
                         for cid in candidates]
-                    if not any(
+                    if getattr(card, "is_spree", False):
+                        if not any(
+                                self._spree_alt_cast_payable(
+                                    player, card_id, card, {
+                                        "card": card,
+                                        "use_alt_cost": "harmonize",
+                                        "harmonize_cost": harmonize_cost,
+                                        "harmonize_reduction": reduction})
+                                for reduction in reductions):
+                            continue
+                    elif not any(
                             gs.mana_system.can_pay_mana_cost_with_lands(
                                 player,
                                 gs.mana_system.calculate_alternative_cost(
@@ -2459,10 +2485,16 @@ class ActionSpaceMixin:
                     if ("instant" not in getattr(card, "card_types", [])
                             and not can_sorcery):
                         continue
-                    if (not self._can_afford_cost_string(
+                    flashback_context = {"card": card,
+                                         "flashback_cost": flashback_cost,
+                                         "use_alt_cost": "flashback"}
+                    if getattr(card, "is_spree", False):
+                        if not self._spree_alt_cast_payable(
+                                player, card_id, card, flashback_context):
+                            continue
+                    elif (not self._can_afford_cost_string(
                             player, flashback_cost,
-                            context={"card": card,
-                                     "flashback_cost": flashback_cost})
+                            context=flashback_context)
                             or not self._targets_available(
                                 card, player, opponent)):
                         continue
@@ -2985,11 +3017,21 @@ class ActionSpaceMixin:
                 is_instant = 'instant' in getattr(card, 'card_types', [])
                 if is_sorcery_speed or is_instant: # Check timing
                     cost_match = re.search(r"flashback ((?:\{[^\}]+\})+)", card.oracle_text.lower())
-                    if (cost_match
-                            and self._can_afford_cost_string(
+                    if not cost_match:
+                        continue
+                    if getattr(card, 'is_spree', False):
+                        castable = self._spree_alt_cast_payable(
+                            player, card_id, card,
+                            {"card": card,
+                             "flashback_cost": cost_match.group(1),
+                             "use_alt_cost": "flashback"})
+                    else:
+                        castable = (
+                            self._can_afford_cost_string(
                                 player, cost_match.group(1))
                             and self._targets_available(
-                                card, player, opponent)):
+                                card, player, opponent))
+                    if castable:
                         # Context needs gy_idx
                         context = {'gy_idx': i}
                         # FIXED: Use correct action ID for CAST_WITH_FLASHBACK (398)
@@ -3184,16 +3226,26 @@ class ActionSpaceMixin:
                     max(0, int(getattr(
                         gs._safe_get_card(creature_id), "power", 0) or 0))
                     for creature_id in candidates]
-                payable = any(
-                    gs.mana_system.can_pay_mana_cost_with_lands(
-                        player,
-                        gs.mana_system.calculate_alternative_cost(
-                            card_id, player, "harmonize", {
+                if getattr(card, "is_spree", False):
+                    payable = any(
+                        self._spree_alt_cast_payable(
+                            player, card_id, card, {
+                                "card": card,
+                                "use_alt_cost": "harmonize",
                                 "harmonize_cost": harmonize_cost,
-                                "harmonize_reduction": reduction,
-                            }),
-                        {"card": card})
-                    for reduction in reductions)
+                                "harmonize_reduction": reduction})
+                        for reduction in reductions)
+                else:
+                    payable = any(
+                        gs.mana_system.can_pay_mana_cost_with_lands(
+                            player,
+                            gs.mana_system.calculate_alternative_cost(
+                                card_id, player, "harmonize", {
+                                    "harmonize_cost": harmonize_cost,
+                                    "harmonize_reduction": reduction,
+                                }),
+                            {"card": card})
+                        for reduction in reductions)
                 if not payable:
                     continue
                 set_valid_action(
@@ -3210,12 +3262,20 @@ class ActionSpaceMixin:
                 is_instant = "instant" in getattr(card, "card_types", [])
                 if not is_sorcery_speed and not is_instant:
                     continue
-                if not self._can_afford_cost_string(
-                        player, flashback_cost,
-                        context={"card": card, "flashback_cost": flashback_cost}):
-                    continue
-                if not self._targets_available(card, player, opponent):
-                    continue
+                flashback_context = {"card": card,
+                                     "flashback_cost": flashback_cost,
+                                     "use_alt_cost": "flashback"}
+                if getattr(card, "is_spree", False):
+                    if not self._spree_alt_cast_payable(
+                            player, card_id, card, flashback_context):
+                        continue
+                else:
+                    if not self._can_afford_cost_string(
+                            player, flashback_cost,
+                            context=flashback_context):
+                        continue
+                    if not self._targets_available(card, player, opponent):
+                        continue
                 set_valid_action(
                     472 + graveyard_index,
                     f"CAST_WITH_FLASHBACK {card.name}",

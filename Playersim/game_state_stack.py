@@ -553,8 +553,22 @@ class GameStateStackMixin:
         cast_context = dict(context or {})
         cast_context['card'] = card
         cast_context['selected_spree_modes'] = chosen
-        base_cost = self.mana_system.parse_mana_cost(
-            getattr(card, 'mana_cost', '') or '')
+        # An alternative cost (flashback, harmonize, ...) replaces the printed
+        # base, and cast_spell stacks the chosen mode costs on top of that
+        # replacement.  Always starting from the printed cost made this check
+        # disagree with the actual payment for flashback casts of Three Steps
+        # Ahead, so a mask-valid graveyard cast failed announcement.
+        alt_cost_type = cast_context.get('use_alt_cost')
+        if alt_cost_type == 'plot':
+            base_cost = self.mana_system.parse_mana_cost('')
+        elif alt_cost_type:
+            base_cost = self.mana_system.calculate_alternative_cost(
+                card_id, controller, alt_cost_type, cast_context)
+            if base_cost is None:
+                return None
+        else:
+            base_cost = self.mana_system.parse_mana_cost(
+                getattr(card, 'mana_cost', '') or '')
         total_cost = base_cost
         for index in chosen:
             mode_cost = self.mana_system.parse_mana_cost(
