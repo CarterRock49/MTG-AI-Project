@@ -1,6 +1,7 @@
 import os
 import json
 import hashlib
+import re
 import platform
 import subprocess
 import multiprocessing
@@ -1428,7 +1429,8 @@ class CustomLearningRateScheduler:
         return self.current_lr
 
 
-def create_training_model(env, training_config, seed=None, device="auto"):
+def create_training_model(env, training_config, seed=None, device="auto",
+                          tensorboard_log=None):
     """Construct the final MaskablePPO model from one complete config."""
     policy_kwargs = {
         'features_extractor_class': FixedWindowMTGExtractor,
@@ -1444,7 +1446,8 @@ def create_training_model(env, training_config, seed=None, device="auto"):
         policy=FixedDimensionMaskableActorCriticPolicy,
         env=env,
         learning_rate=lr_scheduler,
-        tensorboard_log=TENSORBOARD_DIR,
+        tensorboard_log=(tensorboard_log if tensorboard_log is not None
+                         else TENSORBOARD_DIR),
         policy_kwargs=policy_kwargs,
         n_steps=training_config['n_steps'],
         batch_size=training_config['batch_size'],
@@ -1969,7 +1972,8 @@ class PhaseTimingCallback(BaseCallback):
         self.previous_rollout_ended_at = now
 
 
-def create_callbacks(eval_env, run_id, args, num_train_envs=1):
+def create_callbacks(eval_env, run_id, args, num_train_envs=1,
+                     tb_run_dir=None):
     """Create a comprehensive set of callbacks"""
     # BaseCallback.n_calls counts VecEnv steps, not individual transitions.
     # Keep CLI frequencies expressed in total training timesteps as documented.
@@ -2005,17 +2009,21 @@ def create_callbacks(eval_env, run_id, args, num_train_envs=1):
     # Progress bar callback
     progress_callback = ProgressBarCallback()
     
-    # Resource monitoring callback
+    # Resource monitoring callback. Keep every TensorBoard stream for one
+    # training run under its single run folder ('<run>/system', '<run>/
+    # network') so the sidebar groups them instead of interleaving
+    # system_logs_*/network_logs_* entries between runs.
+    if tb_run_dir is None:
+        tb_run_dir = os.path.join(TENSORBOARD_DIR, run_id)
     resource_callback = ResourceMonitorCallback(
-        log_dir=os.path.join(TENSORBOARD_DIR, f"system_logs_{run_id}"),
+        log_dir=os.path.join(tb_run_dir, "system"),
         monitor_freq=callback_frequency(5000)
     )
 
     callbacks = [eval_callback, checkpoint_callback, progress_callback]
     if args.record_network:
         callbacks.append(NetworkRecordingCallback(
-            log_dir=os.path.join(
-                TENSORBOARD_DIR, f"network_logs_{run_id}"),
+            log_dir=os.path.join(tb_run_dir, "network"),
             record_freq=callback_frequency(args.record_freq)
         ))
     callbacks.append(resource_callback)
@@ -2135,6 +2143,10 @@ def analyze_model_weights(model_path):
 def main():
     parser = argparse.ArgumentParser(description="Train an MTG AI agent")
     parser.add_argument("--resume", type=str, help="Path to a model to resume training from")
+    parser.add_argument("--run-name", type=str, default=None,
+                        help="Short label folded into the run id and TensorBoard "
+                             "run name so runs are recognizable at a glance "
+                             "(e.g. --run-name lr3e4-crewfix)")
     parser.add_argument("--timesteps", type=int, default=1000000, help="Total timesteps to train")
     parser.add_argument("--eval-freq", type=int, default=10000, help="Evaluation frequency")
     parser.add_argument("--eval-episodes", type=int, default=20,
@@ -2201,7 +2213,10 @@ def main():
         os.makedirs(directory, exist_ok=True)
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    base_run_id = f"{VERSION}_{timestamp}"
+    run_label = re.sub(r"[^A-Za-z0-9._-]+", "-",
+                       args.run_name).strip("-_.") if args.run_name else ""
+    base_run_id = (f"{VERSION}_{timestamp}_{run_label}" if run_label
+                   else f"{VERSION}_{timestamp}")
     run_id = base_run_id
     suffix = 1
     while True:
@@ -2212,6 +2227,19 @@ def main():
         except FileExistsError:
             run_id = f"{base_run_id}_{suffix}"
             suffix += 1
+
+    # TensorBoard's run list truncates long names, and every run used to share
+    # the same VERSION prefix with only the trailing timestamp digits
+    # differing. Lead with the distinct part (day-time, then the label), and
+    # group this run's streams (train/system/network) under one folder so the
+    # sidebar reads e.g. '0713-103012_lr3e4/train' instead of three scattered
+    # 'ALPHA_ZERO_MTG_V3.00_...' entries per run.
+    tb_run_name = f"{timestamp[4:8]}-{timestamp[9:]}"  # MMDD-HHMMSS
+    if run_label:
+        tb_run_name += f"_{run_label}"
+    if run_id != base_run_id:
+        tb_run_name += f"_{suffix - 1}"
+    tb_run_dir = os.path.join(TENSORBOARD_DIR, tb_run_name)
 
     manifest_path = os.path.join(run_model_dir, "training_run.json")
     manifest = {
@@ -2246,7 +2274,7 @@ def main():
             "log_directory": os.path.relpath(
                 os.path.join(LOG_DIR, run_id), BASE_DIR).replace(os.sep, "/"),
             "tensorboard_directory": os.path.relpath(
-                TENSORBOARD_DIR, BASE_DIR).replace(os.sep, "/"),
+                tb_run_dir, BASE_DIR).replace(os.sep, "/"),
         },
         "artifacts": {},
         "metrics": {},
@@ -2405,7 +2433,8 @@ def main():
                 assigned_eval_seeds)
 
         callbacks = create_callbacks(
-            eval_env, run_id, args, num_train_envs=num_envs)
+            eval_env, run_id, args, num_train_envs=num_envs,
+            tb_run_dir=tb_run_dir)
 
         current_phase = "model_setup"
         manifest["phase"] = current_phase
@@ -2414,13 +2443,14 @@ def main():
             model = MaskablePPO.load(
                 args.resume,
                 env=vec_env,
-                tensorboard_log=TENSORBOARD_DIR,
+                tensorboard_log=tb_run_dir,
                 seed=args.seed,
                 device=selected_device)
             logging.info(f"Resuming training from {args.resume}")
         else:
             model = create_training_model(
-                vec_env, training_config, args.seed, selected_device)
+                vec_env, training_config, args.seed, selected_device,
+                tb_run_dir)
         if hasattr(model, "set_random_seed"):
             model.set_random_seed(args.seed)
         initial_num_timesteps = int(getattr(model, "num_timesteps", 0))
@@ -2448,7 +2478,7 @@ def main():
             model.learn(
                 total_timesteps=args.timesteps,
                 callback=callbacks,
-                tb_log_name=run_id,
+                tb_log_name="train",
                 reset_num_timesteps=not args.resume
             )
 

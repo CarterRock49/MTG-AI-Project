@@ -2944,6 +2944,7 @@ class ActionSpaceMixin:
         gs = self.game_state
         if not gs.can_player_cast_spells(player):
             return
+        opponent = gs.p2 if player is gs.p1 else gs.p1
         # Evoke changes only the cost, so it follows the card's normal timing.
         # Action 221 carries the selected hand slot in generated context; if
         # multiple Evoke cards are legal, set_valid_action's shared catalog
@@ -2984,7 +2985,11 @@ class ActionSpaceMixin:
                 is_instant = 'instant' in getattr(card, 'card_types', [])
                 if is_sorcery_speed or is_instant: # Check timing
                     cost_match = re.search(r"flashback ((?:\{[^\}]+\})+)", card.oracle_text.lower())
-                    if cost_match and self._can_afford_cost_string(player, cost_match.group(1)):
+                    if (cost_match
+                            and self._can_afford_cost_string(
+                                player, cost_match.group(1))
+                            and self._targets_available(
+                                card, player, opponent)):
                         # Context needs gy_idx
                         context = {'gy_idx': i}
                         # FIXED: Use correct action ID for CAST_WITH_FLASHBACK (398)

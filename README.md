@@ -409,6 +409,7 @@ artifacts for 14 days.
 | `--format` / `--decks` / `--format-dir` | Format legality + corpus / deck dir / frozen namespace | pinned Standard |
 | `--optimize-hp` | Run Optuna hyperparameter search | off |
 | `--record-network` / `--record-freq` | Record network parameters / cadence | off / `5000` |
+| `--run-name` | Short label folded into the run id and TensorBoard run name | none |
 | `--cpu-only` | Force CPU even if a GPU is available | off |
 | `--debug` | Extra debugging output | off |
 
@@ -419,6 +420,12 @@ artifacts for 14 days.
 ```bash
 tensorboard --logdir=tensorboard_logs
 ```
+
+Each training run groups its streams under one folder named
+`MMDD-HHMMSS[_label]` (label from `--run-name`), containing `train` (policy
+metrics), `system` (resource usage), and `network` (parameter recording when
+enabled). The distinct part leads the name so runs stay tellable-apart in
+TensorBoard's sidebar even when truncated.
 
 Logged metrics include reward components, win/terminal rates, action
 distributions, network-parameter changes, and CPU/GPU/memory usage. All
