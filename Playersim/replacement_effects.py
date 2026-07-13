@@ -639,7 +639,8 @@ class ReplacementEffectSystem:
             logging.debug(f"Applying {len(ordered_effects)} replacements for {event_type} to {affected_object_id}")
             active_effect_applied_in_loop = True
             applied_ids = set()
-            max_replacement_loops = 10; current_loop = 0
+            max_replacement_loops = 20; current_loop = 0
+            valid_effects_for_loop = []
 
             while active_effect_applied_in_loop and current_loop < max_replacement_loops:
                 current_loop += 1
@@ -711,8 +712,18 @@ class ReplacementEffectSystem:
                              ordered_effects = [e for e in ordered_effects if e.get('effect_id') != effect_id_applying]
 
 
-            if current_loop >= max_replacement_loops:
-                logging.error(f"Exceeded max replacement loops for event {event_type}.")
+            # Only a real problem if the cap stopped the loop while effects
+            # were still applying; a natural exit on the final iteration is
+            # normal (the previous check fired spuriously there).  Name the
+            # pending effects so a recurrence is diagnosable.
+            if current_loop >= max_replacement_loops and active_effect_applied_in_loop:
+                pending = [
+                    f"{e.get('effect_id')}:{e.get('description', '?')}"
+                    for e in valid_effects_for_loop
+                    if e.get('effect_id') not in applied_ids]
+                logging.error(
+                    f"Exceeded max replacement loops for event {event_type}. "
+                    f"Applied {len(applied_ids)} effects; still pending: {pending}")
 
             return modified_context, was_replaced
         

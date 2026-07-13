@@ -1679,6 +1679,16 @@ class TriggeredAbility(Ability):
                         and context.get("casting_player") is not
                         context.get("controller")):
                     return False
+                # "When you cast this spell/card" is a self-cast trigger; it
+                # must not fire for other spells cast while the source is on
+                # the battlefield (Sage of the Skies was copying every later
+                # spell its controller cast, then fizzling with a warning).
+                if re.search(r"\byou cast\s+this\s+(?:spell|card|creature)\b",
+                             self.trigger_condition, re.IGNORECASE):
+                    cast_id = context.get(
+                        "cast_card_id", context.get("event_card_id"))
+                    if cast_id != getattr(self, "card_id", None):
+                        return False
                 if "your second spell each turn" in self.trigger_condition:
                     game_state = context.get("game_state")
                     trigger_controller = context.get("controller")

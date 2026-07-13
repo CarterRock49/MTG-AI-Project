@@ -1077,16 +1077,19 @@ class Card:
         # Reset Room attributes with more detailed structure
         self.is_room = False
         self.doors = []
-        
+
         if not hasattr(self, 'type_line') or 'room' not in self.type_line.lower():
             return
 
         self.is_room = True
 
         try:
-            # Handle double-faced rooms
-            if hasattr(self, 'card_faces') and len(self.card_faces) == 2:
-                for face in self.card_faces:
+            # Handle double-faced rooms. The Card attribute is ``faces``
+            # (see __init__), not ``card_faces`` -- the old check never
+            # matched, so split rooms parsed as one combined door.
+            faces = getattr(self, 'faces', None)
+            if faces and len(faces) == 2:
+                for face in faces:
                     door = self._parse_single_door(face)
                     if door:
                         self.doors.append(door)
@@ -1095,7 +1098,17 @@ class Card:
                 door = self._parse_single_door(self)
                 if door:
                     self.doors.append(door)
-        
+
+            # handle_unlock_door and the door-state helpers read door1/door2
+            # dicts; they were initialized empty and never filled, so every
+            # door looked locked with no mana cost and unlocked for free.
+            if self.doors:
+                self.door1 = self.doors[0]
+                self.door1.setdefault('unlocked', False)
+            if len(self.doors) > 1:
+                self.door2 = self.doors[1]
+                self.door2.setdefault('unlocked', False)
+
         except Exception as e:
             logging.error(f"Advanced Room parsing error for {self.name}: {str(e)}")
             import traceback

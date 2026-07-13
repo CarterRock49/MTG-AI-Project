@@ -237,7 +237,7 @@ class AlphaZeroMTGEnv(gym.Env):
             "threat_assessment": spaces.Box(low=0, high=10, shape=(self.max_battlefield,), dtype=np.float32),
             "card_synergy_scores": spaces.Box(low=-1, high=1, shape=(self.max_battlefield, self.max_battlefield), dtype=np.float32),
             "my_mana_pool": spaces.Box(low=0, high=100, shape=(6,), dtype=np.int32),
-            "my_mana": spaces.Box(low=0, high=20, shape=(1,), dtype=np.int32),
+            "my_mana": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "total_available_mana": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "untapped_land_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
             "remaining_mana_sources": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
@@ -313,6 +313,23 @@ class AlphaZeroMTGEnv(gym.Env):
             "dredgeable_cards_in_gy": spaces.Box(low=-1, high=100, shape=(6,), dtype=np.int32),
         })
         # *** End Observation Space Modification ***
+
+        # Scalar game quantities (P/T, mana, life) have no rules-defined
+        # ceiling; their declared bounds are deliberate saturation points.
+        # Exceeding them (doubling combos reach 2^20 power) is expected in
+        # degenerate games, so clipping these features must not warn or be
+        # recorded as an observation fidelity error. Structural features
+        # (masks, indices, phases) keep the hard bound check.
+        self._saturating_features = frozenset({
+            "my_life", "opp_life", "life_difference", "p1_life", "p2_life",
+            "my_hand", "my_battlefield", "opp_battlefield", "p1_battlefield",
+            "p2_battlefield", "graveyard_key_cards", "exile_key_cards",
+            "estimated_opponent_hand", "target_cards", "choice_cards",
+            "my_total_power", "my_total_toughness", "opp_total_power",
+            "opp_total_toughness", "power_advantage", "toughness_advantage",
+            "potential_combat_damage", "my_mana_pool", "my_mana",
+            "total_available_mana",
+        })
         self.action_space = spaces.Discrete(self.ACTION_SPACE_SIZE)
         # Add memory for actions and rewards
         self.last_n_actions = np.full(self.action_memory_size, -1, dtype=np.int32) # Use -1 for padding
@@ -2162,6 +2179,14 @@ class AlphaZeroMTGEnv(gym.Env):
                 # (but false) value that clipping can no longer repair.
                 bounded = np.clip(array, space.low, space.high)
                 if not np.array_equal(array, bounded):
+                    if key in getattr(self, '_saturating_features', ()):
+                        # Expected saturation of an unbounded game quantity
+                        # (huge P/T, big mana): clip silently by design.
+                        logging.debug(
+                            "Observation feature '%s' saturated at its "
+                            "declared bound.", key)
+                        normalized[key] = bounded.astype(space.dtype, copy=False)
+                        continue
                     first_bound_error = self._record_observation_error(
                         f"feature {key}",
                         ValueError("value exceeded declared observation bounds"))

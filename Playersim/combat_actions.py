@@ -224,10 +224,18 @@ class CombatActionHandler:
              # Check if at least two valid blockers exist for this attacker
              num_valid_for_this_attacker = 0
              valid_blocker_indices = []
+             valid_blocker_ids = []
              for blocker_idx, blocker_id in possible_blockers:
                   if self._can_block(blocker_id, attacker_id):
                        num_valid_for_this_attacker += 1
                        valid_blocker_indices.append(blocker_idx)
+                       valid_blocker_ids.append(blocker_id)
+
+             # Skip when this exact multi-block is already in place; the
+             # handler treats the re-assignment as a failed no-op, so keeping
+             # it mask-valid only lets a deterministic policy loop on it.
+             if getattr(gs, 'current_block_assignments', {}).get(attacker_id) == valid_blocker_ids:
+                 continue
 
              if num_valid_for_this_attacker >= 2:
                  if atk_idx < 10: # Action 383-392 assume attacker index 0-9
@@ -1076,6 +1084,13 @@ class CombatActionHandler:
 
         # --- Assign Block ---
         if not hasattr(gs, 'current_block_assignments'): gs.current_block_assignments = {}
+        # Re-assigning the identical multi-block is a no-op; report failure so
+        # the agent cannot farm the success reward by repeating the action
+        # (seen as a 2000-step DECLARE_BLOCKERS stall in training).
+        if gs.current_block_assignments.get(attacker_id) == valid_blocker_ids:
+            logging.debug(
+                f"Multi-block for {attacker_card.name} already assigned; redundant action ignored.")
+            return False
         # Replace any existing single blocks for this attacker with the multi-block
         gs.current_block_assignments[attacker_id] = valid_blocker_ids
 
@@ -1322,6 +1337,14 @@ class CombatActionHandler:
                     for bf_idx, blocker_id in possible_blockers
                     if self._can_block(blocker_id, attacker_id)
                 ]
+                # Skip when this exact multi-block is already assigned; the
+                # handler rejects the redundant re-assignment, so masking it
+                # valid only invites an action-selection loop.
+                proposed_ids = [
+                    blocker_id for _, blocker_id in
+                    valid_multi_blockers_for_attacker]
+                if live_assignments.get(attacker_id, []) == proposed_ids:
+                    continue
                 if len(valid_multi_blockers_for_attacker) >= 2:
                     # Corrected from 383 to match ACTION_MEANINGS
                     set_valid_action(

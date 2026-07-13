@@ -2293,7 +2293,7 @@ class EffectFactory:
 
             # Copy Spell
             elif (re.search(r"\bcopy target\b.*\bspell\b", clause_lower)
-                  or re.search(r"\bcopy that spell\b", clause_lower)):
+                  or re.search(r"\bcopy (?:that|this) spell\b", clause_lower)):
                  target_type = "spell"
                  if "instant or sorcery spell" in clause_lower: target_type = "instant or sorcery spell"
                  elif "instant spell" in clause_lower: target_type = "instant"
@@ -2301,9 +2301,13 @@ class EffectFactory:
                  elif "creature spell" in clause_lower: target_type = "creature spell"
                  # Add other types
                  new_targets = "choose new targets" in clause_lower
+                 # "copy this spell" (Sage of the Skies-style self-copy cast
+                 # triggers) resolves against the referencing spell too; it
+                 # previously fell through to the unimplemented-effect stub.
                  created_effect = CopySpellEffect(
                      target_type=target_type, new_targets=new_targets,
-                     copy_that="copy that spell" in clause_lower)
+                     copy_that=bool(re.search(
+                         r"\bcopy (?:that|this) spell\b", clause_lower)))
 
             # Transform
             elif re.search(r"\btransform\b", clause_lower):
@@ -2343,6 +2347,24 @@ class EffectFactory:
             if created_effect:
                 effects.append(created_effect)
             else:
+                 # A bare "(reveal it and) put it into your hand" fragment is
+                 # the severed tail of a search/look instruction that already
+                 # owns the card movement (the comma splitter again).  Adding
+                 # a generic no-op effect for it only produces an
+                 # "unimplemented effect" warning at resolution.
+                 dangling_hand_move = re.fullmatch(
+                     r"(?:reveal (?:it|that card) and\s+)?put (?:it|that card)"
+                     r" into (?:your|their) hand[.\s]*",
+                     clause_lower)
+                 if dangling_hand_move and re.search(
+                         r"\bsearch(?:es)?\s+(?:your|their)\s+library\b"
+                         r"|\blook at the top\b|\breveal the top\b",
+                         effect_text, re.IGNORECASE):
+                     logging.debug(
+                         f"Skipping dangling hand-move fragment already "
+                         f"handled by its search/look instruction: "
+                         f"'{clause_clean}'")
+                     continue
                  # Add generic effect if specific parsing fails for this clause
                  effect_keywords = ["destroy", "exile", "draw", "gain", "lose", "counter", "create", "search", "tap", "untap", "put", "scry", "surveil", "fight", "transform", "copy", "mill", "discard", "return"]
                  if clause_clean and any(kw in clause_lower for kw in effect_keywords): # Check clean text and lower

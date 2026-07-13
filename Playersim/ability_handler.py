@@ -187,26 +187,28 @@ class AbilityHandler:
         door_to_unlock_num = None
         door_data = None
 
-        if hasattr(room_card, 'door2') and not getattr(room_card,'door2',{}).get('unlocked', False):
+        # An unparsed door is an empty dict; hasattr() was always true for
+        # it, which let single-door rooms "unlock" a nonexistent door 2 for
+        # free. Only consider doors that actually parsed with content.
+        door1 = getattr(room_card, 'door1', None) or None
+        door2 = getattr(room_card, 'door2', None) or None
+
+        if door2 and not door2.get('unlocked', False):
             door_to_unlock_num = 2
-            door_data = room_card.door2
-        elif hasattr(room_card, 'door1') and not getattr(room_card,'door1',{}).get('unlocked', False):
+            door_data = door2
+        elif door1 and not door1.get('unlocked', False):
              # Note: Door 1 unlocking might not always be an explicit action
              # If door 1 has a cost, we can proceed. If not, it might unlock implicitly.
-             door1_cost = getattr(room_card, 'door1', {}).get('mana_cost')
+             door1_cost = door1.get('mana_cost')
              if door1_cost:
                  door_to_unlock_num = 1
-                 door_data = room_card.door1
+                 door_data = door1
              else:
                  logging.debug(f"Door 1 of {room_card.name} has no cost, assumed implicitly unlocked or via other means.")
                  # If Door 2 also doesn't exist or is unlocked, no action possible.
-                 if not hasattr(room_card, 'door2') or getattr(room_card,'door2',{}).get('unlocked', False):
+                 if not door2 or door2.get('unlocked', False):
                      logging.warning(f"No available doors to unlock for {room_card.name}.")
                      return False
-        # Check if door 1 is already unlocked but door 2 is not (this block is needed if logic above doesn't catch it)
-        elif hasattr(room_card, 'door2') and not getattr(room_card,'door2',{}).get('unlocked', False):
-            door_to_unlock_num = 2
-            door_data = room_card.door2
 
 
         if door_to_unlock_num is None:
@@ -1954,6 +1956,17 @@ class AbilityHandler:
                                # Store (card_id, ability, player_controlling_ability, zone_name)
                                abilities_to_check.extend([(card_id, ab, player_obj, zone_name) for ab in self.registered_abilities[card_id]])
 
+        # Self-cast triggers ("When you cast this spell, ...") live on the
+        # spell itself, which is on the stack during CAST_SPELL — a zone the
+        # loop above never scans, so those triggers silently never fired.
+        if event_type == "CAST_SPELL":
+            cast_id = context.get('cast_card_id')
+            caster = context.get('casting_player') or context.get('controller')
+            if cast_id is not None and caster and cast_id in self.registered_abilities:
+                abilities_to_check.extend(
+                    (cast_id, ab, caster, 'stack')
+                    for ab in self.registered_abilities[cast_id])
+
         # Iterate through collected potential triggers
         queued_trigger_count = 0
         for card_id, ability, controller, zone_name in abilities_to_check:
@@ -1998,8 +2011,15 @@ class AbilityHandler:
                  if triggering_zone == 'battlefield' and ("leaves the battlefield" in trigger_text):
                      can_trigger_from_current_zone = True
              elif event_type == "CAST_SPELL":
+                  # The spell being cast triggers its own "when you cast this
+                  # spell" ability from the stack.
+                  if (zone_name == 'stack'
+                          and context.get('cast_card_id') == card_id
+                          and ("when you cast" in trigger_text
+                               or "whenever you cast" in trigger_text)):
+                       can_trigger_from_current_zone = True
                   # Cast triggers can be on the card itself (trigger zone = source zone) or on other cards
-                  if zone_name == triggering_zone and ("when you cast" in trigger_text or "whenever you cast" in trigger_text):
+                  elif zone_name == triggering_zone and ("when you cast" in trigger_text or "whenever you cast" in trigger_text):
                        # Needs to check if the card being cast *is this card* OR if it triggers on *any* cast
                        cast_source_id = context.get('cast_card_id')
                        if cast_source_id == card_id: # It triggered itself being cast
@@ -2164,10 +2184,23 @@ class AbilityHandler:
                     sacrifice_choices=sacrifice_choices):
                 # Add to stack WITH the ability object: resolution needs it (an
                 # empty context made every generic activation resolve to nothing).
-                self.game_state.add_to_stack("ABILITY", card_id, controller, {
+                effect_text = getattr(ability, 'effect', '') or getattr(
+                    ability, 'effect_text', '')
+                stack_context = {
                     "ability": ability,
-                    "effect_text": getattr(ability, 'effect', '') or getattr(ability, 'effect_text', ''),
-                })
+                    "effect_text": effect_text,
+                }
+                # Earthbend's target instruction lives only in the mechanic's
+                # reminder text, which parsers strip -- without this the
+                # ability reached resolution with no target ever chosen and
+                # EarthbendEffect fizzled with a warning. Mirror the trigger
+                # path: targets are chosen as the ability goes on the stack.
+                if ("earthbend" in (effect_text or '').lower()
+                        and "target" not in (effect_text or '').lower()):
+                    stack_context["targeting_text"] = "Target land you control"
+                    stack_context["target_choice_pending"] = True
+                self.game_state.add_to_stack(
+                    "ABILITY", card_id, controller, stack_context)
                 card = self.game_state._safe_get_card(card_id)
                 logging.debug(
                     f"Activated ability {ability_index} for "

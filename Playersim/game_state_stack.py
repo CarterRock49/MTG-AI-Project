@@ -274,6 +274,13 @@ class GameStateStackMixin:
                  or re.search(r"\btarget(?:\s+[a-z-]+){1,4}\s+permanents?\b", text)):
              return "permanent"
          if "any target" in text or "any other target" in text: return "any"
+         # Damage split among unqualified "targets" ("deals 1 damage to each
+         # of one or two targets", "divided as you choose among any number of
+         # targets") is any-target damage: creatures, players, planeswalkers,
+         # battles. The generic fallback let enchantments/artifacts be chosen
+         # and the damage effect then rejected the commit.
+         if re.search(r"deals?\s+\S+\s+damage[^.]{0,60}\btargets\b", text):
+             return "any"
          # "target <creature subtype> you control" (Manifold Mouse's
          # "target Mouse you control"): pass the subtype through so the
          # targeting system can filter by it. The generic categories above
