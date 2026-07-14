@@ -47,6 +47,7 @@ import torch.nn as nn
 # Import MTG Environment Components
 from Playersim.card import Card, load_decks_and_card_db
 from Playersim.environment import AlphaZeroMTGEnv
+from Playersim.observation_schema import SEMANTIC_IDENTITY_FIELDS
 from Playersim.debug import DEBUG_MODE
 
 # Custom Feature Extractor and Policy
@@ -65,6 +66,20 @@ class FixedWindowMTGExtractor(BaseFeaturesExtractor):
         # Their weights were invisible to the optimizer (never trained), missing from
         # state_dict (never saved in checkpoints), and never moved to GPU.
         self.extractors = torch.nn.ModuleDict()
+        self.semantic_identity_fields = tuple(
+            key for key in SEMANTIC_IDENTITY_FIELDS
+            if key in observation_space.spaces)
+        identity_highs = {
+            int(np.asarray(observation_space.spaces[key].high).max())
+            for key in self.semantic_identity_fields
+        }
+        if len(identity_highs) != 1:
+            raise ValueError(
+                "Semantic identity fields must share one frozen vocabulary")
+        identity_vocabulary_size = (
+            identity_highs.pop() + 1 if identity_highs else 2)
+        self.semantic_identity_embedding = torch.nn.Embedding(
+            identity_vocabulary_size, 32, padding_idx=0)
         
         # BUGFIX: was Embedding(10, 16), but engine phase indices go up to 19
         # (PHASE_CHOOSE) -> IndexError the first time an episode reached phase >= 10.
@@ -93,6 +108,19 @@ class FixedWindowMTGExtractor(BaseFeaturesExtractor):
             # MaskablePPO; target_card_ids are unstable runtime occurrence
             # handles used only to verify the public target-page protocol.
             if key in {"phase", "action_mask", "target_card_ids"}:
+                continue
+
+            if key in SEMANTIC_IDENTITY_FIELDS:
+                if len(subspace.shape) != 1:
+                    raise ValueError(
+                        f"Semantic identity field '{key}' must be rank 1, "
+                        f"got shape={subspace.shape}")
+                high = np.asarray(subspace.high)
+                if not np.all(np.isfinite(high)):
+                    raise ValueError(
+                        f"Semantic identity field '{key}' has no finite bound")
+                merged_dim += int(np.prod(subspace.shape)) * \
+                    self.semantic_identity_embedding.embedding_dim
                 continue
                 
             if len(subspace.shape) == 1:
@@ -158,8 +186,8 @@ class FixedWindowMTGExtractor(BaseFeaturesExtractor):
         """Compress unbounded observation scalars before any linear layer.
 
         Several declared observation bounds are saturation points, not
-        typical magnitudes (P/T and combat damage saturate at 1e6, card ids
-        reach 2**31). Feeding those raw into ``Linear`` layers let a single
+        typical magnitudes (P/T and combat damage saturate at 1e6). Feeding
+        those raw into ``Linear`` layers let a single
         degenerate game drive value predictions to ~1e5 and poison the GAE
         targets for the whole batch. sign(x)*log1p(|x|) is monotone, exact
         near zero, and keeps every input within ~22.
@@ -177,6 +205,16 @@ class FixedWindowMTGExtractor(BaseFeaturesExtractor):
                 0, self.phase_embedding.num_embeddings - 1)
             phase_emb = self.phase_embedding(phase_tensor)
             encoded_tensor_list.append(phase_emb)
+
+        # Stable canonical identities are categorical.  Passing registry
+        # indices through symlog/Linear would incorrectly impose ordinal
+        # distance (card 100 is not semantically closer to 101 than to 4000).
+        embedding = self.semantic_identity_embedding
+        for key in self.semantic_identity_fields:
+            if key in observations:
+                identity_tensor = observations[key].long().clamp(
+                    0, embedding.num_embeddings - 1)
+                encoded_tensor_list.append(embedding(identity_tensor))
 
         # Process continuous observation spaces
         for key, extractor in self.extractors.items():
@@ -1443,6 +1481,7 @@ def build_training_config(args, optuna_params=None):
 
 def make_masked_mtg_env(decks, card_db, storage_root, *, agent_is_p1=True,
                         alternate_agent_seat=False, subtype_vocab=None,
+                        strategy_memory_enabled=False,
                         reward_discount=AlphaZeroMTGEnv.DEFAULT_REWARD_DISCOUNT,
                         action_reward_scale=
                             AlphaZeroMTGEnv.DEFAULT_ACTION_REWARD_SCALE,
@@ -1459,6 +1498,7 @@ def make_masked_mtg_env(decks, card_db, storage_root, *, agent_is_p1=True,
             agent_is_p1=agent_is_p1,
             alternate_agent_seat=alternate_agent_seat,
             subtype_vocab=subtype_vocab,
+            strategy_memory_enabled=strategy_memory_enabled,
             reward_discount=reward_discount,
             action_reward_scale=action_reward_scale,
             state_potential_scale=state_potential_scale,
@@ -2696,6 +2736,7 @@ def main():
             "selected_device": selected_device,
             "alternate_agent_seat": True,
             "opponent_policy": "scripted",
+            "strategy_memory": "disabled",
             "callback_frequencies_timesteps": {
                 "evaluation": args.eval_freq,
                 "checkpoint": args.checkpoint_freq,

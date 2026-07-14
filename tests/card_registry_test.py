@@ -282,6 +282,9 @@ class LineageIdentityTest(SubtypeVocabGuard):
             lineage["feature_schema"]["sha256"], schema["sha256"])
         self.assertEqual(
             lineage["feature_schema"]["feature_dim"], schema["feature_dim"])
+        self.assertEqual(
+            lineage["observation_schema"]["schema_version"], 2)
+        self.assertTrue(lineage["observation_schema"]["sha256"])
         self.assertEqual(lineage["pool_snapshot"]["format"], "standard")
 
         # Format-free lineage still records the corpus identity.
@@ -295,6 +298,9 @@ class LineageIdentityTest(SubtypeVocabGuard):
         self.assertIsNone(unformatted["pool_snapshot"])
         self.assertIsNone(unformatted["card_registry"])
         self.assertIsNone(unformatted["feature_schema"])
+        self.assertEqual(
+            unformatted["observation_schema"],
+            lineage["observation_schema"])
         self.assertTrue(unformatted["corpus"]["sha256"])
 
 

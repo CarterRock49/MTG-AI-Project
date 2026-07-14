@@ -1314,62 +1314,13 @@ class SearchDecisionMixin:
             return None # Truly stuck if no valid actions list available
 
     def suggest_action_from_memory(self, valid_actions):
-        """
-        Use strategy memory to suggest an action.
-        
-        Args:
-            valid_actions: List of valid action indices
-            
-        Returns:
-            int or None: Suggested action index
-        """
+        """Delegate to deterministic action-specific strategy evidence."""
         try:
-            # Check if strategy memory exists in game state
-            if not hasattr(self.game_state, 'strategy_memory'):
+            memory = getattr(self.game_state, 'strategy_memory', None)
+            if memory is None:
                 return None
-            
-            # Get current game state pattern
-            current_pattern = self.game_state.strategy_memory.extract_strategy_pattern(self.game_state)
-            
-            # Find strategies matching the current game state
-            matching_strategies = [
-                (pattern, strategy) for pattern, strategy in self.game_state.strategy_memory.strategies.items()
-                if pattern == current_pattern and strategy['success_rate'] > 0.6 and strategy['count'] > 3
-            ]
-            
-            # If no exact match, try partial matching
-            if not matching_strategies:
-                matching_strategies = [
-                    (pattern, strategy) for pattern, strategy in self.game_state.strategy_memory.strategies.items()
-                    if self._pattern_similarity(pattern, current_pattern) > 0.7
-                ]
-            
-            # Sort strategies by success rate and count
-            matching_strategies.sort(
-                key=lambda x: x[1]['success_rate'] * x[1]['count'], 
-                reverse=True
-            )
-            
-            # Find matching action sequences
-            for pattern, _ in matching_strategies:
-                matching_sequences = [
-                    (seq[0], reward) for seq, reward in self.game_state.strategy_memory.action_sequences
-                    if len(seq) > 0 and seq[0] in valid_actions and reward > 0
-                ]
-                
-                # Weighted random selection if matches found
-                if matching_sequences:
-                    weights = [max(0.1, r) for _, r in matching_sequences]
-                    chosen_action = random.choices(
-                        [a for a, _ in matching_sequences], 
-                        weights=[w/sum(weights) for w in weights]
-                    )[0]
-                    
-                    logging.debug(f"Strategy memory suggested action {chosen_action}")
-                    return chosen_action
-            
-            return None
-        
+            return memory.get_suggested_action(
+                self.game_state, valid_actions, exploration_rate=0.0)
         except Exception as e:
             logging.error(f"Error in suggest_action_from_memory: {str(e)}")
             return None

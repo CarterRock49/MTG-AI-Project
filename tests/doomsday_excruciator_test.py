@@ -146,11 +146,18 @@ class DoomsdayExcruciatorTest(unittest.TestCase):
 
         observation = get_env().observation_for(game_state.p1)
         hidden_count = len(p1_order[:-6])
+        # Observation v2 orders public exile detail newest-first. Hidden
+        # objects occupy an explicit unknown-identity slot instead of looking
+        # like padding, while their private card vectors stay zero.
+        self.assertTrue(np.any(observation["my_exile_cards"][0] != 0))
+        self.assertGreaterEqual(observation["my_exile_card_identity"][0], 1)
+        self.assertTrue(observation["my_exile_card_visibility"][0])
         self.assertTrue(np.all(
-            observation["exile_key_cards"][:hidden_count] == 0))
-        visible_index = game_state.p1["exile"].index(visible_artifact)
-        self.assertTrue(np.any(
-            observation["exile_key_cards"][visible_index] != 0))
+            observation["my_exile_cards"][1:1 + hidden_count] == 0))
+        self.assertTrue(np.all(
+            observation["my_exile_card_identity"][1:1 + hidden_count] == 1))
+        self.assertFalse(np.any(
+            observation["my_exile_card_visibility"][1:1 + hidden_count]))
         np.testing.assert_allclose(
             observation["deck_composition_estimate"],
             np.array([0.5, 0.0, 0.0, 0.5, 0.0, 0.0],

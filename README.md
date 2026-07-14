@@ -206,16 +206,21 @@ python -m Playersim.card_registry freeze --decks <corpus_dir> --format standard 
 ```
 
 This writes `card_registry.json` (canonical card IDs) and `feature_schema.json`
-(frozen observation layout), both versioned and self-hashed. Use `--extend` to
+(frozen card-vector layout), both versioned and self-hashed. Use `--extend` to
 append new cards without renumbering existing IDs; a card that would widen the
 frozen subtype vocabulary is rejected (that requires a new schema version, and
 therefore a new checkpoint lineage).
 
+The separate global policy-input contract is Observation v2, documented in
+[OBSERVATION_SCHEMA.md](OBSERVATION_SCHEMA.md) and self-hashed by
+`Playersim/observation_schema.py`.
+
 Every run-level manifest (`training_run.json`, `harvest_run.json`,
 `harvest_protocol.json`, `promotion.json`) stamps a `lineage` object recording
-the format, pool-snapshot hash, corpus hash, and registry/schema
-version + hash. **Never merge statistics whose lineage hashes differ** — they may
-disagree on card identity or on what the policy observed. See
+the format, pool-snapshot hash, corpus hash, card registry, card feature schema,
+and observation schema versions + hashes. **Never merge statistics whose
+lineage hashes differ** — they may disagree on card identity or on what the
+policy observed. See
 [STATS_SCHEMA.md](STATS_SCHEMA.md) → "Format namespaces and run lineage".
 
 ### Deck pool
@@ -306,7 +311,7 @@ revision and dirty state, CLI and resolved configuration, device and dependency
 inventory, deck/lineage provenance, lifecycle result, and artifact paths. A
 dirty run also stores a hashed `source_worktree.patch` beside the manifest.
 
-> **Checkpoint boundary (Round 7.82).** The full Standard namespace widened card
+> **Checkpoint boundary (Round 7.83 / Observation v2).** The full Standard namespace widened card
 > observations to 436 fields (259 subtype fields plus MDFC fields), signed live
 > power/toughness, and count/stat bounds large enough for legal boards above 20
 > permanents. Round 7.62 also widened the declared choice-count, allocation, and
@@ -323,7 +328,14 @@ dirty run also stores a hashed `source_worktree.patch` beside the manifest.
 > 7.82 made planner observations state/perspective-fresh, repaired exact target
 > and stack indexing, routed combat summaries through canonical legality/search,
 > and added the previously-omitted rank-3 ability-recommendation extractor.
-> **Do not resume a checkpoint created before Round 7.82** — start fresh
+> Round 7.83 freezes Observation v2: categorical canonical-card embeddings,
+> symmetric public zones and mana, library/player/permanent state, exact
+> attachment/combat mappings, richer stack objects, observer-relative indices,
+> and removal of exact/dead v1 duplicates. The online strategy-memory hint was
+> also removed from policy input: the optional replacement is deterministic,
+> isolated per environment, and disabled during training/evaluation. The
+> observation hash is now part of run lineage.
+> **Do not resume a checkpoint created before Round 7.83** — start fresh
 > without `--resume`.
 
 ### Hyperparameter optimization

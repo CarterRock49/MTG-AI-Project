@@ -24,6 +24,10 @@ from collections import defaultdict
 from .deck_stats_tracker import DeckStatsTracker
 from .card_memory import CardMemory
 from .ability_types import ManaAbility
+from .observation_schema import (
+    OBSERVATION_SCHEMA_SHA256, OBSERVATION_SCHEMA_VERSION,
+    SEMANTIC_IDENTITY_MAX,
+)
 
 
 def _card_number(card, attribute, default=0.0):
@@ -43,11 +47,14 @@ class AlphaZeroMTGEnv(gym.Env):
     DEFAULT_REWARD_DISCOUNT = 0.995
     DEFAULT_ACTION_REWARD_SCALE = 0.02
     DEFAULT_STATE_POTENTIAL_SCALE = 0.40
+    OBSERVATION_SCHEMA_VERSION = OBSERVATION_SCHEMA_VERSION
+    OBSERVATION_SCHEMA_SHA256 = OBSERVATION_SCHEMA_SHA256
 
     def __init__(self, decks, card_db, max_turns=30, max_hand_size=7, max_battlefield=20,
                  deck_stats_path="./deck_stats", card_memory_path="./card_memory",
                  planner_recommendations=False, agent_is_p1=True,
                  alternate_agent_seat=False, subtype_vocab=None,
+                 strategy_memory_enabled=False,
                  reward_discount=DEFAULT_REWARD_DISCOUNT,
                  action_reward_scale=DEFAULT_ACTION_REWARD_SCALE,
                  state_potential_scale=DEFAULT_STATE_POTENTIAL_SCALE):
@@ -83,12 +90,13 @@ class AlphaZeroMTGEnv(gym.Env):
         # limit on GameState while observing every directly actionable hand slot.
         self.hand_observation_size = max(10, max_hand_size)
         self.max_battlefield = max_battlefield
-        # Scope the strategy-memory file to this env's storage instead of the
-        # process CWD: a shared global pkl leaked between unrelated runs
-        # (perturbing the rec/mem observation features of seeded runs) and
-        # SubprocVecEnv workers would race on one file.
-        self.strategy_memory = StrategyMemory(
-            memory_file=self._strategy_memory_file())
+        # Strategy memory is an optional deterministic advisory subsystem. It
+        # is disabled for policy training/evaluation and never enters the
+        # learned observation. Explicit users still receive one file per env.
+        self.strategy_memory_enabled = bool(strategy_memory_enabled)
+        self.strategy_memory = (
+            StrategyMemory(memory_file=self._strategy_memory_file())
+            if self.strategy_memory_enabled else None)
         self.current_episode_actions = []
         self.replay_actions = []
         self.reset_seed = None
@@ -127,9 +135,49 @@ class AlphaZeroMTGEnv(gym.Env):
         self._subtype_vocab = subtype_vocab
         self._feature_dim = (
             4 + 6 + len(Card.ALL_KEYWORDS) + 5 + len(self._subtype_vocab) + 3)
+        # Observation v2 gives every visible card slot a categorical semantic
+        # identity.  Registry IDs may be sparse in a selected corpus, so size
+        # the embedding namespace from the largest frozen canonical index,
+        # not from len(card_db).  0 is padding, 1 is a visible unknown/token,
+        # and canonical index N is encoded as N+2.
+        deck_canonical_ids = {
+            int(card_id)
+            for deck in decks if isinstance(deck, dict)
+            for card_id in deck.get("cards", ())
+            if isinstance(card_id, (int, np.integer)) and int(card_id) >= 0
+        }
+        # A previously used shared card_db can still contain retired runtime
+        # clones. Derive canonical entries from deck inputs so those per-game
+        # IDs never become learned semantic categories in a later env.
+        canonical_entries = [
+            (card_id, card_db[card_id]) for card_id in deck_canonical_ids
+            if card_id in card_db
+        ]
+        if not canonical_entries:
+            canonical_entries = [
+                (int(card_id), card) for card_id, card in card_db.items()
+                if isinstance(card_id, (int, np.integer)) and int(card_id) >= 0
+            ]
+        self._canonical_card_id_max = max(
+            (card_id for card_id, _ in canonical_entries), default=-1)
+        if self._canonical_card_id_max + 2 > SEMANTIC_IDENTITY_MAX:
+            raise ValueError(
+                "Canonical card registry exceeds Observation v2's semantic "
+                f"identity capacity ({SEMANTIC_IDENTITY_MAX - 1} cards)")
+        self._canonical_card_ids = {
+            card_id for card_id, _ in canonical_entries}
+        self._semantic_identity_high = SEMANTIC_IDENTITY_MAX
+        self._canonical_card_ids_by_name = {
+            str(getattr(card, "name", "")).casefold(): card_id
+            for card_id, card in canonical_entries
+            if getattr(card, "name", None)
+        }
         logging.info(
-            "Using feature dimension %s (%s subtype fields)",
-            self._feature_dim, len(self._subtype_vocab))
+            "Using feature dimension %s (%s subtype fields), observation "
+            "schema v%s (%s semantic identities)",
+            self._feature_dim, len(self._subtype_vocab),
+            self.OBSERVATION_SCHEMA_VERSION,
+            self._semantic_identity_high + 1)
 
         # Initialize deck statistics tracker (Corrected class name usage)
         try:
@@ -209,12 +257,16 @@ class AlphaZeroMTGEnv(gym.Env):
                 high=np.broadcast_to(card_feature_high, (rows, self._feature_dim)).copy(),
                 dtype=np.float32)
 
+        def semantic_identity_space(rows):
+            return spaces.Box(
+                low=0, high=self._semantic_identity_high,
+                shape=(rows,), dtype=np.int32)
+
         # --- UPDATED: Observation Space with Context Facilitation Fields ---
         # *** MODIFIED: Updated estimated_opponent_hand shape ***
         self.observation_space = spaces.Dict({
             # --- Existing Fields (mostly unchanged shapes) ---
             "phase": spaces.Box(low=0, high=MAX_PHASE, shape=(1,), dtype=np.int32),
-            "phase_onehot": spaces.Box(low=0, high=1, shape=(MAX_PHASE + 1,), dtype=np.float32),
             # Turn-limit adjudication occurs after the counter advances past
             # max_turns, so the terminal observation legitimately sees +1.
             "turn": spaces.Box(low=0, high=self.max_turns + 1, shape=(1,), dtype=np.int32),
@@ -224,26 +276,32 @@ class AlphaZeroMTGEnv(gym.Env):
             "my_life": spaces.Box(low=-10000, high=10000, shape=(1,), dtype=np.int32),
             "opp_life": spaces.Box(low=-10000, high=10000, shape=(1,), dtype=np.int32),
             "life_difference": spaces.Box(low=-20000, high=20000, shape=(1,), dtype=np.int32),
-            "p1_life": spaces.Box(low=-10000, high=10000, shape=(1,), dtype=np.int32),
-            "p2_life": spaces.Box(low=-10000, high=10000, shape=(1,), dtype=np.int32),
             "my_hand": card_feature_space(self.hand_observation_size),
+            "my_hand_card_identity": semantic_identity_space(self.hand_observation_size),
             "my_hand_count": spaces.Box(low=0, high=1000, shape=(1,), dtype=np.int32),
             "opp_hand_count": spaces.Box(low=0, high=1000, shape=(1,), dtype=np.int32),
             "hand_playable": spaces.Box(low=0, high=1, shape=(self.hand_observation_size,), dtype=np.float32),
             "hand_card_types": spaces.Box(low=0, high=1, shape=(self.hand_observation_size, 5), dtype=np.float32),
-            "hand_performance": spaces.Box(low=0, high=1, shape=(self.hand_observation_size,), dtype=np.float32),
             "hand_synergy_scores": spaces.Box(low=0, high=1, shape=(self.hand_observation_size,), dtype=np.float32),
             "opportunity_assessment": spaces.Box(low=0, high=10, shape=(self.hand_observation_size,), dtype=np.float32),
             "my_battlefield": card_feature_space(self.max_battlefield),
+            "my_battlefield_card_identity": semantic_identity_space(self.max_battlefield),
             "my_battlefield_flags": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5), dtype=np.float32),
-            "my_battlefield_keywords": spaces.Box(low=0, high=1, shape=(self.max_battlefield, keyword_dimension), dtype=np.float32),
-            "my_tapped_permanents": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=bool),
             "opp_battlefield": card_feature_space(self.max_battlefield),
+            "opp_battlefield_card_identity": semantic_identity_space(self.max_battlefield),
             "opp_battlefield_flags": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5), dtype=np.float32),
-            "p1_battlefield": card_feature_space(self.max_battlefield),
-            "p2_battlefield": card_feature_space(self.max_battlefield),
-            "p1_bf_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
-            "p2_bf_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
+            "my_battlefield_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
+            "opp_battlefield_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
+            # Counter columns: +1/+1, -1/-1, loyalty, defense, lore, other.
+            "my_permanent_counters": spaces.Box(low=0, high=combat_stat_observation_max, shape=(self.max_battlefield, 6), dtype=np.int32),
+            "opp_permanent_counters": spaces.Box(low=0, high=combat_stat_observation_max, shape=(self.max_battlefield, 6), dtype=np.int32),
+            "my_damage_marked": spaces.Box(low=0, high=combat_stat_observation_max, shape=(self.max_battlefield,), dtype=np.int32),
+            "opp_damage_marked": spaces.Box(low=0, high=combat_stat_observation_max, shape=(self.max_battlefield,), dtype=np.int32),
+            # Relative combined battlefield index: my rows first, then opp.
+            "my_attachment_targets": spaces.Box(low=-1, high=self.max_battlefield * 2 - 1, shape=(self.max_battlefield,), dtype=np.int32),
+            "opp_attachment_targets": spaces.Box(low=-1, high=self.max_battlefield * 2 - 1, shape=(self.max_battlefield,), dtype=np.int32),
+            "my_attachment_counts": spaces.Box(low=0, high=count_observation_max, shape=(self.max_battlefield,), dtype=np.int32),
+            "opp_attachment_counts": spaces.Box(low=0, high=count_observation_max, shape=(self.max_battlefield,), dtype=np.int32),
             "my_creature_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
             "opp_creature_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
             "my_total_power": spaces.Box(low=-combat_stat_observation_max, high=combat_stat_observation_max, shape=(1,), dtype=np.int32),
@@ -256,22 +314,54 @@ class AlphaZeroMTGEnv(gym.Env):
             "threat_assessment": spaces.Box(low=0, high=10, shape=(self.max_battlefield,), dtype=np.float32),
             "card_synergy_scores": spaces.Box(low=-1, high=1, shape=(self.max_battlefield, self.max_battlefield), dtype=np.float32),
             "my_mana_pool": spaces.Box(low=0, high=100, shape=(6,), dtype=np.int32),
-            "my_mana": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
+            "opp_mana_pool": spaces.Box(low=0, high=100, shape=(6,), dtype=np.int32),
+            "my_snow_mana_pool": spaces.Box(low=0, high=100, shape=(6,), dtype=np.int32),
+            "opp_snow_mana_pool": spaces.Box(low=0, high=100, shape=(6,), dtype=np.int32),
+            "my_restricted_mana_pool": spaces.Box(low=0, high=100, shape=(6,), dtype=np.int32),
+            "opp_restricted_mana_pool": spaces.Box(low=0, high=100, shape=(6,), dtype=np.int32),
             "total_available_mana": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "untapped_land_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
-            "remaining_mana_sources": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
             "turn_vs_mana": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
+            "my_library_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
+            "opp_library_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
+            # Player counters: poison, energy, experience. Status: blessing, monarch.
+            "my_player_counters": spaces.Box(low=0, high=count_observation_max, shape=(3,), dtype=np.int32),
+            "opp_player_counters": spaces.Box(low=0, high=count_observation_max, shape=(3,), dtype=np.int32),
+            "my_player_status": spaces.Box(low=0, high=1, shape=(2,), dtype=np.int32),
+            "opp_player_status": spaces.Box(low=0, high=1, shape=(2,), dtype=np.int32),
             "my_graveyard_count": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "opp_graveyard_count": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
+            "my_exile_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
+            "opp_exile_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
             "my_dead_creatures": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
             "opp_dead_creatures": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
-            "graveyard_key_cards": card_feature_space(10),
-            "exile_key_cards": card_feature_space(10),
+            "my_graveyard_cards": card_feature_space(10),
+            "my_graveyard_card_identity": semantic_identity_space(10),
+            "opp_graveyard_cards": card_feature_space(10),
+            "opp_graveyard_card_identity": semantic_identity_space(10),
+            "my_exile_cards": card_feature_space(10),
+            "my_exile_card_identity": semantic_identity_space(10),
+            "my_exile_card_visibility": spaces.Box(low=0, high=1, shape=(10,), dtype=bool),
+            "opp_exile_cards": card_feature_space(10),
+            "opp_exile_card_identity": semantic_identity_space(10),
+            "opp_exile_card_visibility": spaces.Box(low=0, high=1, shape=(10,), dtype=bool),
             "stack_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
             "stack_controller": spaces.Box(low=-1, high=1, shape=(5,), dtype=np.int32),
             "stack_card_types": spaces.Box(low=0, high=1, shape=(5, 5), dtype=np.float32),
+            "stack_cards": card_feature_space(5),
+            "stack_card_identity": semantic_identity_space(5),
+            # 0 empty, 1 spell, 2 activated ability, 3 trigger, 4 other.
+            "stack_object_kinds": spaces.Box(low=0, high=4, shape=(5,), dtype=np.int32),
+            "stack_target_counts": spaces.Box(low=0, high=count_observation_max, shape=(5,), dtype=np.int32),
+            "stack_mode_counts": spaces.Box(low=0, high=100, shape=(5,), dtype=np.int32),
             "attackers_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
             "blockers_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
+            # Row = relative combined battlefield object. -2 means not
+            # attacking, -1 is an off-window defender, 0 is the defending
+            # player, and N+1 means public permanent N.
+            "combat_attack_targets": spaces.Box(low=-2, high=self.max_battlefield * 2, shape=(self.max_battlefield * 2,), dtype=np.int32),
+            # Row = blocker; value = relative combined attacker index or -1.
+            "combat_blocker_assignments": spaces.Box(low=-1, high=self.max_battlefield * 2 - 1, shape=(self.max_battlefield * 2,), dtype=np.int32),
             "potential_combat_damage": spaces.Box(low=0, high=combat_stat_observation_max, shape=(1,), dtype=np.int32),
             "ability_features": spaces.Box(low=0, high=10, shape=(self.max_battlefield, 5), dtype=np.float32),
             "ability_timing": spaces.Box(low=0, high=1, shape=(5,), dtype=np.float32),
@@ -283,8 +373,6 @@ class AlphaZeroMTGEnv(gym.Env):
             "action_mask": spaces.Box(low=0, high=1, shape=(self.ACTION_SPACE_SIZE,), dtype=bool),
             "recommended_action": spaces.Box(low=-1, high=self.ACTION_SPACE_SIZE - 1, shape=(1,), dtype=np.int32),
             "recommended_action_confidence": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
-            "memory_suggested_action": spaces.Box(low=-1, high=self.ACTION_SPACE_SIZE - 1, shape=(1,), dtype=np.int32),
-            "suggestion_matches_recommendation": spaces.Box(low=0, high=1, shape=(1,), dtype=np.int32),
             "optimal_attackers": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=np.float32),
             "attacker_values": spaces.Box(low=-10, high=10, shape=(self.max_battlefield,), dtype=np.float32),
             "ability_recommendations": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5, 2), dtype=np.float32),
@@ -308,6 +396,7 @@ class AlphaZeroMTGEnv(gym.Env):
             "targetable_cards_in_graveyards": spaces.Box(low=-1, high=np.iinfo(np.int32).max, shape=(10 * 2,), dtype=np.int32),
             # Exact SELECT_TARGET page. Slot i describes action 274+i.
             "target_cards": card_feature_space(10),
+            "target_card_identity": semantic_identity_space(10),
             "target_card_mask": spaces.Box(low=0, high=1, shape=(10,), dtype=bool),
             "target_card_ids": spaces.Box(low=-1, high=2147483647, shape=(10,), dtype=np.int64),
             "target_kinds": spaces.Box(low=0, high=6, shape=(10,), dtype=np.int32),
@@ -317,6 +406,7 @@ class AlphaZeroMTGEnv(gym.Env):
             "selectable_modes": spaces.Box(low=-1, high=10, shape=(10,), dtype=np.int32),
             "selectable_colors": spaces.Box(low=-1, high=4, shape=(5,), dtype=np.int32),
             "choice_cards": card_feature_space(10),
+            "choice_card_identity": semantic_identity_space(10),
             "choice_card_mask": spaces.Box(low=0, high=1, shape=(10,), dtype=bool),
             "choice_kind": spaces.Box(low=0, high=16, shape=(1,), dtype=np.int32),
             "choice_remaining": spaces.Box(
@@ -340,14 +430,18 @@ class AlphaZeroMTGEnv(gym.Env):
         # recorded as an observation fidelity error. Structural features
         # (masks, indices, phases) keep the hard bound check.
         self._saturating_features = frozenset({
-            "my_life", "opp_life", "life_difference", "p1_life", "p2_life",
-            "my_hand", "my_battlefield", "opp_battlefield", "p1_battlefield",
-            "p2_battlefield", "graveyard_key_cards", "exile_key_cards",
+            "my_life", "opp_life", "life_difference",
+            "my_hand", "my_battlefield", "opp_battlefield",
+            "my_graveyard_cards", "opp_graveyard_cards",
+            "my_exile_cards", "opp_exile_cards", "stack_cards",
             "estimated_opponent_hand", "target_cards", "choice_cards",
             "my_total_power", "my_total_toughness", "opp_total_power",
             "opp_total_toughness", "power_advantage", "toughness_advantage",
-            "potential_combat_damage", "my_mana_pool", "my_mana",
-            "total_available_mana",
+            "potential_combat_damage", "my_mana_pool", "opp_mana_pool",
+            "my_snow_mana_pool", "opp_snow_mana_pool",
+            "my_restricted_mana_pool", "opp_restricted_mana_pool",
+            "my_permanent_counters", "opp_permanent_counters",
+            "my_damage_marked", "opp_damage_marked", "total_available_mana",
         })
         self.action_space = spaces.Discrete(self.ACTION_SPACE_SIZE)
         # Add memory for actions and rewards
@@ -383,11 +477,15 @@ class AlphaZeroMTGEnv(gym.Env):
         return "strategy_memory.pkl"
 
     def initialize_strategic_memory(self):
-        """Initialize and connect the strategy memory system."""
+        """Connect the optional memory without reconstructing it on reset."""
         try:
-            self.strategy_memory = StrategyMemory(
-                memory_file=self._strategy_memory_file())
-            # Enable the strategy memory to access critical game state components
+            if not self.strategy_memory_enabled:
+                self.strategy_memory = None
+                self.game_state.strategy_memory = None
+                return
+            if self.strategy_memory is None:
+                self.strategy_memory = StrategyMemory(
+                    memory_file=self._strategy_memory_file())
             self.game_state.strategy_memory = self.strategy_memory
             logging.debug("Strategic memory system initialized successfully")
         except ImportError as e:
@@ -924,6 +1022,12 @@ class AlphaZeroMTGEnv(gym.Env):
                 self.card_memory.save_all_card_data()
         except Exception as e:
             logging.error(f"close(): card memory save failed: {e}")
+        try:
+            memory = getattr(self, 'strategy_memory', None)
+            if memory is not None and getattr(memory, 'dirty', False):
+                memory.save_memory()
+        except Exception as e:
+            logging.error(f"close(): strategy memory save failed: {e}")
         super().close()
 
     def _get_strategic_advice(self):
@@ -1347,6 +1451,15 @@ class AlphaZeroMTGEnv(gym.Env):
         # Potential-based shaping is computed from the learned agent's fixed
         # perspective across the complete agent + scripted-opponent transition.
         previous_state_potential = self._calculate_state_potential()
+        strategy_pattern = None
+        if self.strategy_memory is not None:
+            try:
+                strategy_pattern = \
+                    self.strategy_memory.extract_strategy_pattern(gs)
+            except Exception as memory_error:
+                logging.error(
+                    "Could not capture pre-action strategy pattern: %s",
+                    memory_error)
 
         # --- Initialize Info Dict ---
         env_info = {
@@ -1655,6 +1768,18 @@ class AlphaZeroMTGEnv(gym.Env):
             if hasattr(self, 'current_episode_actions'): self.current_episode_actions.append(action_idx)
             self.replay_actions.append({"action": int(action_idx), "context": dict(action_context)})
             if hasattr(self, 'episode_rewards'): self.episode_rewards.append(step_reward)
+            if self.strategy_memory is not None and strategy_pattern is not None:
+                try:
+                    self.strategy_memory.update_strategy(
+                        strategy_pattern, step_reward, action_idx=action_idx)
+                    if done or truncated:
+                        self.strategy_memory.record_action_sequence(
+                            self.current_episode_actions,
+                            sum(self.episode_rewards), game_state=gs)
+                        self.strategy_memory.save_memory()
+                except Exception as memory_error:
+                    logging.error(
+                        "Could not update strategy memory: %s", memory_error)
 
             # Record game result if ended
             if done and not getattr(self, '_game_result_recorded', False):
@@ -2365,12 +2490,10 @@ class AlphaZeroMTGEnv(gym.Env):
                         "turn": np.array([1], dtype=np.int32),
                         "my_life": np.array([0], dtype=np.int32),
                         "opp_life": np.array([0], dtype=np.int32),
-                        "p1_life": np.array([0], dtype=np.int32),
-                        "p2_life": np.array([0], dtype=np.int32),
                         "my_hand_count": np.array([0], dtype=np.int32),
                         "opp_hand_count": np.array([0], dtype=np.int32),
-                        "p1_bf_count": np.array([0], dtype=np.int32),
-                        "p2_bf_count": np.array([0], dtype=np.int32),
+                        "my_battlefield_count": np.array([0], dtype=np.int32),
+                        "opp_battlefield_count": np.array([0], dtype=np.int32),
                     }
                 # Ensure crucial keys are present
                 obs["action_mask"][11] = True; obs["action_mask"][12] = True;
@@ -3174,14 +3297,11 @@ class AlphaZeroMTGEnv(gym.Env):
             keyword_dimension = len(Card.ALL_KEYWORDS) # Ensure this matches
 
             obs["phase"] = np.array([current_phase], dtype=np.int32)
-            obs["phase_onehot"] = self._phase_to_onehot(current_phase)
             obs["turn"] = np.array([current_turn], dtype=np.int32)
             obs["is_my_turn"] = np.array([int(is_my_turn)], dtype=np.int32)
             obs["my_life"] = self._bounded_int_array("my_life", [agent_player_obj.get('life', 0)])
             obs["opp_life"] = self._bounded_int_array("opp_life", [opp.get('life', 0)])
             obs["life_difference"] = self._bounded_int_array("life_difference", [agent_player_obj.get('life', 0) - opp.get('life', 0)])
-            obs["p1_life"] = self._bounded_int_array("p1_life", [gs.p1.get('life', 0)])
-            obs["p2_life"] = self._bounded_int_array("p2_life", [gs.p2.get('life', 0)])
 
             # --- 4. Populate Zone Features and Related Info ---
             # Wrap potentially complex population blocks in try/excepts to prevent
@@ -3189,11 +3309,12 @@ class AlphaZeroMTGEnv(gym.Env):
             try:
                 # Hand state
                 obs["my_hand"] = self._get_zone_features(agent_player_obj.get("hand", []), self.hand_observation_size)
+                obs["my_hand_card_identity"] = self._get_zone_identities(
+                    agent_player_obj.get("hand", []), self.hand_observation_size)
                 obs["my_hand_count"] = np.array([len(agent_player_obj.get("hand", []))], dtype=np.int32)
                 obs["opp_hand_count"] = np.array([len(opp.get("hand", []))], dtype=np.int32)
                 obs["hand_card_types"] = self._get_hand_card_types(agent_player_obj.get("hand", []))
                 obs["hand_playable"] = self._get_hand_playable(agent_player_obj.get("hand", []), agent_player_obj, is_my_turn)
-                obs["hand_performance"] = self._get_hand_performance(agent_player_obj.get("hand", []))
                 obs["hand_synergy_scores"] = self._get_hand_synergy_scores(agent_player_obj.get("hand", []), agent_player_obj.get("battlefield", []))
                 obs["opportunity_assessment"] = self._get_opportunity_assessment(agent_player_obj.get("hand", []), agent_player_obj)
             except Exception as e:
@@ -3204,15 +3325,26 @@ class AlphaZeroMTGEnv(gym.Env):
             try:
                 # Battlefield state
                 obs["my_battlefield"] = self._get_zone_features(agent_player_obj.get("battlefield", []), self.max_battlefield)
+                obs["my_battlefield_card_identity"] = self._get_zone_identities(
+                    agent_player_obj.get("battlefield", []), self.max_battlefield)
                 obs["my_battlefield_flags"] = self._get_battlefield_flags(agent_player_obj.get("battlefield", []), agent_player_obj, self.max_battlefield)
-                obs["my_battlefield_keywords"] = self._get_battlefield_keywords(agent_player_obj.get("battlefield", []), keyword_dimension)
-                obs["my_tapped_permanents"] = self._get_tapped_mask(agent_player_obj.get("battlefield", []), agent_player_obj.get("tapped_permanents", set()), self.max_battlefield)
                 obs["opp_battlefield"] = self._get_zone_features(opp.get("battlefield", []), self.max_battlefield)
+                obs["opp_battlefield_card_identity"] = self._get_zone_identities(
+                    opp.get("battlefield", []), self.max_battlefield)
                 obs["opp_battlefield_flags"] = self._get_battlefield_flags(opp.get("battlefield", []), opp, self.max_battlefield)
-                obs["p1_battlefield"] = self._get_zone_features(gs.p1.get("battlefield", []), self.max_battlefield)
-                obs["p2_battlefield"] = self._get_zone_features(gs.p2.get("battlefield", []), self.max_battlefield)
-                obs["p1_bf_count"] = np.array([len(gs.p1.get("battlefield", []))], dtype=np.int32)
-                obs["p2_bf_count"] = np.array([len(gs.p2.get("battlefield", []))], dtype=np.int32)
+                obs["my_battlefield_count"] = self._bounded_int_array(
+                    "my_battlefield_count",
+                    [len(agent_player_obj.get("battlefield", []))])
+                obs["opp_battlefield_count"] = self._bounded_int_array(
+                    "opp_battlefield_count", [len(opp.get("battlefield", []))])
+                (obs["my_permanent_counters"], obs["my_damage_marked"],
+                 obs["my_attachment_targets"],
+                 obs["my_attachment_counts"]) = self._get_permanent_public_state(
+                    agent_player_obj, agent_player_obj, opp)
+                (obs["opp_permanent_counters"], obs["opp_damage_marked"],
+                 obs["opp_attachment_targets"],
+                 obs["opp_attachment_counts"]) = self._get_permanent_public_state(
+                    opp, agent_player_obj, opp)
             except Exception as e:
                 self._record_observation_error("battlefield features", e)
                 logging.error(f"Error populating battlefield features in _get_obs: {e}", exc_info=True)
@@ -3238,24 +3370,66 @@ class AlphaZeroMTGEnv(gym.Env):
 
             try:
                 # Mana state
-                obs["my_mana_pool"] = self._bounded_int_array("my_mana_pool", [agent_player_obj.get("mana_pool", {}).get(c, 0) for c in ['W', 'U', 'B', 'R', 'G', 'C']])
-                obs["my_mana"] = self._bounded_int_array("my_mana", [sum(agent_player_obj.get("mana_pool", {}).values())])
+                obs["my_mana_pool"] = self._mana_pool_vector(
+                    agent_player_obj, "mana_pool", "my_mana_pool")
+                obs["opp_mana_pool"] = self._mana_pool_vector(
+                    opp, "mana_pool", "opp_mana_pool")
+                obs["my_snow_mana_pool"] = self._mana_pool_vector(
+                    agent_player_obj, "snow_mana_pool", "my_snow_mana_pool")
+                obs["opp_snow_mana_pool"] = self._mana_pool_vector(
+                    opp, "snow_mana_pool", "opp_snow_mana_pool")
+                obs["my_restricted_mana_pool"] = self._restricted_mana_vector(
+                    agent_player_obj, "my_restricted_mana_pool")
+                obs["opp_restricted_mana_pool"] = self._restricted_mana_vector(
+                    opp, "opp_restricted_mana_pool")
                 obs["untapped_land_count"] = np.array([sum(1 for cid in agent_player_obj.get("battlefield", []) if self._is_land(cid) and cid not in agent_player_obj.get("tapped_permanents", set()))], dtype=np.int32)
-                obs["total_available_mana"] = self._bounded_int_array("total_available_mana", [sum(agent_player_obj.get("mana_pool", {}).values()) + int(obs["untapped_land_count"][0])]) # Simplified total available
+                floating_mana = sum(
+                    int(np.asarray(obs[key], dtype=np.int64).sum())
+                    for key in ("my_mana_pool", "my_snow_mana_pool",
+                                "my_restricted_mana_pool"))
+                obs["total_available_mana"] = self._bounded_int_array(
+                    "total_available_mana",
+                    [floating_mana + int(obs["untapped_land_count"][0])])
                 obs["turn_vs_mana"] = np.array([min(1.0, len([cid for cid in agent_player_obj.get("battlefield",[]) if self._is_land(cid)]) / max(1.0, float(current_turn)))], dtype=np.float32)
-                obs["remaining_mana_sources"] = np.array([obs["untapped_land_count"][0]], dtype=np.int32) # Same as untapped lands for now
             except Exception as e:
                 self._record_observation_error("mana features", e)
                 logging.error(f"Error populating mana features in _get_obs: {e}", exc_info=True)
 
             try:
                 # Graveyard/Exile state
+                obs["my_library_count"] = self._bounded_int_array(
+                    "my_library_count", [len(agent_player_obj.get("library", []))])
+                obs["opp_library_count"] = self._bounded_int_array(
+                    "opp_library_count", [len(opp.get("library", []))])
+                obs["my_player_counters"] = self._player_counter_vector(
+                    agent_player_obj)
+                obs["opp_player_counters"] = self._player_counter_vector(opp)
+                obs["my_player_status"] = self._player_status_vector(
+                    agent_player_obj)
+                obs["opp_player_status"] = self._player_status_vector(opp)
                 obs["my_graveyard_count"] = np.array([len(agent_player_obj.get("graveyard", []))], dtype=np.int32)
                 obs["opp_graveyard_count"] = np.array([len(opp.get("graveyard", []))], dtype=np.int32)
+                obs["my_exile_count"] = self._bounded_int_array(
+                    "my_exile_count", [len(agent_player_obj.get("exile", []))])
+                obs["opp_exile_count"] = self._bounded_int_array(
+                    "opp_exile_count", [len(opp.get("exile", []))])
                 obs["my_dead_creatures"] = np.array([sum(1 for cid in agent_player_obj.get("graveyard", []) if self._is_creature(cid))], dtype=np.int32)
                 obs["opp_dead_creatures"] = np.array([sum(1 for cid in opp.get("graveyard", []) if self._is_creature(cid))], dtype=np.int32)
-                obs["graveyard_key_cards"] = self._get_zone_features(agent_player_obj.get("graveyard", []), 10)
-                obs["exile_key_cards"] = self._get_zone_features(agent_player_obj.get("exile", []), 10)
+                for prefix, player_obj, zone in (
+                        ("my", agent_player_obj, "graveyard"),
+                        ("opp", opp, "graveyard"),
+                        ("my", agent_player_obj, "exile"),
+                        ("opp", opp, "exile")):
+                    card_ids = player_obj.get(zone, [])
+                    obs[f"{prefix}_{zone}_cards"] = self._get_zone_features(
+                        card_ids, 10, newest_first=True)
+                    obs[f"{prefix}_{zone}_card_identity"] = \
+                        self._get_zone_identities(
+                            card_ids, 10, newest_first=True)
+                    if zone == "exile":
+                        obs[f"{prefix}_exile_card_visibility"] = \
+                            self._get_zone_visibility(
+                                card_ids, 10, newest_first=True)
             except Exception as e:
                 self._record_observation_error("graveyard/exile features", e)
                 logging.error(f"Error populating graveyard/exile features in _get_obs: {e}", exc_info=True)
@@ -3266,6 +3440,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 obs["stack_count"] = np.array([len(gs.stack)], dtype=np.int32)
                 obs["stack_controller"] = stack_controllers
                 obs["stack_card_types"] = stack_types
+                obs.update(self._get_detailed_stack_observation(agent_player_obj))
             except Exception as e:
                 self._record_observation_error("stack features", e)
                 logging.error(f"Error populating stack features in _get_obs: {e}", exc_info=True)
@@ -3274,6 +3449,10 @@ class AlphaZeroMTGEnv(gym.Env):
                 # Combat state
                 obs["attackers_count"] = np.array([len(getattr(gs, 'current_attackers', []))], dtype=np.int32)
                 obs["blockers_count"] = np.array([sum(len(b) for b in getattr(gs, 'current_block_assignments', {}).values())], dtype=np.int32)
+                (obs["combat_attack_targets"],
+                 obs["combat_blocker_assignments"]) = \
+                    self._get_combat_assignment_observation(
+                        agent_player_obj, opp)
                 # Declared since the space existed but fed a constant zero.
                 # Now the agent's on-demand attack output: total power of its
                 # currently legal attackers.  Reuse the combat handler's
@@ -3408,6 +3587,8 @@ class AlphaZeroMTGEnv(gym.Env):
                             continue
                         obs['choice_cards'][option_index] = self._get_card_feature(
                             candidate_id, self._feature_dim)
+                        obs['choice_card_identity'][option_index] = \
+                            self._semantic_card_index(candidate_id)
                         obs['choice_card_mask'][option_index] = True
                     obs['choice_remaining'] = np.array(
                         [max(0, int(choice.get('remaining', 0)))], dtype=np.int32)
@@ -3489,11 +3670,10 @@ class AlphaZeroMTGEnv(gym.Env):
                     obs["threat_assessment"][:copy_len_threat] = threat_assessment_values[:copy_len_threat]
 
                     valid_actions_list = np.where(current_mask)[0].tolist()
-                    rec_action, rec_conf, mem_action, matches = self._get_recommendations(valid_actions_list)
+                    rec_action, rec_conf = self._get_recommendations(
+                        valid_actions_list)
                     obs["recommended_action"][0] = rec_action
                     obs["recommended_action_confidence"][0] = rec_conf
-                    obs["memory_suggested_action"][0] = mem_action
-                    obs["suggestion_matches_recommendation"][0] = matches
 
                     bf_ids_agent = agent_player_obj.get("battlefield", [])
                     # The old gate checked strategic_planner for
@@ -3597,14 +3777,6 @@ class AlphaZeroMTGEnv(gym.Env):
             return self._get_obs()
         finally:
             gs.agent_is_p1 = original
-
-    def _get_tapped_mask(self, battlefield_ids, tapped_set, max_size):
-        """Helper to get a boolean mask for tapped permanents."""
-        mask = np.zeros(max_size, dtype=bool)
-        for i, card_id in enumerate(battlefield_ids):
-            if i >= max_size: break
-            mask[i] = card_id in tapped_set
-        return mask
 
     def _get_planeswalker_activation_flags(self, battlefield_ids, player):
         """Helper for planeswalker activation flags."""
@@ -3820,6 +3992,7 @@ class AlphaZeroMTGEnv(gym.Env):
         gs = self.game_state
         result = {
             "target_cards": np.zeros((10, self._feature_dim), dtype=np.float32),
+            "target_card_identity": np.zeros(10, dtype=np.int32),
             "target_card_mask": np.zeros(10, dtype=bool),
             "target_card_ids": np.full(10, -1, dtype=np.int64),
             "target_kinds": np.zeros(10, dtype=np.int32),
@@ -3835,8 +4008,10 @@ class AlphaZeroMTGEnv(gym.Env):
         page = int(context.get("target_page", 0))
         for slot, target_id in enumerate(candidates[page * 10:(page + 1) * 10]):
             if target_id == "p1" or target_id == "p2":
+                target_player = gs.p1 if target_id == "p1" else gs.p2
                 result["target_kinds"][slot] = 1
-                result["target_controllers"][slot] = 0 if target_id == "p1" else 1
+                result["target_controllers"][slot] = (
+                    0 if target_player is player else 1)
                 continue
 
             owner = None
@@ -3850,7 +4025,8 @@ class AlphaZeroMTGEnv(gym.Env):
                         owner, zone = candidate_owner, candidate_zone
                         zone_index = values.index(target_id)
                         result["target_kinds"][slot] = kind
-                        result["target_controllers"][slot] = controller_index
+                        result["target_controllers"][slot] = (
+                            0 if candidate_owner is player else 1)
                         break
                 if zone is not None:
                     break
@@ -3861,7 +4037,8 @@ class AlphaZeroMTGEnv(gym.Env):
                         owner, zone, zone_index = item[2], "stack", stack_index
                         result["target_kinds"][slot] = 3
                         result["target_controllers"][slot] = (
-                            0 if owner is gs.p1 else 1 if owner is gs.p2 else -1)
+                            0 if owner is player else
+                            1 if owner in (gs.p1, gs.p2) else -1)
                         break
             result["target_zone_indices"][slot] = zone_index
             hidden_exile = bool(
@@ -3872,6 +4049,8 @@ class AlphaZeroMTGEnv(gym.Env):
                 if not hidden_exile:
                     result["target_card_ids"][slot] = int(target_id)
                 if target_id in gs.card_db:
+                    result["target_card_identity"][slot] = \
+                        self._semantic_card_index(target_id)
                     if not hidden_exile:
                         result["target_cards"][slot] = self._get_card_feature(
                             target_id, self._feature_dim)
@@ -3881,14 +4060,13 @@ class AlphaZeroMTGEnv(gym.Env):
     def _get_potential_targets_vector(self, target_kind):
         """Return exact public-zone indices for targetable entities.
 
-        Permanent and graveyard indices use the stable flattened order
-        ``p1 zone + p2 zone``; players use 0=P1/1=P2; spells use their real
-        stack indices.  The former implementation discarded these identifiers
-        and emitted 0..N-1, which made a lone P2 target look like P1 and a
-        target at stack index four look like index zero.
+        Permanent and graveyard indices use the observer-relative flattened
+        order ``my zone + opponent zone``; players use 0=me/1=opponent;
+        spells use their real stack indices.
         """
         gs = self.game_state
         agent_player_obj = gs.p1 if gs.agent_is_p1 else gs.p2
+        opponent_player_obj = gs.p2 if gs.agent_is_p1 else gs.p1
         target_indices = []
         max_size = 0
         dtype_for_space = np.int32 # Use integers for indices
@@ -3918,18 +4096,21 @@ class AlphaZeroMTGEnv(gym.Env):
                                 "permanent"]:
                         valid_ids.update(valid_targets_map.get(cat, []))
                     flattened_battlefield = (
-                        list(gs.p1.get("battlefield", []))
-                        + list(gs.p2.get("battlefield", [])))
+                        list(agent_player_obj.get("battlefield", []))
+                        + list(opponent_player_obj.get("battlefield", [])))
                     target_indices = [
                         index for index, card_id in
                         enumerate(flattened_battlefield)
                         if card_id in valid_ids]
                 elif target_kind == 'player':
                     valid_players = valid_targets_map.get("player", [])
-                    if "p1" in valid_players:
-                        target_indices.append(0)
-                    if "p2" in valid_players:
-                        target_indices.append(1)
+                    for target_name in valid_players:
+                        target_player = (
+                            gs.p1 if target_name == "p1" else
+                            gs.p2 if target_name == "p2" else None)
+                        if target_player is not None:
+                            target_indices.append(
+                                0 if target_player is agent_player_obj else 1)
                 elif target_kind == 'spell':
                     valid_spells = set(valid_targets_map.get("spell", []))
                     target_indices = [
@@ -3939,12 +4120,16 @@ class AlphaZeroMTGEnv(gym.Env):
                 elif target_kind == 'graveyard_card':
                     valid_cards = set(valid_targets_map.get("card", []))
                     flattened_graveyards = (
-                        list(gs.p1.get("graveyard", []))
-                        + list(gs.p2.get("graveyard", [])))
+                        list(agent_player_obj.get("graveyard", []))
+                        + list(opponent_player_obj.get("graveyard", [])))
                     target_indices = [
                         index for index, card_id in
                         enumerate(flattened_graveyards)
                         if card_id in valid_cards]
+
+        # Encode public indices in canonical observer-relative order. Targeting
+        # systems may return players or cards in seat/insertion order.
+        target_indices = sorted(set(target_indices))
 
         # Encode Indices (pad/truncate)
         encoded_indices = np.full(max_size, -1, dtype=dtype_for_space)
@@ -4128,13 +4313,261 @@ class AlphaZeroMTGEnv(gym.Env):
 
         return options
 
-    def _get_zone_features(self, card_ids, max_size):
-        """Helper to get feature vectors for cards in a zone, padded/truncated."""
+    def _card_identity_is_hidden(self, card_id):
+        """Whether a visible object must conceal its printed identity."""
+        gs = self.game_state
+        card = gs.card_db.get(card_id) if isinstance(gs.card_db, dict) else None
+        if bool(getattr(card, "face_down", False)):
+            observer = gs.p1 if gs.agent_is_p1 else gs.p2
+            # A player may look at face-down permanents they control (manifest,
+            # morph, disguise); opponents receive only public face-down state.
+            if card_id not in observer.get("battlefield", ()):
+                return True
+        return bool(
+            hasattr(gs, "is_face_down_exile_card")
+            and gs.is_face_down_exile_card(card_id))
+
+    def _semantic_card_index(self, card_id):
+        """Map a runtime object to Observation v2's stable identity encoding."""
+        if card_id is None:
+            return 0
+        if self._card_identity_is_hidden(card_id):
+            return 1
+        canonical_id = self.game_state.canonical_card_id(card_id)
+        if (isinstance(canonical_id, (int, np.integer))
+                and int(canonical_id) in self._canonical_card_ids):
+            return int(canonical_id) + 2
+        card = self.game_state.card_db.get(card_id)
+        canonical_id = self._canonical_card_ids_by_name.get(
+            str(getattr(card, "name", "")).casefold())
+        if canonical_id is not None:
+            return int(canonical_id) + 2
+        # Generated tokens and cards outside the frozen registry are still
+        # visible objects; keep them distinct from padding without inventing
+        # an unstable per-game category.
+        return 1
+
+    @staticmethod
+    def _zone_window(card_ids, max_size, newest_first=False):
+        values = list(card_ids or ())
+        if newest_first:
+            return list(reversed(values[-max_size:]))
+        return values[:max_size]
+
+    def _get_zone_identities(self, card_ids, max_size, newest_first=False):
+        identities = np.zeros(max_size, dtype=np.int32)
+        for index, card_id in enumerate(self._zone_window(
+                card_ids, max_size, newest_first=newest_first)):
+            identities[index] = self._semantic_card_index(card_id)
+        return identities
+
+    def _get_zone_visibility(self, card_ids, max_size, newest_first=False):
+        visibility = np.zeros(max_size, dtype=bool)
+        for index, card_id in enumerate(self._zone_window(
+                card_ids, max_size, newest_first=newest_first)):
+            visibility[index] = not self._card_identity_is_hidden(card_id)
+        return visibility
+
+    def _get_zone_features(self, card_ids, max_size, newest_first=False):
+        """Return public card vectors in deterministic slot order."""
         features = np.zeros((max_size, self._feature_dim), dtype=np.float32)
-        for i, card_id in enumerate(card_ids):
-            if i >= max_size: break
+        for i, card_id in enumerate(self._zone_window(
+                card_ids, max_size, newest_first=newest_first)):
             features[i] = self._get_card_feature(card_id, self._feature_dim)
         return features
+
+    def _relative_battlefield_index(self, card_id, me, opponent):
+        for offset, player in ((0, me), (self.max_battlefield, opponent)):
+            battlefield = player.get("battlefield", [])
+            try:
+                index = battlefield.index(card_id)
+            except ValueError:
+                continue
+            if index < self.max_battlefield:
+                return offset + index
+        return None
+
+    @staticmethod
+    def _public_count(value, maximum=1_000_000):
+        try:
+            return min(max(0, int(value or 0)), maximum)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    def _get_permanent_public_state(self, player, me, opponent):
+        """Return public counters, damage, and attachment relationships."""
+        counters_result = np.zeros(
+            (self.max_battlefield, 6), dtype=np.int32)
+        damage_result = np.zeros(self.max_battlefield, dtype=np.int32)
+        attachment_targets = np.full(
+            self.max_battlefield, -1, dtype=np.int32)
+        attachment_counts = np.zeros(self.max_battlefield, dtype=np.int32)
+        gs = self.game_state
+
+        all_attachments = {}
+        for attachment_owner in (gs.p1, gs.p2):
+            all_attachments.update(attachment_owner.get("attachments", {}) or {})
+        attached_to_counts = defaultdict(int)
+        for target_id in all_attachments.values():
+            attached_to_counts[target_id] += 1
+
+        recognized = {"+1/+1", "-1/-1", "loyalty", "defense", "lore"}
+        for index, card_id in enumerate(
+                player.get("battlefield", [])[:self.max_battlefield]):
+            card = gs.card_db.get(card_id)
+            raw_counters = getattr(card, "counters", {}) or {}
+            normalized_counters = {
+                str(name).strip().casefold(): self._public_count(count)
+                for name, count in raw_counters.items()
+            }
+            counters_result[index, 0] = normalized_counters.get("+1/+1", 0)
+            counters_result[index, 1] = normalized_counters.get("-1/-1", 0)
+            counters_result[index, 2] = self._public_count(
+                normalized_counters.get(
+                    "loyalty", getattr(card, "loyalty", 0)))
+            counters_result[index, 3] = self._public_count(
+                normalized_counters.get(
+                    "defense", getattr(gs, "battle_cards", {}).get(
+                        card_id, getattr(card, "defense", 0))))
+            counters_result[index, 4] = self._public_count(
+                normalized_counters.get(
+                    "lore", getattr(gs, "saga_counters", {}).get(card_id, 0)))
+            counters_result[index, 5] = self._public_count(sum(
+                count for name, count in normalized_counters.items()
+                if name not in recognized))
+            damage_result[index] = self._public_count(
+                player.get("damage_counters", {}).get(card_id, 0))
+            target_id = all_attachments.get(card_id)
+            if target_id is not None:
+                relative_target = self._relative_battlefield_index(
+                    target_id, me, opponent)
+                if relative_target is not None:
+                    attachment_targets[index] = relative_target
+            attachment_counts[index] = self._public_count(
+                attached_to_counts.get(card_id, 0), maximum=1000)
+        return (
+            counters_result, damage_result,
+            attachment_targets, attachment_counts,
+        )
+
+    def _mana_pool_vector(self, player, pool_name, observation_key):
+        colors = ("W", "U", "B", "R", "G", "C")
+        pool = player.get(pool_name, {}) or {}
+        return self._bounded_int_array(
+            observation_key, [pool.get(color, 0) for color in colors])
+
+    def _restricted_mana_vector(self, player, observation_key):
+        colors = ("W", "U", "B", "R", "G", "C")
+        totals = {color: 0 for color in colors}
+        for pool_name in ("phase_restricted_mana",):
+            for color, amount in (player.get(pool_name, {}) or {}).items():
+                if color in totals:
+                    totals[color] += self._public_count(amount, maximum=100)
+        for pool in (player.get("conditional_mana", {}) or {}).values():
+            if not isinstance(pool, dict):
+                continue
+            for color, amount in pool.items():
+                if color in totals:
+                    totals[color] += self._public_count(amount, maximum=100)
+        return self._bounded_int_array(
+            observation_key, [totals[color] for color in colors])
+
+    def _player_counter_vector(self, player):
+        return np.array([
+            self._public_count(player.get("poison_counters", 0), 1000),
+            self._public_count(player.get("energy_counters", 0), 1000),
+            self._public_count(player.get("experience_counters", 0), 1000),
+        ], dtype=np.int32)
+
+    @staticmethod
+    def _player_status_vector(player):
+        return np.array([
+            int(bool(player.get("city_blessing", False))),
+            int(bool(player.get("monarch", False))),
+        ], dtype=np.int32)
+
+    @staticmethod
+    def _count_stack_targets(value):
+        if value is None:
+            return 0
+        if isinstance(value, dict):
+            return sum(
+                AlphaZeroMTGEnv._count_stack_targets(item)
+                for item in value.values())
+        if isinstance(value, (list, tuple, set)):
+            return sum(
+                AlphaZeroMTGEnv._count_stack_targets(item) for item in value)
+        return 1
+
+    def _get_detailed_stack_observation(self, me_player):
+        result = {
+            "stack_cards": np.zeros(
+                (5, self._feature_dim), dtype=np.float32),
+            "stack_card_identity": np.zeros(5, dtype=np.int32),
+            "stack_object_kinds": np.zeros(5, dtype=np.int32),
+            "stack_target_counts": np.zeros(5, dtype=np.int32),
+            "stack_mode_counts": np.zeros(5, dtype=np.int32),
+        }
+        kind_codes = {
+            "SPELL": 1, "ABILITY": 2, "ACTIVATED_ABILITY": 2,
+            "TRIGGER": 3, "TRIGGERED_ABILITY": 3,
+        }
+        for index, item in enumerate(reversed(self.game_state.stack[-5:])):
+            if not isinstance(item, tuple) or len(item) < 2:
+                result["stack_object_kinds"][index] = 4
+                continue
+            item_type, card_id = item[:2]
+            context = item[3] if len(item) > 3 and isinstance(item[3], dict) else {}
+            result["stack_cards"][index] = self._get_card_feature(
+                card_id, self._feature_dim)
+            result["stack_card_identity"][index] = \
+                self._semantic_card_index(card_id)
+            result["stack_object_kinds"][index] = kind_codes.get(
+                str(item_type).upper(), 4)
+            target_payload = context.get(
+                "targets_by_slot", context.get("targets"))
+            result["stack_target_counts"][index] = self._public_count(
+                self._count_stack_targets(target_payload), maximum=1000)
+            selected_modes = context.get(
+                "selected_spree_modes", context.get("selected_modes", ()))
+            if not isinstance(selected_modes, (list, tuple, set)):
+                selected_modes = () if selected_modes is None else (selected_modes,)
+            result["stack_mode_counts"][index] = self._public_count(
+                len(selected_modes), maximum=100)
+        return result
+
+    def _get_combat_assignment_observation(self, me, opponent):
+        attack_targets = np.full(
+            self.max_battlefield * 2, -2, dtype=np.int32)
+        blocker_assignments = np.full(
+            self.max_battlefield * 2, -1, dtype=np.int32)
+        gs = self.game_state
+        pw_targets = getattr(gs, "planeswalker_attack_targets", {}) or {}
+        battle_targets = getattr(gs, "battle_attack_targets", {}) or {}
+        for attacker_id in getattr(gs, "current_attackers", ()) or ():
+            attacker_index = self._relative_battlefield_index(
+                attacker_id, me, opponent)
+            if attacker_index is None:
+                continue
+            target_id = pw_targets.get(
+                attacker_id, battle_targets.get(attacker_id))
+            if target_id is None:
+                attack_targets[attacker_index] = 0
+            else:
+                target_index = self._relative_battlefield_index(
+                    target_id, me, opponent)
+                # -1 distinguishes an attacker whose public defender is beyond
+                # the fixed detail window from a non-attacker (-2).
+                attack_targets[attacker_index] = (
+                    -1 if target_index is None else target_index + 1)
+            for blocker_id in getattr(
+                    gs, "current_block_assignments", {}).get(
+                        attacker_id, ()) or ():
+                blocker_index = self._relative_battlefield_index(
+                    blocker_id, me, opponent)
+                if blocker_index is not None:
+                    blocker_assignments[blocker_index] = attacker_index
+        return attack_targets, blocker_assignments
 
     def _get_battlefield_flags(self, card_ids, player, max_size):
         """Helper to get flags (tapped, sick, atk, block, keywords) for battlefield."""
@@ -4336,35 +4769,6 @@ class AlphaZeroMTGEnv(gym.Env):
         metrics[8] = 0.0 # Win Condition Proximity
         metrics[9] = 0.0 # Overall Threat Level
         return np.clip(metrics, -1.0, 1.0)
-
-    def _get_hand_performance(self, hand_ids):
-        """Get performance ratings for cards in hand."""
-        gs = self.game_state
-        perf = np.full(self.hand_observation_size, 0.5, dtype=np.float32) # Default 0.5
-        for i, card_id in enumerate(hand_ids):
-            if i >= self.hand_observation_size: break
-            card = gs._safe_get_card(card_id)
-            if card and hasattr(card, 'performance_rating'):
-                 perf[i] = card.performance_rating
-        return perf
-
-    def _get_battlefield_keywords(self, card_ids, keyword_dim):
-        """Get keyword vectors for battlefield cards."""
-        keywords = np.zeros((self.max_battlefield, keyword_dim), dtype=np.float32)
-        gs = self.game_state
-        for i, card_id in enumerate(card_ids):
-             if i >= self.max_battlefield: break
-             card = gs._safe_get_card(card_id)
-             if card and hasattr(card, 'keywords'):
-                 kw_vector = np.array(getattr(card, 'keywords', []))
-                 current_len = len(kw_vector)
-                 if current_len == keyword_dim:
-                      keywords[i, :] = kw_vector
-                 elif current_len < keyword_dim:
-                      keywords[i, :current_len] = kw_vector # Pad end
-                 else: # current_len > keyword_dim
-                      keywords[i, :] = kw_vector[:keyword_dim] # Truncate
-        return keywords
 
     def _get_deck_composition(self, player):
         """Estimate deck composition based on known cards."""
@@ -4634,12 +5038,10 @@ class AlphaZeroMTGEnv(gym.Env):
         return recommendation, reasons_arr, reason_count
 
 
-    def _get_recommendations(self, valid_actions_list): # Renamed argument
-        """Get action recommendations from planner and memory."""
+    def _get_recommendations(self, valid_actions_list):
+        """Get the optional planner recommendation used by diagnostics."""
         rec_action = -1
         rec_conf = 0.0
-        mem_action = -1
-        matches = 0
 
         # Planner Recommendation (Check existence first)
         if (self.planner_recommendations
@@ -4659,23 +5061,9 @@ class AlphaZeroMTGEnv(gym.Env):
                  logging.warning(f"Error getting recommendation from planner: {e}")
                  pass # Ignore errors
 
-        # Memory Recommendation (Check existence first)
-        if hasattr(self, 'strategy_memory') and self.strategy_memory and hasattr(self.strategy_memory, 'get_suggested_action'):
-            try:
-                # Pass the list of valid actions
-                mem_action = self.strategy_memory.get_suggested_action(self.game_state, valid_actions_list)
-            except Exception as e:
-                logging.warning(f"Error getting recommendation from memory: {e}")
-                pass
-
-        if rec_action is not None and rec_action == mem_action:
-             matches = 1
-
         # Ensure -1 if None
         rec_action = -1 if rec_action is None else rec_action
-        mem_action = -1 if mem_action is None else mem_action
-
-        return rec_action, rec_conf, mem_action, matches
+        return rec_action, rec_conf
 
     def _get_attacker_values(self, bf_ids, player):
         """Evaluate the strategic value of attacking with each potential attacker."""

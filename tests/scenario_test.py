@@ -13137,8 +13137,10 @@ def scenario_large_board_counts_remain_exact_and_diagnostics_stick():
     env.last_observation_error = None
     env.last_observation_traceback = None
     observation = env._get_obs()
-    assert observation["p1_bf_count"].tolist() == [21]
-    assert observation["p2_bf_count"].tolist() == [22]
+    expected_my_count = 21 if gs.agent_is_p1 else 22
+    expected_opp_count = 22 if gs.agent_is_p1 else 21
+    assert observation["my_battlefield_count"].tolist() == [expected_my_count]
+    assert observation["opp_battlefield_count"].tolist() == [expected_opp_count]
     assert env.observation_space.contains(observation)
     assert env.last_observation_error is None
 
@@ -15505,10 +15507,12 @@ def scenario_multi_turn_plan_metrics_tolerate_missing_estimates():
     # must not degrade training observations or any strategic evaluator while
     # the card is in hand or before its live CDA has been calculated.
     from unittest.mock import patch
+    from Playersim.strategy_memory import StrategyMemory
+    diagnostic_memory = StrategyMemory(None, auto_save_interval=0)
     with patch("Playersim.strategy_memory.logging.error") as memory_error, \
             patch("Playersim.environment.logging.error") as env_error, \
             patch("Playersim.enhanced_card_evaluator.logging.error") as eval_error:
-        pattern = env.strategy_memory.extract_strategy_pattern(
+        pattern = diagnostic_memory.extract_strategy_pattern(
             gs, detailed=True)
         position = env._calculate_position_advantage()
         analysis = env.strategic_planner.analyze_game_state()
@@ -16096,6 +16100,164 @@ def s_observation_planner_metrics_are_fresh_and_perspective_safe():
     assert after["strategic_metrics"][4] == -opponent_view[
         "strategic_metrics"][4], \
         "opponent observation reused the other seat's strategic analysis"
+
+
+@scenario("observation v2 / semantic identity",
+          "canonical card identity is categorical, stable, and compact")
+def s_observation_v2_semantic_identity_and_compaction():
+    gs = fresh(SEED + 923)
+    env = get_env()
+    gs.agent_is_p1 = True
+    canonical_ids = sorted(set(gs.card_instance_printings.values()))
+    assert len(canonical_ids) >= 2
+    first = inject_card(gs, {
+        "name": "Identity Twin A", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Artifact", "oracle_text": "",
+    })
+    second = inject_card(gs, {
+        "name": "Identity Twin B", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Artifact", "oracle_text": "",
+    })
+    gs.card_instance_printings[first] = canonical_ids[0]
+    gs.card_instance_printings[second] = canonical_ids[1]
+    gs.p1["hand"] = [first, second]
+    observation = env.observation_for(gs.p1)
+
+    assert np.array_equal(observation["my_hand"][0], observation["my_hand"][1]), \
+        "the identity fixture cards were not structurally identical"
+    assert observation["my_hand_card_identity"][:2].tolist() == [
+        canonical_ids[0] + 2, canonical_ids[1] + 2], \
+        "runtime IDs were used instead of stable canonical identities"
+    assert observation["my_hand_card_identity"][2] == 0, \
+        "empty semantic slots must use padding category zero"
+
+    from Playersim.observation_schema import REMOVED_V1_FIELDS
+    assert not (set(REMOVED_V1_FIELDS) & set(env.observation_space.spaces)), \
+        "Observation v1 duplicate/dead fields survived the schema migration"
+
+
+@scenario("observation v2 / public state",
+          "public counters, attachments, combat, stack, zones, and mana are perspective-correct")
+def s_observation_v2_public_state_is_explicit_and_relative():
+    env = get_env(); gs = fresh(SEED + 924)
+    gs.agent_is_p1 = True
+    me, opp = gs.p1, gs.p2
+
+    attacker = inject_card(gs, {
+        "name": "V2 Attacker", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Creature", "oracle_text": "",
+        "power": "2", "toughness": "2",
+    })
+    aura = inject_card(gs, {
+        "name": "V2 Aura", "mana_cost": "{W}", "cmc": 1,
+        "type_line": "Enchantment — Aura", "oracle_text": "Enchant creature",
+    })
+    blocker = inject_card(gs, {
+        "name": "V2 Blocker", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Creature", "oracle_text": "",
+        "power": "2", "toughness": "3",
+    })
+    walker = inject_card(gs, {
+        "name": "V2 Walker", "mana_cost": "{3}", "cmc": 3,
+        "type_line": "Legendary Planeswalker", "oracle_text": "",
+        "loyalty": "4",
+    })
+    stack_spell = inject_card(gs, {
+        "name": "V2 Stack Spell", "mana_cost": "{U}", "cmc": 1,
+        "type_line": "Instant", "oracle_text": "Choose target creature.",
+    })
+    me["battlefield"] = [attacker, aura]
+    opp["battlefield"] = [blocker, walker]
+    for owner, cards in ((me, me["battlefield"]), (opp, opp["battlefield"])):
+        for card_id in cards:
+            gs._last_card_locations[card_id] = (owner, "battlefield")
+
+    gs.card_db[attacker].counters = {"+1/+1": 2, "lore": 3, "charge": 4}
+    me["damage_counters"] = {attacker: 3}
+    me["attachments"] = {aura: attacker}
+    me["poison_counters"] = 2
+    me["energy_counters"] = 5
+    me["experience_counters"] = 1
+    me["city_blessing"] = True
+    opp["monarch"] = True
+    me["mana_pool"].update({"W": 1, "U": 2})
+    opp["mana_pool"].update({"B": 3})
+    me["snow_mana_pool"].update({"G": 1})
+    opp["conditional_mana"] = {"cast_creatures": {"R": 2}}
+    gs.current_attackers = [attacker]
+    gs.current_block_assignments = {attacker: [blocker]}
+    gs.planeswalker_attack_targets = {attacker: walker}
+    gs.battle_attack_targets = {}
+    gs.stack = [("SPELL", stack_spell, me, {
+        "targets": {"creature": [blocker]},
+        "selected_modes": [0, 1],
+    })]
+    gs.phase = gs.PHASE_DECLARE_BLOCKERS
+
+    observation = env.observation_for(me)
+    assert observation["my_library_count"][0] == len(me["library"])
+    assert observation["opp_library_count"][0] == len(opp["library"])
+    assert observation["my_player_counters"].tolist() == [2, 5, 1]
+    assert observation["my_player_status"].tolist() == [1, 0]
+    assert observation["opp_player_status"].tolist() == [0, 1]
+    assert observation["opp_mana_pool"].tolist() == [0, 0, 3, 0, 0, 0]
+    assert observation["my_snow_mana_pool"].tolist() == [0, 0, 0, 0, 1, 0]
+    assert observation["opp_restricted_mana_pool"].tolist() == [0, 0, 0, 2, 0, 0]
+    assert observation["my_permanent_counters"][0].tolist() == [2, 0, 0, 0, 3, 4]
+    assert observation["my_damage_marked"][0] == 3
+    assert observation["my_attachment_targets"][1] == 0
+    assert observation["my_attachment_counts"][0] == 1
+    assert observation["combat_attack_targets"][0] == env.max_battlefield + 2
+    assert observation["combat_blocker_assignments"][env.max_battlefield] == 0
+    assert observation["stack_object_kinds"][0] == 1
+    assert observation["stack_target_counts"][0] == 1
+    assert observation["stack_mode_counts"][0] == 2
+    assert np.any(observation["stack_cards"][0])
+    assert observation["stack_card_identity"][0] == 1, \
+        "synthetic off-registry stack cards should use the visible-unknown identity"
+    assert env.observation_space.contains(observation)
+
+    opponent_view = env.observation_for(opp)
+    assert opponent_view["combat_attack_targets"][env.max_battlefield] == 2, \
+        "attack target mapping was not re-based to the observing seat"
+    assert opponent_view["combat_blocker_assignments"][0] == env.max_battlefield, \
+        "block assignment mapping was not re-based to the observing seat"
+    assert opponent_view["opp_mana_pool"].tolist() == [1, 2, 0, 0, 0, 0]
+
+
+@scenario("strategy memory / deterministic boundary",
+          "optional memory learns only the agent's complete shaped transition")
+def s_strategy_memory_is_optional_deterministic_and_agent_scoped():
+    from Playersim.strategy_memory import StrategyMemory
+
+    env = get_env()
+    gs = fresh(SEED + 925)
+    gs.agent_is_p1 = True
+    memory = StrategyMemory(
+        None, auto_save_interval=0, min_action_count=1)
+    env.strategy_memory_enabled = True
+    env.strategy_memory = memory
+    gs.strategy_memory = memory
+    pattern = memory.extract_strategy_pattern(gs)
+    mask = env.action_mask().astype(bool)
+    valid = [int(action) for action in np.flatnonzero(mask)
+             if int(action) != 12]
+    assert valid, "strategy-memory scenario had no non-concede action"
+    action = 11 if mask[11] else valid[0]
+    try:
+        observation, reward, _, _, _ = env.step(action)
+        assert memory.logical_update == 1, \
+            "handler or scripted-opponent actions also updated strategy memory"
+        action_stats = memory.strategies[pattern]["actions"][action]
+        assert action_stats["count"] == 1
+        assert np.isclose(action_stats["reward"], reward), \
+            "memory learned handler-local reward instead of final shaped reward"
+        assert "memory_suggested_action" not in observation
+        assert "suggestion_matches_recommendation" not in observation
+    finally:
+        env.strategy_memory_enabled = False
+        env.strategy_memory = None
+        gs.strategy_memory = None
 
 
 # ---------------------------------------------------------------------------

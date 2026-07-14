@@ -606,8 +606,10 @@ def check_runtime_configuration():
         environment_calls[1][2]["card_memory_path"])
     assert environment_calls[0][2]["agent_is_p1"] is True
     assert environment_calls[0][2]["alternate_agent_seat"] is False
+    assert environment_calls[0][2]["strategy_memory_enabled"] is False
     assert environment_calls[1][2]["agent_is_p1"] is False
     assert environment_calls[1][2]["alternate_agent_seat"] is True
+    assert environment_calls[1][2]["strategy_memory_enabled"] is False
     assert environment_calls[0][2]["reward_discount"] == 0.995
     assert environment_calls[0][2]["action_reward_scale"] == 0.02
     assert environment_calls[0][2]["state_potential_scale"] == 0.40
@@ -969,12 +971,22 @@ def check_extractor_registration(model):
     state_keys = list(extractor.state_dict().keys())
     assert any(k.startswith("extractors.") for k in state_keys), (
         "extractors.* missing from state_dict — the plain-dict bug is back")
+    assert any(k.startswith("semantic_identity_embedding.") for k in state_keys), (
+        "shared semantic identity embedding missing from state_dict")
+    from Playersim.observation_schema import SEMANTIC_IDENTITY_FIELDS
+    identity_fields = set(SEMANTIC_IDENTITY_FIELDS)
     intentionally_external = {"phase", "action_mask", "target_card_ids"}
     expected_extractor_keys = (
-        set(model.observation_space.spaces) - intentionally_external)
+        set(model.observation_space.spaces)
+        - intentionally_external - identity_fields)
     assert set(extractor.extractors) == expected_extractor_keys, (
         "observation fields silently omitted by the feature extractor: "
         f"{sorted(expected_extractor_keys - set(extractor.extractors))}")
+    assert set(extractor.semantic_identity_fields) == identity_fields, (
+        "semantic identities are not exhaustively routed through categorical "
+        f"embedding: {sorted(identity_fields - set(extractor.semantic_identity_fields))}")
+    assert extractor.semantic_identity_embedding.num_embeddings == 65_536, (
+        "semantic identity vocabulary drifted with the active deck corpus")
     assert "ability_recommendations" in extractor.extractors, (
         "rank-3 ability recommendations do not reach the policy")
 

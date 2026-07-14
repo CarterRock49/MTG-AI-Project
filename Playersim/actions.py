@@ -556,7 +556,6 @@ class ActionHandler(
         reward = 0.0
         done = False
         truncated = False # Gymnasium API requires truncated flag
-        pre_action_pattern = None # Initialize here
         # Start with a clean info dict for this step
         info = {"action_mask": None, "game_result": "undetermined", "critical_error": False}
 
@@ -627,21 +626,9 @@ class ActionHandler(
                 "Applying action: %s -> %s(%s) with context: %s",
                 action_idx, action_type, param, action_context)
 
-            # 4. Store Pre-Action State for Reward Shaping (remains the same)
-            prev_state = {}
-            if me and opp:
-                prev_state = {
-                    "my_life": me.get("life", 0), "opp_life": opp.get("life", 0),
-                    "my_hand": len(me.get("hand", [])), "opp_hand": len(opp.get("hand", [])),
-                    "my_board": len(me.get("battlefield", [])), "opp_board": len(opp.get("battlefield", [])),
-                    "my_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) or 0 for cid in me.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
-                    "opp_power": sum(getattr(gs._safe_get_card(cid), 'power', 0) or 0 for cid in opp.get("battlefield", []) if gs._safe_get_card(cid) and 'creature' in getattr(gs._safe_get_card(cid), 'card_types', [])),
-                }
-            if hasattr(gs, 'strategy_memory') and gs.strategy_memory:
-                try: pre_action_pattern = gs.strategy_memory.extract_strategy_pattern(gs)
-                except Exception as e: logging.error(f"Error extracting pre-action strategy pattern: {e}")
-
-            # --- 5. Execute Action - Delegate to specific handlers ---
+            # 4. Execute Action - Delegate to specific handlers. Strategy
+            # memory is updated by Environment.step after the complete
+            # agent/opponent transition and final shaped reward are known.
             # --- MODIFIED: Ensure handlers return (reward, success) and process this ---
             handler_func = self.action_handlers.get(action_type)
             action_reward = 0.0
@@ -840,11 +827,6 @@ class ActionHandler(
             else: # Fallback if generate_valid_actions is missing on self
                 next_mask = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool); next_mask[11]=True; next_mask[12]=True
             info["action_mask"] = next_mask # Add next mask to info
-
-            # Update strategy memory (remains the same)
-            if hasattr(gs, 'strategy_memory') and gs.strategy_memory and pre_action_pattern is not None:
-                try: gs.strategy_memory.update_strategy(pre_action_pattern, reward)
-                except Exception as strategy_e: logging.error(f"Error updating strategy memory: {strategy_e}")
 
             # *** IMPORTANT: Fix final return statement to return 4 values ***
             return reward, done, truncated, info # Return values for Env

@@ -25,103 +25,88 @@ The engine, policy boundary, replay/fuzz infrastructure, format lineage, and
 Harvest orchestration are operational. The representative Standard corpus has
 no known severe fidelity entry. The project is **not production-ready** because
 no trained checkpoint has passed the paired-seat strength gate, matchup
-calibration has not run, Observation v2 is not frozen, format-wide card support
-remains incomplete, and the deck-builder feedback loop is not connected.
+calibration has not run, format-wide card support remains incomplete, and the
+deck-builder feedback loop is not connected.
 
-### Verified Round 7.82 baseline
+### Verified Round 7.83 / Observation v2 baseline
 
-The observation audit and its follow-up combat fix are green:
+The frozen v2 observation contract and its migration gates are green:
 
 | Gate | Result |
 | --- | --- |
-| Golden scenarios | 376/376 |
+| Golden scenarios | 379/379 |
 | Runtime smoke | 9/9 |
 | Training smoke | 13/13 |
 | Default invariant fuzz | 8/8 seeds × 1,000 valid actions, plus phase-boundary check |
 | Diff/whitespace check | clean |
 
 Standing broader gates last recorded green: 108/108 focused regressions,
-201/201 discovered unit tests, fixture Harvest 16/16, production Harvest
+207/207 discovered unit tests, fixture Harvest 16/16, production Harvest
 protocol 16/16, card registry 19/19, deck ingestion 13/13, fuzz/replay
 configuration 6/6, and strict long fuzz 32 seeds × 10,000 valid actions.
 
 ### Non-negotiable lineage rules
 
-- **Start every new policy from Round 7.82 or later.** The extractor and
-  observation semantics changed; do not resume any earlier checkpoint.
+- **Start every new policy from Round 7.83 or later.** Observation v2 changes
+  the extractor width and semantics; do not resume any earlier checkpoint.
 - Do not mix pre-7.46 statistics with format-namespace statistics.
 - Statistics collected before July 2026 are unusable. They were affected by
   perspective, winner attribution, fabricated play-turn, first-strike, layer,
   and replacement-system defects and must be re-harvested.
-- Any future Observation v2 change creates another explicit schema and
+- Any future policy-observation change creates another explicit schema and
   checkpoint boundary.
 
 ---
 
-## Latest finding — observation contract
+## Latest finding — Observation v2 frozen
 
-### What the 7.80–7.82 audit fixed
+Round 7.83 replaces the audited v1 representation with a self-hashed,
+documented policy contract:
 
-- `potential_combat_damage` now reports canonical attack-capable power rather
-  than a constant zero.
-- Previously dead target summaries and phase history now carry live signal.
-- Combat simulation no longer silently collapses to all-zero evaluations.
-- The rank-3 `ability_recommendations` grid is explicitly extracted; training
-  smoke now requires coverage of every policy-consumed observation key.
-- `phase` uses its dedicated embedding, the action mask remains an external
-  MaskablePPO input, and unstable runtime target occurrence IDs are protocol
-  metadata rather than learned features.
-- Planner analysis refreshes at each observation boundary, preventing stale
-  same-turn values and cross-seat perspective reuse.
-- Target summaries preserve the actual flattened battlefield, graveyard,
-  player, and stack indices. Stack summaries use the real top five objects.
-- Combat-power and optimal-attacker fields use the canonical legality and
-  combination-search paths instead of local approximations.
-- Exercising the real attack search exposed a blocker-controller lookup on a
-  nonexistent resolver helper; it now queries game state and has a real-blocker
-  liveness scenario.
+- Canonical cards receive stable categorical identities: `0` is padding, `1`
+  is visible unknown/off-registry, and canonical registry index `N` is `N+2`.
+  All identity fields share one fixed 65,536-entry embedding. Per-game runtime
+  IDs remain protocol metadata and never become learned semantic identity.
+- Public state now includes both libraries; poison, energy, and experience;
+  monarch and city's blessing; permanent counters, marked damage, attachments;
+  exact attack targets and blocker assignments; richer top-first stack objects;
+  both players' regular, snow, and restricted floating mana; and symmetric
+  graveyard/exile windows with face-down visibility masks.
+- Hand, battlefield, graveyard, exile, stack, target-page, and choice-page card
+  windows carry categorical identity. Hidden opponent information remains
+  zeroed; visible generated or off-registry objects use the unknown category.
+- Public indices, controllers, battlefield counts, combat maps, targets, and
+  zone windows are observer-relative. Perspective tests pin both seats.
+- Dead or duplicated v1 fields were removed: absolute-seat life/battlefield
+  copies, phase one-hot, duplicate battlefield counts/keywords/tapped/mana,
+  `remaining_mana_sources`, `hand_performance`, and asymmetric key-card zones.
+- `OBSERVATION_SCHEMA.md` records every field's shape, bounds, perspective,
+  saturation, visibility, and extractor route. The schema version/hash is now
+  mandatory lineage beside registry and feature-schema identity.
+- Extractor coverage is exhaustive: phase uses its dedicated embedding,
+  semantic identities use the shared categorical embedding, continuous fields
+  use the symlog/MLP path, and masks/runtime IDs stay external.
+- Strategy memory is no longer policy input. Its former empty-memory behavior
+  injected a random legal action, reset-time reconstruction discarded unsaved
+  evidence, and online per-worker state made evaluation non-comparable. The
+  optional replacement is deterministic, action-specific, atomically saved,
+  reused across resets, disabled by default, and isolated per environment.
 
-**Current verdict:** no additional high-priority correctness defect is known
-inside the existing observation contract, and its verification gates are
-green. That does not mean the representation is complete.
-
-### Observation v2 — deliberate schema project
-
-Observation v2 should be implemented as one versioned project, not as unrelated
-field additions during a live training run.
-
-1. ▢ **Stable semantic card identity.** Give the policy a frozen registry or
-   Oracle-level identity signal. Current structural features can alias cards
-   that have different rules text but similar visible characteristics. Never
-   use per-game runtime occurrence IDs as semantic identity.
-2. ▢ **Missing public state.** Represent library sizes, poison counters,
-   permanent counters and attachments, combat assignments and attack targets,
-   richer stack objects, and opponent floating mana where public.
-3. ▢ **Compaction after evidence.** Measure and then consolidate absolute vs.
-   seat-relative duplicates, the dead `hand_performance` proxy, duplicated
-   tapped/keyword information, and derived features that add no policy value.
-   Do not remove fields without ablation results.
-4. ▢ **Schema migration.** Document every key's meaning, perspective, bounds,
-   saturation behavior, and extractor route; version and hash the new schema;
-   update checkpoint compatibility checks and lineage manifests.
-5. ▢ **Acceptance gates.** Preserve hidden-information invariance, exact
-   extractor coverage, finite/bounded values, liveness under seeded play,
-   perspective correctness, and scenario/default-fuzz parity. Record memory
-   and steps-per-second changes before adopting the schema.
-
-Observation v2 is required before the final production policy lineage, but it
-does not block a Round 7.82 diagnostic run whose purpose is to evaluate the
-new offense-weighted reward and current behavior.
+**Current verdict:** no known high-priority observation correctness defect
+remains. Changing a field, bound, identity capacity, visibility rule, or
+extractor route starts a new schema/checkpoint lineage. The next training run
+must record actual v2 throughput and memory alongside behavior telemetry.
 
 ---
 
 ## Current execution plan
 
-### Now — validate the Round 7.82 policy
+### Now — train the first Round 7.83 / Observation v2 policy
 
-1. Launch a fresh Standard candidate under
+1. Launch a fresh Standard candidate; never resume a pre-7.83 checkpoint. Use
    `discounted-state-potential-v3` with `--n-envs 8`, `--eval-freq 25000`,
-   and `--eval-episodes 10`.
+   and `--eval-episodes 10`; confirm the manifest records strategy memory as
+   disabled.
 2. Read the run at roughly 300k steps. The required direction is a rising
    `terminal/life_total_rate`, a falling `terminal/turn_limit_rate`, improving
    episode reward, a stable critic, and zero fidelity/provenance failures.
@@ -129,21 +114,19 @@ new offense-weighted reward and current behavior.
    before changing the reward again. Earlier runs reached about 0.93 critic
    explained variance while roughly 88% of episodes timed out; the model had
    learned the stalled objective rather than failed to learn it.
-4. Keep schema changes and throughput code changes out of the live experiment
-   so its result remains attributable.
+4. Record rollout steps/s, evaluator overhead, host/GPU memory, schema hash,
+   registry hash, and checkpoint provenance. Keep schema and throughput code
+   unchanged during the experiment so its result remains attributable.
 
-### Next — freeze Observation v2, then qualify Standard
+### Next — qualify and calibrate Standard
 
-1. Use the 7.82 diagnostic as the behavioral baseline, then implement and
-   freeze Observation v2 with a new schema hash and checkpoint boundary.
-2. Train a fresh Standard candidate on the frozen v2 schema.
-3. Pass paired-seat scripted qualification: at least the configured 55% score,
+1. Pass paired-seat scripted qualification: at least the configured 55% score,
    zero fidelity counters, and exact checkpoint/lineage provenance.
-4. Freeze the qualified checkpoint as the baseline and promote it into the
+2. Freeze the qualified checkpoint as the baseline and promote it into the
    checkpoint league.
-5. Run 3–5 known-matchup deck pairs at Harvest scale and compare simulated
+3. Run 3–5 known-matchup deck pairs at Harvest scale and compare simulated
    winrates with published or expert expectations.
-6. Only after strength and calibration pass, run the first format-isolated,
+4. Only after strength and calibration pass, run the first format-isolated,
    fidelity-clean Standard production harvest.
 
 ### Then — close the loop and expand formats
@@ -160,8 +143,8 @@ new offense-weighted reward and current behavior.
 
 - Fix newly observed fidelity failures immediately, scenario first.
 - Continue the Standard support sweep in descending manifest impact order.
-- Design Observation v2 and its migration without changing the live run's
-  input schema.
+- Watch v2 identity-category coverage and observation degradation telemetry;
+  treat any schema mismatch or hidden-information leak as a run-stopper.
 - Profile production-sized training and Harvest workloads; land optimizations
   as separately verified changes.
 
@@ -249,7 +232,7 @@ and automatic candidate feedback.
 - ✅ Shared foundation: canonical append-only registry, frozen self-hashed
   feature schema, explicit format/deck configuration, legality checks, and
   lineage-stamped manifests.
-- ◐ Standard: corpus and namespace exist; qualification, Observation v2,
+- ◐ Standard: corpus, namespace, and Observation v2 exist; qualification,
   calibration, and production Harvest remain.
 - ▢ Modern: no representative training corpus yet.
 - ▢ Pioneer: no representative training corpus yet.
@@ -277,9 +260,8 @@ closed or remain fidelity-marked rather than being treated as fully supported.
 | Mutate/Meld/Specialize | Mutate lacks per-component replacement and library-order choices. Meld/Specialize require complete local family data and fail closed when absent. |
 | Exact-card fallbacks | Screaming Nemesis, Anoint, Obliterator, Cavern of Souls, and Obstinate Baloth have documented conservative boundaries. |
 | Hidden exile | Current runtime IDs are unique and hidden correctly. A legacy state sharing one ID between visible and hidden occurrences hides both. |
-| Strategy memory | Per-environment; its optional enhancement pass is nondeterministic, though game RNG is unaffected. |
 | Action tensor | Fixed at 480 actions. Action 479 pages overflow contexts through normal handlers; dormant indices 205–223 remain mask-invalid until their mechanics exist. |
-| Format data | Registry/schema are lineage-bound and Bo1. Sideboards are retained and legality-checked but not played. Schema vocabulary growth requires a new policy lineage. |
+| Format data | Registry/schema are lineage-bound and Bo1. Sideboards are retained and legality-checked but not played. Registry growth changes registry lineage; observation-field or identity-capacity changes require a new policy lineage. |
 
 ---
 
@@ -307,7 +289,7 @@ The project is complete only when all of these are true:
 ## Checkpoint and schema boundaries
 
 Historical boundaries are retained here so old artifacts cannot be resumed by
-mistake. The practical rule remains: **use Round 7.82 or later.**
+mistake. The practical rule remains: **use Round 7.83 or later.**
 
 | Minimum round | Incompatible change |
 | --- | --- |
@@ -319,11 +301,14 @@ mistake. The practical rule remains: **use Round 7.82 or later.**
 | 7.76 | Network width and async evaluation lineage |
 | 7.80 | Offense-weighted reward v3 and live combat-damage observation |
 | 7.82 | Exhaustive extractor routing and repaired observation semantics |
+| 7.83 | Frozen Observation v2, categorical card identity, public-state expansion, v1 compaction, and deterministic strategy-memory boundary |
 
-The canonical registry is append-only within a compatible width. Expanding the
-feature vocabulary or Observation v2 changes the schema hash and starts a new
-lineage. Run manifests—not individual game-log rows—carry format, pool,
-corpus, registry, schema, policy, and checkpoint provenance.
+The canonical registry is append-only within the fixed identity capacity;
+appends change registry lineage without changing observation width. Changing
+feature vocabulary, observation fields, bounds, visibility semantics,
+identity capacity, or extractor routing changes a schema hash and starts a new
+policy lineage. Run manifests—not individual game-log rows—carry format, pool,
+corpus, registry, both schema identities, policy, and checkpoint provenance.
 
 ---
 
@@ -355,6 +340,12 @@ corpus, registry, schema, policy, and checkpoint provenance.
   removed unstable IDs from learned inputs, repaired exact target/stack
   summaries and perspective freshness, and fixed the blocker lookup exposed by
   the real search path.
+- **7.83:** froze Observation v2 with stable categorical card identity, filled
+  missing public zones/resources/counters/attachments/combat/stack state,
+  compacted dead v1 duplicates, removed online strategy memory from policy
+  input, made the optional memory deterministic and disabled by default,
+  documented and hashed the full contract, and made its identity part of every
+  lineage manifest.
 
 ### Institutional lessons retained from the silent-bug catalog
 

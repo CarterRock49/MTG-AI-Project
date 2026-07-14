@@ -31,6 +31,7 @@ import sys
 from pathlib import Path
 
 from .card import Card
+from .observation_schema import observation_schema_identity
 
 REGISTRY_KIND = "canonical_card_registry"
 REGISTRY_SCHEMA_VERSION = 1
@@ -359,6 +360,7 @@ def format_lineage(decks_directory, format_name=None, card_registry=None,
             registry_identity(card_registry) if card_registry else None),
         "feature_schema": (
             feature_schema_identity(feature_schema) if feature_schema else None),
+        "observation_schema": observation_schema_identity(),
     }
 
 

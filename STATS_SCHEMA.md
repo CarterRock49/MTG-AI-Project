@@ -190,6 +190,10 @@ existing indices with `python -m Playersim.card_registry freeze-pool
 - `feature_schema.json` — the frozen card feature-vector layout and
   `feature_dim`. Loading a corpus under it keeps model input width fixed; a
   card outside the frozen subtype vocabulary fails the load loudly.
+- `Playersim/observation_schema.py` — the global, self-hashed policy-input
+  contract. It versions field meanings, perspective, semantic identity
+  encoding, extractor routing, additions, and removals. The human-readable
+  inventory is `OBSERVATION_SCHEMA.md`.
 
 Every run-level manifest (`training_run.json`, `harvest_run.json`,
 `harvest_protocol.json`, `promotion.json`) now carries a `lineage` object:
@@ -201,11 +205,14 @@ Every run-level manifest (`training_run.json`, `harvest_run.json`,
 | `corpus` | deck-corpus directory name, per-file sha256 list, and one aggregate sha256 |
 | `card_registry` | registry schema_version, card count, sha256, or null |
 | `feature_schema` | schema_version, feature_dim, sha256, or null |
+| `observation_schema` | global policy-observation kind, schema_version, and sha256 |
 
 **Consumer rule:** never merge statistics whose `lineage.format`,
-`lineage.card_registry.sha256`, or `lineage.feature_schema.sha256` differ —
-they may disagree on card identity or on what the policy observed. A run with
-`lineage: null` (or missing) predates this contract.
+`lineage.card_registry.sha256`, `lineage.feature_schema.sha256`, or
+`lineage.observation_schema.sha256` differ — they may disagree on card
+identity or on what the policy observed. A run with `lineage: null` (or
+missing) predates this contract; a lineage without `observation_schema`
+predates Observation v2 and is checkpoint/statistics-incompatible with it.
 
 ## Fixture harvest protocol
 

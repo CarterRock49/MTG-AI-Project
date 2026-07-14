@@ -445,48 +445,6 @@ class CombatResolver:
             for n in range(2, min(5, len(sorted_attackers))):
                 attack_combinations.append(sorted_attackers[:n])
             
-            # If using strategic planner, query historical successful patterns
-            if use_strategic_evaluation:
-                # Try to get successful attack patterns from strategy memory
-                if hasattr(gs.strategic_planner, 'memory') and gs.strategic_planner.memory:
-                    memory = gs.strategic_planner.memory
-                    
-                    # Extract the current game state pattern
-                    if hasattr(memory, 'extract_strategy_pattern'):
-                        current_pattern = memory.extract_strategy_pattern(gs)
-                        
-                        # Find similar patterns in memory where attacks were successful
-                        if hasattr(memory, '_pattern_similarity') and hasattr(memory, 'strategies'):
-                            matched_patterns = []
-                            for pattern, strategy_data in memory.strategies.items():
-                                if isinstance(pattern, tuple) and len(pattern) >= len(current_pattern):
-                                    # Compare patterns using similarity function
-                                    similarity = memory._pattern_similarity(current_pattern, pattern)
-                                    if similarity > 0.7 and strategy_data.get('reward', 0) > 0:
-                                        matched_patterns.append((pattern, strategy_data, similarity))
-                            
-                            # Sort by similarity * reward for best matches
-                            if matched_patterns:
-                                matched_patterns.sort(key=lambda x: x[1].get('reward', 0) * x[2], reverse=True)
-                                
-                                # Extract attack patterns from the best matches
-                                for _, strategy_data, _ in matched_patterns[:3]:
-                                    if 'action_sequences' in strategy_data:
-                                        # Look for attack sequences in this strategy
-                                        for action_seq in strategy_data.get('action_sequences', []):
-                                            attack_actions = [a for a in action_seq if isinstance(a, dict) and a.get('action_type') == 'ATTACK']
-                                            if attack_actions:
-                                                # Reconstruct the attack pattern and try to apply it
-                                                pattern_attackers = []
-                                                for attack_action in attack_actions:
-                                                    # Map historical patterns to current board state
-                                                    param = attack_action.get('param')
-                                                    if param is not None and param < len(possible_attackers):
-                                                        pattern_attackers.append(possible_attackers[param])
-                                                
-                                                if pattern_attackers:
-                                                    attack_combinations.append(pattern_attackers)
-                    
             # Add some more combinations for diversity
             import random
             while len(attack_combinations) < max_combinations and len(attack_combinations) < 2**len(possible_attackers):
@@ -545,48 +503,6 @@ class CombatResolver:
                 best_score = attack_score
                 best_attack = list(attackers)
                 best_results = results
-        
-        # If using strategic planner, record the best attack pattern for future learning
-        if use_strategic_evaluation and best_attack and hasattr(gs.strategic_planner, 'memory'):
-            memory = gs.strategic_planner.memory
-            
-            # Create an action sequence representing this attack
-            attack_actions = []
-            for attacker_id in best_attack:
-                try:
-                    idx = possible_attackers.index(attacker_id)
-                    attack_actions.append({
-                        'action_type': 'ATTACK',
-                        'param': idx,
-                        'card_id': attacker_id
-                    })
-                except ValueError:
-                    continue
-                    
-            if attack_actions:
-                # Extract the current game state pattern
-                if hasattr(memory, 'extract_strategy_pattern'):
-                    current_pattern = memory.extract_strategy_pattern(gs)
-                    
-                    # Calculate reward based on the combat outcome
-                    combat_reward = 0.0
-                    if best_results:
-                        # Reward for damage
-                        combat_reward += min(best_results.get('damage_to_player', 0) * 0.15, 0.75)
-                        
-                        # Reward for favorable exchanges
-                        attackers_dying = len(best_results.get('attackers_dying', []))
-                        blockers_dying = len(best_results.get('blockers_dying', []))
-                        exchange_value = blockers_dying - attackers_dying
-                        combat_reward += max(-0.5, min(0.5, exchange_value * 0.2))
-                    
-                    # Record this pattern in strategy memory
-                    if hasattr(memory, 'update_strategy'):
-                        memory.update_strategy(current_pattern, combat_reward)
-                    
-                    # Record the action sequence
-                    if hasattr(memory, 'record_action_sequence'):
-                        memory.record_action_sequence(attack_actions, combat_reward, gs)
         
         # Restore original game state
         gs.current_attackers = original_attackers

@@ -330,9 +330,15 @@ def build_env(decks, card_db):
     declared_high = int(np.asarray(env.observation_space.spaces["phase"].high).max())
     assert declared_high == true_max_phase, (
         f"phase space high={declared_high}, but engine phases reach {true_max_phase}")
-    onehot_len = env.observation_space.spaces["phase_onehot"].shape[0]
-    assert onehot_len == true_max_phase + 1, (
-        f"phase_onehot length {onehot_len} != {true_max_phase + 1}")
+    assert "phase_onehot" not in env.observation_space.spaces, (
+        "Observation v2 must not duplicate the dedicated phase embedding")
+    assert "memory_suggested_action" not in env.observation_space.spaces
+    assert "suggestion_matches_recommendation" not in \
+        env.observation_space.spaces
+    assert env.strategy_memory is None, (
+        "strategy memory must be explicitly enabled and must not perturb "
+        "training/evaluation observations")
+    assert env.OBSERVATION_SCHEMA_VERSION == 2
     return env
 
 
@@ -351,12 +357,15 @@ def check_reset(env):
     assert env.last_observation_error is None, \
         f"reset observation silently degraded: {env.last_observation_error}"
     me = env.game_state.p1 if env.game_state.agent_is_p1 else env.game_state.p2
+    opponent = env.game_state.p2 if env.game_state.agent_is_p1 else env.game_state.p1
     assert int(obs["my_life"][0]) == me["life"], "my_life is not the live game state"
-    assert int(obs["p1_life"][0]) == env.game_state.p1["life"]
-    assert int(obs["p2_life"][0]) == env.game_state.p2["life"]
+    assert int(obs["opp_life"][0]) == opponent["life"]
     assert int(obs["my_hand_count"][0]) == len(me["hand"]), \
         "reset returned a fallback/zero hand count instead of the policy state"
     assert np.any(obs["my_hand"]), "visible hand features are unexpectedly all zero"
+    assert np.count_nonzero(obs["my_hand_card_identity"]) == min(
+        len(me["hand"]), env.hand_observation_size), (
+        "visible hand slots lack stable semantic identities")
     mask = env.action_mask()
     assert mask.any(), "no valid actions available immediately after reset"
     assert np.array_equal(obs["action_mask"], mask), \
