@@ -279,11 +279,25 @@ full-pool coverage counts are in the ROADMAP status snapshot.
 
 ```bash
 python main.py --timesteps 1000000 --learning-rate 1e-4 --batch-size 512 \
-  --n-steps 2048 --seed 20260713 --run-name reward-v1
+  --n-steps 2048 --seed 20260713 --run-name my-run \
+  --eval-freq 25000 --eval-episodes 10 --n-envs 8
 ```
 
 No format or deck flags are required for the pinned Standard default. Custom
 corpora are available through `--decks`, `--format`, and `--format-dir`.
+
+**Throughput.** Training is CPU-bound (the GPU learner needs seconds per
+multi-minute rollout). Since Round 7.76 periodic evaluation runs
+**asynchronously in a dedicated process**: the trainer saves a policy snapshot
+at each `--eval-freq` boundary and keeps rolling while the evaluator scores it
+(the pre-7.76 synchronous evaluator idled every worker — measured at **73% of
+wall time** at the old defaults). Results land in TensorBoard on arrival;
+`eval/evaluated_at_timesteps` records each score's true step. Use `--n-envs 8`
+on a 6-core/12-thread machine (`--n-envs 0` auto-selects only 6; worker count
+is RAM-bounded at ~0.3 MB per rollout-buffer step). If the evaluation cadence
+outruns the evaluator, boundaries are skipped with a warning rather than
+queueing stale snapshots. Deeper per-step optimizations are tracked as the
+ROADMAP Tier 3 throughput program.
 
 Training and evaluation use separate statistics directories and alternate the
 learned policy between P1 and P2 on successive episodes. Each run writes a
@@ -292,15 +306,18 @@ revision and dirty state, CLI and resolved configuration, device and dependency
 inventory, deck/lineage provenance, lifecycle result, and artifact paths. A
 dirty run also stores a hashed `source_worktree.patch` beside the manifest.
 
-> **Checkpoint boundary (Round 7.72).** The full Standard namespace widened card
+> **Checkpoint boundary (Round 7.73).** The full Standard namespace widened card
 > observations to 436 fields (259 subtype fields plus MDFC fields), signed live
 > power/toughness, and count/stat bounds large enough for legal boards above 20
 > permanents. Round 7.62 also widened the declared choice-count, allocation, and
 > X-range bounds to remove the old X ceiling. Stable-Baselines validates the
-> complete observation space. Round 7.72 then replaced the overlapping/dead
+> complete observation space. Round 7.72 replaced the overlapping/dead
 > shaping paths with one discounted state-potential reward and reduced the
-> procedural action-reward scale. **Do not resume a checkpoint created before
-> Round 7.72** — start fresh without `--resume`.
+> procedural action-reward scale. Round 7.73 rebalanced terminal rewards
+> (turn-limit timeouts now pay win +2 / draw −4 / loss −8), cut the action
+> reward scale to 0.02 (`discounted-state-potential-v2`), and added symlog
+> compression to every continuous extractor input. **Do not resume a
+> checkpoint created before Round 7.73** — start fresh without `--resume`.
 
 ### Hyperparameter optimization
 

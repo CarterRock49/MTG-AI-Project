@@ -231,21 +231,71 @@ def check_mask_aware_evaluation():
         m.LOG_DIR = os.path.join(tmp, "logs")
         try:
             callbacks = m.create_callbacks(
-                eval_env, "mask_smoke", args, num_train_envs=2)
-            assert isinstance(callbacks[0], MaskableEvalCallback)
-            assert callbacks[0].use_masking is True
-            assert callbacks[0].deterministic is True
-            assert callbacks[0].eval_freq == 5
+                lambda: eval_env, "mask_smoke", args, num_train_envs=2)
+            assert isinstance(callbacks[0], m.AsyncMaskableEvalCallback)
+            # Evaluation frequency stays in total timesteps: the async
+            # callback compares against num_timesteps, never n_calls, so it
+            # must not be divided by the environment count.
+            assert callbacks[0].eval_freq == 10
             assert callbacks[0].n_eval_episodes == 3
+            assert callbacks[0]._process is None  # worker starts lazily
             assert callbacks[1].save_freq == 10
             assert callbacks[0].best_model_save_path == os.path.join(
                 m.MODEL_DIR, "mask_smoke", "best_model")
-            assert callbacks[0].log_path == os.path.join(
-                m.LOG_DIR, "mask_smoke", "evaluation", "evaluations")
+            assert callbacks[0].snapshot_dir == os.path.join(
+                m.MODEL_DIR, "mask_smoke", "eval_snapshots")
             assert callbacks[1].save_path == os.path.join(
                 m.MODEL_DIR, "mask_smoke", "checkpoints")
             assert any(isinstance(callback, m.StrictTrainingFidelityCallback)
                        for callback in callbacks)
+
+            # Functional contract of the async result path: promote the
+            # evaluated snapshot on a new best, clean up snapshots, record
+            # metrics under the training logger, and fail the run on a
+            # fatal worker report.
+            async_eval = callbacks[0]
+            metrics = {}
+            fake_logger = SimpleNamespace(
+                record=lambda key, value: metrics.__setitem__(key, value))
+            async_eval.model = SimpleNamespace(logger=fake_logger)
+            snapshot = os.path.join(
+                async_eval.snapshot_dir, "eval_snapshot_10_steps.zip")
+            with open(snapshot, "wb") as handle:
+                handle.write(b"snapshot-bytes")
+            async_eval._pending_snapshots = 1
+            async_eval._handle_result({
+                "timesteps": 10, "snapshot_path": snapshot,
+                "mean_reward": 1.5, "std_reward": 0.5,
+                "mean_ep_length": 42.0,
+            })
+            best_path = os.path.join(
+                async_eval.best_model_save_path, "best_model.zip")
+            assert os.path.isfile(best_path), "best snapshot was not promoted"
+            assert not os.path.exists(snapshot), "snapshot was not cleaned up"
+            assert metrics["eval/mean_reward"] == 1.5
+            assert metrics["eval/evaluated_at_timesteps"] == 10
+            assert async_eval._pending_snapshots == 0
+            worse = os.path.join(
+                async_eval.snapshot_dir, "eval_snapshot_20_steps.zip")
+            with open(worse, "wb") as handle:
+                handle.write(b"worse-bytes")
+            async_eval._pending_snapshots = 1
+            async_eval._handle_result({
+                "timesteps": 20, "snapshot_path": worse,
+                "mean_reward": 0.25, "std_reward": 0.1,
+                "mean_ep_length": 40.0,
+            })
+            with open(best_path, "rb") as handle:
+                assert handle.read() == b"snapshot-bytes", \
+                    "a worse evaluation overwrote the promoted best snapshot"
+            assert not os.path.exists(worse)
+            try:
+                async_eval._handle_result({"fatal": "worker exploded"})
+            except RuntimeError as error:
+                assert "worker exploded" in str(error)
+            else:
+                raise AssertionError(
+                    "async evaluation accepted a fatal worker result")
             network_callbacks = [
                 callback for callback in callbacks
                 if isinstance(callback, m.NetworkRecordingCallback)]
@@ -254,7 +304,7 @@ def check_mask_aware_evaluation():
 
             args.record_network = False
             callbacks = m.create_callbacks(
-                eval_env, "mask_smoke_2", args, num_train_envs=2)
+                lambda: eval_env, "mask_smoke_2", args, num_train_envs=2)
             assert not any(isinstance(callback, m.NetworkRecordingCallback)
                            for callback in callbacks)
 
@@ -723,8 +773,12 @@ def check_main_failure_semantics():
             assert fourth_manifest["status"] == "failed"
             assert fourth_manifest["phase"] == "data_loading"
             assert parent_seeds == [42, 1234, 42, 42]
-            assert assigned_seeds == [
-                42, 1000042, 1234, 1001234, 42, 1000042]
+            # Evaluation envs are no longer built (or seeded) in the training
+            # process: the async evaluation worker and the final-validation
+            # branch construct their own via make_evaluation_vec_env, which
+            # seeds with the evaluation offset internally. With fake models
+            # that never write a checkpoint, only train envs are seeded here.
+            assert assigned_seeds == [42, 1234, 42]
             assert environment_vocabularies
             assert all(
                 vocab == frozen_vocab for vocab in environment_vocabularies), (

@@ -2223,6 +2223,24 @@ class AlphaZeroMTGEnv(gym.Env):
                 normalized[key] = np.zeros(space.shape, dtype=space.dtype)
         return normalized
 
+    def _bounded_int_array(self, key, values):
+        """Clamp raw game integers to their declared bounds BEFORE ndarray
+        construction. Doubling/big-mana combos produce Python ints beyond
+        C-long range, and ``np.array(value, dtype=int32)`` raises
+        OverflowError before the post-build saturation clip ever runs —
+        which also aborted the surrounding population block and degraded
+        unrelated features (July 14 reward-v3 stop). Saturation here is
+        by design, exactly like the declared ``_saturating_features``."""
+        space = self.observation_space.spaces[key]
+        low = np.asarray(space.low).reshape(-1)
+        high = np.asarray(space.high).reshape(-1)
+        clamped = [
+            min(max(int(value), int(low[min(i, low.size - 1)])),
+                int(high[min(i, high.size - 1)]))
+            for i, value in enumerate(values)
+        ]
+        return np.array(clamped, dtype=space.dtype)
+
     def _get_obs_safe(self):
         """Build the real policy observation, falling back only on failure."""
         try:
@@ -3132,11 +3150,11 @@ class AlphaZeroMTGEnv(gym.Env):
             obs["phase_onehot"] = self._phase_to_onehot(current_phase)
             obs["turn"] = np.array([current_turn], dtype=np.int32)
             obs["is_my_turn"] = np.array([int(is_my_turn)], dtype=np.int32)
-            obs["my_life"] = np.array([agent_player_obj.get('life', 0)], dtype=np.int32)
-            obs["opp_life"] = np.array([opp.get('life', 0)], dtype=np.int32)
-            obs["life_difference"] = np.array([agent_player_obj.get('life', 0) - opp.get('life', 0)], dtype=np.int32)
-            obs["p1_life"] = np.array([gs.p1.get('life', 0)], dtype=np.int32)
-            obs["p2_life"] = np.array([gs.p2.get('life', 0)], dtype=np.int32)
+            obs["my_life"] = self._bounded_int_array("my_life", [agent_player_obj.get('life', 0)])
+            obs["opp_life"] = self._bounded_int_array("opp_life", [opp.get('life', 0)])
+            obs["life_difference"] = self._bounded_int_array("life_difference", [agent_player_obj.get('life', 0) - opp.get('life', 0)])
+            obs["p1_life"] = self._bounded_int_array("p1_life", [gs.p1.get('life', 0)])
+            obs["p2_life"] = self._bounded_int_array("p2_life", [gs.p2.get('life', 0)])
 
             # --- 4. Populate Zone Features and Related Info ---
             # Wrap potentially complex population blocks in try/excepts to prevent
@@ -3176,15 +3194,15 @@ class AlphaZeroMTGEnv(gym.Env):
                 # Creature stats
                 my_creature_stats = self._get_creature_stats(agent_player_obj.get("battlefield", []))
                 opp_creature_stats = self._get_creature_stats(opp.get("battlefield", []))
-                obs["my_creature_count"] = np.array([my_creature_stats['count']], dtype=np.int32)
-                obs["opp_creature_count"] = np.array([opp_creature_stats['count']], dtype=np.int32)
-                obs["my_total_power"] = np.array([my_creature_stats['power']], dtype=np.int32)
-                obs["my_total_toughness"] = np.array([my_creature_stats['toughness']], dtype=np.int32)
-                obs["opp_total_power"] = np.array([opp_creature_stats['power']], dtype=np.int32)
-                obs["opp_total_toughness"] = np.array([opp_creature_stats['toughness']], dtype=np.int32)
-                obs["power_advantage"] = np.array([my_creature_stats['power'] - opp_creature_stats['power']], dtype=np.int32)
-                obs["toughness_advantage"] = np.array([my_creature_stats['toughness'] - opp_creature_stats['toughness']], dtype=np.int32)
-                obs["creature_advantage"] = np.array([my_creature_stats['count'] - opp_creature_stats['count']], dtype=np.int32)
+                obs["my_creature_count"] = self._bounded_int_array("my_creature_count", [my_creature_stats['count']])
+                obs["opp_creature_count"] = self._bounded_int_array("opp_creature_count", [opp_creature_stats['count']])
+                obs["my_total_power"] = self._bounded_int_array("my_total_power", [my_creature_stats['power']])
+                obs["my_total_toughness"] = self._bounded_int_array("my_total_toughness", [my_creature_stats['toughness']])
+                obs["opp_total_power"] = self._bounded_int_array("opp_total_power", [opp_creature_stats['power']])
+                obs["opp_total_toughness"] = self._bounded_int_array("opp_total_toughness", [opp_creature_stats['toughness']])
+                obs["power_advantage"] = self._bounded_int_array("power_advantage", [my_creature_stats['power'] - opp_creature_stats['power']])
+                obs["toughness_advantage"] = self._bounded_int_array("toughness_advantage", [my_creature_stats['toughness'] - opp_creature_stats['toughness']])
+                obs["creature_advantage"] = self._bounded_int_array("creature_advantage", [my_creature_stats['count'] - opp_creature_stats['count']])
                 obs["threat_assessment"] = self._get_threat_assessment(opp.get("battlefield", []))
                 obs["card_synergy_scores"] = self._calculate_card_synergies(agent_player_obj.get("battlefield", []))
             except Exception as e:
@@ -3193,10 +3211,10 @@ class AlphaZeroMTGEnv(gym.Env):
 
             try:
                 # Mana state
-                obs["my_mana_pool"] = np.array([agent_player_obj.get("mana_pool", {}).get(c, 0) for c in ['W', 'U', 'B', 'R', 'G', 'C']], dtype=np.int32)
-                obs["my_mana"] = np.array([sum(agent_player_obj.get("mana_pool", {}).values())], dtype=np.int32)
+                obs["my_mana_pool"] = self._bounded_int_array("my_mana_pool", [agent_player_obj.get("mana_pool", {}).get(c, 0) for c in ['W', 'U', 'B', 'R', 'G', 'C']])
+                obs["my_mana"] = self._bounded_int_array("my_mana", [sum(agent_player_obj.get("mana_pool", {}).values())])
                 obs["untapped_land_count"] = np.array([sum(1 for cid in agent_player_obj.get("battlefield", []) if self._is_land(cid) and cid not in agent_player_obj.get("tapped_permanents", set()))], dtype=np.int32)
-                obs["total_available_mana"] = np.array([sum(agent_player_obj.get("mana_pool", {}).values()) + obs["untapped_land_count"][0]], dtype=np.int32) # Simplified total available
+                obs["total_available_mana"] = self._bounded_int_array("total_available_mana", [sum(agent_player_obj.get("mana_pool", {}).values()) + int(obs["untapped_land_count"][0])]) # Simplified total available
                 obs["turn_vs_mana"] = np.array([min(1.0, len([cid for cid in agent_player_obj.get("battlefield",[]) if self._is_land(cid)]) / max(1.0, float(current_turn)))], dtype=np.float32)
                 obs["remaining_mana_sources"] = np.array([obs["untapped_land_count"][0]], dtype=np.int32) # Same as untapped lands for now
             except Exception as e:

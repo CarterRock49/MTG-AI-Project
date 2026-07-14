@@ -1,8 +1,10 @@
 import os
 import json
 import hashlib
+import queue
 import re
 import platform
+import shutil
 import subprocess
 import multiprocessing
 import threading
@@ -28,7 +30,7 @@ from stable_baselines3.common.callbacks import (
     BaseCallback
 )
 from stable_baselines3.common.vec_env import (
-    DummyVecEnv, SubprocVecEnv, VecEnvWrapper, VecMonitor)
+    CloudpickleWrapper, DummyVecEnv, SubprocVecEnv, VecEnvWrapper, VecMonitor)
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.utils import set_random_seed
@@ -79,7 +81,7 @@ class FixedWindowMTGExtractor(BaseFeaturesExtractor):
         self.phase_embedding = torch.nn.Embedding(num_phases, phase_dim)
         
         # Final projections
-        self.preprocessing_dim = 256  # Intermediate dimension
+        self.preprocessing_dim = 512  # Intermediate dimension
         self.final_projection = torch.nn.Sequential(
             torch.nn.Linear(self.preprocessing_dim, self.output_dim),
             torch.nn.ReLU()
@@ -94,22 +96,22 @@ class FixedWindowMTGExtractor(BaseFeaturesExtractor):
                 # 1D vector observations (counts, flags, etc.)
                 n_input = int(np.prod(subspace.shape))
                 self.extractors[key] = torch.nn.Sequential(
-                    torch.nn.Linear(n_input, 32),
+                    torch.nn.Linear(n_input, 64),
                     torch.nn.ReLU(),
-                    torch.nn.Linear(32, 64)
+                    torch.nn.Linear(64, 128)
                 )
-                merged_dim += 64
-            
+                merged_dim += 128
+
             elif len(subspace.shape) == 2:
                 # 2D observations like battlefield and hand
                 n_cards, card_dim = subspace.shape
                 self.extractors[key] = torch.nn.Sequential(
-                    torch.nn.Linear(card_dim, 128),
+                    torch.nn.Linear(card_dim, 256),
                     torch.nn.ReLU(),
-                    torch.nn.Linear(128, 64),
+                    torch.nn.Linear(256, 128),
                     torch.nn.ReLU()
                 )
-                merged_dim += n_cards * 64
+                merged_dim += n_cards * 128
         
         # BUGFIX: feature_merger used to be created lazily inside forward(), AFTER the
         # optimizer had already collected parameters -> it was never trained, and a
@@ -1341,7 +1343,12 @@ def validate_training_checkpoint(path, env, *, device, seed):
     }
 
 # Feature Dimension Configuration
-FEATURE_OUTPUT_DIM = 512
+# Round 7.76: widened 512 -> 1024 (with the per-key extractor widths and the
+# default head doubling to 'large'). Training is env-bound and the learner
+# uses ~0.2 of 8 GB VRAM, so extra capacity is nearly free in wall time; it
+# buys sample efficiency, which is what matters when every sample costs
+# CPU-simulated game steps. Width changes start a new checkpoint lineage.
+FEATURE_OUTPUT_DIM = 1024
 
 NETWORK_ARCHITECTURES = {
     'small': {'pi': [128, 64, 32], 'vf': [128, 64, 32]},
@@ -1369,7 +1376,7 @@ def build_training_config(args, optuna_params=None):
         'ent_coef': 0.01,
         'vf_coef': 0.5,
         'target_kl': 0.02,
-        'net_arch': NETWORK_ARCHITECTURES['medium'],
+        'net_arch': NETWORK_ARCHITECTURES['large'],
         'n_epochs': 3,
         'max_grad_norm': 0.5,
         'activation_fn': ACTIVATION_FUNCTIONS['relu'],
@@ -2067,7 +2074,198 @@ class PhaseTimingCallback(BaseCallback):
         self.previous_rollout_ended_at = now
 
 
-def create_callbacks(eval_env, run_id, args, num_train_envs=1,
+def _async_evaluation_worker(request_queue, result_queue, env_factory,
+                             n_eval_episodes, debug=False):
+    """Dedicated evaluation process: build one strict eval env, then score
+    each requested policy snapshot with mask-aware episodes.
+
+    Any failure is posted as ``fatal`` and ends the worker — evaluation
+    fidelity failures must abort training, exactly like the synchronous
+    evaluator this replaces (Tier 3 throughput program, item 5)."""
+    torch.set_num_threads(2)
+    try:
+        configure_runtime_logging(debug=debug, worker=True)
+    except Exception:
+        pass
+    eval_env = None
+    try:
+        eval_env = env_factory.var()
+        while True:
+            request = request_queue.get()
+            if request is None:
+                break
+            snapshot_path, trigger_timesteps = request
+            model = MaskablePPO.load(
+                snapshot_path, env=eval_env, device="cpu")
+            episode_rewards, episode_lengths = evaluate_policy(
+                model, eval_env, n_eval_episodes=n_eval_episodes,
+                deterministic=True, return_episode_rewards=True)
+            result_queue.put({
+                "timesteps": int(trigger_timesteps),
+                "snapshot_path": snapshot_path,
+                "mean_reward": float(np.mean(episode_rewards)),
+                "std_reward": float(np.std(episode_rewards)),
+                "mean_ep_length": float(np.mean(episode_lengths)),
+            })
+    except Exception:
+        result_queue.put({"fatal": traceback.format_exc()})
+    finally:
+        if eval_env is not None:
+            try:
+                eval_env.close()
+            except Exception:
+                pass
+
+
+class AsyncMaskableEvalCallback(BaseCallback):
+    """Periodic mask-aware evaluation in a dedicated process.
+
+    The synchronous evaluator paused every rollout worker for the whole
+    evaluation — measured at 73% of wall time at the July 13 defaults
+    (Tier 3 throughput program, item 5). This callback saves a policy
+    snapshot at each evaluation boundary, hands it to one long-lived
+    evaluation process, and folds results into the training logger when
+    they arrive (``eval/evaluated_at_timesteps`` records the snapshot's
+    true step). The evaluated checkpoint itself is promoted to
+    ``best_model.zip`` on a new best mean reward, matching the old
+    callback's artifact contract. A worker failure fails the run (strict
+    lifecycle); outstanding evaluations are awaited at training end so
+    the final policy's score still lands in the logs."""
+
+    def __init__(self, eval_env_factory, *, eval_freq, n_eval_episodes,
+                 best_model_save_path, snapshot_dir, debug=False,
+                 final_result_timeout_seconds=3600.0, verbose=0):
+        super().__init__(verbose)
+        self.eval_env_factory = eval_env_factory
+        self.eval_freq = int(eval_freq)
+        self.n_eval_episodes = int(n_eval_episodes)
+        self.best_model_save_path = best_model_save_path
+        self.snapshot_dir = snapshot_dir
+        self.debug = bool(debug)
+        self.final_result_timeout_seconds = float(
+            final_result_timeout_seconds)
+        self.best_mean_reward = -np.inf
+        self._next_eval_at = None
+        self._pending_snapshots = 0
+        self._process = None
+        self._request_queue = None
+        self._result_queue = None
+
+    def _on_training_start(self):
+        if self.eval_freq <= 0:
+            return
+        os.makedirs(self.snapshot_dir, exist_ok=True)
+        os.makedirs(self.best_model_save_path, exist_ok=True)
+        context = multiprocessing.get_context("spawn")
+        self._request_queue = context.Queue()
+        self._result_queue = context.Queue()
+        self._process = context.Process(
+            target=_async_evaluation_worker,
+            args=(self._request_queue, self._result_queue,
+                  CloudpickleWrapper(self.eval_env_factory),
+                  self.n_eval_episodes, self.debug),
+            daemon=True,
+            name="async-eval-worker",
+        )
+        self._process.start()
+        self._next_eval_at = self.num_timesteps + self.eval_freq
+
+    def _handle_result(self, result):
+        if "fatal" in result:
+            raise RuntimeError(
+                "Asynchronous evaluation worker failed:\n" + result["fatal"])
+        self._pending_snapshots -= 1
+        mean_reward = float(result["mean_reward"])
+        logging.info(
+            "Async evaluation @ %s steps: mean_reward=%.3f std=%.3f "
+            "mean_ep_length=%.1f", result["timesteps"], mean_reward,
+            result["std_reward"], result["mean_ep_length"])
+        self.logger.record("eval/mean_reward", mean_reward)
+        self.logger.record("eval/std_reward", float(result["std_reward"]))
+        self.logger.record(
+            "eval/mean_ep_length", float(result["mean_ep_length"]))
+        self.logger.record(
+            "eval/evaluated_at_timesteps", int(result["timesteps"]))
+        snapshot_actual = resolve_artifact_path(result.get("snapshot_path"))
+        if mean_reward > self.best_mean_reward:
+            self.best_mean_reward = mean_reward
+            if snapshot_actual is not None:
+                shutil.copyfile(
+                    snapshot_actual,
+                    os.path.join(self.best_model_save_path,
+                                 "best_model.zip"))
+                logging.info(
+                    "New best mean reward %.3f; promoted the evaluated "
+                    "snapshot to best_model.zip", mean_reward)
+        if snapshot_actual is not None:
+            try:
+                os.remove(snapshot_actual)
+            except OSError:
+                pass
+
+    def _drain_results(self, timeout=None):
+        while True:
+            try:
+                if timeout is None:
+                    result = self._result_queue.get_nowait()
+                else:
+                    result = self._result_queue.get(timeout=timeout)
+                    timeout = None  # Only block while waiting for the first.
+            except queue.Empty:
+                return
+            self._handle_result(result)
+
+    def _on_step(self):
+        if self._process is None:
+            return True
+        self._drain_results()
+        if self._pending_snapshots > 0 and not self._process.is_alive():
+            raise RuntimeError(
+                "Asynchronous evaluation worker exited with evaluations "
+                "outstanding.")
+        if self.num_timesteps >= self._next_eval_at:
+            if self._pending_snapshots >= 2:
+                # The evaluator cannot keep up with the requested cadence.
+                # Skip this boundary instead of queueing an unbounded
+                # backlog of stale snapshots; the next boundary retries.
+                logging.warning(
+                    "Async evaluation backlog (%s outstanding); skipping "
+                    "the %s-step evaluation.", self._pending_snapshots,
+                    self.num_timesteps)
+            else:
+                snapshot_path = os.path.join(
+                    self.snapshot_dir,
+                    f"eval_snapshot_{self.num_timesteps}_steps")
+                self.model.save(snapshot_path)
+                self._request_queue.put((snapshot_path, self.num_timesteps))
+                self._pending_snapshots += 1
+            while self._next_eval_at <= self.num_timesteps:
+                self._next_eval_at += self.eval_freq
+        return True
+
+    def _on_training_end(self):
+        if self._process is None:
+            return
+        deadline = time.time() + self.final_result_timeout_seconds
+        while (self._pending_snapshots > 0 and self._process.is_alive()
+               and time.time() < deadline):
+            self._drain_results(timeout=5.0)
+        if self._pending_snapshots > 0:
+            logging.warning(
+                "%s evaluation result(s) still outstanding at training end.",
+                self._pending_snapshots)
+        try:
+            self._request_queue.put(None)
+        except Exception:
+            pass
+        self._process.join(timeout=30)
+        if self._process.is_alive():
+            self._process.terminate()
+            self._process.join(timeout=10)
+        self._process = None
+
+
+def create_callbacks(eval_env_factory, run_id, args, num_train_envs=1,
                      tb_run_dir=None):
     """Create a comprehensive set of callbacks"""
     # BaseCallback.n_calls counts VecEnv steps, not individual transitions.
@@ -2080,18 +2278,22 @@ def create_callbacks(eval_env, run_id, args, num_train_envs=1,
     run_model_dir = os.path.join(MODEL_DIR, run_id)
     best_model_dir = os.path.join(run_model_dir, 'best_model')
     checkpoint_dir = os.path.join(run_model_dir, 'checkpoints')
+    snapshot_dir = os.path.join(run_model_dir, 'eval_snapshots')
     evaluation_log_dir = os.path.join(LOG_DIR, run_id, 'evaluation')
-    for path in (best_model_dir, checkpoint_dir, evaluation_log_dir):
+    for path in (best_model_dir, checkpoint_dir, snapshot_dir,
+                 evaluation_log_dir):
         os.makedirs(path, exist_ok=True)
 
-    # Evaluation callback
-    eval_callback = MaskableEvalCallback(
-        eval_env=eval_env,
+    # Evaluation callback. Runs in its own process; eval_freq stays in
+    # total training timesteps (it is compared against num_timesteps, not
+    # n_calls, so no per-env division applies).
+    eval_callback = AsyncMaskableEvalCallback(
+        eval_env_factory,
+        eval_freq=args.eval_freq,
+        n_eval_episodes=getattr(args, "eval_episodes", 20),
         best_model_save_path=best_model_dir,
-        log_path=evaluation_log_dir,
-        eval_freq=callback_frequency(args.eval_freq),
-        deterministic=True,
-        n_eval_episodes=getattr(args, "eval_episodes", 20)
+        snapshot_dir=snapshot_dir,
+        debug=getattr(args, "debug", False),
     )
 
     # Checkpoint callback
@@ -2462,7 +2664,7 @@ def main():
             "evaluation_environments": eval_env_count,
             "train_vec_env": (
                 "SubprocVecEnv" if num_envs > 1 else "DummyVecEnv"),
-            "evaluation_vec_env": "DummyVecEnv",
+            "evaluation_vec_env": "DummyVecEnv (dedicated async process)",
             "subprocess_start_method": (
                 subproc_start_method if num_envs > 1 else None),
             "learner_threads": learner_threads,
@@ -2528,18 +2730,26 @@ def main():
                         'state_potential_scale'])
             return _init
 
-        eval_env_fns = [
-            make_eval_env_factory(index) for index in range(eval_env_count)]
-        eval_env = StrictEvaluationVecEnv(
-            VecMonitor(DummyVecEnv(eval_env_fns)))
-        eval_env.env_method("set_agent_version", f"{run_id}-eval")
-        if hasattr(eval_env, "seed"):
-            assigned_eval_seeds = eval_env.seed(eval_seed)
-            manifest["resolved"]["assigned_evaluation_worker_seeds"] = json_safe(
-                assigned_eval_seeds)
+        def make_evaluation_vec_env():
+            # Built inside the async evaluation worker process (and again in
+            # the main process for final checkpoint validation). Construction
+            # in the training process would only pay memory for an env the
+            # trainer never steps.
+            eval_env_fns = [
+                make_eval_env_factory(index)
+                for index in range(eval_env_count)]
+            evaluation_env = StrictEvaluationVecEnv(
+                VecMonitor(DummyVecEnv(eval_env_fns)))
+            evaluation_env.env_method("set_agent_version", f"{run_id}-eval")
+            if hasattr(evaluation_env, "seed"):
+                evaluation_env.seed(eval_seed)
+            return evaluation_env
+
+        manifest["resolved"]["assigned_evaluation_worker_seeds"] = json_safe(
+            [eval_seed + index for index in range(eval_env_count)])
 
         callbacks = create_callbacks(
-            eval_env, run_id, args, num_train_envs=num_envs,
+            make_evaluation_vec_env, run_id, args, num_train_envs=num_envs,
             tb_run_dir=tb_run_dir)
 
         current_phase = "model_setup"
@@ -2614,6 +2824,9 @@ def main():
         model.save(pending_model_path)
         pending_actual_path = resolve_artifact_path(pending_model_path)
         if pending_actual_path is not None:
+            # The evaluation env lives in the async worker during training;
+            # build a fresh one here for final checkpoint validation.
+            eval_env = make_evaluation_vec_env()
             manifest["validation"] = validate_training_checkpoint(
                 pending_model_path, eval_env, device=selected_device,
                 seed=eval_seed)

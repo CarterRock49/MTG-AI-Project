@@ -3844,6 +3844,27 @@ class DamageEffect(AbilityEffect):
         self.target_type = target_type_str # e.g., "creature", "player", "any target", "each opponent"
         self.requires_target = "target" in self.target_type or "any" in self.target_type or "each" not in self.target_type
 
+    @staticmethod
+    def _target_identity_matches(game_state, target_id, relevant_categories):
+        """Whether a committed target's actual identity fits the requirement,
+        independent of the single category key it was filed under."""
+        if target_id in ("p1", "p2"):
+            return "players" in relevant_categories
+        card = game_state._safe_get_card(target_id)
+        if not card:
+            return False
+        types = {str(t).lower() for t in (getattr(card, 'card_types', None) or [])}
+        if 'battle' in str(getattr(card, 'type_line', '') or '').lower():
+            types.add('battle')
+        category_types = {
+            "creatures": "creature", "planeswalkers": "planeswalker",
+            "battles": "battle", "artifacts": "artifact",
+            "enchantments": "enchantment", "lands": "land",
+        }
+        return any(
+            category_types[cat] in types
+            for cat in relevant_categories if cat in category_types)
+
     def _apply_effect(self, game_state, source_id, controller, targets):
         # --- X Cost Handling ---
         has_chosen_x = isinstance(targets, dict) and 'X' in targets
@@ -3883,11 +3904,25 @@ class DamageEffect(AbilityEffect):
                  relevant_categories.add(base_cat + "s" if not base_cat.endswith('s') else base_cat)
 
             for cat, id_list in targets.items():
-                if cat in relevant_categories:
-                    for target_id in id_list:
-                        if target_id not in processed_ids:
-                            processed_ids.add(target_id)
-                            targets_to_damage.append(target_id)
+                # Non-category payload entries ('X' carries the chosen X
+                # value as a bare int) are not target lists.
+                if not isinstance(id_list, (list, tuple, set)):
+                    continue
+                for target_id in id_list:
+                    if target_id in processed_ids:
+                        continue
+                    # Category keys file a multi-type permanent under exactly
+                    # one type, so a legal target can arrive under a key this
+                    # instruction does not read (July 14: a battlefield Summon
+                    # saga arrived as 'enchantments' for any-target damage and
+                    # falsely fizzled). The key is a routing hint, not the
+                    # legality authority: accept any committed target whose
+                    # actual identity satisfies the requirement.
+                    if (cat in relevant_categories
+                            or self._target_identity_matches(
+                                game_state, target_id, relevant_categories)):
+                        processed_ids.add(target_id)
+                        targets_to_damage.append(target_id)
         elif "each opponent" in self.target_type:
              opponent = game_state.p2 if controller == game_state.p1 else game_state.p1
              opp_id = "p2" if opponent == game_state.p2 else "p1"

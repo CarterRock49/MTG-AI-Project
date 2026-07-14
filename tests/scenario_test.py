@@ -15658,6 +15658,69 @@ def s_modal_trigger_pause_not_trampled():
         "deferred stack targeting did not open once the pause resolved"
 
 
+@scenario("observation protocol / bounds",
+          "astronomical creature power saturates the observation instead of degrading it")
+def s_huge_power_saturates_observation():
+    gs = fresh(SEED + 913)
+    gs.agent_is_p1 = True
+    env = get_env()
+    monster = inject_into_zone(gs, gs.p2, {
+        "name": "Doubled Monster", "mana_cost": "{G}", "cmc": 1,
+        "type_line": "Creature — Elemental", "oracle_text": "",
+        "power": "2", "toughness": "2",
+    }, "battlefield")
+    # 40 doublings put raw power far past C-long range. np.array(...,
+    # dtype=int32) used to raise OverflowError before the saturation clip,
+    # aborting the whole creature-stats block and degrading unrelated
+    # features every step of the game (July 14 reward-v3 stop).
+    card = gs._safe_get_card(monster)
+    card.power = 2 ** 40
+    card.toughness = 2 ** 40
+
+    obs = env._get_obs_safe()
+    power_cap = int(np.asarray(
+        env.observation_space.spaces["opp_total_power"].high).reshape(-1)[0])
+    assert int(obs["opp_total_power"][0]) == power_cap, \
+        "huge opponent power did not saturate at the declared bound"
+    assert int(obs["power_advantage"][0]) == -power_cap, \
+        "power advantage did not saturate at the declared lower bound"
+    assert env.last_observation_error is None, \
+        "expected silent saturation, but the observation was recorded as degraded"
+
+
+@scenario("601.2c / 608.2b",
+          "any-target damage accepts a legal target filed under a mismatched category key")
+def s_any_target_damage_ignores_category_key():
+    from Playersim.ability_types import DamageEffect
+    gs = fresh(SEED + 914)
+    controller = gs.p1
+    gs.agent_is_p1 = True
+    source = inject_into_zone(gs, controller, {
+        "name": "Charm Source", "mana_cost": "{U}{R}", "cmc": 2,
+        "type_line": "Instant", "oracle_text": "",
+    }, "graveyard")
+    summon = inject_into_zone(gs, gs.p2, {
+        "name": "Summoned Saga Beast", "mana_cost": "{2}{G}", "cmc": 3,
+        "type_line": "Enchantment Creature — Saga Elemental",
+        "oracle_text": "", "power": "3", "toughness": "1",
+    }, "battlefield")
+    assert 'creature' in gs._safe_get_card(summon).card_types
+
+    # July 14 Prismari Charm fizzle: the committed target map files each
+    # target under exactly one category key, and the enchantment-creature
+    # Summon arrived keyed 'enchantments'. The damage instruction read only
+    # its any-target keys, dropped the legal target, and falsely fizzled.
+    effect = DamageEffect(2, target_type="any target")
+    assert effect._apply_effect(
+        gs, source, controller, {"enchantments": [summon]}), \
+        "any-target damage refused a legal target over its category key"
+    gs.check_state_based_actions()
+    assert summon not in gs.p2["battlefield"], \
+        "lethal damage was never marked on the mismatched-key target"
+    assert summon in gs.p2["graveyard"], \
+        "the damaged creature did not die to state-based actions"
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------

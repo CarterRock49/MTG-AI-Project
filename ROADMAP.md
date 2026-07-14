@@ -75,7 +75,7 @@ The project is complete when all of the following hold:
   lineage-stamped manifests. User-supplied decks route into isolated format
   pools automatically; passing policy qualification and builder feedback remain
   open.
-- Test gates: smoke 9/9, training 13/13, scenarios 366/366 (grown from 12),
+- Test gates: smoke 9/9, training 13/13, scenarios 368/368 (grown from 12),
   108/108 focused regression tests, 201/201 discovered unit tests,
   fixture harvest 16/16, production Harvest protocol 16/16, card registry
   19/19, deck ingestion 13/13, fuzz/replay configuration 6/6, deterministic
@@ -151,6 +151,42 @@ Remaining Tier 2 work:
 5. ✅ **Deck legality validation**: `Playersim/deck_legality.py` validates
    minimum size, copy/basic-land rules, bans, restrictions, and format
    status; strict deck loading raises validation failures.
+6. ▢ **Throughput program** — baseline measured July 14, 2026 on the
+   reference trainer (Ryzen 5 5600, 6c/12t, 32 GB, RTX 5060). Effective
+   training speed was 10.6 steps/s against a pure-rollout ~40–55 steps/s:
+   the default evaluation cadence (every 10k steps × 20 episodes in one
+   single-threaded eval env) idled all six workers for **73% of wall
+   time**. A single environment simulates at ~17.5 steps/s; profiling
+   attributes ~62% of each step to observation building (win-condition/
+   threat/synergy analyses recomputed per step — `identify_win_conditions`
+   ~24×/step — plus ~37 per-card 436-field feature rebuilds and ~2,500
+   regex / ~23,000 `str.lower` calls per step) and the 480-action legality
+   mask is regenerated ~9× per step across the scripted-opponent loop.
+   The GPU idles (<11%) by design: the learner needs ~10 s per 10+ minute
+   rollout, so no GPU-side change buys throughput.
+   - **Run configuration (no code):** `--n-envs 8` (worker count is
+     RAM-bounded — the Dict observation costs ~0.3 MB per rollout-buffer
+     step). With evaluation asynchronous since 7.76, `--eval-freq 25000
+     --eval-episodes 10` is a comfortable cadence: the dedicated evaluator
+     needs ~5 minutes per 10 episodes, and the callback skips a boundary
+     (with a warning) rather than queueing a backlog if the cadence ever
+     outruns it.
+   - **Long-term goals (code; every item gated on bit-identical
+     observations and masks under the scenario + fuzz suites — these are
+     caches, not semantic changes, so no schema/lineage impact):**
+     1. Cache per-card feature vectors; dirty-flag only the mutable
+        P/T/counters slice (`Card.to_feature_vector` is rebuilt ~37× per
+        step from scratch).
+     2. Memoize strategic-planner analyses (win conditions, threats,
+        synergies, combo pieces) per turn or on state change instead of
+        per observation.
+     5. ✅ (7.76) Periodic evaluation runs concurrently in a dedicated
+        process (`AsyncMaskableEvalCallback`): training workers never
+        idle behind it, the evaluated snapshot itself is promoted to
+        `best_model.zip`, and a worker failure fails the run.
+     6. ✅ (7.76) The idle GPU now carries a doubled network (1024-dim
+        extractor, 512/256/128 heads, doubled per-key widths) for sample
+        efficiency at near-zero wall-time cost.
 
 ## Tier 4 — Verification & calibration
 
@@ -241,11 +277,20 @@ Phased milestones:
    preflight and paired-seat evaluation queue without contaminating held-out
    promotion or calibration results.
 
-**Current execution order:** launch a fresh Round 7.74 Standard candidate and
-inspect its first 100k steps for nonzero `reward/state_change_nonzero`, bounded
-return/value scales, a critic explained-variance trend that is not
-persistently negative, and a `terminal/life_total_rate` share that grows at
-the expense of `terminal/turn_limit_rate`. Continue the impact-ranked Standard support sweep while
+**Current execution order:** launch a fresh Round 7.75 Standard candidate
+(`reward-v3` was stopped at ~130k steps by the 7.75 observation-overflow
+find, with the critic healthy: explained variance 0.60 and rising) using
+the Tier 3 throughput-program run flags (`--eval-freq 25000
+--eval-episodes 10 --n-envs 8`; evaluation is asynchronous since 7.76).
+Inspect it for nonzero
+`reward/state_change_nonzero`, bounded return/value scales, a critic
+explained-variance trend that is not persistently negative, and — the open
+question at the 300k-step checkpoint — a `terminal/life_total_rate` share
+that grows at the expense of `terminal/turn_limit_rate`; if the terminal
+mix is still ~90% turn-limit with flat negative episode reward there,
+reweight the state potential's damage-progress component before burning
+the rest of the budget. Schedule the throughput-program code items as
+their own verified rounds, never bundled with a live experiment. Continue the impact-ranked Standard support sweep while
 that run proceeds, then qualify the candidate against scripted play, promote it
 into a checkpoint league, and calibrate known matchups. Imported lists can
 widen the working pool without overwriting the pinned metagame; builder-driven
@@ -449,6 +494,47 @@ pre-fix); scenarios 366/366, smoke 9/9, training smoke 13/13, target
 lifecycle + stack integrity 14/14. Engine-only fix — no reward-contract or
 checkpoint boundary; the 7.73 boundary still applies.
 
+**7.75 — observation overflow and category-key target fizzle.** The 7.74
+run (`reward-v3`, user-stopped at ~130k steps with a healthy critic:
+explained variance 0.60 and rising) surfaced two independent bugs.
+First, a doubling combo drove total creature power past C-long range and
+`np.array(value, dtype=int32)` raised OverflowError *before* the declared
+saturation clip could run — aborting the whole creature-stats population
+block and silently degrading unrelated observation features every step of
+that game. Unbounded game integers (life, total P/T, advantages, mana) are
+now clamped to their declared bounds in pure Python before ndarray
+construction (`_bounded_int_array`), which is the documented saturating
+behavior. Second, the twice-seen Prismari Charm fizzle: the committed
+target map files each target under exactly one category key, and a
+battlefield Summon (enchantment creature saga) arrived keyed
+`enchantments`; any-target damage read only its own keys, dropped the
+legal target, and falsely fizzled. `DamageEffect` now treats the key as a
+routing hint, not the legality authority — a committed target whose actual
+printed identity satisfies the requirement is accepted regardless of key
+placement. Both guard scenarios verified to reproduce their failures
+pre-fix; scenarios 368/368, smoke 9/9, training smoke 13/13, focused
+damage/targeting suites 22/22. Engine-only fixes — the 7.73 checkpoint
+boundary still applies.
+
+**7.76 — asynchronous evaluation and network widening (Tier 3 throughput
+items 5–6).** Periodic evaluation moved out of the training loop into one
+long-lived spawned process: `AsyncMaskableEvalCallback` saves a policy
+snapshot at each evaluation boundary, a dedicated worker (own strict eval
+env, CPU device, mask-aware episodes) scores it, and results fold into
+TensorBoard on arrival with `eval/evaluated_at_timesteps` preserving the
+snapshot's true step. The evaluated checkpoint itself is promoted to
+`best_model.zip`; a worker failure fails the run; a backlogged cadence
+skips boundaries with a warning instead of queueing stale snapshots; the
+final-validation env is now built lazily in the main process only when a
+real checkpoint exists. Separately, the policy network doubled across the
+pipeline (extractor 512→1024, per-key sub-networks doubled, merger
+256→512, default heads medium→large 512/256/128) to spend the idle GPU on
+sample efficiency. Verified end-to-end with a real-corpus mini-run (async
+evals completed mid-training, best model promoted, clean shutdown).
+Training smoke 13/13 (eval-callback stage rewritten for the async
+contract). **Checkpoint boundary: the width change starts a new lineage —
+do not resume pre-7.76 checkpoints.**
+
 ---
 
 ## Working agreements
@@ -571,10 +657,10 @@ pending the next choice audit (attacker-side assignment order is exposed).
     retained and legality-checked but not played by the Bo1 runtime.
     Checkpoint-resume boundaries: pre-7.37 (reward rebuild), pre-7.44
     (observation space), pre-7.62 (X/count bounds), pre-7.72 (discounted
-    state-potential reward contract and critic baseline), and pre-7.73
-    (timeout terminal rebalance and symlog extractor inputs) checkpoints
-    must not be resumed; pre-7.46 stats artifacts must not be mixed with
-    format-namespace lineages.
+    state-potential reward contract and critic baseline), pre-7.73
+    (timeout terminal rebalance and symlog extractor inputs), and
+    pre-7.76 (network width) checkpoints must not be resumed; pre-7.46
+    stats artifacts must not be mixed with format-namespace lineages.
 38. Treasure/Beza support is scenario-verified through registration,
     activation costs, color choice, mana production, and the CR 605
     no-stack path; the retained note documents the supported path, not an
