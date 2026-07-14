@@ -89,7 +89,10 @@ class FixedWindowMTGExtractor(BaseFeaturesExtractor):
         
         # Process each observation type separately
         for key, subspace in observation_space.spaces.items():
-            if key == "phase" or key == "action_mask":
+            # phase has a dedicated embedding; action_mask is consumed by
+            # MaskablePPO; target_card_ids are unstable runtime occurrence
+            # handles used only to verify the public target-page protocol.
+            if key in {"phase", "action_mask", "target_card_ids"}:
                 continue
                 
             if len(subspace.shape) == 1:
@@ -112,6 +115,28 @@ class FixedWindowMTGExtractor(BaseFeaturesExtractor):
                     torch.nn.ReLU()
                 )
                 merged_dim += n_cards * 128
+
+            elif len(subspace.shape) == 3:
+                # Preserve the primary object axis while flattening each
+                # object's trailing feature grid.  In particular,
+                # ability_recommendations is [permanent, ability,
+                # (recommend, confidence)]; the old 1D/2D-only dispatch
+                # silently omitted it from the policy input.
+                n_objects = subspace.shape[0]
+                object_dim = int(np.prod(subspace.shape[1:]))
+                self.extractors[key] = torch.nn.Sequential(
+                    torch.nn.Flatten(start_dim=2),
+                    torch.nn.Linear(object_dim, 256),
+                    torch.nn.ReLU(),
+                    torch.nn.Linear(256, 128),
+                    torch.nn.ReLU()
+                )
+                merged_dim += n_objects * 128
+
+            else:
+                raise ValueError(
+                    f"Unsupported observation rank for '{key}': "
+                    f"shape={subspace.shape}")
         
         # BUGFIX: feature_merger used to be created lazily inside forward(), AFTER the
         # optimizer had already collected parameters -> it was never trained, and a

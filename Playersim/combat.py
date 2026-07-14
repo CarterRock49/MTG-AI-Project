@@ -1811,7 +1811,7 @@ class CombatResolver:
             return False
             
         # Get blocker controller
-        blocker_controller = self._get_card_controller(blocker_id)
+        blocker_controller = gs.get_card_controller(blocker_id)
         if not blocker_controller:
             return False
         
@@ -2231,11 +2231,20 @@ class CombatResolver:
                     if has_first_strike:
                         break
             
+            # NOTE: these MUST be explicit base-class calls.
+            # ExtendedCombatResolver shadows _process_attacker_damage /
+            # _process_blocker_damage with a different, state-MARKING
+            # signature; the dynamic dispatch raised TypeError on every
+            # simulation, the outer except returned all-zero results, and
+            # everything built on simulated combat (attack search, planner
+            # evaluation, attacker advisory observations) silently reported
+            # zero value (July 14 observation audit).
             # First strike damage step if needed
             if has_first_strike:
                 # Process attackers with first strike
                 for attacker_id in attackers:
-                    self._process_attacker_damage(
+                    CombatResolver._process_attacker_damage(
+                        self,
                         attacker_id,
                         attacker_player,
                         defender_player,
@@ -2245,15 +2254,16 @@ class CombatResolver:
                         killed_in_first_strike,
                         is_first_strike=True
                     )
-                
+
                 # Process blockers with first strike
                 for attacker_id, blockers in block_assignments.items():
                     # Skip if attacker died from first strike
                     if attacker_id in killed_in_first_strike:
                         continue
-                        
+
                     for blocker_id in blockers:
-                        self._process_blocker_damage(
+                        CombatResolver._process_blocker_damage(
+                            self,
                             blocker_id,
                             attacker_id,
                             attacker_player,
@@ -2267,13 +2277,14 @@ class CombatResolver:
                 # Process creatures dying in first strike damage step
                 self._check_lethal_damage(damage_to_creatures, killed_in_first_strike)
             
-            # Regular damage step
+            # Regular damage step (explicit base-class calls; see note above)
             for attacker_id in attackers:
                 # Skip if attacker died in first strike
                 if attacker_id in killed_in_first_strike:
                     continue
-                    
-                self._process_attacker_damage(
+
+                CombatResolver._process_attacker_damage(
+                    self,
                     attacker_id,
                     attacker_player,
                     defender_player,
@@ -2283,19 +2294,20 @@ class CombatResolver:
                     killed_in_first_strike,
                     is_first_strike=False
                 )
-            
+
             # Process blocker regular damage
             for attacker_id, blockers in block_assignments.items():
                 # Skip if attacker died in first strike
                 if attacker_id in killed_in_first_strike:
                     continue
-                    
+
                 for blocker_id in blockers:
                     # Skip if blocker died in first strike
                     if blocker_id in killed_in_first_strike:
                         continue
-                        
-                    self._process_blocker_damage(
+
+                    CombatResolver._process_blocker_damage(
+                        self,
                         blocker_id,
                         attacker_id,
                         attacker_player,

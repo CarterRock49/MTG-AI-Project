@@ -306,7 +306,7 @@ revision and dirty state, CLI and resolved configuration, device and dependency
 inventory, deck/lineage provenance, lifecycle result, and artifact paths. A
 dirty run also stores a hashed `source_worktree.patch` beside the manifest.
 
-> **Checkpoint boundary (Round 7.73).** The full Standard namespace widened card
+> **Checkpoint boundary (Round 7.82).** The full Standard namespace widened card
 > observations to 436 fields (259 subtype fields plus MDFC fields), signed live
 > power/toughness, and count/stat bounds large enough for legal boards above 20
 > permanents. Round 7.62 also widened the declared choice-count, allocation, and
@@ -315,9 +315,16 @@ dirty run also stores a hashed `source_worktree.patch` beside the manifest.
 > shaping paths with one discounted state-potential reward and reduced the
 > procedural action-reward scale. Round 7.73 rebalanced terminal rewards
 > (turn-limit timeouts now pay win +2 / draw −4 / loss −8), cut the action
-> reward scale to 0.02 (`discounted-state-potential-v2`), and added symlog
-> compression to every continuous extractor input. **Do not resume a
-> checkpoint created before Round 7.73** — start fresh without `--resume`.
+> reward scale to 0.02, and added symlog compression to every continuous
+> extractor input. Round 7.76 doubled the network (1024-dim extractor,
+> 512/256/128 heads). Round 7.80 reweighted the state potential toward
+> offense with a convex damage ramp (`discounted-state-potential-v3`) and
+> populated the previously-zero `potential_combat_damage` observation. Round
+> 7.82 made planner observations state/perspective-fresh, repaired exact target
+> and stack indexing, routed combat summaries through canonical legality/search,
+> and added the previously-omitted rank-3 ability-recommendation extractor.
+> **Do not resume a checkpoint created before Round 7.82** — start fresh
+> without `--resume`.
 
 ### Hyperparameter optimization
 

@@ -39,10 +39,10 @@ class AlphaZeroMTGEnv(gym.Env):
     Updated for improved reward shaping, richer observations, modularity, and detailed logging.
     """
     ACTION_SPACE_SIZE = 480 # Moved constant here
-    REWARD_CONTRACT_VERSION = "discounted-state-potential-v2"
+    REWARD_CONTRACT_VERSION = "discounted-state-potential-v3"
     DEFAULT_REWARD_DISCOUNT = 0.995
     DEFAULT_ACTION_REWARD_SCALE = 0.02
-    DEFAULT_STATE_POTENTIAL_SCALE = 0.25
+    DEFAULT_STATE_POTENTIAL_SCALE = 0.40
 
     def __init__(self, decks, card_db, max_turns=30, max_hand_size=7, max_battlefield=20,
                  deck_stats_path="./deck_stats", card_memory_path="./card_memory",
@@ -302,10 +302,10 @@ class AlphaZeroMTGEnv(gym.Env):
             "mulligan_recommendation": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
             "mulligan_reason_count": spaces.Box(low=0, high=5, shape=(1,), dtype=np.int32),
             "mulligan_reasons": spaces.Box(low=0, high=1, shape=(5,), dtype=np.float32),
-            "targetable_permanents": spaces.Box(low=-1, high=500, shape=(self.max_battlefield * 2,), dtype=np.int32),
+            "targetable_permanents": spaces.Box(low=-1, high=np.iinfo(np.int32).max, shape=(self.max_battlefield * 2,), dtype=np.int32),
             "targetable_players": spaces.Box(low=-1, high=1, shape=(2,), dtype=np.int32),
-            "targetable_spells_on_stack": spaces.Box(low=-1, high=20, shape=(5,), dtype=np.int32),
-            "targetable_cards_in_graveyards": spaces.Box(low=-1, high=200, shape=(10 * 2,), dtype=np.int32),
+            "targetable_spells_on_stack": spaces.Box(low=-1, high=np.iinfo(np.int32).max, shape=(5,), dtype=np.int32),
+            "targetable_cards_in_graveyards": spaces.Box(low=-1, high=np.iinfo(np.int32).max, shape=(10 * 2,), dtype=np.int32),
             # Exact SELECT_TARGET page. Slot i describes action 274+i.
             "target_cards": card_feature_space(10),
             "target_card_mask": spaces.Box(low=0, high=1, shape=(10,), dtype=bool),
@@ -482,8 +482,10 @@ class AlphaZeroMTGEnv(gym.Env):
                 self._logged_errors = set()
                 self.last_observation_error = None
                 self.last_observation_traceback = None
+                self.current_analysis = None
                 self.last_n_actions = np.full(self.action_memory_size, -1, dtype=np.int32)
                 self.last_n_rewards = np.zeros(self.action_memory_size, dtype=np.float32)
+                self._observed_phase_history = []
                 if hasattr(self, '_phase_history_counts'): self._phase_history_counts = defaultdict(int)
                 if hasattr(self, '_last_phase_progressed'): self._last_phase_progressed = -1
                 if hasattr(self, '_phase_stuck_count'): self._phase_stuck_count = 0
@@ -2243,6 +2245,19 @@ class AlphaZeroMTGEnv(gym.Env):
 
     def _get_obs_safe(self):
         """Build the real policy observation, falling back only on failure."""
+        # Record phase transitions at the one seam every observation passes
+        # through. gs._phase_history was only written by dead code, so the
+        # declared phase_history observation was a constant -1 (July 14
+        # observation audit). Appending only on change keeps repeated calls
+        # in the same state idempotent.
+        current_phase = int(getattr(self.game_state, 'phase', -1))
+        history = getattr(self, '_observed_phase_history', None)
+        if history is None:
+            history = []
+            self._observed_phase_history = history
+        if not history or history[-1] != current_phase:
+            history.append(current_phase)
+            del history[:-5]
         try:
             return self._get_obs()
         except Exception as exc:
@@ -2495,7 +2510,16 @@ class AlphaZeroMTGEnv(gym.Env):
             return None
 
     def _calculate_state_potential(self):
-        """Return the bounded strategic potential for the agent's position."""
+        """Return the bounded strategic potential for the agent's position.
+
+        Contract v3 rebalance (July 14): runs v3-v6 all converged on
+        stalling to the turn limit — ~88% of episodes, with the critic
+        eventually predicting that outcome at 0.93 explained variance.
+        Offense now outweighs defense (a point of opponent life is worth
+        2-3x a point of own life) and the damage term is convex, so the
+        marginal value of damage RISES as the opponent approaches lethal
+        instead of paying out linearly and stalling short of the kill.
+        """
         gs = self.game_state
         me = gs.p1 if gs.agent_is_p1 else gs.p2
         opp = gs.p2 if gs.agent_is_p1 else gs.p1
@@ -2519,14 +2543,17 @@ class AlphaZeroMTGEnv(gym.Env):
                     value += 0.6
             return value
 
-        life_component = 0.50 * (
+        life_component = 0.30 * (
             (me.get('life', 0) - opp.get('life', 0)) / 20.0)
-        board_component = 0.25 * np.tanh(
+        board_component = 0.20 * np.tanh(
             (battlefield_value(me) - battlefield_value(opp)) / 6.0)
-        card_component = 0.15 * np.tanh(
+        card_component = 0.10 * np.tanh(
             (len(me.get('hand', [])) - len(opp.get('hand', []))) / 4.0)
-        damage_progress = 0.10 * np.clip(
-            (20.0 - float(opp.get('life', 20))) / 20.0, -1.0, 1.0)
+        damage_taken = np.clip(
+            (20.0 - float(opp.get('life', 20))) / 20.0, 0.0, 1.0)
+        # Convex: slope grows from 0.5x at full life to 1.5x near lethal.
+        damage_progress = 0.40 * (
+            0.5 * damage_taken + 0.5 * damage_taken ** 2)
         return float(np.clip(
             life_component + board_component + card_component + damage_progress,
             -2.0, 2.0))
@@ -3247,7 +3274,28 @@ class AlphaZeroMTGEnv(gym.Env):
                 # Combat state
                 obs["attackers_count"] = np.array([len(getattr(gs, 'current_attackers', []))], dtype=np.int32)
                 obs["blockers_count"] = np.array([sum(len(b) for b in getattr(gs, 'current_block_assignments', {}).values())], dtype=np.int32)
-                obs["potential_combat_damage"] = np.zeros(1, dtype=np.int32) # Placeholder
+                # Declared since the space existed but fed a constant zero.
+                # Now the agent's on-demand attack output: total power of its
+                # currently legal attackers.  Reuse the combat handler's
+                # legality path so defender and dynamic can't-attack effects
+                # cannot inflate the signal. Paired with opp_life it is the
+                # direct "is lethal on board?" signal the stall-heavy runs
+                # never had (7.80).
+                potential_damage = 0
+                for battlefield_card_id in agent_player_obj.get("battlefield", []):
+                    battlefield_card = gs._safe_get_card(battlefield_card_id)
+                    if (not battlefield_card
+                            or 'creature' not in getattr(
+                                battlefield_card, 'card_types', [])):
+                        continue
+                    if (not getattr(self, "action_handler", None)
+                            or not self.action_handler.is_valid_attacker(
+                                battlefield_card_id)):
+                        continue
+                    potential_damage += max(
+                        0, int(getattr(battlefield_card, 'power', 0) or 0))
+                obs["potential_combat_damage"] = self._bounded_int_array(
+                    "potential_combat_damage", [potential_damage])
             except Exception as e:
                 self._record_observation_error("combat features", e)
                 logging.error(f"Error populating combat state features in _get_obs: {e}", exc_info=True)
@@ -3294,7 +3342,9 @@ class AlphaZeroMTGEnv(gym.Env):
 
             # --- 6. Populate History & Planning Features (inside try/except) ---
             try:
-                phase_hist = getattr(gs, '_phase_history', [])
+                # Env-tracked phase transitions (see _get_obs_safe); the old
+                # gs._phase_history source was written only by dead code.
+                phase_hist = getattr(self, '_observed_phase_history', [])
                 phase_hist_len = len(phase_hist)
                 phase_hist_arr = np.full(5, -1, dtype=np.int32)
                 if phase_hist_len > 0: phase_hist_arr[-min(phase_hist_len, 5):] = phase_hist[-min(phase_hist_len, 5):] # Fill from end
@@ -3397,10 +3447,14 @@ class AlphaZeroMTGEnv(gym.Env):
                 if hasattr(self, 'strategic_planner') and self.strategic_planner:
                     # (Planner population logic - remains the same as previous version)
                     # ... (fill strategic_metrics, opponent_archetype, recommendations etc.) ...
-                    analysis = getattr(self, 'current_analysis', None)
-                    if not analysis or analysis.get("game_info", {}).get("turn") != current_turn:
-                        analysis = self.strategic_planner.analyze_game_state()
-                        self.current_analysis = analysis
+                    # Analysis depends on the complete live board and on
+                    # gs.agent_is_p1.  Caching it by turn alone made every
+                    # same-turn transition stale and could feed the learned
+                    # opponent an analysis from the other seat.  Refresh at
+                    # the observation boundary; this also updates the
+                    # planner's own current_analysis for downstream helpers.
+                    analysis = self.strategic_planner.analyze_game_state()
+                    self.current_analysis = analysis
 
                     if analysis:
                         obs["strategic_metrics"][:10] = self._analysis_to_metrics(analysis)[:10]
@@ -3442,15 +3496,25 @@ class AlphaZeroMTGEnv(gym.Env):
                     obs["suggestion_matches_recommendation"][0] = matches
 
                     bf_ids_agent = agent_player_obj.get("battlefield", [])
-                    if hasattr(self.strategic_planner,'find_optimal_attack'):
-                        optimal_ids = self.strategic_planner.find_optimal_attack()
-                        optimal_mask = np.zeros(self.max_battlefield, dtype=np.float32)
-                        for i, cid in enumerate(bf_ids_agent[:self.max_battlefield]):
-                            if cid in optimal_ids: optimal_mask[i] = 1.0
-                        if obs["optimal_attackers"].shape == optimal_mask.shape: obs["optimal_attackers"][:] = optimal_mask
-
-                        attacker_values = self._get_attacker_values(bf_ids_agent, agent_player_obj)
-                        if obs["attacker_values"].shape == attacker_values.shape: obs["attacker_values"][:] = attacker_values
+                    # The old gate checked strategic_planner for
+                    # find_optimal_attack, but the method belongs to the combat
+                    # action handler, so both advisory features were silently
+                    # dead. Compute individual values with the evaluator and
+                    # the optimal combination with the real combat search,
+                    # only while an attack decision is live.
+                    if gs.phase in (gs.PHASE_MAIN_PRECOMBAT,
+                                    gs.PHASE_BEGIN_COMBAT,
+                                    gs.PHASE_DECLARE_ATTACKERS):
+                        attacker_values = self._get_attacker_values(
+                            bf_ids_agent, agent_player_obj)
+                        if obs["attacker_values"].shape == attacker_values.shape:
+                            obs["attacker_values"][:] = attacker_values
+                        optimal_ids = set(
+                            self.action_handler.find_optimal_attack() or [])
+                        for battlefield_index, battlefield_card_id in enumerate(
+                                bf_ids_agent[:self.max_battlefield]):
+                            if battlefield_card_id in optimal_ids:
+                                obs["optimal_attackers"][battlefield_index] = 1.0
 
                     ability_recs = self._get_ability_recommendations(bf_ids_agent, agent_player_obj)
                     if obs["ability_recommendations"].shape == ability_recs.shape: obs["ability_recommendations"][:,:,:] = ability_recs
@@ -3815,10 +3879,17 @@ class AlphaZeroMTGEnv(gym.Env):
         return result
     
     def _get_potential_targets_vector(self, target_kind):
-        """Helper to get INDICES for targetable entities of a specific kind. Returns np.array of indices padded with -1."""
+        """Return exact public-zone indices for targetable entities.
+
+        Permanent and graveyard indices use the stable flattened order
+        ``p1 zone + p2 zone``; players use 0=P1/1=P2; spells use their real
+        stack indices.  The former implementation discarded these identifiers
+        and emitted 0..N-1, which made a lone P2 target look like P1 and a
+        target at stack index four look like index zero.
+        """
         gs = self.game_state
         agent_player_obj = gs.p1 if gs.agent_is_p1 else gs.p2
-        valid_targets_info = [] # Store tuples (target_id, index)
+        target_indices = []
         max_size = 0
         dtype_for_space = np.int32 # Use integers for indices
 
@@ -3839,48 +3910,46 @@ class AlphaZeroMTGEnv(gym.Env):
                      valid_targets_map = gs.targeting_system.get_valid_targets(source_id, controller)
                 else: logging.warning("Targeting system unavailable in _get_potential_targets")
 
-                # Flatten the map into a list of IDs while preserving order for indexing
-                flat_valid_target_ids = []
+                target_indices = []
                 if target_kind == 'permanent':
-                    for cat in ["creatures", "artifacts", "enchantments", "lands", "planeswalkers", "battles", "permanents"]:
-                        flat_valid_target_ids.extend(valid_targets_map.get(cat, []))
+                    valid_ids = set()
+                    for cat in ["creature", "artifact", "enchantment",
+                                "land", "planeswalker", "battle",
+                                "permanent"]:
+                        valid_ids.update(valid_targets_map.get(cat, []))
+                    flattened_battlefield = (
+                        list(gs.p1.get("battlefield", []))
+                        + list(gs.p2.get("battlefield", [])))
+                    target_indices = [
+                        index for index, card_id in
+                        enumerate(flattened_battlefield)
+                        if card_id in valid_ids]
                 elif target_kind == 'player':
-                    # Represent players by index 0 (P1) and 1 (P2)
-                    player_indices = []
-                    if "p1" in valid_targets_map.get("players", []): player_indices.append(0)
-                    if "p2" in valid_targets_map.get("players", []): player_indices.append(1)
-                    flat_valid_target_ids.extend(player_indices)
+                    valid_players = valid_targets_map.get("player", [])
+                    if "p1" in valid_players:
+                        target_indices.append(0)
+                    if "p2" in valid_players:
+                        target_indices.append(1)
                 elif target_kind == 'spell':
-                     # Use stack index as the reference for spells/abilities
-                     for stack_idx, item in enumerate(gs.stack):
-                         if isinstance(item, tuple) and len(item) > 3 and item[0] == "SPELL":
-                              spell_id_on_stack = item[1]
-                              if spell_id_on_stack in valid_targets_map.get("spells",[]):
-                                  flat_valid_target_ids.append(stack_idx) # Add stack index
+                    valid_spells = set(valid_targets_map.get("spell", []))
+                    target_indices = [
+                        stack_index for stack_index, item in enumerate(gs.stack)
+                        if (isinstance(item, tuple) and len(item) > 3
+                            and item[0] == "SPELL" and item[1] in valid_spells)]
                 elif target_kind == 'graveyard_card':
-                     # Use graveyard index relative to owner's graveyard
-                     p1_gy = gs.p1.get("graveyard", [])
-                     p2_gy = gs.p2.get("graveyard", [])
-                     valid_gy_cards = valid_targets_map.get("cards", [])
-                     for card_id in valid_gy_cards:
-                         gy_idx = -1
-                         if card_id in p1_gy: gy_idx = p1_gy.index(card_id)
-                         elif card_id in p2_gy: gy_idx = p2_gy.index(card_id)
-                         if gy_idx != -1: flat_valid_target_ids.append(gy_idx) # Add graveyard index
-                else: # Other specific types
-                    cat_key = target_kind + "s" if not target_kind.endswith('s') else target_kind
-                    flat_valid_target_ids.extend(valid_targets_map.get(cat_key,[]))
-
-                # Assign indices based on the flattened list order
-                for i, target_identifier in enumerate(list(set(flat_valid_target_ids))): # Use unique IDs
-                    valid_targets_info.append((target_identifier, i))
+                    valid_cards = set(valid_targets_map.get("card", []))
+                    flattened_graveyards = (
+                        list(gs.p1.get("graveyard", []))
+                        + list(gs.p2.get("graveyard", [])))
+                    target_indices = [
+                        index for index, card_id in
+                        enumerate(flattened_graveyards)
+                        if card_id in valid_cards]
 
         # Encode Indices (pad/truncate)
         encoded_indices = np.full(max_size, -1, dtype=dtype_for_space)
-        for i, (target_id, index) in enumerate(valid_targets_info):
-             if i >= max_size: break
-             # Use the calculated index `i` which corresponds to the agent's choice parameter
-             encoded_indices[i] = i
+        for output_index, target_index in enumerate(target_indices[:max_size]):
+            encoded_indices[output_index] = target_index
 
         return encoded_indices
 
@@ -4217,7 +4286,7 @@ class AlphaZeroMTGEnv(gym.Env):
         gs = self.game_state
         controllers = np.full(5, -1, dtype=np.int32) # -1=Empty, 0=Me, 1=Opp
         types = np.zeros((5, 5), dtype=np.float32) # Creature, Inst, Sorc, Ability, Other
-        for i, item in enumerate(reversed(stack[:5])): # Top 5 items
+        for i, item in enumerate(reversed(stack[-5:])): # Top 5 items
             if isinstance(item, tuple) and len(item) >= 3:
                 item_type, card_id, controller = item[:3]
                 card = gs._safe_get_card(card_id)

@@ -15869,10 +15869,238 @@ def s_bare_targets_damage_offers_only_damageable():
         "players went missing from any-target damage"
 
 
+@scenario("reward contract v3",
+          "state potential pays more for offense than defense and accelerates near lethal")
+def s_state_potential_prefers_offense():
+    gs = fresh(SEED + 918)
+    gs.agent_is_p1 = True
+    env = get_env()
+    me, opp = gs.p1, gs.p2
+
+    def potential(my_life, opp_life):
+        me['life'], opp['life'] = my_life, opp_life
+        return env._calculate_state_potential()
+
+    # v3-v6 stalled to the turn limit ~88% of the time: defense paid as
+    # well as offense and damage paid linearly, so nothing pushed play
+    # toward actually finishing. A point of opponent life must now be
+    # worth more than a point of own life, and the marginal value of
+    # damage must grow as the opponent approaches lethal.
+    gain_from_damage = potential(20, 19) - potential(20, 20)
+    loss_from_taking = potential(20, 20) - potential(19, 20)
+    assert gain_from_damage > loss_from_taking > 0, \
+        "damaging the opponent does not outweigh preserving own life"
+    early_marginal = potential(20, 19) - potential(20, 20)
+    late_marginal = potential(20, 1) - potential(20, 2)
+    assert late_marginal > early_marginal * 1.5, \
+        "the damage term is no longer convex toward lethal"
+    # Shaping stays a breadcrumb trail: the whole potential range must be
+    # small against the +-10 terminal rewards.
+    assert abs(potential(20, 1)) < 2.0 and env.state_potential_scale <= 0.5
+
+
+@scenario("observation protocol / combat",
+          "potential_combat_damage reports untapped attack-capable power")
+def s_potential_combat_damage_signal():
+    gs = fresh(SEED + 919)
+    gs.agent_is_p1 = True
+    env = get_env()
+    me = gs.p1
+
+    def battlefield_creature(name, power, oracle_text=""):
+        return inject_into_zone(gs, me, {
+            "name": name, "mana_cost": "{2}", "cmc": 2,
+            "type_line": "Creature — Soldier", "oracle_text": oracle_text,
+            "power": str(power), "toughness": "2",
+        }, "battlefield")
+
+    ready = battlefield_creature("Ready Soldier", 3)
+    me.get("entered_battlefield_this_turn", set()).discard(ready)
+    tapped = battlefield_creature("Tapped Soldier", 2)
+    me.get("entered_battlefield_this_turn", set()).discard(tapped)
+    me.setdefault("tapped_permanents", set()).add(tapped)
+    battlefield_creature("Summoning-Sick Soldier", 4)  # stays sick
+    battlefield_creature("Hasty Soldier", 5, oracle_text="Haste")
+    defender = battlefield_creature(
+        "Defender Wall", 9, oracle_text="Defender")
+    me.get("entered_battlefield_this_turn", set()).discard(defender)
+
+    obs = env._get_obs_safe()
+    # Declared since the observation space existed, but fed a constant
+    # zero until 7.80 — the agent had no direct "lethal on board?" signal.
+    assert int(obs["potential_combat_damage"][0]) == 3 + 5, \
+        (f"potential_combat_damage miscounted: "
+         f"{int(obs['potential_combat_damage'][0])} != 8")
+
+
+@scenario("observation protocol / liveness",
+          "targetable indices, attacker advisory, and phase history carry live signal")
+def s_observation_audit_revived_features():
+    gs = fresh(SEED + 920)
+    gs.agent_is_p1 = True
+    env = get_env()
+    me, opp = gs.p1, gs.p2
+
+    # --- phase_history: env-tracked transitions (old source was dead code).
+    env._observed_phase_history = []
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    env._get_obs_safe()
+    gs.phase = gs.PHASE_BEGIN_COMBAT
+    env._get_obs_safe()
+    gs.phase = gs.PHASE_DECLARE_ATTACKERS
+    obs = env._get_obs_safe()
+    assert list(obs["phase_history"][-3:]) == [
+        gs.PHASE_MAIN_PRECOMBAT, gs.PHASE_BEGIN_COMBAT,
+        gs.PHASE_DECLARE_ATTACKERS], \
+        "phase_history did not record the observed phase transitions"
+
+    # --- attacker advisory: the old gate checked a phantom method
+    # (find_optimal_attack) and never ran.
+    attacker = inject_into_zone(gs, me, {
+        "name": "Advisory Bear", "mana_cost": "{1}{G}", "cmc": 2,
+        "type_line": "Creature — Bear", "oracle_text": "",
+        "power": "3", "toughness": "3",
+    }, "battlefield")
+    me.get("entered_battlefield_this_turn", set()).discard(attacker)
+    inject_into_zone(gs, opp, {
+        "name": "Advisory Blocker", "mana_cost": "{1}{W}", "cmc": 2,
+        "type_line": "Creature — Soldier", "oracle_text": "",
+        "power": "2", "toughness": "2",
+    }, "battlefield")
+    from unittest.mock import patch
+    with patch.object(
+            type(env.action_handler), "find_optimal_attack",
+            return_value=[]):
+        obs = env._get_obs_safe()
+    attacker_index = me["battlefield"].index(attacker)
+    assert obs["attacker_values"][attacker_index] != 0, \
+        "attacker_values stayed dead for a legal attacker in an attack phase"
+    assert obs["optimal_attackers"][attacker_index] == 0.0, \
+        "optimal_attackers ignored the combat combination search"
+    with patch.object(
+            type(env.action_handler), "find_optimal_attack",
+            return_value=[attacker]):
+        obs = env._get_obs_safe()
+    assert obs["optimal_attackers"][attacker_index] == 1.0, \
+        "optimal_attackers omitted the combat search's selected attacker"
+    env.last_observation_error = None
+    env._get_obs_safe()
+    assert env.last_observation_error is None, \
+        "real combat search degraded the attacker advisory observation"
+
+    # --- targetable_* vectors: the helper read plural category keys from a
+    # singular-keyed map, so these were constant -1 since they existed.
+    bolt = inject_into_zone(gs, me, {
+        "name": "Audit Bolt", "mana_cost": "{R}", "cmc": 1,
+        "type_line": "Instant",
+        "oracle_text": "Audit Bolt deals 2 damage to any target.",
+    }, "hand")
+    victim = inject_into_zone(gs, opp, {
+        "name": "Victim Bear", "mana_cost": "{1}{G}", "cmc": 2,
+        "type_line": "Creature — Bear", "oracle_text": "",
+        "power": "2", "toughness": "2",
+    }, "battlefield")
+    gs.phase = gs.PHASE_TARGETING
+    gs.targeting_context = {
+        "source_id": bolt, "controller": me, "required_type": "any",
+        "selected_targets": [], "effect_text":
+            "Audit Bolt deals 2 damage to any target.",
+    }
+    obs = env._get_obs_safe()
+    assert (obs["targetable_permanents"] >= 0).any(), \
+        "targetable_permanents stayed -1 during the agent's targeting choice"
+    assert (obs["targetable_players"] >= 0).any(), \
+        "targetable_players stayed -1 for any-target damage"
+    gs.targeting_context = None
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+
+
+@scenario("observation protocol / exact indices",
+          "target summaries retain public indices and stack summaries use the top")
+def s_observation_exact_target_and_stack_indices():
+    from unittest.mock import patch
+
+    gs = fresh(SEED + 921)
+    gs.agent_is_p1 = True
+    env = get_env()
+    me, opp = gs.p1, gs.p2
+
+    source = inject_into_zone(gs, me, {
+        "name": "Index Audit", "mana_cost": "{U}", "cmc": 1,
+        "type_line": "Instant", "oracle_text": "Choose a target.",
+    }, "hand")
+    permanent = inject_into_zone(gs, opp, {
+        "name": "Indexed Permanent", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Creature — Bear", "oracle_text": "",
+        "power": "2", "toughness": "2",
+    }, "battlefield")
+    grave_card = inject_into_zone(gs, opp, {
+        "name": "Indexed Grave Card", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Sorcery", "oracle_text": "Draw a card.",
+    }, "graveyard")
+    stack_cards = [inject_card(gs, {
+        "name": f"Stack Spell {index}", "mana_cost": "{U}", "cmc": 1,
+        "type_line": "Instant", "oracle_text": "Draw a card.",
+    }) for index in range(6)]
+    gs.stack = [
+        ("SPELL", card_id, opp if index < 5 else me, {})
+        for index, card_id in enumerate(stack_cards)]
+    gs.phase = gs.PHASE_TARGETING
+    gs.targeting_context = {
+        "source_id": source, "controller": me,
+        "required_type": "any", "selected_targets": [],
+    }
+    valid_target_map = {
+        "creature": [permanent], "player": ["p2"],
+        "spell": [stack_cards[-1]], "card": [grave_card],
+    }
+    with patch.object(
+            type(gs.targeting_system), "get_valid_targets",
+            return_value=valid_target_map):
+        permanent_indices = env._get_potential_targets_vector("permanent")
+        player_indices = env._get_potential_targets_vector("player")
+        spell_indices = env._get_potential_targets_vector("spell")
+        graveyard_indices = env._get_potential_targets_vector(
+            "graveyard_card")
+
+    assert permanent_indices[0] == (
+        len(me["battlefield"]) + opp["battlefield"].index(permanent))
+    assert player_indices[0] == 1, \
+        "a lone P2 target was encoded as P1"
+    assert spell_indices[0] == 5, \
+        "the real stack index was replaced by its result ordinal"
+    assert graveyard_indices[0] == (
+        len(me["graveyard"]) + opp["graveyard"].index(grave_card))
+
+    stack_controllers, _ = env._get_stack_info(gs.stack, me)
+    assert stack_controllers[0] == 0, \
+        "stack summary did not begin with the top object"
+
+
+@scenario("observation protocol / planner freshness",
+          "strategic metrics refresh within a turn and across perspectives")
+def s_observation_planner_metrics_are_fresh_and_perspective_safe():
+    gs = fresh(SEED + 922)
+    env = get_env()
+    gs.agent_is_p1 = True
+    gs.p1["life"] = 20
+    gs.p2["life"] = 20
+
+    before = env.observation_for(gs.p1)
+    gs.p2["life"] = 15
+    after = env.observation_for(gs.p1)
+    opponent_view = env.observation_for(gs.p2)
+
+    assert after["strategic_metrics"][4] > before["strategic_metrics"][4], \
+        "same-turn life changes reused stale strategic analysis"
+    assert after["strategic_metrics"][4] == -opponent_view[
+        "strategic_metrics"][4], \
+        "opponent observation reused the other seat's strategic analysis"
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
-
 def main():
     print("Playersim rules scenario harness")
     print("=" * 64)

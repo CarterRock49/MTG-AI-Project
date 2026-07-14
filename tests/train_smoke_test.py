@@ -538,8 +538,8 @@ def check_runtime_configuration():
         "max_grad_norm": 0.77,
         "activation_fn": torch.nn.Tanh,
         "action_reward_scale": 0.02,
-        "state_potential_scale": 0.25,
-        "reward_contract_version": "discounted-state-potential-v2",
+        "state_potential_scale": 0.40,
+        "reward_contract_version": "discounted-state-potential-v3",
     }
 
     try:
@@ -610,7 +610,7 @@ def check_runtime_configuration():
     assert environment_calls[1][2]["alternate_agent_seat"] is True
     assert environment_calls[0][2]["reward_discount"] == 0.995
     assert environment_calls[0][2]["action_reward_scale"] == 0.02
-    assert environment_calls[0][2]["state_potential_scale"] == 0.25
+    assert environment_calls[0][2]["state_potential_scale"] == 0.40
 
 
 @stage("training failures are nonzero and never saved as final")
@@ -969,6 +969,14 @@ def check_extractor_registration(model):
     state_keys = list(extractor.state_dict().keys())
     assert any(k.startswith("extractors.") for k in state_keys), (
         "extractors.* missing from state_dict — the plain-dict bug is back")
+    intentionally_external = {"phase", "action_mask", "target_card_ids"}
+    expected_extractor_keys = (
+        set(model.observation_space.spaces) - intentionally_external)
+    assert set(extractor.extractors) == expected_extractor_keys, (
+        "observation fields silently omitted by the feature extractor: "
+        f"{sorted(expected_extractor_keys - set(extractor.extractors))}")
+    assert "ability_recommendations" in extractor.extractors, (
+        "rank-3 ability recommendations do not reach the policy")
 
     # 2. feature_merger must exist at construction time, before any forward().
     assert hasattr(extractor, "feature_merger"), (
