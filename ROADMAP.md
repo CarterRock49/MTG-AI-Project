@@ -28,34 +28,110 @@ no trained checkpoint has passed the paired-seat strength gate, matchup
 calibration has not run, format-wide card support remains incomplete, and the
 deck-builder feedback loop is not connected.
 
-### Verified Round 7.84 / Observation v2 baseline
+### Verified Round 7.86 / Observation v2 baseline
 
 The frozen v2 observation contract and its migration gates are green:
 
 | Gate | Result |
 | --- | --- |
-| Golden scenarios | 380/380 |
+| Golden scenarios | 399/399 |
 | Runtime smoke | 9/9 |
 | Training smoke | 13/13 |
+| Discovered unit tests | 207/207 |
 | Default invariant fuzz | 8/8 seeds × 1,000 valid actions, plus phase-boundary check |
+| Failed-run replay | exact 117-action trace reaches and executes Room action 250 cleanly |
 | Diff/whitespace check | clean |
 | Observation schema | v2 / `8b77a325816aec9fd6a8b7a8e924a2b936a092e163b81f2d0a22947387804ea8` |
 
 Standing broader gates last recorded green: 108/108 focused regressions,
-207/207 discovered unit tests, fixture Harvest 16/16, production Harvest
-protocol 16/16, card registry 19/19, deck ingestion 13/13, fuzz/replay
-configuration 6/6, and strict long fuzz 32 seeds × 10,000 valid actions.
+fixture Harvest 16/16, production Harvest protocol 16/16, card registry 19/19,
+deck ingestion 13/13, fuzz/replay configuration 6/6, and strict long fuzz 32
+seeds × 10,000 valid actions.
 
 ### Non-negotiable lineage rules
 
-- **Start every new policy from Round 7.84 or later.** Observation v2 changes
-  the extractor width and semantics; do not resume any earlier checkpoint.
+- **Start every new policy from Round 7.86 or later.** Observation v2 changes
+  the extractor width and semantics, and the first v2 run exposed additional
+  runtime-fidelity defects; do not resume any earlier checkpoint.
 - Do not mix pre-7.46 statistics with format-namespace statistics.
 - Statistics collected before July 2026 are unusable. They were affected by
   perspective, winner attribution, fabricated play-turn, first-strike, layer,
   and replacement-system defects and must be re-harvested.
 - Any future policy-observation change creates another explicit schema and
   checkpoint boundary.
+
+---
+
+## Latest run finding — `round-7.85-reward-v8` invalid, Round 7.86 repaired
+
+`ALPHA_ZERO_MTG_V3.00_20260714_172013_round-7.85-reward-v8` was interrupted
+at roughly 275k steps and is diagnostic-only. Its persisted training logs
+contain 600 games: 548 turn limits (91.3%), 41 decking losses, only 10
+life-total endings (1.7%), and zero fidelity-counter failures. The low lethal
+rate was not primarily a policy-strength result: the public damage phases
+allowed both players to pass directly to end of combat without ever invoking
+the combat resolver. A minimal unblocked 3-power attacker reproduced the
+failure with both masks exposing only Pass and the defender remaining at 20.
+
+Round 7.86 closes the live combat and reward defects exposed by that run:
+
+- Empty-stack double-pass now performs mandatory combat damage and fails
+  closed if the resolver does not mark the current damage step complete.
+  Multi-blocker ordering follows the same failure contract.
+- Attack declaration taps non-vigilance attackers, both seats use the active
+  turn player for damage ownership, and combatants persist through end of
+  combat before being cleared.
+- First-strike and regular damage are separate priority windows. Eligibility
+  is snapshotted, blocked status survives departed blockers, and double strike,
+  trample, planeswalker/battle targets, ordering, and simultaneous damage use
+  the preserved combat declaration.
+- Canonical source-damage events now cover players, creatures, planeswalkers,
+  and battles with correct source/controller/type filters. Printed and granted
+  lifelink share one actual-damage path and state-based actions wait until the
+  simultaneous batch, including lifelink, is complete.
+- Attackers and blockers beyond the 20-card detail window use the paged action
+  catalog; overflow blockers can also complete or withdraw sequential menace
+  declarations beyond the ten atomic multi-block targets.
+- Declaration completion has one public policy action instead of a duplicate
+  Pass alias. The scripted baseline opens overflow combat choices before
+  finishing declarations.
+- Reward contract v4 gives every turn-limit result a flat `-6`; a small life
+  lead can no longer earn `+2` by avoiding combat until timeout.
+
+This is a new reward/gameplay checkpoint boundary but not an Observation v2
+schema change. The observation hash remains
+`8b77a325816aec9fd6a8b7a8e924a2b936a092e163b81f2d0a22947387804ea8`.
+Do not resume the interrupted model, its best model, or its checkpoints.
+
+## Previous run finding — `reward-v7` invalid, Round 7.85 repaired
+
+The first full Observation v2 attempt,
+`ALPHA_ZERO_MTG_V3.00_20260714_155433_reward-v7`, is not a usable policy
+lineage. Strict fidelity correctly stopped it after a mask-valid Room unlock
+failed in environment 2. Its 25k–100k evaluation trend is diagnostic only;
+none of its best, checkpoint, or failed-model artifacts may be resumed,
+qualified, or harvested.
+
+Round 7.85 closes every issue found between the 7.84 freeze and that abort:
+
+- Combat lookahead now restores life, poison, counters, P/T, and combat-trigger
+  state after hypothetical damage, and damage accumulation no longer assumes a
+  pre-existing dictionary entry.
+- Stale attackers/blockers that already left the battlefield are excluded from
+  combat simulation; star-P/T objects outside the battlefield safely use zero
+  instead of raising on `None`.
+- Room unlock masks and execution share one land-aware affordability/payment
+  transaction. Generated actions pin controller, battlefield occurrence, Room
+  ID, and door number; execution auto-taps the lands accepted by the mask, and
+  full-unlock detection now reads the actual door dictionaries.
+- Earthbend's reminder-defined target is reconstructed for activated-ability
+  legality, target choice, stack validation, and resolution. Ba Sing Se now
+  commits a controlled land before it taps or pays mana, eliminating the empty
+  mandatory-target warning.
+
+These are gameplay and policy-boundary repairs, not an observation-contract
+change. Observation v2 remains at hash
+`8b77a325816aec9fd6a8b7a8e924a2b936a092e163b81f2d0a22947387804ea8`.
 
 ---
 
@@ -113,20 +189,23 @@ v2 throughput and memory alongside behavior telemetry.
 
 ## Current execution plan
 
-### Now — train the first Round 7.84 / Observation v2 policy
+### Now — train the first combat-valid Round 7.86 / Observation v2 policy
 
-1. Launch a fresh Standard candidate; never resume a pre-7.84 checkpoint. Use
-   `discounted-state-potential-v3` with `--n-envs 8`, `--eval-freq 25000`,
-   and `--eval-episodes 10`; confirm the manifest records strategy memory as
-   disabled.
-2. Read the run at roughly 300k steps. The required direction is a rising
+1. Freeze the repaired Round 7.86 source, then launch a fresh Standard
+   candidate; never resume `round-7.85-reward-v8`, either `reward-v7` run, or
+   any pre-7.86 checkpoint. Use `discounted-state-potential-v4` with
+   `--n-envs 8`, `--eval-freq 25000`, and `--eval-episodes 10`; confirm the
+   manifest records strategy memory as disabled.
+2. Treat 25k as a combat canary: manually inspect several action traces and
+   require actual attack declarations, combat-damage life changes, and no
+   resolver failures before spending another long run.
+3. Read the run again at roughly 300k steps. The required direction is a rising
    `terminal/life_total_rate`, a falling `terminal/turn_limit_rate`, improving
    episode reward, a stable critic, and zero fidelity/provenance failures.
-3. If the policy still stalls, investigate the scripted opponent's passivity
-   before changing the reward again. Earlier runs reached about 0.93 critic
-   explained variance while roughly 88% of episodes timed out; the model had
-   learned the stalled objective rather than failed to learn it.
-4. Record rollout steps/s, evaluator overhead, host/GPU memory, schema hash,
+4. If the policy still stalls, inspect attack/block choice frequencies and the
+   scripted opponent before changing the reward again. Earlier runs learned a
+   timeout-heavy objective while combat damage itself was unreachable.
+5. Record rollout steps/s, evaluator overhead, host/GPU memory, schema hash,
    registry hash, and checkpoint provenance. Keep schema and throughput code
    unchanged during the experiment so its result remains attributable.
 
@@ -301,7 +380,7 @@ The project is complete only when all of these are true:
 ## Checkpoint and schema boundaries
 
 Historical boundaries are retained here so old artifacts cannot be resumed by
-mistake. The practical rule remains: **use Round 7.84 or later.**
+mistake. The practical rule remains: **use Round 7.86 or later.**
 
 | Minimum round | Incompatible change |
 | --- | --- |
@@ -315,6 +394,8 @@ mistake. The practical rule remains: **use Round 7.84 or later.**
 | 7.82 | Exhaustive extractor routing and repaired observation semantics |
 | 7.83 | Frozen Observation v2, categorical card identity, public-state expansion, v1 compaction, and deterministic strategy-memory boundary |
 | 7.84 | Deterministic planner observations, hidden-information-safe inference, and removal of fake/dead planner inputs |
+| 7.85 | First-v2-run fidelity boundary: isolated combat simulation, live participant filtering, Room mask/payment parity, and Earthbend target commitment |
+| 7.86 | Mandatory public combat damage, split first-strike steps, preserved blocked status, canonical all-target damage/lifelink, overflow combat actions, and flat-timeout reward v4 |
 
 The canonical registry is append-only within the fixed identity capacity;
 appends change registry lineage without changing observation width. Changing
@@ -363,6 +444,15 @@ corpus, registry, both schema identities, policy, and checkpoint provenance.
   excluded face-down identities from opponent inference, removed fake exact
   hand/action inputs, compacted live strategy metrics, and pinned the final v2
   hash with purity regressions.
+- **7.85:** invalidated the first v2 training attempt after strict fidelity
+  caught a Room unlock mismatch; made combat lookahead state-pure and resilient
+  to stale/star-P/T participants, unified Room mask/payment execution, and
+  restored mandatory Earthbend targeting without changing the v2 schema hash.
+- **7.86:** invalidated the interrupted `round-7.85-reward-v8` lineage after
+  proving public passes skipped combat damage; made damage mandatory and
+  fail-closed, separated and snapshotted damage steps, preserved combat state,
+  unified source events and lifelink, opened overflow combat choices, and
+  removed the timeout life-lead incentive with reward contract v4.
 
 ### Institutional lessons retained from the silent-bug catalog
 

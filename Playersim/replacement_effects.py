@@ -196,12 +196,10 @@ class ReplacementEffectSystem:
              if effect_id:
                   registered_effects.append(effect_id)
 
-        # Check for lifelink
-        if "lifelink" in oracle_text.lower() or (hasattr(card, 'keywords') and
-                                            len(card.keywords) > 7 and card.keywords[7]):
-            effect_id = self._register_lifelink_effect(card_id, player)
-            if effect_id:
-                registered_effects.append(effect_id)
+        # Lifelink is applied by the canonical damage helpers after the final
+        # prevented/replaced amount is known. Registering a second delayed
+        # life-gain replacement here doubled printed lifelink while missing
+        # layer-granted lifelink.
 
         # Check for deathtouch
         if "deathtouch" in oracle_text.lower() or (hasattr(card, 'keywords') and

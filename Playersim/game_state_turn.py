@@ -524,8 +524,32 @@ class GameStateTurnMixin:
                 else:
                     # Advance phase only if stack is empty AND no special choice context is pending
                     if not (self.targeting_context or self.sacrifice_context or self.choice_context):
-                        self._advance_phase() # This resets priority and handles next phase start
-                    else: 
+                        # The damage-step phases double as the post-block
+                        # priority window in this sequential action API.  Once
+                        # both players pass with an empty stack, combat damage
+                        # is a mandatory turn-based action; it cannot be skipped
+                        # by advancing directly to end of combat.
+                        damage_pending = (
+                            self.phase in (
+                                self.PHASE_FIRST_STRIKE_DAMAGE,
+                                self.PHASE_COMBAT_DAMAGE,
+                            )
+                            and not getattr(
+                                self, "combat_damage_dealt", False)
+                        )
+                        if damage_pending:
+                            combat_handler = getattr(
+                                self, "combat_action_handler", None)
+                            if not combat_handler:
+                                raise RuntimeError(
+                                    "Combat damage is pending but no combat "
+                                    "action handler is installed")
+                            if not combat_handler.handle_assign_combat_damage():
+                                raise RuntimeError(
+                                    "Mandatory combat damage resolution failed")
+                        else:
+                            self._advance_phase() # This resets priority and handles next phase start
+                    else:
                         # If choice context pending, force priority to the chooser to prevent stuck state
                         chooser = None
                         if self.targeting_context: chooser = self.targeting_context.get("controller")
@@ -615,6 +639,20 @@ class GameStateTurnMixin:
                 next_idx = (current_idx + 1) % len(phase_sequence)
                 next_phase_in_sequence = phase_sequence[next_idx]
 
+                # Combatants remain attacking/blocking through the end-of-
+                # combat step, then cease being combatants as that step ends.
+                if current_phase_for_check == self.PHASE_END_OF_COMBAT:
+                    resolver = getattr(self, "combat_resolver", None)
+                    if resolver and hasattr(resolver, "_clear_combat_state"):
+                        resolver._clear_combat_state()
+                    else:
+                        self.current_attackers = []
+                        self.current_block_assignments = {}
+                        self.blocked_attackers_this_combat = set()
+                        self.first_strike_damage_dealt = False
+                        self.first_strike_damage_participants = set()
+                        self.exerted_this_combat = set()
+
                 # CR 500.8: a combat+main pair is inserted immediately after
                 # the phase in which the effect resolved, then the original
                 # turn sequence resumes. This differs from a bare additional
@@ -650,6 +688,9 @@ class GameStateTurnMixin:
                     self.extra_combat_phases -= 1
                     self.current_attackers = []
                     self.current_block_assignments = {}
+                    self.blocked_attackers_this_combat = set()
+                    self.first_strike_damage_dealt = False
+                    self.first_strike_damage_participants = set()
                     self.combat_damage_dealt = False
                     if hasattr(self, 'exerted_this_combat'):
                         self.exerted_this_combat = set()
@@ -764,6 +805,10 @@ class GameStateTurnMixin:
     def _reset_turn_tracking_variables(self):
         """Helper to reset variables at the start of a new turn."""
         self.combat_damage_dealt = False
+        self.first_strike_damage_dealt = False
+        self.first_strike_damage_participants = set()
+        self.blocked_attackers_this_combat = set()
+        self.exerted_this_combat = set()
         self.day_night_checked_this_turn = False
         self.spells_cast_this_turn = []
         self.attackers_this_turn = set()

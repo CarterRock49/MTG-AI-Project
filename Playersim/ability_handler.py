@@ -152,7 +152,69 @@ class AbilityHandler:
 
         return success
         
-    def handle_unlock_door(self, room_idx):
+    def get_unlockable_room_door(self, controller, room_idx, room_id=None,
+                                 door_number=None):
+        """Return one exact payable Room-door transaction, or ``None``.
+
+        Room unlocks are special actions whose masks count untapped lands.  The
+        execution path must use that same land-aware affordability predicate;
+        checking only floated mana made mask-valid unlocks fail at runtime.
+        ``room_id`` and ``door_number`` pin a generated action to the physical
+        Room and locked half that were inspected by the mask.
+        """
+        gs = self.game_state
+        battlefield = controller.get("battlefield", []) if controller else []
+        if (not isinstance(room_idx, int)
+                or not 0 <= room_idx < len(battlefield)
+                or not getattr(gs, "mana_system", None)
+                or not gs._can_act_at_sorcery_speed(controller)):
+            return None
+
+        live_room_id = battlefield[room_idx]
+        if room_id is not None and live_room_id != room_id:
+            return None
+        room_card = gs._safe_get_card(live_room_id)
+        if not room_card or not getattr(room_card, "is_room", False):
+            return None
+
+        if door_number is not None:
+            candidate_numbers = [door_number]
+        else:
+            # A normally cast Room has exactly one locked door. Preserve the
+            # legacy preference for door 2 if malformed/staged state has both.
+            candidate_numbers = [2, 1]
+        for candidate_number in candidate_numbers:
+            if candidate_number not in (1, 2):
+                continue
+            door = getattr(room_card, f"door{candidate_number}", None) or None
+            if not door or door.get("unlocked", False):
+                continue
+            cost_text = door.get("mana_cost", "")
+            if not cost_text:
+                continue
+            parsed_cost = gs.mana_system.parse_mana_cost(cost_text)
+            payment_context = {
+                "card_id": live_room_id,
+                "card": room_card,
+                "is_ability": True,
+                "cause": "room_unlock",
+            }
+            if not gs.mana_system.can_pay_mana_cost_with_lands(
+                    controller, parsed_cost, payment_context):
+                continue
+            return {
+                "room_id": live_room_id,
+                "room_card": room_card,
+                "door_number": candidate_number,
+                "door": door,
+                "cost_text": cost_text,
+                "parsed_cost": parsed_cost,
+                "payment_context": payment_context,
+            }
+        return None
+
+    def handle_unlock_door(self, room_idx, controller=None, room_id=None,
+                           door_number=None):
         """
         Handle unlocking a door on a Room card with proper trigger processing.
         Includes mana cost payment and trigger processing.
@@ -164,81 +226,26 @@ class AbilityHandler:
             bool: True if door was unlocked successfully.
         """
         gs = self.game_state
-        active_player = gs._get_active_player() # Use GS helper method
-
-        # Validate index
-        if not (0 <= room_idx < len(active_player.get("battlefield", []))): # Use get
-            logging.warning(f"Invalid room index: {room_idx}")
+        controller = controller or gs._get_active_player()
+        transaction = self.get_unlockable_room_door(
+            controller, room_idx, room_id=room_id, door_number=door_number)
+        if not transaction:
+            logging.debug(
+                "No payable locked Room door at index %s for %s.",
+                room_idx, controller.get("name", "unknown") if controller else "unknown")
             return False
 
-        # Get the room card
-        room_id = active_player["battlefield"][room_idx]
-        room_card = gs._safe_get_card(room_id)
-
-        # Verify it's a Room card
-        # *** FIXED typo card_room -> room_card ***
-        if not room_card or not hasattr(room_card, 'is_room') or not room_card.is_room:
-            logging.warning(f"Card {room_id} (index {room_idx}) is not a Room.")
-            return False
-
-        # --- Determine which door to unlock ---
-        # Assume action always targets the *next* locked door sequentially, or door 2 if available?
-        # For simplicity, let's try door 2 if it exists and is locked. If not, try door 1.
-        door_to_unlock_num = None
-        door_data = None
-
-        # An unparsed door is an empty dict; hasattr() was always true for
-        # it, which let single-door rooms "unlock" a nonexistent door 2 for
-        # free. Only consider doors that actually parsed with content.
-        door1 = getattr(room_card, 'door1', None) or None
-        door2 = getattr(room_card, 'door2', None) or None
-
-        if door2 and not door2.get('unlocked', False):
-            door_to_unlock_num = 2
-            door_data = door2
-        elif door1 and not door1.get('unlocked', False):
-             # Note: Door 1 unlocking might not always be an explicit action
-             # If door 1 has a cost, we can proceed. If not, it might unlock implicitly.
-             door1_cost = door1.get('mana_cost')
-             if door1_cost:
-                 door_to_unlock_num = 1
-                 door_data = door1
-             else:
-                 logging.debug(f"Door 1 of {room_card.name} has no cost, assumed implicitly unlocked or via other means.")
-                 # If Door 2 also doesn't exist or is unlocked, no action possible.
-                 if not door2 or door2.get('unlocked', False):
-                     logging.warning(f"No available doors to unlock for {room_card.name}.")
-                     return False
-
-
-        if door_to_unlock_num is None:
-             logging.warning(f"No lockable door found or selected for {room_card.name}.")
-             return False
-
-        # --- Get Door Cost ---
-        door_cost_str = door_data.get('mana_cost', '')
-        if not door_cost_str:
-            logging.warning(f"No mana cost defined for Door {door_to_unlock_num} of {room_card.name}. Assuming free?")
-            door_cost_str = "{0}" # Treat as free if no cost defined
-
-        # Check affordability using ManaSystem
-        parsed_cost_dict = None # Renamed for clarity
-        if hasattr(gs, 'mana_system') and gs.mana_system:
-             try:
-                 parsed_cost_dict = gs.mana_system.parse_mana_cost(door_cost_str)
-                 if not gs.mana_system.can_pay_mana_cost(active_player, parsed_cost_dict):
-                     logging.debug(f"Cannot afford to unlock Door {door_to_unlock_num} for {room_card.name} (Cost: {door_cost_str})")
-                     return False
-             except Exception as e:
-                  logging.error(f"Error checking mana cost for door unlock: {e}")
-                  return False
-        else:
-            logging.warning("Mana system not found, cannot check door unlock affordability.")
-            return False # Cannot proceed without mana system
-
-        # --- Pay the cost ---
-        if not gs.mana_system.pay_mana_cost(active_player, parsed_cost_dict): # Pass parsed cost
-            logging.warning(f"Failed to pay unlock cost {door_cost_str} for Door {door_to_unlock_num} of {room_card.name}")
+        room_id = transaction["room_id"]
+        room_card = transaction["room_card"]
+        door_to_unlock_num = transaction["door_number"]
+        door_data = transaction["door"]
+        door_cost_str = transaction["cost_text"]
+        if not gs.mana_system.pay_mana_cost(
+                controller, transaction["parsed_cost"],
+                transaction["payment_context"]):
+            logging.warning(
+                f"Failed to pay unlock cost {door_cost_str} for Door "
+                f"{door_to_unlock_num} of {room_card.name}")
             return False
 
         # Unlock the door (Update the card's state)
@@ -246,19 +253,19 @@ class AbilityHandler:
         logging.info(f"Unlocked Door {door_to_unlock_num} for Room {room_card.name}")
 
         # --- Check if fully unlocked ---
-        fully_unlocked = True
-        for n in [1, 2]: # Check standard door numbers
-             door_attr = f"door{n}"
-             if hasattr(room_card, door_attr):
-                  # Safely get nested attribute
-                  if not getattr(getattr(room_card, door_attr, {}),'unlocked', False):
-                       fully_unlocked = False; break
+        parsed_doors = [
+            door for door in (
+                getattr(room_card, "door1", None),
+                getattr(room_card, "door2", None))
+            if door]
+        fully_unlocked = bool(parsed_doors) and all(
+            door.get("unlocked", False) for door in parsed_doors)
 
         # --- Prepare context for triggers ---
         context = {
             "door_number": door_to_unlock_num,
             "room_id": room_id,
-            "controller": active_player,
+            "controller": controller,
             "cost_paid": door_cost_str,
             "fully_unlocked": fully_unlocked
         }
@@ -278,7 +285,7 @@ class AbilityHandler:
              if chapter_advanced:
                  chapter_context = {
                      "room_id": room_id,
-                     "controller": active_player,
+                     "controller": controller,
                      "chapter": getattr(room_card, 'current_chapter', None)
                  }
                  logging.debug(f"Room {room_card.name} advanced to chapter {chapter_context['chapter']}")
@@ -2132,6 +2139,21 @@ class AbilityHandler:
                 return True
         return available_power >= required_power
 
+    @staticmethod
+    def get_ability_targeting_text(ability):
+        """Return the targeting instruction used to announce an ability.
+
+        Some keyword reminder text is stripped before activated abilities are
+        registered. Earthbend still has a mandatory target by definition, so
+        reconstruct that instruction for mask, choice, and resolution paths.
+        """
+        effect_text = getattr(
+            ability, "effect", getattr(ability, "effect_text", "")) or ""
+        lowered = effect_text.lower()
+        if "earthbend" in lowered and "target" not in lowered:
+            return "Target land you control"
+        return effect_text
+
     def can_activate_ability(self, card_id, ability_index, controller):
         """Check if a specific activated ability can be activated"""
         activated_abilities = self.get_activated_abilities(card_id)
@@ -2154,8 +2176,7 @@ class AbilityHandler:
             # activated.  The execution handler already enforced this, but
             # the mask-side predicate checked costs only, exposing Floodpits
             # Drowner with no stun-counter creature to target.
-            effect_text = getattr(
-                ability, 'effect', getattr(ability, 'effect_text', '')) or ''
+            effect_text = self.get_ability_targeting_text(ability)
             if "target" in effect_text.lower():
                 minimum, _ = self.game_state._target_bounds_from_text(
                     effect_text)
@@ -2186,21 +2207,18 @@ class AbilityHandler:
                 # empty context made every generic activation resolve to nothing).
                 effect_text = getattr(ability, 'effect', '') or getattr(
                     ability, 'effect_text', '')
+                targeting_text = self.get_ability_targeting_text(ability)
                 stack_context = {
                     "ability": ability,
                     "effect_text": effect_text,
                 }
-                # Earthbend's target instruction lives only in the mechanic's
-                # reminder text, which parsers strip -- without this the
-                # ability reached resolution with no target ever chosen and
-                # EarthbendEffect fizzled with a warning. Mirror the trigger
-                # path: targets are chosen as the ability goes on the stack.
-                if ("earthbend" in (effect_text or '').lower()
-                        and "target" not in (effect_text or '').lower()):
-                    stack_context["targeting_text"] = "Target land you control"
+                if "target" in targeting_text.lower():
+                    stack_context["targeting_text"] = targeting_text
                     stack_context["target_choice_pending"] = True
                 self.game_state.add_to_stack(
                     "ABILITY", card_id, controller, stack_context)
+                if stack_context.get("target_choice_pending"):
+                    self.game_state.start_pending_stack_target_choice()
                 card = self.game_state._safe_get_card(card_id)
                 logging.debug(
                     f"Activated ability {ability_index} for "

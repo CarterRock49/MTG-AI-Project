@@ -48,6 +48,7 @@ class LeatherheadRuntimeTest(unittest.TestCase):
                 "controller": player,
                 "damage_amount": 5,
                 "to_player": True,
+                "is_combat_damage": True,
             },
         )
 
@@ -92,6 +93,7 @@ class LeatherheadRuntimeTest(unittest.TestCase):
                 "controller": player,
                 "damage_amount": 2,
                 "to_player": True,
+                "is_combat_damage": True,
             }))
         self.assertEqual(game_state.ability_handler.active_triggers, [])
 
@@ -100,6 +102,7 @@ class LeatherheadRuntimeTest(unittest.TestCase):
                 "controller": player,
                 "damage_amount": 5,
                 "to_player": False,
+                "is_combat_damage": True,
             }))
         self.assertEqual(game_state.ability_handler.active_triggers, [])
 

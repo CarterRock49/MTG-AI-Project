@@ -195,7 +195,7 @@ class GameStatePermanentsMixin:
             # Remove the effect record
             self.temp_control_effects.pop(card_id, None)
 
-    def add_defense_counter(self, card_id, count=1):
+    def add_defense_counter(self, card_id, count=1, defer_defeat=False):
         """
         Add defense counters to a battle card.
         
@@ -235,7 +235,7 @@ class GameStatePermanentsMixin:
         logging.debug(f"Changed defense counters on battle card {card.name} by {count}, now has {new_defense}")
         
         # If defense reaches 0, sacrifice the battle
-        if new_defense == 0:
+        if new_defense == 0 and not defer_defeat:
             self.move_card(card_id, card_owner, "battlefield", card_owner, "graveyard")
             logging.debug(f"Battle card {card.name} lost all defense counters and was sacrificed")
         

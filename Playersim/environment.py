@@ -43,7 +43,7 @@ class AlphaZeroMTGEnv(gym.Env):
     Updated for improved reward shaping, richer observations, modularity, and detailed logging.
     """
     ACTION_SPACE_SIZE = 480 # Moved constant here
-    REWARD_CONTRACT_VERSION = "discounted-state-potential-v3"
+    REWARD_CONTRACT_VERSION = "discounted-state-potential-v4"
     DEFAULT_REWARD_DISCOUNT = 0.995
     DEFAULT_ACTION_REWARD_SCALE = 0.02
     DEFAULT_STATE_POTENTIAL_SCALE = 0.40
@@ -1697,19 +1697,8 @@ class AlphaZeroMTGEnv(gym.Env):
                 terminal_reason = self._terminal_reason(env_info)
                 env_info["terminal_reason"] = terminal_reason
                 result = env_info.get("game_result", "draw")
-                if terminal_reason == "turn_limit":
-                    # Timing out must never approximate winning: the v1 run's
-                    # rollouts ended at the turn limit 88% of the time because
-                    # a life-lead timeout paid half a real win. Every timeout
-                    # outcome is now clearly worse than closing the game out,
-                    # while surviving to the limit still beats dying (-10).
-                    terminal_reward = {
-                        "win": 2.0, "loss": -8.0, "draw": -4.0,
-                    }.get(result, -4.0)
-                else:
-                    terminal_reward = {
-                        "win": 10.0, "loss": -10.0, "draw": -0.25,
-                    }.get(result, -0.25)
+                terminal_reward = self._terminal_outcome_reward(
+                    terminal_reason, result)
                 step_reward += terminal_reward
 
             env_info["reward_components"] = {
@@ -2087,6 +2076,8 @@ class AlphaZeroMTGEnv(gym.Env):
                 for action_idx in range(28, 48):
                     if opponent_mask[action_idx]:
                         return choose(action_idx)
+                if opponent_mask[479]:
+                    return choose(479)
                 if opponent_mask[438]:
                     return choose(438)
             if gs.phase == gs.PHASE_DECLARE_BLOCKERS:
@@ -2119,6 +2110,8 @@ class AlphaZeroMTGEnv(gym.Env):
                 for action_idx in range(383, 393):
                     if opponent_mask[action_idx]:
                         return choose(action_idx)
+                if opponent_mask[479]:
+                    return choose(479)
                 if opponent_mask[439]:
                     return choose(439)
 
@@ -2532,6 +2525,21 @@ class AlphaZeroMTGEnv(gym.Env):
                     self.ACTION_SPACE_SIZE, dtype=bool)
                 obs["action_mask"][12] = True
         return self._coerce_observation(obs)
+
+    @staticmethod
+    def _terminal_outcome_reward(terminal_reason, result):
+            """Map a terminal category/result to the training objective.
+
+            A turn-limit life lead is useful for evaluation diagnostics, but
+            it is not a win. Giving that label a positive terminal reward made
+            it rational to establish a small lead and avoid risky combat. All
+            timeouts therefore share one penalty, independent of life totals.
+            """
+            if terminal_reason == "turn_limit":
+                return -6.0
+            return {
+                "win": 10.0, "loss": -10.0, "draw": -0.25,
+            }.get(result, -0.25)
 
     def _terminal_reason(self, info=None):
             """Return a stable terminal category for logs and reward policy."""

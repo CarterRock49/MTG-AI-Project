@@ -431,8 +431,50 @@ class GameStateDamageMixin:
 
         return initial_actions_performed
 
+    def _emit_source_damage_event(self, source_id, target_id, amount, *,
+                                  target_player=None, target_card=None,
+                                  is_combat_damage=False):
+        """Emit the canonical event for damage that was actually dealt.
+
+        Damage replacements and prevention run in the target-specific helpers,
+        so callers invoke this only after the final positive amount is known.
+        Keeping the event in one place makes source-side triggers work for
+        players, creatures, planeswalkers, and battles alike.
+        """
+        if amount <= 0 or source_id is None:
+            return False
+        source_card = self._safe_get_card(source_id)
+        if source_card is None:
+            return False
+        source_controller = self.get_card_controller(source_id)
+        return bool(self.trigger_ability(source_id, "DEALS_DAMAGE", {
+            "controller": source_controller,
+            "source_id": source_id,
+            "source_card_id": source_id,
+            "event_card_id": source_id,
+            "source_card": source_card,
+            "target_id": target_id,
+            "target_player": target_player,
+            "target_card": target_card,
+            "damage_amount": amount,
+            "to_player": target_player is not None,
+            "is_combat": bool(is_combat_damage),
+            "is_combat_damage": bool(is_combat_damage),
+        }))
+
+    def _apply_lifelink_for_damage(self, source_id, amount):
+        """Apply lifelink once for damage that actually happened."""
+        if amount <= 0 or source_id is None:
+            return
+        if not hasattr(self, 'check_keyword') or not self.check_keyword(
+                source_id, "lifelink"):
+            return
+        controller = self.get_card_controller(source_id)
+        if controller:
+            self.handle_lifelink_gain(source_id, controller, amount)
+
     def damage_planeswalker(self, planeswalker_id, amount, source_id,
-                            defer_sba=False):
+                            defer_sba=False, is_combat_damage=False):
         """Deal damage to a planeswalker (removes loyalty counters). Returns actual damage dealt."""
         pw_card = self._safe_get_card(planeswalker_id)
         owner = self.get_card_controller(planeswalker_id)
@@ -440,7 +482,7 @@ class GameStateDamageMixin:
             return 0 # Indicate no damage applied
 
         # Apply damage replacement effects targeting this planeswalker
-        damage_context = { "source_id": source_id, "target_id": planeswalker_id, "target_obj": pw_card, "target_is_player": False, "damage_amount": amount, "is_combat_damage": False } # Assume non-combat unless context passed
+        damage_context = { "source_id": source_id, "target_id": planeswalker_id, "target_obj": pw_card, "target_is_player": False, "damage_amount": amount, "is_combat_damage": is_combat_damage }
         actual_damage = amount
         if hasattr(self, 'replacement_effects'):
             modified_context, was_replaced = self.replacement_effects.apply_replacements("DAMAGE", damage_context)
@@ -455,14 +497,25 @@ class GameStateDamageMixin:
             # Use a dedicated method to remove loyalty counters
             counters_removed = self._remove_loyalty_counters(planeswalker_id, owner, actual_damage)
 
-            if counters_removed > 0:
-                source_name = getattr(self._safe_get_card(source_id),'name',source_id)
-                current_loyalty = owner.get("loyalty_counters", {}).get(planeswalker_id, 0)
-                logging.debug(f"{source_name} dealt {counters_removed} damage to {pw_card.name}. Loyalty now {current_loyalty}")
-                self.trigger_ability(planeswalker_id, "DAMAGED", {"amount": counters_removed, "source_id": source_id})
-                if not defer_sba:
-                    self.check_state_based_actions() # PW might leave
-                return counters_removed # Return damage actually applied as counter removal
+            source_name = getattr(
+                self._safe_get_card(source_id), 'name', source_id)
+            current_loyalty = owner.get(
+                "loyalty_counters", {}).get(planeswalker_id, 0)
+            logging.debug(
+                f"{source_name} dealt {actual_damage} damage to "
+                f"{pw_card.name}, removing {counters_removed} loyalty. "
+                f"Loyalty now {current_loyalty}")
+            self.trigger_ability(
+                planeswalker_id, "DAMAGED",
+                {"amount": actual_damage, "source_id": source_id})
+            self._emit_source_damage_event(
+                source_id, planeswalker_id, actual_damage,
+                target_card=pw_card,
+                is_combat_damage=is_combat_damage)
+            self._apply_lifelink_for_damage(source_id, actual_damage)
+            if not defer_sba:
+                self.check_state_based_actions() # PW might leave
+            return actual_damage
         return 0 # No damage applied or counters removed
 
     def _remove_loyalty_counters(self, planeswalker_id, owner, amount):
@@ -475,7 +528,8 @@ class GameStateDamageMixin:
         owner.setdefault("loyalty_counters", {})[planeswalker_id] = new_loyalty
         return amount_to_remove
 
-    def damage_battle(self, battle_id, amount, source_id):
+    def damage_battle(self, battle_id, amount, source_id,
+                      is_combat_damage=False, defer_sba=False):
         """Deal damage to a battle (removes defense counters). Returns actual damage dealt."""
         battle_card = self._safe_get_card(battle_id)
         owner = self.get_card_controller(battle_id)
@@ -483,7 +537,7 @@ class GameStateDamageMixin:
             return 0 # Indicate no damage applied
 
         # Apply damage replacement effects targeting this battle
-        damage_context = { "source_id": source_id, "target_id": battle_id, "target_obj": battle_card, "target_is_player": False, "damage_amount": amount, "is_combat_damage": False } # Assume non-combat unless context passed
+        damage_context = { "source_id": source_id, "target_id": battle_id, "target_obj": battle_card, "target_is_player": False, "damage_amount": amount, "is_combat_damage": is_combat_damage }
         actual_damage = amount
         if hasattr(self, 'replacement_effects'):
             modified_context, was_replaced = self.replacement_effects.apply_replacements("DAMAGE", damage_context)
@@ -496,18 +550,25 @@ class GameStateDamageMixin:
 
         if actual_damage > 0:
             # Use add_defense_counter with negative amount
-            success = self.add_defense_counter(battle_id, -actual_damage)
+            success = self.add_defense_counter(
+                battle_id, -actual_damage, defer_defeat=defer_sba)
             if success:
                 source_name = getattr(self._safe_get_card(source_id),'name',source_id)
                 current_defense = getattr(self,'battle_cards',{}).get(battle_id,0) # Read current defense
                 logging.debug(f"{source_name} dealt {actual_damage} damage to {battle_card.name}. Defense now {current_defense}")
                 self.trigger_ability(battle_id, "DAMAGED", {"amount": actual_damage, "source_id": source_id})
-                # SBA check for battle defeat handled within add_defense_counter or separate SBA check
-                self.check_state_based_actions()
+                self._emit_source_damage_event(
+                    source_id, battle_id, actual_damage,
+                    target_card=battle_card,
+                    is_combat_damage=is_combat_damage)
+                self._apply_lifelink_for_damage(source_id, actual_damage)
+                if not defer_sba:
+                    self.check_state_based_actions()
                 return actual_damage # Return damage successfully applied
         return 0 # No damage applied
 
-    def damage_player(self, player, amount, source_id, is_combat_damage=False):
+    def damage_player(self, player, amount, source_id, is_combat_damage=False,
+                      defer_sba=False):
         """Deals damage to a player, applying replacements. Returns actual damage dealt."""
         if not player or amount <= 0: return 0
 
@@ -535,7 +596,13 @@ class GameStateDamageMixin:
             # Trigger "damaged" or "lost life" events
             self.trigger_ability(None, "PLAYER_DAMAGED", {"player": player, "amount": actual_damage, "source_id": source_id})
             self.trigger_ability(None, "LOSE_LIFE", {"player": player, "amount": actual_damage, "source_id": source_id})
-            self.check_state_based_actions() # Player might lose
+            self._emit_source_damage_event(
+                source_id, player_id, actual_damage,
+                target_player=player,
+                is_combat_damage=is_combat_damage)
+            self._apply_lifelink_for_damage(source_id, actual_damage)
+            if not defer_sba:
+                self.check_state_based_actions() # Player might lose
             return actual_damage
         return 0
 
@@ -642,6 +709,11 @@ class GameStateDamageMixin:
              logging.debug(f"{source_name} marked {actual_damage} damage on {target_card.name}{' (Deathtouch)' if has_deathtouch else ''}.")
              # Trigger DAMAGED event immediately after marking
              self.trigger_ability(target_id, "DAMAGED", {"amount": actual_damage, "source_id": source_id, "is_combat": is_combat_damage})
+             self._emit_source_damage_event(
+                 source_id, target_id, actual_damage,
+                 target_card=target_card,
+                 is_combat_damage=is_combat_damage)
+             self._apply_lifelink_for_damage(source_id, actual_damage)
              # SBA check will happen later in the game loop
              return actual_damage # Return damage actually marked
         return 0 # No damage applied

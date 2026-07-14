@@ -311,7 +311,7 @@ revision and dirty state, CLI and resolved configuration, device and dependency
 inventory, deck/lineage provenance, lifecycle result, and artifact paths. A
 dirty run also stores a hashed `source_worktree.patch` beside the manifest.
 
-> **Checkpoint boundary (Round 7.84 / Observation v2).** The full Standard namespace widened card
+> **Checkpoint boundary (Round 7.86 / Observation v2).** The full Standard namespace widened card
 > observations to 436 fields (259 subtype fields plus MDFC fields), signed live
 > power/toughness, and count/stat bounds large enough for legal boards above 20
 > permanents. Round 7.62 also widened the declared choice-count, allocation, and
@@ -338,9 +338,21 @@ dirty run also stores a hashed `source_worktree.patch` beside the manifest.
 > pre-training planner audit: observation reads no longer consume RNG,
 > face-down cards cannot shape archetype inference, fake exact opponent-hand
 > estimates and disabled action recommendations are removed, and the strategic
-> metric vector contains only its seven live values.
-> **Do not resume a checkpoint created before Round 7.84** — start fresh
-> without `--resume`.
+> metric vector contains only its seven live values. Round 7.85 keeps the same
+> Observation v2 hash while repairing combat-lookahead state isolation, stale
+> combat participants, Room unlock mask/payment parity, and Ba Sing Se's
+> mandatory Earthbend target commitment. The failed July 14 `reward-v7` run is
+> diagnostic-only. Round 7.86 keeps the Observation v2 hash but makes public
+> combat damage mandatory, separates and snapshots first-strike/regular steps,
+> preserves blocked status and end-of-combat participants, emits canonical
+> all-target damage events, unifies printed/granted lifelink, opens overflow
+> combat actions, and changes the reward lineage to
+> `discounted-state-potential-v4` (all turn-limit outcomes pay `-6`). The
+> interrupted `round-7.85-reward-v8` run skipped combat damage and is also
+> diagnostic-only.
+> **Do not resume a checkpoint created before Round 7.86, including the failed
+> `reward-v7` or `round-7.85-reward-v8` artifacts** — start fresh without
+> `--resume`.
 
 ### Hyperparameter optimization
 

@@ -54,13 +54,20 @@ class CombatHandlersMixin:
     def _handle_attack(self, param, **kwargs):
         gs = self.game_state
         player = gs._get_active_player()
-        battlefield_idx = param
+        context = kwargs.get("context", {}) or {}
+        battlefield_idx = int(context.get("battlefield_idx", param))
 
-        if battlefield_idx >= len(player.get("battlefield", [])):
+        if not 0 <= battlefield_idx < len(player.get("battlefield", [])):
             logging.warning(f"ATTACK: Invalid battlefield index {battlefield_idx}")
             return -0.2, False
 
         card_id = player["battlefield"][battlefield_idx]
+        pinned_card_id = context.get("card_id")
+        if pinned_card_id is not None and pinned_card_id != card_id:
+            logging.warning(
+                "ATTACK: Pinned card %s no longer occupies battlefield slot %s",
+                pinned_card_id, battlefield_idx)
+            return -0.2, False
         card = gs._safe_get_card(card_id)
         if not card: return -0.2, False
 
@@ -97,14 +104,20 @@ class CombatHandlersMixin:
     def _handle_block(self, param, **kwargs):
         gs = self.game_state
         blocker_player = gs._get_non_active_player()
-        battlefield_idx = param
         context = kwargs.get('context', {})
+        battlefield_idx = int(context.get("battlefield_idx", param))
 
-        if battlefield_idx >= len(blocker_player.get("battlefield", [])):
+        if not 0 <= battlefield_idx < len(blocker_player.get("battlefield", [])):
             logging.warning(f"BLOCK: Invalid battlefield index {battlefield_idx}")
             return -0.2, False
 
         blocker_id = blocker_player["battlefield"][battlefield_idx]
+        pinned_card_id = context.get("card_id")
+        if pinned_card_id is not None and pinned_card_id != blocker_id:
+            logging.warning(
+                "BLOCK: Pinned card %s no longer occupies battlefield slot %s",
+                pinned_card_id, battlefield_idx)
+            return -0.2, False
         blocker_card = gs._safe_get_card(blocker_id)
         if not blocker_card or 'creature' not in getattr(blocker_card, 'card_types', []):
              logging.warning(f"BLOCK: {blocker_id} is not a creature.")

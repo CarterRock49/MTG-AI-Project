@@ -428,6 +428,9 @@ class CombatActionHandler:
             "battle_attack_targets": {},
             "planeswalker_protectors": {},
             "first_strike_ordering": {},
+            "blocked_attackers_this_combat": set(),
+            "first_strike_damage_participants": set(),
+            "first_strike_damage_dealt": False,
             "combat_damage_dealt": False
         }
         for attr, default in attrs_defaults.items():
@@ -436,6 +439,8 @@ class CombatActionHandler:
             elif attr == "current_block_assignments": # Ensure nested dicts are cleared
                 getattr(gs, attr).clear()
             elif isinstance(default, list): # Clear lists
+                 getattr(gs, attr).clear()
+            elif isinstance(default, set):
                  getattr(gs, attr).clear()
             elif isinstance(default, dict): # Clear dicts
                  getattr(gs, attr).clear()
@@ -467,6 +472,7 @@ class CombatActionHandler:
         damage_assignments = param # Map param to expected argument
         gs = self.game_state
         if not gs.combat_resolver: return False
+        damage_phase = gs.phase
 
         if damage_assignments:
              # Apply manual assignments
@@ -484,15 +490,34 @@ class CombatActionHandler:
                  return True
              # Auto-resolve damage if no ordering choice is needed
              _ = gs.combat_resolver.resolve_combat() # Resolve combat automatically
-             success = True
+             success = self._finish_damage_step(damage_phase)
+             if not success:
+                  logging.error(
+                      "Combat resolver returned without marking the current "
+                      "damage step complete.")
+             return success
 
-        if success:
-             # Move to next phase (End of Combat) if damage resolution succeeded
-             gs._empty_mana_pools()
-             gs.phase = gs.PHASE_END_OF_COMBAT
-             gs.priority_player = gs._get_active_player()
-             gs.priority_pass_count = 0
-        return success
+        if not success:
+            return False
+        return self._finish_damage_step(damage_phase)
+
+    def _finish_damage_step(self, damage_phase):
+        """Validate resolver completion and enter the next combat step."""
+        gs = self.game_state
+        if damage_phase == gs.PHASE_FIRST_STRIKE_DAMAGE:
+            if not getattr(gs, "first_strike_damage_dealt", False):
+                return False
+            # This is the actual between-damage-steps priority window.
+            gs._advance_phase()
+            return gs.phase == gs.PHASE_COMBAT_DAMAGE
+
+        if not getattr(gs, "combat_damage_dealt", False):
+            return False
+        gs._empty_mana_pools()
+        gs.phase = gs.PHASE_END_OF_COMBAT
+        gs.priority_player = gs._get_active_player()
+        gs.priority_pass_count = 0
+        return True
 
     def begin_blocker_order_choice(self):
         """Open an ``order_blockers`` choice under CR 510.1c.
@@ -530,6 +555,12 @@ class CombatActionHandler:
             'remaining_attackers': [a for a, _ in needs_order[1:]],
             'source_id': first_attacker,
             'resolved': False,
+            'damage_phase': (
+                gs.previous_priority_phase
+                if gs.previous_priority_phase in (
+                    gs.PHASE_FIRST_STRIKE_DAMAGE,
+                    gs.PHASE_COMBAT_DAMAGE)
+                else gs.PHASE_COMBAT_DAMAGE),
         }
         gs.priority_pass_count = 0
         gs.priority_player = chooser
@@ -573,14 +604,15 @@ class CombatActionHandler:
         # the deferred combat resolution (mirrors handle_assign_combat_damage's
         # tail).
         gs.choice_context = None
-        prev = getattr(gs, 'previous_priority_phase', None)
+        prev = ctx.get('damage_phase') or getattr(
+            gs, 'previous_priority_phase', None)
         if prev is not None:
             gs.phase = prev
         _ = gs.combat_resolver.resolve_combat()
-        gs._empty_mana_pools()
-        gs.phase = gs.PHASE_END_OF_COMBAT
-        gs.priority_player = gs._get_active_player()
-        gs.priority_pass_count = 0
+        if not self._finish_damage_step(prev):
+            logging.error(
+                "Combat resolver failed after damage-assignment ordering.")
+            return False
         return True
 
     def handle_attack_battle(self, param=None, context=None, **kwargs):
@@ -802,6 +834,13 @@ class CombatActionHandler:
         if not hasattr(gs, 'attackers_this_turn') or gs.attackers_this_turn is None:
             gs.attackers_this_turn = set()
         for attacker_id in list(getattr(gs, 'current_attackers', [])):
+            attacker = gs._safe_get_card(attacker_id)
+            controller = gs.get_card_controller(attacker_id)
+            if (attacker and controller
+                    and not self._has_keyword(attacker, "vigilance")):
+                # CR 508.1f: tapping is part of declaring the creature as an
+                # attacker, before attack triggers are put on the stack.
+                gs.tap_permanent(attacker_id, controller)
             first_attack = attacker_id not in gs.attackers_this_turn
             gs.attackers_this_turn.add(attacker_id)
             if hasattr(gs, 'ability_handler') and gs.ability_handler:
@@ -834,14 +873,22 @@ class CombatActionHandler:
                 getattr(attacker_card, 'name', incomplete_menace))
             return False
 
+        gs.blocked_attackers_this_combat = {
+            attacker_id
+            for attacker_id, blockers in gs.current_block_assignments.items()
+            if blockers
+        }
+
         # Determine if First Strike combat step is needed
-        needs_first_strike_step = False
+        first_strike_participants = set()
         combatants = gs.current_attackers[:]
         for blockers in gs.current_block_assignments.values(): combatants.extend(blockers)
         for cid in combatants:
              card = gs._safe_get_card(cid)
              if card and (self._has_keyword(card, "first strike") or self._has_keyword(card, "double strike")):
-                  needs_first_strike_step = True; break
+                  first_strike_participants.add(cid)
+        gs.first_strike_damage_participants = first_strike_participants
+        needs_first_strike_step = bool(first_strike_participants)
 
         if needs_first_strike_step:
              gs._empty_mana_pools()
@@ -852,6 +899,7 @@ class CombatActionHandler:
              gs.phase = gs.PHASE_COMBAT_DAMAGE
              logging.debug("Ended Declare Blockers. Moving to Combat Damage (no first strike).")
 
+        gs.first_strike_damage_dealt = False
         gs.combat_damage_dealt = False # Reset flag before damage steps
         gs.priority_player = gs._get_active_player() # Priority back to active player for damage step
         gs.priority_pass_count = 0
@@ -989,8 +1037,9 @@ class CombatActionHandler:
             for blocker_id in blockers)
         defender = gs._get_non_active_player()
         available_count = 0
-        # Only slots 0-19 have ordinary BLOCK actions (48-67).
-        for candidate_id in defender.get('battlefield', [])[:20]:
+        # Slots beyond 19 are exposed through the paged action catalog and are
+        # just as independently selectable as the fixed BLOCK actions.
+        for candidate_id in defender.get('battlefield', []):
             if assigned_remaining[candidate_id] > 0:
                 assigned_remaining[candidate_id] -= 1
                 continue
@@ -1198,10 +1247,11 @@ class CombatActionHandler:
     def _add_attack_declaration_actions(self, player, opponent, valid_actions, set_valid_action):
         """Adds actions specific to the Declare Attackers step. (Called by ActionHandler)"""
         gs = self.game_state
+        overflow_actions = []
         # Declare Attackers
         possible_attackers = []
         player_battlefield = player.get("battlefield", [])
-        for i in range(min(len(player_battlefield), 20)): # Indices 0-19 map to actions 28-47
+        for i in range(len(player_battlefield)):
             try:
                 card_id = player_battlefield[i]
                 # ATTACK is a declaration action in the public policy API, not
@@ -1217,7 +1267,20 @@ class CombatActionHandler:
                 if self.is_valid_attacker(card_id):
                     card = gs._safe_get_card(card_id)
                     card_name = getattr(card, 'name', f'Creature {i}')
-                    set_valid_action(28 + i, f"ATTACK with {card_name}")
+                    if i < 20:  # Direct policy slots 28-47.
+                        set_valid_action(28 + i, f"ATTACK with {card_name}")
+                    else:
+                        overflow_actions.append({
+                            "label": f"ATTACK with {card_name}",
+                            # The exact battlefield occurrence is pinned in the
+                            # context; action 28 supplies the public ATTACK
+                            # dispatcher without pretending this is slot zero.
+                            "action_index": 28,
+                            "action_context": {
+                                "battlefield_idx": i,
+                                "card_id": card_id,
+                            },
+                        })
                     possible_attackers.append((i, card_id)) # Store index and ID
             except IndexError:
                 logging.warning(f"Combat Handler: IndexError accessing battlefield for ATTACK at index {i}")
@@ -1248,18 +1311,20 @@ class CombatActionHandler:
         # Always allow finishing declaration if player has declared at least one action or no valid attacks
         # Corrected from 433 to 438 to match ACTION_MEANINGS
         set_valid_action(438, "Finish Declaring Attackers")
+        return overflow_actions
 
     def _add_block_declaration_actions(self, player, valid_actions, set_valid_action):
         """Adds actions specific to the Declare Blockers step. (Called by ActionHandler)"""
         gs = self.game_state
+        overflow_actions = []
         if not getattr(gs, 'current_attackers', []):
             set_valid_action(439, "Finish Declaring No Blockers")
-            return
+            return overflow_actions
 
         player_battlefield = player.get("battlefield", [])
         possible_blockers = []
         live_assignments = self._live_block_assignments()
-        for i in range(min(len(player_battlefield), 20)): # Indices 0-19 map to actions 48-67
+        for i in range(len(player_battlefield)):
             try:
                 card_id = player_battlefield[i]
                 card = gs._safe_get_card(card_id)
@@ -1276,9 +1341,23 @@ class CombatActionHandler:
                             and self._has_keyword(attacker_card, "menace")
                             and len(live_assignments.get(
                                 blocking_attacker, [])) == 1):
-                        set_valid_action(
-                            48 + i,
-                            f"Withdraw incomplete menace block with {card_name}")
+                        withdraw_context = {
+                            "battlefield_idx": i,
+                            "card_id": card_id,
+                        }
+                        if i < 20:
+                            set_valid_action(
+                                48 + i,
+                                f"Withdraw incomplete menace block with {card_name}",
+                                context=withdraw_context)
+                        else:
+                            overflow_actions.append({
+                                "label": (
+                                    "Withdraw incomplete menace block with "
+                                    f"{card_name}"),
+                                "action_index": 48,
+                                "action_context": withdraw_context,
+                            })
                     continue
 
                 if ('creature' not in getattr(card, 'card_types', [])
@@ -1320,9 +1399,21 @@ class CombatActionHandler:
 
                         target_attacker_id = max(
                             ordinary_targets, key=target_priority)
-                        set_valid_action(
-                            48 + i, f"Assign Block with {card_name}",
-                            context={"target_attacker_id": target_attacker_id})
+                        block_context = {
+                            "battlefield_idx": i,
+                            "card_id": card_id,
+                            "target_attacker_id": target_attacker_id,
+                        }
+                        if i < 20:  # Direct policy slots 48-67.
+                            set_valid_action(
+                                48 + i, f"Assign Block with {card_name}",
+                                context=block_context)
+                        else:
+                            overflow_actions.append({
+                                "label": f"Assign Block with {card_name}",
+                                "action_index": 48,
+                                "action_context": block_context,
+                            })
             except IndexError:
                 logging.warning(f"Combat Handler: IndexError accessing battlefield for BLOCK at index {i}")
                 break
@@ -1389,25 +1480,17 @@ class CombatActionHandler:
         # public mask aligned with that same completed-declaration predicate.
         if self._can_finish_block_declaration():
             set_valid_action(439, "Finish Declaring Blockers")
+        return overflow_actions
 
 
     def _add_combat_damage_actions(self, player, valid_actions, set_valid_action):
-        """Adds actions for assigning combat damage order if needed. (Called by ActionHandler)"""
-        gs = self.game_state
-        # Check if damage assignment order is needed (multiple blockers assigned)
-        needs_order_assignment = False
-        for attacker_id, blockers in gs.current_block_assignments.items():
-            if len(blockers) > 1:
-                attacker_card = gs._safe_get_card(attacker_id)
-                # Check power to see if damage assignment matters
-                if attacker_card and (getattr(attacker_card, 'power', 0) or 0) > 0:
-                    needs_order_assignment = True
-                    break
-        if needs_order_assignment:
-            # Corrected from 430 to 435 to match ACTION_MEANINGS
-            set_valid_action(435, "Assign Combat Damage Order")
+        """Expose the mandatory combat-damage transition.
 
-        # Corrected from 431 to 436 to match ACTION_MEANINGS
+        Action 436 opens the real blocker-order choice when one is required,
+        then resolves combat after the chooser completes it.  The legacy 435
+        action silently sorted blockers and remained mask-valid afterward,
+        which could create a deterministic policy loop instead of damage.
+        """
         set_valid_action(436, "Resolve Combat Damage")
 
 

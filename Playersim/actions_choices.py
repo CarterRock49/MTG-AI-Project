@@ -619,13 +619,14 @@ class ChoiceHandlersMixin:
             return -0.05, False
 
         effect_text = getattr(ability, 'effect', getattr(ability, 'effect_text', 'Unknown Effect'))
-        requires_target = "target" in effect_text.lower()
+        targeting_text = gs.ability_handler.get_ability_targeting_text(ability)
+        requires_target = "target" in targeting_text.lower()
         activation_targets = context.get("activation_targets")
         if requires_target and not activation_targets:
-            target_type = gs._get_target_type_from_text(effect_text)
-            min_targets, max_targets = gs._target_bounds_from_text(effect_text)
+            target_type = gs._get_target_type_from_text(targeting_text)
+            min_targets, max_targets = gs._target_bounds_from_text(targeting_text)
             valid_map = gs.targeting_system.get_valid_targets(
-                card_id, player, target_type, effect_text=effect_text)
+                card_id, player, target_type, effect_text=targeting_text)
             if not any(valid_map.values()):
                 logging.debug(f"Cannot activate {card.name}: no legal targets.")
                 return -0.05, False
@@ -637,7 +638,7 @@ class ChoiceHandlersMixin:
             gs.targeting_context = {
                 "source_id": card_id,
                 "controller": player,
-                "effect_text": effect_text,
+                "effect_text": targeting_text,
                 "required_type": target_type,
                 "required_count": max_targets,
                 "min_targets": min_targets,
@@ -938,6 +939,8 @@ class ChoiceHandlersMixin:
             "crew_cost_paid": bool(context.get('crew_cost_paid')),
             "X": int(context.get('activation_X', 0) or 0),
         }
+        if requires_target:
+            stack_context["targeting_text"] = targeting_text
         if context.get("counter_allocations"):
             stack_context["counter_allocations"] = dict(
                 context["counter_allocations"])

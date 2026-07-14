@@ -159,9 +159,16 @@ class MechanicsHandlersMixin:
 
     def _handle_unlock_door(self, param, context, **kwargs):
         gs = self.game_state
-        bf_idx = param
+        context = context or {}
+        player = self._get_policy_player(context)
+        bf_idx = context.get("battlefield_idx", param)
+        if bf_idx != param:
+            return -0.15, False
         if hasattr(gs, 'ability_handler') and hasattr(gs.ability_handler,'handle_unlock_door'):
-             success = gs.ability_handler.handle_unlock_door(bf_idx)
+             success = gs.ability_handler.handle_unlock_door(
+                 bf_idx, controller=player,
+                 room_id=context.get("card_id"),
+                 door_number=context.get("door_number"))
              return 0.3, success # Reward successful unlock
         logging.error("UNLOCK_DOOR: AbilityHandler or method missing.")
         return -0.15, False # Failure if handler missing

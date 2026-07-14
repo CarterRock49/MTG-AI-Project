@@ -39,8 +39,12 @@ class GameState(
                  "graveyard_adventure_permissions", "flashback_permissions",
                  "earthbent_lands",
                  "phase_history", "stack", "priority_pass_count", "last_stack_size",
-                 "turn", "_phase", "_last_turn_phase", "agent_is_p1", "combat_damage_dealt", "day_night_state",
-                 "current_attackers", "current_block_assignments", 'mulligan_data',
+                 "turn", "_phase", "_last_turn_phase", "agent_is_p1",
+                 "combat_damage_dealt", "first_strike_damage_dealt",
+                 "first_strike_damage_participants",
+                 "day_night_state", "current_attackers",
+                 "current_block_assignments", "blocked_attackers_this_combat",
+                 "exerted_this_combat", 'mulligan_data',
                  "current_spell_requires_target", "current_spell_card_id", "exhaust_ability_used",
                  "_last_card_locations", "_ceased_token_cards",
                  "optimal_attackers", "attack_suggestion_used", 'cards_played', 'play_history',
@@ -188,6 +192,8 @@ class GameState(
         self.phase = self.PHASE_UNTAP # Start at UNTAP
         self.agent_is_p1 = True
         self.combat_damage_dealt = False
+        self.first_strike_damage_dealt = False
+        self.first_strike_damage_participants = set()
         self.stack = []
         self.priority_pass_count = 0
         self.last_stack_size = 0
@@ -198,6 +204,8 @@ class GameState(
         # Combat state initialization
         self.current_attackers = []
         self.current_block_assignments = {}
+        self.blocked_attackers_this_combat = set()
+        self.exerted_this_combat = set()
         self.exhaust_ability_used = {} # Add this line
         self._last_card_locations = {}
         self._ceased_token_cards = {}
@@ -1054,7 +1062,9 @@ class GameState(
         # --- Copy Primitive/Immutable Attributes ---
         # List all attributes expected to be simple types (int, float, bool, str, None)
         primitive_attrs = [
-            "turn", "phase", "_last_turn_phase", "agent_is_p1", "combat_damage_dealt", "day_night_state",
+            "turn", "phase", "_last_turn_phase", "agent_is_p1",
+            "combat_damage_dealt", "first_strike_damage_dealt",
+            "day_night_state",
             "day_night_checked_this_turn", "priority_pass_count", "last_stack_size",
             "previous_priority_phase", "mulligan_in_progress", "bottoming_in_progress",
             "cards_to_bottom", "bottoming_count", "split_second_active", "gravestorm_count",
@@ -1110,7 +1120,9 @@ class GameState(
             # Contexts will be handled separately due to player references
         ]
         mutable_attrs_copy = [ # Attributes safe for shallow copy (typically sets/lists of IDs/primitives)
-            "current_attackers", "attackers_this_turn", "adventure_cards", "mdfc_cards",
+            "current_attackers", "blocked_attackers_this_combat",
+            "exerted_this_combat", "first_strike_damage_participants",
+            "attackers_this_turn", "adventure_cards", "mdfc_cards",
             "cards_castable_from_exile", "exile_alternative_costs", "cast_as_back_face", "face_down_exile_cards", "prepared_cards", "phased_out", "kicked_cards",
             "evoked_cards", "blitz_cards", "dash_cards", "unearthed_cards", "jump_start_cards",
             "buyback_cards", "flashback_cards", "exile_at_end_of_combat", "haste_until_eot",

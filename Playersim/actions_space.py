@@ -304,11 +304,17 @@ class ActionSpaceMixin:
                             if (gs.phase == gs.PHASE_DECLARE_ATTACKERS
                                     and perspective_player == active_p_gs
                                     and not gs.stack):
-                                self.combat_handler._add_attack_declaration_actions(perspective_player, non_active_p_gs, valid_actions, set_valid_action)
+                                overflow_action_catalog.extend(
+                                    self.combat_handler._add_attack_declaration_actions(
+                                        perspective_player, non_active_p_gs,
+                                        valid_actions, set_valid_action))
                             elif (gs.phase == gs.PHASE_DECLARE_BLOCKERS
                                     and perspective_player == non_active_p_gs
                                     and not gs.stack):
-                                self.combat_handler._add_block_declaration_actions(perspective_player, valid_actions, set_valid_action)
+                                overflow_action_catalog.extend(
+                                    self.combat_handler._add_block_declaration_actions(
+                                        perspective_player, valid_actions,
+                                        set_valid_action))
 
                             # Ninjutsu is activated after blockers are declared by the
                             # attacking player, so it must be exposed independently of
@@ -352,9 +358,17 @@ class ActionSpaceMixin:
                             "resume_phase": gs.phase,
                         })
 
-                # Pass is a backward-compatible alias for explicit declaration
-                # completion, but must be hidden whenever that completion would
-                # be illegal (for example one blocker on a menace attacker).
+                # Pass remains a dispatcher-level compatibility alias for old
+                # replays, but the policy mask exposes exactly one declaration
+                # completion action.  Offering PASS beside 438/439 doubled the
+                # probability mass on "declare nothing / stop declaring" and
+                # biased exploration away from adding attackers or blockers.
+                if valid_actions[438] or valid_actions[439]:
+                    valid_actions[11] = False
+                    action_reasons.pop(11, None)
+
+                # An incomplete declaration (for example one blocker on a
+                # menace attacker) cannot expose either completion route.
                 if (not gs.stack and gs.phase == gs.PHASE_DECLARE_BLOCKERS
                         and priority_player_obj == perspective_player
                         and perspective_player == gs._get_non_active_player()
@@ -1442,11 +1456,19 @@ class ActionSpaceMixin:
         for i in range(min(len(player["battlefield"]), 5)): # Room index 0-4
             card_id = player["battlefield"][i]
             card = gs._safe_get_card(card_id)
-            if card and hasattr(card, 'is_room') and card.is_room:
-                 if hasattr(card, 'door2') and not card.door2.get('unlocked', False):
-                     cost = card.door2.get('mana_cost', '')
-                     if self._can_afford_cost_string(player, cost):
-                         set_valid_action(248 + i, f"UNLOCK_DOOR {card.name}")
+            if not card or not getattr(card, "is_room", False):
+                continue
+            transaction = gs.ability_handler.get_unlockable_room_door(
+                player, i, room_id=card_id)
+            if transaction:
+                set_valid_action(
+                    248 + i, f"UNLOCK_DOOR {card.name}",
+                    context={
+                        "battlefield_idx": i,
+                        "card_id": card_id,
+                        "controller_id": "p1" if player is gs.p1 else "p2",
+                        "door_number": transaction["door_number"],
+                    })
 
     def _add_equip_actions(self, player, valid_actions, set_valid_action):
         gs = self.game_state

@@ -31,6 +31,22 @@ class ExtendedCombatResolver(CombatResolver):
         # Tracks the final damage value applied to each target ID after replacements
         self.final_damage_applied = defaultdict(int)
         self.combat_triggers = [] # Used by _add_combat_trigger
+
+    def _clear_combat_state(self):
+        """Remove participants and per-combat bookkeeping after combat ends."""
+        gs = self.game_state
+        gs.current_attackers = []
+        gs.current_block_assignments = {}
+        gs.blocked_attackers_this_combat = set()
+        gs.first_strike_damage_dealt = False
+        gs.first_strike_damage_participants = set()
+        gs.exerted_this_combat = set()
+        for attr in (
+                "planeswalker_attack_targets", "battle_attack_targets",
+                "planeswalker_protectors", "first_strike_ordering"):
+            value = getattr(gs, attr, None)
+            if hasattr(value, "clear"):
+                value.clear()
         
     def resolve_combat(self):
         """
@@ -44,30 +60,77 @@ class ExtendedCombatResolver(CombatResolver):
             # Reset internal tracking for this call
             self._reset_resolution_tracking()
 
-            if gs.combat_damage_dealt:
+            # Public phase progression resolves one damage step at a time so
+            # players receive a real priority window between first-strike and
+            # regular damage. Direct resolver callers outside a damage phase
+            # retain the legacy whole-combat behavior used by simulations and
+            # focused rules tests.
+            if gs.phase == gs.PHASE_FIRST_STRIKE_DAMAGE:
+                resolution_mode = "first"
+            elif gs.phase == gs.PHASE_COMBAT_DAMAGE:
+                resolution_mode = "regular"
+            else:
+                resolution_mode = "all"
+
+            if (resolution_mode != "first" and gs.combat_damage_dealt):
                 logging.debug("Combat damage already applied this turn, skipping resolution.")
                 # Return 0 damage dealt and no lifelink gain possibility
                 return {"damage_to_opponent": 0, "potential_lifegain": {}}
 
             if not gs.current_attackers:
                 logging.debug("No attackers declared; skipping combat resolution.")
-                gs.combat_damage_dealt = True # Mark damage phase as completed
+                if resolution_mode == "first":
+                    gs.first_strike_damage_dealt = True
+                else:
+                    gs.combat_damage_dealt = True
                 return {"damage_to_opponent": 0, "potential_lifegain": {}}
 
-            attacker_player = gs.p1 if gs.agent_is_p1 else gs.p2
-            defender_player = gs.p2 if gs.agent_is_p1 else gs.p1
+            if (resolution_mode == "first"
+                    and getattr(gs, "first_strike_damage_dealt", False)):
+                logging.debug("First-strike combat damage already applied, skipping resolution.")
+                return {"damage_to_opponent": 0, "potential_lifegain": {}}
+
+            # CR 509.1h: an attacker remains blocked for the rest of combat
+            # even if every blocker later leaves. Preserve that declaration
+            # separately because zone cleanup removes dead blockers from the
+            # live assignment map between damage steps.
+            if not hasattr(gs, "blocked_attackers_this_combat"):
+                gs.blocked_attackers_this_combat = set()
+            gs.blocked_attackers_this_combat.update(
+                attacker_id
+                for attacker_id, blockers in
+                getattr(gs, "current_block_assignments", {}).items()
+                if blockers)
+
+            # Combat ownership follows the turn, never the observation seat.
+            # ``agent_is_p1`` changes while the environment services both
+            # policies and is not a stable rules-state source of truth.
+            attacker_player = gs._get_active_player()
+            defender_player = gs._get_non_active_player()
 
             self._log_combat_state() # Log participants and their stats
 
             # Check if first strike damage step is needed
-            needs_first_strike_step = False
             combatants = list(gs.current_attackers) # Start with attackers
             for blockers in gs.current_block_assignments.values(): combatants.extend(blockers) # Add blockers
-            for cid in combatants:
-                card = gs._safe_get_card(cid)
-                if card and (self._has_keyword(card, "first strike") or self._has_keyword(card, "double strike")):
-                    needs_first_strike_step = True
-                    break
+            if resolution_mode == "all":
+                gs.first_strike_damage_participants = {
+                    cid for cid in combatants
+                    if ((card := gs._safe_get_card(cid)) is not None
+                        and (self._has_keyword(card, "first strike")
+                             or self._has_keyword(card, "double strike")))
+                }
+            first_strike_participants = set(getattr(
+                gs, "first_strike_damage_participants", set()))
+            needs_first_strike_step = bool(first_strike_participants)
+
+            if resolution_mode == "first" and not needs_first_strike_step:
+                # The step was created at blocker declaration, but its last
+                # first/double-strike combatant may have left before damage.
+                # Complete the empty first-strike step without leaking regular
+                # damage into it.
+                gs.first_strike_damage_dealt = True
+                return {"damage_to_opponent": 0, "potential_lifegain": {}}
 
             # --- Structures to MARK damage before application (with source tracking) ---
             # {target_id: {'amount': int, 'sources': {source_id: damage}, 'deathtouch': bool}}
@@ -82,7 +145,7 @@ class ExtendedCombatResolver(CombatResolver):
             creatures_dealt_damage_regular = set()
 
             # --- STEP 1: First Strike Damage Phase (Calculation & Application) ---
-            if needs_first_strike_step:
+            if needs_first_strike_step and resolution_mode != "regular":
                  logging.debug("COMBAT EXT: Calculating First Strike Damage")
                  # Iterate copies of lists to avoid modification issues during processing
                  attackers_copy = list(gs.current_attackers)
@@ -122,12 +185,24 @@ class ExtendedCombatResolver(CombatResolver):
                  if hasattr(gs, 'check_state_based_actions'):
                      gs.check_state_based_actions()
 
+                 gs.first_strike_damage_dealt = True
+
                  # Clear marking structures for the regular damage step
                  damage_marked_on_creatures.clear()
                  damage_marked_on_players = {"p1": defaultdict(int), "p2": defaultdict(int)}
                  damage_marked_on_planeswalkers.clear()
                  damage_marked_on_battles.clear()
                  self._damage_applied_this_step.clear() # Clear step-specific lifelink tracker
+
+                 if resolution_mode == "first":
+                     defender_key = "p2" if defender_player == gs.p2 else "p1"
+                     return {
+                         "damage_to_opponent": self.final_damage_applied.get(
+                             defender_key, 0),
+                         "potential_lifegain": {
+                             p: dict(sources)
+                             for p, sources in self.potential_lifegain.items()}
+                     }
 
             # --- STEP 2: Regular Damage Phase (Calculation & Application) ---
             logging.debug("COMBAT EXT: Calculating Regular Damage")
@@ -160,6 +235,9 @@ class ExtendedCombatResolver(CombatResolver):
 
             gs.combat_damage_dealt = True # Mark damage phase as completed for this turn
 
+            # Combatants remain attacking/blocking through the end-of-combat
+            # step. GameState._advance_phase clears them when that step ends.
+
             # --- Determine Final Results ---
             # Get total actual damage applied to the opponent player from final_damage_applied
             defender_key = "p2" if defender_player == gs.p2 else "p1"
@@ -185,39 +263,37 @@ class ExtendedCombatResolver(CombatResolver):
         gs = self.game_state
         if not hasattr(self, '_damage_applied_this_step'): self._damage_applied_this_step = defaultdict(int)
         else: self._damage_applied_this_step.clear()
-        if not hasattr(self, 'final_damage_applied'): self.final_damage_applied = defaultdict(int)
-        else: self.final_damage_applied.clear() # Track damage ACTUALLY applied
+        if not hasattr(self, 'final_damage_applied'):
+            self.final_damage_applied = defaultdict(int)
+        # Keep the first-strike totals when applying the regular step. The
+        # per-resolution accumulator is already cleared by
+        # _reset_resolution_tracking().
 
 
         # Apply to Creatures
         for target_id, damage_info in marked_creatures.items():
             base_amount = damage_info.get("amount", 0)
             sources = damage_info.get("sources", {}) # {source_id: damage}
-            has_deathtouch = damage_info.get("deathtouch", False)
             is_combat = True
 
             if base_amount <= 0: continue
 
-            # Apply damage via GS, it handles replacements, returns actual damage marked
-            # We need to aggregate damage applied PER SOURCE for lifelink check
-            # Let apply_damage_to_permanent handle the source context and return applied damage.
-            # We will sum this up later for lifelink check.
-            damage_marked_on_target = 0
-            first_source_id = next(iter(sources), 'combat_damage') # Get one source for logging/simple case
-
-            # Call GS method to mark damage - assumes it handles replacements internally
-            # gs.apply_damage_to_permanent now just marks the damage. SBAs handle death later.
-            damage_marked = gs.apply_damage_to_permanent(target_id, base_amount, first_source_id, is_combat, has_deathtouch) # Pass accumulated damage amount
-
-            # If damage was marked, attribute it back to sources for lifelink tracking
-            if damage_marked > 0:
-                 self.final_damage_applied[target_id] += damage_marked # Track final damage applied
-                 # Distribute applied damage proportionally back to sources for lifelink (approximate)
-                 total_marked_from_sources = sum(sources.values())
-                 if total_marked_from_sources > 0:
-                     for source_id, marked_by_source in sources.items():
-                          prop_damage = (marked_by_source / total_marked_from_sources) * damage_marked
-                          self._damage_applied_this_step[source_id] += prop_damage
+            # Damage from separate sources is applied and attributed
+            # separately. Aggregating it under the first source broke
+            # protection, lifelink, deathtouch, and source-side triggers when
+            # multiple blockers damaged one attacker simultaneously.
+            for source_id, marked_by_source in sources.items():
+                if marked_by_source <= 0:
+                    continue
+                source_has_deathtouch = bool(
+                    hasattr(gs, 'check_keyword')
+                    and gs.check_keyword(source_id, "deathtouch"))
+                damage_marked = gs.apply_damage_to_permanent(
+                    target_id, marked_by_source, source_id, is_combat,
+                    source_has_deathtouch)
+                if damage_marked > 0:
+                    self.final_damage_applied[target_id] += damage_marked
+                    self._damage_applied_this_step[source_id] += damage_marked
 
 
         # Apply to Players
@@ -229,7 +305,9 @@ class ExtendedCombatResolver(CombatResolver):
             for source_id, damage_amount in source_damage_map.items():
                  if damage_amount <= 0: continue
                  # Use GS method to apply damage to player, it returns actual damage dealt (after replacements)
-                 damage_applied = gs.damage_player(player_obj, damage_amount, source_id, is_combat_damage=True)
+                 damage_applied = gs.damage_player(
+                     player_obj, damage_amount, source_id,
+                     is_combat_damage=True, defer_sba=True)
                  if damage_applied > 0:
                      total_damage_to_player += damage_applied
                      # Attribute applied damage back to the correct source
@@ -242,7 +320,9 @@ class ExtendedCombatResolver(CombatResolver):
              total_damage_to_pw = 0
              for source_id, damage_amount in source_damage_map.items():
                   if damage_amount <= 0: continue
-                  damage_applied = gs.damage_planeswalker(target_id, damage_amount, source_id)
+                  damage_applied = gs.damage_planeswalker(
+                      target_id, damage_amount, source_id,
+                      defer_sba=True, is_combat_damage=True)
                   if damage_applied > 0:
                       total_damage_to_pw += damage_applied
                       self._damage_applied_this_step[source_id] += damage_applied
@@ -254,35 +334,24 @@ class ExtendedCombatResolver(CombatResolver):
              total_damage_to_battle = 0
              for source_id, damage_amount in source_damage_map.items():
                   if damage_amount <= 0: continue
-                  damage_applied = gs.damage_battle(target_id, damage_amount, source_id)
+                  damage_applied = gs.damage_battle(
+                      target_id, damage_amount, source_id,
+                      is_combat_damage=True, defer_sba=True)
                   if damage_applied > 0:
                       total_damage_to_battle += damage_applied
                       self._damage_applied_this_step[source_id] += damage_applied
              self.final_damage_applied[target_id] += total_damage_to_battle
 
 
-        # --- Handle Lifelink Based on Applied Damage ---
-        for source_id, total_damage_dealt in self._damage_applied_this_step.items():
-            if total_damage_dealt <= 0: continue
-            # Fetch source card using ID
-            source_card_id = source_id # Ensure we use the string ID
-            source_card = gs._safe_get_card(source_card_id) # Use helper
-            if not source_card: continue # Skip if source card not found
+        # Lifelink is applied once by each canonical GameState damage helper.
+        # Keeping it there covers combat and noncombat damage, printed and
+        # layer-granted lifelink, without a duplicate delayed replacement.
 
-            # Use central check_keyword method (delegates appropriately)
-            has_lifelink = False
-            if hasattr(gs, 'check_keyword'):
-                 has_lifelink = gs.check_keyword(source_card_id, "lifelink")
-            elif hasattr(gs, 'ability_handler'): # Fallback to ability handler
-                 has_lifelink = gs.ability_handler.check_keyword(source_card_id, "lifelink")
-
-
-            if has_lifelink:
-                lifelink_controller = gs.get_card_controller(source_card_id)
-                if lifelink_controller:
-                     # Use GameState's centralized lifelink handler
-                     # Round damage dealt for life gain
-                     gs.handle_lifelink_gain(source_card_id, lifelink_controller, round(total_damage_dealt))
+        # Combat damage and lifelink happen simultaneously. Defer state-based
+        # actions until every source/target pair and all associated life gain
+        # have been applied.
+        if hasattr(gs, 'check_state_based_actions'):
+            gs.check_state_based_actions()
 
         self._damage_applied_this_step.clear() # Clear for next phase
         
@@ -346,6 +415,55 @@ class ExtendedCombatResolver(CombatResolver):
             return True
         return False
                 
+    def _mark_attacked_object_damage(
+            self, attacker_id, attacker_card, defender_player, amount,
+            damage_marked_on_players, damage_marked_on_planeswalkers,
+            damage_marked_on_battles, is_first_strike, is_trample=False):
+        """Mark damage on the player, planeswalker, or battle being attacked."""
+        if amount <= 0:
+            return 0
+        gs = self.game_state
+        pw_target_id = getattr(
+            gs, 'planeswalker_attack_targets', {}).get(attacker_id)
+        battle_target_id = getattr(
+            gs, 'battle_attack_targets', {}).get(attacker_id)
+        trigger_context = {"damage_amount": amount}
+        if is_trample:
+            trigger_context["is_trample"] = True
+
+        if pw_target_id is not None:
+            damage_marked_on_planeswalkers[pw_target_id][attacker_id] += amount
+            trigger_context["target_id"] = pw_target_id
+            logging.debug(
+                "COMBAT EXT Mark: %s will deal %s%s damage to PW %s",
+                attacker_card.name, amount, " trample" if is_trample else "",
+                getattr(gs._safe_get_card(pw_target_id), 'name', pw_target_id))
+            self._add_combat_trigger(
+                attacker_id, "deals_combat_damage_to_planeswalker",
+                trigger_context, is_first_strike)
+        elif battle_target_id is not None:
+            damage_marked_on_battles[battle_target_id][attacker_id] += amount
+            trigger_context["target_id"] = battle_target_id
+            logging.debug(
+                "COMBAT EXT Mark: %s will deal %s%s damage to Battle %s",
+                attacker_card.name, amount, " trample" if is_trample else "",
+                getattr(gs._safe_get_card(battle_target_id), 'name',
+                        battle_target_id))
+            self._add_combat_trigger(
+                attacker_id, "deals_combat_damage_to_battle",
+                trigger_context, is_first_strike)
+        else:
+            defender_key = "p2" if defender_player == gs.p2 else "p1"
+            damage_marked_on_players[defender_key][attacker_id] += amount
+            logging.debug(
+                "COMBAT EXT Mark: %s will deal %s%s damage to player %s",
+                attacker_card.name, amount, " trample" if is_trample else "",
+                defender_player['name'])
+            self._add_combat_trigger(
+                attacker_id, "deals_combat_damage_to_player",
+                trigger_context, is_first_strike)
+        return amount
+
     def _process_attacker_damage(self, attacker_id, attacker_player, defender_player,
                                 damage_marked_on_creatures, damage_marked_on_players,
                                 damage_marked_on_planeswalkers, damage_marked_on_battles,
@@ -366,28 +484,24 @@ class ExtendedCombatResolver(CombatResolver):
 
         total_potential_damage = 0
 
-        pw_target_id = getattr(gs, 'planeswalker_attack_targets', {}).get(attacker_id)
-        battle_target_id = getattr(gs, 'battle_attack_targets', {}).get(attacker_id)
         blockers = gs.current_block_assignments.get(attacker_id, [])
         valid_blockers = [bid for bid in blockers if gs.find_card_location(bid)[1] == 'battlefield'] # Check if blocker still exists
+        was_blocked = attacker_id in getattr(
+            gs, "blocked_attackers_this_combat", set())
 
-        if pw_target_id and not valid_blockers:
-            damage_marked_on_planeswalkers[pw_target_id][attacker_id] += damage
-            total_potential_damage = damage
-            logging.debug(f"COMBAT EXT Mark: {attacker_card.name} will deal {damage} to PW {gs._safe_get_card(pw_target_id).name}")
-            self._add_combat_trigger(attacker_id, "deals_combat_damage_to_planeswalker", {"damage_amount": damage, "target_id": pw_target_id}, is_first_strike)
-        elif battle_target_id and not valid_blockers:
-            damage_marked_on_battles[battle_target_id][attacker_id] += damage
-            total_potential_damage = damage
-            logging.debug(f"COMBAT EXT Mark: {attacker_card.name} will deal {damage} to Battle {gs._safe_get_card(battle_target_id).name}")
-            self._add_combat_trigger(attacker_id, "deals_combat_damage_to_battle", {"damage_amount": damage, "target_id": battle_target_id}, is_first_strike)
-        elif not valid_blockers: # Unblocked, target player
-            defender_key = "p2" if defender_player == gs.p2 else "p1"
-            # Store damage with attacker_id as source
-            damage_marked_on_players[defender_key][attacker_id] += damage
-            total_potential_damage = damage
-            logging.debug(f"COMBAT EXT Mark: {attacker_card.name} will deal {damage} to player {defender_player['name']}")
-            self._add_combat_trigger(attacker_id, "deals_combat_damage_to_player", {"damage_amount": damage}, is_first_strike)
+        if not valid_blockers:
+            if was_blocked and not has_trample:
+                logging.debug(
+                    "COMBAT EXT: %s remains blocked after its blockers left; "
+                    "no damage reaches the attacked object.", attacker_card.name)
+                total_potential_damage = 0
+            else:
+                total_potential_damage = self._mark_attacked_object_damage(
+                    attacker_id, attacker_card, defender_player, damage,
+                    damage_marked_on_players,
+                    damage_marked_on_planeswalkers,
+                    damage_marked_on_battles, is_first_strike,
+                    is_trample=was_blocked and has_trample)
         else: # Blocked
             # --- Damage Assignment Logic ---
             ordered_blockers = valid_blockers # Use simple order for now, ordering handled by first_strike_ordering/user choice in handler
@@ -409,7 +523,9 @@ class ExtendedCombatResolver(CombatResolver):
                 blocker_toughness = self._get_card_toughness(blocker_card, defender_player)
                 existing_damage = defender_player.get("damage_counters", {}).get(blocker_id, 0)
                 # Lethal damage: 1 for deathtouch, or toughness - existing damage
-                lethal_needed = 1 if has_deathtouch else max(1, blocker_toughness - existing_damage) # Need at least 1 damage if deathtouch is involved, even if already damaged
+                lethal_needed = max(0, blocker_toughness - existing_damage)
+                if has_deathtouch and lethal_needed > 0:
+                    lethal_needed = 1
 
                 # Must assign at least lethal, unless insufficient damage remains
                 assign_amount = min(remaining_damage, lethal_needed)
@@ -429,12 +545,12 @@ class ExtendedCombatResolver(CombatResolver):
 
             # Trample damage
             if has_trample and remaining_damage > 0:
-                 defender_key = "p2" if defender_player == gs.p2 else "p1"
-                 # Mark trample damage with source attacker_id
-                 damage_marked_on_players[defender_key][attacker_id] += remaining_damage
-                 potential_damage_this_step += remaining_damage
-                 logging.debug(f"COMBAT EXT Mark: {attacker_card.name} will deal {remaining_damage} trample damage to player {defender_player['name']}")
-                 self._add_combat_trigger(attacker_id, "deals_combat_damage_to_player", {"damage_amount": remaining_damage, "is_trample": True}, is_first_strike)
+                 potential_damage_this_step += self._mark_attacked_object_damage(
+                     attacker_id, attacker_card, defender_player,
+                     remaining_damage, damage_marked_on_players,
+                     damage_marked_on_planeswalkers,
+                     damage_marked_on_battles, is_first_strike,
+                     is_trample=True)
 
             total_potential_damage = potential_damage_this_step
 
@@ -482,15 +598,18 @@ class ExtendedCombatResolver(CombatResolver):
     def _should_deal_damage_this_phase(self, card, is_first_strike_phase):
         """Check if a creature should deal damage in the current phase."""
         if not card: return False
-        has_first_strike = self._has_keyword(card, "first strike")
+        card_id = getattr(card, "card_id", None)
+        first_step_combatants = getattr(
+            self.game_state, "first_strike_damage_participants", set())
         has_double_strike = self._has_keyword(card, "double strike")    
 
         if is_first_strike_phase:
-            # Only FS/DS deal damage in first strike phase
-            return has_first_strike or has_double_strike
-        else:
-            # Creatures without FS deal damage, and DS creatures deal damage *again*
-            return not has_first_strike or has_double_strike  
+            return card_id in first_step_combatants
+        # CR 510.4: creatures that were eligible for the first damage step do
+        # not deal regular damage unless they currently have double strike.
+        # Everyone that missed the first step still deals regular damage even
+        # if its current keywords changed in the between-step window.
+        return card_id not in first_step_combatants or has_double_strike
                 
     def process_ninjutsu(self, ninjutsu_card_id, attacker_id):
         """Process the ninjutsu ability during combat"""

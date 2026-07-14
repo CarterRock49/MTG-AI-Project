@@ -1328,6 +1328,8 @@ def s_attack_declaration_mask_is_monotonic():
 
     initial_mask = handler.generate_valid_actions()
     assert initial_mask[first_action] and initial_mask[second_action]
+    assert initial_mask[438] and not initial_mask[11], \
+        "attack declaration exposed duplicate PASS and explicit finish actions"
     _, _, _, info = handler.apply_action(first_action)
     assert not info.get("execution_failed"), \
         f"first attack declaration failed: {info}"
@@ -2995,15 +2997,15 @@ def s_menace_public_block_mask_contract():
     mask = handler.generate_valid_actions()
     assert not mask[blocker_a_action], \
         "a lone ordinary blocker was exposed against an unassigned menace attacker"
-    assert mask[11], \
-        "PASS was not retained as a legal completion alias"
+    assert not mask[11], \
+        "block declaration exposed duplicate PASS and explicit finish actions"
     assert mask[439], \
         "declaring no blockers against menace was not available"
-    _, _, _, info = handler.apply_action(11)
+    _, _, _, info = handler.apply_action(439)
     assert not info.get("execution_failed"), \
-        f"Pass did not route through legal block completion: {info}"
+        f"explicit block completion failed: {info}"
     assert gs.phase in (gs.PHASE_COMBAT_DAMAGE, gs.PHASE_FIRST_STRIKE_DAMAGE), \
-        "Pass left the declaration open or bypassed its combat transition"
+        "explicit finish left the declaration open or bypassed its combat transition"
 
     # A stale partial declaration cannot finish, but it can withdraw its lone
     # blocker and return to the legal no-block declaration.
@@ -3104,20 +3106,17 @@ def s_menace_sequential_fallback_beyond_atomic_slots():
         "cmc": 2, "type_line": "Creature - Elf", "oracle_text": "",
         "power": 2, "toughness": 2,
     }, "battlefield")
-    # Fixture decks use repeated canonical IDs for physical copies. Exercise
-    # the occurrence-aware sequential path with a second copy of blocker A.
-    gs.p2["library"].append(blocker_a)
-    assert gs.move_card(
-        blocker_a, gs.p2, "library", gs.p2, "battlefield",
-        cause="duplicate_blocker_probe")
-    blocker_b = blocker_a
+    blocker_b = inject_into_zone(gs, gs.p2, {
+        "name": "Late Menace Blocker B", "mana_cost": "{1}{G}",
+        "cmc": 2, "type_line": "Creature - Elf", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
     grant_keyword(gs, menace, "menace")
     gs.current_attackers = earlier_attackers + [menace]
     blocker_slots = [
-        index for index, card_id in enumerate(gs.p2["battlefield"])
-        if card_id == blocker_a
+        gs.p2["battlefield"].index(blocker_a),
+        gs.p2["battlefield"].index(blocker_b),
     ]
-    assert len(blocker_slots) == 2
     action_a, action_b = (48 + blocker_slots[0], 48 + blocker_slots[1])
 
     mask = handler.generate_valid_actions()
@@ -3144,6 +3143,74 @@ def s_menace_sequential_fallback_beyond_atomic_slots():
     _, _, _, info = handler.apply_action(
         selected_action, context=selected_context)
     assert not info.get("execution_failed"), info
+    assert gs.current_block_assignments.get(menace) == [blocker_a, blocker_b]
+    assert handler.generate_valid_actions()[439]
+
+
+@scenario("702.111 / action catalog", "overflow blockers can complete an out-of-range menace block")
+def s_overflow_blockers_complete_out_of_range_menace_block():
+    gs = fresh(SEED + 943)
+    handler = get_env().action_handler
+    gs.agent_is_p1 = False
+    gs.turn = 1
+    gs.phase = gs.PHASE_DECLARE_BLOCKERS
+    gs.priority_player = gs.p2
+    gs.priority_pass_count = 0
+    gs.stack.clear()
+    gs.current_block_assignments = {}
+
+    attackers = [inject_into_zone(gs, gs.p1, {
+        "name": f"Overflow Menace Earlier Attacker {index}",
+        "mana_cost": "{1}", "type_line": "Creature - Test",
+        "oracle_text": "", "power": 1, "toughness": 1,
+    }, "battlefield") for index in range(10)]
+    menace = inject_into_zone(gs, gs.p1, {
+        "name": "Overflow Menace Target", "mana_cost": "{3}{B}",
+        "type_line": "Creature - Horror", "oracle_text": "Menace",
+        "power": 4, "toughness": 4,
+    }, "battlefield")
+    gs.current_attackers = attackers + [menace]
+
+    for index in range(20):
+        inject_into_zone(gs, gs.p2, {
+            "name": f"Overflow Menace Land {index}", "mana_cost": "",
+            "type_line": "Basic Land - Swamp",
+            "oracle_text": "{T}: Add {B}.",
+        }, "battlefield")
+    blocker_a = inject_into_zone(gs, gs.p2, {
+        "name": "Overflow Menace Blocker A", "mana_cost": "{1}",
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    blocker_b = inject_into_zone(gs, gs.p2, {
+        "name": "Overflow Menace Blocker B", "mana_cost": "{1}",
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+
+    def choose_catalog_block(blocker_id):
+        mask = handler.generate_valid_actions()
+        assert mask[479], "overflow block catalog was not exposed"
+        handler.current_valid_actions = mask
+        _, _, _, info = handler.apply_action(479)
+        assert not info.get("execution_failed"), info
+        options = gs.choice_context.get("options", [])
+        option_index = next(
+            index for index, entry in enumerate(options)
+            if entry.get("action_context", {}).get("card_id") == blocker_id
+            and entry.get("action_context", {}).get(
+                "target_attacker_id") == menace)
+        choice_action = 353 + option_index
+        choice_mask = handler.generate_valid_actions()
+        assert choice_mask[choice_action]
+        handler.current_valid_actions = choice_mask
+        _, _, _, info = handler.apply_action(choice_action)
+        assert not info.get("execution_failed"), info
+
+    choose_catalog_block(blocker_a)
+    assert not handler.generate_valid_actions()[439], \
+        "an incomplete overflow menace block could be finished"
+    choose_catalog_block(blocker_b)
     assert gs.current_block_assignments.get(menace) == [blocker_a, blocker_b]
     assert handler.generate_valid_actions()[439]
 
@@ -3982,6 +4049,13 @@ def s_stats_draw_result_is_canonical():
 @scenario("training reward", "position shaping is potential-based and terminal rewards are centralized")
 def s_training_reward_contract():
     gs = fresh(); env = get_env()
+    timeout_rewards = {
+        env._terminal_outcome_reward("turn_limit", result)
+        for result in ("win", "loss", "draw")}
+    assert timeout_rewards == {-6.0}, \
+        f"life-based timeout labels changed the training reward: {timeout_rewards}"
+    assert env._terminal_outcome_reward("life_total", "win") == 10.0
+    assert env._terminal_outcome_reward("life_total", "loss") == -10.0
     baseline = env._calculate_state_potential()
     assert env._calculate_state_potential() == baseline, \
         "unchanged state produced a changing board potential"
@@ -16404,6 +16478,713 @@ def s_simulate_combat_ignores_stale_combat_participants():
         "a blocker assigned to a dead attacker still dealt simulated damage"
     assert ghost_blocker not in results["blockers_dying"], results
     assert star_blocker not in results["blockers_dying"], results
+
+
+@scenario("510.1 / public API", "combat damage is a mandatory mask-valid transition that changes life")
+def s_combat_damage_public_mask_resolves_unblocked_attacker():
+    gs = fresh(SEED + 930)
+    player = gs.p1
+    opponent = gs.p2
+    gs.agent_is_p1 = True
+    gs.turn = 1
+    gs.phase = gs.PHASE_COMBAT_DAMAGE
+    gs.priority_player = player
+    gs.priority_pass_count = 0
+    gs.stack.clear()
+
+    attacker = inject_into_zone(gs, player, {
+        "name": "Public Combat Damage Probe", "mana_cost": "{2}",
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 3, "toughness": 3,
+    }, "battlefield")
+    player["entered_battlefield_this_turn"].discard(attacker)
+    gs.current_attackers = [attacker]
+    gs.current_block_assignments = {}
+    gs.combat_damage_dealt = False
+
+    handler = get_env().action_handler
+    life_before = opponent["life"]
+    mask = handler.generate_valid_actions()
+    assert mask[11], "active player had no post-block combat priority pass"
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(11)
+    assert not info.get("execution_failed"), info
+    assert opponent["life"] == life_before, \
+        "combat damage resolved before the defending player passed priority"
+    assert gs.phase == gs.PHASE_COMBAT_DAMAGE
+
+    gs.agent_is_p1 = False
+    defender_mask = handler.generate_valid_actions()
+    assert defender_mask[11], "defending player had no combat priority pass"
+    handler.current_valid_actions = defender_mask
+    _, _, _, info = handler.apply_action(11)
+    assert not info.get("execution_failed"), info
+    assert opponent["life"] == life_before - 3, \
+        "an unblocked 3-power attacker did not damage the defending player"
+    assert gs.combat_damage_dealt, "combat resolver did not mark damage complete"
+    assert gs.phase == gs.PHASE_END_OF_COMBAT, \
+        "successful damage resolution did not advance to end of combat"
+    assert gs.current_attackers == [attacker], \
+        "the attacker stopped attacking before end of combat ended"
+
+    for acting_player in (player, opponent):
+        gs.agent_is_p1 = acting_player is gs.p1
+        end_mask = handler.generate_valid_actions()
+        assert end_mask[11]
+        handler.current_valid_actions = end_mask
+        _, _, _, info = handler.apply_action(11)
+        assert not info.get("execution_failed"), info
+    assert not gs.current_attackers and not gs.current_block_assignments, \
+        "combat participants leaked past the end-of-combat step"
+
+
+@scenario("508.1f / public API", "attack declaration taps attackers except those with vigilance")
+def s_public_attack_completion_taps_non_vigilance_attackers():
+    gs = fresh(SEED + 931)
+    player = gs.p1
+    gs.agent_is_p1 = True
+    gs.turn = 1
+    gs.phase = gs.PHASE_DECLARE_ATTACKERS
+    gs.priority_player = player
+    gs.priority_pass_count = 0
+    gs.stack.clear()
+
+    ordinary = inject_into_zone(gs, player, {
+        "name": "Ordinary Combat Tap Probe", "mana_cost": "{2}",
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    vigilant = inject_into_zone(gs, player, {
+        "name": "Vigilant Combat Tap Probe", "mana_cost": "{2}",
+        "type_line": "Creature - Test", "oracle_text": "Vigilance",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    player["entered_battlefield_this_turn"].difference_update(
+        {ordinary, vigilant})
+    gs.current_attackers = [ordinary, vigilant]
+    gs.current_block_assignments = {}
+
+    handler = get_env().action_handler
+    mask = handler.generate_valid_actions()
+    assert mask[438], "attack declaration could not be completed"
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(438)
+    assert not info.get("execution_failed"), info
+    assert ordinary in player["tapped_permanents"], \
+        "ordinary attacker was not tapped during declaration"
+    assert vigilant not in player["tapped_permanents"], \
+        "vigilance attacker was incorrectly tapped"
+
+
+@scenario("505-510 / public API", "both seats traverse the complete public combat lifecycle and deal damage")
+def s_full_public_combat_lifecycle_deals_damage_for_both_seats():
+    for case, (turn, active_is_p1) in enumerate(((1, True), (2, False))):
+        gs = fresh(SEED + 932 + case)
+        handler = get_env().action_handler
+        active = gs.p1 if active_is_p1 else gs.p2
+        defender = gs.p2 if active_is_p1 else gs.p1
+        gs.turn = turn
+        assert gs._get_active_player() is active, \
+            "test turn did not select the intended active seat"
+        gs.phase = gs.PHASE_MAIN_PRECOMBAT
+        gs.priority_player = active
+        gs.priority_pass_count = 0
+        gs.stack.clear()
+        gs.current_attackers = []
+        gs.current_block_assignments = {}
+        gs.combat_damage_dealt = False
+
+        attacker = inject_into_zone(gs, active, {
+            "name": f"Full Combat Probe {case}", "mana_cost": "{3}",
+            "type_line": "Creature - Test", "oracle_text": "",
+            "power": 4, "toughness": 4,
+        }, "battlefield")
+        active["entered_battlefield_this_turn"].discard(attacker)
+
+        def apply_from(player, action_index):
+            gs.agent_is_p1 = player is gs.p1
+            mask = handler.generate_valid_actions()
+            assert mask[action_index], \
+                f"action {action_index} was masked in {gs._PHASE_NAMES[gs.phase]}"
+            handler.current_valid_actions = mask
+            _, _, _, info = handler.apply_action(action_index)
+            assert not info.get("execution_failed"), info
+
+        # Leave precombat main, then let both seats pass through beginning of
+        # combat. The ordinary priority route is what training actually uses.
+        apply_from(active, 3)
+        assert gs.phase == gs.PHASE_BEGIN_COMBAT
+        apply_from(active, 11)
+        apply_from(defender, 11)
+        assert gs.phase == gs.PHASE_DECLARE_ATTACKERS
+
+        attack_action = 28 + active["battlefield"].index(attacker)
+        apply_from(active, attack_action)
+        apply_from(active, 438)
+        assert gs.phase == gs.PHASE_DECLARE_BLOCKERS
+        assert attacker in active["tapped_permanents"]
+
+        apply_from(defender, 439)
+        assert gs.phase == gs.PHASE_COMBAT_DAMAGE
+        life_before = defender["life"]
+        apply_from(active, 11)
+        apply_from(defender, 11)
+        assert defender["life"] == life_before - 4
+        assert gs.phase == gs.PHASE_END_OF_COMBAT
+        assert gs.combat_damage_dealt
+        assert gs.current_attackers == [attacker]
+
+
+@scenario("510.2 / 603", "actual combat damage to a player emits the canonical source damage event")
+def s_combat_damage_to_player_queues_source_trigger():
+    gs = fresh(SEED + 934)
+    player = gs.p1
+    defender = gs.p2
+    gs.agent_is_p1 = True
+    gs.turn = 1
+    gs.phase = gs.PHASE_COMBAT_DAMAGE
+    gs.priority_player = player
+    gs.priority_pass_count = 0
+    gs.stack.clear()
+    gs.ability_handler.active_triggers.clear()
+
+    attacker = inject_real_card(
+        gs, player, "Leatherhead, Swamp Stalker", "battlefield")
+    player["entered_battlefield_this_turn"].discard(attacker)
+    gs.current_attackers = [attacker]
+    gs.current_block_assignments = {}
+    gs.combat_damage_dealt = False
+
+    handler = get_env().action_handler
+    for acting_player in (player, defender):
+        gs.agent_is_p1 = acting_player is gs.p1
+        mask = handler.generate_valid_actions()
+        assert mask[11]
+        handler.current_valid_actions = mask
+        _, _, _, info = handler.apply_action(11)
+        assert not info.get("execution_failed"), info
+
+    assert gs.stack, \
+        "Leatherhead's combat-damage trigger was not put on the stack"
+    assert any(item[0] == "TRIGGER" and item[1] == attacker for item in gs.stack), \
+        f"combat damage queued no source trigger for Leatherhead: {gs.stack}"
+
+
+@scenario("509.1h / 510.1c", "an attacker stays blocked after its blocker leaves combat")
+def s_departed_blocker_does_not_make_attacker_unblocked():
+    gs = fresh(SEED + 937)
+    attacker_player, defender = gs.p1, gs.p2
+    attacker = inject_into_zone(gs, attacker_player, {
+        "name": "Still Blocked Probe", "mana_cost": "{2}",
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 3, "toughness": 3,
+    }, "battlefield")
+    blocker = inject_into_zone(gs, defender, {
+        "name": "Departing Blocker Probe", "mana_cost": "{1}",
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    gs.turn = 1
+    gs.phase = gs.PHASE_DECLARE_BLOCKERS
+    gs.current_attackers = [attacker]
+    gs.current_block_assignments = {attacker: [blocker]}
+    handler = get_env().action_handler
+    assert handler.combat_handler.handle_declare_blockers_done()
+    assert attacker in gs.blocked_attackers_this_combat
+    assert gs.move_card(
+        blocker, defender, "battlefield", defender, "graveyard",
+        cause="test_blocker_departed")
+
+    life_before = defender["life"]
+    for acting_player in (attacker_player, defender):
+        gs.agent_is_p1 = acting_player is gs.p1
+        mask = handler.generate_valid_actions()
+        assert mask[11]
+        handler.current_valid_actions = mask
+        _, _, _, info = handler.apply_action(11)
+        assert not info.get("execution_failed"), info
+    assert defender["life"] == life_before, \
+        "a blocked non-trampler damaged the player after its blocker left"
+
+
+@scenario("510.4 / public API", "first-strike and regular damage have separate priority windows")
+def s_double_strike_damage_steps_are_separate_and_remember_blocks():
+    gs = fresh(SEED + 938)
+    attacker_player, defender = gs.p1, gs.p2
+    attacker = inject_into_zone(gs, attacker_player, {
+        "name": "Double Strike Window Probe", "mana_cost": "{3}",
+        "type_line": "Creature - Test", "oracle_text": "Double strike",
+        "power": 4, "toughness": 4,
+    }, "battlefield")
+    blocker = inject_into_zone(gs, defender, {
+        "name": "First Strike Casualty Probe", "mana_cost": "{1}",
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    gs.turn = 1
+    gs.phase = gs.PHASE_DECLARE_BLOCKERS
+    gs.current_attackers = [attacker]
+    gs.current_block_assignments = {attacker: [blocker]}
+    handler = get_env().action_handler
+    assert handler.combat_handler.handle_declare_blockers_done()
+    assert gs.phase == gs.PHASE_FIRST_STRIKE_DAMAGE
+    life_before = defender["life"]
+
+    def pass_pair():
+        for acting_player in (attacker_player, defender):
+            gs.agent_is_p1 = acting_player is gs.p1
+            mask = handler.generate_valid_actions()
+            assert mask[11]
+            handler.current_valid_actions = mask
+            _, _, _, info = handler.apply_action(11)
+            assert not info.get("execution_failed"), info
+
+    pass_pair()
+    assert gs.find_card_location(blocker)[1] == "graveyard"
+    assert gs.phase == gs.PHASE_COMBAT_DAMAGE, \
+        "first-strike damage skipped the regular-damage priority window"
+    assert gs.first_strike_damage_dealt and not gs.combat_damage_dealt
+    assert defender["life"] == life_before
+
+    pass_pair()
+    assert gs.phase == gs.PHASE_END_OF_COMBAT
+    assert gs.combat_damage_dealt
+    assert defender["life"] == life_before, \
+        "a blocked double striker forgot its block after killing the blocker"
+
+
+@scenario("510.4", "regular-damage eligibility remembers the first damage step")
+def s_first_strike_eligibility_is_snapshotted_between_steps():
+    gs = fresh(SEED + 944)
+    first_striker = inject_into_zone(gs, gs.p1, {
+        "name": "Loses First Strike Probe", "mana_cost": "{2}",
+        "type_line": "Creature - Test", "oracle_text": "First strike",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    vanilla = inject_into_zone(gs, gs.p1, {
+        "name": "Gains First Strike Probe", "mana_cost": "{2}",
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 3, "toughness": 3,
+    }, "battlefield")
+    gs.turn = 1
+    gs.phase = gs.PHASE_DECLARE_BLOCKERS
+    gs.current_attackers = [first_striker, vanilla]
+    gs.current_block_assignments = {}
+    handler = get_env().action_handler
+    assert handler.combat_handler.handle_declare_blockers_done()
+    assert gs.first_strike_damage_participants == {first_striker}
+
+    def pass_pair():
+        for acting_player in (gs.p1, gs.p2):
+            gs.agent_is_p1 = acting_player is gs.p1
+            mask = handler.generate_valid_actions()
+            assert mask[11]
+            handler.current_valid_actions = mask
+            _, _, _, info = handler.apply_action(11)
+            assert not info.get("execution_failed"), info
+
+    life_before = gs.p2["life"]
+    pass_pair()
+    assert gs.p2["life"] == life_before - 2
+    assert gs.phase == gs.PHASE_COMBAT_DAMAGE
+
+    gs.layer_system.register_effect({
+        "source_id": vanilla, "layer": 6,
+        "affected_ids": [first_striker],
+        "effect_type": "remove_ability", "effect_value": "first strike",
+        "duration": "permanent", "source_ability": "remove first strike",
+    })
+    gs.layer_system.register_effect({
+        "source_id": vanilla, "layer": 6,
+        "affected_ids": [vanilla],
+        "effect_type": "add_ability", "effect_value": "first strike",
+        "duration": "permanent", "source_ability": "gain first strike",
+    })
+    gs.layer_system.invalidate_cache()
+    gs.layer_system.apply_all_effects()
+    assert not gs.check_keyword(first_striker, "first strike")
+    assert gs.check_keyword(vanilla, "first strike")
+
+    pass_pair()
+    assert gs.p2["life"] == life_before - 5, \
+        "regular damage was recomputed from changed first-strike keywords"
+
+
+@scenario("119.3f / 704.5", "combat lifelink is applied before state-based losses")
+def s_simultaneous_combat_lifelink_can_prevent_lethal_life_loss():
+    gs = fresh(SEED + 945)
+    attacker = inject_into_zone(gs, gs.p2, {
+        "name": "Lethal Trample Probe", "mana_cost": "{4}",
+        "type_line": "Creature - Test", "oracle_text": "Trample",
+        "power": 4, "toughness": 4,
+    }, "battlefield")
+    blocker = inject_into_zone(gs, gs.p1, {
+        "name": "Saving Lifelink Probe", "mana_cost": "{2}",
+        "type_line": "Creature - Test", "oracle_text": "Lifelink",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    gs.turn = 2
+    gs.agent_is_p1 = True
+    gs.cards_to_graveyard_this_turn.setdefault(gs.turn, [])
+    assert gs._get_active_player() is gs.p2
+    gs.p1["life"] = 2
+    gs.current_attackers = [attacker]
+    gs.current_block_assignments = {attacker: [blocker]}
+    gs.combat_damage_dealt = False
+    gs.combat_resolver.resolve_combat()
+    assert gs.p1["life"] == 2, \
+        "state-based loss ran before simultaneous lifelink life gain"
+    assert not gs.p1.get("lost_game", False)
+
+
+@scenario("510.2 / 306", "simultaneous sources all damage a doomed planeswalker")
+def s_simultaneous_planeswalker_damage_credits_every_source():
+    gs = fresh(SEED + 946)
+    attackers = [inject_into_zone(gs, gs.p1, {
+        "name": f"Planeswalker Lifelink Source {index}",
+        "mana_cost": "{2}", "type_line": "Creature - Test",
+        "oracle_text": "Lifelink", "power": 2, "toughness": 2,
+    }, "battlefield") for index in range(2)]
+    planeswalker = inject_into_zone(gs, gs.p2, {
+        "name": "Doomed Simultaneous Planeswalker", "mana_cost": "{3}",
+        "type_line": "Legendary Planeswalker - Test", "oracle_text": "",
+        "loyalty": "1",
+    }, "battlefield")
+    gs.p1["life"] = 10
+    gs.current_attackers = list(attackers)
+    gs.current_block_assignments = {}
+    gs.planeswalker_attack_targets = {
+        attacker: planeswalker for attacker in attackers}
+    gs.combat_damage_dealt = False
+    gs.combat_resolver.resolve_combat()
+    assert gs.p1["life"] == 14, \
+        "later simultaneous planeswalker damage was not credited to lifelink"
+    assert gs.find_card_location(planeswalker)[1] == "graveyard"
+
+
+@scenario("603 / damage source", "damage watchers use the dealing creature and its controller")
+def s_controlled_creature_damage_watcher_uses_event_source():
+    gs = fresh(SEED + 939)
+    watcher = inject_into_zone(gs, gs.p1, {
+        "name": "Controlled Damage Watcher", "mana_cost": "{2}{U}",
+        "type_line": "Enchantment", "oracle_text": (
+            "Whenever a creature you control deals combat damage to a player, "
+            "draw a card."),
+    }, "battlefield")
+    friendly = inject_into_zone(gs, gs.p1, {
+        "name": "Friendly Damage Source", "mana_cost": "{1}",
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    enemy = inject_into_zone(gs, gs.p2, {
+        "name": "Enemy Damage Source", "mana_cost": "{1}",
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    gs.ability_handler.active_triggers.clear()
+
+    assert gs.damage_player(gs.p1, 1, enemy, is_combat_damage=True) == 1
+    assert not any(
+        ability.card_id == watcher
+        for ability, _, _ in gs.ability_handler.active_triggers), \
+        "an opposing creature triggered a creature-you-control watcher"
+    gs.ability_handler.active_triggers.clear()
+
+    assert gs.damage_player(gs.p2, 1, friendly, is_combat_damage=True) == 1
+    assert any(
+        ability.card_id == watcher
+        for ability, _, _ in gs.ability_handler.active_triggers), \
+        "the enchantment watcher inspected itself instead of the damage source"
+
+
+@scenario("119.4 / 603", "damage to a creature emits a source-side damage event")
+def s_damage_to_creature_queues_source_trigger():
+    gs = fresh(SEED + 940)
+    source = inject_into_zone(gs, gs.p1, {
+        "name": "Creature Damage Event Probe", "mana_cost": "{2}",
+        "type_line": "Creature - Test", "oracle_text": (
+            "Whenever this creature deals combat damage to a creature, "
+            "draw a card."),
+        "power": 2, "toughness": 2,
+    }, "battlefield")
+    target = inject_into_zone(gs, gs.p2, {
+        "name": "Creature Damage Target Probe", "mana_cost": "{3}",
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 3, "toughness": 4,
+    }, "battlefield")
+    gs.ability_handler.active_triggers.clear()
+    assert gs.apply_damage_to_permanent(
+        target, 1, source, is_combat_damage=True) == 1
+    assert any(
+        ability.card_id == source
+        for ability, _, _ in gs.ability_handler.active_triggers), \
+        "source-side triggers did not see damage dealt to a creature"
+    gs.ability_handler.active_triggers.clear()
+    assert gs.apply_damage_to_permanent(
+        target, 1, source, is_combat_damage=False) == 1
+    assert not any(
+        ability.card_id == source
+        for ability, _, _ in gs.ability_handler.active_triggers), \
+        "a combat-damage trigger fired for noncombat creature damage"
+
+
+@scenario("510.1c / failure contract", "ordered combat cannot advance when its resolver fails")
+def s_blocker_order_resolution_failure_does_not_skip_damage():
+    gs = fresh(SEED + 941)
+    attacker = inject_into_zone(gs, gs.p1, {
+        "name": "Ordering Failure Attacker", "mana_cost": "{4}",
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 5, "toughness": 5,
+    }, "battlefield")
+    blockers = [inject_into_zone(gs, gs.p2, {
+        "name": f"Ordering Failure Blocker {index}", "mana_cost": "{1}",
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 1, "toughness": 2,
+    }, "battlefield") for index in range(2)]
+    gs.phase = gs.PHASE_COMBAT_DAMAGE
+    gs.current_attackers = [attacker]
+    gs.current_block_assignments = {attacker: blockers}
+    gs.combat_damage_dealt = False
+    combat_handler = get_env().action_handler.combat_handler
+    assert combat_handler.begin_blocker_order_choice()
+
+    class FailingResolver:
+        @staticmethod
+        def resolve_combat():
+            return {"damage_to_opponent": 0, "potential_lifegain": {}}
+
+    gs.combat_resolver = FailingResolver()
+    assert not combat_handler.blocker_order_chosen(0)
+    assert gs.phase == gs.PHASE_COMBAT_DAMAGE
+    assert not gs.combat_damage_dealt
+
+
+@scenario("702.19 / 306", "trample excess follows a planeswalker attack target")
+def s_trample_excess_hits_attacked_planeswalker_not_player():
+    gs = fresh(SEED + 942)
+    attacker = inject_into_zone(gs, gs.p1, {
+        "name": "Planeswalker Trample Probe", "mana_cost": "{4}",
+        "type_line": "Creature - Test", "oracle_text": "Trample",
+        "power": 4, "toughness": 4,
+    }, "battlefield")
+    blocker = inject_into_zone(gs, gs.p2, {
+        "name": "Planeswalker Blocker Probe", "mana_cost": "{1}",
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    planeswalker = inject_into_zone(gs, gs.p2, {
+        "name": "Trample Target Planeswalker", "mana_cost": "{3}",
+        "type_line": "Legendary Planeswalker - Test", "oracle_text": "",
+        "loyalty": "5",
+    }, "battlefield")
+    gs.current_attackers = [attacker]
+    gs.current_block_assignments = {attacker: [blocker]}
+    gs.planeswalker_attack_targets = {attacker: planeswalker}
+    life_before = gs.p2["life"]
+    loyalty_before = gs.p2["loyalty_counters"][planeswalker]
+    gs.combat_resolver.resolve_combat()
+    assert gs.p2["life"] == life_before, \
+        "trample from a planeswalker attack was redirected to its protector"
+    assert gs.p2["loyalty_counters"][planeswalker] == loyalty_before - 3
+
+
+@scenario("508.1 / action protocol", "an attacker beyond the 20-slot detail window uses the action catalog")
+def s_overflow_battlefield_creature_can_attack():
+    gs = fresh(SEED + 935)
+    player = gs.p1
+    gs.agent_is_p1 = True
+    gs.turn = 1
+    gs.phase = gs.PHASE_DECLARE_ATTACKERS
+    gs.priority_player = player
+    gs.priority_pass_count = 0
+    gs.stack.clear()
+    gs.current_attackers = []
+
+    for index in range(20):
+        inject_into_zone(gs, player, {
+            "name": f"Overflow Combat Land {index}", "mana_cost": "",
+            "type_line": "Basic Land - Forest", "oracle_text": "{T}: Add {G}.",
+        }, "battlefield")
+    attacker = inject_into_zone(gs, player, {
+        "name": "Overflow Combat Attacker", "mana_cost": "{3}",
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 4, "toughness": 4,
+    }, "battlefield")
+    player["entered_battlefield_this_turn"].discard(attacker)
+    assert player["battlefield"].index(attacker) >= 20
+
+    handler = get_env().action_handler
+    mask = handler.generate_valid_actions()
+    assert mask[479], "the ready overflow attacker had no catalog action"
+    scripted_action, _ = get_env()._get_scripted_opponent_action(
+        player, mask, {"phase_context": "priority"})
+    assert scripted_action == 479, \
+        "the scripted baseline finished attacks before opening overflow combat"
+    catalog_context = handler.action_reasons_with_context[479]["context"]
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(479)
+    assert not info.get("execution_failed"), info
+    options = gs.choice_context.get("options", [])
+    option_index = next(
+        index for index, entry in enumerate(options)
+        if entry.get("action_context", {}).get("card_id") == attacker)
+    choice_action = 353 + option_index
+    choice_mask = handler.generate_valid_actions()
+    assert choice_mask[choice_action]
+    handler.current_valid_actions = choice_mask
+    _, _, _, info = handler.apply_action(choice_action)
+    assert not info.get("execution_failed"), info
+    assert gs.current_attackers == [attacker], \
+        "the overflow catalog choice did not declare its pinned creature"
+
+
+@scenario("509.1 / action protocol", "a blocker beyond the 20-slot detail window uses the action catalog")
+def s_overflow_battlefield_creature_can_block():
+    gs = fresh(SEED + 936)
+    attacker_player = gs.p1
+    defender = gs.p2
+    gs.agent_is_p1 = False
+    gs.turn = 1
+    gs.phase = gs.PHASE_DECLARE_BLOCKERS
+    gs.priority_player = defender
+    gs.priority_pass_count = 0
+    gs.stack.clear()
+
+    attacker = inject_into_zone(gs, attacker_player, {
+        "name": "Overflow Block Target", "mana_cost": "{3}",
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 4, "toughness": 4,
+    }, "battlefield")
+    gs.current_attackers = [attacker]
+    gs.current_block_assignments = {}
+    for index in range(20):
+        inject_into_zone(gs, defender, {
+            "name": f"Overflow Block Land {index}", "mana_cost": "",
+            "type_line": "Basic Land - Plains", "oracle_text": "{T}: Add {W}.",
+        }, "battlefield")
+    blocker = inject_into_zone(gs, defender, {
+        "name": "Overflow Combat Blocker", "mana_cost": "{2}",
+        "type_line": "Creature - Test", "oracle_text": "",
+        "power": 2, "toughness": 5,
+    }, "battlefield")
+    assert defender["battlefield"].index(blocker) >= 20
+
+    handler = get_env().action_handler
+    mask = handler.generate_valid_actions()
+    assert mask[479], "the ready overflow blocker had no catalog action"
+    scripted_action, _ = get_env()._get_scripted_opponent_action(
+        defender, mask, {"phase_context": "priority"})
+    assert scripted_action == 479, \
+        "the scripted baseline finished blocks before opening overflow combat"
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(479)
+    assert not info.get("execution_failed"), info
+    options = gs.choice_context.get("options", [])
+    option_index = next(
+        index for index, entry in enumerate(options)
+        if entry.get("action_context", {}).get("card_id") == blocker)
+    choice_action = 353 + option_index
+    choice_mask = handler.generate_valid_actions()
+    assert choice_mask[choice_action]
+    handler.current_valid_actions = choice_mask
+    _, _, _, info = handler.apply_action(choice_action)
+    assert not info.get("execution_failed"), info
+    assert gs.current_block_assignments == {attacker: [blocker]}, \
+        "the overflow catalog choice did not assign its pinned blocker"
+
+
+@scenario("709.5 / Room", "unlocking a Room uses the same land-aware payment contract as its action mask")
+def s_room_unlock_mask_and_execution_share_payment_contract():
+    gs = fresh(SEED + 928)
+    player = gs.p1
+    gs.agent_is_p1 = True
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+
+    room_id = inject_real_card(
+        gs, player, "Roaring Furnace // Steaming Sauna", "battlefield")
+    room = gs._safe_get_card(room_id)
+    room.door1["unlocked"] = True
+    lands = [
+        inject_into_zone(gs, player, {
+            "name": f"Room Payment Island {index}", "mana_cost": "",
+            "type_line": "Basic Land - Island", "oracle_text": "{T}: Add {U}.",
+        }, "battlefield")
+        for index in range(5)
+    ]
+    player["battlefield"].remove(room_id)
+    player["battlefield"].insert(0, room_id)
+    player["mana_pool"] = {
+        color: 0 for color in ("W", "U", "B", "R", "G", "C")}
+
+    handler = get_env().action_handler
+    mask = handler.generate_valid_actions()
+    assert mask[248], "five untapped Islands did not make {3}{U}{U} unlockable"
+    action_context = handler.action_reasons_with_context[248]["context"]
+    assert action_context == {
+        "battlefield_idx": 0, "card_id": room_id,
+        "controller_id": "p1", "door_number": 2,
+    }, f"Room action was not pinned to its exact door: {action_context}"
+
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(248)
+    assert not info.get("execution_failed"), info
+    assert room.door2.get("unlocked"), "the paid Room door remained locked"
+    assert all(land_id in player["tapped_permanents"] for land_id in lands), \
+        "Room payment did not auto-tap the five lands accepted by the mask"
+    assert sum(player["mana_pool"].values()) == 0
+
+
+@scenario("602.2b / Earthbend", "Ba Sing Se commits its Earthbend land target before paying activation costs")
+def s_ba_sing_se_earthbend_uses_activation_target_flow():
+    gs = fresh(SEED + 929)
+    player = gs.p1
+    gs.agent_is_p1 = True
+    gs.turn = 1
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = player
+
+    target_land = inject_into_zone(gs, player, {
+        "name": "Ba Sing Se Earthbend Target", "mana_cost": "",
+        "type_line": "Basic Land - Forest", "oracle_text": "{T}: Add {G}.",
+    }, "battlefield")
+    source_id = inject_real_card(gs, player, "Ba Sing Se", "battlefield")
+    player["tapped_permanents"].discard(source_id)
+    player["mana_pool"] = {
+        "W": 0, "U": 0, "B": 0, "R": 0, "G": 1, "C": 2}
+
+    abilities = gs.ability_handler.get_activated_abilities(source_id)
+    ability_index = next(
+        index for index, ability in enumerate(abilities)
+        if "earthbend" in getattr(ability, "effect", "").lower())
+    battlefield_index = player["battlefield"].index(source_id)
+    action_index = 100 + battlefield_index * 3 + ability_index
+    handler = get_env().action_handler
+    mask = handler.generate_valid_actions()
+    assert mask[action_index], "the payable Ba Sing Se activation was not exposed"
+
+    mana_before = dict(player["mana_pool"])
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(action_index)
+    assert not info.get("execution_failed"), info
+    assert gs.targeting_context, "Earthbend did not request its mandatory land target"
+    assert gs.targeting_context["effect_text"] == "Target land you control"
+    assert source_id not in player["tapped_permanents"], \
+        "Ba Sing Se paid its tap cost before its target was committed"
+    assert player["mana_pool"] == mana_before, \
+        "Ba Sing Se paid mana before its target was committed"
+
+    candidates = handler._get_target_selection_candidates(
+        player, gs.targeting_context)
+    _, ok = handler._handle_select_target(candidates.index(target_land), {})
+    assert ok, "the Earthbend land target could not be committed"
+    assert source_id in player["tapped_permanents"]
+    assert sum(player["mana_pool"].values()) == 0
+    assert gs.stack and gs.stack[-1][3].get("targets") == {
+        "lands": [target_land]}
+    assert gs.resolve_top_of_stack(), "Ba Sing Se's Earthbend failed to resolve"
+    assert gs._safe_get_card(target_land).counters.get("+1/+1", 0) == 2
 
 
 # ---------------------------------------------------------------------------

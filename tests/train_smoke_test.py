@@ -539,7 +539,7 @@ def check_runtime_configuration():
         "activation_fn": torch.nn.Tanh,
         "action_reward_scale": 0.02,
         "state_potential_scale": 0.40,
-        "reward_contract_version": "discounted-state-potential-v3",
+        "reward_contract_version": "discounted-state-potential-v4",
     }
 
     try:

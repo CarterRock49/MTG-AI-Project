@@ -1529,6 +1529,7 @@ class TriggeredAbility(Ability):
                 source_card_id = context.get("source_card_id", self.card_id)
                 event_card_id = context.get("event_card_id")
                 source_card = context.get("source_card")
+                damage_source_card = context.get("event_card")
                 source_name = str(
                     getattr(source_card, "name", "") or "").lower()
                 short_name = source_name.split(",")[0].strip()
@@ -1540,9 +1541,52 @@ class TriggeredAbility(Ability):
                         self.trigger_condition, re.IGNORECASE)))
                 if names_source and source_card_id != event_card_id:
                     return False
-                if ("combat damage to a player" in self.trigger_condition
-                        and (not context.get("to_player")
-                             or int(context.get("damage_amount", 0) or 0) <= 0)):
+                controlled_source = re.search(
+                    r"\b(creature|creatures|permanent|permanents|artifact|"
+                    r"artifacts|enchantment|enchantments) you control "
+                    r"deal(?:s)?\b",
+                    self.trigger_condition, re.IGNORECASE)
+                if controlled_source:
+                    if context.get("event_controller") is not context.get(
+                            "controller"):
+                        return False
+                    required_type = controlled_source.group(1).lower()
+                    required_type = {
+                        "creatures": "creature",
+                        "permanents": "permanent",
+                        "artifacts": "artifact",
+                        "enchantments": "enchantment",
+                    }.get(required_type, required_type)
+                    source_types = {
+                        str(card_type).lower()
+                        for card_type in getattr(
+                            damage_source_card, "card_types", [])}
+                    if (required_type != "permanent"
+                            and required_type not in source_types):
+                        return False
+                condition_lower = self.trigger_condition.lower()
+                combat_damage = bool(context.get(
+                    "is_combat_damage", context.get("is_combat", False)))
+                if ("combat damage" in condition_lower
+                        and not combat_damage):
+                    return False
+                if int(context.get("damage_amount", 0) or 0) <= 0:
+                    return False
+                if ("damage to a player" in condition_lower
+                        and not context.get("to_player")):
+                    return False
+                target_card = context.get("target_card")
+                target_types = {
+                    str(card_type).lower()
+                    for card_type in getattr(target_card, "card_types", [])}
+                if ("damage to a creature" in condition_lower
+                        and "creature" not in target_types):
+                    return False
+                if ("damage to a planeswalker" in condition_lower
+                        and "planeswalker" not in target_types):
+                    return False
+                if ("damage to a battle" in condition_lower
+                        and "battle" not in target_types):
                     return False
             if event_type == "DIES":
                 context = context or {}
