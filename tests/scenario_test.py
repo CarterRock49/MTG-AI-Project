@@ -11766,11 +11766,11 @@ def scenario_action_mask_is_pure_for_paged_choices():
     assert not info.get('execution_failed') and gs.choice_context['choice_page'] == 1
     page_one = copy.deepcopy(gs.choice_context)
     next_mask = handler.generate_valid_actions()
-    assert gs.choice_context == page_one and next_mask[479]
-    handler.current_valid_actions = next_mask
-    _, _, _, info = handler.apply_action(479)
-    assert not info.get('execution_failed') and gs.choice_context['choice_page'] == 0, \
-        "page-next did not wrap using its generated page count"
+    # 7.77: paging is one-way (the wrapping pager livelocked deterministic
+    # evaluation). The final page must not expose PAGE_NEXT, and mask
+    # generation must still be pure on that page.
+    assert gs.choice_context == page_one and not next_mask[479], \
+        "the final page exposed PAGE_NEXT (one-way paging regression)"
 
     gs.phase = gs.PHASE_CHOOSE
     gs.priority_player = player
@@ -15719,6 +15719,49 @@ def s_any_target_damage_ignores_category_key():
         "lethal damage was never marked on the mismatched-key target"
     assert summon in gs.p2["graveyard"], \
         "the damaged creature did not die to state-based actions"
+
+
+@scenario("601.2b / policy protocol",
+          "paged choices are one-way: no PAGE_NEXT on the final page, no wrap-around")
+def s_choice_paging_is_one_way():
+    gs = fresh(SEED + 915)
+    controller = gs.p1
+    gs.agent_is_p1 = True
+    options = [
+        inject_into_zone(gs, controller, {
+            "name": f"Dug Card {index}", "mana_cost": "{1}", "cmc": 1,
+            "type_line": "Instant", "oracle_text": "",
+        }, "library")
+        for index in range(12)
+    ]
+    gs.choice_context = {
+        "type": "dig_select", "player": controller,
+        "controller": controller, "options": list(options),
+        "choice_page": 0, "source_zone": "library",
+        "resume_phase": gs.PHASE_MAIN_PRECOMBAT,
+    }
+    gs.phase = gs.PHASE_CHOOSE
+    gs.priority_player = controller
+    handler = get_env().action_handler
+
+    # July 14 reward-v4 failure: the pager wrapped, so a deterministic
+    # policy whose argmax preferred 479 cycled a dig_select forever; the
+    # 2000-step episode limit fired and strict evaluation failed the run.
+    mask = handler.generate_valid_actions()
+    assert mask[353] and mask[362], "page one did not expose its ten options"
+    assert mask[479], "a multi-page choice did not expose PAGE_NEXT"
+    _, ok = handler._handle_target_page_next(None, {})
+    assert ok and gs.choice_context["choice_page"] == 1, \
+        "PAGE_NEXT did not advance to the final page"
+
+    mask = handler.generate_valid_actions()
+    assert mask[353] and mask[354] and not mask[355], \
+        "the final page did not expose exactly its two options"
+    assert not mask[479], \
+        "the final page still exposed PAGE_NEXT (wrap-around livelock)"
+    _, ok = handler._handle_target_page_next(None, {})
+    assert not ok and gs.choice_context["choice_page"] == 1, \
+        "paging off the final page wrapped instead of failing"
 
 
 # ---------------------------------------------------------------------------

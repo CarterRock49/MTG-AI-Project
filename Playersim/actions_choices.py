@@ -154,8 +154,16 @@ class ChoiceHandlersMixin:
                 1, int(requested_page_count)
                 if requested_page_count is not None
                 else (len(choice_options) + 9) // 10)
-            choice['choice_page'] = (
-                int(choice.get('choice_page', 0)) + 1) % page_count
+            # One-way paging, mirroring the 7.71 target-page contract: a
+            # wrapping pager livelocked deterministic evaluation (the argmax
+            # policy pinned 479 through a dig_select for 2000 steps and the
+            # strict evaluator failed the July 14 reward-v4 run). The mask
+            # stops exposing 479 on the final page; multi-pick flows reset
+            # choice_page per pick, so every pick can still see every page.
+            current_page = int(choice.get('choice_page', 0))
+            if current_page + 1 >= page_count:
+                return -0.1, False
+            choice['choice_page'] = current_page + 1
             return 0.0, True
         return -0.1, False
 

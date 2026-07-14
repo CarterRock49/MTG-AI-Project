@@ -767,7 +767,7 @@ class ActionSpaceMixin:
                         f"DISCARD_CARD {card_name}",
                         context={"hand_idx": page * 10 + page_index},
                     )
-                if page_count > 1:
+                if page + 1 < page_count:  # one-way paging: no 479 on the final page
                     set_valid_action(
                         479, f"DISCARD_PAGE_NEXT ({page + 1}/{page_count})",
                         context={"page_count": page_count})
@@ -800,7 +800,7 @@ class ActionSpaceMixin:
                         f"FORCED_SACRIFICE {card_name}",
                         context={"option_index": option_index},
                     )
-                if page_count > 1:
+                if page + 1 < page_count:  # one-way paging: no 479 on the final page
                     set_valid_action(
                         479,
                         f"FORCED_SACRIFICE_PAGE_NEXT ({page + 1}/{page_count})",
@@ -816,7 +816,7 @@ class ActionSpaceMixin:
                         353 + option_index,
                         f"CHOOSE_KEYWORD {keyword}",
                         context={"option_index": option_index})
-                if page_count > 1:
+                if page + 1 < page_count:  # one-way paging: no 479 on the final page
                     set_valid_action(
                         479,
                         f"KEYWORD_PAGE_NEXT ({page + 1}/{page_count})",
@@ -844,7 +844,7 @@ class ActionSpaceMixin:
                     set_valid_action(353 + option_index,
                                      f"CHOOSE_HAND_CARD {getattr(card, 'name', card_id)}",
                                      context={"option_index": option_index})
-                if page_count > 1:
+                if page + 1 < page_count:  # one-way paging: no 479 on the final page
                     set_valid_action(
                         479, f"HAND_PAGE_NEXT ({page + 1}/{page_count})",
                         context={"page_count": page_count})
@@ -862,7 +862,7 @@ class ActionSpaceMixin:
                         353 + option_index,
                         f"PREPARED_CAST {face.get('name', card_id)}",
                         context={"option_index": option_index})
-                if page_count > 1:
+                if page + 1 < page_count:  # one-way paging: no 479 on the final page
                     set_valid_action(
                         479,
                         f"PREPARED_SOURCE_PAGE_NEXT ({page + 1}/{page_count})",
@@ -882,7 +882,7 @@ class ActionSpaceMixin:
                         f"PREPARE_EXILE {getattr(card, 'name', card_id)} "
                         f"({selected + 1}/{required})",
                         context={"option_index": option_index})
-                if page_count > 1:
+                if page + 1 < page_count:  # one-way paging: no 479 on the final page
                     set_valid_action(
                         479,
                         f"PREPARE_PAYMENT_PAGE_NEXT ({page + 1}/{page_count})",
@@ -929,7 +929,7 @@ class ActionSpaceMixin:
                         353 + option_index,
                         f"PAY_WARD_{kind.upper()} {label}",
                         context={"option_index": option_index})
-                if page_count > 1:
+                if page + 1 < page_count:  # one-way paging: no 479 on the final page
                     set_valid_action(
                         479, f"WARD_PAGE_NEXT ({page + 1}/{page_count})",
                         context={"page_count": page_count})
@@ -951,7 +951,7 @@ class ActionSpaceMixin:
                         353 + option_index,
                         f"SACRIFICE_COST {getattr(card, 'name', card_id)}",
                         context={"option_index": option_index})
-                if page_count > 1:
+                if page + 1 < page_count:  # one-way paging: no 479 on the final page
                     set_valid_action(
                         479,
                         f"SACRIFICE_COST_PAGE_NEXT ({page + 1}/{page_count})",
@@ -970,7 +970,7 @@ class ActionSpaceMixin:
                         353 + option_index,
                         f"DISCARD_ACTIVATION_COST {getattr(card, 'name', card_id)}",
                         context={"option_index": option_index})
-                if page_count > 1:
+                if page + 1 < page_count:  # one-way paging: no 479 on the final page
                     set_valid_action(
                         479,
                         f"DISCARD_COST_PAGE_NEXT ({page + 1}/{page_count})",
@@ -987,7 +987,7 @@ class ActionSpaceMixin:
                     set_valid_action(353 + option_index,
                                      f"SACRIFICE_EFFECT {getattr(card, 'name', card_id)}",
                                      context={"option_index": option_index})
-                if page_count > 1:
+                if page + 1 < page_count:  # one-way paging: no 479 on the final page
                     set_valid_action(
                         479, f"SACRIFICE_PAGE_NEXT ({page + 1}/{page_count})",
                         context={"page_count": page_count})
@@ -1010,7 +1010,7 @@ class ActionSpaceMixin:
                     set_valid_action(353 + option_index,
                                      f"PUT_{context.get('counter_type', '+1/+1')}_COUNTER {getattr(card, 'name', card_id)}",
                                      context={"option_index": option_index})
-                if page_count > 1:
+                if page + 1 < page_count:  # one-way paging: no 479 on the final page
                     set_valid_action(
                         479, f"COUNTER_PAGE_NEXT ({page + 1}/{page_count})",
                         context={"page_count": page_count})
@@ -1024,7 +1024,7 @@ class ActionSpaceMixin:
                     set_valid_action(353 + option_index,
                                      f"DIG_TAKE {getattr(card, 'name', card_id)}",
                                      context={"option_index": option_index})
-                if page_count > 1:
+                if page + 1 < page_count:  # one-way paging: no 479 on the final page
                     set_valid_action(
                         479, f"DIG_PAGE_NEXT ({page + 1}/{page_count})",
                         context={"page_count": page_count})
@@ -1047,7 +1047,7 @@ class ActionSpaceMixin:
                         353 + option_index,
                         f"RESOLUTION_CHOICE {label}",
                         context={"option_index": option_index})
-                if page_count > 1:
+                if page + 1 < page_count:  # one-way paging: no 479 on the final page
                     set_valid_action(
                         479, f"CHOICE_PAGE_NEXT ({page + 1}/{page_count})",
                         context={"page_count": page_count})
@@ -1219,7 +1219,7 @@ class ActionSpaceMixin:
                         353 + option_index,
                         f"CATALOG_ACTION {entry.get('label', option_index)}",
                         context={"option_index": option_index})
-                if page_count > 1:
+                if page + 1 < page_count:  # one-way paging: no 479 on the final page
                     set_valid_action(
                         479,
                         f"ACTION_CATALOG_PAGE_NEXT ({page + 1}/{page_count})",
@@ -1292,7 +1292,7 @@ class ActionSpaceMixin:
                     set_valid_action(
                         363 + option_index, f"CHOOSE_X_VALUE {x_value}",
                         context={"x_value": x_value})
-                if page_count > 1:
+                if page + 1 < page_count:  # one-way paging: no 479 on the final page
                     set_valid_action(
                         479, f"CHOOSE_X_PAGE_NEXT ({page + 1}/{page_count})",
                         context={"page_count": page_count})

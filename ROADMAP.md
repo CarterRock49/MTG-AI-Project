@@ -75,7 +75,7 @@ The project is complete when all of the following hold:
   lineage-stamped manifests. User-supplied decks route into isolated format
   pools automatically; passing policy qualification and builder feedback remain
   open.
-- Test gates: smoke 9/9, training 13/13, scenarios 368/368 (grown from 12),
+- Test gates: smoke 9/9, training 13/13, scenarios 369/369 (grown from 12),
   108/108 focused regression tests, 201/201 discovered unit tests,
   fixture harvest 16/16, production Harvest protocol 16/16, card registry
   19/19, deck ingestion 13/13, fuzz/replay configuration 6/6, deterministic
@@ -534,6 +534,23 @@ evals completed mid-training, best model promoted, clean shutdown).
 Training smoke 13/13 (eval-callback stage rewritten for the async
 contract). **Checkpoint boundary: the width change starts a new lineage —
 do not resume pre-7.76 checkpoints.**
+
+**7.77 — one-way choice paging (deterministic-evaluation livelock).** The
+first 7.76 run (`reward-v4`) was failed by its own strict async evaluator
+22 minutes in: under `deterministic=True`, the young policy's argmax
+pinned action 479 (PAGE_NEXT) inside a two-page `dig_select`, and because
+the generic choice pager wrapped (`(page+1) % page_count`), the episode
+cycled until the 2000-step cap fired. Training never trips this
+(stochastic sampling escapes); deterministic evaluation can never escape
+it. Every paged choice now follows the 7.71 target-page contract: the
+handler advances one-way and refuses on the final page, and all 15 mask
+sites stop exposing 479 on the final page. Multi-pick flows already reset
+`choice_page` per pick, so each pick can still reach every page. The
+mask-purity scenario was updated from pinning wrap to pinning one-way; a
+new guard scenario reproduces the livelock pre-fix. Scenarios 369/369,
+default fuzz 8/8 seeds, smoke 9/9, training smoke 13/13, focused
+choice/catalog/target suites 25/25. Engine-only; the 7.76 boundary still
+applies.
 
 ---
 
