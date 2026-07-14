@@ -39,9 +39,9 @@ class AlphaZeroMTGEnv(gym.Env):
     Updated for improved reward shaping, richer observations, modularity, and detailed logging.
     """
     ACTION_SPACE_SIZE = 480 # Moved constant here
-    REWARD_CONTRACT_VERSION = "discounted-state-potential-v1"
+    REWARD_CONTRACT_VERSION = "discounted-state-potential-v2"
     DEFAULT_REWARD_DISCOUNT = 0.995
-    DEFAULT_ACTION_REWARD_SCALE = 0.10
+    DEFAULT_ACTION_REWARD_SCALE = 0.02
     DEFAULT_STATE_POTENTIAL_SCALE = 0.25
 
     def __init__(self, decks, card_db, max_turns=30, max_hand_size=7, max_battlefield=20,
@@ -1592,9 +1592,14 @@ class AlphaZeroMTGEnv(gym.Env):
                 env_info["terminal_reason"] = terminal_reason
                 result = env_info.get("game_result", "draw")
                 if terminal_reason == "turn_limit":
+                    # Timing out must never approximate winning: the v1 run's
+                    # rollouts ended at the turn limit 88% of the time because
+                    # a life-lead timeout paid half a real win. Every timeout
+                    # outcome is now clearly worse than closing the game out,
+                    # while surviving to the limit still beats dying (-10).
                     terminal_reward = {
-                        "win": 5.0, "loss": -5.0, "draw": -1.0,
-                    }.get(result, -1.0)
+                        "win": 2.0, "loss": -8.0, "draw": -4.0,
+                    }.get(result, -4.0)
                 else:
                     terminal_reward = {
                         "win": 10.0, "loss": -10.0, "draw": -0.25,

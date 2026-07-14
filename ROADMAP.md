@@ -59,9 +59,9 @@ The project is complete when all of the following hold:
   dropped in 7.64 as an honesty correction: 321 previously silent
   unclassified clauses are now reported instead of passing as clean.
 - Tier 3 (training/environment): ◐ policy plumbing, audit work, the explicit
-  paired-seat scripted qualification gate, and the Round 7.72 reward/critic
-  stabilization are complete; a fresh trained checkpoint still needs to pass
-  qualification before Harvest is promoted to policy-vs-policy.
+  paired-seat scripted qualification gate, and the Round 7.72–7.73
+  reward/critic stabilization are complete; a fresh trained checkpoint still
+  needs to pass qualification before Harvest is promoted to policy-vs-policy.
 - Tier 4 (verification/calibration): ◐ invariant and long-fuzz gates are green;
   the matchup calibration study remains open.
 - Tier 5 (operations/integration): ◐ Harvest orchestration and the fail-closed
@@ -240,10 +240,11 @@ Phased milestones:
    preflight and paired-seat evaluation queue without contaminating held-out
    promotion or calibration results.
 
-**Current execution order:** launch a fresh Round 7.72 Standard candidate and
+**Current execution order:** launch a fresh Round 7.73 Standard candidate and
 inspect its first 100k steps for nonzero `reward/state_change_nonzero`, bounded
-return/value scales, and a critic explained-variance trend that is not
-persistently negative. Continue the impact-ranked Standard support sweep while
+return/value scales, a critic explained-variance trend that is not
+persistently negative, and a `terminal/life_total_rate` share that grows at
+the expense of `terminal/turn_limit_rate`. Continue the impact-ranked Standard support sweep while
 that run proceeds, then qualify the candidate against scripted play, promote it
 into a checkpoint league, and calibrate known matchups. Imported lists can
 widen the working pool without overwriting the pinned metagame; builder-driven
@@ -410,6 +411,23 @@ failure logs were converted into engine and training-contract fixes:
   explained variance. Training smoke is 13/13 and rules scenarios are 365/365.
   **This is a reward-contract boundary: do not resume pre-7.72 checkpoints.**
 
+**7.73 — timeout stalling and critic-input repair.** The first 7.72 run
+(`reward-v1`, stopped at ~172k/1M steps) diagnosed two coupled failures.
+First, 88% of rollout episodes ended at the turn limit and only 3.6% by
+life total: a life-lead timeout paid +5 (half a real win), so accumulating
+per-action shaping while coasting to the limit beat trying to close games.
+The terminal contract is now `discounted-state-potential-v2`: real results
+stay ±10, but timeouts pay win +2 / draw −4 / loss −8, and
+`action_reward_scale` drops 0.10 → 0.02 (~0.24/episode, tie-break only).
+Second, the critic diverged (value loss 1e7, |V| to 1.4e5 against true
+returns of ~±20) because saturation-bounded observation scalars (P/T and
+combat damage to 1e6, raw card ids to 2^31) fed `Linear` layers unsquashed;
+one degenerate game contaminated the GAE targets of its whole batch. The
+extractor now applies stateless symlog `sign(x)·log1p(|x|)` to every
+continuous input, keeping magnitudes ≤ ~22 with no VecNormalize state to
+save or sync. **This is a reward-contract and extractor boundary: do not
+resume pre-7.73 checkpoints.**
+
 ---
 
 ## Working agreements
@@ -531,9 +549,10 @@ pending the next choice audit (attacker-side assignment order is exposed).
     snapshot but refuses a half-present registry/schema pair; sideboards are
     retained and legality-checked but not played by the Bo1 runtime.
     Checkpoint-resume boundaries: pre-7.37 (reward rebuild), pre-7.44
-    (observation space), pre-7.62 (X/count bounds), and pre-7.72 (discounted
-    state-potential reward contract and critic baseline) checkpoints must not
-    be resumed; pre-7.46 stats artifacts must not be mixed with
+    (observation space), pre-7.62 (X/count bounds), pre-7.72 (discounted
+    state-potential reward contract and critic baseline), and pre-7.73
+    (timeout terminal rebalance and symlog extractor inputs) checkpoints
+    must not be resumed; pre-7.46 stats artifacts must not be mixed with
     format-namespace lineages.
 38. Treasure/Beza support is scenario-verified through registration,
     activation costs, color choice, mana production, and the CR 605

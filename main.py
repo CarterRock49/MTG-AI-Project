@@ -126,10 +126,23 @@ class FixedWindowMTGExtractor(BaseFeaturesExtractor):
             batch_first=True
         )
     
+    @staticmethod
+    def _symlog(tensor):
+        """Compress unbounded observation scalars before any linear layer.
+
+        Several declared observation bounds are saturation points, not
+        typical magnitudes (P/T and combat damage saturate at 1e6, card ids
+        reach 2**31). Feeding those raw into ``Linear`` layers let a single
+        degenerate game drive value predictions to ~1e5 and poison the GAE
+        targets for the whole batch. sign(x)*log1p(|x|) is monotone, exact
+        near zero, and keeps every input within ~22.
+        """
+        return torch.sign(tensor) * torch.log1p(torch.abs(tensor))
+
     def forward(self, observations):
         """Process the observations through the feature extractors"""
         encoded_tensor_list = []
-            
+
         # Process discrete observations
         if "phase" in observations:
             # Defensive clamp: never index outside the embedding table.
@@ -137,11 +150,12 @@ class FixedWindowMTGExtractor(BaseFeaturesExtractor):
                 0, self.phase_embedding.num_embeddings - 1)
             phase_emb = self.phase_embedding(phase_tensor)
             encoded_tensor_list.append(phase_emb)
-        
+
         # Process continuous observation spaces
         for key, extractor in self.extractors.items():
             if key in observations:
-                encoded_tensor_list.append(extractor(observations[key]))
+                encoded_tensor_list.append(
+                    extractor(self._symlog(observations[key])))
         
         batch_size = encoded_tensor_list[0].shape[0]
         

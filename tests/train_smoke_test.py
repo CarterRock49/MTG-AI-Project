@@ -487,9 +487,9 @@ def check_runtime_configuration():
         "n_epochs": 9,
         "max_grad_norm": 0.77,
         "activation_fn": torch.nn.Tanh,
-        "action_reward_scale": 0.1,
+        "action_reward_scale": 0.02,
         "state_potential_scale": 0.25,
-        "reward_contract_version": "discounted-state-potential-v1",
+        "reward_contract_version": "discounted-state-potential-v2",
     }
 
     try:
@@ -559,7 +559,7 @@ def check_runtime_configuration():
     assert environment_calls[1][2]["agent_is_p1"] is False
     assert environment_calls[1][2]["alternate_agent_seat"] is True
     assert environment_calls[0][2]["reward_discount"] == 0.995
-    assert environment_calls[0][2]["action_reward_scale"] == 0.1
+    assert environment_calls[0][2]["action_reward_scale"] == 0.02
     assert environment_calls[0][2]["state_potential_scale"] == 0.25
 
 
