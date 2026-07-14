@@ -2043,8 +2043,10 @@ class CombatResolver:
             if not hasattr(card, 'power'):
                 logging.warning(f"Card {getattr(card, 'name', 'Unknown')} missing 'power' attribute")
                 return 0
-                
-            base_power = card.power
+
+            # Star P/T (CDA) cards print None; the live value exists only
+            # while the layer system computes it on the battlefield.
+            base_power = card.power if card.power is not None else 0
             
             # Add +1/+1 counters
             if hasattr(card, 'counters'):
@@ -2066,8 +2068,10 @@ class CombatResolver:
         """Get a card's current toughness, accounting for counters and effects."""
         if not card or not hasattr(card, 'toughness'):
             return 0
-            
-        base_toughness = card.toughness
+
+        # Star P/T (CDA) cards print None; the live value exists only while
+        # the layer system computes it on the battlefield.
+        base_toughness = card.toughness if card.toughness is not None else 0
         
         # Add +1/+1 counters
         if hasattr(card, 'counters'):
@@ -2184,12 +2188,26 @@ class CombatResolver:
             # break in-simulation lethality checks that read live card state.
             snapshot = self._snapshot_combat_sim_state()
 
-            # Use deep copies to avoid modifying game state
-            attackers = list(gs.current_attackers)
-            block_assignments = {k: list(v) for k, v in gs.current_block_assignments.items()}
-            
             attacker_player = gs.p1 if gs.agent_is_p1 else gs.p2
             defender_player = gs.p2 if gs.agent_is_p1 else gs.p1
+
+            # Use deep copies to avoid modifying game state.  Combat state can
+            # be stale here: an aborted resolution keeps its declarations, and
+            # planner callers stage hypothetical attackers without touching the
+            # block map.  Restrict the simulation to objects actually on the
+            # battlefield and to blocks against creatures actually attacking,
+            # so a creature that already died can neither deal nor receive
+            # simulated damage (dead star-P/T cards also read power None).
+            attacker_battlefield = set(attacker_player.get("battlefield", ()))
+            defender_battlefield = set(defender_player.get("battlefield", ()))
+            attackers = [attacker_id for attacker_id in gs.current_attackers
+                         if attacker_id in attacker_battlefield]
+            attacking = set(attackers)
+            block_assignments = {
+                attacker_id: [blocker_id for blocker_id in blockers
+                              if blocker_id in defender_battlefield]
+                for attacker_id, blockers in gs.current_block_assignments.items()
+                if attacker_id in attacking}
             
             # Track expected outcomes
             simulation_results = {

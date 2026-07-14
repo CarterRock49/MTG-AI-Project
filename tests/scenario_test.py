@@ -16334,6 +16334,78 @@ def s_strategy_memory_is_optional_deterministic_and_agent_scoped():
         gs.strategy_memory = None
 
 
+@scenario("combat simulation / stale participants",
+          "simulate_combat ignores attackers and blockers that left the battlefield")
+def s_simulate_combat_ignores_stale_combat_participants():
+    from Playersim.combat import CombatResolver
+
+    gs = fresh(SEED + 927)
+    gs.agent_is_p1 = True
+    me, opp = gs.p1, gs.p2
+
+    attacker = inject_into_zone(gs, me, {
+        "name": "Stale Sim Attacker", "mana_cost": "{2}{R}", "cmc": 3,
+        "type_line": "Creature - Warrior", "oracle_text": "",
+        "power": "3", "toughness": "3",
+    }, "battlefield")
+    live_blocker = inject_into_zone(gs, opp, {
+        "name": "Stale Sim Live Blocker", "mana_cost": "{1}{W}", "cmc": 2,
+        "type_line": "Creature - Soldier", "oracle_text": "",
+        "power": "2", "toughness": "2",
+    }, "battlefield")
+    lifelink_blocker = inject_into_zone(gs, opp, {
+        "name": "Stale Sim Lifelink Blocker", "mana_cost": "{W}{W}", "cmc": 2,
+        "type_line": "Creature - Cleric", "oracle_text": "Lifelink",
+        "power": "2", "toughness": "2",
+    }, "battlefield")
+
+    # A big blocker and a star-power CDA blocker (printed power None, live
+    # value computed by the layer system only on the battlefield) that both
+    # blocked an earlier combat and died, plus a dead former attacker whose
+    # block-map entry also survived. Aborted resolutions and hypothetical
+    # attacks staged by planner callers leave exactly this stale state behind.
+    ghost_blocker = inject_into_zone(gs, opp, {
+        "name": "Stale Sim Dead Blocker", "mana_cost": "{4}{G}", "cmc": 5,
+        "type_line": "Creature - Beast", "oracle_text": "",
+        "power": "9", "toughness": "9",
+    }, "battlefield")
+    star_blocker = inject_into_zone(gs, opp, {
+        "name": "Stale Sim Dead Star Blocker", "mana_cost": "{1}{U}{U}",
+        "cmc": 3, "type_line": "Legendary Creature - Merfolk",
+        "oracle_text": "This creature's power is equal to the number of "
+                       "Merfolk you control.",
+        "power": "*", "toughness": "4",
+    }, "battlefield")
+    ghost_attacker = inject_into_zone(gs, me, {
+        "name": "Stale Sim Dead Attacker", "mana_cost": "{3}{B}", "cmc": 4,
+        "type_line": "Creature - Horror", "oracle_text": "",
+        "power": "4", "toughness": "4",
+    }, "battlefield")
+    assert gs.move_card(ghost_blocker, opp, "battlefield", opp, "graveyard")
+    assert gs.move_card(star_blocker, opp, "battlefield", opp, "graveyard")
+    assert gs.move_card(ghost_attacker, me, "battlefield", me, "graveyard")
+    assert gs._safe_get_card(star_blocker).power is None, \
+        "star-power fixture no longer prints None power; scenario needs a new hidden-value card"
+
+    gs.current_attackers = [attacker]
+    gs.current_block_assignments = {
+        attacker: [live_blocker, ghost_blocker, star_blocker],
+        ghost_attacker: [lifelink_blocker],
+    }
+
+    results = CombatResolver(gs).simulate_combat()
+
+    # Only the live 3/3-vs-2/2 exchange may exist: the live blocker dies, the
+    # attacker survives, and nothing dead deals or receives simulated damage.
+    assert live_blocker in results["blockers_dying"], results
+    assert results["attackers_dying"] == [], \
+        "a dead blocker still dealt simulated combat damage"
+    assert results["life_gained"] == 0, \
+        "a blocker assigned to a dead attacker still dealt simulated damage"
+    assert ghost_blocker not in results["blockers_dying"], results
+    assert star_blocker not in results["blockers_dying"], results
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
