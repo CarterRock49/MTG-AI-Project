@@ -16102,6 +16102,80 @@ def s_observation_planner_metrics_are_fresh_and_perspective_safe():
         "opponent observation reused the other seat's strategic analysis"
 
 
+@scenario("observation v2 / planner purity",
+          "planner summaries are deterministic, RNG-neutral, and use only visible opponent cards")
+def s_observation_planner_summaries_are_pure_and_public():
+    gs = fresh(SEED + 926)
+    env = get_env()
+    gs.agent_is_p1 = True
+    me, opp = gs.p1, gs.p2
+    gs.turn = 1
+    gs.priority_player = me
+    gs.phase = gs.PHASE_DECLARE_ATTACKERS
+
+    # Force both former random branches: no known land drops for the projected
+    # plan, and more than five legal attackers for bounded combat search.
+    for card_id in list(me.get("hand", [])):
+        card = gs._safe_get_card(card_id)
+        if "land" in getattr(card, "card_types", []):
+            assert gs.move_card(card_id, me, "hand", me, "library")
+    for index in range(6):
+        attacker = inject_into_zone(gs, me, {
+            "name": f"Deterministic Attacker {index}",
+            "mana_cost": "{1}{G}", "cmc": 2,
+            "type_line": "Creature - Warrior", "oracle_text": "",
+            "power": str(index + 1), "toughness": "2",
+        }, "battlefield")
+        me.get("entered_battlefield_this_turn", set()).discard(attacker)
+
+    saved_rng_state = random.getstate()
+    try:
+        random.seed(926_926)
+        before_read = random.getstate()
+        first = env.observation_for(me)
+        after_first = random.getstate()
+        second = env.observation_for(me)
+        after_second = random.getstate()
+    finally:
+        random.setstate(saved_rng_state)
+
+    assert before_read == after_first == after_second, \
+        "reading planner observations consumed the gameplay RNG"
+    assert np.array_equal(first["multi_turn_plan"], second["multi_turn_plan"])
+    assert np.array_equal(first["optimal_attackers"], second["optimal_attackers"])
+    assert first["strategic_metrics"].shape == (7,)
+    removed = {
+        "recommended_action", "recommended_action_confidence",
+        "estimated_opponent_hand",
+    }
+    assert not (removed & set(env.observation_space.spaces)), \
+        "dead or hidden-runtime planner fields survived Observation v2 cleanup"
+
+    baseline_archetype = first["opponent_archetype"].copy()
+    hidden_exile = inject_card(gs, {
+        "name": "Hidden Infinite Combo Tutor", "mana_cost": "{7}",
+        "cmc": 7, "type_line": "Sorcery",
+        "oracle_text": "Search your library for a card. Infinite combo.",
+    })
+    opp["library"].append(hidden_exile)
+    gs._last_card_locations[hidden_exile] = (opp, "library")
+    assert gs.move_card(
+        hidden_exile, opp, "library", opp, "exile",
+        context={"face_down_exile": True})
+    hidden_permanent = inject_into_zone(gs, opp, {
+        "name": "Hidden Hasty Aggro Threat", "mana_cost": "{R}",
+        "cmc": 1, "type_line": "Creature - Goblin",
+        "oracle_text": "Haste, menace, double strike.",
+        "power": "8", "toughness": "8",
+    }, "battlefield")
+    gs._safe_get_card(hidden_permanent).face_down = True
+
+    hidden_view = env.observation_for(me)
+    assert np.array_equal(
+        hidden_view["opponent_archetype"], baseline_archetype), \
+        "face-down opponent identities leaked into archetype inference"
+
+
 @scenario("observation v2 / semantic identity",
           "canonical card identity is categorical, stable, and compact")
 def s_observation_v2_semantic_identity_and_compaction():

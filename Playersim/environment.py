@@ -52,7 +52,7 @@ class AlphaZeroMTGEnv(gym.Env):
 
     def __init__(self, decks, card_db, max_turns=30, max_hand_size=7, max_battlefield=20,
                  deck_stats_path="./deck_stats", card_memory_path="./card_memory",
-                 planner_recommendations=False, agent_is_p1=True,
+                 agent_is_p1=True,
                  alternate_agent_seat=False, subtype_vocab=None,
                  strategy_memory_enabled=False,
                  reward_discount=DEFAULT_REWARD_DISCOUNT,
@@ -107,11 +107,6 @@ class AlphaZeroMTGEnv(gym.Env):
         self.alternate_agent_seat = bool(alternate_agent_seat)
         self._successful_reset_count = 0
         self.current_analysis = None
-        # Calling the full planner from observation construction can launch MCTS
-        # for every policy step.  That is both circular (a policy recommendation
-        # becomes a policy input) and far too expensive for rollouts.  Keep the
-        # legacy feature opt-in for diagnostics; training uses the cheap default.
-        self.planner_recommendations = bool(planner_recommendations)
         # Card.SUBTYPE_VOCAB is populated by load_decks_and_card_db *after*
         # this module is imported.  The former import-time dummy therefore
         # measured a zero-subtype vector (177 fields) and silently truncated
@@ -263,7 +258,6 @@ class AlphaZeroMTGEnv(gym.Env):
                 shape=(rows,), dtype=np.int32)
 
         # --- UPDATED: Observation Space with Context Facilitation Fields ---
-        # *** MODIFIED: Updated estimated_opponent_hand shape ***
         self.observation_space = spaces.Dict({
             # --- Existing Fields (mostly unchanged shapes) ---
             "phase": spaces.Box(low=0, high=MAX_PHASE, shape=(1,), dtype=np.int32),
@@ -371,14 +365,11 @@ class AlphaZeroMTGEnv(gym.Env):
             "previous_rewards": spaces.Box(low=-1000, high=1000, shape=(self.action_memory_size,), dtype=np.float32),
             "phase_history": spaces.Box(low=-1, high=MAX_PHASE, shape=(5,), dtype=np.int32),
             "action_mask": spaces.Box(low=0, high=1, shape=(self.ACTION_SPACE_SIZE,), dtype=bool),
-            "recommended_action": spaces.Box(low=-1, high=self.ACTION_SPACE_SIZE - 1, shape=(1,), dtype=np.int32),
-            "recommended_action_confidence": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
             "optimal_attackers": spaces.Box(low=0, high=1, shape=(self.max_battlefield,), dtype=np.float32),
             "attacker_values": spaces.Box(low=-10, high=10, shape=(self.max_battlefield,), dtype=np.float32),
             "ability_recommendations": spaces.Box(low=0, high=1, shape=(self.max_battlefield, 5, 2), dtype=np.float32),
-            "strategic_metrics": spaces.Box(low=-1, high=1, shape=(10,), dtype=np.float32),
+            "strategic_metrics": spaces.Box(low=-1, high=1, shape=(7,), dtype=np.float32),
             "position_advantage": spaces.Box(low=-1, high=1, shape=(1,), dtype=np.float32),
-            "estimated_opponent_hand": card_feature_space(self.hand_observation_size),
             "deck_composition_estimate": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
             "opponent_archetype": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
             "future_state_projections": spaces.Box(low=-1, high=1, shape=(7,), dtype=np.float32),
@@ -434,7 +425,7 @@ class AlphaZeroMTGEnv(gym.Env):
             "my_hand", "my_battlefield", "opp_battlefield",
             "my_graveyard_cards", "opp_graveyard_cards",
             "my_exile_cards", "opp_exile_cards", "stack_cards",
-            "estimated_opponent_hand", "target_cards", "choice_cards",
+            "target_cards", "choice_cards",
             "my_total_power", "my_total_toughness", "opp_total_power",
             "opp_total_toughness", "power_advantage", "toughness_advantage",
             "potential_combat_damage", "my_mana_pool", "opp_mana_pool",
@@ -2998,121 +2989,6 @@ class AlphaZeroMTGEnv(gym.Env):
         
         return np.clip(overall_advantage, -1.0, 1.0)
     
-    def _calculate_card_likelihood(self, card, color_count, visible_creatures, visible_instants, visible_artifacts):
-        """Helper to calculate how likely a card is to be in opponent's hand"""
-        gs = self.game_state
-        weight = 1.0
-        
-        # Card must have required attributes
-        if not card or not hasattr(card, 'colors') or not hasattr(card, 'card_types'):
-            return 0.0
-        
-        # Color matching
-        card_colors = np.array(card.colors)
-        color_match = np.sum(card_colors * color_count) / (np.sum(color_count) + 1e-6)
-        weight *= (1.0 + color_match)
-        
-        # Card type matching
-        if 'creature' in card.card_types and visible_creatures > 0:
-            weight *= 1.5
-        if 'instant' in card.card_types and visible_instants > 0:
-            weight *= 1.2
-        if 'artifact' in card.card_types and visible_artifacts > 0:
-            weight *= 1.3
-            
-        # Mana curve considerations - higher probability of having castable cards
-        if hasattr(card, 'cmc'):
-            if card.cmc <= gs.turn:
-                weight *= 2.0
-            elif card.cmc <= gs.turn + 2:
-                weight *= 1.0
-            else:
-                weight *= 0.5
-        
-        return weight
-    
-    def _estimate_opponent_hand(self):
-        """Create a probabilistic model of opponent's hand based on known information. Uses self._feature_dim."""
-        gs = self.game_state
-        opp = gs.p2 if gs.agent_is_p1 else gs.p1
-
-        # --- Use the environment's stored feature dimension ---
-        feature_dim = self._feature_dim
-        # --- End modification ---
-
-        # Get known cards in opponent's deck
-        known_deck_cards = set()
-        # Check existence of zones safely
-        for zone in ["battlefield", "graveyard", "exile"]:
-            if opp and zone in opp: # Ensure player and zone exist
-                for card_id in opp[zone]:
-                    if (zone == "exile"
-                            and hasattr(gs, "is_face_down_exile_card")
-                            and gs.is_face_down_exile_card(card_id, opp)):
-                        # This public-zone object has no visible identity. Its
-                        # real types/colors must not shape hand inference.
-                        continue
-                    known_deck_cards.add(card_id)
-
-        # Count cards by type in opponent's visible cards to infer deck strategy
-        visible_creatures = 0
-        visible_instants = 0
-        visible_artifacts = 0
-        color_count = np.zeros(5)  # WUBRG
-
-        for card_id in known_deck_cards:
-            card = gs._safe_get_card(card_id)
-            if not card: continue
-
-            if hasattr(card, 'card_types'):
-                if 'creature' in card.card_types: visible_creatures += 1
-                if 'instant' in card.card_types: visible_instants += 1
-                if 'artifact' in card.card_types: visible_artifacts += 1
-
-            if hasattr(card, 'colors'):
-                # --- Ensure correct length before accessing ---
-                if len(card.colors) == 5:
-                     for i, color_val in enumerate(card.colors):
-                         color_count[i] += color_val
-                # --- End modification ---
-
-        # Create estimated hand based on deck profile
-        estimated_hand = np.zeros((self.hand_observation_size, feature_dim), dtype=np.float32) # Use correct feature_dim
-
-        # Create pool of likely cards based on observed deck profile
-        likely_cards = []
-
-        # Modified part: iterate over card_db differently depending on its type
-        if isinstance(gs.card_db, dict):
-            for card_id, card in gs.card_db.items():
-                if card_id in known_deck_cards: continue # Skip known cards
-                if (hasattr(gs, "is_face_down_exile_card")
-                        and gs.is_face_down_exile_card(card_id)):
-                    # The physical opaque object is publicly in exile, so it
-                    # is not a possible opponent-hand object either. Do not let
-                    # its hidden characteristics affect candidate ranking.
-                    continue
-                weight = self._calculate_card_likelihood(card, color_count, visible_creatures, visible_instants, visible_artifacts)
-                likely_cards.append((card_id, weight))
-        else:
-            logging.warning("Unexpected card_db format")
-
-        # Sort by weight and select top cards
-        likely_cards.sort(key=lambda x: x[1], reverse=True)
-
-        # Fill estimated hand with top weighted cards
-        opp_hand_size = len(opp.get("hand", [])) if opp else 0 # Safe get hand size
-        hand_size_to_fill = min(opp_hand_size, self.hand_observation_size)
-        for i in range(hand_size_to_fill):
-            if i < len(likely_cards):
-                # --- Pass the correct feature_dim ---
-                estimated_hand[i] = self._get_card_feature(likely_cards[i][0], feature_dim)
-            else: # Pad with zeros if likely_cards run out before filling estimated hand size
-                 estimated_hand[i] = np.zeros(feature_dim, dtype=np.float32)
-        # The rest of the estimated_hand array remains zeros
-
-        return estimated_hand
-    
     def _log_episode_summary(self):
         logging.info(f"Episode ended with total reward: {sum(self.episode_rewards)} and {self.episode_invalid_actions} invalid actions.")
     
@@ -3532,9 +3408,8 @@ class AlphaZeroMTGEnv(gym.Env):
                 obs["previous_rewards"] = np.array(self.last_n_rewards if hasattr(self, 'last_n_rewards') else [0.0]*self.action_memory_size, dtype=np.float32)
 
                 # Planning Features
-                obs["strategic_metrics"] = np.zeros(10, dtype=np.float32) # Default
+                obs["strategic_metrics"] = np.zeros(7, dtype=np.float32) # Default
                 obs["position_advantage"] = np.array([self._calculate_position_advantage()], dtype=np.float32)
-                obs["estimated_opponent_hand"] = self._estimate_opponent_hand()
                 obs["deck_composition_estimate"] = self._get_deck_composition(agent_player_obj)
                 obs["opponent_archetype"] = np.zeros(6, dtype=np.float32) # Default
                 obs["future_state_projections"] = np.zeros(7, dtype=np.float32) # Default
@@ -3638,7 +3513,7 @@ class AlphaZeroMTGEnv(gym.Env):
                     self.current_analysis = analysis
 
                     if analysis:
-                        obs["strategic_metrics"][:10] = self._analysis_to_metrics(analysis)[:10]
+                        obs["strategic_metrics"][:] = self._analysis_to_metrics(analysis)
                         obs["position_advantage"][0] = np.clip(
                             analysis.get("position", {}).get("score", 0),
                             -1.0, 1.0)
@@ -3668,12 +3543,6 @@ class AlphaZeroMTGEnv(gym.Env):
                     threat_assessment_values = self._get_threat_assessment(bf_ids_opp)
                     copy_len_threat = min(len(obs["threat_assessment"]), len(threat_assessment_values))
                     obs["threat_assessment"][:copy_len_threat] = threat_assessment_values[:copy_len_threat]
-
-                    valid_actions_list = np.where(current_mask)[0].tolist()
-                    rec_action, rec_conf = self._get_recommendations(
-                        valid_actions_list)
-                    obs["recommended_action"][0] = rec_action
-                    obs["recommended_action_confidence"][0] = rec_conf
 
                     bf_ids_agent = agent_player_obj.get("battlefield", [])
                     # The old gate checked strategic_planner for
@@ -4749,9 +4618,9 @@ class AlphaZeroMTGEnv(gym.Env):
         """Convert strategic analysis dict to metrics vector."""
         # Fallback: Return zeros if strategic planner is not available or analysis is None
         if not hasattr(self, 'strategic_planner') or not self.strategic_planner or not analysis:
-            return np.zeros(10, dtype=np.float32)
+            return np.zeros(7, dtype=np.float32)
 
-        metrics = np.zeros(10, dtype=np.float32)
+        metrics = np.zeros(7, dtype=np.float32)
         # --- Safely access analysis keys with .get() ---
         metrics[0] = analysis.get("position", {}).get("score", 0)
         metrics[1] = analysis.get("board_state", {}).get("board_advantage", 0)
@@ -4764,10 +4633,6 @@ class AlphaZeroMTGEnv(gym.Env):
         metrics[5] = analysis.get("tempo", {}).get("tempo_advantage", 0)
         stage = analysis.get("game_info", {}).get("game_stage", 'mid')
         metrics[6] = 0.0 if stage == 'early' else 0.5 if stage == 'mid' else 1.0
-        # --- END safe access ---
-        metrics[7] = 0.0 # Opponent Archetype Confidence
-        metrics[8] = 0.0 # Win Condition Proximity
-        metrics[9] = 0.0 # Overall Threat Level
         return np.clip(metrics, -1.0, 1.0)
 
     def _get_deck_composition(self, player):
@@ -5037,33 +4902,6 @@ class AlphaZeroMTGEnv(gym.Env):
                  logging.warning(f"Error getting mulligan recommendation: {mull_e}")
         return recommendation, reasons_arr, reason_count
 
-
-    def _get_recommendations(self, valid_actions_list):
-        """Get the optional planner recommendation used by diagnostics."""
-        rec_action = -1
-        rec_conf = 0.0
-
-        # Planner Recommendation (Check existence first)
-        if (self.planner_recommendations
-                and hasattr(self, 'strategic_planner')
-                and self.strategic_planner
-                and hasattr(self.strategic_planner, 'recommend_action')):
-             try:
-                 # Pass the list of valid actions
-                 rec_action = self.strategic_planner.recommend_action(valid_actions_list)
-                 # Crude confidence based on position
-                 # --- Check if current_analysis exists before using it ---
-                 analysis = getattr(self, 'current_analysis', None) or getattr(self.strategic_planner, 'current_analysis', {})
-                 # --- End Check ---
-                 score = analysis.get('position', {}).get('score', 0)
-                 rec_conf = 0.5 + abs(score) * 0.4 # Map score [-1, 1] to confidence [0.5, 0.9]
-             except Exception as e:
-                 logging.warning(f"Error getting recommendation from planner: {e}")
-                 pass # Ignore errors
-
-        # Ensure -1 if None
-        rec_action = -1 if rec_action is None else rec_action
-        return rec_action, rec_conf
 
     def _get_attacker_values(self, bf_ids, player):
         """Evaluate the strategic value of attacking with each potential attacker."""

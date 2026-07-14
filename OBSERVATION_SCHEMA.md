@@ -2,6 +2,9 @@
 
 Current contract: **Observation v2**, frozen July 14, 2026.
 
+Current schema hash:
+`8b77a325816aec9fd6a8b7a8e924a2b936a092e163b81f2d0a22947387804ea8`.
+
 The executable version and hash live in
 `Playersim/observation_schema.py`. Training, fixture Harvest, and production
 Harvest lineage record that identity independently from the card registry and
@@ -158,23 +161,24 @@ Mana vectors use color order `W,U,B,R,G,C` and saturate at 100 per entry.
 | `previous_actions` | `(80)`, `-1..A` | Recent action history, padded with `-1`. |
 | `previous_rewards` | `(80)`, `-1000..1000` | Recent reward history. |
 | `phase_history` | `(5)`, `-1..phase_max` | Last observed phase transitions. |
-| `recommended_action` | `(1)`, `-1..A-1` | Optional planner action recommendation. |
-| `recommended_action_confidence` | `(1)`, `0..1` | Planner confidence. |
-| `optimal_attackers` | `(B)`, boolean | Real combination-search recommendation during attack decisions. |
+| `optimal_attackers` | `(B)`, boolean | Deterministic bounded-combination recommendation during attack decisions. |
 | `attacker_values` | `(B)`, `-10..10` | Per-attacker evaluator score. |
 | `ability_recommendations` | `(B,5,2)`, `0..1` | Recommend/confidence pair per ability; rank-3 extractor route. |
-| `strategic_metrics` | `(10)`, `-1..1` | Perspective-fresh planner metrics. |
+| `strategic_metrics` | `(7)`, `-1..1` | Position, board, card, mana, life, tempo, and game-stage metrics. |
 | `position_advantage` | `(1)`, `-1..1` | Planner position score. |
-| `estimated_opponent_hand` | `(H,F)`, card bounds | Public-information inference, never actual hidden hand identity. |
 | `deck_composition_estimate`, `opponent_archetype` | `(6)`, `0..1` | Public-information deck/archetype summaries. |
 | `future_state_projections` | `(7)`, `-1..1` | Planner projection summary. |
-| `multi_turn_plan`, `win_condition_viability` | `(6)`, `0..1` | Planner plan/win-condition summary. |
+| `multi_turn_plan`, `win_condition_viability` | `(6)`, `0..1` | Deterministic expected-value plan and win-condition summary. |
 | `win_condition_timings` | `(6)`, `0..max_turns+1` | Estimated turns to each win condition. |
 | `resource_efficiency` | `(3)`, `0..1` | Mana, card, and tempo efficiency summary. |
 
-Planner analysis is recomputed per observation. A future performance cache must
-be keyed by both state version and observing player; turn-only caching is
-forbidden because it is stale within a turn and unsafe across seats.
+Planner analysis is recomputed per observation. Constructing an observation is
+RNG-neutral: unknown future draws use expected values, and wide-board attack
+candidates use a deterministic bounded ordering. Opponent inference may inspect
+only identities visible to the observer; face-down permanents and face-down
+exile objects are excluded. A future performance cache must be keyed by both
+state version and observing player; turn-only caching is forbidden because it
+is stale within a turn and unsafe across seats.
 
 ### Mulligan, target, and choice protocol
 
@@ -227,12 +231,18 @@ The v2 migration intentionally removes only exact/dead redundancy:
 - `memory_suggested_action`, `suggestion_matches_recommendation` (the former
   online, per-environment memory injected a random legal action when it had no
   evidence and made otherwise equal observations depend on rollout history).
+- `recommended_action`, `recommended_action_confidence` (constant in the
+  default training configuration and stochastic/circular when enabled).
+- `estimated_opponent_hand` (presented fake exact card vectors selected from a
+  live runtime database containing hidden deck instances; opponent hand count
+  and public archetype evidence remain represented without inventing cards).
 
 Strategy memory remains available as an explicitly enabled, deterministic
 advisory/diagnostic subsystem. It is disabled by default, uses isolated
 per-environment versioned storage, and never enters the policy observation.
 
-Other derived planner and advantage fields remain until policy ablation gives
+The remaining derived planner and advantage fields are deterministic,
+observer-information-only summaries. They remain until policy ablation gives
 evidence that removing them is safe.
 
 ## Compatibility rule

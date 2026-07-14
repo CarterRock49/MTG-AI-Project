@@ -311,7 +311,7 @@ revision and dirty state, CLI and resolved configuration, device and dependency
 inventory, deck/lineage provenance, lifecycle result, and artifact paths. A
 dirty run also stores a hashed `source_worktree.patch` beside the manifest.
 
-> **Checkpoint boundary (Round 7.83 / Observation v2).** The full Standard namespace widened card
+> **Checkpoint boundary (Round 7.84 / Observation v2).** The full Standard namespace widened card
 > observations to 436 fields (259 subtype fields plus MDFC fields), signed live
 > power/toughness, and count/stat bounds large enough for legal boards above 20
 > permanents. Round 7.62 also widened the declared choice-count, allocation, and
@@ -328,14 +328,18 @@ dirty run also stores a hashed `source_worktree.patch` beside the manifest.
 > 7.82 made planner observations state/perspective-fresh, repaired exact target
 > and stack indexing, routed combat summaries through canonical legality/search,
 > and added the previously-omitted rank-3 ability-recommendation extractor.
-> Round 7.83 freezes Observation v2: categorical canonical-card embeddings,
+> Round 7.83 introduced Observation v2: categorical canonical-card embeddings,
 > symmetric public zones and mana, library/player/permanent state, exact
 > attachment/combat mappings, richer stack objects, observer-relative indices,
 > and removal of exact/dead v1 duplicates. The online strategy-memory hint was
 > also removed from policy input: the optional replacement is deterministic,
 > isolated per environment, and disabled during training/evaluation. The
-> observation hash is now part of run lineage.
-> **Do not resume a checkpoint created before Round 7.83** — start fresh
+> observation hash is now part of run lineage. Round 7.84 completes the
+> pre-training planner audit: observation reads no longer consume RNG,
+> face-down cards cannot shape archetype inference, fake exact opponent-hand
+> estimates and disabled action recommendations are removed, and the strategic
+> metric vector contains only its seven live values.
+> **Do not resume a checkpoint created before Round 7.84** — start fresh
 > without `--resume`.
 
 ### Hyperparameter optimization

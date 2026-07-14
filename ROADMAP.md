@@ -28,17 +28,18 @@ no trained checkpoint has passed the paired-seat strength gate, matchup
 calibration has not run, format-wide card support remains incomplete, and the
 deck-builder feedback loop is not connected.
 
-### Verified Round 7.83 / Observation v2 baseline
+### Verified Round 7.84 / Observation v2 baseline
 
 The frozen v2 observation contract and its migration gates are green:
 
 | Gate | Result |
 | --- | --- |
-| Golden scenarios | 379/379 |
+| Golden scenarios | 380/380 |
 | Runtime smoke | 9/9 |
 | Training smoke | 13/13 |
 | Default invariant fuzz | 8/8 seeds × 1,000 valid actions, plus phase-boundary check |
 | Diff/whitespace check | clean |
+| Observation schema | v2 / `8b77a325816aec9fd6a8b7a8e924a2b936a092e163b81f2d0a22947387804ea8` |
 
 Standing broader gates last recorded green: 108/108 focused regressions,
 207/207 discovered unit tests, fixture Harvest 16/16, production Harvest
@@ -47,7 +48,7 @@ configuration 6/6, and strict long fuzz 32 seeds × 10,000 valid actions.
 
 ### Non-negotiable lineage rules
 
-- **Start every new policy from Round 7.83 or later.** Observation v2 changes
+- **Start every new policy from Round 7.84 or later.** Observation v2 changes
   the extractor width and semantics; do not resume any earlier checkpoint.
 - Do not mix pre-7.46 statistics with format-namespace statistics.
 - Statistics collected before July 2026 are unusable. They were affected by
@@ -58,10 +59,10 @@ configuration 6/6, and strict long fuzz 32 seeds × 10,000 valid actions.
 
 ---
 
-## Latest finding — Observation v2 frozen
+## Latest finding — Observation v2 planner audit complete
 
-Round 7.83 replaces the audited v1 representation with a self-hashed,
-documented policy contract:
+Round 7.84 completes the audited, self-hashed Observation v2 policy contract
+before its first training run:
 
 - Canonical cards receive stable categorical identities: `0` is padding, `1`
   is visible unknown/off-registry, and canonical registry index `N` is `N+2`.
@@ -91,19 +92,30 @@ documented policy contract:
   evidence, and online per-worker state made evaluation non-comparable. The
   optional replacement is deterministic, action-specific, atomically saved,
   reused across resets, disabled by default, and isolated per environment.
+- Planner-derived observations are now pure reads. Multi-turn mana development
+  uses expected land draws instead of sampling, and wide-board attacker search
+  uses a stable bounded combination order instead of the game RNG.
+- Opponent archetype inference excludes face-down exile and face-down
+  permanents. The fake `estimated_opponent_hand` tensor was removed because it
+  ranked exact candidates from a runtime database containing hidden deck
+  instances.
+- Disabled `recommended_action` inputs were removed, and `strategic_metrics`
+  was compacted from ten positions to its seven live values.
 
 **Current verdict:** no known high-priority observation correctness defect
-remains. Changing a field, bound, identity capacity, visibility rule, or
-extractor route starts a new schema/checkpoint lineage. The next training run
-must record actual v2 throughput and memory alongside behavior telemetry.
+remains. The frozen v2 hash is
+`8b77a325816aec9fd6a8b7a8e924a2b936a092e163b81f2d0a22947387804ea8`.
+Changing a field, bound, identity capacity, visibility rule, or extractor route
+starts a new schema/checkpoint lineage. The next training run must record actual
+v2 throughput and memory alongside behavior telemetry.
 
 ---
 
 ## Current execution plan
 
-### Now — train the first Round 7.83 / Observation v2 policy
+### Now — train the first Round 7.84 / Observation v2 policy
 
-1. Launch a fresh Standard candidate; never resume a pre-7.83 checkpoint. Use
+1. Launch a fresh Standard candidate; never resume a pre-7.84 checkpoint. Use
    `discounted-state-potential-v3` with `--n-envs 8`, `--eval-freq 25000`,
    and `--eval-episodes 10`; confirm the manifest records strategy memory as
    disabled.
@@ -289,7 +301,7 @@ The project is complete only when all of these are true:
 ## Checkpoint and schema boundaries
 
 Historical boundaries are retained here so old artifacts cannot be resumed by
-mistake. The practical rule remains: **use Round 7.83 or later.**
+mistake. The practical rule remains: **use Round 7.84 or later.**
 
 | Minimum round | Incompatible change |
 | --- | --- |
@@ -302,6 +314,7 @@ mistake. The practical rule remains: **use Round 7.83 or later.**
 | 7.80 | Offense-weighted reward v3 and live combat-damage observation |
 | 7.82 | Exhaustive extractor routing and repaired observation semantics |
 | 7.83 | Frozen Observation v2, categorical card identity, public-state expansion, v1 compaction, and deterministic strategy-memory boundary |
+| 7.84 | Deterministic planner observations, hidden-information-safe inference, and removal of fake/dead planner inputs |
 
 The canonical registry is append-only within the fixed identity capacity;
 appends change registry lineage without changing observation width. Changing
@@ -346,6 +359,10 @@ corpus, registry, both schema identities, policy, and checkpoint provenance.
   input, made the optional memory deterministic and disabled by default,
   documented and hashed the full contract, and made its identity part of every
   lineage manifest.
+- **7.84:** completed the planner-observation audit: removed RNG consumption,
+  excluded face-down identities from opponent inference, removed fake exact
+  hand/action inputs, compacted live strategy metrics, and pinned the final v2
+  hash with purity regressions.
 
 ### Institutional lessons retained from the silent-bug catalog
 

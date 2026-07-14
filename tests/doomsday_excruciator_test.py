@@ -192,11 +192,10 @@ class DoomsdayExcruciatorTest(unittest.TestCase):
             hidden_card, game_state.p1, "exile", game_state.p1, "hand"))
         self.assertNotIn(hidden_card, game_state.face_down_exile_cards)
 
-    def test_hidden_opponent_exile_does_not_shape_estimated_hand_profile(self):
+    def test_hidden_opponent_objects_do_not_shape_archetype_profile(self):
         game_state = self._state(8105)
         observer, opponent = game_state.p1, game_state.p2
-        inject_into_zone(
-            game_state, opponent, card("Unknown Hand Card"), "hand")
+        baseline = game_state.strategic_planner.predict_opponent_archetype()
         hidden = inject_card(game_state, {
             **card("Hidden Red Creature", "creature"),
             "colors": [0, 0, 0, 1, 0], "power": 4, "toughness": 4,
@@ -206,30 +205,20 @@ class DoomsdayExcruciatorTest(unittest.TestCase):
         self.assertTrue(game_state.move_card(
             hidden, opponent, "library", opponent, "exile",
             context={"face_down_exile": True}))
+        manifested = inject_into_zone(game_state, opponent, {
+            **card("Hidden Combo Tutor", "creature"),
+            "oracle_text": "Search your library for a card. Infinite combo.",
+            "power": 8, "toughness": 8,
+        }, "battlefield")
+        game_state._safe_get_card(manifested).face_down = True
 
-        observed_profiles = []
-        scored_candidates = []
-        original = get_env()._calculate_card_likelihood
-
-        def capture_profile(candidate, colors, creatures, instants, artifacts):
-            scored_candidates.append(candidate)
-            observed_profiles.append((
-                colors.copy(), creatures, instants, artifacts))
-            return original(
-                candidate, colors, creatures, instants, artifacts)
-
-        with patch.object(
-                get_env(), "_calculate_card_likelihood",
-                side_effect=capture_profile):
-            get_env().observation_for(observer)
-
-        self.assertTrue(observed_profiles)
-        self.assertNotIn(game_state._safe_get_card(hidden), scored_candidates)
-        self.assertTrue(all(
-            not colors.any()
-            and creatures == instants == artifacts == 0
-            for colors, creatures, instants, artifacts
-            in observed_profiles))
+        inferred = game_state.strategic_planner.predict_opponent_archetype()
+        np.testing.assert_array_equal(inferred, baseline)
+        observation = get_env().observation_for(observer)
+        np.testing.assert_array_equal(
+            observation["opponent_archetype"], baseline)
+        self.assertNotIn(
+            "estimated_opponent_hand", get_env().observation_space.spaces)
 
     def test_hidden_exile_fails_identity_targeting_and_redacts_target_id(self):
         game_state = self._state(8106)

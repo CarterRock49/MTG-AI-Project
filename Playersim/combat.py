@@ -415,8 +415,16 @@ class CombatResolver:
         original_attackers = list(gs.current_attackers)
         original_block_assignments = {k: list(v) for k, v in gs.current_block_assignments.items()}
         
-        # Generate attack combinations efficiently
+        # Generate attack combinations efficiently.  This method feeds the
+        # policy observation, so candidate selection must be deterministic and
+        # must not consume the game's global RNG.
         attack_combinations = []
+
+        def add_combination(attackers):
+            candidate = list(attackers)
+            if (candidate not in attack_combinations
+                    and len(attack_combinations) < max_combinations):
+                attack_combinations.append(candidate)
         
         # Check if we have a strategic_planner for advanced evaluation
         use_strategic_evaluation = hasattr(gs, 'strategic_planner') and gs.strategic_planner is not None
@@ -431,27 +439,32 @@ class CombatResolver:
             )
             
             # Always consider attacking with everything
-            attack_combinations.append(sorted_attackers)
+            add_combination(sorted_attackers)
             
             # Consider attacking with just the strongest creatures
             if len(sorted_attackers) >= 2:
-                attack_combinations.append(sorted_attackers[:len(sorted_attackers)//2])
+                add_combination(
+                    sorted_attackers[:len(sorted_attackers)//2])
             
             # Consider the top creatures individually
             for attacker in sorted_attackers[:3]:
-                attack_combinations.append([attacker])
+                add_combination([attacker])
                 
             # Consider strategic combinations (top n creatures)
             for n in range(2, min(5, len(sorted_attackers))):
-                attack_combinations.append(sorted_attackers[:n])
-            
-            # Add some more combinations for diversity
-            import random
-            while len(attack_combinations) < max_combinations and len(attack_combinations) < 2**len(possible_attackers):
-                size = random.randint(1, len(sorted_attackers))
-                combo = random.sample(sorted_attackers, size)
-                if combo not in attack_combinations:
-                    attack_combinations.append(combo)
+                add_combination(sorted_attackers[:n])
+
+            # Fill the remaining budget in a stable order.  Because attackers
+            # are power-sorted, early combinations still emphasize the most
+            # strategically relevant creatures without stochastic sampling.
+            import itertools
+            for size in range(1, len(sorted_attackers) + 1):
+                for combo in itertools.combinations(sorted_attackers, size):
+                    add_combination(combo)
+                    if len(attack_combinations) >= max_combinations:
+                        break
+                if len(attack_combinations) >= max_combinations:
+                    break
         else:
             # Generate all possible attack combinations
             import itertools

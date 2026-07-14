@@ -582,9 +582,12 @@ class SearchDecisionMixin:
         
         # Estimate mana development curve
         def project_mana_development(current_turn, turns_ahead):
-            """Project mana availability for future turns"""
-            # Start with current lands
-            land_count = len(my_lands)
+            """Project expected mana without sampling or consuming game RNG."""
+            # This is an observation summary, not a rollout.  Use the expected
+            # value of unknown future land draws so equal public states always
+            # produce equal policy inputs and observation reads cannot perturb
+            # later gameplay randomness.
+            land_count = float(len(my_lands))
             
             # Count lands in hand
             lands_in_hand = len([card for card in hand if hasattr(card, 'type_line') and 'land' in card.type_line])
@@ -596,10 +599,7 @@ class SearchDecisionMixin:
                 if i < lands_in_hand:
                     land_count += 1
                 else:
-                    # Probability of drawing a land
-                    draw_chance = 0.4  # 40% chance to draw a land
-                    if random.random() < draw_chance:
-                        land_count += 1
+                    land_count += 0.4
                 
                 # Store projected land count for this turn
                 projected_lands.append(land_count)

@@ -309,7 +309,19 @@ class ArchetypeAnalysisMixin:
         # Count observed card types and game patterns
         observed_cards = []
         for zone in ["battlefield", "graveyard", "exile"]:
-            observed_cards.extend([gs._safe_get_card(cid) for cid in opp[zone]])
+            for card_id in opp.get(zone, []):
+                if (zone == "exile"
+                        and hasattr(gs, "is_face_down_exile_card")
+                        and gs.is_face_down_exile_card(card_id, opp)):
+                    continue
+                card = gs._safe_get_card(card_id)
+                # An opponent's face-down permanent is a public object, but
+                # its printed identity, types, stats, and rules text are not
+                # public inputs to archetype inference.
+                if (zone == "battlefield"
+                        and bool(getattr(card, "face_down", False))):
+                    continue
+                observed_cards.append(card)
         
         # Filter out None values
         observed_cards = [card for card in observed_cards if card]

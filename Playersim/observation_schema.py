@@ -53,6 +53,9 @@ REMOVED_V1_FIELDS = (
     "graveyard_key_cards", "exile_key_cards",
     "memory_suggested_action",  # online per-env heuristic, not game state
     "suggestion_matches_recommendation",
+    "recommended_action",       # disabled constant; stochastic if enabled
+    "recommended_action_confidence",
+    "estimated_opponent_hand",  # fake exact cards ranked from hidden runtime DB
 )
 
 ADDED_V2_FIELDS = (
@@ -96,6 +99,13 @@ def _schema_payload() -> dict:
             "default_runtime_mode": "disabled",
             "optional_storage_schema": 2,
             "selection": "deterministic_action_evidence",
+        },
+        "planner_observation": {
+            "observer_information_only": True,
+            "observation_rng_consumption": "forbidden",
+            "future_draw_projection": "expected_value",
+            "wide_attack_candidates": "deterministic_bounded_combinations",
+            "strategic_metric_count": 7,
         },
         "removed_v1_fields": list(REMOVED_V1_FIELDS),
         "added_v2_fields": list(ADDED_V2_FIELDS),
