@@ -810,6 +810,18 @@ class TargetingSystem:
         if "any target" in oracle_text or "any other target" in oracle_text:
              requirements.append({"type": "any"}) # Any target includes creatures, players, planeswalkers
 
+        # Damage dealt to unqualified "targets" ("deals 1 damage to each of
+        # one or two targets", "divided as you choose among ... targets") is
+        # any-target damage: creatures, players, planeswalkers, battles.
+        # Falling through to the generic requirement offered every permanent,
+        # so pure artifacts/enchantments were selectable and the damage
+        # effect then refused the commit at resolution (Prismari Charm
+        # fizzle warnings, July 13-14). Mirrors _get_target_type_from_text.
+        if (not requirements
+                and re.search(r"deals?\s+\S+\s+damage[^.]{0,60}\btargets\b",
+                              oracle_text)):
+             requirements.append({"type": "any"})
+
         if not requirements and "target" in oracle_text:
              # Fallback if "target" exists but pattern failed
              requirements.append({"type": "target"})

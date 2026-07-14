@@ -75,7 +75,7 @@ The project is complete when all of the following hold:
   lineage-stamped manifests. User-supplied decks route into isolated format
   pools automatically; passing policy qualification and builder feedback remain
   open.
-- Test gates: smoke 9/9, training 13/13, scenarios 369/369 (grown from 12),
+- Test gates: smoke 9/9, training 13/13, scenarios 371/371 (grown from 12),
   108/108 focused regression tests, 201/201 discovered unit tests,
   fixture harvest 16/16, production Harvest protocol 16/16, card registry
   19/19, deck ingestion 13/13, fuzz/replay configuration 6/6, deterministic
@@ -551,6 +551,39 @@ new guard scenario reproduces the livelock pre-fix. Scenarios 369/369,
 default fuzz 8/8 seeds, smoke 9/9, training smoke 13/13, focused
 choice/catalog/target suites 25/25. Engine-only; the 7.76 boundary still
 applies.
+
+**7.78 — discard mask/execution parity across shrinking pages.** The
+second 7.76 run (`reward-v5`) was failed by the strict trainer 33 minutes
+in: mask-valid `DISCARD_CARD(9)` was rejected at execution. A discard on
+a later page shrinks the hand, the mask's *displayed* page collapses via
+modulo (`choice_page % page_count`), but `_handle_discard_card`
+recomputed the hand index from the raw stored page (`choice_page*10 +
+param` → index 19 into a ten-card hand). Latent since the discard pager
+was written; unrelated to 7.77. The handler now consumes the absolute
+`hand_idx` the mask pins on each slot (the same pin-through-execution
+contract the PLAY_LAND path already guarantees), falls back to the mask's
+own modulo arithmetic when unpinned, and clamps a stale `choice_page`
+after every successful discard. Guard scenario replays the exact
+sequence (page next → discard the last page-two card → discard slot ten
+of the collapsed page) and fails pre-fix. Scenarios 370/370, default
+fuzz 8/8, smoke 9/9, training smoke 13/13. Engine-only; the 7.76
+boundary still applies.
+
+**7.79 — selection-side legality for untyped damage targets.** Closed
+the recurring Prismari Charm fizzle (three sightings across reward-v3
+through v5). `_parse_targeting_requirements` had no case for damage
+dealt to unqualified "targets" ("deals 1 damage to each of one or two
+targets"), so it fell through to the generic `target` requirement, which
+validates every battlefield permanent — pure artifacts and enchantments
+were offered and committed, and resolution (correctly, since 7.75)
+refused them as any-target damage recipients. The parser now emits an
+`any` requirement for that wording, mirroring the existing
+`_get_target_type_from_text` rule, so selection, commit, and resolution
+finally agree end to end. Guard scenario verifies pure
+artifacts/enchantments are no longer offered while creatures,
+enchantment creatures, and players still are (fails pre-fix). Scenarios
+371/371, default fuzz 8/8, smoke 9/9, training smoke 13/13, targeting
+suites 21/21. Engine-only; the 7.76 boundary still applies.
 
 ---
 

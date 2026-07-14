@@ -493,8 +493,23 @@ class CastingHandlersMixin:
              logging.warning("DISCARD_CARD called by a player without choice authority.")
              return -0.2, False
 
-        hand_idx = int(context.get("choice_page", 0)) * 10 + param
-        if not isinstance(hand_idx, int) or not 0 <= hand_idx < len(player.get("hand", [])):
+        # The mask pins the absolute hand index it displayed for this slot.
+        # Recomputing from the raw choice_page desynchronized mask and
+        # execution: a discard that shrinks the hand below the current page
+        # collapses the *displayed* page via modulo while the stored
+        # choice_page stays stale, so page*10+param indexed past the hand
+        # (July 14 reward-v5 strict failure).
+        action_context = kwargs.get("context") or {}
+        hand_idx = action_context.get("hand_idx")
+        if hand_idx is None:
+            # No pinned index (direct/scripted call): derive it with the
+            # same modulo the mask uses so both sides stay in agreement.
+            hand = player.get("hand", [])
+            page_count = max(1, (len(hand) + 9) // 10)
+            page = int(context.get("choice_page", 0)) % page_count
+            hand_idx = page * 10 + param
+        hand_idx = int(hand_idx)
+        if not 0 <= hand_idx < len(player.get("hand", [])):
              logging.warning(f"DISCARD_CARD: Invalid hand index {hand_idx}")
              return -0.2, False
 
@@ -515,6 +530,16 @@ class CastingHandlersMixin:
                  gs._resume_effect_continuation(context)
         else:
              success = gs.choose_discard_card(hand_idx)
+        if success:
+            # A successful discard can shrink the hand below the stored
+            # page. Clamp so the persisted page always refers to a page
+            # that still exists for the continuing choice.
+            live_context = getattr(gs, "choice_context", None)
+            if live_context is context:
+                page_count = max(
+                    1, (len(player.get("hand", [])) + 9) // 10)
+                if int(context.get("choice_page", 0)) >= page_count:
+                    context["choice_page"] = page_count - 1
         reward = -0.05 - value * 0.2
         return reward, success
 

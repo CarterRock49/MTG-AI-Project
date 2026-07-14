@@ -15764,6 +15764,111 @@ def s_choice_paging_is_one_way():
         "paging off the final page wrapped instead of failing"
 
 
+@scenario("policy protocol / mask-execution parity",
+          "a discard that shrinks the hand keeps every displayed slot executable")
+def s_discard_shrinking_hand_page_parity():
+    gs = fresh(SEED + 916)
+    controller = gs.p1
+    gs.agent_is_p1 = True
+    controller["hand"] = []
+    for index in range(11):
+        inject_into_zone(gs, controller, {
+            "name": f"Handful {index}", "mana_cost": "{1}", "cmc": 1,
+            "type_line": "Instant", "oracle_text": "",
+        }, "hand")
+    assert len(controller["hand"]) == 11
+    gs.choice_context = {
+        "type": "discard", "player": controller, "remaining": 2,
+        "cause": "spell_effect", "choice_page": 0,
+        "resume_phase": gs.PHASE_MAIN_PRECOMBAT,
+    }
+    gs.phase = gs.PHASE_CHOOSE
+    gs.priority_player = controller
+    handler = get_env().action_handler
+
+    mask = handler.generate_valid_actions()
+    assert mask[238] and mask[247] and mask[479], \
+        "an eleven-card discard did not expose a full page plus PAGE_NEXT"
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(479)
+    assert not info.get("execution_failed")
+
+    # Final page holds exactly one card (hand index 10). Discarding it
+    # shrinks the hand to ten cards while the stored choice_page stays 1.
+    mask = handler.generate_valid_actions()
+    assert mask[238] and not mask[239] and not mask[479]
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(238)
+    assert not info.get("execution_failed")
+    assert gs.choice_context and gs.choice_context.get("remaining") == 1
+
+    # July 14 reward-v5 strict failure: the mask collapsed to page 0 via
+    # modulo, but execution recomputed hand_idx from the stale stored page
+    # (1*10+9=19) and rejected a mask-valid action. Every displayed slot,
+    # including the last, must execute against the card it displayed.
+    mask = handler.generate_valid_actions()
+    assert mask[238] and mask[247] and not mask[479]
+    slot_context = handler.action_reasons_with_context[247]["context"]
+    assert slot_context.get("hand_idx") == 9, \
+        "the mask no longer pins the absolute hand index it displayed"
+    doomed = controller["hand"][9]
+    handler.current_valid_actions = mask
+    _, _, _, info = handler.apply_action(247)
+    assert not info.get("execution_failed"), \
+        "mask-valid DISCARD_CARD failed after the hand shrank below the stored page"
+    assert doomed in controller["graveyard"], \
+        "the discard did not remove the exact card the mask displayed"
+
+
+@scenario("601.2c / 114.1",
+          "damage to unqualified 'targets' only offers any-target-legal candidates")
+def s_bare_targets_damage_offers_only_damageable():
+    gs = fresh(SEED + 917)
+    ts = gs.targeting_system
+    text = "prismari charm deals 1 damage to each of one or two targets."
+
+    # July 13-14 Prismari Charm fizzle warnings: the requirement parser fell
+    # through to the generic 'target' requirement, which validates every
+    # battlefield permanent. Pure artifacts/enchantments were offered and
+    # committed, and the damage effect then refused them at resolution.
+    assert ts._parse_targeting_requirements(text) == [{"type": "any"}], \
+        "bare-'targets' damage did not parse as an any-target requirement"
+
+    artifact = inject_into_zone(gs, gs.p2, {
+        "name": "Pure Trinket", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Artifact", "oracle_text": "",
+    }, "battlefield")
+    enchantment = inject_into_zone(gs, gs.p2, {
+        "name": "Pure Shrine", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Enchantment", "oracle_text": "",
+    }, "battlefield")
+    creature = inject_into_zone(gs, gs.p2, {
+        "name": "Plain Bear", "mana_cost": "{1}{G}", "cmc": 2,
+        "type_line": "Creature — Bear", "oracle_text": "",
+        "power": "2", "toughness": "2",
+    }, "battlefield")
+    enchantment_creature = inject_into_zone(gs, gs.p2, {
+        "name": "Shrine Beast", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Enchantment Creature — Beast", "oracle_text": "",
+        "power": "2", "toughness": "2",
+    }, "battlefield")
+    source = inject_into_zone(gs, gs.p1, {
+        "name": "Charm Source", "mana_cost": "{U}{R}", "cmc": 2,
+        "type_line": "Instant", "oracle_text": "",
+    }, "hand")
+
+    valid_map = ts.get_valid_targets(source, gs.p1, effect_text=text)
+    offered = {target for ids in valid_map.values() for target in ids}
+    assert artifact not in offered, \
+        "a pure artifact was offered as an any-target damage candidate"
+    assert enchantment not in offered, \
+        "a pure enchantment was offered as an any-target damage candidate"
+    assert creature in offered and enchantment_creature in offered, \
+        "legal creature candidates went missing from any-target damage"
+    assert {"p1", "p2"}.issubset(offered), \
+        "players went missing from any-target damage"
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
