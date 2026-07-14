@@ -6,6 +6,10 @@ try:
 except ImportError:
     DEBUG_MODE = False # Default if not found
 
+# Sentinel for combat-simulation snapshots: distinguishes "key/attribute was
+# absent before the simulation" from any real stored value (including None/0).
+_SIM_MISSING = object()
+
 class CombatResolver:
     """Advanced combat resolution system implementing detailed MTG combat rules"""
     
@@ -1483,7 +1487,7 @@ class CombatResolver:
                     logging.debug(f"COMBAT: {attacker_card.name} dies from -1/-1 counters")
             else:
                 # Regular damage
-                damage_to_creatures[attacker_id] += damage_to_assign
+                damage_to_creatures[attacker_id] = damage_to_creatures.get(attacker_id, 0) + damage_to_assign
                 logging.debug(f"COMBAT: Blocking {blocker_card.name} deals {damage_to_assign} damage to {attacker_card.name}")
             
             creatures_dealt_damage.add(blocker_id)
@@ -2108,15 +2112,78 @@ class CombatResolver:
                 if gs._safe_get_card(bid)
             ]
             logging.debug(f"COMBAT BASE: {attacker_card.name} blocked by {len(blockers)} creatures: {', '.join(blocker_names)}")
-    
+
+    def _snapshot_combat_sim_state(self):
+        """Capture the live state the damage processors mutate, so simulate_combat can undo it.
+
+        _process_attacker_damage/_process_blocker_damage write directly to player
+        life and poison totals, card power/toughness/counters (infect/wither),
+        and self.combat_triggers. Those writes are correct during real combat
+        resolution, but a simulation must restore all of them afterward.
+        """
+        gs = self.game_state
+        player_keys = ("life", "poison_counters")
+        players = [
+            (player, {k: player.get(k, _SIM_MISSING) for k in player_keys})
+            for player in (gs.p1, gs.p2)
+        ]
+
+        cards = []
+        seen_ids = set()
+        for player in (gs.p1, gs.p2):
+            for card_id in player.get("battlefield", []):
+                if card_id in seen_ids:
+                    continue
+                seen_ids.add(card_id)
+                card = gs._safe_get_card(card_id)
+                if not card:
+                    continue
+                cards.append((
+                    card,
+                    getattr(card, "power", _SIM_MISSING),
+                    getattr(card, "toughness", _SIM_MISSING),
+                    dict(card.counters) if hasattr(card, "counters") else _SIM_MISSING,
+                ))
+
+        return {"players": players, "cards": cards, "triggers": list(self.combat_triggers)}
+
+    def _restore_combat_sim_state(self, snapshot):
+        """Undo all game-state mutations made during simulate_combat."""
+        for player, saved in snapshot["players"]:
+            for key, value in saved.items():
+                if value is _SIM_MISSING:
+                    player.pop(key, None)
+                else:
+                    player[key] = value
+
+        for card, power, toughness, counters in snapshot["cards"]:
+            for attr, value in (("power", power), ("toughness", toughness), ("counters", counters)):
+                if value is _SIM_MISSING:
+                    try:
+                        delattr(card, attr)
+                    except AttributeError:
+                        pass
+                else:
+                    setattr(card, attr, value)
+
+        self.combat_triggers[:] = snapshot["triggers"]
+
     def simulate_combat(self):
         """
         Simulate combat without actually changing game state.
         Returns detailed information about expected outcomes.
         """
+        snapshot = None
         try:
             gs = self.game_state
-            
+
+            # The shared damage processors mutate live state (life, poison,
+            # infect/wither counters, power/toughness, combat triggers).
+            # Snapshot it here and restore in the finally block so the
+            # simulation leaves no trace; skipping the mutations instead would
+            # break in-simulation lethality checks that read live card state.
+            snapshot = self._snapshot_combat_sim_state()
+
             # Use deep copies to avoid modifying game state
             attackers = list(gs.current_attackers)
             block_assignments = {k: list(v) for k, v in gs.current_block_assignments.items()}
@@ -2355,7 +2422,10 @@ class CombatResolver:
                 "life_gained": 0,
                 "expected_value": 0.0
             }
-        
+        finally:
+            if snapshot is not None:
+                self._restore_combat_sim_state(snapshot)
+
     def evaluate_potential_blocks(self, attacker_id, potential_blockers):
         """Evaluate different blocking configurations for an attacker."""
         import itertools
