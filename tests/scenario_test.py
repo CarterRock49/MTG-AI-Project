@@ -15593,6 +15593,71 @@ def s_crew_mask_matches_execution():
     assert value == -1.0, "evaluator did not reject a None ability index"
 
 
+@scenario("603.3b / policy protocol",
+          "a modal trigger's mode pause survives batch stacking and deferred targeting")
+def s_modal_trigger_pause_not_trampled():
+    from Playersim.ability_types import TriggeredAbility
+    gs = fresh(SEED + 912)
+    active = gs._get_active_player()
+    nap = gs.p2 if active is gs.p1 else gs.p1
+    gs.agent_is_p1 = active is gs.p1
+
+    zenith = inject_real_card(gs, active, "Cosmogrand Zenith", "battlefield")
+    modal = TriggeredAbility(
+        zenith,
+        trigger_condition="whenever you cast your second spell each turn",
+        effect=("choose one —\n"
+                "• Create two 1/1 white Human Soldier creature tokens.\n"
+                "• Put a +1/+1 counter on each creature you control."))
+
+    watcher = inject_into_zone(gs, nap, {
+        "name": "Retaliating Watcher", "mana_cost": "{2}{R}", "cmc": 3,
+        "type_line": "Enchantment", "oracle_text": "",
+    }, "battlefield")
+    inject_into_zone(gs, nap, {
+        "name": "Vanilla Bystander", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Creature — Human", "oracle_text": "",
+        "power": "1", "toughness": "1",
+    }, "battlefield")
+    targeted = TriggeredAbility(
+        watcher,
+        trigger_condition="whenever an opponent casts a spell",
+        effect="Retaliating Watcher deals 1 damage to target creature.")
+
+    # July 13 reward-v2 deadlock: the modal AP trigger opened its mode
+    # choice, but batch stacking kept going, stacked the NAP trigger on top,
+    # and the deferred target opener stamped PHASE_TARGETING over the CHOOSE
+    # pause. The stranded trigger_mode context belonged to a phase nothing
+    # routes to, so the game could only pass priority forever and the strict
+    # trainer aborted the run.
+    gs.ability_handler.active_triggers = [
+        (modal, active, {"game_state": gs, "controller": active}),
+        (targeted, nap, {"game_state": gs, "controller": nap}),
+    ]
+    gs.ability_handler.process_triggered_abilities()
+
+    assert gs.choice_context and gs.choice_context.get("type") == "trigger_mode", \
+        "modal trigger did not open its mode choice"
+    assert gs.phase == gs.PHASE_CHOOSE, \
+        "mode pause lost PHASE_CHOOSE (deferred targeting trampled it)"
+    assert gs.targeting_context is None, \
+        "stack targeting opened while the mode choice was still pending"
+    assert len(gs.stack) == 1, \
+        "the NAP batch was stacked on top of an open mode pause"
+
+    # Answering the mode must release the parked NAP trigger and only then
+    # open its target choice; nothing may remain stranded.
+    assert get_env().action_handler._handle_choose_mode(0, {})[1], \
+        "mode choice was not answerable"
+    assert gs.stack and gs.stack[0][3].get("selected_trigger_mode") == 0
+    assert len(gs.stack) == 2, \
+        "parked NAP trigger was lost after the mode choice"
+    assert gs.choice_context is None, \
+        "a choice context remained after the mode was chosen"
+    assert gs.targeting_context is not None and gs.phase == gs.PHASE_TARGETING, \
+        "deferred stack targeting did not open once the pause resolved"
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------

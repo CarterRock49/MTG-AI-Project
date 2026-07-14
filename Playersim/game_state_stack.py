@@ -840,6 +840,12 @@ class GameStateStackMixin:
         """Open the next unresolved target choice already waiting on the stack."""
         if self.targeting_context:
             return True
+        if getattr(self, 'choice_context', None):
+            # A pending policy choice owns the game. Opening targeting here
+            # would stamp PHASE_TARGETING over PHASE_CHOOSE without saving it
+            # as a resume anchor, stranding the choice with no owner (July 13
+            # reward-v2 deadlock). Every choice-completion path calls back in.
+            return False
 
         stack_index = 0
         while stack_index < len(self.stack):

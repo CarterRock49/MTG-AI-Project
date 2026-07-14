@@ -59,9 +59,10 @@ The project is complete when all of the following hold:
   dropped in 7.64 as an honesty correction: 321 previously silent
   unclassified clauses are now reported instead of passing as clean.
 - Tier 3 (training/environment): ◐ policy plumbing, audit work, the explicit
-  paired-seat scripted qualification gate, and the Round 7.72–7.73
-  reward/critic stabilization are complete; a fresh trained checkpoint still
-  needs to pass qualification before Harvest is promoted to policy-vs-policy.
+  paired-seat scripted qualification gate, the Round 7.72–7.73 reward/critic
+  stabilization, and the 7.74 modal-trigger pause lifecycle repair are
+  complete; a fresh trained checkpoint still needs to pass qualification
+  before Harvest is promoted to policy-vs-policy.
 - Tier 4 (verification/calibration): ◐ invariant and long-fuzz gates are green;
   the matchup calibration study remains open.
 - Tier 5 (operations/integration): ◐ Harvest orchestration and the fail-closed
@@ -74,7 +75,7 @@ The project is complete when all of the following hold:
   lineage-stamped manifests. User-supplied decks route into isolated format
   pools automatically; passing policy qualification and builder feedback remain
   open.
-- Test gates: smoke 9/9, training 13/13, scenarios 365/365 (grown from 12),
+- Test gates: smoke 9/9, training 13/13, scenarios 366/366 (grown from 12),
   108/108 focused regression tests, 201/201 discovered unit tests,
   fixture harvest 16/16, production Harvest protocol 16/16, card registry
   19/19, deck ingestion 13/13, fuzz/replay configuration 6/6, deterministic
@@ -240,7 +241,7 @@ Phased milestones:
    preflight and paired-seat evaluation queue without contaminating held-out
    promotion or calibration results.
 
-**Current execution order:** launch a fresh Round 7.73 Standard candidate and
+**Current execution order:** launch a fresh Round 7.74 Standard candidate and
 inspect its first 100k steps for nonzero `reward/state_change_nonzero`, bounded
 return/value scales, a critic explained-variance trend that is not
 persistently negative, and a `terminal/life_total_rate` share that grows at
@@ -427,6 +428,26 @@ extractor now applies stateless symlog `sign(x)·log1p(|x|)` to every
 continuous input, keeping magnitudes ≤ ~22 with no VecNormalize state to
 save or sync. **This is a reward-contract and extractor boundary: do not
 resume pre-7.73 checkpoints.**
+
+**7.74 — modal-trigger pause lifecycle.** The first 7.73 run (`reward-v2`)
+died at ~52k steps to the strict non-progress guard: a `trigger_mode` choice
+(Cosmogrand Zenith, scripted seat) was stranded with the phase back in
+PRIORITY, unanswerable by any routing. Root cause was a three-part
+choice-lifecycle hole in trigger stacking: the non-interactive batch loop
+kept stacking triggers after one of them opened the mode pause (burying it
+and recursing into the NAP batch), `start_pending_stack_target_choice`
+stamped PHASE_TARGETING over PHASE_CHOOSE without saving it as a resume
+anchor, and `_push_trigger_to_stack` overwrote any pending `choice_context`
+unconditionally. Fixes: batch stacking now stops at a mode pause and parks
+the remainder (rest of batch + NAP batch) on the same
+`parent_order_triggers` continuation the nested CR 603.3b flow uses; the
+deferred target opener refuses to run while any `choice_context` is
+pending (every choice-completion path calls back in); and a modal trigger
+facing a foreign pending choice stacks unmoded with a loud warning instead
+of clobbering it. Guard scenario added (verified to reproduce the deadlock
+pre-fix); scenarios 366/366, smoke 9/9, training smoke 13/13, target
+lifecycle + stack integrity 14/14. Engine-only fix — no reward-contract or
+checkpoint boundary; the 7.73 boundary still applies.
 
 ---
 

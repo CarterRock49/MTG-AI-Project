@@ -2267,6 +2267,24 @@ class AbilityHandler:
         if source_name == "cosmogrand zenith":
             modal_modes, _, _ = self._parse_modal_text(
                 getattr(ability, "effect", ""))
+        pending_choice = getattr(gs, 'choice_context', None)
+        if (modal_modes and "selected_trigger_mode" not in context_at_trigger
+                and pending_choice
+                and pending_choice.get('type') != 'order_triggers'):
+            # Replacing a foreign pending choice would strand it: nothing
+            # restores a clobbered context (July 13 reward-v2 deadlock).
+            # An order_triggers context is exempt because both ordering
+            # flows deliberately stage it, then re-link it as the child's
+            # parent after this call returns. This branch should be
+            # unreachable now that batch stacking pauses on a mode choice;
+            # resolving unmoded is a loud, non-fatal degradation.
+            logging.warning(
+                "Modal trigger for %s stacked without a mode choice: a %s "
+                "choice is already pending.", ability.card_id,
+                pending_choice.get('type'))
+            gs.add_to_stack(
+                "TRIGGER", ability.card_id, controller, context_at_trigger)
+            return True
         if modal_modes and "selected_trigger_mode" not in context_at_trigger:
             context_at_trigger["modal_trigger_modes"] = list(modal_modes)
             context_at_trigger["mode_choice_pending"] = True
@@ -2434,9 +2452,34 @@ class AbilityHandler:
 
         if not interactive:
             added = 0
-            for ability, ctrl, trig_ctx in batch:
+            for index, (ability, ctrl, trig_ctx) in enumerate(batch):
+                choice_before = getattr(gs, 'choice_context', None)
                 if self._push_trigger_to_stack(ability, ctrl, trig_ctx):
                     added += 1
+                choice_after = getattr(gs, 'choice_context', None)
+                if choice_after is not None and choice_after is not choice_before:
+                    # Pushing this trigger paused the game for a policy
+                    # choice (a modal trigger's mode). Stacking must stop
+                    # here: continuing used to bury the pause under the
+                    # rest of the batch and the NAP batch, and the deferred
+                    # target opener then stamped PHASE_TARGETING over the
+                    # CHOOSE pause, stranding the choice forever (July 13
+                    # reward-v2 deadlock). Park the remainder on the same
+                    # continuation the nested CR 603.3b ordering flow uses;
+                    # choose_trigger_mode resumes it.
+                    choice_after['parent_order_triggers'] = {
+                        'type': 'order_triggers',
+                        'player': ctrl,
+                        'pending': list(batch[index + 1:]),
+                        'next_batch': list(next_batch) if next_batch else [],
+                        'source_id': getattr(ability, 'card_id', None),
+                        'resolved': False,
+                    }
+                    if added:
+                        logging.debug(
+                            f"Added {added} triggered abilities to stack "
+                            f"(auto order, paused for a mode choice).")
+                    return
             if added:
                 logging.debug(f"Added {added} triggered abilities to stack (auto order).")
             if next_batch:
