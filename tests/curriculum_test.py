@@ -6,8 +6,8 @@ import unittest
 import numpy as np
 
 from Playersim.curriculum import (
-    COMBAT_CURRICULUM_V1, CurriculumScheduler, derive_matchup_seed,
-    resolve_curriculum,
+    COMBAT_CURRICULUM_V1, COMBAT_CURRICULUM_V2, CurriculumScheduler,
+    derive_matchup_seed, resolve_curriculum,
 )
 
 
@@ -100,6 +100,33 @@ class CurriculumSchedulerTest(unittest.TestCase):
         self.assertEqual(second["matchup_episode_index"], 0)
         self.assertFalse(second["agent_is_p1"])
         self.assertEqual(second["p2_deck"], second["agent_deck"])
+
+    def test_mastery_curriculum_uses_gradual_profile_mixes(self):
+        spec = resolve_curriculum("combat-v2", DECKS)
+        self.assertEqual(spec["progression"], "mastery")
+        self.assertEqual(spec["stages"][0]["profile_bag"], ["passive"] * 10)
+        self.assertEqual(
+            spec["stages"][1]["profile_bag"].count("novice"), 3)
+        self.assertEqual(
+            spec["stages"][2]["profile_bag"].count("scripted"), 3)
+        for stage in spec["stages"][:-1]:
+            gate = stage["advance_when"]
+            self.assertGreater(gate["window_episodes"], 0)
+            self.assertGreater(gate["min_stage_timesteps"], 0)
+
+    def test_mastery_stage_override_is_explicit_and_validated(self):
+        spec = resolve_curriculum("combat-v2", DECKS)
+        scheduler = CurriculumScheduler(spec, 901)
+        scheduler.set_timestep(500_000)
+        self.assertEqual(
+            spec["stages"][scheduler.stage_index()]["name"], "full_pool")
+        scheduler.set_stage(1, timestep=500_000)
+        self.assertEqual(
+            spec["stages"][scheduler.stage_index()]["name"], "race")
+        row = scheduler.peek(True)
+        self.assertEqual(row["stage"], "race")
+        with self.assertRaisesRegex(ValueError, "out of range"):
+            scheduler.set_stage(99)
 
 
 if __name__ == "__main__":

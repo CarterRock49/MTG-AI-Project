@@ -29,6 +29,7 @@ What it verifies:
 
 import os
 import json
+import queue
 from functools import partial
 import shutil
 import sys
@@ -319,6 +320,60 @@ def check_mask_aware_evaluation():
             ]
             assert curriculum_metrics["curriculum/stage_index"] == 1
 
+            mastery_probe = ScheduleProbe()
+            mastery_metrics = {}
+            mastery_curriculum = {
+                "id": "mastery-test",
+                "version": 1,
+                "progression": "mastery",
+                "stages": [
+                    {
+                        "name": "learn",
+                        "start_timestep": 0,
+                        "advance_when": {
+                            "window_episodes": 2,
+                            "min_stage_timesteps": 10,
+                            "min_decisive_win_rate": 1.0,
+                            "max_decisive_loss_rate": 0.0,
+                            "max_timeout_rate": 0.0,
+                        },
+                    },
+                    {"name": "apply", "start_timestep": 10},
+                ],
+            }
+            mastery_callback = m.CurriculumProgressCallback(
+                mastery_curriculum)
+            mastery_callback.model = SimpleNamespace(
+                get_env=lambda: mastery_probe,
+                logger=SimpleNamespace(record=lambda name, value:
+                                       mastery_metrics.__setitem__(
+                                           name, value)),
+            )
+            mastery_callback.num_timesteps = 0
+            mastery_callback._on_training_start()
+            mastery_callback.num_timesteps = 10
+            mastery_callback.locals = {
+                "infos": [{
+                    "curriculum_stage": "learn",
+                    "game_result": "win",
+                    "terminal_reason": "life_total",
+                }],
+                "dones": np.array([True]),
+            }
+            assert mastery_callback._on_step()
+            assert mastery_callback._active_stage_index == 0
+            assert mastery_callback._on_step()
+            assert mastery_callback._active_stage_index == 1
+            assert mastery_probe.calls == [
+                ("set_curriculum_stage", (0, 0)),
+                ("set_curriculum_stage", (1, 10)),
+            ]
+            saved_mastery = getattr(
+                mastery_callback.model,
+                m.CurriculumProgressCallback.MODEL_STATE_ATTRIBUTE)
+            assert saved_mastery["stage_index"] == 1
+            assert mastery_metrics["curriculum/stage_index"] == 1
+
             # Functional contract of the async result path: outcome quality,
             # not shaped mean reward, promotes the exact evaluated snapshot.
             # Every per-case result and checkpoint hash remains attributable.
@@ -359,7 +414,8 @@ def check_mask_aware_evaluation():
                 [1.0, -1.0, 10.0]))
             best_path = os.path.join(
                 async_eval.best_model_save_path, "best_model.zip")
-            assert os.path.isfile(best_path), "best snapshot was not promoted"
+            assert not os.path.isfile(best_path), (
+                "an unqualified snapshot was published as best")
             assert not os.path.exists(snapshot), "snapshot was not cleaned up"
             assert metrics["eval/decisive_wins"] == 1
             assert metrics["eval/timeouts"] == 1
@@ -372,7 +428,7 @@ def check_mask_aware_evaluation():
             async_eval._pending_snapshots = 1
             async_eval._handle_result(result_for(
                 better_outcome, 20,
-                [("win", "life_total"), ("loss", "life_total"),
+                [("win", "life_total"), ("win", "life_total"),
                  ("draw", "decking")],
                 [-9.0, -9.0, -9.0]))
             with open(best_path, "rb") as handle:
@@ -402,15 +458,22 @@ def check_mask_aware_evaluation():
             assert history["schedule_sha256"] == async_eval.schedule_sha256
             assert history["fixed_schedule"] == fixed_schedule
             assert len(history["evaluations"]) == 3
+            assert history["evaluations"][0]["qualified"] is False
+            assert history["evaluations"][0]["promoted"] is False
+            assert history["evaluations"][1]["qualified"] is True
             assert history["evaluations"][1]["promoted"] is True
             assert history["evaluations"][2]["promoted"] is False
+            assert history["minimum_qualification_score"] == 0.55
+            assert history["best_candidate_timestep"] == 20
             assert len(history["evaluations"][0]["checkpoint_sha256"]) == 64
             assert history["evaluations"][0]["episodes"][0][
                 "case"] == fixed_schedule[0]
             history_summary = m.evaluation_history_summary("mask_smoke")
-            assert history_summary["status"] == "passed"
+            assert history_summary["status"] == "qualified"
+            assert history_summary["qualified"] is True
             assert history_summary["evaluation_points"] == 3
             assert history_summary["best_timestep"] == 20
+            assert history_summary["qualified_evaluation_points"] == 1
             try:
                 async_eval._handle_result({"fatal": "worker exploded"})
             except RuntimeError as error:
@@ -418,6 +481,36 @@ def check_mask_aware_evaluation():
             else:
                 raise AssertionError(
                     "async evaluation accepted a fatal worker result")
+
+            cancelled_snapshot = os.path.join(
+                async_eval.snapshot_dir, "eval_snapshot_40_steps.zip")
+            with open(cancelled_snapshot, "wb") as handle:
+                handle.write(b"cancel-me")
+
+            class CancellableEvaluationProcess:
+                def __init__(self):
+                    self.alive = True
+
+                def is_alive(self):
+                    return self.alive
+
+                def join(self, timeout=None):
+                    self.alive = False
+
+                def terminate(self):
+                    self.alive = False
+
+            async_eval._process = CancellableEvaluationProcess()
+            async_eval._request_queue = queue.Queue()
+            async_eval._result_queue = queue.Queue()
+            async_eval._pending_snapshots = 1
+            async_eval._pending_snapshot_paths[cancelled_snapshot] = 40
+            async_eval.cancel_pending("test_interruption")
+            assert not os.path.exists(cancelled_snapshot)
+            with open(history_path, encoding="utf-8") as handle:
+                cancelled_history = json.load(handle)
+            assert cancelled_history["cancelled_evaluations"][-1][
+                "reason"] == "test_interruption"
 
             class DeadEvaluationProcess:
                 def is_alive(self):
@@ -1065,6 +1158,35 @@ def check_main_failure_semantics():
                 vocab == frozen_vocab for vocab in environment_vocabularies), (
                     "main did not pass the frozen format vocabulary to every "
                     "training and validation environment")
+
+            # Ctrl-C is an interruption, not a failed experiment, and its
+            # recoverable checkpoint must carry the same distinction.
+            class InterruptingModel(FakeModel):
+                def learn(self, **_kwargs):
+                    raise KeyboardInterrupt()
+
+            saved_paths.clear()
+            made_vec_envs.clear()
+            m.load_decks_and_card_db = fake_load_decks
+            m.create_training_model = lambda *_args: InterruptingModel(False)
+            sys.argv = [
+                "main.py", "--timesteps", "1", "--n-envs", "1",
+                "--curriculum", "none",
+            ]
+            assert m.main() == 130
+            assert saved_paths and saved_paths[-1].endswith(
+                "interrupted_model")
+            assert not any("failed_model" in path for path in saved_paths)
+            interrupted_manifest_path = os.path.join(
+                m.MODEL_DIR, "ALPHA_ZERO_MTG_V3.00_20000101_000000_4",
+                "training_run.json")
+            with open(interrupted_manifest_path, encoding="utf-8") as handle:
+                interrupted_manifest = json.load(handle)
+            assert interrupted_manifest["status"] == "interrupted"
+            assert interrupted_manifest["failure"] is None
+            assert interrupted_manifest["interruption"]["type"] == \
+                "KeyboardInterrupt"
+            assert all(env.closed for env in made_vec_envs)
         finally:
             sys.argv = original_argv
             for name, original in originals.items():

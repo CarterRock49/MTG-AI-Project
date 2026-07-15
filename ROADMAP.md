@@ -1,4 +1,4 @@
-# Playersim roadmap — current as of July 14, 2026
+# Playersim roadmap — current as of July 15, 2026
 
 ## Mission and scope
 
@@ -28,7 +28,7 @@ no trained checkpoint has passed the paired-seat strength gate, matchup
 calibration has not run, format-wide card support remains incomplete, and the
 deck-builder feedback loop is not connected.
 
-### Round 7.87 / Observation v2 pre-run boundary
+### Round 7.88 / Observation v2 pre-run boundary
 
 The frozen v2 observation contract and its migration gates are green:
 
@@ -37,7 +37,7 @@ The frozen v2 observation contract and its migration gates are green:
 | Golden scenarios | 401/401 |
 | Runtime smoke | 9/9 |
 | Training smoke | 13/13 |
-| Discovered unit tests | 213/213 |
+| Discovered unit tests | 217/217 |
 | Default invariant fuzz | 8/8 seeds × 1,000 valid actions, plus phase-boundary check |
 | Failed-run replay | exact 117-action trace reaches and executes Room action 250 cleanly |
 | Diff/whitespace check | clean |
@@ -54,8 +54,8 @@ seeds × 10,000 valid actions.
   the extractor width and semantics, and the first v2 run exposed additional
   runtime-fidelity defects; do not resume any earlier checkpoint.
 - Resume now verifies the companion manifest's reward contract and Observation
-  version/hash. `combat-v1` continuation is intentionally rejected until its
-  per-worker scheduler counters can be checkpointed; launch Round 7.87 fresh.
+  version/hash. Curriculum continuation is intentionally rejected until its
+  per-worker scheduler counters can be checkpointed; launch Round 7.88 fresh.
 - Do not mix pre-7.46 statistics with format-namespace statistics.
 - Statistics collected before July 2026 are unusable. They were affected by
   perspective, winner attribution, fabricated play-turn, first-strike, layer,
@@ -65,7 +65,39 @@ seeds × 10,000 valid actions.
 
 ---
 
-## Latest run finding — `round-7.86-combat-v4` is diagnostic-only; Round 7.87 repaired
+## Latest run finding — `round-7.87-curriculum-v5` is diagnostic-only; Round 7.88 repaired
+
+`ALPHA_ZERO_MTG_V3.00_20260715_002725_round-7.87-curriculum-v5` was manually
+interrupted at 107,200 steps. It was fidelity-clean, but the fixed curriculum
+advanced much faster than demonstrated ability: goldfish finished 33 decisive
+wins, no losses, and 49 timeouts; race then fell to 13 wins and 265 losses;
+bridge recorded 5 wins and 169 losses. The 25k fixed evaluation consumed about
+937 seconds and returned 1 win, 50 losses, and 13 timeouts, yet that first weak
+checkpoint was still published as `best_model`. The 100k boundary was skipped
+because the single evaluator was backlogged. Critic values also became much
+larger than rollout rewards while fit quality was unstable, and per-card gzip
+statistics produced avoidable small-file I/O.
+
+Round 7.88 keeps reward v5 and Observation v2, but changes the training and
+run-lifecycle controls:
+
+- `combat-v2` advances only after a rolling mastery window meets decisive-win,
+  loss, timeout, and minimum-stage-duration gates. Opponent strength ramps via
+  mixtures instead of jumping from passive to 100% novice.
+- Full evaluation defaults to every 100k steps. A checkpoint needs a 55%
+  qualification score (decisive wins plus half non-timeout draws) before
+  `best_model.zip` is published; best-so-far candidates remain observable.
+- Evaluation game logs identify the exact checkpoint timestep and SHA-256.
+  Backlog skips and interruption cancellations are durable, pending snapshots
+  are cleaned up, and user interruption has its own manifest status and
+  `interrupted_model` artifact.
+- Every run has `logs/<run>/training.log`. Training statistics batch compressed
+  aggregate writes for ten games and flush on shutdown. Critic scale telemetry
+  now warns on repeated value/reward divergence.
+
+---
+
+## Previous run finding — `round-7.86-combat-v4` is diagnostic-only; Round 7.87 repaired
 
 `ALPHA_ZERO_MTG_V3.00_20260714_195653_round-7.86-combat-v4` was interrupted
 after its 350k checkpoint. Combat was reachable and the engine recorded 1,303
@@ -241,18 +273,20 @@ v2 throughput and memory alongside behavior telemetry.
 
 ## Current execution plan
 
-### Now — train the Round 7.87 reward/curriculum canary
+### Now — train the Round 7.88 mastery canary
 
-1. Freeze the Round 7.87 source and launch a fresh Standard candidate with
-   reward v5, `combat-v1`, eight workers, 25k evaluation cadence, and the fixed
-   64-case suite. Never resume `round-7.86-combat-v4` or an older checkpoint.
-2. At 30k, confirm the goldfish stage produced legal attacks and decisive wins,
-   the curriculum changed to `race`, and terminal reward/result sign mismatches
-   remain zero. Stop on any fidelity, replay, schema, or evaluator failure.
-3. At 75k and 125k, confirm the `bridge` and `full_pool` transitions, inspect
-   per-profile decisive win/loss/timeout rates, and require timeout rate to stay
-   below the old run rather than merely improving shaped return.
-4. At 250k, compare checkpoints only through `evaluations.json`. Require rising
+1. Freeze the Round 7.88 source and launch a fresh Standard candidate with
+   reward v5, `combat-v2`, eight workers, 100k evaluation cadence, and the fixed
+   64-case suite. Do not resume the diagnostic Round 7.87 run or an older
+   checkpoint.
+2. After 30k, confirm goldfish remains active until its 64-game mastery window
+   passes, then verify the transition to `race`; terminal reward/result sign
+   mismatches must remain zero. Stop on fidelity, replay, schema, or evaluator
+   failure.
+3. Confirm later `bridge` and `full_pool` transitions occur only after their
+   configured mastery gates. Inspect per-profile decisive win/loss/timeout
+   rates and require timeout rate to stay below the old run.
+4. At 300k, compare checkpoints only through `evaluations.json`. Require rising
    decisive wins, no regression hidden by random cases, policy KL materially
    above the old ~0.003 without breaching the 0.02 target, and a stable critic.
 5. Keep the observation schema, curriculum thresholds, fixed evaluation cases,
@@ -261,7 +295,7 @@ v2 throughput and memory alongside behavior telemetry.
 ### Next — qualify and calibrate Standard
 
 1. Pass paired-seat scripted qualification: at least the configured 55%
-   decisive score, timeout life leads worth zero, zero fidelity counters, and
+   qualification score, timeout life leads worth zero, zero fidelity counters, and
    exact checkpoint/lineage provenance.
 2. Freeze the qualified checkpoint as the baseline and promote it into the
    checkpoint league.

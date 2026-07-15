@@ -17,6 +17,7 @@ OPPONENT_PROFILES = frozenset({"passive", "novice", "scripted"})
 COMBAT_CURRICULUM_V1 = {
     "id": "combat-v1",
     "version": 1,
+    "progression": "fixed_timesteps",
     "allow_mirrors": False,
     "stages": [
         {
@@ -50,6 +51,71 @@ COMBAT_CURRICULUM_V1 = {
 }
 
 
+# Round 7.88: the first combat curriculum moved from passive play to a 100%
+# novice field while the policy still timed out in most goldfish games.  V2
+# keeps every matchup deterministic, but lets the trainer hold a stage until a
+# rolling outcome window demonstrates that the policy is ready for the next
+# distribution.  Opponent strength also ramps through mixtures instead of a
+# single hard step.
+COMBAT_CURRICULUM_V2 = {
+    "id": "combat-v2",
+    "version": 2,
+    "progression": "mastery",
+    "allow_mirrors": False,
+    "stages": [
+        {
+            "name": "goldfish",
+            "start_timestep": 0,
+            "decks": ["Selesnya Ouroboroid", "Mono-Green Landfall"],
+            "profile_bag": ["passive"] * 10,
+            "advance_when": {
+                "window_episodes": 64,
+                "min_stage_timesteps": 30_000,
+                "min_decisive_win_rate": 0.60,
+                "max_decisive_loss_rate": 0.25,
+                "max_timeout_rate": 0.35,
+            },
+        },
+        {
+            "name": "race",
+            "start_timestep": 30_000,
+            "decks": ["Selesnya Ouroboroid", "Mono-Green Landfall"],
+            "profile_bag": ["passive"] * 7 + ["novice"] * 3,
+            "advance_when": {
+                "window_episodes": 96,
+                "min_stage_timesteps": 45_000,
+                "min_decisive_win_rate": 0.45,
+                "max_decisive_loss_rate": 0.40,
+                "max_timeout_rate": 0.25,
+            },
+        },
+        {
+            "name": "bridge",
+            "start_timestep": 75_000,
+            "decks": [
+                "Selesnya Ouroboroid", "Mono-Green Landfall",
+                "Izzet Prowess", "Azorius Momo",
+            ],
+            "profile_bag": (
+                ["passive"] * 2 + ["novice"] * 5 + ["scripted"] * 3),
+            "advance_when": {
+                "window_episodes": 128,
+                "min_stage_timesteps": 75_000,
+                "min_decisive_win_rate": 0.30,
+                "max_decisive_loss_rate": 0.55,
+                "max_timeout_rate": 0.25,
+            },
+        },
+        {
+            "name": "full_pool",
+            "start_timestep": 150_000,
+            "decks": "*",
+            "profile_bag": ["novice"] * 2 + ["scripted"] * 8,
+        },
+    ],
+}
+
+
 def _stable_seed(*parts) -> int:
     payload = ":".join(str(part) for part in parts).encode("utf-8")
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
@@ -64,9 +130,13 @@ def resolve_curriculum(name, decks):
     """Resolve and strictly validate a named curriculum for this corpus."""
     if name in (None, "none"):
         return None
-    if name != "combat-v1":
+    presets = {
+        "combat-v1": COMBAT_CURRICULUM_V1,
+        "combat-v2": COMBAT_CURRICULUM_V2,
+    }
+    if name not in presets:
         raise ValueError(f"Unknown curriculum: {name}")
-    spec = deepcopy(COMBAT_CURRICULUM_V1)
+    spec = deepcopy(presets[name])
     available = [
         deck.get("name") for deck in decks if isinstance(deck, dict)
     ]
@@ -74,6 +144,10 @@ def resolve_curriculum(name, decks):
         raise ValueError("Curriculum deck names must be unique")
     available_set = set(available)
     stages = spec.get("stages") or []
+    progression = str(spec.get("progression") or "fixed_timesteps")
+    if progression not in {"fixed_timesteps", "mastery"}:
+        raise ValueError(f"Unknown curriculum progression: {progression}")
+    spec["progression"] = progression
     if not stages or stages[0].get("start_timestep") != 0:
         raise ValueError("Curriculum stage zero must start at timestep zero")
     previous = -1
@@ -102,9 +176,31 @@ def resolve_curriculum(name, decks):
         if not bag or unknown:
             raise ValueError(
                 f"Curriculum stage {stage_name} has invalid profiles: {unknown}")
+        gate = stage.get("advance_when")
+        if progression == "mastery" and stage is not stages[-1]:
+            if not isinstance(gate, dict):
+                raise ValueError(
+                    f"Curriculum stage {stage_name} needs an advance_when gate")
+            window = int(gate.get("window_episodes", 0))
+            minimum_steps = int(gate.get("min_stage_timesteps", -1))
+            if window <= 0 or minimum_steps < 0:
+                raise ValueError(
+                    f"Curriculum stage {stage_name} has an invalid mastery window")
+            gate["window_episodes"] = window
+            gate["min_stage_timesteps"] = minimum_steps
+            for field in (
+                    "min_decisive_win_rate", "max_decisive_loss_rate",
+                    "max_timeout_rate"):
+                value = float(gate.get(field, -1.0))
+                if not 0.0 <= value <= 1.0:
+                    raise ValueError(
+                        f"Curriculum stage {stage_name} has invalid {field}")
+                gate[field] = value
         stage["decks"] = stage_decks
         stage["profile_bag"] = bag
-    spec["transition_semantics"] = "global_timestep_next_reset"
+    spec["transition_semantics"] = (
+        "central_mastery_next_reset" if progression == "mastery"
+        else "global_timestep_next_reset")
     return spec
 
 
@@ -117,18 +213,30 @@ class CurriculumScheduler:
         self.spec = deepcopy(spec)
         self.matchup_seed = int(matchup_seed)
         self.timestep = 0
+        self._stage_override = None
         self._episode_counts = [0] * len(self.spec["stages"])
 
     def set_timestep(self, timestep):
         self.timestep = max(0, int(timestep))
 
     def stage_index(self):
+        if self._stage_override is not None:
+            return self._stage_override
         selected = 0
         for index, stage in enumerate(self.spec["stages"]):
             if self.timestep < int(stage["start_timestep"]):
                 break
             selected = index
         return selected
+
+    def set_stage(self, stage_index, timestep=None):
+        """Select an explicit centrally coordinated stage for future resets."""
+        selected = int(stage_index)
+        if not 0 <= selected < len(self.spec["stages"]):
+            raise ValueError(f"Curriculum stage index is out of range: {selected}")
+        self._stage_override = selected
+        if timestep is not None:
+            self.set_timestep(timestep)
 
     def _shuffled_cycle(self, values, label, stage, cycle):
         values = list(values)

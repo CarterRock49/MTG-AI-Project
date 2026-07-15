@@ -7,6 +7,7 @@ Run from the repository root with::
 
 from __future__ import annotations
 
+import asyncio
 import math
 import sys
 import tempfile
@@ -76,6 +77,55 @@ class DeckStatsNumericSafetyTest(unittest.TestCase):
         valid = {archetype.value for archetype in DeckArchetype}
         self.assertIn(winner_archetype, valid)
         self.assertEqual(loser_archetype, winner_archetype)
+
+    def test_training_persistence_batches_episode_flushes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tracker = DeckStatsTracker(
+                storage_path=temp_dir, use_compression=False,
+                persistence_interval_games=3)
+            flushes = []
+            tracker.identify_archetype = lambda _deck: "midrange"
+            tracker.update_meta_with_game_result = lambda **_kwargs: True
+            tracker._update_deck_stats = lambda **_kwargs: True
+            tracker._update_card_stats = lambda **_kwargs: True
+
+            def record_flush():
+                flushes.append(True)
+                tracker._games_since_persistence = 0
+                return True
+
+            tracker.save_updates_sync = record_flush
+            for game_index in range(5):
+                self.assertTrue(tracker.record_game(
+                    winner_deck=[], loser_deck=[], card_db={},
+                    turn_count=game_index + 1,
+                    winner_deck_name="Winner",
+                    loser_deck_name="Loser"))
+            self.assertEqual(len(flushes), 1)
+            self.assertEqual(tracker._games_since_persistence, 2)
+
+    def test_failed_deck_batch_is_retained_for_retry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tracker = DeckStatsTracker(
+                storage_path=temp_dir, use_compression=False)
+            tracker.batch_updates["deck-id"] = {"name": "Retry Deck"}
+            tracker.validate_deck_stats = lambda _stats: (True, [])
+            tracker._generate_deck_filename = (
+                lambda *_args: "retry_deck.json")
+
+            async def fail_save(_path, _stats):
+                return False
+
+            tracker.save_async = fail_save
+            self.assertFalse(asyncio.run(tracker.save_batch_updates()))
+            self.assertIn("deck-id", tracker.batch_updates)
+
+            async def pass_save(_path, _stats):
+                return True
+
+            tracker.save_async = pass_save
+            self.assertTrue(asyncio.run(tracker.save_batch_updates()))
+            self.assertNotIn("deck-id", tracker.batch_updates)
 
 
 if __name__ == "__main__":

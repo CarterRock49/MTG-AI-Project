@@ -284,9 +284,9 @@ full-pool coverage counts are in the ROADMAP status snapshot.
 
 ```bash
 python main.py --timesteps 1000000 --learning-rate 2e-4 --batch-size 256 \
-  --n-steps 1024 --seed 20260714 --run-name round-7.87-curriculum-v5 \
-  --eval-freq 25000 --eval-episodes 64 --n-envs 8 \
-  --curriculum combat-v1
+  --n-steps 1024 --seed 20260715 --run-name round-7.88-mastery-v5 \
+  --eval-freq 100000 --eval-episodes 64 --n-envs 8 \
+  --curriculum combat-v2
 ```
 
 No format or deck flags are required for the pinned Standard default. Custom
@@ -302,14 +302,19 @@ wall time** at the old defaults). Results land in TensorBoard on arrival;
 on a 6-core/12-thread machine (`--n-envs 0` auto-selects only 6; worker count
 is RAM-bounded at ~0.3 MB per rollout-buffer step). If the evaluation cadence
 outruns the evaluator, boundaries are skipped with a warning rather than
-queueing stale snapshots. Deeper per-step optimizations are tracked as the
-ROADMAP Tier 3 throughput program.
+queueing stale snapshots. Skipped/cancelled boundaries are retained in
+`evaluations.json`, and interrupted runs terminate the evaluator and remove
+unpublished snapshots. Training workers batch compressed statistics for ten
+games; close still forces a final flush. Deeper per-step optimizations are
+tracked as the ROADMAP Tier 3 throughput program.
 
-Every checkpoint is evaluated against the same paired deck/seat/seed cases.
+Every periodic evaluation uses the same paired deck/seat/seed cases.
 Promotion is ordered by decisive wins, decisive win-minus-loss score, fewer
-turn limits, then shaped return. The exact cases, per-game outcomes, checkpoint
-SHA-256, and promotion decisions are published atomically to
-`logs/<run>/evaluation/evaluations.json`.
+turn limits, then shaped return. A candidate is only published as
+`best_model.zip` after its decisive-win plus half non-timeout-draw score reaches
+55%; being merely best-so-far is recorded separately. The exact cases,
+per-game outcomes, checkpoint SHA-256, and promotion decisions are published
+atomically to `logs/<run>/evaluation/evaluations.json`.
 
 Training and evaluation use separate statistics directories and alternate the
 learned policy between P1 and P2 on successive episodes. Each run writes a
@@ -319,7 +324,7 @@ inventory, deck/lineage provenance, lifecycle result, and artifact paths. A
 dirty run also stores a hashed `source_worktree.patch` beside the manifest,
 including both tracked changes and untracked files.
 
-> **Checkpoint boundary (Round 7.87 / Observation v2).** The full Standard namespace widened card
+> **Checkpoint boundary (Round 7.88 / Observation v2).** The full Standard namespace widened card
 > observations to 436 fields (259 subtype fields plus MDFC fields), signed live
 > power/toughness, and count/stat bounds large enough for legal boards above 20
 > permanents. Round 7.62 also widened the declared choice-count, allocation, and
@@ -364,8 +369,9 @@ including both tracked changes and untracked files.
 > `discounted-state-potential-v5`: opponent-ended results are translated back
 > to the learned seat, all timeouts and safety truncations pay `-10`, and
 > handler-local action reward is diagnostic-only. Training now uses the
-> deterministic `combat-v1` opponent curriculum (passive goldfish, novice
-> race, mixed bridge, then the full scripted pool), while evaluation remains a
+> deterministic, mastery-gated `combat-v2` opponent curriculum (passive
+> goldfish, gradual passive/novice/scripted mixtures, then the full scripted
+> pool), while evaluation remains a
 > fixed 64-game paired scripted suite. PPO defaults are 2e-4 learning rate,
 > 1,024 rollout steps, batch 256, gamma 0.999, lambda 0.98, value coefficient
 > 0.25, and five epochs. Observation v2 and its hash are unchanged.
@@ -389,8 +395,8 @@ python main.py --resume models/<run>/final_model --timesteps 10000
 ```
 
 (Only for manifest-verified, lineage-compatible checkpoints — see the boundary
-note above. `combat-v1` resume is currently rejected because its per-worker
-matchup counters are not checkpointed; Round 7.87 must start fresh.)
+note above. Curriculum resume is currently rejected because per-worker matchup
+counters are not checkpointed; Round 7.88 must start fresh.)
 
 ---
 
@@ -480,9 +486,9 @@ artifacts for 14 days.
 | `--batch-size` | Batch size | `256` |
 | `--n-steps` | Rollout steps before an update | `1024` |
 | `--n-envs` | Parallel training environments (`0` = auto) | `0` |
-| `--eval-freq` / `--eval-episodes` | Periodic cadence / fixed paired cases | `10000` / `64` |
+| `--eval-freq` / `--eval-episodes` | Periodic cadence / fixed paired cases | `100000` / `64` |
 | `--checkpoint-freq` | Checkpoint cadence (timesteps) | `50000` |
-| `--curriculum` | Training opponent schedule (`combat-v1` or `none`) | `combat-v1` |
+| `--curriculum` | Training opponent schedule (`combat-v2`, `combat-v1`, or `none`) | `combat-v2` |
 | `--format` / `--decks` / `--format-dir` | Format legality + corpus / deck dir / frozen namespace | pinned Standard |
 | `--optimize-hp` | Run Optuna hyperparameter search | off |
 | `--record-network` / `--record-freq` | Record network parameters / cadence | off / `5000` |

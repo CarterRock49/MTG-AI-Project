@@ -87,13 +87,21 @@ class DeckStatsTracker:
     
     def __init__(self, storage_path: str = "./deck_stats",
                  card_db: Dict = None, use_compression: bool = True,
-                 decks: List = None, decks_directory: str = None):
+                 decks: List = None, decks_directory: str = None,
+                 persistence_interval_games: int = 1):
         # Initialize storage path
         self.base_path = storage_path
         self.use_compression = use_compression
         self.card_db = card_db or {}
         self.source_decks = list(decks or [])
         self.decks_directory = decks_directory
+        self.persistence_interval_games = max(
+            1, int(persistence_interval_games))
+        self._games_since_persistence = 0
+        self._meta_data_cache = None
+        self._meta_data_dirty = False
+        self._individual_card_cache = {}
+        self._dirty_individual_card_files = set()
         self._ensure_directories()
         self.current_deck_name_p1 = None
         self.current_deck_name_p2 = None
@@ -1267,6 +1275,8 @@ class DeckStatsTracker:
     
     def _load_meta_data(self) -> Dict:
         """Load meta data from storage"""
+        if self._meta_data_cache is not None:
+            return self._meta_data_cache
         meta_data = self.load("meta/meta_data.json")
         if not meta_data:
             # Initialize empty meta data
@@ -1290,13 +1300,17 @@ class DeckStatsTracker:
             card_data["play_rate"] = _deck_seat_share(
                 card_data.get("games", 0), total_games)
         meta_data["version"] = STATS_VERSION
+        self._meta_data_cache = meta_data
         return meta_data
 
     def save_meta_data(self) -> bool:
         """Save meta data to storage"""
         meta_data = self._load_meta_data()
         # meta_data["last_updated"] = time.time() # Removed time dependency
-        return self.save("meta/meta_data.json", meta_data)
+        saved = self.save("meta/meta_data.json", meta_data)
+        if saved:
+            self._meta_data_dirty = False
+        return saved
     
     def update_meta_with_game_result(self, winner_deck: List[int], loser_deck: List[int], 
                                 winner_archetype: str, loser_archetype: str,
@@ -1451,8 +1465,8 @@ class DeckStatsTracker:
             card_data["play_rate"] = _deck_seat_share(
                 card_data["games"], meta_data["total_games"])
         
-        # Save updated meta data
-        return self.save("meta/meta_data.json", meta_data)
+        self._meta_data_dirty = True
+        return True
     
     def get_top_archetypes(self, limit: int = 5, min_games: int = 10) -> List[Dict]:
         """
@@ -2349,8 +2363,12 @@ class DeckStatsTracker:
                 play_history=play_history
             )
             
-            # Save updates
-            self.save_updates_sync()
+            # Training workers batch the many small compressed card/deck files;
+            # direct callers retain the historical immediate-persistence default.
+            self._games_since_persistence += 1
+            if self._games_since_persistence >= \
+                    self.persistence_interval_games:
+                self.save_updates_sync()
             
             if is_draw:
                 logging.info(f"Game recorded: Draw between {winner_archetype} and {loser_archetype}, Turns: {turn_count}")
@@ -3512,8 +3530,12 @@ class DeckStatsTracker:
         # Create file path
         card_file = f"cards/{self._sanitize_filename(card_name)}.json"
 
-        # Get existing stats or initialize new ones
-        card_stats = self.load(card_file)
+        # Keep the working copy in memory. A Standard game touches dozens of
+        # unique cards, so loading and rewriting one gzip per card per episode
+        # dominated the statistics path during vectorized training.
+        card_stats = self._individual_card_cache.get(card_file)
+        if card_stats is None:
+            card_stats = self.load(card_file)
         if not card_stats:
             card_stats = {
                 "name": card_name,
@@ -3606,8 +3628,9 @@ class DeckStatsTracker:
         card_stats["by_game_state"][game_state]["wins"] += stats_update.get("wins", 0)
         card_stats["by_game_state"][game_state]["draws"] += stats_update.get("draws", 0)
 
-        # Save updated stats
-        return self.save(card_file, card_stats)
+        self._individual_card_cache[card_file] = card_stats
+        self._dirty_individual_card_files.add(card_file)
+        return True
     
     # === Analysis and Recommendations ===
     
@@ -3996,6 +4019,7 @@ class DeckStatsTracker:
             return True  # Nothing to save
         
         success = True
+        failed_updates = {}
         for deck_key, stats in batch.items():
             try:
                 # Validate before saving
@@ -4016,13 +4040,35 @@ class DeckStatsTracker:
                 if not save_result:
                     logging.error(f"Failed to save stats for deck {deck_key}")
                     success = False
+                    failed_updates[deck_key] = stats
             
             except Exception as e:
                 logging.error(f"Error saving deck stats for {deck_key}: {str(e)}")
                 success = False
+                failed_updates[deck_key] = stats
+
+        if failed_updates:
+            with self.batch_lock:
+                # A newer snapshot for the same deck wins; otherwise retain
+                # the failed snapshot so the next flush can retry it.
+                for deck_key, stats in failed_updates.items():
+                    self.batch_updates.setdefault(deck_key, stats)
         
         return success
     
+    def _flush_auxiliary_stats(self):
+        """Persist cached meta and per-card snapshots without losing failures."""
+        success = True
+        if self._meta_data_dirty and not self.save_meta_data():
+            success = False
+        for card_file in list(self._dirty_individual_card_files):
+            card_stats = self._individual_card_cache.get(card_file)
+            if card_stats is None or not self.save(card_file, card_stats):
+                success = False
+                continue
+            self._dirty_individual_card_files.discard(card_file)
+        return success
+
     def save_updates_sync(self):
         """
         Synchronous method to save all pending updates.
@@ -4033,26 +4079,36 @@ class DeckStatsTracker:
         Returns:
             bool: True if updates were saved successfully, False otherwise
         """
+        deck_success = False
         try:
             # Use run_until_complete to run the async method
             loop = asyncio.get_event_loop()
-            return loop.run_until_complete(self.save_batch_updates())
+            deck_success = loop.run_until_complete(self.save_batch_updates())
         except RuntimeError:
             # If no event loop exists, create a new one
             try:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                return loop.run_until_complete(self.save_batch_updates())
+                deck_success = loop.run_until_complete(
+                    self.save_batch_updates())
             except Exception as e:
                 logging.error(f"Error saving updates synchronously (no event loop): {e}")
                 return False
         except Exception as e:
             logging.error(f"Error saving updates synchronously: {e}")
             return False
+        auxiliary_success = self._flush_auxiliary_stats()
+        if deck_success and auxiliary_success:
+            self._games_since_persistence = 0
+        return deck_success and auxiliary_success
     
     async def save_all_pending_updates(self) -> bool:
         """Save all pending updates to storage"""
-        return await self.save_batch_updates()
+        deck_success = await self.save_batch_updates()
+        auxiliary_success = self._flush_auxiliary_stats()
+        if deck_success and auxiliary_success:
+            self._games_since_persistence = 0
+        return deck_success and auxiliary_success
     
     
 

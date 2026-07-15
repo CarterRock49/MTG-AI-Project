@@ -61,7 +61,8 @@ class AlphaZeroMTGEnv(gym.Env):
                  state_potential_scale=DEFAULT_STATE_POTENTIAL_SCALE,
                  curriculum=None, opponent_profile="scripted",
                  matchup_seed=None,
-                 adaptive_decision_history_enabled=True):
+                 adaptive_decision_history_enabled=True,
+                 stats_persistence_interval_games=1):
         logging.info("Initializing AlphaZeroMTGEnv...")
         super().__init__()
         self.decks = decks
@@ -70,10 +71,15 @@ class AlphaZeroMTGEnv(gym.Env):
         self.card_memory_path = card_memory_path
         self.adaptive_decision_history_enabled = bool(
             adaptive_decision_history_enabled)
+        self.stats_persistence_interval_games = max(
+            1, int(stats_persistence_interval_games))
         # Version stamp for recorded games: card values measured under a weak agent
         # are not card values. main.py sets this to the run id; update it at
         # checkpoints for finer granularity.
         self.agent_version = "unversioned"
+        self.training_timestep = None
+        self.evaluation_timestep = None
+        self.evaluation_checkpoint_sha256 = None
         self._fidelity_agg = {"games_recorded": 0, "unimplemented_action": 0,
                               "unparsed_mana": 0, "unparsed_modal": 0,
                               "unparsed_effects": 0, "unparsed_cards": {}}
@@ -204,7 +210,9 @@ class AlphaZeroMTGEnv(gym.Env):
             self.stats_tracker = DeckStatsTracker(
                 storage_path=self.deck_stats_path,
                 card_db=card_db,
-                decks=decks) # BUGFIX: map the environment's active format pool
+                decks=decks,
+                persistence_interval_games=
+                    self.stats_persistence_interval_games)
             self.has_stats_tracker = True
         except (ImportError, ModuleNotFoundError, NameError):
             logging.warning("DeckStatsTracker not available, statistics will not be recorded")
@@ -555,6 +563,20 @@ class AlphaZeroMTGEnv(gym.Env):
         if self.curriculum_scheduler is not None:
             self.curriculum_scheduler.set_timestep(timestep)
 
+    def set_curriculum_stage(self, stage_index, timestep=None):
+        """Apply a centrally coordinated mastery stage to future resets."""
+        if self.curriculum_scheduler is not None:
+            self.curriculum_scheduler.set_stage(stage_index, timestep)
+
+    def set_training_timestep(self, timestep):
+        """Stamp subsequent game records with their rollout's lower bound."""
+        self.training_timestep = int(timestep)
+
+    def set_evaluation_checkpoint(self, timestep, checkpoint_sha256):
+        """Attribute evaluator game records to the exact policy snapshot."""
+        self.evaluation_timestep = int(timestep)
+        self.evaluation_checkpoint_sha256 = str(checkpoint_sha256)
+
     def set_episode_schedule(self, cases):
         """Install an exact reset schedule used by deterministic evaluation."""
         normalized = []
@@ -596,6 +618,10 @@ class AlphaZeroMTGEnv(gym.Env):
             "agent_deck": self.current_agent_deck,
             "opponent_deck": self.current_opponent_deck,
             "matchup_episode_index": self.current_matchup_episode_index,
+            "training_timestep": self.training_timestep,
+            "evaluation_timestep": self.evaluation_timestep,
+            "evaluation_checkpoint_sha256":
+                self.evaluation_checkpoint_sha256,
         }
 
     def reset(self, seed=None, options=None):
@@ -1014,7 +1040,8 @@ class AlphaZeroMTGEnv(gym.Env):
             except Exception as mem_e:
                  logging.error(f"Error recording cards to memory: {mem_e}", exc_info=True)
 
-        # Persist immediately: a crash mid-training must not lose recorded games.
+        # Append provenance immediately. The stats tracker itself may batch its
+        # compressed aggregate files for a small, configured episode window.
         if getattr(self, '_game_result_recorded', False):
             if not getattr(self, '_game_logged', False):
                 try:
