@@ -24,6 +24,7 @@ from collections import defaultdict
 from .deck_stats_tracker import DeckStatsTracker
 from .card_memory import CardMemory
 from .ability_types import ManaAbility
+from .curriculum import CurriculumScheduler, OPPONENT_PROFILES
 from .observation_schema import (
     OBSERVATION_SCHEMA_SHA256, OBSERVATION_SCHEMA_VERSION,
     SEMANTIC_IDENTITY_MAX,
@@ -43,9 +44,9 @@ class AlphaZeroMTGEnv(gym.Env):
     Updated for improved reward shaping, richer observations, modularity, and detailed logging.
     """
     ACTION_SPACE_SIZE = 480 # Moved constant here
-    REWARD_CONTRACT_VERSION = "discounted-state-potential-v4"
-    DEFAULT_REWARD_DISCOUNT = 0.995
-    DEFAULT_ACTION_REWARD_SCALE = 0.02
+    REWARD_CONTRACT_VERSION = "discounted-state-potential-v5"
+    DEFAULT_REWARD_DISCOUNT = 0.999
+    DEFAULT_ACTION_REWARD_SCALE = 0.0
     DEFAULT_STATE_POTENTIAL_SCALE = 0.40
     OBSERVATION_SCHEMA_VERSION = OBSERVATION_SCHEMA_VERSION
     OBSERVATION_SCHEMA_SHA256 = OBSERVATION_SCHEMA_SHA256
@@ -57,13 +58,18 @@ class AlphaZeroMTGEnv(gym.Env):
                  strategy_memory_enabled=False,
                  reward_discount=DEFAULT_REWARD_DISCOUNT,
                  action_reward_scale=DEFAULT_ACTION_REWARD_SCALE,
-                 state_potential_scale=DEFAULT_STATE_POTENTIAL_SCALE):
+                 state_potential_scale=DEFAULT_STATE_POTENTIAL_SCALE,
+                 curriculum=None, opponent_profile="scripted",
+                 matchup_seed=None,
+                 adaptive_decision_history_enabled=True):
         logging.info("Initializing AlphaZeroMTGEnv...")
         super().__init__()
         self.decks = decks
         self.card_db = card_db
         self.deck_stats_path = deck_stats_path
         self.card_memory_path = card_memory_path
+        self.adaptive_decision_history_enabled = bool(
+            adaptive_decision_history_enabled)
         # Version stamp for recorded games: card values measured under a weak agent
         # are not card values. main.py sets this to the run id; update it at
         # checkpoints for finer granularity.
@@ -101,6 +107,25 @@ class AlphaZeroMTGEnv(gym.Env):
         self.replay_actions = []
         self.reset_seed = None
         self.opponent_policy = None
+        if opponent_profile not in OPPONENT_PROFILES:
+            raise ValueError(f"Unknown opponent profile: {opponent_profile}")
+        self.default_opponent_profile = opponent_profile
+        self.active_opponent_profile = opponent_profile
+        self.curriculum = curriculum
+        self.curriculum_scheduler = (
+            CurriculumScheduler(curriculum, matchup_seed)
+            if curriculum is not None else None)
+        self.matchup_seed = int(matchup_seed or 0)
+        self._matchup_rng = random.Random(self.matchup_seed)
+        self._engine_seed_rng = random.Random(
+            self.matchup_seed ^ 0x9E3779B97F4A7C15)
+        self._episode_schedule = []
+        self._episode_schedule_index = 0
+        self.current_curriculum_stage = None
+        self.current_curriculum_stage_index = None
+        self.current_matchup_episode_index = None
+        self.current_agent_deck = None
+        self.current_opponent_deck = None
         # Training can alternate the learned policy between seats without
         # changing the default behavior used by fixtures and direct callers.
         self.initial_agent_is_p1 = bool(agent_is_p1)
@@ -525,20 +550,55 @@ class AlphaZeroMTGEnv(gym.Env):
         # Return bool version
         return self.current_valid_actions.astype(bool)
 
+    def set_curriculum_timestep(self, timestep):
+        """Select the stage that the next successful reset will commit."""
+        if self.curriculum_scheduler is not None:
+            self.curriculum_scheduler.set_timestep(timestep)
+
+    def set_episode_schedule(self, cases):
+        """Install an exact reset schedule used by deterministic evaluation."""
+        normalized = []
+        for index, case in enumerate(cases or []):
+            if not isinstance(case, dict):
+                raise ValueError(f"Evaluation case {index} is not a mapping")
+            required = {"seed", "p1_deck", "p2_deck", "agent_is_p1"}
+            missing = sorted(required - set(case))
+            if missing:
+                raise ValueError(
+                    f"Evaluation case {index} is missing fields: {missing}")
+            item = dict(case)
+            item.setdefault("opponent_profile", "scripted")
+            if item["opponent_profile"] not in OPPONENT_PROFILES:
+                raise ValueError(
+                    f"Evaluation case {index} has an unknown opponent profile")
+            normalized.append(item)
+        self._episode_schedule = normalized
+        self._episode_schedule_index = 0
+
+    def reset_episode_schedule(self):
+        self._episode_schedule_index = 0
+
+    def _curriculum_reset_case(self, agent_is_p1):
+        if self.curriculum_scheduler is None:
+            return None
+        return self.curriculum_scheduler.peek(agent_is_p1)
+
+    def _episode_metadata(self):
+        return {
+            "episode_seed": self.reset_seed,
+            "p1_deck": getattr(self, "current_deck_name_p1", None),
+            "p2_deck": getattr(self, "current_deck_name_p2", None),
+            "agent_is_p1": bool(getattr(
+                getattr(self, "game_state", None), "agent_is_p1", True)),
+            "curriculum_stage": self.current_curriculum_stage,
+            "curriculum_stage_index": self.current_curriculum_stage_index,
+            "opponent_profile": self.active_opponent_profile,
+            "agent_deck": self.current_agent_deck,
+            "opponent_deck": self.current_opponent_deck,
+            "matchup_episode_index": self.current_matchup_episode_index,
+        }
+
     def reset(self, seed=None, options=None):
-            # BUGFIX: gym seeds only self.np_random; deck selection and other engine
-            # randomness use the global `random` module, so seeded resets were not
-            # reproducible. Seed both global RNGs when a seed is provided.
-            # (Indented to match this function's existing 12-space body style --
-            # a shallower block here would swallow the whole body as its suite.)
-            if seed is None:
-                # Gymnasium supplies an explicit seed only for the first
-                # VecEnv reset. Derive and record one for every later episode
-                # so a failure replay never carries an unusable null seed.
-                seed = random.randrange(0, 2**32)
-            random.seed(seed)
-            np.random.seed(seed % (2**32))
-            self.reset_seed = seed
             """
             Reset the environment and return initial observation and info.
             Aligns with GameState starting in the Mulligan phase.
@@ -550,6 +610,28 @@ class AlphaZeroMTGEnv(gym.Env):
             Returns:
                 tuple: Initial observation and info dictionary
             """
+            explicit_options = dict(options or {})
+            scheduled_case = None
+            scheduled_index = None
+            if self._episode_schedule:
+                scheduled_index = (
+                    self._episode_schedule_index % len(self._episode_schedule))
+                scheduled_case = dict(self._episode_schedule[scheduled_index])
+                # Fixed evaluation takes absolute precedence over curriculum,
+                # replay options, ordinary matchup RNG, and seat alternation.
+                options = scheduled_case
+                seed = int(scheduled_case["seed"])
+            else:
+                options = explicit_options
+
+            # Matchmaking owns a separate RNG. Game randomness may consume the
+            # global streams freely without changing a later deck/profile draw.
+            if seed is None:
+                seed = self._engine_seed_rng.randrange(0, 2**32)
+            random.seed(seed)
+            np.random.seed(seed % (2**32))
+            self.reset_seed = int(seed)
+            self._reset_fallback_active = False
             env_id = getattr(self, "env_id", id(self)) # For tracking
             try:
                 # --- Pre-Reset Logging & Safety Checks ---
@@ -579,6 +661,36 @@ class AlphaZeroMTGEnv(gym.Env):
                 if hasattr(self, '_last_phase_progressed'): self._last_phase_progressed = -1
                 if hasattr(self, '_phase_stuck_count'): self._phase_stuck_count = 0
 
+                # Resolve the learned seat before selecting semantic agent and
+                # opponent decks. Selecting P1/P2 decks first silently swaps a
+                # curriculum matchup every other episode.
+                seat_is_p1 = self.initial_agent_is_p1
+                if (self.alternate_agent_seat
+                        and self._successful_reset_count % 2 == 1):
+                    seat_is_p1 = not seat_is_p1
+                requested_seat = (options or {}).get("agent_is_p1")
+                if isinstance(requested_seat, bool):
+                    seat_is_p1 = requested_seat
+
+                curriculum_case = None
+                has_explicit_matchup = any(
+                    key in explicit_options and explicit_options.get(key) is not None
+                    for key in ("p1_deck", "p2_deck"))
+                if (scheduled_case is None and not has_explicit_matchup
+                        and self.curriculum_scheduler is not None):
+                    curriculum_case = self._curriculum_reset_case(seat_is_p1)
+                    # Curriculum supplies defaults; explicit seat/profile
+                    # options remain authoritative for replay/probes.
+                    options = dict(curriculum_case)
+                    options.update(explicit_options)
+
+                requested_profile = (options or {}).get(
+                    "opponent_profile", self.default_opponent_profile)
+                if requested_profile not in OPPONENT_PROFILES:
+                    raise ValueError(
+                        f"Unknown opponent profile: {requested_profile}")
+                self.active_opponent_profile = requested_profile
+
                 # --- Deck Selection ---
                 if not self.decks:
                     logging.error("No decks available in environment! Using dummy deck.")
@@ -607,9 +719,9 @@ class AlphaZeroMTGEnv(gym.Env):
                         raise ValueError(
                             f"Requested replay P2 deck is unavailable: {requested_p2}")
                     if p1_deck_data is None:
-                        p1_deck_data = random.choice(self.decks)
+                        p1_deck_data = self._matchup_rng.choice(self.decks)
                     if p2_deck_data is None:
-                        p2_deck_data = random.choice(self.decks)
+                        p2_deck_data = self._matchup_rng.choice(self.decks)
                 
                 self.current_deck_name_p1 = p1_deck_data.get("name", "P1_Deck")
                 self.current_deck_name_p2 = p2_deck_data.get("name", "P2_Deck")
@@ -624,14 +736,22 @@ class AlphaZeroMTGEnv(gym.Env):
                 # Reset GameState (Initializes players, hands, subsystems)
                 self.game_state.reset(self.original_p1_deck, self.original_p2_deck, seed)
                 gs = self.game_state # Alias
-                seat_is_p1 = self.initial_agent_is_p1
-                if (self.alternate_agent_seat
-                        and self._successful_reset_count % 2 == 1):
-                    seat_is_p1 = not seat_is_p1
-                requested_seat = (options or {}).get("agent_is_p1")
-                if isinstance(requested_seat, bool):
-                    seat_is_p1 = requested_seat
                 gs.agent_is_p1 = seat_is_p1
+                selected_case = (
+                    scheduled_case or curriculum_case or explicit_options)
+                self.current_curriculum_stage = selected_case.get("stage")
+                self.current_curriculum_stage_index = selected_case.get(
+                    "stage_index")
+                self.current_matchup_episode_index = selected_case.get(
+                    "matchup_episode_index", scheduled_index)
+                self.current_agent_deck = (
+                    selected_case.get("agent_deck")
+                    or (self.current_deck_name_p1 if seat_is_p1
+                        else self.current_deck_name_p2))
+                self.current_opponent_deck = (
+                    selected_case.get("opponent_deck")
+                    or (self.current_deck_name_p2 if seat_is_p1
+                        else self.current_deck_name_p1))
 
                 # --- Link Subsystems to Environment ---
                 # 1. External Systems
@@ -640,12 +760,16 @@ class AlphaZeroMTGEnv(gym.Env):
                     gs.strategy_memory = self.strategy_memory
                     
                 if self.has_stats_tracker and self.stats_tracker:
-                    gs.stats_tracker = self.stats_tracker
+                    gs.stats_tracker = (
+                        self.stats_tracker
+                        if self.adaptive_decision_history_enabled else None)
                     self.stats_tracker.current_deck_name_p1 = self.current_deck_name_p1
                     self.stats_tracker.current_deck_name_p2 = self.current_deck_name_p2
                     
                 if self.has_card_memory and self.card_memory:
-                    gs.card_memory = self.card_memory
+                    gs.card_memory = (
+                        self.card_memory
+                        if self.adaptive_decision_history_enabled else None)
 
                 # 2. Rules subsystems (Reflect from GameState to Env). The agent
                 # layer is NOT reflected: the environment owns it and rebuilds it
@@ -683,8 +807,14 @@ class AlphaZeroMTGEnv(gym.Env):
                     "initial_state": True,
                     "mulligan_active": gs.mulligan_in_progress
                 }
+                info.update(self._episode_metadata())
 
                 self._successful_reset_count += 1
+                if curriculum_case is not None:
+                    self.curriculum_scheduler.commit(
+                        curriculum_case["stage_index"])
+                if scheduled_case is not None:
+                    self._episode_schedule_index += 1
                 logging.info(f"Environment {env_id} reset complete. P1: {self.current_deck_name_p1} vs P2: {self.current_deck_name_p2}")
                 return obs, info
 
@@ -697,6 +827,7 @@ class AlphaZeroMTGEnv(gym.Env):
         """Provides a minimal valid state if the main reset fails."""
         try:
             logging.warning("Attempting emergency fallback reset...")
+            self._reset_fallback_active = True
             # Create minimal GameState
             self.game_state = GameState(self.card_db, self.max_turns, self.max_hand_size, self.max_battlefield)
             
@@ -753,6 +884,12 @@ class AlphaZeroMTGEnv(gym.Env):
              is_draw = True
              self._game_result = "invalid_limit"
              gs.terminal_reason = "invalid_action_limit"
+        elif (isinstance(forced_result, str)
+              and forced_result.startswith(("error_", "invalid_"))):
+            # Safety failures are not competitive draws, but the stats writer
+            # still needs a stable result row paired with terminal_reason.
+            is_draw = True
+            self._game_result = forced_result
         elif forced_result in ("win", "loss", "draw"):
             # Result already adjudicated by the caller (e.g., turn-limit life
             # comparison in _check_game_end_conditions). Trust it: the flag-based
@@ -959,9 +1096,34 @@ class AlphaZeroMTGEnv(gym.Env):
 
         fc = getattr(gs, 'fidelity_counters', None) or {}
         per_game_fidelity = {k: (sorted(v) if isinstance(v, set) else v) for k, v in fc.items()}
+        fallback_agent_deck = (
+            getattr(self, "current_deck_name_p1", "Unknown_P1")
+            if getattr(gs, "agent_is_p1", True)
+            else getattr(self, "current_deck_name_p2", "Unknown_P2"))
+        fallback_opponent_deck = (
+            getattr(self, "current_deck_name_p2", "Unknown_P2")
+            if getattr(gs, "agent_is_p1", True)
+            else getattr(self, "current_deck_name_p1", "Unknown_P1"))
+        episode_metadata = (
+            self._episode_metadata()
+            if callable(getattr(self, "_episode_metadata", None)) else {
+                "curriculum_stage": getattr(
+                    self, "current_curriculum_stage", None),
+                "curriculum_stage_index": getattr(
+                    self, "current_curriculum_stage_index", None),
+                "opponent_profile": getattr(
+                    self, "active_opponent_profile", "scripted"),
+                "agent_deck": getattr(
+                    self, "current_agent_deck", None) or fallback_agent_deck,
+                "opponent_deck": getattr(
+                    self, "current_opponent_deck", None)
+                    or fallback_opponent_deck,
+                "matchup_episode_index": getattr(
+                    self, "current_matchup_episode_index", None),
+            })
 
         entry = {
-            "schema_version": 1,
+            "schema_version": 2,
             "ts": _time.time(),
             "result": getattr(self, '_game_result', None),
             "terminal_reason": self._terminal_reason(
@@ -971,6 +1133,7 @@ class AlphaZeroMTGEnv(gym.Env):
             "p2_deck": getattr(self, 'current_deck_name_p2', "Unknown_P2"),
             "agent_is_p1": getattr(gs, 'agent_is_p1', True),
             "agent_version": getattr(self, 'agent_version', "unversioned"),
+            **episode_metadata,
             "fidelity": per_game_fidelity,
         }
         with open(os.path.join(base, "game_log.jsonl"), "a", encoding="utf-8") as f:
@@ -1460,6 +1623,9 @@ class AlphaZeroMTGEnv(gym.Env):
             "invalid_action": False,
             "invalid_action_reason": None
         }
+        env_info.update(self._episode_metadata())
+        if getattr(self, "_reset_fallback_active", False):
+            env_info["error_reset"] = True
 
         try:
             self.current_step += 1 # Increment step counter
@@ -1492,7 +1658,11 @@ class AlphaZeroMTGEnv(gym.Env):
                 step_reward = -0.1 # Apply penalty
                 if self.invalid_action_count >= self.invalid_action_limit:
                      logging.warning(f"Invalid action limit ({self.invalid_action_limit}) reached. Terminating episode.")
-                     done, truncated, step_reward = True, True, -2.0
+                     done, truncated = True, True
+                     env_info["game_result"] = "invalid_limit"
+                     env_info["terminal_reason"] = "invalid_action_limit"
+                     step_reward = self._failure_transition_reward(
+                         env_info, previous_state_potential)
                      self.ensure_game_result_recorded(forced_result="invalid_limit") # Record specific result
                 gs.agent_is_p1 = initial_agent_is_p1 # Ensure perspective before getting obs
                 obs = self._get_obs_safe() # Get current observation
@@ -1508,11 +1678,15 @@ class AlphaZeroMTGEnv(gym.Env):
             if not self.action_handler:
                  logging.critical("ActionHandler is None in env.step before applying action! Cannot proceed.")
                  env_info["critical_error"] = True; env_info["error_message"] = "ActionHandler is None"
+                 env_info["game_result"] = "error_action_handler_missing"
+                 env_info["terminal_reason"] = "engine_error"
                  env_info["action_mask"] = current_mask
                  gs.agent_is_p1 = initial_agent_is_p1 # Ensure perspective before safe obs
                  obs = self._get_obs_safe()
                  self.ensure_game_result_recorded(forced_result="error")
-                 return obs, -5.0, True, False, env_info # done=True
+                 step_reward = self._failure_transition_reward(
+                     env_info, previous_state_potential)
+                 return obs, step_reward, True, False, env_info # done=True
 
             reward, done, truncated, handler_info = self.action_handler.apply_action(action_idx, context=action_context)
             env_info.update(handler_info) # Merge info
@@ -1584,6 +1758,15 @@ class AlphaZeroMTGEnv(gym.Env):
                 # Check if the opponent's action ended the game
                 done = done or opp_done # Update global done flag
                 truncated = truncated or opp_truncated # Update global truncated flag
+                if opp_done:
+                    # ActionHandler reports win/loss from the acting seat. The
+                    # scripted opponent temporarily owns ``agent_is_p1`` here,
+                    # so translate its result before it reaches PPO.
+                    env_info["game_result"] = self._result_for_fixed_agent(
+                        opp_handler_info.get("game_result", "undetermined"),
+                        actor_is_p1=(opponent_player is gs.p1),
+                        agent_is_p1=initial_agent_is_p1,
+                    )
                 if opp_handler_info.get("critical_error"): # Propagate critical errors
                     env_info["critical_error"] = True
                     env_info["error_message"] = opp_handler_info.get("error_message", "Opponent action critical error")
@@ -1652,6 +1835,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 truncated = True
                 env_info["episode_step_limit"] = True
                 env_info["game_result"] = "error_episode_step_limit"
+                gs.terminal_reason = "episode_step_limit"
                 env_info["policy_state"] = diagnostic
                 env_info["error_message"] = (
                     f"Episode exceeded {self.max_episode_steps} steps: "
@@ -1666,9 +1850,16 @@ class AlphaZeroMTGEnv(gym.Env):
 
 
             # --- 5. Check Final Game End Conditions ---
+            # Everything below this boundary is learned-agent telemetry.
+            gs.agent_is_p1 = initial_agent_is_p1
             if not done:
                  game_ended_by_check = self._check_game_end_conditions(env_info)
                  done = done or game_ended_by_check
+            if done:
+                env_info["game_result"] = self._canonical_terminal_result(
+                    env_info.get("game_result", "undetermined"),
+                    agent_is_p1=initial_agent_is_p1,
+                )
 
             # Direct action heuristics are retained as a weak tie-breaker, not
             # the main objective. Their previous scale made longer games pay
@@ -1693,7 +1884,7 @@ class AlphaZeroMTGEnv(gym.Env):
             env_info["board_state_potential"] = current_state_potential
 
             terminal_reward = 0.0
-            if done:
+            if done or truncated:
                 terminal_reason = self._terminal_reason(env_info)
                 env_info["terminal_reason"] = terminal_reason
                 result = env_info.get("game_result", "draw")
@@ -1809,9 +2000,13 @@ class AlphaZeroMTGEnv(gym.Env):
                 "game_result": "error",
                 "turn": gs.turn if hasattr(self,'game_state') and gs else -1,
                 "phase": gs.phase if hasattr(self,'game_state') and gs else -1,
+                "terminal_reason": "engine_error",
             }
+            final_info.update(self._episode_metadata())
             self.ensure_game_result_recorded(forced_result="error") # Record error result
-            return obs, -5.0, True, False, final_info # done=True, truncated=False
+            step_reward = self._failure_transition_reward(
+                final_info, previous_state_potential)
+            return obs, step_reward, True, False, final_info # done=True, truncated=False
 
     # --- ADDED Helper Methods for Opponent Simulation ---
 
@@ -1873,6 +2068,7 @@ class AlphaZeroMTGEnv(gym.Env):
         """Simple scripted policy for opponent actions."""
         gs = self.game_state
         phase_ctx = opponent_context.get("phase_context")
+        profile = getattr(self, "active_opponent_profile", "scripted")
 
         def choose(action_idx):
             generated = self.action_handler.action_reasons_with_context.get(
@@ -1889,7 +2085,13 @@ class AlphaZeroMTGEnv(gym.Env):
             )
             if any(phrase in text for phrase in downside_phrases):
                 return False
-            memory = getattr(self, "card_memory", None)
+            # Fixed evaluation environments still record outcomes for audit
+            # artifacts, but their scripted decisions must not learn from
+            # earlier checkpoints/cases in the same process.
+            memory = (
+                getattr(self, "card_memory", None)
+                if self.adaptive_decision_history_enabled else None
+            )
             stats = (getattr(memory, "card_data", {}) or {}).get(
                 str(gs.canonical_card_id(card_id)), {}) if memory else {}
             samples = int(stats.get("in_opening_hand", 0) or 0)
@@ -2073,14 +2275,20 @@ class AlphaZeroMTGEnv(gym.Env):
         if phase_ctx == "priority":
             # Complete combat declarations before ordinary priority choices.
             if gs.phase == gs.PHASE_DECLARE_ATTACKERS:
-                for action_idx in range(28, 48):
-                    if opponent_mask[action_idx]:
-                        return choose(action_idx)
+                if profile != "passive":
+                    for action_idx in range(28, 48):
+                        if opponent_mask[action_idx]:
+                            return choose(action_idx)
                 if opponent_mask[479]:
                     return choose(479)
                 if opponent_mask[438]:
                     return choose(438)
             if gs.phase == gs.PHASE_DECLARE_BLOCKERS:
+                if profile in ("passive", "novice"):
+                    if opponent_mask[479]:
+                        return choose(479)
+                    if opponent_mask[439]:
+                        return choose(439)
                 # If a sequential declaration is incomplete, add the next
                 # blocker before considering the withdrawal action occupying
                 # an earlier slot. Otherwise the ascending first-action policy
@@ -2114,6 +2322,16 @@ class AlphaZeroMTGEnv(gym.Env):
                     return choose(479)
                 if opponent_mask[439]:
                     return choose(439)
+
+            # The goldfish profile completes mandatory game transactions but
+            # never develops, attacks, or blocks. It teaches the learned seat
+            # to produce a legal kill before defensive pressure is introduced.
+            if profile == "passive":
+                if opponent_mask[11]:
+                    return choose(11)
+                if opponent_mask[224]:
+                    return choose(224)
+                return choose(12) if opponent_mask[12] else (None, {})
 
             # Develop mana first, then cast the first affordable legal spell.
             # This remains intentionally simple, but is a real baseline rather
@@ -2179,10 +2397,11 @@ class AlphaZeroMTGEnv(gym.Env):
     def export_replay(self, path=None):
         """Return (and optionally persist) a deterministic episode replay."""
         payload = {
-            "version": 2, "seed": self.reset_seed,
+            "version": 3, "seed": self.reset_seed,
             "p1_deck": getattr(self, 'current_deck_name_p1', None),
             "p2_deck": getattr(self, 'current_deck_name_p2', None),
             "agent_is_p1": bool(getattr(self.game_state, 'agent_is_p1', True)),
+            **self._episode_metadata(),
             "actions": list(self.replay_actions),
         }
         if path:
@@ -2245,6 +2464,14 @@ class AlphaZeroMTGEnv(gym.Env):
         if isinstance(payload, (str, os.PathLike)):
             with open(payload, 'r', encoding='utf-8') as handle:
                 payload = json.load(handle)
+        try:
+            replay_version = int(payload.get("version", 1))
+        except (TypeError, ValueError) as error:
+            raise ValueError("Replay version must be an integer") from error
+        if replay_version not in (1, 2, 3):
+            raise ValueError(
+                f"Unsupported replay version {replay_version}; supported "
+                "versions are 1, 2, and 3")
         replay_seat = payload.get('agent_is_p1')
         if replay_seat is None:
             replay_seat = (payload.get('failure') or {}).get('agent_is_p1')
@@ -2254,6 +2481,14 @@ class AlphaZeroMTGEnv(gym.Env):
                 'p1_deck': payload.get('p1_deck'),
                 'p2_deck': payload.get('p2_deck'),
                 'agent_is_p1': replay_seat,
+                'opponent_profile': payload.get(
+                    'opponent_profile', self.default_opponent_profile),
+                'stage': payload.get('curriculum_stage'),
+                'stage_index': payload.get('curriculum_stage_index'),
+                'agent_deck': payload.get('agent_deck'),
+                'opponent_deck': payload.get('opponent_deck'),
+                'matchup_episode_index': payload.get(
+                    'matchup_episode_index'),
             })
         if (payload.get('p1_deck') != self.current_deck_name_p1
                 or payload.get('p2_deck') != self.current_deck_name_p2):
@@ -2527,25 +2762,126 @@ class AlphaZeroMTGEnv(gym.Env):
         return self._coerce_observation(obs)
 
     @staticmethod
-    def _terminal_outcome_reward(terminal_reason, result):
-            """Map a terminal category/result to the training objective.
+    def _result_for_fixed_agent(result, actor_is_p1, agent_is_p1):
+        """Translate an acting-seat result to the learned policy's seat."""
+        if result == "draw":
+            return "draw"
+        if result not in ("win", "loss"):
+            return result
+        actor_won = result == "win"
+        p1_won = bool(actor_is_p1) == actor_won
+        return "win" if bool(agent_is_p1) == p1_won else "loss"
 
-            A turn-limit life lead is useful for evaluation diagnostics, but
-            it is not a win. Giving that label a positive terminal reward made
-            it rational to establish a small lead and avoid risky combat. All
-            timeouts therefore share one penalty, independent of life totals.
-            """
-            if terminal_reason == "turn_limit":
-                return -6.0
-            return {
-                "win": 10.0, "loss": -10.0, "draw": -0.25,
-            }.get(result, -0.25)
+    def _canonical_terminal_result(self, fallback, agent_is_p1=None):
+        """Return a terminal result from the learned policy's fixed seat.
+
+        Action handlers describe results from their current acting seat. That
+        seat is deliberately flipped during scripted-opponent simulation, so
+        state flags are the source of truth at the environment boundary.
+        ``fallback`` is already translated by the caller when the state has no
+        independently adjudicable result (for example, a handler error).
+        """
+        gs = self.game_state
+        agent_is_p1 = (gs.agent_is_p1 if agent_is_p1 is None
+                       else bool(agent_is_p1))
+        p1, p2 = gs.p1, gs.p2
+        if not p1 or not p2:
+            return fallback
+
+        def lost(player):
+            return bool(
+                player.get("lost_game", False)
+                or player.get("life", 20) <= 0
+                or player.get("attempted_draw_from_empty", False)
+                or player.get("poison_counters", 0) >= 10)
+
+        p1_lost, p2_lost = lost(p1), lost(p2)
+        if p1_lost and p2_lost:
+            return "draw"
+        if p1_lost:
+            return "loss" if agent_is_p1 else "win"
+        if p2_lost:
+            return "win" if agent_is_p1 else "loss"
+        if p1.get("game_draw", False) or p2.get("game_draw", False):
+            return "draw"
+        if p1.get("won_game", False) and p2.get("won_game", False):
+            return "draw"
+        if p1.get("won_game", False):
+            return "win" if agent_is_p1 else "loss"
+        if p2.get("won_game", False):
+            return "loss" if agent_is_p1 else "win"
+        if (getattr(gs, "terminal_reason", None) == "turn_limit"
+                or gs.turn > gs.max_turns):
+            my_life = p1.get("life", 0) if agent_is_p1 else p2.get("life", 0)
+            opp_life = p2.get("life", 0) if agent_is_p1 else p1.get("life", 0)
+            if my_life > opp_life:
+                return "win"
+            if my_life < opp_life:
+                return "loss"
+            return "draw"
+        return fallback
+
+    @staticmethod
+    def _terminal_outcome_reward(terminal_reason, result):
+        """Map a terminal category/result to reward contract v5.
+
+        Life leads at the turn limit are diagnostic labels, not wins. Engine
+        safety terminations are likewise fail-closed instead of silently
+        receiving the draw fallback.
+        """
+        if terminal_reason in ("turn_limit", "episode_step_limit"):
+            return -10.0
+        if str(result).startswith(("error", "invalid")):
+            return -10.0
+        return {
+            "win": 10.0, "loss": -10.0, "draw": -0.25,
+        }.get(result, -0.25)
+
+    def _failure_transition_reward(
+            self, info, previous_state_potential, raw_action_reward=0.0):
+        """Apply reward contract v5 to fail-closed early-return branches."""
+        action_reward = self.action_reward_scale * float(raw_action_reward)
+        try:
+            current_state_potential = self._calculate_state_potential()
+            state_change_reward = self._state_potential_reward(
+                previous_state_potential, current_state_potential,
+                terminal=True)
+        except Exception as potential_error:
+            logging.error(
+                "Could not calculate terminal failure potential: %s",
+                potential_error)
+            current_state_potential = float(previous_state_potential)
+            state_change_reward = 0.0
+        terminal_reason = (
+            info.get("terminal_reason") or self._terminal_reason(info))
+        result = info.get("game_result", "error")
+        terminal_reward = self._terminal_outcome_reward(
+            terminal_reason, result)
+        info["terminal_reason"] = terminal_reason
+        info["state_change_reward"] = float(state_change_reward)
+        info["state_potential"] = float(current_state_potential)
+        info["board_state_reward"] = float(state_change_reward)
+        info["board_state_potential"] = float(current_state_potential)
+        info["reward_components"] = {
+            "action": float(action_reward),
+            "state_change": float(state_change_reward),
+            "terminal": float(terminal_reward),
+        }
+        info["reward_diagnostics"] = {
+            "action_raw": float(raw_action_reward),
+            "state_potential": float(current_state_potential),
+            "state_potential_previous": float(previous_state_potential),
+        }
+        info["reward_contract"] = self.REWARD_CONTRACT_VERSION
+        return float(action_reward + state_change_reward + terminal_reward)
 
     def _terminal_reason(self, info=None):
             """Return a stable terminal category for logs and reward policy."""
             gs = self.game_state
             if getattr(gs, 'terminal_reason', None):
                 return gs.terminal_reason
+            if (info or {}).get('episode_step_limit'):
+                return "episode_step_limit"
             players = [gs.p1, gs.p2]
             if any(p and p.get('attempted_draw_from_empty') for p in players):
                 return "decking"

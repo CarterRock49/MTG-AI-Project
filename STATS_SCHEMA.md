@@ -1,9 +1,9 @@
-# Playersim Stats Schema — Contract for the Deck-Builder AI (v1)
+# Playersim Stats Schema — Contract for the Deck-Builder AI (v2)
 
 Everything the downstream deck-construction AI needs to consume Playersim output.
 All files are written relative to the training process's working directory.
 
-The append-only game-log contract remains schema version `1`. Tracker aggregate
+The append-only game-log contract is schema version `2`. Tracker aggregate
 files use an independent `STATS_VERSION`, currently `3.2.0`.
 
 ## Directory layout
@@ -29,7 +29,7 @@ The primary join table. Append-only; each line:
 
 | field           | type   | meaning |
 |-----------------|--------|---------|
-| `schema_version`| int    | currently `1`; reject records with a higher version |
+| `schema_version`| int    | currently `2`; v1 remains readable, reject higher versions |
 | `ts`            | float  | unix timestamp at record time |
 | `result`        | str    | **agent-relative**: `win`, `loss`, `draw`, `draw_both_loss`, `error`, `invalid_limit` |
 | `terminal_reason` | str  | stable cause category such as `life_total`, `decking`, `poison`, `concession`, `turn_limit`, or `alternate_win` |
@@ -37,11 +37,15 @@ The primary join table. Append-only; each line:
 | `p1_deck` / `p2_deck` | str | deck names as loaded from the deck JSONs |
 | `agent_is_p1`   | bool   | which seat the learning agent occupied |
 | `agent_version` | str    | run id / checkpoint tag (see caveats) |
+| `curriculum_stage` / `curriculum_stage_index` | str/null, int/null | training curriculum stage; null for fixed evaluation and non-curriculum games |
+| `opponent_profile` | str | `passive`, `novice`, or `scripted` |
+| `agent_deck` / `opponent_deck` | str | semantic deck roles independent of physical P1/P2 seat |
+| `matchup_episode_index` | int/null | deterministic stage/schedule episode index |
 | `fidelity`      | object | per-game fidelity counters (below) |
 
-Games with no adjudicated result (aborted simulations, opponent-loop truncations)
-are deliberately **not** recorded — absence of a line means the game produced no
-trustworthy signal. `harvest_fixtures.py` is stricter: any reset fallback,
+Safety terminations are recorded with an `error_*`/`invalid_*` result and
+stable terminal reason for diagnosis, but are never strength evidence.
+`harvest_fixtures.py` is stricter: any reset fallback,
 degraded/out-of-space observation, mask-valid execution failure, mask-invalid
 checkpoint choice, error, repeated wait state, or step-cap abort fails the run
 and therefore never writes its `harvest_run.json` success marker.
@@ -105,8 +109,9 @@ with current card-performance aggregates.
    from ranking until the engine covers them.
 3. **`error` / `invalid_limit` results** are recorded as draws in the tracker
    aggregates; filter them out via `game_log.jsonl` when computing win rates.
-4. **Versioning**: for `game_log.jsonl`, bump handling when `schema_version > 1`
-   appears. Tracker consumers must separately recognize aggregate version
+4. **Versioning**: v1 rows predate curriculum/matchup fields; treat those fields
+   as null/`scripted`. Bump handling when `schema_version > 2` appears. Tracker
+   consumers must separately recognize aggregate version
    `3.2.0`; `last_updated` is optional and may be null.
 
 ---

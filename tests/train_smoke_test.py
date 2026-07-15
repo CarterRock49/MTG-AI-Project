@@ -230,14 +230,58 @@ def check_mask_aware_evaluation():
         m.MODEL_DIR = os.path.join(tmp, "models")
         m.LOG_DIR = os.path.join(tmp, "logs")
         try:
+            schedule_decks = [
+                {"name": "Aggro", "cards": []},
+                {"name": "Control", "cards": []},
+                {"name": "Midrange", "cards": []},
+            ]
+            full_schedule = m.build_fixed_evaluation_schedule(
+                schedule_decks, 64, 12345)
+            assert len(full_schedule) == 64
+            assert full_schedule == m.build_fixed_evaluation_schedule(
+                list(reversed(schedule_decks)), 64, 12345)
+            assert full_schedule != m.build_fixed_evaluation_schedule(
+                schedule_decks, 64, 12346)
+            for first, second in zip(
+                    full_schedule[::2], full_schedule[1::2]):
+                assert first["seed"] == second["seed"]
+                assert first["agent_is_p1"] is True
+                assert second["agent_is_p1"] is False
+                assert first["p1_deck"] == second["p2_deck"]
+                assert first["p2_deck"] == second["p1_deck"]
+            fixed_schedule = full_schedule[:args.eval_episodes]
+
+            class ScheduleProbe:
+                num_envs = 1
+
+                def __init__(self):
+                    self.calls = []
+
+                def env_method(self, name, *values):
+                    self.calls.append((name, values))
+
+            schedule_probe = ScheduleProbe()
+            m.install_fixed_evaluation_schedule(
+                schedule_probe, fixed_schedule)
+            m.install_fixed_evaluation_schedule(
+                schedule_probe, fixed_schedule)
+            assert [name for name, _ in schedule_probe.calls] == [
+                "reset_episode_schedule", "set_episode_schedule",
+                "reset_episode_schedule", "set_episode_schedule",
+            ]
+            assert schedule_probe.calls[1][1][0] == fixed_schedule
             callbacks = m.create_callbacks(
-                lambda: eval_env, "mask_smoke", args, num_train_envs=2)
+                lambda: eval_env, "mask_smoke", args, num_train_envs=2,
+                evaluation_schedule=fixed_schedule)
             assert isinstance(callbacks[0], m.AsyncMaskableEvalCallback)
             # Evaluation frequency stays in total timesteps: the async
             # callback compares against num_timesteps, never n_calls, so it
             # must not be divided by the environment count.
             assert callbacks[0].eval_freq == 10
             assert callbacks[0].n_eval_episodes == 3
+            assert callbacks[0].fixed_evaluation_schedule == fixed_schedule
+            assert callbacks[0].schedule_sha256 == \
+                m.evaluation_schedule_sha256(fixed_schedule)
             assert callbacks[0]._process is None  # worker starts lazily
             assert callbacks[1].save_freq == 10
             assert callbacks[0].best_model_save_path == os.path.join(
@@ -249,10 +293,35 @@ def check_mask_aware_evaluation():
             assert any(isinstance(callback, m.StrictTrainingFidelityCallback)
                        for callback in callbacks)
 
-            # Functional contract of the async result path: promote the
-            # evaluated snapshot on a new best, clean up snapshots, record
-            # metrics under the training logger, and fail the run on a
-            # fatal worker report.
+            curriculum_probe = ScheduleProbe()
+            curriculum_metrics = {}
+            curriculum = {
+                "stages": [
+                    {"name": "goldfish", "start_timestep": 0},
+                    {"name": "race", "start_timestep": 30_000},
+                ]}
+            curriculum_callback = m.CurriculumProgressCallback(curriculum)
+            curriculum_callback.model = SimpleNamespace(
+                get_env=lambda: curriculum_probe,
+                logger=SimpleNamespace(record=lambda name, value:
+                                       curriculum_metrics.__setitem__(
+                                           name, value)),
+            )
+            curriculum_callback.num_timesteps = 0
+            curriculum_callback._on_training_start()
+            curriculum_callback.num_timesteps = 29_999
+            assert curriculum_callback._on_step()
+            curriculum_callback.num_timesteps = 30_000
+            assert curriculum_callback._on_step()
+            assert curriculum_probe.calls == [
+                ("set_curriculum_timestep", (0,)),
+                ("set_curriculum_timestep", (30_000,)),
+            ]
+            assert curriculum_metrics["curriculum/stage_index"] == 1
+
+            # Functional contract of the async result path: outcome quality,
+            # not shaped mean reward, promotes the exact evaluated snapshot.
+            # Every per-case result and checkpoint hash remains attributable.
             async_eval = callbacks[0]
             metrics = {}
             fake_logger = SimpleNamespace(
@@ -262,33 +331,86 @@ def check_mask_aware_evaluation():
                 async_eval.snapshot_dir, "eval_snapshot_10_steps.zip")
             with open(snapshot, "wb") as handle:
                 handle.write(b"snapshot-bytes")
+
+            def result_for(path, timestep, outcomes, rewards):
+                episodes = []
+                for index, ((game_result, terminal_reason), reward) in \
+                        enumerate(zip(outcomes, rewards)):
+                    episodes.append({
+                        "case_index": index,
+                        "case": dict(fixed_schedule[index]),
+                        "game_result": game_result,
+                        "terminal_reason": terminal_reason,
+                        "reward": reward,
+                        "length": 40 + index,
+                    })
+                return {
+                    "timesteps": timestep,
+                    "snapshot_path": path,
+                    "schedule_sha256": async_eval.schedule_sha256,
+                    "episodes": episodes,
+                }
+
             async_eval._pending_snapshots = 1
-            async_eval._handle_result({
-                "timesteps": 10, "snapshot_path": snapshot,
-                "mean_reward": 1.5, "std_reward": 0.5,
-                "mean_ep_length": 42.0,
-            })
+            async_eval._handle_result(result_for(
+                snapshot, 10,
+                [("win", "life_total"), ("loss", "life_total"),
+                 ("win_turn_limit", "turn_limit")],
+                [1.0, -1.0, 10.0]))
             best_path = os.path.join(
                 async_eval.best_model_save_path, "best_model.zip")
             assert os.path.isfile(best_path), "best snapshot was not promoted"
             assert not os.path.exists(snapshot), "snapshot was not cleaned up"
-            assert metrics["eval/mean_reward"] == 1.5
+            assert metrics["eval/decisive_wins"] == 1
+            assert metrics["eval/timeouts"] == 1
             assert metrics["eval/evaluated_at_timesteps"] == 10
             assert async_eval._pending_snapshots == 0
-            worse = os.path.join(
+            better_outcome = os.path.join(
                 async_eval.snapshot_dir, "eval_snapshot_20_steps.zip")
-            with open(worse, "wb") as handle:
-                handle.write(b"worse-bytes")
+            with open(better_outcome, "wb") as handle:
+                handle.write(b"outcome-bytes")
             async_eval._pending_snapshots = 1
-            async_eval._handle_result({
-                "timesteps": 20, "snapshot_path": worse,
-                "mean_reward": 0.25, "std_reward": 0.1,
-                "mean_ep_length": 40.0,
-            })
+            async_eval._handle_result(result_for(
+                better_outcome, 20,
+                [("win", "life_total"), ("loss", "life_total"),
+                 ("draw", "decking")],
+                [-9.0, -9.0, -9.0]))
             with open(best_path, "rb") as handle:
-                assert handle.read() == b"snapshot-bytes", \
-                    "a worse evaluation overwrote the promoted best snapshot"
-            assert not os.path.exists(worse)
+                assert handle.read() == b"outcome-bytes", (
+                    "fewer timeouts did not beat higher shaped reward")
+            assert not os.path.exists(better_outcome)
+
+            reward_only = os.path.join(
+                async_eval.snapshot_dir, "eval_snapshot_30_steps.zip")
+            with open(reward_only, "wb") as handle:
+                handle.write(b"reward-only-bytes")
+            async_eval._pending_snapshots = 1
+            async_eval._handle_result(result_for(
+                reward_only, 30,
+                [("draw", "decking"), ("draw", "decking"),
+                 ("draw", "decking")],
+                [100.0, 100.0, 100.0]))
+            with open(best_path, "rb") as handle:
+                assert handle.read() == b"outcome-bytes", (
+                    "shaped mean reward overrode decisive outcome quality")
+            assert not os.path.exists(reward_only)
+
+            history_path = os.path.join(
+                m.LOG_DIR, "mask_smoke", "evaluation", "evaluations.json")
+            with open(history_path, encoding="utf-8") as handle:
+                history = json.load(handle)
+            assert history["schedule_sha256"] == async_eval.schedule_sha256
+            assert history["fixed_schedule"] == fixed_schedule
+            assert len(history["evaluations"]) == 3
+            assert history["evaluations"][1]["promoted"] is True
+            assert history["evaluations"][2]["promoted"] is False
+            assert len(history["evaluations"][0]["checkpoint_sha256"]) == 64
+            assert history["evaluations"][0]["episodes"][0][
+                "case"] == fixed_schedule[0]
+            history_summary = m.evaluation_history_summary("mask_smoke")
+            assert history_summary["status"] == "passed"
+            assert history_summary["evaluation_points"] == 3
+            assert history_summary["best_timestep"] == 20
             try:
                 async_eval._handle_result({"fatal": "worker exploded"})
             except RuntimeError as error:
@@ -296,6 +418,28 @@ def check_mask_aware_evaluation():
             else:
                 raise AssertionError(
                     "async evaluation accepted a fatal worker result")
+
+            class DeadEvaluationProcess:
+                def is_alive(self):
+                    return False
+
+                def join(self, timeout=None):
+                    return None
+
+                def terminate(self):
+                    raise AssertionError("dead process was terminated again")
+
+            async_eval._process = DeadEvaluationProcess()
+            async_eval._request_queue = SimpleNamespace(put=lambda _item: None)
+            async_eval._pending_snapshots = 1
+            try:
+                async_eval._on_training_end()
+            except RuntimeError as error:
+                assert "refusing to publish" in str(error)
+            else:
+                raise AssertionError(
+                    "training end accepted a missing fixed evaluation")
+            assert async_eval._process is None
             network_callbacks = [
                 callback for callback in callbacks
                 if isinstance(callback, m.NetworkRecordingCallback)]
@@ -304,7 +448,8 @@ def check_mask_aware_evaluation():
 
             args.record_network = False
             callbacks = m.create_callbacks(
-                lambda: eval_env, "mask_smoke_2", args, num_train_envs=2)
+                lambda: eval_env, "mask_smoke_2", args, num_train_envs=2,
+                evaluation_schedule=fixed_schedule)
             assert not any(isinstance(callback, m.NetworkRecordingCallback)
                            for callback in callbacks)
 
@@ -348,6 +493,7 @@ def check_mask_aware_evaluation():
             rewards.locals = {
                 "infos": [
                     {
+                        "game_result": "loss",
                         "terminal_reason": "life_total",
                         "reward_components": {
                             "action": 0.002,
@@ -356,7 +502,11 @@ def check_mask_aware_evaluation():
                         },
                         "reward_diagnostics": {"action_raw": 0.02},
                     },
-                    {"terminal_reason": "decking"}, {}, {},
+                    {
+                        "game_result": "win",
+                        "terminal_reason": "turn_limit",
+                        "reward_components": {"terminal": -10.0},
+                    }, {}, {},
                 ],
                 "dones": np.array([True, True, False, False]),
                 "rewards": np.array([-10.248, 0.0, 0.1, -0.1]),
@@ -365,7 +515,11 @@ def check_mask_aware_evaluation():
             assert metrics["terminal/any_count"] == 2
             assert metrics["terminal/any_rate"] == 0.5
             assert metrics["terminal/life_total_rate"] == 0.25
-            assert metrics["terminal/decking_rate"] == 0.25
+            assert metrics["terminal/turn_limit_rate"] == 0.25
+            assert metrics["outcome/decisive_loss_count"] == 1
+            assert metrics["outcome/timeout_count"] == 1
+            assert metrics[
+                "reward_diagnostic/terminal_result_sign_mismatch_count"] == 0
             assert metrics["reward/state_change"] == -0.25
             assert metrics["reward/state_change_abs"] == 0.25
             assert metrics["reward/state_change_nonzero"] == 1.0
@@ -378,7 +532,7 @@ def check_mask_aware_evaluation():
             assert rewards._on_step()
             assert metrics["terminal/any_rate"] == 0.25
             assert metrics["terminal/life_total_rate"] == 0.125
-            assert metrics["terminal/decking_rate"] == 0.125
+            assert metrics["terminal/turn_limit_rate"] == 0.125
 
             critic = m.CriticDiagnosticsCallback()
             critic.model = SimpleNamespace(
@@ -508,6 +662,11 @@ def check_runtime_configuration():
         n_steps=2048,
         batch_size=256,
     )
+    base_config = m.build_training_config(args)
+    assert base_config["gamma"] == 0.999
+    assert base_config["gae_lambda"] == 0.98
+    assert base_config["vf_coef"] == 0.25
+    assert base_config["n_epochs"] == 5
     optimized = {
         "learning_rate": 8e-5,
         "n_steps": 4096,
@@ -531,15 +690,15 @@ def check_runtime_configuration():
         "clip_range": 0.17,
         "clip_range_vf": 0.2,
         "ent_coef": 0.004,
-        "vf_coef": 0.5,
+        "vf_coef": 0.25,
         "target_kl": 0.02,
         "net_arch": m.NETWORK_ARCHITECTURES["large"],
         "n_epochs": 9,
         "max_grad_norm": 0.77,
         "activation_fn": torch.nn.Tanh,
-        "action_reward_scale": 0.02,
+        "action_reward_scale": 0.0,
         "state_potential_scale": 0.40,
-        "reward_contract_version": "discounted-state-potential-v4",
+        "reward_contract_version": "discounted-state-potential-v5",
     }
 
     try:
@@ -594,7 +753,8 @@ def check_runtime_configuration():
             train_env = m.make_masked_mtg_env([], {}, train_root)
             eval_env = m.make_masked_mtg_env(
                 [], {}, eval_root, agent_is_p1=False,
-                alternate_agent_seat=True)
+                alternate_agent_seat=True,
+                adaptive_decision_history_enabled=False)
             train_env.close()
             eval_env.close()
     finally:
@@ -607,12 +767,102 @@ def check_runtime_configuration():
     assert environment_calls[0][2]["agent_is_p1"] is True
     assert environment_calls[0][2]["alternate_agent_seat"] is False
     assert environment_calls[0][2]["strategy_memory_enabled"] is False
+    assert environment_calls[0][2]["adaptive_decision_history_enabled"] is True
     assert environment_calls[1][2]["agent_is_p1"] is False
     assert environment_calls[1][2]["alternate_agent_seat"] is True
     assert environment_calls[1][2]["strategy_memory_enabled"] is False
-    assert environment_calls[0][2]["reward_discount"] == 0.995
-    assert environment_calls[0][2]["action_reward_scale"] == 0.02
+    assert environment_calls[1][2]["adaptive_decision_history_enabled"] is False
+    assert environment_calls[0][2]["reward_discount"] == 0.999
+    assert environment_calls[0][2]["action_reward_scale"] == 0.0
     assert environment_calls[0][2]["state_potential_scale"] == 0.40
+    assert environment_calls[0][2]["curriculum"] is None
+    assert environment_calls[0][2]["opponent_profile"] == "scripted"
+
+    # Dirty-run provenance must include newly added source, not only tracked
+    # modifications.  Mock Git here so the regression remains valid after the
+    # real curriculum files are committed.
+    original_subprocess_run = m.subprocess.run
+    try:
+        def fake_git_run(command, **_kwargs):
+            if "ls-files" in command:
+                return SimpleNamespace(
+                    returncode=0, stdout=b"Playersim/new_source.py\0",
+                    stderr=b"")
+            if "--no-index" in command:
+                return SimpleNamespace(
+                    returncode=1,
+                    stdout=(b"diff --git a/Playersim/new_source.py "
+                            b"b/Playersim/new_source.py\n"
+                            b"new file mode 100644\n+new source\n"),
+                    stderr=b"")
+            return SimpleNamespace(
+                returncode=0,
+                stdout=b"diff --git a/main.py b/main.py\n+tracked source\n",
+                stderr=b"")
+
+        m.subprocess.run = fake_git_run
+        with tempfile.TemporaryDirectory() as tmp:
+            identity = m.capture_working_tree_patch(tmp)
+            assert identity and identity["size_bytes"] > 0
+            with open(os.path.join(tmp, "source_worktree.patch"), "rb") as handle:
+                patch_payload = handle.read()
+            assert b"tracked source" in patch_payload
+            assert b"Playersim/new_source.py" in patch_payload
+            assert b"new source" in patch_payload
+    finally:
+        m.subprocess.run = original_subprocess_run
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run_dir = os.path.join(tmp, "source_run")
+        checkpoint_dir = os.path.join(run_dir, "checkpoints")
+        os.makedirs(checkpoint_dir)
+        checkpoint_path = os.path.join(checkpoint_dir, "model.zip")
+        with open(checkpoint_path, "wb") as handle:
+            handle.write(b"checkpoint")
+        resume_manifest_path = os.path.join(run_dir, "training_run.json")
+        resume_manifest = {
+            "kind": "playersim_training_run",
+            "run_id": "compatible-v5",
+            "resolved": {
+                "training_config": {
+                    "reward_contract_version":
+                        m.AlphaZeroMTGEnv.REWARD_CONTRACT_VERSION,
+                },
+                "observation_schema_version":
+                    m.AlphaZeroMTGEnv.OBSERVATION_SCHEMA_VERSION,
+                "observation_schema_sha256":
+                    m.AlphaZeroMTGEnv.OBSERVATION_SCHEMA_SHA256,
+                "curriculum": None,
+            },
+        }
+        with open(resume_manifest_path, "w", encoding="utf-8") as handle:
+            json.dump(resume_manifest, handle)
+        lineage = m.validate_resume_lineage(checkpoint_path, "none")
+        assert lineage["run_id"] == "compatible-v5"
+
+        resume_manifest["resolved"]["training_config"][
+            "reward_contract_version"] = "discounted-state-potential-v4"
+        with open(resume_manifest_path, "w", encoding="utf-8") as handle:
+            json.dump(resume_manifest, handle)
+        try:
+            m.validate_resume_lineage(checkpoint_path, "none")
+        except ValueError as error:
+            assert "reward contract" in str(error)
+        else:
+            raise AssertionError("reward-v4 checkpoint bypassed resume guard")
+
+        resume_manifest["resolved"]["training_config"][
+            "reward_contract_version"] = \
+                m.AlphaZeroMTGEnv.REWARD_CONTRACT_VERSION
+        resume_manifest["resolved"]["curriculum"] = {"id": "combat-v1"}
+        with open(resume_manifest_path, "w", encoding="utf-8") as handle:
+            json.dump(resume_manifest, handle)
+        try:
+            m.validate_resume_lineage(checkpoint_path, "combat-v1")
+        except ValueError as error:
+            assert "scheduler counters" in str(error)
+        else:
+            raise AssertionError("curriculum resume bypassed scheduler guard")
 
 
 @stage("training failures are nonzero and never saved as final")
@@ -681,7 +931,7 @@ def check_main_failure_semantics():
             m.TENSORBOARD_DIR = os.path.join(tmp, "tensorboard")
             def fake_load_decks(_path, **_kwargs):
                 Card.SUBTYPE_VOCAB = list(frozen_vocab)
-                return [object()], {}
+                return [{"name": "Synthetic Deck", "cards": []}], {}
 
             def fake_make_masked_env(
                     _decks, _card_db, _storage_root, **kwargs):
@@ -705,7 +955,10 @@ def check_main_failure_semantics():
             # A failed learn() must return nonzero and save only a clearly
             # incomplete artifact.
             m.create_training_model = lambda *_args: FakeModel(fail=True)
-            sys.argv = ["main.py", "--timesteps", "1", "--n-envs", "1"]
+            sys.argv = [
+                "main.py", "--timesteps", "1", "--n-envs", "1",
+                "--curriculum", "none",
+            ]
             assert m.main() == 1
             assert saved_paths and saved_paths[-1].endswith("failed_model")
             assert not any("final_model" in path for path in saved_paths)
@@ -727,6 +980,7 @@ def check_main_failure_semantics():
             sys.argv = [
                 "main.py", "--timesteps", "1", "--n-envs", "1",
                 "--seed", "1234",
+                "--curriculum", "none",
             ]
             assert m.main() == 0
             assert saved_paths and saved_paths[-1].endswith("final_model")
@@ -745,9 +999,34 @@ def check_main_failure_semantics():
             saved_paths.clear()
             made_vec_envs.clear()
             m.MaskablePPO = FailingLoader
+            resume_source_dir = os.path.join(tmp, "resume_source")
+            os.makedirs(resume_source_dir)
+            resume_checkpoint = os.path.join(
+                resume_source_dir, "compatible_checkpoint.zip")
+            with open(resume_checkpoint, "wb") as handle:
+                handle.write(b"checkpoint")
+            with open(os.path.join(
+                    resume_source_dir, "training_run.json"), "w",
+                    encoding="utf-8") as handle:
+                json.dump({
+                    "kind": "playersim_training_run",
+                    "run_id": "resume-source",
+                    "resolved": {
+                        "training_config": {
+                            "reward_contract_version":
+                                m.AlphaZeroMTGEnv.REWARD_CONTRACT_VERSION,
+                        },
+                        "observation_schema_version":
+                            m.AlphaZeroMTGEnv.OBSERVATION_SCHEMA_VERSION,
+                        "observation_schema_sha256":
+                            m.AlphaZeroMTGEnv.OBSERVATION_SCHEMA_SHA256,
+                        "curriculum": None,
+                    },
+                }, handle)
             sys.argv = [
                 "main.py", "--timesteps", "1", "--n-envs", "1",
-                "--resume", "missing.zip",
+                "--resume", resume_checkpoint,
+                "--curriculum", "none",
             ]
             assert m.main() == 1
             assert not saved_paths

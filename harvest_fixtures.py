@@ -45,6 +45,10 @@ REQUIRED_GAME_FIELDS = {
     "schema_version", "ts", "result", "turn_count", "p1_deck", "p2_deck",
     "agent_is_p1", "agent_version", "terminal_reason", "fidelity",
 }
+V2_GAME_FIELDS = {
+    "curriculum_stage", "curriculum_stage_index", "opponent_profile",
+    "agent_deck", "opponent_deck", "matchup_episode_index",
+}
 
 EXPECTED_SAMPLE_DECKS = (
     "Selesnya Ouroboroid",
@@ -742,9 +746,25 @@ def _validate_artifacts(
             raise RuntimeError(
                 f"Game record {record_index} is missing: "
                 + ", ".join(sorted(missing_fields)))
-        if record.get("schema_version") != 1:
+        schema_version = record.get("schema_version")
+        if schema_version not in {1, 2}:
             raise RuntimeError(
                 f"Game record {record_index} has unsupported schema_version")
+        if schema_version == 2:
+            missing_v2 = V2_GAME_FIELDS - set(record)
+            if missing_v2:
+                raise RuntimeError(
+                    f"Game record {record_index} is missing v2 fields: "
+                    + ", ".join(sorted(missing_v2)))
+            if record.get("opponent_profile") not in {
+                    "passive", "novice", "scripted"}:
+                raise RuntimeError(
+                    f"Game record {record_index} has an invalid opponent profile")
+            if any(not isinstance(record.get(field), str)
+                   or not record.get(field)
+                   for field in ("agent_deck", "opponent_deck")):
+                raise RuntimeError(
+                    f"Game record {record_index} has invalid semantic deck roles")
         if record.get("result") not in VALID_RESULTS:
             raise RuntimeError(
                 f"Game record {record_index} is not a completed result: "

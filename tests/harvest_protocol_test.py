@@ -237,6 +237,15 @@ class HarvestProtocolTest(unittest.TestCase):
                 "promote",
             )
 
+    def test_promotion_does_not_score_turn_limit_life_leads_as_wins(self):
+        records = [
+            {"result": "win", "terminal_reason": "turn_limit"},
+            {"result": "win", "terminal_reason": "life_total"},
+            {"result": "draw", "terminal_reason": "turn_limit"},
+        ]
+        self.assertEqual(protocol._candidate_points(records, True), 1.0)
+        self.assertEqual(protocol._candidate_points(records, False), 0.0)
+
     def test_cli_parses_harvest_and_promotion(self):
         parser = protocol.build_parser()
         harvest = parser.parse_args([

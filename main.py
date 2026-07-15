@@ -47,6 +47,9 @@ import torch.nn as nn
 # Import MTG Environment Components
 from Playersim.card import Card, load_decks_and_card_db
 from Playersim.environment import AlphaZeroMTGEnv
+from Playersim.curriculum import (
+    derive_matchup_seed, resolve_curriculum,
+)
 from Playersim.observation_schema import SEMANTIC_IDENTITY_FIELDS
 from Playersim.debug import DEBUG_MODE
 
@@ -1012,6 +1015,76 @@ def artifact_identity(path):
     }
 
 
+def build_fixed_evaluation_schedule(decks, n_eval_episodes, seed):
+    """Build reproducible deck/seat pairs for every periodic evaluation.
+
+    Each adjacent pair keeps the learned policy on the same deck against the
+    same opponent deck while swapping the physical P1/P2 seats.  Both games in
+    a pair use the same seed.  An odd episode count retains the first half of
+    the final pair for backward-compatible CLI behavior; production runs
+    should use an even count (64 or more).
+    """
+    episode_count = int(n_eval_episodes)
+    if episode_count <= 0:
+        raise ValueError("n_eval_episodes must be positive")
+
+    deck_names = sorted({
+        str(deck.get("name"))
+        for deck in decks
+        if isinstance(deck, dict) and deck.get("name")
+    }, key=str.casefold)
+    if not deck_names:
+        raise ValueError(
+            "Fixed evaluation requires decks with stable non-empty names")
+
+    if len(deck_names) == 1:
+        matchups = [(deck_names[0], deck_names[0])]
+    else:
+        matchups = [
+            (agent_deck, opponent_deck)
+            for agent_deck in deck_names
+            for opponent_deck in deck_names
+            if agent_deck != opponent_deck
+        ]
+
+    rng = random.Random(int(seed))
+    rng.shuffle(matchups)
+    schedule = []
+    pair_count = (episode_count + 1) // 2
+    for pair_index in range(pair_count):
+        if pair_index and pair_index % len(matchups) == 0:
+            # A deterministic reshuffle prevents large schedules from simply
+            # repeating the first matchup ordering.
+            rng.shuffle(matchups)
+        agent_deck, opponent_deck = matchups[pair_index % len(matchups)]
+        pair_seed = rng.randrange(0, 2**32)
+        schedule.extend((
+            {
+                "seed": pair_seed,
+                "p1_deck": agent_deck,
+                "p2_deck": opponent_deck,
+                "agent_is_p1": True,
+                "opponent_profile": "scripted",
+            },
+            {
+                "seed": pair_seed,
+                "p1_deck": opponent_deck,
+                "p2_deck": agent_deck,
+                "agent_is_p1": False,
+                "opponent_profile": "scripted",
+            },
+        ))
+    return schedule[:episode_count]
+
+
+def evaluation_schedule_sha256(schedule):
+    """Hash a fixed evaluation schedule independent of JSON whitespace."""
+    payload = json.dumps(
+        json_safe(list(schedule)), sort_keys=True,
+        separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def git_provenance():
     """Capture the exact source revision without making Git a hard dependency."""
     def run_git(*arguments):
@@ -1044,18 +1117,125 @@ def git_provenance():
 
 
 def capture_working_tree_patch(run_model_dir):
-    """Persist the tracked source delta so a dirty training run is reproducible."""
+    """Persist tracked changes and untracked files as one reproducible patch."""
+    patch_chunks = []
     try:
-        completed = subprocess.run(
+        tracked = subprocess.run(
             ["git", "-C", BASE_DIR, "diff", "--binary", "HEAD"],
+            capture_output=True, timeout=15, check=False)
+        untracked = subprocess.run(
+            ["git", "-C", BASE_DIR, "ls-files", "--others",
+             "--exclude-standard", "-z"],
             capture_output=True, timeout=15, check=False)
     except (OSError, subprocess.SubprocessError):
         return None
-    if completed.returncode != 0 or not completed.stdout:
+    if tracked.returncode != 0 or untracked.returncode != 0:
         return None
+    if tracked.stdout:
+        patch_chunks.append(tracked.stdout)
+
+    # ``git diff HEAD`` omits untracked source entirely.  Generate normal
+    # binary-capable new-file patches without mutating the index so a launch
+    # from a dirty tree can still be reconstructed exactly.
+    for encoded_path in untracked.stdout.split(b"\0"):
+        if not encoded_path:
+            continue
+        relative_path = os.fsdecode(encoded_path)
+        try:
+            addition = subprocess.run(
+                ["git", "-C", BASE_DIR, "diff", "--binary", "--no-index",
+                 "--", "/dev/null", relative_path],
+                capture_output=True, timeout=15, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        # --no-index uses 1 to mean "files differ".
+        if addition.returncode not in (0, 1):
+            return None
+        if addition.returncode == 1 and not addition.stdout:
+            return None
+        if addition.stdout:
+            patch_chunks.append(addition.stdout)
+
+    if not patch_chunks:
+        return None
+    patch_payload = b"".join(
+        chunk if chunk.endswith(b"\n") else chunk + b"\n"
+        for chunk in patch_chunks)
     patch_path = os.path.join(run_model_dir, "source_worktree.patch")
-    write_bytes_atomic(patch_path, completed.stdout)
+    write_bytes_atomic(patch_path, patch_payload)
     return artifact_identity(patch_path)
+
+
+def validate_resume_lineage(checkpoint_path, requested_curriculum):
+    """Reject checkpoints that cannot safely continue the requested lineage."""
+    checkpoint = resolve_artifact_path(checkpoint_path)
+    if checkpoint is None:
+        raise ValueError(f"Resume checkpoint does not exist: {checkpoint_path}")
+
+    manifest_path = None
+    cursor = os.path.dirname(os.path.abspath(checkpoint))
+    for _ in range(8):
+        candidate = os.path.join(cursor, "training_run.json")
+        if os.path.isfile(candidate):
+            manifest_path = candidate
+            break
+        parent = os.path.dirname(cursor)
+        if parent == cursor:
+            break
+        cursor = parent
+    if manifest_path is None:
+        raise ValueError(
+            "Resume checkpoint has no companion training_run.json; its reward "
+            "and observation lineage cannot be verified")
+
+    try:
+        with open(manifest_path, encoding="utf-8") as handle:
+            source_manifest = json.load(handle)
+    except (OSError, ValueError) as error:
+        raise ValueError(
+            f"Could not read resume manifest {manifest_path}: {error}") from error
+    if source_manifest.get("kind") != "playersim_training_run":
+        raise ValueError("Resume manifest has an unknown artifact kind")
+
+    resolved = source_manifest.get("resolved") or {}
+    training_config = resolved.get("training_config") or {}
+    reward_contract = training_config.get("reward_contract_version")
+    if reward_contract != AlphaZeroMTGEnv.REWARD_CONTRACT_VERSION:
+        raise ValueError(
+            "Resume checkpoint uses reward contract "
+            f"{reward_contract!r}; {AlphaZeroMTGEnv.REWARD_CONTRACT_VERSION!r} "
+            "is required")
+    schema_version = resolved.get("observation_schema_version")
+    schema_sha256 = resolved.get("observation_schema_sha256")
+    if (schema_version != AlphaZeroMTGEnv.OBSERVATION_SCHEMA_VERSION
+            or schema_sha256 != AlphaZeroMTGEnv.OBSERVATION_SCHEMA_SHA256):
+        raise ValueError(
+            "Resume checkpoint does not match the current Observation v2 "
+            "version/hash")
+
+    requested_name = None if requested_curriculum in (None, "none") \
+        else str(requested_curriculum)
+    recorded_curriculum = resolved.get("curriculum")
+    recorded_name = (
+        recorded_curriculum.get("id")
+        if isinstance(recorded_curriculum, dict) else None)
+    if recorded_name != requested_name:
+        raise ValueError(
+            "Resume curriculum does not match its source run: "
+            f"recorded={recorded_name!r}, requested={requested_name!r}")
+    if requested_name is not None:
+        raise ValueError(
+            "Curriculum resume is disabled until per-worker scheduler counters "
+            "are checkpointed; start this Round 7.87 lineage fresh")
+
+    return {
+        "run_id": source_manifest.get("run_id"),
+        "manifest": artifact_identity(manifest_path),
+        "reward_contract_version": reward_contract,
+        "observation_schema_version": schema_version,
+        "observation_schema_sha256": schema_sha256,
+        "curriculum": recorded_name,
+    }
 
 
 def dependency_versions():
@@ -1202,8 +1382,11 @@ def training_artifacts(run_model_dir, run_id):
         "failed_model": artifact_identity(os.path.join(run_model_dir, "failed_model")),
         "best_model": artifact_identity(
             os.path.join(run_model_dir, "best_model", "best_model")),
-        "evaluation_history": artifact_identity(os.path.join(
-            LOG_DIR, run_id, "evaluation", "evaluations.npz")),
+        "evaluation_history": (
+            artifact_identity(os.path.join(
+                LOG_DIR, run_id, "evaluation", "evaluations.json"))
+            or artifact_identity(os.path.join(
+                LOG_DIR, run_id, "evaluation", "evaluations.npz"))),
         "feature_extractor": artifact_identity(
             os.path.join(run_model_dir, "feature_extractor.pth")),
         "network_summary": artifact_identity(os.path.join(
@@ -1213,7 +1396,57 @@ def training_artifacts(run_model_dir, run_id):
 
 
 def evaluation_history_summary(run_id):
-    """Summarize EvalCallback output without making the NPZ the only record."""
+    """Return a manifest-safe summary of checkpoint-attributable evaluation."""
+    json_path = os.path.join(
+        LOG_DIR, run_id, "evaluation", "evaluations.json")
+    if os.path.isfile(json_path):
+        try:
+            with open(json_path, encoding="utf-8") as handle:
+                history = json.load(handle)
+            evaluations = list(history.get("evaluations") or ())
+        except (OSError, TypeError, ValueError) as error:
+            return {"status": "unreadable", "error": str(error)}
+        if not evaluations:
+            return {
+                "status": "not_run",
+                "evaluation_points": 0,
+                "schedule_sha256": history.get("schedule_sha256"),
+                "episodes_per_evaluation": len(
+                    history.get("fixed_schedule") or ()),
+            }
+        summaries = [item.get("summary") or {} for item in evaluations]
+        promoted = [item for item in evaluations if item.get("promoted")]
+        return {
+            "status": "passed",
+            "evaluation_points": len(evaluations),
+            "timesteps": [int(item["timesteps"]) for item in evaluations],
+            "episodes_per_evaluation": len(
+                history.get("fixed_schedule") or ()),
+            "schedule_sha256": history.get("schedule_sha256"),
+            "checkpoint_sha256": [
+                item.get("checkpoint_sha256") for item in evaluations],
+            "mean_rewards": [
+                float(summary.get("mean_reward", 0.0))
+                for summary in summaries],
+            "mean_episode_lengths": [
+                float(summary.get("mean_ep_length", 0.0))
+                for summary in summaries],
+            "decisive_wins": [
+                int(summary.get("decisive_wins", 0))
+                for summary in summaries],
+            "decisive_losses": [
+                int(summary.get("decisive_losses", 0))
+                for summary in summaries],
+            "timeouts": [
+                int(summary.get("timeouts", 0))
+                for summary in summaries],
+            "promotion_keys": [
+                item.get("promotion_key") for item in evaluations],
+            "best_timestep": (
+                int(promoted[-1]["timesteps"]) if promoted else None),
+        }
+
+    # Compatibility with historical synchronous EvalCallback runs.
     path = os.path.join(LOG_DIR, run_id, "evaluation", "evaluations.npz")
     if not os.path.isfile(path):
         return {"status": "not_run", "evaluation_points": 0}
@@ -1432,15 +1665,15 @@ def build_training_config(args, optuna_params=None):
         'learning_rate': args.learning_rate,
         'n_steps': args.n_steps,
         'batch_size': args.batch_size,
-        'gamma': 0.995,
-        'gae_lambda': 0.95,
+        'gamma': 0.999,
+        'gae_lambda': 0.98,
         'clip_range': 0.2,
         'clip_range_vf': 0.2,
         'ent_coef': 0.01,
-        'vf_coef': 0.5,
+        'vf_coef': 0.25,
         'target_kl': 0.02,
         'net_arch': NETWORK_ARCHITECTURES['large'],
-        'n_epochs': 3,
+        'n_epochs': 5,
         'max_grad_norm': 0.5,
         'activation_fn': ACTIVATION_FUNCTIONS['relu'],
         'action_reward_scale':
@@ -1482,11 +1715,14 @@ def build_training_config(args, optuna_params=None):
 def make_masked_mtg_env(decks, card_db, storage_root, *, agent_is_p1=True,
                         alternate_agent_seat=False, subtype_vocab=None,
                         strategy_memory_enabled=False,
+                        adaptive_decision_history_enabled=True,
                         reward_discount=AlphaZeroMTGEnv.DEFAULT_REWARD_DISCOUNT,
                         action_reward_scale=
                             AlphaZeroMTGEnv.DEFAULT_ACTION_REWARD_SCALE,
                         state_potential_scale=
-                            AlphaZeroMTGEnv.DEFAULT_STATE_POTENTIAL_SCALE):
+                            AlphaZeroMTGEnv.DEFAULT_STATE_POTENTIAL_SCALE,
+                        curriculum=None, opponent_profile="scripted",
+                        matchup_seed=None):
     """Create an environment whose generated statistics stay in one scope."""
     os.makedirs(storage_root, exist_ok=True)
     return ActionMasker(
@@ -1499,9 +1735,14 @@ def make_masked_mtg_env(decks, card_db, storage_root, *, agent_is_p1=True,
             alternate_agent_seat=alternate_agent_seat,
             subtype_vocab=subtype_vocab,
             strategy_memory_enabled=strategy_memory_enabled,
+            adaptive_decision_history_enabled=
+                adaptive_decision_history_enabled,
             reward_discount=reward_discount,
             action_reward_scale=action_reward_scale,
             state_potential_scale=state_potential_scale,
+            curriculum=curriculum,
+            opponent_profile=opponent_profile,
+            matchup_seed=matchup_seed,
         ),
         action_mask_fn='action_mask',
     )
@@ -1638,7 +1879,8 @@ def objective(trial, base_seed=42):
             agent_is_p1=(env_index % 2 == 0),
             alternate_agent_seat=True,
             subtype_vocab=format_subtype_vocab,
-            reward_discount=gamma)
+            reward_discount=gamma,
+            adaptive_decision_history_enabled=False)
 
     # Evaluation must not step the training VecEnv. Doing so leaves PPO's
     # cached ``_last_obs`` out of sync with the environment before the next
@@ -2028,6 +2270,13 @@ class RewardComponentsCallback(BaseCallback):
         self._terminal_counts = {}
         self._terminal_total = 0
         self._transition_total = 0
+        self._outcome_counts = {
+            "win": 0, "loss": 0, "draw": 0, "unknown": 0,
+            "timeout": 0, "decisive_win": 0, "decisive_loss": 0,
+        }
+        self._terminal_reward_mismatches = 0
+        self._profile_outcomes = {}
+        self._stage_outcomes = {}
 
     def _on_step(self):
         infos = list(self.locals.get("infos", ()) or ())
@@ -2041,6 +2290,11 @@ class RewardComponentsCallback(BaseCallback):
                     self.logger.record_mean("reward/total_abs", abs(numeric))
         self._transition_total += len(infos)
         for index, info in enumerate(infos):
+            action_mask = info.get("action_mask")
+            if action_mask is not None:
+                self.logger.record_mean(
+                    "policy/valid_action_count",
+                    float(np.asarray(action_mask, dtype=bool).sum()))
             for name, value in (info.get("reward_components") or {}).items():
                 if np.isfinite(value):
                     numeric = float(value)
@@ -2055,11 +2309,53 @@ class RewardComponentsCallback(BaseCallback):
                         f"reward_diagnostic/{name}", float(value))
             reason = info.get("terminal_reason")
             is_done = dones is None or index >= len(dones) or bool(dones[index])
-            if reason and is_done:
-                safe_reason = str(reason).replace(" ", "_").replace("/", "_")
+            if is_done:
+                safe_reason = str(reason or "unknown").replace(
+                    " ", "_").replace("/", "_")
                 self._terminal_counts[safe_reason] = (
                     self._terminal_counts.get(safe_reason, 0) + 1)
                 self._terminal_total += 1
+                try:
+                    result = canonical_evaluation_game_result(
+                        info.get("game_result"))
+                except RuntimeError:
+                    result = "unknown"
+                self._outcome_counts[result] += 1
+                is_timeout = safe_reason == "turn_limit"
+                if is_timeout:
+                    self._outcome_counts["timeout"] += 1
+                elif result in {"win", "loss"}:
+                    self._outcome_counts[f"decisive_{result}"] += 1
+                for buckets, label in (
+                        (self._profile_outcomes,
+                         info.get("opponent_profile") or "unknown"),
+                        (self._stage_outcomes,
+                         info.get("curriculum_stage") or "none")):
+                    safe_label = re.sub(
+                        r"[^a-zA-Z0-9_.-]+", "_", str(label))
+                    bucket = buckets.setdefault(safe_label, {
+                        "episodes": 0, "decisive_win": 0,
+                        "decisive_loss": 0, "timeout": 0,
+                    })
+                    bucket["episodes"] += 1
+                    if is_timeout:
+                        bucket["timeout"] += 1
+                    elif result in {"win", "loss"}:
+                        bucket[f"decisive_{result}"] += 1
+
+                terminal_component = (info.get("reward_components") or {}).get(
+                    "terminal")
+                if (terminal_component is not None and not is_timeout
+                        and result in {"win", "loss"}):
+                    expected_sign = 1.0 if result == "win" else -1.0
+                    if (float(terminal_component) == 0.0
+                            or np.sign(float(terminal_component)) != expected_sign):
+                        self._terminal_reward_mismatches += 1
+                if transition_rewards is not None and index < len(
+                        np.asarray(transition_rewards).reshape(-1)):
+                    self.logger.record_mean(
+                        "outcome/terminal_transition_reward",
+                        float(np.asarray(transition_rewards).reshape(-1)[index]))
         denominator = max(1, self._transition_total)
         self.logger.record(
             "terminal/any_count", self._terminal_total)
@@ -2068,6 +2364,28 @@ class RewardComponentsCallback(BaseCallback):
         for reason, count in sorted(self._terminal_counts.items()):
             self.logger.record(f"terminal/{reason}_count", count)
             self.logger.record(f"terminal/{reason}_rate", count / denominator)
+            self.logger.record(
+                f"terminal_episode/{reason}_rate",
+                count / max(1, self._terminal_total))
+        for result, count in sorted(self._outcome_counts.items()):
+            self.logger.record(f"outcome/{result}_count", count)
+            self.logger.record(
+                f"outcome/{result}_rate",
+                count / max(1, self._terminal_total))
+        self.logger.record(
+            "reward_diagnostic/terminal_result_sign_mismatch_count",
+            self._terminal_reward_mismatches)
+        for namespace, buckets in (
+                ("opponent_profile", self._profile_outcomes),
+                ("curriculum_stage", self._stage_outcomes)):
+            for label, bucket in sorted(buckets.items()):
+                episodes = max(1, bucket["episodes"])
+                self.logger.record(
+                    f"{namespace}/{label}/episodes", bucket["episodes"])
+                for metric in ("decisive_win", "decisive_loss", "timeout"):
+                    self.logger.record(
+                        f"{namespace}/{label}/{metric}_rate",
+                        bucket[metric] / episodes)
         return True
 
 
@@ -2139,8 +2457,160 @@ class PhaseTimingCallback(BaseCallback):
         self.previous_rollout_ended_at = now
 
 
+class CurriculumProgressCallback(BaseCallback):
+    """Broadcast global training progress to deterministic matchup schedulers."""
+
+    def __init__(self, curriculum):
+        super().__init__(verbose=0)
+        self.curriculum = curriculum
+        self._active_stage_index = None
+
+    def _stage_index(self):
+        selected = 0
+        for index, stage in enumerate(self.curriculum["stages"]):
+            if self.num_timesteps < int(stage["start_timestep"]):
+                break
+            selected = index
+        return selected
+
+    def _broadcast(self, force=False):
+        stage_index = self._stage_index()
+        if not force and stage_index == self._active_stage_index:
+            return
+        self.training_env.env_method(
+            "set_curriculum_timestep", int(self.num_timesteps))
+        self._active_stage_index = stage_index
+        stage = self.curriculum["stages"][stage_index]
+        self.logger.record("curriculum/stage_index", stage_index)
+        logging.info(
+            "Opponent curriculum entered stage %s at timestep %s",
+            stage["name"], self.num_timesteps)
+
+    def _on_training_start(self):
+        self._broadcast(force=True)
+
+    def _on_step(self):
+        self._broadcast()
+        return True
+
+
+def canonical_evaluation_game_result(value):
+    """Normalize terminal result labels to the learned agent's perspective."""
+    raw = str(value or "").strip().casefold().replace("-", "_")
+    if raw.startswith("win"):
+        return "win"
+    if raw.startswith("loss"):
+        return "loss"
+    if raw.startswith("draw") or raw in {"tie", "tied"}:
+        return "draw"
+    raise RuntimeError(
+        f"Evaluation episode ended without a canonical game_result: {value!r}")
+
+
+def canonical_evaluation_terminal_reason(value):
+    reason = str(value or "").strip().casefold()
+    reason = re.sub(r"[^a-z0-9]+", "_", reason).strip("_")
+    if not reason:
+        raise RuntimeError(
+            "Evaluation episode ended without a terminal_reason")
+    return reason
+
+
+def evaluation_is_timeout(terminal_reason):
+    reason = canonical_evaluation_terminal_reason(terminal_reason)
+    return reason in {"turn_limit", "time_limit", "timeout"} or (
+        "turn_limit" in reason or reason.endswith("_timeout"))
+
+
+def summarize_evaluation_episodes(episodes):
+    """Validate per-case outcomes and derive the checkpoint promotion score."""
+    if not episodes:
+        raise RuntimeError("Evaluation produced no completed episodes")
+    normalized = []
+    for index, episode in enumerate(episodes):
+        item = dict(episode)
+        raw_result = item.get("raw_game_result", item.get("game_result"))
+        result = canonical_evaluation_game_result(raw_result)
+        terminal_reason = canonical_evaluation_terminal_reason(
+            item.get("terminal_reason"))
+        reward = float(item.get("reward", 0.0))
+        length = int(item.get("length", 0))
+        if not np.isfinite(reward):
+            raise RuntimeError(
+                f"Evaluation episode {index} produced non-finite reward")
+        if length <= 0:
+            raise RuntimeError(
+                f"Evaluation episode {index} produced invalid length {length}")
+        timed_out = evaluation_is_timeout(terminal_reason)
+        item.update({
+            "case_index": int(item.get("case_index", index)),
+            "raw_game_result": str(raw_result),
+            "game_result": result,
+            "terminal_reason": terminal_reason,
+            "reward": reward,
+            "length": length,
+            "timeout": timed_out,
+            "decisive": bool(not timed_out and result in {"win", "loss"}),
+        })
+        normalized.append(item)
+
+    decisive_wins = sum(
+        item["decisive"] and item["game_result"] == "win"
+        for item in normalized)
+    decisive_losses = sum(
+        item["decisive"] and item["game_result"] == "loss"
+        for item in normalized)
+    non_timeout_draws = sum(
+        not item["timeout"] and item["game_result"] == "draw"
+        for item in normalized)
+    timeouts = sum(item["timeout"] for item in normalized)
+    rewards = np.asarray(
+        [item["reward"] for item in normalized], dtype=np.float64)
+    lengths = np.asarray(
+        [item["length"] for item in normalized], dtype=np.float64)
+    decisive_score = int(decisive_wins - decisive_losses)
+    summary = {
+        "episodes": len(normalized),
+        "decisive_wins": int(decisive_wins),
+        "decisive_losses": int(decisive_losses),
+        "non_timeout_draws": int(non_timeout_draws),
+        "timeouts": int(timeouts),
+        "decisive_score": decisive_score,
+        "decisive_win_rate": float(decisive_wins / len(normalized)),
+        "timeout_rate": float(timeouts / len(normalized)),
+        "mean_reward": float(np.mean(rewards)),
+        "std_reward": float(np.std(rewards)),
+        "mean_ep_length": float(np.mean(lengths)),
+    }
+    # Fixed cases make counts comparable across checkpoints.  Shaped reward is
+    # deliberately last: a timeout-heavy policy can never become "best" merely
+    # because it accumulated a favorable life-lead shaping return.
+    promotion_key = (
+        summary["decisive_wins"],
+        summary["decisive_score"],
+        -summary["timeouts"],
+        summary["mean_reward"],
+    )
+    return normalized, summary, promotion_key
+
+
+def install_fixed_evaluation_schedule(eval_env, schedule):
+    """Rewind and install the exact same public cases for one checkpoint."""
+    if int(getattr(eval_env, "num_envs", 1)) != 1:
+        raise RuntimeError(
+            "Fixed periodic evaluation currently requires exactly one VecEnv")
+    cases = [dict(case) for case in schedule]
+    try:
+        eval_env.env_method("reset_episode_schedule")
+        eval_env.env_method("set_episode_schedule", cases)
+    except Exception as error:
+        raise RuntimeError(
+            "Evaluation environments must implement reset_episode_schedule() "
+            "and set_episode_schedule(cases)") from error
+
+
 def _async_evaluation_worker(request_queue, result_queue, env_factory,
-                             n_eval_episodes, debug=False):
+                             fixed_schedule, debug=False):
     """Dedicated evaluation process: build one strict eval env, then score
     each requested policy snapshot with mask-aware episodes.
 
@@ -2155,22 +2625,88 @@ def _async_evaluation_worker(request_queue, result_queue, env_factory,
     eval_env = None
     try:
         eval_env = env_factory.var()
+        fixed_schedule = [dict(case) for case in fixed_schedule]
+        n_eval_episodes = len(fixed_schedule)
+        if n_eval_episodes <= 0:
+            raise RuntimeError("Asynchronous evaluation schedule is empty")
+        schedule_hash = evaluation_schedule_sha256(fixed_schedule)
         while True:
             request = request_queue.get()
             if request is None:
                 break
             snapshot_path, trigger_timesteps = request
+            install_fixed_evaluation_schedule(eval_env, fixed_schedule)
+            snapshot_actual = resolve_artifact_path(snapshot_path)
+            if snapshot_actual is None:
+                raise FileNotFoundError(
+                    f"Evaluation snapshot was not published: {snapshot_path}")
             model = MaskablePPO.load(
-                snapshot_path, env=eval_env, device="cpu")
+                snapshot_actual, env=eval_env, device="cpu")
+            if hasattr(model, "set_random_seed"):
+                model.set_random_seed(int(fixed_schedule[0]["seed"]))
+            terminal_infos = []
+
+            def capture_terminal_info(callback_locals, _callback_globals):
+                if not bool(callback_locals.get("done")):
+                    return
+                info = callback_locals.get("info") or {}
+                terminal_infos.append({
+                    "raw_game_result": info.get("game_result"),
+                    "terminal_reason": info.get("terminal_reason"),
+                    "resolved_case": {
+                        "seed": info.get("episode_seed"),
+                        "p1_deck": info.get("p1_deck"),
+                        "p2_deck": info.get("p2_deck"),
+                        "agent_is_p1": info.get("agent_is_p1"),
+                        "opponent_profile": info.get("opponent_profile"),
+                    },
+                })
+
             episode_rewards, episode_lengths = evaluate_policy(
                 model, eval_env, n_eval_episodes=n_eval_episodes,
-                deterministic=True, return_episode_rewards=True)
+                deterministic=True, return_episode_rewards=True,
+                callback=capture_terminal_info)
+            if not (len(terminal_infos) == len(episode_rewards)
+                    == len(fixed_schedule)):
+                raise RuntimeError(
+                    "Fixed evaluation completed an unexpected number of "
+                    "episodes: outcomes=%s rewards=%s cases=%s" % (
+                        len(terminal_infos), len(episode_rewards),
+                        len(fixed_schedule)))
+            episodes = []
+            for case_index, (case, outcome, reward, length) in enumerate(zip(
+                    fixed_schedule, terminal_infos, episode_rewards,
+                    episode_lengths)):
+                expected_case = {
+                    key: case.get(key) for key in (
+                        "seed", "p1_deck", "p2_deck", "agent_is_p1",
+                        "opponent_profile")}
+                resolved_case = outcome["resolved_case"]
+                if resolved_case != expected_case:
+                    raise RuntimeError(
+                        "Fixed evaluation case did not resolve as requested: "
+                        f"index={case_index} expected={expected_case} "
+                        f"resolved={resolved_case}")
+                episodes.append({
+                    "case_index": case_index,
+                    "case": dict(case),
+                    "resolved_case": dict(resolved_case),
+                    "raw_game_result": outcome["raw_game_result"],
+                    "terminal_reason": outcome["terminal_reason"],
+                    "reward": float(reward),
+                    "length": int(length),
+                })
+            episodes, summary, promotion_key = \
+                summarize_evaluation_episodes(episodes)
             result_queue.put({
                 "timesteps": int(trigger_timesteps),
                 "snapshot_path": snapshot_path,
-                "mean_reward": float(np.mean(episode_rewards)),
-                "std_reward": float(np.std(episode_rewards)),
-                "mean_ep_length": float(np.mean(episode_lengths)),
+                "checkpoint_sha256": sha256_file(snapshot_actual),
+                "checkpoint_size_bytes": os.path.getsize(snapshot_actual),
+                "schedule_sha256": schedule_hash,
+                "episodes": episodes,
+                "summary": summary,
+                "promotion_key": list(promotion_key),
             })
     except Exception:
         result_queue.put({"fatal": traceback.format_exc()})
@@ -2192,13 +2728,15 @@ class AsyncMaskableEvalCallback(BaseCallback):
     evaluation process, and folds results into the training logger when
     they arrive (``eval/evaluated_at_timesteps`` records the snapshot's
     true step). The evaluated checkpoint itself is promoted to
-    ``best_model.zip`` on a new best mean reward, matching the old
-    callback's artifact contract. A worker failure fails the run (strict
-    lifecycle); outstanding evaluations are awaited at training end so
-    the final policy's score still lands in the logs."""
+    ``best_model.zip`` by decisive outcomes, then timeout avoidance, with
+    shaped return only as the final tie-breaker. A worker failure fails the
+    run (strict lifecycle); outstanding evaluations are awaited at training
+    end so the final policy's score still lands in the logs."""
 
     def __init__(self, eval_env_factory, *, eval_freq, n_eval_episodes,
-                 best_model_save_path, snapshot_dir, debug=False,
+                 best_model_save_path, snapshot_dir,
+                 fixed_evaluation_schedule=None,
+                 evaluation_history_path=None, debug=False,
                  final_result_timeout_seconds=3600.0, verbose=0):
         super().__init__(verbose)
         self.eval_env_factory = eval_env_factory
@@ -2206,10 +2744,23 @@ class AsyncMaskableEvalCallback(BaseCallback):
         self.n_eval_episodes = int(n_eval_episodes)
         self.best_model_save_path = best_model_save_path
         self.snapshot_dir = snapshot_dir
+        self.fixed_evaluation_schedule = [
+            dict(case) for case in (fixed_evaluation_schedule or ())]
+        if (self.fixed_evaluation_schedule
+                and len(self.fixed_evaluation_schedule)
+                != self.n_eval_episodes):
+            raise ValueError(
+                "fixed_evaluation_schedule length must equal n_eval_episodes")
+        self.schedule_sha256 = (
+            evaluation_schedule_sha256(self.fixed_evaluation_schedule)
+            if self.fixed_evaluation_schedule else None)
+        self.evaluation_history_path = evaluation_history_path
         self.debug = bool(debug)
         self.final_result_timeout_seconds = float(
             final_result_timeout_seconds)
         self.best_mean_reward = -np.inf
+        self.best_promotion_key = None
+        self._evaluation_records = []
         self._next_eval_at = None
         self._pending_snapshots = 0
         self._process = None
@@ -2219,8 +2770,15 @@ class AsyncMaskableEvalCallback(BaseCallback):
     def _on_training_start(self):
         if self.eval_freq <= 0:
             return
+        if not self.fixed_evaluation_schedule:
+            raise RuntimeError(
+                "Periodic evaluation requires a fixed evaluation schedule")
+        if not self.evaluation_history_path:
+            raise RuntimeError(
+                "Periodic evaluation requires an evaluation history path")
         os.makedirs(self.snapshot_dir, exist_ok=True)
         os.makedirs(self.best_model_save_path, exist_ok=True)
+        self._write_evaluation_history()
         context = multiprocessing.get_context("spawn")
         self._request_queue = context.Queue()
         self._result_queue = context.Queue()
@@ -2228,45 +2786,121 @@ class AsyncMaskableEvalCallback(BaseCallback):
             target=_async_evaluation_worker,
             args=(self._request_queue, self._result_queue,
                   CloudpickleWrapper(self.eval_env_factory),
-                  self.n_eval_episodes, self.debug),
+                  self.fixed_evaluation_schedule, self.debug),
             daemon=True,
             name="async-eval-worker",
         )
         self._process.start()
         self._next_eval_at = self.num_timesteps + self.eval_freq
 
+    def _write_evaluation_history(self):
+        if not self.evaluation_history_path:
+            return
+        promoted = [
+            item for item in self._evaluation_records
+            if item.get("promoted")]
+        write_json_atomic(self.evaluation_history_path, {
+            "schema_version": 1,
+            "kind": "playersim_fixed_checkpoint_evaluations",
+            "schedule_sha256": self.schedule_sha256,
+            "fixed_schedule": self.fixed_evaluation_schedule,
+            "promotion_order": [
+                "decisive_wins",
+                "decisive_score",
+                "fewer_timeouts",
+                "mean_reward",
+            ],
+            "best_timestep": (
+                promoted[-1]["timesteps"] if promoted else None),
+            "evaluations": self._evaluation_records,
+        })
+
     def _handle_result(self, result):
         if "fatal" in result:
             raise RuntimeError(
                 "Asynchronous evaluation worker failed:\n" + result["fatal"])
         self._pending_snapshots -= 1
-        mean_reward = float(result["mean_reward"])
+        if result.get("schedule_sha256") != self.schedule_sha256:
+            raise RuntimeError(
+                "Asynchronous evaluation used a different fixed case schedule")
+        episodes, summary, promotion_key = summarize_evaluation_episodes(
+            result.get("episodes") or ())
+        if len(episodes) != self.n_eval_episodes:
+            raise RuntimeError(
+                "Asynchronous evaluation returned %s episodes for %s cases" % (
+                    len(episodes), self.n_eval_episodes))
+        for index, episode in enumerate(episodes):
+            if episode.get("case") != self.fixed_evaluation_schedule[index]:
+                raise RuntimeError(
+                    f"Asynchronous evaluation case {index} did not match "
+                    "the fixed schedule")
+        mean_reward = float(summary["mean_reward"])
         logging.info(
-            "Async evaluation @ %s steps: mean_reward=%.3f std=%.3f "
-            "mean_ep_length=%.1f", result["timesteps"], mean_reward,
-            result["std_reward"], result["mean_ep_length"])
+            "Async evaluation @ %s steps: decisive=%s-%s score=%s "
+            "timeouts=%s/%s mean_reward=%.3f mean_ep_length=%.1f",
+            result["timesteps"], summary["decisive_wins"],
+            summary["decisive_losses"], summary["decisive_score"],
+            summary["timeouts"], summary["episodes"], mean_reward,
+            summary["mean_ep_length"])
         self.logger.record("eval/mean_reward", mean_reward)
-        self.logger.record("eval/std_reward", float(result["std_reward"]))
+        self.logger.record("eval/std_reward", summary["std_reward"])
         self.logger.record(
-            "eval/mean_ep_length", float(result["mean_ep_length"]))
+            "eval/mean_ep_length", summary["mean_ep_length"])
+        self.logger.record(
+            "eval/decisive_wins", summary["decisive_wins"])
+        self.logger.record(
+            "eval/decisive_losses", summary["decisive_losses"])
+        self.logger.record(
+            "eval/decisive_score", summary["decisive_score"])
+        self.logger.record("eval/timeouts", summary["timeouts"])
+        self.logger.record("eval/timeout_rate", summary["timeout_rate"])
         self.logger.record(
             "eval/evaluated_at_timesteps", int(result["timesteps"]))
         snapshot_actual = resolve_artifact_path(result.get("snapshot_path"))
-        if mean_reward > self.best_mean_reward:
+        if snapshot_actual is None:
+            raise FileNotFoundError(
+                "Evaluated snapshot disappeared before promotion/history")
+        checkpoint_sha256 = sha256_file(snapshot_actual)
+        reported_sha256 = result.get("checkpoint_sha256")
+        if reported_sha256 and reported_sha256 != checkpoint_sha256:
+            raise RuntimeError(
+                "Evaluated snapshot hash changed between scoring and promotion")
+        promoted = (self.best_promotion_key is None
+                    or tuple(promotion_key) > self.best_promotion_key)
+        if promoted:
+            self.best_promotion_key = tuple(promotion_key)
             self.best_mean_reward = mean_reward
-            if snapshot_actual is not None:
-                shutil.copyfile(
-                    snapshot_actual,
-                    os.path.join(self.best_model_save_path,
-                                 "best_model.zip"))
-                logging.info(
-                    "New best mean reward %.3f; promoted the evaluated "
-                    "snapshot to best_model.zip", mean_reward)
-        if snapshot_actual is not None:
+            best_path = os.path.join(
+                self.best_model_save_path, "best_model.zip")
+            temporary_best_path = f"{best_path}.tmp"
             try:
-                os.remove(snapshot_actual)
-            except OSError:
-                pass
+                shutil.copyfile(snapshot_actual, temporary_best_path)
+                os.replace(temporary_best_path, best_path)
+            finally:
+                try:
+                    os.remove(temporary_best_path)
+                except OSError:
+                    pass
+            logging.info(
+                "New best fixed-suite outcome key %s; promoted the evaluated "
+                "snapshot to best_model.zip", promotion_key)
+        self._evaluation_records.append({
+            "timesteps": int(result["timesteps"]),
+            "completed_at": utc_timestamp(),
+            "snapshot_name": os.path.basename(snapshot_actual),
+            "checkpoint_sha256": checkpoint_sha256,
+            "checkpoint_size_bytes": os.path.getsize(snapshot_actual),
+            "schedule_sha256": self.schedule_sha256,
+            "promotion_key": list(promotion_key),
+            "promoted": promoted,
+            "summary": summary,
+            "episodes": episodes,
+        })
+        self._write_evaluation_history()
+        try:
+            os.remove(snapshot_actual)
+        except OSError:
+            pass
 
     def _drain_results(self, timeout=None):
         while True:
@@ -2311,27 +2945,36 @@ class AsyncMaskableEvalCallback(BaseCallback):
     def _on_training_end(self):
         if self._process is None:
             return
-        deadline = time.time() + self.final_result_timeout_seconds
-        while (self._pending_snapshots > 0 and self._process.is_alive()
-               and time.time() < deadline):
-            self._drain_results(timeout=5.0)
-        if self._pending_snapshots > 0:
-            logging.warning(
-                "%s evaluation result(s) still outstanding at training end.",
-                self._pending_snapshots)
+        failure = None
         try:
-            self._request_queue.put(None)
-        except Exception:
-            pass
-        self._process.join(timeout=30)
-        if self._process.is_alive():
-            self._process.terminate()
-            self._process.join(timeout=10)
-        self._process = None
+            deadline = time.time() + self.final_result_timeout_seconds
+            while (self._pending_snapshots > 0 and self._process.is_alive()
+                   and time.time() < deadline):
+                self._drain_results(timeout=5.0)
+            if self._pending_snapshots > 0:
+                failure = RuntimeError(
+                    "%s fixed evaluation result(s) remained outstanding at "
+                    "training end; refusing to publish an unevaluated run."
+                    % self._pending_snapshots)
+        except Exception as error:
+            failure = error
+        finally:
+            try:
+                self._request_queue.put(None)
+            except Exception:
+                pass
+            self._process.join(timeout=30)
+            if self._process.is_alive():
+                self._process.terminate()
+                self._process.join(timeout=10)
+            self._process = None
+        if failure is not None:
+            raise failure
 
 
 def create_callbacks(eval_env_factory, run_id, args, num_train_envs=1,
-                     tb_run_dir=None):
+                     tb_run_dir=None, evaluation_schedule=None,
+                     curriculum=None):
     """Create a comprehensive set of callbacks"""
     # BaseCallback.n_calls counts VecEnv steps, not individual transitions.
     # Keep CLI frequencies expressed in total training timesteps as documented.
@@ -2355,9 +2998,12 @@ def create_callbacks(eval_env_factory, run_id, args, num_train_envs=1,
     eval_callback = AsyncMaskableEvalCallback(
         eval_env_factory,
         eval_freq=args.eval_freq,
-        n_eval_episodes=getattr(args, "eval_episodes", 20),
+        n_eval_episodes=getattr(args, "eval_episodes", 64),
         best_model_save_path=best_model_dir,
         snapshot_dir=snapshot_dir,
+        fixed_evaluation_schedule=evaluation_schedule,
+        evaluation_history_path=os.path.join(
+            evaluation_log_dir, "evaluations.json"),
         debug=getattr(args, "debug", False),
     )
 
@@ -2383,6 +3029,8 @@ def create_callbacks(eval_env_factory, run_id, args, num_train_envs=1,
     )
 
     callbacks = [eval_callback, checkpoint_callback, progress_callback]
+    if curriculum is not None:
+        callbacks.append(CurriculumProgressCallback(curriculum))
     if args.record_network:
         callbacks.append(NetworkRecordingCallback(
             log_dir=os.path.join(tb_run_dir, "network"),
@@ -2512,12 +3160,14 @@ def main():
                              "(e.g. --run-name lr3e4-crewfix)")
     parser.add_argument("--timesteps", type=int, default=1000000, help="Total timesteps to train")
     parser.add_argument("--eval-freq", type=int, default=10000, help="Evaluation frequency")
-    parser.add_argument("--eval-episodes", type=int, default=20,
-                        help="Episodes per periodic evaluation")
+    parser.add_argument(
+        "--eval-episodes", type=int, default=64,
+        help=("Fixed paired deck/seat/seed cases per periodic evaluation "
+              "(use an even count; 64+ recommended)"))
     parser.add_argument("--checkpoint-freq", type=int, default=50000, help="Checkpoint frequency")
-    parser.add_argument("--learning-rate", type=float, default=1e-4, help="Initial learning rate")
-    parser.add_argument("--batch-size", type=int, default=512, help="Batch size for training")
-    parser.add_argument("--n-steps", type=int, default=2048, help="Number of steps to collect before training")  # Reduced for CPU
+    parser.add_argument("--learning-rate", type=float, default=2e-4, help="Initial learning rate")
+    parser.add_argument("--batch-size", type=int, default=256, help="Batch size for training")
+    parser.add_argument("--n-steps", type=int, default=1024, help="Number of steps to collect before training")
     parser.add_argument("--n-envs", type=int, default=0, help="Number of environments to run in parallel (0 = auto)")
     parser.add_argument("--debug", action="store_true", help="Enable additional debugging")
     parser.add_argument("--optimize-hp", action="store_true", help="Run hyperparameter optimization")
@@ -2538,6 +3188,10 @@ def main():
     parser.add_argument("--format-dir", type=str, default=None,
                         help="Explicit frozen format-namespace directory "
                              "(default: formats/<format> when --format is given)")
+    parser.add_argument(
+        "--curriculum", choices=("combat-v1", "none"),
+        default="combat-v1",
+        help="Deterministic training opponent curriculum (evaluation stays fixed)")
     args = parser.parse_args()
     if args.resume and args.optimize_hp:
         parser.error("--resume and --optimize-hp cannot be used together")
@@ -2545,6 +3199,15 @@ def main():
         parser.error("--timesteps must be positive")
     if args.eval_episodes <= 0:
         parser.error("--eval-episodes must be positive")
+    if args.eval_episodes % 2:
+        parser.error("--eval-episodes must be even for paired-seat evaluation")
+    resume_lineage = None
+    if args.resume:
+        try:
+            resume_lineage = validate_resume_lineage(
+                args.resume, args.curriculum)
+        except ValueError as error:
+            parser.error(str(error))
     maximum_base_seed = (2**32 - 1) - EVALUATION_SEED_OFFSET - 10_000
     if not 0 <= args.seed <= maximum_base_seed:
         parser.error(
@@ -2622,6 +3285,7 @@ def main():
             "argv": list(sys.argv),
             "cli": vars(args).copy(),
             "resume_checkpoint": artifact_identity(args.resume) if args.resume else None,
+            "resume_lineage": resume_lineage,
         },
         "source": {
             "git": git_provenance(),
@@ -2690,6 +3354,7 @@ def main():
                 "winning configuration: %s", best_params)
 
         training_config = build_training_config(args, best_params)
+        resolved_curriculum = resolve_curriculum(args.curriculum, decks)
         num_envs = (
             args.n_envs if args.n_envs > 0
             else max(1, min(6, detected_cpus // 2))
@@ -2700,6 +3365,10 @@ def main():
         eval_seed = args.seed + EVALUATION_SEED_OFFSET
         eval_rng = random.Random(eval_seed)
         eval_decks = eval_rng.sample(decks, min(10, len(decks)))
+        fixed_evaluation_schedule = build_fixed_evaluation_schedule(
+            eval_decks, args.eval_episodes, eval_seed)
+        fixed_evaluation_schedule_hash = evaluation_schedule_sha256(
+            fixed_evaluation_schedule)
         subproc_start_method = "spawn" if os.name == "nt" else None
         learner_threads = (
             max(2, detected_cpus - num_envs)
@@ -2718,6 +3387,10 @@ def main():
             for index, deck in enumerate(eval_decks)]
         manifest["resolved"] = {
             "training_config": json_safe(training_config),
+            "observation_schema_version":
+                AlphaZeroMTGEnv.OBSERVATION_SCHEMA_VERSION,
+            "observation_schema_sha256":
+                AlphaZeroMTGEnv.OBSERVATION_SCHEMA_SHA256,
             "optimized_parameters": json_safe(best_params),
             "seed": args.seed,
             "train_worker_seeds": [args.seed + index
@@ -2735,8 +3408,15 @@ def main():
             "learner_threads": learner_threads,
             "selected_device": selected_device,
             "alternate_agent_seat": True,
-            "opponent_policy": "scripted",
+            "opponent_policy": (
+                "scripted-curriculum"
+                if resolved_curriculum is not None else "scripted"),
+            "curriculum": json_safe(resolved_curriculum),
+            "train_matchup_seeds": [
+                derive_matchup_seed(args.seed, index)
+                for index in range(num_envs)],
             "strategy_memory": "disabled",
+            "training_adaptive_decision_history": True,
             "callback_frequencies_timesteps": {
                 "evaluation": args.eval_freq,
                 "checkpoint": args.checkpoint_freq,
@@ -2744,6 +3424,12 @@ def main():
                     args.record_freq if args.record_network else None),
             },
             "evaluation_episodes": args.eval_episodes,
+            "fixed_evaluation_schedule_sha256": (
+                fixed_evaluation_schedule_hash),
+            "fixed_evaluation_schedule": fixed_evaluation_schedule,
+            "evaluation_opponent_profile": "scripted",
+            "evaluation_curriculum": None,
+            "evaluation_adaptive_decision_history": False,
         }
         manifest["phase"] = "environment_setup"
         publish_manifest()
@@ -2763,7 +3449,10 @@ def main():
                     action_reward_scale=training_config[
                         'action_reward_scale'],
                     state_potential_scale=training_config[
-                        'state_potential_scale'])
+                        'state_potential_scale'],
+                    curriculum=resolved_curriculum,
+                    opponent_profile="scripted",
+                    matchup_seed=derive_matchup_seed(args.seed, idx))
             return _init
 
         env_fns = [make_env_factory(index) for index in range(num_envs)]
@@ -2793,7 +3482,11 @@ def main():
                     action_reward_scale=training_config[
                         'action_reward_scale'],
                     state_potential_scale=training_config[
-                        'state_potential_scale'])
+                        'state_potential_scale'],
+                    curriculum=None,
+                    opponent_profile="scripted",
+                    matchup_seed=eval_seed + idx,
+                    adaptive_decision_history_enabled=False)
             return _init
 
         def make_evaluation_vec_env():
@@ -2816,7 +3509,9 @@ def main():
 
         callbacks = create_callbacks(
             make_evaluation_vec_env, run_id, args, num_train_envs=num_envs,
-            tb_run_dir=tb_run_dir)
+            tb_run_dir=tb_run_dir,
+            evaluation_schedule=fixed_evaluation_schedule,
+            curriculum=resolved_curriculum)
 
         current_phase = "model_setup"
         manifest["phase"] = current_phase
@@ -2836,6 +3531,9 @@ def main():
         if hasattr(model, "set_random_seed"):
             model.set_random_seed(args.seed)
         initial_num_timesteps = int(getattr(model, "num_timesteps", 0))
+        if resolved_curriculum is not None:
+            vec_env.env_method(
+                "set_curriculum_timestep", initial_num_timesteps)
         manifest["resolved"]["model_device"] = str(
             getattr(model, "device", selected_device))
 

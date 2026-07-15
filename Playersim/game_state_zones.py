@@ -8,7 +8,6 @@ import random
 import logging
 import copy
 import re
-from collections import defaultdict
 
 
 class GameStateZonesMixin:
@@ -935,8 +934,11 @@ class GameStateZonesMixin:
              trigger_name = f"ENTER_{final_destination_zone.upper()}"
              self.trigger_ability(card_id, trigger_name, enter_trigger_context)
              if final_destination_zone == "graveyard":
-                 if not hasattr(self, 'cards_to_graveyard_this_turn'): self.cards_to_graveyard_this_turn = defaultdict(list)
-                 self.cards_to_graveyard_this_turn[self.turn].append(card_id)
+                 if (not hasattr(self, 'cards_to_graveyard_this_turn')
+                         or self.cards_to_graveyard_this_turn is None):
+                     self.cards_to_graveyard_this_turn = {}
+                 self.cards_to_graveyard_this_turn.setdefault(
+                     self.turn, []).append(card_id)
                  if actual_from_zone == "battlefield":
                      # Trigger "dies" ability
                      dies_context = {'controller': from_player, 'from_zone': actual_from_zone, 'to_zone': final_destination_zone, 'cause': cause, **context}

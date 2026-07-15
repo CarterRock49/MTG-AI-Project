@@ -231,6 +231,12 @@ def _candidate_points(records: Sequence[dict], candidate_is_agent: bool) -> floa
     """Score agent-relative records for the policy occupying either role."""
     points = 0.0
     for record in records:
+        # A life lead at the engine's turn cap is diagnostic information, not
+        # a game win.  Reward v4 exposed how counting these labels as wins can
+        # promote a policy whose main skill is stalling.  Qualification and
+        # periodic evaluation must share the decisive-outcome contract.
+        if record.get("terminal_reason") == "turn_limit":
+            continue
         result = record["result"]
         if result in {"draw", "draw_both_loss"}:
             points += 0.5

@@ -4052,10 +4052,13 @@ def s_training_reward_contract():
     timeout_rewards = {
         env._terminal_outcome_reward("turn_limit", result)
         for result in ("win", "loss", "draw")}
-    assert timeout_rewards == {-6.0}, \
+    assert timeout_rewards == {-10.0}, \
         f"life-based timeout labels changed the training reward: {timeout_rewards}"
     assert env._terminal_outcome_reward("life_total", "win") == 10.0
     assert env._terminal_outcome_reward("life_total", "loss") == -10.0
+    assert env.DEFAULT_ACTION_REWARD_SCALE == 0.0 \
+        and env.action_reward_scale == 0.0
+    assert env.REWARD_CONTRACT_VERSION == "discounted-state-potential-v5"
     baseline = env._calculate_state_potential()
     assert env._calculate_state_potential() == baseline, \
         "unchanged state produced a changing board potential"
@@ -4093,6 +4096,202 @@ def s_training_reward_contract():
         f"returned reward does not match its components: {components}"
     assert info.get('reward_contract') == env.REWARD_CONTRACT_VERSION
 
+    # Fail-closed early returns used to bypass the centralized reward path and
+    # leak legacy -2/-5 penalties without component telemetry.
+    fresh(SEED + 943)
+    original_invalid_limit = env.invalid_action_limit
+    try:
+        env.invalid_action_limit = 1
+        invalid_action = int(np.flatnonzero(~env.action_mask().astype(bool))[0])
+        _, failure_reward, failure_done, failure_truncated, failure_info = \
+            env.step(invalid_action)
+    finally:
+        env.invalid_action_limit = original_invalid_limit
+    assert failure_done and failure_truncated
+    failure_components = failure_info.get("reward_components", {})
+    assert failure_components.get("terminal") == -10.0
+    assert failure_info.get("reward_contract") == env.REWARD_CONTRACT_VERSION
+    assert np.isclose(failure_reward, sum(failure_components.values()))
+
+
+@scenario("training reward / perspective",
+          "opponent-ended games retain the learned policy's win/loss perspective")
+def s_opponent_terminal_result_uses_learned_agent_perspective():
+    from unittest.mock import patch
+
+    env = get_env()
+    cases = (
+        (True, True), (True, False),
+        (False, True), (False, False),
+    )
+    for case_index, (agent_is_p1, learned_wins) in enumerate(cases):
+        gs = fresh(SEED + 944 + case_index)
+        learned = gs.p1 if agent_is_p1 else gs.p2
+        opponent = gs.p2 if agent_is_p1 else gs.p1
+        gs.agent_is_p1 = agent_is_p1
+        gs.phase = gs.PHASE_PRIORITY
+        gs.previous_priority_phase = gs.PHASE_MAIN_PRECOMBAT
+        gs.priority_player = learned
+        gs.priority_pass_count = 0
+        gs.stack.clear()
+        calls = 0
+
+        def fake_apply(action_idx, context=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                # Raw direct telemetry remains visible even though contract v5
+                # excludes it from the optimized reward.
+                return 7.5, False, False, {
+                    "game_result": "undetermined", "critical_error": False}
+            loser = opponent if learned_wins else learned
+            loser["life"] = 0
+            loser["lost_game"] = True
+            gs.terminal_reason = "life_total"
+            return 0.0, True, False, {
+                # Deliberately reported from the scripted opponent's seat.
+                "game_result": "loss" if learned_wins else "win",
+                "critical_error": False,
+            }
+
+        handler = env.action_handler
+        with patch.object(handler, "apply_action", side_effect=fake_apply), \
+                patch.object(env, "_opponent_needs_to_act",
+                             return_value=(opponent, {})), \
+                patch.object(env, "_get_opponent_policy_action",
+                             return_value=(11, {})):
+            assert env.action_mask()[11]
+            _, reward, terminated, truncated, info = env.step(11)
+
+        expected_result = "win" if learned_wins else "loss"
+        expected_terminal = 10.0 if learned_wins else -10.0
+        assert terminated and not truncated, info
+        assert info.get("game_result") == expected_result, \
+            f"opponent result leaked its acting perspective: {info}"
+        components = info.get("reward_components", {})
+        assert components.get("terminal") == expected_terminal
+        assert components.get("action") == 0.0
+        assert info.get("reward_diagnostics", {}).get("action_raw") == 7.5
+        assert np.isclose(reward, sum(components.values()))
+        assert gs.agent_is_p1 is agent_is_p1, \
+            "terminal transition returned with the opponent perspective active"
+
+
+@scenario("training curriculum",
+          "matchups are deterministic and fixed evaluation overrides curriculum")
+def s_curriculum_and_fixed_evaluation_schedule_are_reproducible():
+    from Playersim.curriculum import CurriculumScheduler
+
+    env = get_env()
+    deck_names = [deck["name"] for deck in env.decks]
+    assert len(deck_names) >= 2
+    spec = {
+        "id": "fixture-curriculum",
+        "version": 1,
+        "allow_mirrors": False,
+        "stages": [
+            {
+                "name": "goldfish", "start_timestep": 0,
+                "decks": deck_names, "profile_bag": ["passive"],
+            },
+            {
+                "name": "race", "start_timestep": 10,
+                "decks": deck_names, "profile_bag": ["novice"],
+            },
+        ],
+    }
+    original = {
+        "curriculum": env.curriculum,
+        "curriculum_scheduler": env.curriculum_scheduler,
+        "alternate_agent_seat": env.alternate_agent_seat,
+        "initial_agent_is_p1": env.initial_agent_is_p1,
+        "successful_reset_count": env._successful_reset_count,
+        "episode_schedule": list(env._episode_schedule),
+        "episode_schedule_index": env._episode_schedule_index,
+        "adaptive_decision_history_enabled":
+            env.adaptive_decision_history_enabled,
+    }
+    try:
+        env.curriculum = spec
+        env.curriculum_scheduler = CurriculumScheduler(spec, 20260714)
+        env.alternate_agent_seat = True
+        env.initial_agent_is_p1 = True
+        env._successful_reset_count = 0
+        _, first_info = env.reset(seed=SEED + 946)
+        _, second_info = env.reset(seed=SEED + 947)
+        assert first_info["curriculum_stage"] == "goldfish"
+        assert second_info["curriculum_stage"] == "goldfish"
+        assert first_info["opponent_profile"] == "passive"
+        assert second_info["opponent_profile"] == "passive"
+        assert first_info["agent_deck"] != first_info["opponent_deck"]
+        assert second_info["agent_deck"] != second_info["opponent_deck"]
+        assert env.game_state.agent_is_p1 is False, \
+            "curriculum reset did not preserve alternating learned seats"
+
+        env.set_curriculum_timestep(10)
+        _, override_info = env.reset(
+            seed=SEED + 948,
+            options={"agent_is_p1": True,
+                     "opponent_profile": "scripted"})
+        assert override_info["curriculum_stage"] == "race"
+        assert override_info["opponent_profile"] == "scripted", \
+            "explicit opponent profile did not override curriculum"
+        _, race_info = env.reset(seed=SEED + 948)
+        assert race_info["curriculum_stage"] == "race"
+        assert race_info["opponent_profile"] == "novice"
+
+        fixed_case = {
+            "seed": SEED + 949,
+            "p1_deck": deck_names[0],
+            "p2_deck": deck_names[1],
+            "agent_is_p1": False,
+            "opponent_profile": "scripted",
+        }
+        env.set_episode_schedule([fixed_case])
+        env.adaptive_decision_history_enabled = False
+        first_obs, fixed_info = env.reset(
+            seed=999, options={"agent_is_p1": True})
+        assert env.game_state.card_memory is None
+        assert env.game_state.stats_tracker is None
+        assert env.card_evaluator.card_memory is None
+        assert env.card_evaluator.stats_tracker is None
+        if env.card_memory:
+            env.card_memory.card_data["fixed-eval-poison"] = {
+                "in_opening_hand": 100,
+                "wins_in_opening_hand": 0,
+            }
+        env.reset_episode_schedule()
+        second_obs, repeated_info = env.reset()
+        assert env.game_state.card_memory is None
+        assert env.game_state.stats_tracker is None
+        assert env.card_evaluator.card_memory is None
+        assert env.card_evaluator.stats_tracker is None
+        assert fixed_info["curriculum_stage"] is None
+        assert fixed_info["opponent_profile"] == "scripted"
+        assert fixed_info["episode_seed"] == fixed_case["seed"]
+        assert fixed_info["p1_deck"] == fixed_case["p1_deck"]
+        assert fixed_info["p2_deck"] == fixed_case["p2_deck"]
+        assert fixed_info["agent_is_p1"] is fixed_case["agent_is_p1"]
+        assert env.current_deck_name_p1 == fixed_case["p1_deck"]
+        assert env.current_deck_name_p2 == fixed_case["p2_deck"]
+        assert env.game_state.agent_is_p1 is False
+        assert repeated_info["agent_deck"] == fixed_info["agent_deck"]
+        for key in ("phase", "my_life", "my_hand_card_identity"):
+            assert np.array_equal(first_obs[key], second_obs[key]), \
+                f"fixed evaluation reset changed {key}"
+    finally:
+        env.curriculum = original["curriculum"]
+        env.curriculum_scheduler = original["curriculum_scheduler"]
+        env.alternate_agent_seat = original["alternate_agent_seat"]
+        env.initial_agent_is_p1 = original["initial_agent_is_p1"]
+        env._successful_reset_count = original["successful_reset_count"]
+        env._episode_schedule = original["episode_schedule"]
+        env._episode_schedule_index = original["episode_schedule_index"]
+        env.adaptive_decision_history_enabled = original[
+            "adaptive_decision_history_enabled"]
+        if env.card_memory:
+            env.card_memory.card_data.pop("fixed-eval-poison", None)
+
 
 @scenario("scripted baseline", "the opponent develops mana, casts spells, and declares attacks")
 def s_scripted_baseline_plays_magic():
@@ -4111,8 +4310,23 @@ def s_scripted_baseline_plays_magic():
     gs.priority_player = opponent
     gs.priority_pass_count = 0
     mask = env.action_mask().astype(bool)
-    action, context = env._get_scripted_opponent_action(
-        opponent, mask, {"phase_context": "priority"})
+    original_profile = env.active_opponent_profile
+    try:
+        env.active_opponent_profile = "passive"
+        passive_action, _ = env._get_scripted_opponent_action(
+            opponent, mask, {"phase_context": "priority"})
+        env.active_opponent_profile = "novice"
+        novice_action, _ = env._get_scripted_opponent_action(
+            opponent, mask, {"phase_context": "priority"})
+        env.active_opponent_profile = "scripted"
+        action, context = env._get_scripted_opponent_action(
+            opponent, mask, {"phase_context": "priority"})
+    finally:
+        env.active_opponent_profile = original_profile
+    assert passive_action == 11, \
+        "passive curriculum opponent developed its board"
+    assert novice_action == 13, \
+        "novice curriculum opponent failed to play a legal land"
     assert action == 13 and context.get('card_id') == land_id
     _, _, _, handler_info = env.action_handler.apply_action(
         action, context=context)
@@ -4131,8 +4345,22 @@ def s_scripted_baseline_plays_magic():
     gs.phase = gs.PHASE_DECLARE_ATTACKERS
     gs.priority_player = opponent
     mask = env.action_mask().astype(bool)
-    action, context = env._get_scripted_opponent_action(
-        opponent, mask, {"phase_context": "priority"})
+    try:
+        env.active_opponent_profile = "passive"
+        passive_action, _ = env._get_scripted_opponent_action(
+            opponent, mask, {"phase_context": "priority"})
+        env.active_opponent_profile = "novice"
+        novice_action, _ = env._get_scripted_opponent_action(
+            opponent, mask, {"phase_context": "priority"})
+        env.active_opponent_profile = "scripted"
+        action, context = env._get_scripted_opponent_action(
+            opponent, mask, {"phase_context": "priority"})
+    finally:
+        env.active_opponent_profile = original_profile
+    assert passive_action in (438, 479), \
+        "passive curriculum opponent declared an attack"
+    assert novice_action == 29, \
+        "novice curriculum opponent failed to declare a legal attack"
     assert action == 29, \
         f"scripted attack action={action}, context={context}, valid={np.flatnonzero(mask).tolist()}"
 
@@ -4874,6 +5102,9 @@ def s_bushwhack_impossible_fight_mode_is_masked():
             "• Target creature you control fights target creature you don't control."),
     }, "hand")
     gs.turn = 1 if player is gs.p1 else 2
+    # A cloned mid-turn continuation must not assume begin_turn initialized
+    # this optional event bucket for the synthetic turn used by the fixture.
+    gs.cards_to_graveyard_this_turn.pop(gs.turn, None)
     gs.phase = gs.PHASE_MAIN_PRECOMBAT
     gs.priority_player = player
     player["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 1, 'C': 0}
@@ -11622,8 +11853,17 @@ def scenario_seeded_action_replay():
     action = int(225 if mask[225] else valid[0])
     first = env.step(action)
     payload = env.export_replay()
-    assert payload['version'] == 2
+    assert payload['version'] == 3
+    assert payload['opponent_profile'] == env.active_opponent_profile
     assert payload['agent_is_p1'] == env.game_state.agent_is_p1
+    future_payload = dict(payload)
+    future_payload["version"] = 999
+    try:
+        env.replay(future_payload)
+    except ValueError as error:
+        assert "Unsupported replay version" in str(error)
+    else:
+        raise AssertionError("unknown future replay version was accepted")
     snapshot = (env.game_state.turn, env.game_state.phase,
                 env.game_state.p1['life'], env.game_state.p2['life'])
     original_decks = env.decks
@@ -11935,7 +12175,7 @@ def scenario_environment_routes_both_mulligan_decisions():
         env.initial_agent_is_p1 = original_agent_is_p1
 
 
-@scenario("environment episode bound", "the configured step cap terminates a non-progressing episode")
+@scenario("environment episode bound", "the configured step cap fails closed with a terminal penalty")
 def scenario_environment_enforces_episode_step_limit():
     env = get_env()
     original_limit = env.max_episode_steps
@@ -11943,11 +12183,19 @@ def scenario_environment_enforces_episode_step_limit():
         _, info = env.reset(seed=SEED + 911)
         assert np.asarray(info["action_mask"], dtype=bool)[225]
         env.max_episode_steps = 1
-        _, _, terminated, truncated, info = env.step(225)
+        _, reward, terminated, truncated, info = env.step(225)
         assert not terminated and truncated, \
             f"the one-step episode limit was not enforced: {info}"
         assert info.get("episode_step_limit") is True
         assert info.get("game_result") == "error_episode_step_limit"
+        assert info.get("terminal_reason") == "episode_step_limit"
+        components = info.get("reward_components", {})
+        assert components.get("terminal", 0.0) <= -10.0, \
+            f"step-limit truncation escaped its terminal penalty: {components}"
+        assert np.isclose(reward, sum(components.values())), \
+            f"step-limit reward did not match its components: {components}"
+        assert info.get("reward_contract") == \
+            "discounted-state-potential-v5"
         assert os.path.isfile(info.get("failure_replay_path", "")), \
             "the step-limit failure did not retain its action replay"
         assert isinstance(env.reset_seed, int)

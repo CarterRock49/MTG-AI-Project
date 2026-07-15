@@ -497,9 +497,12 @@ def check_stats_pipeline(decks, card_db):
         for r in records:
             for field in ("schema_version", "ts", "result", "terminal_reason", "turn_count",
                           "p1_deck", "p2_deck", "agent_is_p1",
-                          "agent_version", "fidelity"):
+                          "agent_version", "curriculum_stage",
+                          "opponent_profile", "agent_deck",
+                          "opponent_deck", "matchup_episode_index",
+                          "fidelity"):
                 assert field in r, f"game log record missing '{field}'"
-            assert r["schema_version"] == 1, "unexpected game log schema version"
+            assert r["schema_version"] == 2, "unexpected game log schema version"
             assert r["agent_version"] == "smoke-test", "agent version not stamped"
         rep_path = os.path.join(paths["deck_stats_path"], "fidelity_report.json")
         assert os.path.exists(rep_path), "fidelity_report.json missing"

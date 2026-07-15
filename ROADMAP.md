@@ -28,31 +28,34 @@ no trained checkpoint has passed the paired-seat strength gate, matchup
 calibration has not run, format-wide card support remains incomplete, and the
 deck-builder feedback loop is not connected.
 
-### Verified Round 7.86 / Observation v2 baseline
+### Round 7.87 / Observation v2 pre-run boundary
 
 The frozen v2 observation contract and its migration gates are green:
 
 | Gate | Result |
 | --- | --- |
-| Golden scenarios | 399/399 |
+| Golden scenarios | 401/401 |
 | Runtime smoke | 9/9 |
 | Training smoke | 13/13 |
-| Discovered unit tests | 207/207 |
+| Discovered unit tests | 213/213 |
 | Default invariant fuzz | 8/8 seeds × 1,000 valid actions, plus phase-boundary check |
 | Failed-run replay | exact 117-action trace reaches and executes Room action 250 cleanly |
 | Diff/whitespace check | clean |
 | Observation schema | v2 / `8b77a325816aec9fd6a8b7a8e924a2b936a092e163b81f2d0a22947387804ea8` |
 
 Standing broader gates last recorded green: 108/108 focused regressions,
-fixture Harvest 16/16, production Harvest protocol 16/16, card registry 19/19,
+fixture Harvest 16/16, production Harvest protocol 17/17, card registry 19/19,
 deck ingestion 13/13, fuzz/replay configuration 6/6, and strict long fuzz 32
 seeds × 10,000 valid actions.
 
 ### Non-negotiable lineage rules
 
-- **Start every new policy from Round 7.86 or later.** Observation v2 changes
+- **Start every new policy from Round 7.87 or later.** Observation v2 changes
   the extractor width and semantics, and the first v2 run exposed additional
   runtime-fidelity defects; do not resume any earlier checkpoint.
+- Resume now verifies the companion manifest's reward contract and Observation
+  version/hash. `combat-v1` continuation is intentionally rejected until its
+  per-worker scheduler counters can be checkpointed; launch Round 7.87 fresh.
 - Do not mix pre-7.46 statistics with format-namespace statistics.
 - Statistics collected before July 2026 are unusable. They were affected by
   perspective, winner attribution, fabricated play-turn, first-strike, layer,
@@ -62,7 +65,56 @@ seeds × 10,000 valid actions.
 
 ---
 
-## Latest run finding — `round-7.85-reward-v8` invalid, Round 7.86 repaired
+## Latest run finding — `round-7.86-combat-v4` is diagnostic-only; Round 7.87 repaired
+
+`ALPHA_ZERO_MTG_V3.00_20260714_195653_round-7.86-combat-v4` was interrupted
+after its 350k checkpoint. Combat was reachable and the engine recorded 1,303
+training games, but the policy did not learn a reliable win condition: 309
+games reached the turn limit, 99 of the 137 logged wins were only timeout life
+leads, and just 38 games were decisive wins. The 125k checkpoint selected as
+"best" later went 0–10 with six timeouts; the 250k checkpoint went 3–7 but was
+not promoted. The critic was already fitting its targets (explained variance
+about 0.874) while policy KL remained around 0.003, pointing to a weak policy
+update and a bad objective/evaluator rather than an underfit value network.
+
+The postmortem found one Priority 0 reward bug: when the scripted opponent's
+action ended a game, its acting-seat `game_result` was discarded. PPO commonly
+received the `-0.25` fallback instead of the learned seat's `+10`/`-10`
+terminal outcome even though later statistics inferred the result correctly.
+Round 7.87 establishes a new reward/training boundary:
+
+- Reward contract v5 translates opponent-ended results back to the fixed
+  learned seat, gives all turn limits and safety truncations `-10`, removes
+  handler-local action reward from the optimized objective, and records a
+  terminal-result sign diagnostic.
+- Periodic evaluation uses one immutable 64-case paired deck/seat/seed suite.
+  Promotion is lexicographic: decisive wins, decisive win-minus-loss score,
+  fewer timeouts, then shaped return. `evaluations.json` retains every case,
+  resolved runtime identity, outcome, checkpoint SHA-256, and promotion
+  decision. Adaptive card/deck history is disconnected from evaluator choices,
+  so checkpoint order cannot change the fixed opponent.
+- `combat-v1` provides deterministic, worker-isolated opponent progression:
+  passive two-deck goldfish at 0, novice race at 30k, four-deck mixed bridge
+  at 75k, and the full mostly-scripted pool at 125k. Fixed evaluation always
+  overrides the curriculum and uses scripted play.
+- PPO defaults move to learning rate `2e-4`, rollout `1024`, batch `256`, gamma
+  `0.999`, GAE lambda `0.98`, value coefficient `0.25`, and five epochs. This
+  is a measured canary configuration, not a claim that tuning is finished.
+- Harvest qualification and promotion give timeout life leads zero points.
+  Matchup/profile/stage identity is now present in run manifests, game logs,
+  replays, and TensorBoard outcome telemetry.
+- Reward-v5 telemetry now covers fail-closed early returns as well as ordinary
+  terminal transitions. Dirty-run source patches include untracked files, and
+  cloned deferred resolutions safely initialize missing turn-ledger buckets.
+
+Observation v2 itself is unchanged at
+`8b77a325816aec9fd6a8b7a8e924a2b936a092e163b81f2d0a22947387804ea8`.
+Do not resume `round-7.86-combat-v4`; its policy optimized the broken reward
+and its checkpoints were selected by the old random, return-based evaluator.
+
+---
+
+## Previous run finding — `round-7.85-reward-v8` invalid, Round 7.86 repaired
 
 `ALPHA_ZERO_MTG_V3.00_20260714_172013_round-7.85-reward-v8` was interrupted
 at roughly 275k steps and is diagnostic-only. Its persisted training logs
@@ -189,30 +241,28 @@ v2 throughput and memory alongside behavior telemetry.
 
 ## Current execution plan
 
-### Now — train the first combat-valid Round 7.86 / Observation v2 policy
+### Now — train the Round 7.87 reward/curriculum canary
 
-1. Freeze the repaired Round 7.86 source, then launch a fresh Standard
-   candidate; never resume `round-7.85-reward-v8`, either `reward-v7` run, or
-   any pre-7.86 checkpoint. Use `discounted-state-potential-v4` with
-   `--n-envs 8`, `--eval-freq 25000`, and `--eval-episodes 10`; confirm the
-   manifest records strategy memory as disabled.
-2. Treat 25k as a combat canary: manually inspect several action traces and
-   require actual attack declarations, combat-damage life changes, and no
-   resolver failures before spending another long run.
-3. Read the run again at roughly 300k steps. The required direction is a rising
-   `terminal/life_total_rate`, a falling `terminal/turn_limit_rate`, improving
-   episode reward, a stable critic, and zero fidelity/provenance failures.
-4. If the policy still stalls, inspect attack/block choice frequencies and the
-   scripted opponent before changing the reward again. Earlier runs learned a
-   timeout-heavy objective while combat damage itself was unreachable.
-5. Record rollout steps/s, evaluator overhead, host/GPU memory, schema hash,
-   registry hash, and checkpoint provenance. Keep schema and throughput code
-   unchanged during the experiment so its result remains attributable.
+1. Freeze the Round 7.87 source and launch a fresh Standard candidate with
+   reward v5, `combat-v1`, eight workers, 25k evaluation cadence, and the fixed
+   64-case suite. Never resume `round-7.86-combat-v4` or an older checkpoint.
+2. At 30k, confirm the goldfish stage produced legal attacks and decisive wins,
+   the curriculum changed to `race`, and terminal reward/result sign mismatches
+   remain zero. Stop on any fidelity, replay, schema, or evaluator failure.
+3. At 75k and 125k, confirm the `bridge` and `full_pool` transitions, inspect
+   per-profile decisive win/loss/timeout rates, and require timeout rate to stay
+   below the old run rather than merely improving shaped return.
+4. At 250k, compare checkpoints only through `evaluations.json`. Require rising
+   decisive wins, no regression hidden by random cases, policy KL materially
+   above the old ~0.003 without breaching the 0.02 target, and a stable critic.
+5. Keep the observation schema, curriculum thresholds, fixed evaluation cases,
+   and PPO settings unchanged within this canary so the result is attributable.
 
 ### Next — qualify and calibrate Standard
 
-1. Pass paired-seat scripted qualification: at least the configured 55% score,
-   zero fidelity counters, and exact checkpoint/lineage provenance.
+1. Pass paired-seat scripted qualification: at least the configured 55%
+   decisive score, timeout life leads worth zero, zero fidelity counters, and
+   exact checkpoint/lineage provenance.
 2. Freeze the qualified checkpoint as the baseline and promote it into the
    checkpoint league.
 3. Run 3–5 known-matchup deck pairs at Harvest scale and compare simulated
@@ -380,7 +430,7 @@ The project is complete only when all of these are true:
 ## Checkpoint and schema boundaries
 
 Historical boundaries are retained here so old artifacts cannot be resumed by
-mistake. The practical rule remains: **use Round 7.86 or later.**
+mistake. The practical rule remains: **use Round 7.87 or later.**
 
 | Minimum round | Incompatible change |
 | --- | --- |
@@ -396,6 +446,7 @@ mistake. The practical rule remains: **use Round 7.86 or later.**
 | 7.84 | Deterministic planner observations, hidden-information-safe inference, and removal of fake/dead planner inputs |
 | 7.85 | First-v2-run fidelity boundary: isolated combat simulation, live participant filtering, Room mask/payment parity, and Earthbend target commitment |
 | 7.86 | Mandatory public combat damage, split first-strike steps, preserved blocked status, canonical all-target damage/lifelink, overflow combat actions, and flat-timeout reward v4 |
+| 7.87 | Correct opponent-terminal perspective, reward v5, fixed outcome evaluation, deterministic combat curriculum, and PPO canary defaults |
 
 The canonical registry is append-only within the fixed identity capacity;
 appends change registry lineage without changing observation width. Changing

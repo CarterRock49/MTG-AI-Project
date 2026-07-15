@@ -283,9 +283,10 @@ full-pool coverage counts are in the ROADMAP status snapshot.
 ## Training
 
 ```bash
-python main.py --timesteps 1000000 --learning-rate 1e-4 --batch-size 512 \
-  --n-steps 2048 --seed 20260713 --run-name my-run \
-  --eval-freq 25000 --eval-episodes 10 --n-envs 8
+python main.py --timesteps 1000000 --learning-rate 2e-4 --batch-size 256 \
+  --n-steps 1024 --seed 20260714 --run-name round-7.87-curriculum-v5 \
+  --eval-freq 25000 --eval-episodes 64 --n-envs 8 \
+  --curriculum combat-v1
 ```
 
 No format or deck flags are required for the pinned Standard default. Custom
@@ -304,14 +305,21 @@ outruns the evaluator, boundaries are skipped with a warning rather than
 queueing stale snapshots. Deeper per-step optimizations are tracked as the
 ROADMAP Tier 3 throughput program.
 
+Every checkpoint is evaluated against the same paired deck/seat/seed cases.
+Promotion is ordered by decisive wins, decisive win-minus-loss score, fewer
+turn limits, then shaped return. The exact cases, per-game outcomes, checkpoint
+SHA-256, and promotion decisions are published atomically to
+`logs/<run>/evaluation/evaluations.json`.
+
 Training and evaluation use separate statistics directories and alternate the
 learned policy between P1 and P2 on successive episodes. Each run writes a
 `training_run.json` provenance manifest under its model directory — seed, Git
 revision and dirty state, CLI and resolved configuration, device and dependency
 inventory, deck/lineage provenance, lifecycle result, and artifact paths. A
-dirty run also stores a hashed `source_worktree.patch` beside the manifest.
+dirty run also stores a hashed `source_worktree.patch` beside the manifest,
+including both tracked changes and untracked files.
 
-> **Checkpoint boundary (Round 7.86 / Observation v2).** The full Standard namespace widened card
+> **Checkpoint boundary (Round 7.87 / Observation v2).** The full Standard namespace widened card
 > observations to 436 fields (259 subtype fields plus MDFC fields), signed live
 > power/toughness, and count/stat bounds large enough for legal boards above 20
 > permanents. Round 7.62 also widened the declared choice-count, allocation, and
@@ -350,8 +358,20 @@ dirty run also stores a hashed `source_worktree.patch` beside the manifest.
 > `discounted-state-potential-v4` (all turn-limit outcomes pay `-6`). The
 > interrupted `round-7.85-reward-v8` run skipped combat damage and is also
 > diagnostic-only.
-> **Do not resume a checkpoint created before Round 7.86, including the failed
-> `reward-v7` or `round-7.85-reward-v8` artifacts** — start fresh without
+> The subsequent `round-7.86-combat-v4` run proved combat was reachable but
+> exposed a terminal-perspective reward bug and a timeout-heavy
+> training/evaluation objective. Round 7.87 introduces
+> `discounted-state-potential-v5`: opponent-ended results are translated back
+> to the learned seat, all timeouts and safety truncations pay `-10`, and
+> handler-local action reward is diagnostic-only. Training now uses the
+> deterministic `combat-v1` opponent curriculum (passive goldfish, novice
+> race, mixed bridge, then the full scripted pool), while evaluation remains a
+> fixed 64-game paired scripted suite. PPO defaults are 2e-4 learning rate,
+> 1,024 rollout steps, batch 256, gamma 0.999, lambda 0.98, value coefficient
+> 0.25, and five epochs. Observation v2 and its hash are unchanged.
+> **Do not resume a checkpoint created before Round 7.87, including the failed
+> `reward-v7`, `round-7.85-reward-v8`, or `round-7.86-combat-v4` artifacts**.
+> Start fresh without
 > `--resume`.
 
 ### Hyperparameter optimization
@@ -368,7 +388,9 @@ Automatically selects 10, 25, or 50 Optuna trials based on logical CPU count.
 python main.py --resume models/<run>/final_model --timesteps 10000
 ```
 
-(Only for lineage-compatible checkpoints — see the boundary note above.)
+(Only for manifest-verified, lineage-compatible checkpoints — see the boundary
+note above. `combat-v1` resume is currently rejected because its per-worker
+matchup counters are not checkpointed; Round 7.87 must start fresh.)
 
 ---
 
@@ -413,7 +435,8 @@ python harvest_protocol.py promote --games 64 --workers 4 \
 
 Qualification pairs the candidate against the scripted policy from both seats.
 It writes an atomic `qualification.json` after both strict legs validate, counts
-draws as half a point, and passes only at the default 55% score threshold with
+decisive draws as half a point, gives turn-limit life leads zero points, and
+passes only at the default 55% score threshold with
 zero fidelity counters and no `unparsed`/`crash` support entries. A completed
 failed gate is recorded for audit and returns a nonzero command status; an
 invalid or incomplete protocol never publishes the qualification manifest.
@@ -453,12 +476,13 @@ artifacts for 14 days.
 | `--timesteps` | Total training timesteps | `1000000` |
 | `--seed` | Base seed (Python, NumPy, Torch, workers, evaluation) | `42` |
 | `--resume` | Path to a lineage-compatible checkpoint to continue | — |
-| `--learning-rate` | Initial learning rate | `1e-4` |
-| `--batch-size` | Batch size | `512` |
-| `--n-steps` | Rollout steps before an update | `2048` |
+| `--learning-rate` | Initial learning rate | `2e-4` |
+| `--batch-size` | Batch size | `256` |
+| `--n-steps` | Rollout steps before an update | `1024` |
 | `--n-envs` | Parallel training environments (`0` = auto) | `0` |
-| `--eval-freq` / `--eval-episodes` | Periodic evaluation cadence / episodes | `10000` / `20` |
+| `--eval-freq` / `--eval-episodes` | Periodic cadence / fixed paired cases | `10000` / `64` |
 | `--checkpoint-freq` | Checkpoint cadence (timesteps) | `50000` |
+| `--curriculum` | Training opponent schedule (`combat-v1` or `none`) | `combat-v1` |
 | `--format` / `--decks` / `--format-dir` | Format legality + corpus / deck dir / frozen namespace | pinned Standard |
 | `--optimize-hp` | Run Optuna hyperparameter search | off |
 | `--record-network` / `--record-freq` | Record network parameters / cadence | off / `5000` |
@@ -481,12 +505,15 @@ enabled). The distinct part leads the name so runs stay tellable-apart in
 TensorBoard's sidebar even when truncated.
 
 Logged metrics include signed/absolute/nonzero reward components, raw action
-and state-potential diagnostics, rollout critic target/value scales, win/
-terminal rates, action distributions, network-parameter changes, and CPU/GPU/
+and state-potential diagnostics, rollout critic target/value scales, decisive
+outcomes, timeouts, valid-action counts, action distributions,
+network-parameter changes, and CPU/GPU/
 memory usage. All
 time-series use policy timesteps as their x-axis. Terminal telemetry is reported
-both as cumulative `terminal/*_count` and normalized `terminal/*_rate`, so a
-single ending is never shown as a permanent 100% rate.
+as both transition-normalized `terminal/*` metrics and episode-normalized
+`terminal_episode/*`/`outcome/*` metrics. Terminal reward/result sign
+mismatches have their own diagnostic counter; decisive and timeout rates are
+also split under `opponent_profile/*` and `curriculum_stage/*`.
 
 ---
 
@@ -500,8 +527,9 @@ single ending is never shown as a permanent 100% rate.
 - **Not recurrent.** The extractor's gated block applies an LSTM-shaped transform
   to a length-one input; its parameters train, but no hidden state is carried
   across policy calls. This is not yet a recurrent policy.
-- **Scripted opponent by default.** Training plays a scripted opponent; self-play
-  / league play is gated on a checkpoint first beating scripted play.
+- **Curriculum opponent by default.** Training progresses from passive through
+  novice to mostly scripted play; fixed evaluation always uses the scripted
+  profile. Self-play / league play is gated on first beating scripted play.
 - **Heuristic planning is opt-in.** Strategic-planner projections are available in
   the observation, but training does not inject a planner-selected action by
   default, and these features provide no cross-step memory.
