@@ -1314,7 +1314,12 @@ class GameStateZonesMixin:
              best_choice_id = None
              best_score = -float('inf')
              # Add turn and phase to context
-             eval_context = {"current_turn": self.turn, "current_phase": self.phase, "goal": criteria}
+             eval_context = {
+                 "current_turn": self.turn,
+                 "current_phase": self.phase,
+                 "goal": criteria,
+                 "perspective": "p1" if player is self.p1 else "p2",
+             }
              if ai_choice_context: eval_context.update(ai_choice_context)
 
              for card_id in matches:

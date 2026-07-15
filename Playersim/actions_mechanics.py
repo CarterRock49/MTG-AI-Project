@@ -446,8 +446,20 @@ class MechanicsHandlersMixin:
         if drew_card and player["hand"]:
             chosen_discard_id = None
             # ... (AI discard choice logic) ...
-            if self.card_evaluator: lowest_value=float('inf') ; [ (val < lowest_value and (lowest_value:=val, chosen_discard_id:=cid)) for cid in player["hand"] if (val := self.card_evaluator.evaluate_card(cid, "discard")) ]
-            else: chosen_discard_id = card_drawn_id if card_drawn_id in player["hand"] else (player["hand"][0] if player["hand"] else None)
+            if self.card_evaluator:
+                lowest_value = float('inf')
+                perspective = "p1" if player is gs.p1 else "p2"
+                for candidate_id in player["hand"]:
+                    candidate_value = self.card_evaluator.evaluate_card(
+                        candidate_id, "discard",
+                        context_details={"perspective": perspective})
+                    if candidate_value < lowest_value:
+                        lowest_value = candidate_value
+                        chosen_discard_id = candidate_id
+            else:
+                chosen_discard_id = (
+                    card_drawn_id if card_drawn_id in player["hand"]
+                    else (player["hand"][0] if player["hand"] else None))
 
             if chosen_discard_id is not None:
                 discard_success = gs.move_card(chosen_discard_id, player, "hand", player, "graveyard", cause="learn_discard")

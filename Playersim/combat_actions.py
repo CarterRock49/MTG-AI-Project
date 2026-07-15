@@ -1710,11 +1710,13 @@ class CombatActionHandler:
         # Delegate to TargetingSystem preferred
         if hasattr(gs, 'targeting_system') and gs.targeting_system:
             if hasattr(gs.targeting_system, 'check_can_be_blocked'):
-                 try:
-                     can_be_blocked = gs.targeting_system.check_can_be_blocked(attacker_id, blocker_id)
-                     return can_be_blocked
-                 except Exception as e:
-                      logging.error(f"Error checking block via TargetingSystem: {e}")
+                try:
+                    return gs.targeting_system.check_can_be_blocked(
+                        attacker_id, blocker_id)
+                except Exception as e:
+                    logging.error(
+                        f"Error checking block via TargetingSystem: {e}")
+                    return False
 
         # --- Fallback logic (without Banding interaction) ---
         logging.warning("Using basic _can_block fallback in CombatActionHandler.")

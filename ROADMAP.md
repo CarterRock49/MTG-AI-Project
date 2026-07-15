@@ -31,31 +31,45 @@ deck-builder feedback loop is not connected.
 ### Round 7.89 / Observation v3 pre-run boundary
 
 The corrected v3 observation contract, active-gated curriculum, balanced
-evaluation schedule, and combat audit are green:
+evaluation schedule, combat audit, and final targeting/analytics audit are
+green:
 
 | Gate | Result |
 | --- | --- |
 | Golden scenarios | 403/403 |
 | Runtime smoke | 9/9 |
 | Training smoke | 13/13 |
-| Discovered unit tests | 243/243 |
-| Focused combat regressions | 17/17 |
-| Strategic numeric regressions | 11/11 |
+| Discovered unit tests | 298/298 |
+| Focused targeting and lifecycle audit | 32/32 |
+| Card/deck analytics and evaluator audit | 40/40 |
+| Focused combat regressions | 22/22 |
+| Strategic numeric regressions | 14/14 |
 | Default invariant fuzz | 8/8 seeds × 1,000 valid actions, plus phase-boundary check |
 | Failed-run replay | exact 117-action trace reaches and executes Room action 250 cleanly |
 | Diff/whitespace check | clean |
-| Observation schema | v3 / `401f929f7e9cb21bceb2ba328a67f8f165f51c1eafe83afcdb73fd5c0561bb95` |
+| Observation schema | v3 / `6e29a94e3443881681afd794185f061133f24ff72350a7df27f48524f00d4137` |
 
-Standing broader gates last recorded green: 108/108 focused regressions,
-fixture Harvest 16/16, production Harvest protocol 17/17, card registry 19/19,
-deck ingestion 13/13, fuzz/replay configuration 6/6, and strict long fuzz 32
-seeds × 10,000 valid actions.
+Standing broader gates last recorded green: fixture Harvest 16/16, production
+Harvest protocol 17/17, card registry 19/19, deck ingestion 13/13, fuzz/replay
+configuration 6/6, and strict long fuzz 32 seeds × 10,000 valid actions.
+
+The final pre-run audit aligned target discovery, action masks, selection, and
+resolution around the exact active instruction; unknown target grammar fails
+closed. Card and deck analytics now preserve canonical printing identity,
+player-relative turns, draw-aware rates, and atomic per-file persistence.
+Evaluator caches retain only static characteristics, while live state and
+perspective are recomputed for each decision.
 
 ### Non-negotiable lineage rules
 
 - **Start every new policy from Round 7.89.** Observation v3 corrects learned
   mana, land-development, resource-advantage, and strategic-viability
-  semantics; do not resume an Observation v2 checkpoint into this lineage.
+  semantics. Adaptive card/deck history is recorded but excluded from live
+  evaluator advice by default so worker-local histories cannot make the same
+  public state nonstationary. Recorded archetypes are canonical and play-turn
+  analytics are player-relative; targetable observations match the active
+  target instruction. Do not resume an Observation v2 checkpoint into this
+  lineage.
 - Resume now verifies the companion manifest's reward contract and Observation
   version/hash. Curriculum continuation is intentionally rejected until its
   per-worker scheduler counters can be checkpointed; launch Round 7.89 fresh.
@@ -274,7 +288,7 @@ before its first training run:
 **Historical v2 verdict:** no high-priority correctness defect was known at
 that freeze. Round 7.89's deeper audit nevertheless found semantic defects and
 supersedes it with Observation v3 at
-`401f929f7e9cb21bceb2ba328a67f8f165f51c1eafe83afcdb73fd5c0561bb95`.
+`6e29a94e3443881681afd794185f061133f24ff72350a7df27f48524f00d4137`.
 Changing a field, bound, identity capacity, visibility rule, or extractor route
 starts a new schema/checkpoint lineage. The next training run must record actual
 v3 throughput and memory alongside behavior telemetry.

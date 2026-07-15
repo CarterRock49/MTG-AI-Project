@@ -1022,7 +1022,7 @@ def check_runtime_configuration():
     assert environment_calls[0][2]["agent_is_p1"] is True
     assert environment_calls[0][2]["alternate_agent_seat"] is False
     assert environment_calls[0][2]["strategy_memory_enabled"] is False
-    assert environment_calls[0][2]["adaptive_decision_history_enabled"] is True
+    assert environment_calls[0][2]["adaptive_decision_history_enabled"] is False
     assert environment_calls[1][2]["agent_is_p1"] is False
     assert environment_calls[1][2]["alternate_agent_seat"] is True
     assert environment_calls[1][2]["strategy_memory_enabled"] is False

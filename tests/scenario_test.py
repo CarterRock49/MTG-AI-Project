@@ -4005,18 +4005,18 @@ def s_stats_draw_opening_and_play_telemetry():
     assert gs.opening_hands['p1'] == [opening_id], \
         f"final kept hand was not captured: {gs.opening_hands}"
 
-    gs.turn = 4
+    gs.turn = 5  # P1's third turn on the alternating global clock.
     gs._reset_turn_tracking_variables()
     drawn_id = gs.p1['library'][0]
     drawn_printing = gs.canonical_card_id(drawn_id)
     assert gs._draw_card(gs.p1) == drawn_id
-    assert gs.draw_history['p1'][4] == [drawn_id]
+    assert gs.draw_history['p1'][5] == [drawn_id]
     gs.track_card_played(drawn_id, 0)
 
     before_drawn = env.card_memory.card_data.get(
         str(drawn_printing), {}).get('times_drawn', 0)
     before_played_turn = env.card_memory.card_data.get(
-        str(drawn_printing), {}).get('turn_played', {}).get('4', 0)
+        str(drawn_printing), {}).get('turn_played', {}).get('3', 0)
     before_opening = env.card_memory.card_data.get(
         str(opening_id), {}).get('in_opening_hand', 0)
     env._record_cards_to_memory(
@@ -4026,13 +4026,13 @@ def s_stats_draw_opening_and_play_telemetry():
     drawn_stats = env.card_memory.card_data[str(drawn_printing)]
     opening_stats = env.card_memory.card_data[str(opening_id)]
     assert drawn_stats['times_drawn'] == before_drawn + 1
-    assert drawn_stats['turn_played']['4'] == before_played_turn + 1
+    assert drawn_stats['turn_played']['3'] == before_played_turn + 1
     assert opening_stats['in_opening_hand'] == before_opening + 1
 
     openings, draws, mulligans = env._stats_telemetry_mapped(
         gs, is_p1_winner=True)
     assert openings['winner'] == [opening_id]
-    assert draws['winner'][4] == [drawn_id]
+    assert draws['winner'][5] == [drawn_printing]
     assert mulligans == {'winner': 0, 'loser': 0}
 
 

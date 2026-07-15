@@ -466,7 +466,8 @@ def check_stats_pipeline(decks, card_db):
         agent = gs.p1 if gs.agent_is_p1 else gs.p2
         agent_key = "p1" if gs.agent_is_p1 else "p2"
         opening_probe = gs.opening_hands[agent_key][0]
-        gs.turn = 2
+        # Use the learned seat's second actual turn on the alternating clock.
+        gs.turn = 3 if gs.agent_is_p1 else 4
         gs._reset_turn_tracking_variables()
         drawn_probe = gs._draw_card(agent)
         assert drawn_probe is not None, "telemetry probe could not draw"

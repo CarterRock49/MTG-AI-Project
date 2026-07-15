@@ -580,7 +580,9 @@ class ActionSpaceMixin:
                                 and 'instant' not in back_type_line
                                 and not ('instant' in back_types or back_has_flash)):
                             if self._can_afford_card(player, back_face_data, is_back_face=True, context={}):
-                                 if self._targets_available_from_data(back_face_data, player, opponent):
+                                 if self._targets_available_from_data(
+                                         back_face_data, player, opponent,
+                                         source_id=card_id):
                                      mdfc_back_context = {
                                          'hand_idx': i,
                                          'cast_as_back_face': True,
@@ -592,7 +594,9 @@ class ActionSpaceMixin:
                         adv_data = card.get_adventure_data()
                         if adv_data and ('sorcery' in adv_data.get('type','').lower() or 'instant' in adv_data.get('type','').lower()):
                             if self._can_afford_cost_string(player, adv_data.get('cost',''), context={}):
-                                if self._targets_available_from_text(adv_data.get('effect',''), player, opponent):
+                                if self._targets_available_from_text(
+                                        adv_data.get('effect',''), player,
+                                        opponent, source_id=card_id):
                                     adventure_context = {'hand_idx': i, 'play_adventure': True}
                                     set_valid_action(196 + i, f"PLAY_ADVENTURE {adv_data.get('name', 'Unknown')}", context=adventure_context)
 
@@ -673,7 +677,8 @@ class ActionSpaceMixin:
                                 player, back_face_data, is_back_face=True,
                                 context={})
                             and self._targets_available_from_data(
-                                back_face_data, player, opponent)):
+                                back_face_data, player, opponent,
+                                source_id=card_id)):
                         set_valid_action(
                             188 + i,
                             f"PLAY_MDFC_BACK {back_face_data.get('name', 'Unknown')}",
@@ -690,7 +695,7 @@ class ActionSpaceMixin:
                                 player, adventure_data.get('cost', ''), context={})
                             and self._targets_available_from_text(
                                 adventure_data.get('effect', ''), player,
-                                opponent)):
+                                opponent, source_id=card_id)):
                         set_valid_action(
                             196 + i,
                             f"PLAY_ADVENTURE {adventure_data.get('name', 'Unknown')}",
@@ -714,35 +719,79 @@ class ActionSpaceMixin:
         if gs.stack: self._add_response_actions(player, valid_actions, set_valid_action)
         self._add_specific_mechanics_actions(player, valid_actions, set_valid_action, is_sorcery_speed=False)
 
-    def _targets_available_from_data(self, card_data, caster, opponent):
+    def _targets_available_from_data(
+            self, card_data, caster, opponent=None, source_id=None):
         """Check target availability from card data dict."""
-        gs = self.game_state
         oracle_text = card_data.get('oracle_text', '').lower()
-        if 'target' not in oracle_text: return True
-        card_id = card_data.get('id') # Need ID
-        if card_id is None: return True # Cannot check without ID
+        type_line = str(card_data.get('type_line', '') or '').lower()
+        card_types = {
+            str(card_type).lower()
+            for card_type in card_data.get('card_types', [])}
+        is_spell = bool(card_types.intersection({'instant', 'sorcery'})) \
+            or 'instant' in type_line or 'sorcery' in type_line
+        is_aura = 'aura' in {
+            str(subtype).lower()
+            for subtype in card_data.get('subtypes', [])} \
+            or 'aura' in type_line
+        if not is_spell and not is_aura:
+            return True
+        if is_aura and 'target' not in oracle_text:
+            enchant_match = re.search(
+                r"\benchant\s+([^\n.(]+)", oracle_text)
+            if not enchant_match:
+                return False
+            oracle_text = f"target {enchant_match.group(1).strip()}."
+        elif 'target' not in oracle_text:
+            return True
+        card_id = card_data.get('id')
+        if card_id is None:
+            card_id = source_id
+        return self._targets_available_from_text(
+            oracle_text, caster, opponent, source_id=card_id)
 
-        if hasattr(gs, 'targeting_system') and gs.targeting_system:
-            try:
-                target_type = gs._get_target_type_from_text(oracle_text)
-                valid_targets = gs.targeting_system.get_valid_targets(
-                    card_id, caster, target_type,
-                    effect_text=oracle_text)
-                return any(targets for targets in valid_targets.values())
-            except Exception as e: return True
-        else: return True
-
-    def _targets_available_from_text(self, effect_text, caster, opponent):
-        """Check target availability just from effect text (less precise)."""
+    def _targets_available_from_text(
+            self, effect_text, caster, opponent=None, source_id=None):
+        """Check mandatory target availability through canonical legality."""
         gs = self.game_state
         if 'target' not in effect_text.lower(): return True
-        # Basic heuristic: check if *any* creatures or players exist
-        if 'target creature' in effect_text.lower():
-             if len(caster.get("battlefield",[])) > 0 or len(opponent.get("battlefield",[])) > 0: return True
-        if 'target player' in effect_text.lower(): return True
-        if 'target opponent' in effect_text.lower(): return True
-        # ... add more basic checks
-        return True # Assume available if check is simple
+        if source_id is None or not getattr(gs, 'targeting_system', None):
+            return False
+        try:
+            target_slots = gs._ordinary_target_slots(effect_text)
+            if target_slots:
+                for slot in target_slots:
+                    minimum = int(slot.get('min_targets', 0))
+                    if minimum == 0:
+                        continue
+                    valid_targets = gs.targeting_system.get_valid_targets(
+                        source_id, caster,
+                        slot.get('required_type', 'target'),
+                        effect_text=slot.get('effect_text', ''))
+                    valid_ids = {
+                        target_id
+                        for targets in valid_targets.values()
+                        for target_id in targets}
+                    if len(valid_ids) < minimum:
+                        return False
+                return True
+            targeting_text = gs._ordinary_single_targeting_text(effect_text)
+            minimum, _ = gs._target_bounds_from_text(targeting_text)
+            if minimum == 0:
+                return True
+            target_type = gs._get_target_type_from_text(targeting_text)
+            valid_targets = gs.targeting_system.get_valid_targets(
+                source_id, caster, target_type,
+                effect_text=targeting_text)
+            valid_ids = {
+                target_id
+                for targets in valid_targets.values()
+                for target_id in targets}
+            return len(valid_ids) >= minimum
+        except Exception as error:
+            logging.warning(
+                "Target availability probe failed for source %r: %s",
+                source_id, error)
+            return False
 
     def _add_special_choice_actions(self, player, valid_actions, set_valid_action):
         """Add actions for discard and the other dedicated choice phases."""
@@ -2298,7 +2347,7 @@ class ActionSpaceMixin:
                 return len(valid_ids) >= minimum
             except Exception as e:
                  logging.warning(f"Error checking targets with TargetingSystem for {card.name}: {e}")
-                 return True # Assume targets exist on error
+                 return False
         else:
             return True # Assume targets exist if no system
 
@@ -2464,7 +2513,8 @@ class ActionSpaceMixin:
                 if (self._can_afford_cost_string(
                         player, adventure.get("cost", ""), context={})
                         and self._targets_available_from_text(
-                            adventure.get("effect", ""), player, opponent)):
+                            adventure.get("effect", ""), player, opponent,
+                            source_id=card_id)):
                     context.update({"graveyard_adventure_cast": True,
                                     "cast_as_adventure": True})
                 else:
@@ -3074,7 +3124,11 @@ class ActionSpaceMixin:
                         discard_idx = min(
                             range(len(player["hand"])),
                             key=lambda idx: self.card_evaluator.evaluate_card(
-                                player["hand"][idx], "discard")
+                                player["hand"][idx], "discard",
+                                context_details={
+                                    "perspective": (
+                                        "p1" if player is gs.p1 else "p2"),
+                                })
                             if self.card_evaluator else idx)
                         context = {'gy_idx': i, 'discard_idx': discard_idx}
                         set_valid_action(399, f"CAST_WITH_JUMP_START {card.name}", context=context)
@@ -3225,7 +3279,8 @@ class ActionSpaceMixin:
                         player, adventure.get("cost", ""), context={}):
                     continue
                 if not self._targets_available_from_text(
-                        adventure.get("effect", ""), player, opponent):
+                        adventure.get("effect", ""), player, opponent,
+                        source_id=card_id):
                     continue
                 set_valid_action(
                     472 + graveyard_index,

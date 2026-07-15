@@ -514,7 +514,11 @@ class CastingHandlersMixin:
              return -0.2, False
 
         card_id = player["hand"][hand_idx]
-        value = self.card_evaluator.evaluate_card(card_id, "discard") if self.card_evaluator else 0
+        value = self.card_evaluator.evaluate_card(
+            card_id, "discard",
+            context_details={
+                "perspective": "p1" if player is gs.p1 else "p2",
+            }) if self.card_evaluator else 0
         if context.get("type") == "specialize_discard":
              success = gs.choose_specialize_discard(hand_idx)
         elif context.get("type") == "connive_discard":

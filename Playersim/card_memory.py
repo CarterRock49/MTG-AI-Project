@@ -5,7 +5,13 @@ import logging
 import time
 import gzip
 import threading
+import copy
+import math
+import tempfile
 from typing import Dict, List, Union
+
+
+CARD_MEMORY_VERSION = 2
 
 
 class CardMemory:
@@ -27,7 +33,11 @@ class CardMemory:
         self.card_data = {}  # In-memory cache
         self.card_name_to_id = {}  # Mapping of card names to IDs
         self.card_id_to_name = {}  # Mapping of card IDs to names
+        self.ambiguous_card_names = set()
         self.memory_lock = threading.RLock()  # Thread-safe operations
+        self._save_lock = threading.Lock()
+        self._save_thread = None
+        self._mutation_version = 0
         self.cache = {}  # Simple memory cache
         self.cache_ttl = 300  # Cache TTL in seconds
         self.last_cache_cleanup = time.time()
@@ -106,6 +116,8 @@ class CardMemory:
         """Set a value in the cache with current timestamp."""
         with self.memory_lock:
             self.cache[key] = (time.time(), value)
+            if len(self.cache) > 10000:
+                self._cleanup_cache()
     
     def load_all_card_data(self) -> None:
         """Load all card data from storage into memory."""
@@ -118,17 +130,13 @@ class CardMemory:
                 if self.use_compression and os.path.exists(compressed_file):
                     with gzip.open(compressed_file, 'rt', encoding='utf-8') as f:
                         data = json.load(f)
-                        self.card_data = data.get('cards', {})
-                        self.card_name_to_id = data.get('name_to_id', {})
-                        self.card_id_to_name = data.get('id_to_name', {})
+                        self._load_payload(data)
                         logging.info(f"Loaded data for {len(self.card_data)} cards from compressed file")
                 # Try uncompressed file
                 elif os.path.exists(cards_file):
                     with open(cards_file, 'r', encoding='utf-8') as f:
                         data = json.load(f)
-                        self.card_data = data.get('cards', {})
-                        self.card_name_to_id = data.get('name_to_id', {})
-                        self.card_id_to_name = data.get('id_to_name', {})
+                        self._load_payload(data)
                         logging.info(f"Loaded data for {len(self.card_data)} cards from uncompressed file")
                 else:
                     logging.info("No existing card memory file found, starting with empty memory")
@@ -138,38 +146,132 @@ class CardMemory:
                 self.card_data = {}
                 self.card_name_to_id = {}
                 self.card_id_to_name = {}
+                self.ambiguous_card_names = set()
+
+    def _load_payload(self, data: Dict) -> None:
+        """Validate the persisted envelope and rebuild identity mappings."""
+        if not isinstance(data, dict):
+            raise ValueError("card-memory root must be a dictionary")
+        version = data.get('schema_version', 1)
+        if version not in (1, CARD_MEMORY_VERSION):
+            raise ValueError(f"unsupported card-memory schema version {version!r}")
+        cards = data.get('cards', {})
+        if not isinstance(cards, dict):
+            raise ValueError("card-memory cards must be a dictionary")
+
+        normalized = {}
+        name_to_id = {}
+        id_to_name = {}
+        ambiguous_names = set()
+        for raw_key, raw_stats in cards.items():
+            if not isinstance(raw_stats, dict):
+                logging.warning("Ignoring malformed card-memory entry %r", raw_key)
+                continue
+            card_key = str(raw_key)
+            stats = copy.deepcopy(raw_stats)
+            name = stats.get('name')
+            if not isinstance(name, str) or not name.strip():
+                logging.warning("Ignoring unnamed card-memory entry %r", raw_key)
+                continue
+            stats['name'] = name
+            if str(stats.get('id', raw_key)) != card_key:
+                logging.warning(
+                    "Repairing mismatched card-memory ID for entry %r", raw_key)
+                stats['id'] = raw_key
+            else:
+                stats.setdefault('id', raw_key)
+            self._ensure_card_stats_fields(stats)
+            normalized[card_key] = stats
+            id_to_name[card_key] = name
+            existing_id = name_to_id.get(name)
+            if existing_id is not None and existing_id != card_key:
+                # A name lookup cannot choose safely between two identities.
+                name_to_id.pop(name, None)
+                ambiguous_names.add(name)
+            elif name not in ambiguous_names:
+                name_to_id[name] = card_key
+
+        self.card_data = normalized
+        self.card_name_to_id = name_to_id
+        self.card_id_to_name = id_to_name
+        self.ambiguous_card_names = ambiguous_names
     
     def save_all_card_data(self) -> bool:
-        """Save all card data to storage."""
-        with self.memory_lock:
-            try:
-                data = {
+        """Atomically save a consistent snapshot of all card data."""
+        with self._save_lock:
+            with self.memory_lock:
+                snapshot_version = self._mutation_version
+                data = copy.deepcopy({
+                    'schema_version': CARD_MEMORY_VERSION,
                     'cards': self.card_data,
                     'name_to_id': self.card_name_to_id,
                     'id_to_name': self.card_id_to_name,
+                    'ambiguous_names': sorted(self.ambiguous_card_names),
                     'last_updated': time.time()
-                }
-                
+                })
+                card_count = len(self.card_data)
+
+            temp_path = None
+            try:
+                os.makedirs(self.storage_path, exist_ok=True)
                 cards_file = os.path.join(self.storage_path, "all_cards.json")
-                
+                target_path = cards_file + ".gz" if self.use_compression else cards_file
+                fd, temp_path = tempfile.mkstemp(
+                    prefix="all_cards_", suffix=".tmp",
+                    dir=self.storage_path)
+                os.close(fd)
                 if self.use_compression:
-                    with gzip.open(cards_file + ".gz", 'wt', encoding='utf-8') as f:
+                    with gzip.open(temp_path, 'wt', encoding='utf-8') as f:
                         json.dump(data, f)
                 else:
-                    with open(cards_file, 'w', encoding='utf-8') as f:
+                    with open(temp_path, 'w', encoding='utf-8') as f:
                         json.dump(data, f)
-                
-                logging.info(f"Saved data for {len(self.card_data)} cards")
+                os.replace(temp_path, target_path)
+                temp_path = None
+                with self.memory_lock:
+                    if self._mutation_version == snapshot_version:
+                        self.updates_since_save = 0
+                logging.info(f"Saved data for {card_count} cards")
                 return True
             except Exception as e:
                 logging.error(f"Error saving card data: {e}")
                 return False
+            finally:
+                if temp_path:
+                    try:
+                        os.unlink(temp_path)
+                    except OSError:
+                        pass
     
-    def update_card_mapping(self, card_id: int, card_name: str) -> None:
+    def update_card_mapping(self, card_id: int, card_name: str) -> bool:
         """Update mapping between card IDs and names."""
         with self.memory_lock:
-            self.card_id_to_name[str(card_id)] = card_name
-            self.card_name_to_id[card_name] = str(card_id)
+            card_key = str(card_id)
+            previous_name = self.card_id_to_name.get(card_key)
+            if previous_name is not None and previous_name != card_name:
+                logging.error(
+                    "Refusing to rename card-memory identity %s from %r to %r",
+                    card_key, previous_name, card_name)
+                return False
+            previous_id = self.card_name_to_id.get(card_name)
+            changed = (
+                previous_name != card_name
+                or (card_name not in self.ambiguous_card_names
+                    and previous_id != card_key))
+            self.card_id_to_name[card_key] = card_name
+            if previous_id is not None and previous_id != card_key:
+                # Keep both ID entries, but fail closed for ambiguous name-only
+                # queries rather than returning statistics for the wrong card.
+                self.card_name_to_id.pop(card_name, None)
+                self.ambiguous_card_names.add(card_name)
+                logging.error(
+                    "Card-memory name %r maps to both %s and %s; "
+                    "name-only lookup disabled", card_name, previous_id, card_key)
+            elif card_name not in self.ambiguous_card_names:
+                self.card_name_to_id[card_name] = card_key
+            if changed:
+                self._mutation_version += 1
+            return True
     
     def get_card_stats(self, card_id: Union[int, str]) -> Dict:
         """
@@ -207,8 +309,15 @@ class CardMemory:
         """
         card_key = str(card_id)
         with self.memory_lock:
+            existing_name = self.card_data.get(card_key, {}).get('name')
+            if existing_name is not None and existing_name != card_name:
+                logging.error(
+                    "Refusing to register card-memory identity %s as both %r and %r",
+                    card_key, existing_name, card_name)
+                return
             # Update ID-name mapping
-            self.update_card_mapping(card_id, card_name)
+            if not self.update_card_mapping(card_id, card_name):
+                return
             
             # Create or update card entry
             if card_key not in self.card_data:
@@ -227,10 +336,11 @@ class CardMemory:
                     'performance_by_turn': {},
                     'in_opening_hand': 0,
                     'wins_in_opening_hand': 0,
+                    'draws_in_opening_hand': 0,
                     'mana_curve_performance': {
-                        'on_curve': {'played': 0, 'wins': 0},
-                        'below_curve': {'played': 0, 'wins': 0},
-                        'above_curve': {'played': 0, 'wins': 0}
+                        'on_curve': {'played': 0, 'wins': 0, 'draws': 0},
+                        'below_curve': {'played': 0, 'wins': 0, 'draws': 0},
+                        'above_curve': {'played': 0, 'wins': 0, 'draws': 0}
                     },
                     'archetype_performance': {},
                     'synergy_partners': {},
@@ -238,12 +348,18 @@ class CardMemory:
                     'performance_trend': [],
                     'meta_position': {}
                 }
+                self._mutation_version += 1
             
             # Update card data if provided
             if card_data:
-                for key, value in card_data.items():
-                    if key not in ['id', 'name', 'first_seen']:  # Don't overwrite core fields
+                metadata_fields = {
+                    'cmc', 'types', 'colors', 'mana_cost', 'oracle_id'
+                }
+                for key in metadata_fields.intersection(card_data):
+                    value = card_data[key]
+                    if self.card_data[card_key].get(key) != value:
                         self.card_data[card_key][key] = value
+                        self._mutation_version += 1
     
     def update_card_performance(self, card_id: int, game_result: Dict) -> None:
         """
@@ -271,7 +387,10 @@ class CardMemory:
                     logging.warning(f"Skipping update for unknown card: {card_id}")
                     return
                 
-                card_stats = self.card_data[card_key]
+                # Work on a private copy so malformed telemetry cannot leave a
+                # half-applied game (for example games_played incremented but
+                # archetype/outcome totals unchanged).
+                card_stats = copy.deepcopy(self.card_data[card_key])
                 
                 # Ensure all required fields exist with defaults
                 self._ensure_card_stats_fields(card_stats)
@@ -280,8 +399,8 @@ class CardMemory:
                 card_stats['games_played'] += 1
                 
                 # Update win/loss/draw counters
-                is_draw = game_result.get('is_draw', False)
-                is_win = game_result.get('is_win', False)
+                is_draw = bool(game_result.get('is_draw', False))
+                is_win = bool(game_result.get('is_win', False))
                 
                 if is_draw:
                     card_stats['draws'] += 1
@@ -302,7 +421,11 @@ class CardMemory:
                     card_stats['times_played'] += 1
                     
                     # Update turn played statistics
-                    turn_played = game_result.get('turn_played', 0)
+                    try:
+                        turn_played = max(0, int(game_result.get(
+                            'turn_played', 0)))
+                    except (TypeError, ValueError, OverflowError):
+                        turn_played = 0
                     if turn_played > 0:
                         # Initialize if this turn hasn't been recorded before
                         if str(turn_played) not in card_stats['turn_played']:
@@ -324,25 +447,41 @@ class CardMemory:
                         else:
                             perf['losses'] += 1
                     
-                    # Mana curve performance (if CMC is known)
-                    if 'cmc' in game_result and turn_played > 0:
-                        cmc = game_result['cmc']
+                    # Mana curve performance. Registration normally owns the
+                    # static mana value, while per-game telemetry owns the
+                    # play turn; callers should not need to duplicate it.
+                    cmc_value = game_result.get('cmc', card_stats.get('cmc'))
+                    if cmc_value is not None and turn_played > 0:
+                        try:
+                            cmc = float(cmc_value)
+                        except (TypeError, ValueError, OverflowError):
+                            cmc = math.nan
+                        if not math.isfinite(cmc):
+                            cmc = None
                         curve_status = 'on_curve'
                         
-                        if turn_played < cmc:
+                        if cmc is None:
+                            curve_status = None
+                        elif turn_played < cmc:
                             curve_status = 'below_curve'  # Played earlier than CMC
                         elif turn_played > cmc:
                             curve_status = 'above_curve'  # Played later than CMC
                         
                         # Update curve statistics
-                        card_stats['mana_curve_performance'][curve_status]['played'] += 1
-                        if is_win:
-                            card_stats['mana_curve_performance'][curve_status]['wins'] += 1
+                        if curve_status:
+                            curve = card_stats['mana_curve_performance'][curve_status]
+                            curve['played'] += 1
+                            if is_draw:
+                                curve['draws'] += 1
+                            elif is_win:
+                                curve['wins'] += 1
                 
                 # Opening hand statistics
                 if game_result.get('in_opening_hand', False):
                     card_stats['in_opening_hand'] += 1
-                    if is_win:
+                    if is_draw:
+                        card_stats['draws_in_opening_hand'] += 1
+                    elif is_win:
                         card_stats['wins_in_opening_hand'] += 1
                 
                 # Archetype performance
@@ -368,13 +507,17 @@ class CardMemory:
                 self._update_performance_trend(card_stats, is_win, is_draw)
                 
                 # Calculate effectiveness rating
-                self._calculate_effectiveness_rating(card_key)
+                self._calculate_effectiveness_rating(
+                    card_key, card_stats=card_stats)
+
+                self.card_data[card_key] = card_stats
+                self._mutation_version += 1
+                self._invalidate_effectiveness_cache(card_key)
                 
                 # Track updates and trigger periodic saving
                 self.updates_since_save += 1
                 if self.updates_since_save >= self.save_frequency:
                     self.save_memory_async()
-                    self.updates_since_save = 0
                     logging.info(f"Triggered automatic save after {self.save_frequency} card updates")
 
         except Exception as e:
@@ -397,10 +540,11 @@ class CardMemory:
             'performance_by_turn': {},
             'in_opening_hand': 0,
             'wins_in_opening_hand': 0,
+            'draws_in_opening_hand': 0,
             'mana_curve_performance': {
-                'on_curve': {'played': 0, 'wins': 0},
-                'below_curve': {'played': 0, 'wins': 0},
-                'above_curve': {'played': 0, 'wins': 0}
+                'on_curve': {'played': 0, 'wins': 0, 'draws': 0},
+                'below_curve': {'played': 0, 'wins': 0, 'draws': 0},
+                'above_curve': {'played': 0, 'wins': 0, 'draws': 0}
             },
             'archetype_performance': {},
             'synergy_partners': {},
@@ -411,13 +555,125 @@ class CardMemory:
         
         for key, default in required_fields.items():
             if key not in card_stats:
-                card_stats[key] = default
+                card_stats[key] = copy.deepcopy(default)
+
+        def nonnegative_int(value):
+            try:
+                return max(0, int(value))
+            except (TypeError, ValueError, OverflowError):
+                return 0
+
+        def unit_float(value, default=0.0):
+            try:
+                value = float(value)
+            except (TypeError, ValueError, OverflowError):
+                return default
+            if not math.isfinite(value):
+                return default
+            return max(0.0, min(1.0, value))
+
+        if not isinstance(card_stats.get('mana_curve_performance'), dict):
+            card_stats['mana_curve_performance'] = {}
+        for bucket in ('on_curve', 'below_curve', 'above_curve'):
+            data = card_stats['mana_curve_performance'].setdefault(bucket, {})
+            if not isinstance(data, dict):
+                data = {}
+                card_stats['mana_curve_performance'][bucket] = data
+            for field in ('played', 'wins', 'draws'):
+                data[field] = nonnegative_int(data.get(field, 0))
+
+        for field in ('games_played', 'wins', 'losses', 'draws',
+                      'times_drawn', 'times_played', 'in_opening_hand',
+                      'wins_in_opening_hand', 'draws_in_opening_hand'):
+            card_stats[field] = nonnegative_int(card_stats.get(field, 0))
+
+        turn_played = card_stats.get('turn_played')
+        card_stats['turn_played'] = {
+            str(turn): nonnegative_int(count)
+            for turn, count in turn_played.items()
+        } if isinstance(turn_played, dict) else {}
+
+        nested_counter_fields = {
+            'performance_by_turn': ('played', 'wins', 'draws', 'losses'),
+            'archetype_performance': ('games', 'wins', 'draws', 'losses'),
+            'synergy_partners': (
+                'games_together', 'wins_together', 'draws_together'),
+        }
+        for container_name, counter_fields in nested_counter_fields.items():
+            container = card_stats.get(container_name)
+            normalized = {}
+            if isinstance(container, dict):
+                for raw_key, raw_data in container.items():
+                    data = copy.deepcopy(raw_data) \
+                        if isinstance(raw_data, dict) else {}
+                    for field in counter_fields:
+                        data[field] = nonnegative_int(data.get(field, 0))
+                    normalized[str(raw_key)] = data
+            card_stats[container_name] = normalized
+
+        trend = card_stats.get('performance_trend')
+        card_stats['performance_trend'] = [
+            unit_float(value) for value in trend[-10:]
+        ] if isinstance(trend, list) else []
+
+        meta_position = card_stats.get('meta_position')
+        if not isinstance(meta_position, dict):
+            meta_position = {}
+        else:
+            meta_position = copy.deepcopy(meta_position)
+        win_rate_trend = meta_position.get('win_rate_trend')
+        normalized_win_rate_trend = []
+        if isinstance(win_rate_trend, list):
+            for sample in win_rate_trend[-100:]:
+                if isinstance(sample, (list, tuple)) and len(sample) == 2:
+                    try:
+                        timestamp = float(sample[0])
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if not math.isfinite(timestamp) or timestamp < 0:
+                        continue
+                    normalized_win_rate_trend.append(
+                        (timestamp, unit_float(sample[1], 0.5)))
+                else:
+                    # Version-1 experiments occasionally stored only the
+                    # value. Preserve it with an explicit unknown timestamp.
+                    normalized_win_rate_trend.append(
+                        (0.0, unit_float(sample, 0.5)))
+        meta_position['win_rate_trend'] = normalized_win_rate_trend
+        if 'popularity' in meta_position:
+            meta_position['popularity'] = unit_float(
+                meta_position['popularity'])
+        if 'power_index' in meta_position:
+            meta_position['power_index'] = unit_float(
+                meta_position['power_index'], 0.5)
+        card_stats['meta_position'] = meta_position
+
+        games_played = card_stats['games_played']
+        card_stats['win_rate'] = (
+            card_stats['wins'] + 0.5 * card_stats['draws']
+        ) / games_played if games_played else 0.0
+        card_stats['effectiveness_rating'] = unit_float(
+            card_stats.get('effectiveness_rating', 0.5), 0.5)
+
+    def _invalidate_effectiveness_cache(self, card_key: str) -> None:
+        """Drop every archetype-specific cached value for one card."""
+        prefix = f"{card_key}_"
+        for key in list(self.cache):
+            if str(key).startswith(prefix):
+                self.cache.pop(key, None)
 
     def _update_synergy_partners(self, card_stats, game_result, is_win, is_draw):
         """Update the synergy partners tracking"""
-        synergy_partners = game_result.get('synergy_partners', [])
-        for partner_id in synergy_partners:
-            partner_key = str(partner_id)
+        # "Together" means both cards were played in this game. The caller
+        # supplies deck-wide partners for every card, so an unplayed card must
+        # not acquire synergy merely by being present in the list.
+        if not game_result.get('was_played', False):
+            return
+        synergy_partners = {
+            str(partner_id)
+            for partner_id in (game_result.get('synergy_partners', []) or [])
+        }
+        for partner_key in synergy_partners:
             if partner_key not in card_stats['synergy_partners']:
                 card_stats['synergy_partners'][partner_key] = {
                     'games_together': 0, 'wins_together': 0, 'draws_together': 0
@@ -444,7 +700,8 @@ class CardMemory:
         else:
             card_stats['performance_trend'].append(0.0)
     
-    def _calculate_effectiveness_rating(self, card_key: str) -> None:
+    def _calculate_effectiveness_rating(
+            self, card_key: str, card_stats: Dict = None) -> None:
         """
         Calculate a comprehensive effectiveness rating for a card based on all statistics,
         using a more data-driven, adaptive approach.
@@ -453,10 +710,10 @@ class CardMemory:
         Args:
             card_key: The card ID as a string
         """
-        if card_key not in self.card_data:
-            return
-            
-        card_stats = self.card_data[card_key]
+        if card_stats is None:
+            if card_key not in self.card_data:
+                return
+            card_stats = self.card_data[card_key]
         
         # Need minimum number of games for reliable rating
         if card_stats['games_played'] < 5:
@@ -484,8 +741,12 @@ class CardMemory:
                 components.append((recent_performance, 0.2))
         
         # Play/draw component (how often the card is actually played when drawn)
-        if card_stats['times_drawn'] > 0:
-            play_rate = card_stats['times_played'] / card_stats['times_drawn']
+        if card_stats['times_drawn'] > 0 or card_stats['in_opening_hand'] > 0:
+            seen_games = min(
+                card_stats['games_played'],
+                card_stats['times_drawn'] + card_stats['in_opening_hand'])
+            play_rate = card_stats['times_played'] / max(
+                1, seen_games, card_stats['times_played'])
             # Cards that are almost always played are likely good
             play_rate_weight = 0.1
             components.append((play_rate, play_rate_weight))
@@ -496,7 +757,10 @@ class CardMemory:
         
         if on_curve_played > 0:
             on_curve_wins = curve_data['on_curve']['wins']
-            curve_efficiency = on_curve_wins / on_curve_played
+            curve_efficiency = (
+                on_curve_wins
+                + 0.5 * curve_data['on_curve'].get('draws', 0)
+            ) / on_curve_played
             
             # Add weight based on how many times it's been played on curve
             curve_weight = min(0.15, 0.05 + (on_curve_played / 20) * 0.1) 
@@ -504,7 +768,10 @@ class CardMemory:
         
         # Opening hand component with sample-size adjusted weight
         if card_stats['in_opening_hand'] > 0:
-            opening_win_rate = card_stats['wins_in_opening_hand'] / card_stats['in_opening_hand']
+            opening_win_rate = (
+                card_stats['wins_in_opening_hand']
+                + 0.5 * card_stats.get('draws_in_opening_hand', 0)
+            ) / card_stats['in_opening_hand']
             opening_weight = min(0.25, 0.1 + (card_stats['in_opening_hand'] / 20) * 0.15)
             components.append((opening_win_rate, opening_weight))
         
@@ -532,7 +799,8 @@ class CardMemory:
         weighted_sum = sum(value * weight for value, weight in components)
         
         if total_weight > 0:
-            card_stats['effectiveness_rating'] = weighted_sum / total_weight
+            card_stats['effectiveness_rating'] = max(
+                0.0, min(1.0, weighted_sum / total_weight))
         else:
             card_stats['effectiveness_rating'] = 0.5  # Default if no components
         
@@ -698,13 +966,11 @@ class CardMemory:
                 # Calculate win rate (counting draws as 0.5 wins)
                 win_rate = (arch_data['wins'] + 0.5 * arch_data.get('draws', 0)) / arch_data['games']
                 
-                # Scale win rate to 0-1 range with better distribution
-                # Win rates below 0.4 become worse, win rates above 0.6 become better
-                effectiveness = 0.0
-                if win_rate <= 0.5:
-                    effectiveness = win_rate * 0.8  # Scale 0-0.5 to 0-0.4
-                else:
-                    effectiveness = 0.4 + (win_rate - 0.5) * 1.2  # Scale 0.5-1 to 0.4-1.0
+                # A 50% score is neutral to consumers, which subtract 0.5
+                # before applying the historical adjustment. The previous
+                # piecewise transform mapped exactly 50% to 0.4 and therefore
+                # penalized statistically neutral cards.
+                effectiveness = max(0.0, min(1.0, win_rate))
                 
                 # Cache the result if we have caching capability
                 if hasattr(self, 'cache_set'):
@@ -737,33 +1003,53 @@ class CardMemory:
                 - counters: List of cards that counter this card
         """
         card_key = str(card_id)
+        if not isinstance(meta_data, dict):
+            logging.error("Cannot update meta position with non-dictionary data")
+            return
         with self.memory_lock:
             if card_key not in self.card_data:
                 logging.warning(f"Cannot update meta position for unknown card: {card_id}")
                 return
-                
-            # Create meta_position dict if it doesn't exist
-            if 'meta_position' not in self.card_data[card_key]:
-                self.card_data[card_key]['meta_position'] = {
-                    'popularity': 0.0,
-                    'win_rate_trend': [],
-                    'metagame_tier': 'unknown',
-                    'last_updated': time.time()
-                }
-            
-            meta_position = self.card_data[card_key]['meta_position']
+
+            card_stats = copy.deepcopy(self.card_data[card_key])
+            self._ensure_card_stats_fields(card_stats)
+            meta_position = card_stats.get('meta_position')
+            if not isinstance(meta_position, dict):
+                meta_position = {}
+            meta_position.setdefault('popularity', 0.0)
+            meta_position.setdefault('win_rate_trend', [])
+            meta_position.setdefault('metagame_tier', 'unknown')
+            if not isinstance(meta_position['win_rate_trend'], list):
+                meta_position['win_rate_trend'] = []
+            card_stats['meta_position'] = meta_position
             
             # Update with new meta data
             for key, value in meta_data.items():
                 if key == 'win_rate':
                     # Store win rate history
-                    meta_position['win_rate_trend'].append((time.time(), value))
+                    try:
+                        win_rate = float(value)
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if not math.isfinite(win_rate):
+                        continue
+                    win_rate = max(0.0, min(1.0, win_rate))
+                    meta_position['win_rate_trend'].append(
+                        (time.time(), win_rate))
                     # Limit trend size
                     if len(meta_position['win_rate_trend']) > 10:
                         meta_position['win_rate_trend'] = meta_position['win_rate_trend'][-10:]
+                elif key == 'popularity':
+                    try:
+                        popularity = float(value)
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if math.isfinite(popularity):
+                        meta_position[key] = max(
+                            0.0, min(1.0, popularity))
                 else:
                     # Update other fields directly
-                    meta_position[key] = value
+                    meta_position[key] = copy.deepcopy(value)
             
             # Always update timestamp
             meta_position['last_updated'] = time.time()
@@ -771,8 +1057,10 @@ class CardMemory:
             # Calculate derived metrics
             if 'popularity' in meta_data and 'win_rate' in meta_data:
                 # Power index: combination of popularity and win rate
-                popularity = meta_data['popularity']
-                win_rate = meta_data['win_rate']
+                popularity = meta_position.get('popularity', 0.0)
+                win_rate = (
+                    meta_position['win_rate_trend'][-1][1]
+                    if meta_position['win_rate_trend'] else 0.5)
                 
                 # Cards that are both popular and successful are powerful in the meta
                 meta_position['power_index'] = (popularity * 0.4 + win_rate * 0.6) 
@@ -791,9 +1079,21 @@ class CardMemory:
                     meta_position['metagame_tier'] = 'D'  # Below average
                 else:
                     meta_position['metagame_tier'] = 'F'  # Weak
+
+            self._calculate_effectiveness_rating(
+                card_key, card_stats=card_stats)
+            self.card_data[card_key] = card_stats
+            self._mutation_version += 1
+            self._invalidate_effectiveness_cache(card_key)
     
-    def save_memory_async(self) -> None:
-        """Save card memory asynchronously in a separate thread."""
-        thread = threading.Thread(target=self.save_all_card_data)
-        thread.daemon = True
-        thread.start()
+    def save_memory_async(self):
+        """Start at most one background save and return its thread."""
+        with self.memory_lock:
+            if self._save_thread is not None and self._save_thread.is_alive():
+                return self._save_thread
+            self._save_thread = threading.Thread(
+                target=self.save_all_card_data,
+                name="card-memory-save",
+                daemon=False)
+            self._save_thread.start()
+            return self._save_thread

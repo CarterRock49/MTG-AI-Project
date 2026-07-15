@@ -326,6 +326,13 @@ inventory, deck/lineage provenance, lifecycle result, and artifact paths. A
 dirty run also stores a hashed `source_worktree.patch` beside the manifest,
 including both tracked changes and untracked files.
 
+Training workers continue to record card and deck outcomes, but adaptive
+history is analytics-only by default: it does not feed evaluator advice back
+into live training decisions. Evaluation uses the same history-free behavior,
+so identical public states do not acquire worker-local meanings over time.
+Recorded history uses canonical archetype labels and each seat's own turn
+count, rather than deck names or the engine's alternating global turn.
+
 > **Checkpoint boundary (Round 7.89 / Observation v3).** The full Standard namespace widened card
 > observations to 436 fields (259 subtype fields plus MDFC fields), signed live
 > power/toughness, and count/stat bounds large enough for legal boards above 20
@@ -389,7 +396,9 @@ including both tracked changes and untracked files.
 > from satisfying the next stage's minimum exposure clock.
 > Observation v3 starts a fresh checkpoint lineage for Round 7.89: snow mana
 > provenance, available-mana totals, land development, strategic resource
-> magnitudes, and win-condition viability now have corrected semantics.
+> magnitudes, win-condition viability, and default evaluator history isolation
+> now have corrected semantics. Targetable vectors also follow the exact live
+> target instruction, and adaptive turn analytics are player-relative.
 > **Do not resume any pre-Round 7.89 checkpoint into this Observation v3
 > lineage, including the failed `reward-v7`, `round-7.85-reward-v8`, or
 > `round-7.86-combat-v4` artifacts.** Start fresh without `--resume`.

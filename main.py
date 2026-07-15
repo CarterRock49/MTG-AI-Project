@@ -1768,7 +1768,7 @@ def build_training_config(args, optuna_params=None):
 def make_masked_mtg_env(decks, card_db, storage_root, *, agent_is_p1=True,
                         alternate_agent_seat=False, subtype_vocab=None,
                         strategy_memory_enabled=False,
-                        adaptive_decision_history_enabled=True,
+                        adaptive_decision_history_enabled=False,
                         reward_discount=AlphaZeroMTGEnv.DEFAULT_REWARD_DISCOUNT,
                         action_reward_scale=
                             AlphaZeroMTGEnv.DEFAULT_ACTION_REWARD_SCALE,
@@ -3986,7 +3986,7 @@ def main():
                 derive_matchup_seed(args.seed, index)
                 for index in range(num_envs)],
             "strategy_memory": "disabled",
-            "training_adaptive_decision_history": True,
+            "training_adaptive_decision_history": False,
             "callback_frequencies_timesteps": {
                 "evaluation": args.eval_freq,
                 "checkpoint": args.checkpoint_freq,

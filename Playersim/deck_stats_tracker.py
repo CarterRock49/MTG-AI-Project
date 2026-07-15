@@ -8,17 +8,54 @@ import time
 import threading
 import re
 import glob
+import tempfile
 from collections import defaultdict, Counter
 from typing import Dict, List, Any, Optional, Tuple, Union
 from enum import Enum
 import math
 # Version information for tracking schema changes
-STATS_VERSION = "3.2.0"  # Deck-seat-normalized prevalence rates
+STATS_VERSION = "3.3.0"  # Player-relative turn analytics
 
 
 def _deck_seat_share(appearances: int, total_games: int) -> float:
     """Probability that a randomly selected deck seat has an appearance."""
     return appearances / (2 * total_games) if total_games else 0.0
+
+
+def _opposing_position(position: "GamePosition") -> "GamePosition":
+    """Translate a board assessment to the other player's perspective."""
+    if position == GamePosition.AHEAD:
+        return GamePosition.BEHIND
+    if position == GamePosition.BEHIND:
+        return GamePosition.AHEAD
+    return GamePosition.PARITY
+
+
+def _player_turn_number(global_turn: Any, went_first: Optional[bool]) -> Optional[int]:
+    """Translate the engine's alternating turn into this seat's turn count."""
+    if went_first is None:
+        return None
+    try:
+        global_turn = int(global_turn)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if global_turn <= 0:
+        return None
+    return ((global_turn + 1) // 2
+            if went_first else global_turn // 2)
+
+
+def _player_turn_history(history: Dict, went_first: Optional[bool]) -> Dict:
+    """Re-key global-turn telemetry by turns received by one player."""
+    if not isinstance(history, dict) or went_first is None:
+        return {}
+    normalized = {}
+    for raw_turn, raw_cards in history.items():
+        player_turn = _player_turn_number(raw_turn, went_first)
+        if not player_turn or not isinstance(raw_cards, (list, tuple, set)):
+            continue
+        normalized.setdefault(player_turn, []).extend(list(raw_cards))
+    return normalized
 
 
 def _finite_card_number(card, attribute: str, default: float = 0.0) -> float:
@@ -108,6 +145,7 @@ class DeckStatsTracker:
         # Set up locks for thread safety
         self.batch_lock = threading.RLock()
         self.lock = threading.RLock()
+        self._io_lock = threading.RLock()
         
         # Initialize cache with default settings
         self.cache = self._create_statistics_cache(max_size=100, ttl=3600)
@@ -234,21 +272,37 @@ class DeckStatsTracker:
         os.makedirs(os.path.join(self.base_path, "cards"), exist_ok=True)
         
     def save(self, path: str, data: Any) -> bool:
-        """Save data to a JSON file"""
-        try:
-            full_path = os.path.join(self.base_path, path)
-            os.makedirs(os.path.dirname(full_path), exist_ok=True)
-            
-            if self.use_compression:
-                with gzip.open(f"{full_path}.gz", 'wt', encoding='utf-8') as f:
-                    json.dump(data, f, indent=2)
-            else:
-                with open(full_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, indent=2)
-            return True
-        except Exception as e:
-            logging.error(f"Error saving data to {path}: {str(e)}")
-            return False
+        """Atomically save data to a JSON file."""
+        temp_path = None
+        with self._io_lock:
+            try:
+                full_path = os.path.join(self.base_path, path)
+                directory = os.path.dirname(full_path)
+                os.makedirs(directory, exist_ok=True)
+                target_path = f"{full_path}.gz" if self.use_compression else full_path
+                fd, temp_path = tempfile.mkstemp(
+                    prefix=os.path.basename(full_path) + "_",
+                    suffix=".tmp", dir=directory)
+                os.close(fd)
+
+                if self.use_compression:
+                    with gzip.open(temp_path, 'wt', encoding='utf-8') as f:
+                        json.dump(data, f, indent=2)
+                else:
+                    with open(temp_path, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, indent=2)
+                os.replace(temp_path, target_path)
+                temp_path = None
+                return True
+            except Exception as e:
+                logging.error(f"Error saving data to {path}: {str(e)}")
+                return False
+            finally:
+                if temp_path:
+                    try:
+                        os.unlink(temp_path)
+                    except OSError:
+                        pass
         
     def validate_and_repair_compressed_files(self, directory: str):
         """
@@ -491,12 +545,9 @@ class DeckStatsTracker:
 
     def _cache_evict_oldest(self) -> None:
         """Evict the oldest entry from the cache (LRU via OrderedDict)"""
-        if self.cache["cache"]:
-             self.cache["cache"].popitem(last=False) # Removes the first (oldest) item
-            
-        oldest_key = min(self.cache["timestamps"], key=self.cache["timestamps"].get)
-        del self.cache["cache"][oldest_key]
-        del self.cache["timestamps"][oldest_key]
+        with self.cache["lock"]:
+            if self.cache["cache"]:
+                self.cache["cache"].popitem(last=False)
         
     def _check_deck_conflict(self, deck_id: str, deck_name: str, card_list: List) -> bool:
         """
@@ -554,7 +605,7 @@ class DeckStatsTracker:
         # Generate the hash (no salt or timestamp)
         fingerprint = hashlib.md5(deck_str.encode()).hexdigest()
         
-        logging.debug(f"Generated fingerprint {fingerprint} for deck with {len(set(card_list))} unique cards" + 
+        logging.debug(f"Generated fingerprint {fingerprint} for deck with {len(items)} unique cards" +
                     (f" (name: {deck_name})" if deck_name else ""))
         
         return fingerprint
@@ -949,8 +1000,12 @@ class DeckStatsTracker:
         # Check numeric fields for valid values
         numeric_fields = ["wins", "losses", "games", "avg_game_length", "draws"]
         for field in numeric_fields:
-            if field in stats and (not isinstance(stats[field], (int, float)) or stats[field] < 0):
-                errors.append(f"Invalid value for {field}: {stats[field]}")
+            if field in stats:
+                value = stats[field]
+                if (isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not math.isfinite(float(value)) or value < 0):
+                    errors.append(f"Invalid value for {field}: {value}")
                 
         # Check consistency
         if "wins" in stats and "losses" in stats and "draws" in stats and "games" in stats:
@@ -987,8 +1042,13 @@ class DeckStatsTracker:
         # Check numeric fields for valid values
         numeric_fields = ["games_played", "wins", "losses", "usage_count", "win_rate"]
         for field in numeric_fields:
-            if field in stats and (not isinstance(stats[field], (int, float)) or (field != "win_rate" and stats[field] < 0)):
-                errors.append(f"Invalid value for {field}: {stats[field]}")
+            if field in stats:
+                value = stats[field]
+                if (isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not math.isfinite(float(value))
+                        or (field != "win_rate" and value < 0)):
+                    errors.append(f"Invalid value for {field}: {value}")
                 
         # Check consistency
         if "wins" in stats and "losses" in stats and "games_played" in stats:
@@ -1954,6 +2014,10 @@ class DeckStatsTracker:
             
             # Validate data types before updating
             update_data = self._validate_stats_types(update_data)
+            outcome_fields = ("wins", "losses", "draws")
+            if any(field in update_data for field in outcome_fields):
+                for field in outcome_fields:
+                    current_stats.setdefault(field, 0)
             
             for key, value in update_data.items():
                 if key == "card_list":
@@ -2018,16 +2082,10 @@ class DeckStatsTracker:
                                 existing_items.add(str(item))
                 else:
                     # For numeric fields, we add; for others, we replace.
-                    if key in ["wins", "losses", "games", "total_turns"]:
+                    if key in ["wins", "losses", "draws", "games", "total_turns"]:
                         current_stats[key] = current_stats.get(key, 0) + value
                     else:
                         current_stats[key] = value
-            
-            # Recalculate derived values.
-            if "wins" in current_stats and "games" in current_stats and current_stats["games"] > 0:
-                current_stats["win_rate"] = current_stats["wins"] / current_stats["games"]
-            if "total_turns" in current_stats and "games" in current_stats and current_stats["games"] > 0:
-                current_stats["avg_game_length"] = current_stats["total_turns"] / current_stats["games"]
             
             # Ensure consistency between total games and sum of outcomes
             if all(k in current_stats for k in ["wins", "losses", "draws"]):
@@ -2035,19 +2093,23 @@ class DeckStatsTracker:
                 if current_stats.get("games", 0) != expected_games:
                     logging.info(f"Fixing inconsistent game count for {deck_key}: {current_stats.get('games', 0)} to {expected_games}")
                     current_stats["games"] = expected_games
-                    # Update win rate with corrected game count
-                    if current_stats["games"] > 0:
-                        current_stats["win_rate"] = (current_stats["wins"] + 0.5 * current_stats["draws"]) / current_stats["games"]
+
+            # Recalculate derived values after outcome reconciliation so draws
+            # contribute half a win and corrected game totals are respected.
+            games = current_stats.get("games", 0)
+            if games > 0:
+                current_stats["win_rate"] = (
+                    current_stats.get("wins", 0)
+                    + 0.5 * current_stats.get("draws", 0)
+                ) / games
+                if "total_turns" in current_stats:
+                    current_stats["avg_game_length"] = (
+                        current_stats["total_turns"] / games)
+            elif "games" in current_stats:
+                current_stats["win_rate"] = 0.0
             
             current_stats["last_updated"] = time.time()
                     
-            if abs(current_stats.get("games", 0) - expected_games) <= 5:
-                current_stats["games"] = expected_games
-                
-                # Update win rate with corrected game count
-                if current_stats["games"] > 0:
-                    current_stats["win_rate"] = (current_stats["wins"] + 0.5 * current_stats.get("draws", 0)) / current_stats["games"]
-            
             # Update cache and batch updates.
             self.cache_set(f"deck:{deck_key}", current_stats)
             self.batch_updates[deck_key] = current_stats
@@ -2125,8 +2187,10 @@ class DeckStatsTracker:
             }
         
         # Try to get from individual card stats first
-        card_file = f"cards/{self._sanitize_filename(card_name)}.json"
-        card_stats = self.load(card_file)
+        card_file = self._card_stats_file(card_name)
+        card_stats = self._individual_card_cache.get(card_file)
+        if card_stats is None:
+            card_stats = self.load(card_file)
         if card_stats:
             return card_stats
         
@@ -2302,7 +2366,15 @@ class DeckStatsTracker:
             
             # Default play order if not provided
             if play_order is None:
-                play_order = {"first_player": "winner" if turn_count % 2 == 1 else "loser"}
+                play_order = {"first_player": "unknown"}
+            first_player = play_order.get("first_player")
+            winner_play_order = (
+                True if first_player == "winner"
+                else False if first_player == "loser" else None)
+            loser_play_order = (
+                True if first_player == "loser"
+                else False if first_player == "winner" else None)
+            loser_game_state = _opposing_position(game_state)
             
             # Record game result
             game_result_success = self.update_meta_with_game_result(
@@ -2330,7 +2402,7 @@ class DeckStatsTracker:
                 mulligan_count=mulligan_data.get("winner", 0),
                 opening_hand=opening_hands.get("winner", []),
                 draw_history=draw_history.get("winner", {}),
-                play_order=play_order.get("first_player") == "winner"
+                play_order=winner_play_order
             )
             
             success_2 = self._update_deck_stats(
@@ -2341,12 +2413,12 @@ class DeckStatsTracker:
                 is_draw=is_draw,
                 turn_count=turn_count,
                 game_stage=game_stage,
-                game_state=game_state,
+                game_state=loser_game_state,
                 deck_name=loser_deck_name,
                 mulligan_count=mulligan_data.get("loser", 0),
                 opening_hand=opening_hands.get("loser", []),
                 draw_history=draw_history.get("loser", {}),
-                play_order=play_order.get("first_player") == "loser"
+                play_order=loser_play_order
             )
             
             # Update card statistics, passing draw information
@@ -2448,7 +2520,8 @@ class DeckStatsTracker:
                             game_stage: GameStage, game_state: GamePosition,
                             deck_name: str = None, is_draw: bool = False,
                             mulligan_count: int = 0, opening_hand: List[int] = None,
-                            draw_history: Dict = None, play_order: bool = True) -> bool:
+                            draw_history: Dict = None,
+                            play_order: Optional[bool] = None) -> bool:
         """
         Update statistics for a deck with enhanced tracking for mulligans and game progression.
         (Removed time.time() update for last_updated)
@@ -2583,7 +2656,9 @@ class DeckStatsTracker:
         else: stats["mulligan_stats"]["avg_mulligans"] = 0.0
 
         # Play order stats
-        play_position = "play_first" if play_order else "play_second"
+        play_position = (
+            "play_first" if play_order is True
+            else "play_second" if play_order is False else "unknown")
         if play_position not in stats["play_order_stats"]: # Ensure sub-dict exists
             stats["play_order_stats"][play_position] = {"games": 0, "wins": 0, "draws": 0}
         stats["play_order_stats"][play_position]["games"] += 1
@@ -2618,7 +2693,9 @@ class DeckStatsTracker:
         # Opening hand stats
         if opening_hand:
             if "opening_hand_stats" not in stats: stats["opening_hand_stats"] = {}
-            for card_id in opening_hand:
+            # Buckets represent deck-seat games containing a card, not the
+            # number of physical copies of that card in one hand.
+            for card_id in set(opening_hand):
                 card_key = str(card_id)
                 if card_key not in stats["opening_hand_stats"]:
                     stats["opening_hand_stats"][card_key] = {"games": 0, "wins": 0, "losses": 0, "draws": 0}
@@ -2627,13 +2704,16 @@ class DeckStatsTracker:
                 elif is_winner: stats["opening_hand_stats"][card_key]["wins"] += 1
                 else: stats["opening_hand_stats"][card_key]["losses"] += 1
 
-        # Draw history stats
-        if draw_history:
+        # Draw history is recorded on the engine's alternating global turn.
+        # Store it against this deck seat's actual turn count.
+        player_draw_history = _player_turn_history(
+            draw_history or {}, play_order)
+        if player_draw_history:
             if "draw_history_stats" not in stats: stats["draw_history_stats"] = {}
-            for turn, cards in draw_history.items():
+            for turn, cards in player_draw_history.items():
                 turn_key = str(turn)
                 if turn_key not in stats["draw_history_stats"]: stats["draw_history_stats"][turn_key] = {}
-                for card_id in cards:
+                for card_id in set(cards):
                     card_key = str(card_id)
                     if card_key not in stats["draw_history_stats"][turn_key]:
                         stats["draw_history_stats"][turn_key][card_key] = {"games": 0, "wins": 0, "losses": 0, "draws": 0}
@@ -2695,11 +2775,20 @@ class DeckStatsTracker:
         
         if play_order is None:
             play_order = {"first_player": "unknown"}
+        first_player = play_order.get("first_player")
+        winner_went_first = (
+            True if first_player == "winner"
+            else False if first_player == "loser" else None)
+        loser_went_first = (
+            True if first_player == "loser"
+            else False if first_player == "winner" else None)
+        loser_game_state = _opposing_position(game_state)
             
         # Process cards for winner deck
         first_played = cards_played.get(0, [])
         first_opening_hand = opening_hands.get("winner", [])
-        first_draw_history = draw_history.get("winner", {})
+        first_draw_history = _player_turn_history(
+            draw_history.get("winner", {}), winner_went_first)
         
         # Track when cards were played (by turn)
         first_play_history = {}
@@ -2708,14 +2797,10 @@ class DeckStatsTracker:
             # Triage fix (July 2026): use the REAL turns recorded by
             # gs.track_card_played. The CMC estimate below fabricated curve
             # data (every 6-drop "played on turn 6").
-            first_play_history = {int(t): list(ids) for t, ids in real_winner_history.items()}
-        else:
-            # Fallback for older callers without play tracking: CMC estimate.
-            for card_id in first_played:
-                card = self.card_db.get(card_id)
-                if card and hasattr(card, 'cmc'):
-                    estimated_turn = max(1, min(int(card.cmc), 20))
-                    first_play_history.setdefault(estimated_turn, []).append(card_id)
+            first_play_history = _player_turn_history(
+                real_winner_history, winner_went_first)
+        # Missing telemetry stays unknown. Inferring the play turn from mana
+        # value makes every card look as though it was cast perfectly on curve.
         
         # Update card performances for winner deck
         for card_entry in winner_composition:
@@ -2868,7 +2953,11 @@ class DeckStatsTracker:
                     name_perf["performance_by_position"][position_key]["wins"] += 1
                 
                 # Track play order performance
-                play_position = "play_first" if play_order.get("first_player") == "winner" else "play_second"
+                first_player = play_order.get("first_player")
+                play_position = (
+                    "play_first" if first_player == "winner"
+                    else "play_second" if first_player == "loser"
+                    else "unknown")
                 if play_position not in card_perf["play_order_performance"]:
                     card_perf["play_order_performance"][play_position] = {"wins": 0, "losses": 0, "draws": 0, "played": 0}
                 
@@ -3100,27 +3189,23 @@ class DeckStatsTracker:
                 "win_rate": 0.5 if is_draw else 1.0,
                 "game_stage": game_stage.value,
                 "game_state": game_state.value,
-                "deck_archetype": winner_stats.get("archetype", "unknown"),
-                "play_position": play_order.get("first_player") == "winner"
+                "deck_archetype": winner_stats.get("archetype", "unknown")
             })
 
         # Process cards for loser deck (similar logic as above)
         second_played = cards_played.get(1, [])
         second_opening_hand = opening_hands.get("loser", [])
-        second_draw_history = draw_history.get("loser", {})
+        second_draw_history = _player_turn_history(
+            draw_history.get("loser", {}), loser_went_first)
         
         # Track when cards were played (by turn)
         second_play_history = {}
         real_loser_history = (play_history or {}).get("loser") or {}
         if real_loser_history:
             # Real turns (see winner-side comment).
-            second_play_history = {int(t): list(ids) for t, ids in real_loser_history.items()}
-        else:
-            for card_id in second_played:
-                card = self.card_db.get(card_id)
-                if card and hasattr(card, 'cmc'):
-                    estimated_turn = max(1, min(int(card.cmc), 20))
-                    second_play_history.setdefault(estimated_turn, []).append(card_id)
+            second_play_history = _player_turn_history(
+                real_loser_history, loser_went_first)
+        # Missing telemetry stays unknown; see the winner-side comment.
         
         # Update card performances for loser deck
         for card_entry in loser_composition:
@@ -3251,13 +3336,8 @@ class DeckStatsTracker:
                 else:
                     name_perf["performance_by_stage"][stage_key]["losses"] += 1  # Loss for loser
                 
-                # Track performance by game state/position
-                # Invert game state for loser's perspective
-                position_key = GamePosition.BEHIND.value
-                if game_state == GamePosition.BEHIND:
-                    position_key = GamePosition.AHEAD.value
-                elif game_state == GamePosition.PARITY:
-                    position_key = GamePosition.PARITY.value
+                # Track performance from the loser's own perspective.
+                position_key = loser_game_state.value
                     
                 if position_key not in card_perf["performance_by_position"]:
                     card_perf["performance_by_position"][position_key] = {"wins": 0, "losses": 0, "draws": 0, "played": 0}
@@ -3279,7 +3359,11 @@ class DeckStatsTracker:
                     name_perf["performance_by_position"][position_key]["losses"] += 1  # Loss for loser
                 
                 # Track play order performance
-                play_position = "play_first" if play_order.get("first_player") == "loser" else "play_second"
+                first_player = play_order.get("first_player")
+                play_position = (
+                    "play_first" if first_player == "loser"
+                    else "play_second" if first_player == "winner"
+                    else "unknown")
                 if play_position not in card_perf["play_order_performance"]:
                     card_perf["play_order_performance"][play_position] = {"wins": 0, "losses": 0, "draws": 0, "played": 0}
                 
@@ -3498,9 +3582,8 @@ class DeckStatsTracker:
                 "usage_count": 1 if was_played else 0,
                 "win_rate": 0.5 if is_draw else 0.0,
                 "game_stage": game_stage.value,
-                "game_state": game_state.value,
-                "deck_archetype": loser_stats.get("archetype", "unknown"),
-                "play_position": play_order.get("first_player") == "loser"
+                "game_state": loser_game_state.value,
+                "deck_archetype": loser_stats.get("archetype", "unknown")
             })
         
         # Save updated stats
@@ -3528,7 +3611,7 @@ class DeckStatsTracker:
             return False
 
         # Create file path
-        card_file = f"cards/{self._sanitize_filename(card_name)}.json"
+        card_file = self._card_stats_file(card_name)
 
         # Keep the working copy in memory. A Standard game touches dozens of
         # unique cards, so loading and rewriting one gzip per card per episode
@@ -3869,8 +3952,10 @@ class DeckStatsTracker:
         
         # Check individual card stats first
         if card_name:
-            card_file = f"cards/{self._sanitize_filename(card_name)}.json"
-            card_stats = self.load(card_file)
+            card_file = self._card_stats_file(card_name)
+            card_stats = self._individual_card_cache.get(card_file)
+            if card_stats is None:
+                card_stats = self.load(card_file)
             if card_stats:
                 return {
                     "win_rate": card_stats.get("win_rate", 0),
@@ -3942,7 +4027,24 @@ class DeckStatsTracker:
         max_length = 50  # Maximum reasonable filename length
         if len(sanitized) > max_length:
             sanitized = sanitized[:max_length]
-        return sanitized
+        return sanitized or "card"
+
+    def _card_stats_file(self, card_name: str) -> str:
+        """Return a backward-compatible, collision-safe card aggregate path."""
+        base = self._sanitize_filename(card_name)
+        legacy_path = f"cards/{base}.json"
+        existing = self._individual_card_cache.get(legacy_path)
+        if existing is None:
+            existing = self.load(legacy_path)
+        if (not existing
+                or str(existing.get("name", "")).casefold()
+                == str(card_name).casefold()):
+            return legacy_path
+
+        # Sanitization removes punctuation and truncates long names, so two
+        # distinct cards can otherwise share one file and aggregate identity.
+        digest = hashlib.sha256(str(card_name).encode("utf-8")).hexdigest()[:12]
+        return f"cards/{base[:37]}_{digest}.json"
     
     def _get_all_deck_files(self) -> List[str]:
         """Get all deck JSON files from storage"""
@@ -4081,19 +4183,32 @@ class DeckStatsTracker:
         """
         deck_success = False
         try:
-            # Use run_until_complete to run the async method
-            loop = asyncio.get_event_loop()
-            deck_success = loop.run_until_complete(self.save_batch_updates())
-        except RuntimeError:
-            # If no event loop exists, create a new one
             try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                deck_success = loop.run_until_complete(
-                    self.save_batch_updates())
-            except Exception as e:
-                logging.error(f"Error saving updates synchronously (no event loop): {e}")
-                return False
+                asyncio.get_running_loop()
+            except RuntimeError:
+                deck_success = asyncio.run(self.save_batch_updates())
+            else:
+                # A loop cannot be nested in the same thread. Direct notebook
+                # and async-service callers still need this synchronous flush,
+                # so run the coroutine to completion in a short-lived worker.
+                result = {}
+
+                def _run_batch_save():
+                    try:
+                        result["value"] = asyncio.run(
+                            self.save_batch_updates())
+                    except Exception as error:
+                        result["error"] = error
+
+                worker = threading.Thread(
+                    target=_run_batch_save,
+                    name="deck-stats-sync-save",
+                    daemon=False)
+                worker.start()
+                worker.join()
+                if "error" in result:
+                    raise result["error"]
+                deck_success = bool(result.get("value", False))
         except Exception as e:
             logging.error(f"Error saving updates synchronously: {e}")
             return False

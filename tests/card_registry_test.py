@@ -287,7 +287,7 @@ class LineageIdentityTest(SubtypeVocabGuard):
             lineage["observation_schema"]["schema_version"], 3)
         self.assertEqual(
             lineage["observation_schema"]["sha256"],
-            "73b7e83d99664b65c4fbdbcbc4a1fba4a8cf26576d6f66e3e9548306a5865487")
+            "6e29a94e3443881681afd794185f061133f24ff72350a7df27f48524f00d4137")
         self.assertIn(
             "multi_turn_plan_uses_live_spendable_mana",
             CORRECTED_V3_SEMANTICS)

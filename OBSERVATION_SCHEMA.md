@@ -3,7 +3,7 @@
 Current contract: **Observation v3**, frozen July 15, 2026.
 
 Current schema hash:
-`73b7e83d99664b65c4fbdbcbc4a1fba4a8cf26576d6f66e3e9548306a5865487`.
+`6e29a94e3443881681afd794185f061133f24ff72350a7df27f48524f00d4137`.
 
 The executable version and hash live in
 `Playersim/observation_schema.py`. Training, fixture Harvest, and production
@@ -240,9 +240,23 @@ Strategy memory remains available as an explicitly enabled, deterministic
 advisory/diagnostic subsystem. It is disabled by default, uses isolated
 per-environment versioned storage, and never enters the policy observation.
 
+Card-memory and deck-statistics outcomes are still recorded by every worker,
+but their adaptive evaluator inputs are disabled by default. This keeps equal
+public states stationary across workers and keeps training aligned with the
+history-free evaluation environment. Adaptive history remains an explicit
+opt-in diagnostic mode and is not part of the default policy contract. Its
+play and optimal-turn statistics use turns received by the relevant player,
+not the engine's alternating global turn number.
+
 The remaining derived planner and advantage fields are deterministic,
 observer-information-only summaries. They remain until policy ablation gives
 evidence that removing them is safe.
+
+During target selection, every targetable observation vector is derived from
+the active instruction's required type and effect text, including modal and
+multi-instruction spells. It therefore describes the same candidates bound to
+the current target-selection actions rather than all targets mentioned on the
+printed card.
 
 ## Compatibility rule
 

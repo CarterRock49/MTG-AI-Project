@@ -95,6 +95,9 @@ CORRECTED_V3_SEMANTICS = (
     "strategic_resource_advantages_preserve_magnitude",
     "win_condition_viability_excludes_nonviable_paths",
     "turn_vs_mana_uses_observer_turns_received",
+    "default_evaluator_advice_excludes_adaptive_history",
+    "adaptive_history_uses_player_relative_turns",
+    "targetable_vectors_match_active_target_instruction",
 )
 
 

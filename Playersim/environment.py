@@ -61,7 +61,7 @@ class AlphaZeroMTGEnv(gym.Env):
                  state_potential_scale=DEFAULT_STATE_POTENTIAL_SCALE,
                  curriculum=None, opponent_profile="scripted",
                  matchup_seed=None,
-                 adaptive_decision_history_enabled=True,
+                 adaptive_decision_history_enabled=False,
                  stats_persistence_interval_games=1):
         logging.info("Initializing AlphaZeroMTGEnv...")
         super().__init__()
@@ -963,16 +963,19 @@ class AlphaZeroMTGEnv(gym.Env):
             gs.terminal_reason = self._terminal_reason(
                 {"game_result": self._game_result})
 
+        # Shared by the aggregate and card-memory writers. Keeping these
+        # outside either optional subsystem also lets CardMemory operate when
+        # aggregate statistics are unavailable.
+        original_p1_deck = getattr(self, 'original_p1_deck', [])
+        original_p2_deck = getattr(self, 'original_p2_deck', [])
+        p1_name = getattr(self, 'current_deck_name_p1', "Unknown_P1")
+        p2_name = getattr(self, 'current_deck_name_p2', "Unknown_P2")
+        p1_archetype = self._stats_archetype_label(original_p1_deck)
+        p2_archetype = self._stats_archetype_label(original_p2_deck)
+
         # --- Record the game result ---
         if self.has_stats_tracker and self.stats_tracker:
             try:
-                # --- ADDED: Robust determination of decks and names ---
-                # Use original decks stored at reset, default to empty list if missing
-                original_p1_deck = getattr(self, 'original_p1_deck', [])
-                original_p2_deck = getattr(self, 'original_p2_deck', [])
-                p1_name = getattr(self, 'current_deck_name_p1', "Unknown_P1")
-                p2_name = getattr(self, 'current_deck_name_p2', "Unknown_P2")
-
                 # Prepare arguments based on win/loss/draw
                 if is_draw:
                     winner_deck_list, loser_deck_list = original_p1_deck, original_p2_deck
@@ -1006,6 +1009,12 @@ class AlphaZeroMTGEnv(gym.Env):
                     opening_hands=_opening_mapped,
                     draw_history=_draws_mapped,
                     mulligan_data=_mulligans_mapped,
+                    # GameState always designates P1 as the starting player.
+                    # Winner/loser slots above may swap P1 and P2.
+                    play_order={
+                        "first_player": "winner"
+                        if (is_draw or is_p1_winner) else "loser"
+                    },
                     is_draw=is_draw
                 )
                 self._game_result_recorded = True
@@ -1019,17 +1028,15 @@ class AlphaZeroMTGEnv(gym.Env):
                 if is_draw:
                     p1_deck_list_mem = getattr(self, 'original_p1_deck', [])
                     p2_deck_list_mem = getattr(self, 'original_p2_deck', [])
-                    p1_name_mem = self.current_deck_name_p1
-                    p2_name_mem = self.current_deck_name_p2
                     self._record_cards_to_memory(p1_deck_list_mem, p2_deck_list_mem, getattr(gs, 'cards_played', {0: [], 1: []}), gs.turn,
-                                           p1_name_mem, p2_name_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), getattr(gs, 'play_history', {}), is_draw=True, is_win=False, player_idx=0) # P1 perspective
+                                           p1_archetype, p2_archetype, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), getattr(gs, 'play_history', {}), is_draw=True, is_win=False, player_idx=0) # P1 perspective
                     self._record_cards_to_memory(p2_deck_list_mem, p1_deck_list_mem, getattr(gs, 'cards_played', {0: [], 1: []}), gs.turn,
-                                           p2_name_mem, p1_name_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), getattr(gs, 'play_history', {}), is_draw=True, is_win=False, player_idx=1) # P2 perspective
+                                           p2_archetype, p1_archetype, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), getattr(gs, 'play_history', {}), is_draw=True, is_win=False, player_idx=1) # P2 perspective
                 else:
                     winner_deck_list_mem = original_p1_deck if is_p1_winner else original_p2_deck
                     loser_deck_list_mem = original_p2_deck if is_p1_winner else original_p1_deck
-                    winner_archetype_mem = p1_name if is_p1_winner else p2_name
-                    loser_archetype_mem = p2_name if is_p1_winner else p1_name
+                    winner_archetype_mem = p1_archetype if is_p1_winner else p2_archetype
+                    loser_archetype_mem = p2_archetype if is_p1_winner else p1_archetype
                     winner_idx = 0 if is_p1_winner else 1
                     loser_idx = 1 - winner_idx
                     self._record_cards_to_memory(winner_deck_list_mem, loser_deck_list_mem, getattr(gs, 'cards_played', {0: [], 1: []}), gs.turn,
@@ -1311,6 +1318,32 @@ class AlphaZeroMTGEnv(gym.Env):
         # No progression was forced
         return False
     
+    def _stats_archetype_label(self, deck):
+        """Return the canonical analytics archetype for a deck."""
+        identifier = getattr(
+            getattr(self, 'stats_tracker', None), 'identify_archetype', None)
+        if not callable(identifier):
+            return "unknown"
+        try:
+            label = identifier(list(deck or []))
+        except Exception as error:
+            logging.warning("Could not identify deck archetype: %s", error)
+            return "unknown"
+        label = getattr(label, 'value', label)
+        return str(label or "unknown").strip().lower() or "unknown"
+
+    @staticmethod
+    def _player_turn_number(global_turn, player_idx):
+        """Translate global alternating turns to a player's received turns."""
+        try:
+            global_turn = int(global_turn)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+        if global_turn <= 0 or player_idx not in (0, 1):
+            return 0
+        return ((global_turn + 1) // 2
+                if player_idx == 0 else global_turn // 2)
+
     def _stats_result_mapped(self, gs, is_p1_winner):
         """Map p1/p2-indexed play data into winner/loser order for the stats
         tracker, which reads cards_played index 0 as the WINNER.
@@ -1335,18 +1368,23 @@ class AlphaZeroMTGEnv(gym.Env):
         openings = getattr(gs, 'opening_hands', {}) or {}
         draws = getattr(gs, 'draw_history', {}) or {}
         mulligans = getattr(gs, 'mulligan_data', {}) or {}
+        canonical = getattr(gs, 'canonical_card_id', lambda card_id: card_id)
         return (
             {
-                'winner': list(openings.get(winner_key, [])),
-                'loser': list(openings.get(loser_key, [])),
+                'winner': [
+                    canonical(card_id)
+                    for card_id in openings.get(winner_key, [])],
+                'loser': [
+                    canonical(card_id)
+                    for card_id in openings.get(loser_key, [])],
             },
             {
                 'winner': {
-                    int(turn): list(cards)
+                    int(turn): [canonical(card_id) for card_id in cards]
                     for turn, cards in draws.get(winner_key, {}).items()
                 },
                 'loser': {
-                    int(turn): list(cards)
+                    int(turn): [canonical(card_id) for card_id in cards]
                     for turn, cards in draws.get(loser_key, {}).items()
                 },
             },
@@ -1382,8 +1420,11 @@ class AlphaZeroMTGEnv(gym.Env):
 
             player_turn_played = {}
             for turn, cards in player_plays.items():
+                player_turn = self._player_turn_number(turn, player_idx)
+                if player_turn <= 0:
+                    continue
                 for card_id in cards:
-                    player_turn_played.setdefault(card_id, int(turn))
+                    player_turn_played.setdefault(card_id, player_turn)
 
             for card_id in set(canonical(card_id) for card_id in player_deck):
                 card = self.game_state._safe_get_card(card_id)
@@ -3444,6 +3485,7 @@ class AlphaZeroMTGEnv(gym.Env):
                     opening_hands=opening_hands,
                     draw_history=draw_history,
                     mulligan_data=mulligan_data,
+                    play_order={"first_player": "winner"},
                     game_stage=game_stage,
                     is_draw=True
                 )
@@ -3482,6 +3524,10 @@ class AlphaZeroMTGEnv(gym.Env):
                     opening_hands=opening_hands,
                     draw_history=draw_history,
                     mulligan_data=mulligan_data,
+                    play_order={
+                        "first_player": "winner"
+                        if winner_is_p1 else "loser"
+                    },
                     game_stage=game_stage,
                     is_draw=False
                 )
@@ -4340,31 +4386,40 @@ class AlphaZeroMTGEnv(gym.Env):
 
         # Only populate if targeting context is relevant
         if gs.phase == gs.PHASE_TARGETING and gs.targeting_context:
-            source_id = gs.targeting_context["source_id"]
-            controller = gs.targeting_context["controller"]
-            if controller == agent_player_obj: # Only show targets if it's agent's turn to target
-                valid_targets_map = {}
-                if gs.targeting_system:
-                     valid_targets_map = gs.targeting_system.get_valid_targets(source_id, controller)
-                else: logging.warning("Targeting system unavailable in _get_potential_targets")
+            context = gs.targeting_context
+            source_id = context.get("source_id")
+            controller = context.get("controller")
+            if controller is agent_player_obj: # Only show targets if it's agent's turn to target
+                candidate_ids = set()
+                if (gs.targeting_system
+                        and getattr(self, "action_handler", None)):
+                    candidate_ids.update(
+                        self.action_handler._get_target_selection_candidates(
+                            controller, context))
+                elif gs.targeting_system:
+                    valid_targets_map = gs.targeting_system.get_valid_targets(
+                        source_id, controller,
+                        context.get("required_type", "target"),
+                        effect_text=context.get("effect_text"))
+                    candidate_ids.update(
+                        target_id
+                        for targets in valid_targets_map.values()
+                        for target_id in targets)
+                else:
+                    logging.warning(
+                        "Targeting system unavailable in _get_potential_targets")
 
                 target_indices = []
                 if target_kind == 'permanent':
-                    valid_ids = set()
-                    for cat in ["creature", "artifact", "enchantment",
-                                "land", "planeswalker", "battle",
-                                "permanent"]:
-                        valid_ids.update(valid_targets_map.get(cat, []))
                     flattened_battlefield = (
                         list(agent_player_obj.get("battlefield", []))
                         + list(opponent_player_obj.get("battlefield", [])))
                     target_indices = [
                         index for index, card_id in
                         enumerate(flattened_battlefield)
-                        if card_id in valid_ids]
+                        if card_id in candidate_ids]
                 elif target_kind == 'player':
-                    valid_players = valid_targets_map.get("player", [])
-                    for target_name in valid_players:
+                    for target_name in candidate_ids:
                         target_player = (
                             gs.p1 if target_name == "p1" else
                             gs.p2 if target_name == "p2" else None)
@@ -4372,20 +4427,19 @@ class AlphaZeroMTGEnv(gym.Env):
                             target_indices.append(
                                 0 if target_player is agent_player_obj else 1)
                 elif target_kind == 'spell':
-                    valid_spells = set(valid_targets_map.get("spell", []))
                     target_indices = [
                         stack_index for stack_index, item in enumerate(gs.stack)
                         if (isinstance(item, tuple) and len(item) > 3
-                            and item[0] == "SPELL" and item[1] in valid_spells)]
+                            and item[0] == "SPELL"
+                            and item[1] in candidate_ids)]
                 elif target_kind == 'graveyard_card':
-                    valid_cards = set(valid_targets_map.get("card", []))
                     flattened_graveyards = (
                         list(agent_player_obj.get("graveyard", []))
                         + list(opponent_player_obj.get("graveyard", [])))
                     target_indices = [
                         index for index, card_id in
                         enumerate(flattened_graveyards)
-                        if card_id in valid_cards]
+                        if card_id in candidate_ids]
 
         # Encode public indices in canonical observer-relative order. Targeting
         # systems may return players or cards in seat/insertion order.

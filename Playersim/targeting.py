@@ -35,6 +35,11 @@ class TargetingSystem:
     (Moved from ability_handler.py)
     """
 
+    _PERMANENT_CARD_TYPES = frozenset({
+        "artifact", "battle", "creature", "enchantment", "land",
+        "planeswalker",
+    })
+
     def __init__(self, game_state):
         self.game_state = game_state
         # Add reference to ability_handler if needed for centralized keyword checks
@@ -83,11 +88,12 @@ class TargetingSystem:
             return {}
 
         oracle_text = (effect_text or getattr(card, "oracle_text", "")).lower()
-        opponent = gs.p2 if controller == gs.p1 else gs.p1
+        opponent = gs.p2 if controller is gs.p1 else gs.p1
 
         valid_targets = {
             "creature": [], "player": [], "permanent": [], "spell": [],
             "land": [], "artifact": [], "enchantment": [], "planeswalker": [],
+            "battle": [],
             "artifact_or_enchantment": [],
             "creature_or_vehicle": [], "creature_or_spell": [],
             "spell_or_permanent": [],
@@ -108,8 +114,18 @@ class TargetingSystem:
             target_requirements.append({"type": "target"}) # Generic target
 
         # Filter requirements if a specific target type is requested
-        if target_type:
-            target_requirements = [req for req in target_requirements if req.get("type") == target_type or req.get("type") in ["any", "target"]]
+        if target_type and target_type not in {"target", "any"}:
+            normalized_target_type = str(target_type).lower()
+            target_requirements = [
+                req for req in target_requirements
+                if req.get("type") == target_type
+                or req.get("type") in ["any", "target"]
+                or self._card_restriction_accepts_requested_type(
+                    req.get("card_type_restriction"),
+                    normalized_target_type)
+                or str(req.get("subtype_restriction", "")).lower()
+                == normalized_target_type
+            ]
             if not target_requirements: return {} # No matching requirement for requested type
 
         # Define potential target sources
@@ -118,7 +134,7 @@ class TargetingSystem:
             ("p1", gs.p1, "player"),
             ("p2", gs.p2, "player"),
             # Battlefield
-            *[(perm_id, gs.get_card_controller(perm_id), "battlefield") for player in [gs.p1, gs.p2] for perm_id in player.get("battlefield", [])],
+            *[(perm_id, player, "battlefield") for player in [gs.p1, gs.p2] for perm_id in player.get("battlefield", [])],
             # Stack (Spells and Abilities)
             *[(item[1], item[2], "stack") for item in gs.stack if isinstance(item, tuple) and len(item) >= 3],
             # Graveyards
@@ -181,13 +197,15 @@ class TargetingSystem:
                     actual_types = set()
                     if isinstance(target_object, Card):
                         actual_types.update(getattr(target_object, 'card_types', []))
-                        if 'creature' in actual_types: primary_cat = 'creature'
+                        if current_zone in {'graveyard', 'exile', 'library'}:
+                            primary_cat = 'card'
+                        elif 'creature' in actual_types: primary_cat = 'creature'
                         elif 'land' in actual_types: primary_cat = 'land'
                         elif 'planeswalker' in actual_types: primary_cat = 'planeswalker'
+                        elif 'battle' in actual_types: primary_cat = 'battle'
                         elif 'artifact' in actual_types: primary_cat = 'artifact'
                         elif 'enchantment' in actual_types: primary_cat = 'enchantment'
                         elif current_zone == 'stack': primary_cat = 'spell'
-                        elif current_zone == 'graveyard' or current_zone == 'exile': primary_cat = 'card'
                     elif current_zone == 'player': primary_cat = 'player'
                     elif current_zone == 'stack' and isinstance(target_object, tuple):
                         primary_cat = (
@@ -235,7 +253,8 @@ class TargetingSystem:
         """
         return self.resolve_targeting(card_id, controller, ability_text)
 
-    def resolve_targeting_for_spell(self, spell_id, controller):
+    def resolve_targeting_for_spell(self, spell_id, controller,
+                                    effect_text=None):
         """
         Handle targeting for a spell using the unified targeting system.
 
@@ -246,7 +265,64 @@ class TargetingSystem:
         Returns:
             dict: Selected targets or None if targeting failed
         """
-        return self.resolve_targeting(spell_id, controller)
+        return self.resolve_targeting(spell_id, controller, effect_text)
+
+    def _live_characteristic(self, card, characteristic, default=None,
+                             *, use_layers=True):
+        """Read a battlefield object's current layered characteristic."""
+        if card is None:
+            return default
+        card_id = getattr(card, "card_id", None)
+        layer_system = getattr(self.game_state, "layer_system", None)
+        if use_layers and card_id is not None and layer_system:
+            value = layer_system.get_characteristic(card_id, characteristic)
+            if value is not None:
+                return value
+        return getattr(card, characteristic, default)
+
+    @staticmethod
+    def _normalized_values(values):
+        return {str(value).lower() for value in (values or [])}
+
+    @staticmethod
+    def _card_type_restriction_options(restriction):
+        if not restriction:
+            return set()
+        if isinstance(restriction, (list, tuple, set, frozenset)):
+            return {str(value).strip().lower() for value in restriction}
+        return {
+            value.strip().lower()
+            for value in re.split(r"\s+or\s+", str(restriction))
+            if value.strip()
+        }
+
+    @classmethod
+    def _card_restriction_accepts_requested_type(
+            cls, restriction, requested_type):
+        options = cls._card_type_restriction_options(restriction)
+        if requested_type in options:
+            return True
+        if requested_type != "permanent" or not options:
+            return False
+        return all(
+            option in cls._PERMANENT_CARD_TYPES
+            or option in {"permanent", "nonland permanent"}
+            for option in options)
+
+    @staticmethod
+    def _matches_numeric_restriction(value, restriction):
+        """Compare a numeric characteristic, failing closed on symbols/None."""
+        try:
+            numeric_value = float(value)
+            threshold = float(restriction["value"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        comparison = restriction.get("comparison", "exactly")
+        if comparison == "greater":
+            return numeric_value >= threshold
+        if comparison == "less":
+            return numeric_value <= threshold
+        return numeric_value == threshold
 
     def _is_valid_target(self, source_id, target_id, caster, target_info, requirement):
         """Unified check for any target type."""
@@ -255,6 +331,9 @@ class TargetingSystem:
         target_obj, target_owner, target_zone = target_info # Expect target_info=(obj, owner, zone)
 
         if not target_obj: return False
+        if (target_zone == "battlefield"
+                and target_id in getattr(gs, "phased_out", set())):
+            return False
 
         # 1. Zone Check. Magic distinguishes a permanent from a spell with
         # permanent-card types: an object with ``creature`` in its types is a
@@ -300,32 +379,43 @@ class TargetingSystem:
 
         # 2. Type Check
         actual_types = set()
+        characteristic_card = None
         if isinstance(target_obj, dict) and target_id in ["p1", "p2"]: # Player target
             actual_types.add("player")
             # Also check owner relationship for player targets
-            if requirement.get("opponent_only") and target_obj == caster: return False
-            if requirement.get("controller_is_caster") and target_obj != caster: return False # Target self only
+            if requirement.get("opponent_only") and target_obj is caster: return False
+            if requirement.get("controller_is_caster") and target_obj is not caster: return False # Target self only
         elif isinstance(target_obj, Card): # Card object
-            actual_types.update(getattr(target_obj, 'card_types', []))
-            actual_types.update(getattr(target_obj, 'subtypes', []))
+            characteristic_card = target_obj
+            actual_types.update(self._normalized_values(
+                self._live_characteristic(
+                    target_obj, 'card_types', [],
+                    use_layers=target_zone == "battlefield")))
+            actual_types.update(self._normalized_values(
+                self._live_characteristic(
+                    target_obj, 'subtypes', [],
+                    use_layers=target_zone == "battlefield")))
         elif isinstance(target_obj, tuple): # Stack item (Spell/Ability/Trigger)
              item_type = target_obj[0]
              if item_type == "SPELL":
                   actual_types.add("spell")
                   spell_card = gs._safe_get_card(target_obj[1])
                   if spell_card:
-                       actual_types.update(getattr(spell_card, 'card_types', []))
+                       characteristic_card = spell_card
+                       actual_types.update(self._normalized_values(
+                           getattr(spell_card, 'card_types', [])))
              elif item_type == "ABILITY": actual_types.add("ability")
              elif item_type == "TRIGGER": actual_types.add("ability"); actual_types.add("triggered") # Allow target triggered ability
 
         # Check against required type
         valid_type = False
         if target_type == "target": valid_type = True # Generic "target" - skip specific type check initially
-        elif target_type == "any": # Creature, Player, Planeswalker
-             valid_type = any(t in actual_types for t in ["creature", "player", "planeswalker"])
+        elif target_type == "any": # Creature, player, planeswalker, or battle
+             valid_type = any(t in actual_types for t in [
+                 "creature", "player", "planeswalker", "battle"])
         elif target_type == "card" and isinstance(target_obj, Card): valid_type = True # Targeting a card in specific zone
         elif target_type in actual_types: valid_type = True
-        elif target_type == "permanent" and any(t in actual_types for t in ["creature", "artifact", "enchantment", "land", "planeswalker"]): valid_type = True
+        elif target_type == "permanent" and any(t in actual_types for t in ["creature", "artifact", "enchantment", "land", "planeswalker", "battle"]): valid_type = True
         elif target_type == "artifact_or_enchantment":
              valid_type = bool({"artifact", "enchantment"}.intersection(actual_types))
         elif target_type == "creature_or_vehicle":
@@ -349,6 +439,25 @@ class TargetingSystem:
         allowed_types = set(requirement.get("allowed_types", []))
         if allowed_types and not allowed_types.intersection(actual_types):
             return False
+        card_type_options = self._card_type_restriction_options(
+            requirement.get("card_type_restriction"))
+        if card_type_options:
+            type_matches = False
+            for card_type_option in card_type_options:
+                if card_type_option == "permanent":
+                    type_matches = bool(
+                        self._PERMANENT_CARD_TYPES.intersection(actual_types))
+                elif card_type_option == "nonland permanent":
+                    type_matches = (
+                        "land" not in actual_types
+                        and bool(self._PERMANENT_CARD_TYPES.intersection(
+                            actual_types)))
+                else:
+                    type_matches = card_type_option in actual_types
+                if type_matches:
+                    break
+            if not type_matches:
+                return False
         if (requirement.get("controller_is_caster")
                 and target_owner is not caster):
             return False
@@ -364,7 +473,7 @@ class TargetingSystem:
                   # --- ADDED: Player Protection Checks ---
                   # Assumes _check_keyword can delegate to GS for player checks
                   # Check for hexproof (granted by effects like Leyline of Sanctity)
-                  if caster != target_owner and self._check_keyword(target_obj, "hexproof"):
+                  if caster is not target_owner and self._check_keyword(target_obj, "hexproof"):
                        logging.debug(f"Targeting failed: Player {target_id} has hexproof from opponent.")
                        return False
                   # Check for shroud (less common on players, but possible)
@@ -374,7 +483,7 @@ class TargetingSystem:
                   # --- END ADDED ---
              elif isinstance(target_obj, Card): # Permanent or Spell
                  target_card_id = getattr(target_obj, 'card_id', None)
-                 if not target_card_id: return False # Need ID to check keywords centrally
+                 if target_card_id is None: return False # Need ID to check keywords centrally
 
                  # Protection
                  if self._has_protection_from(target_obj, source_card, target_owner, caster): return False
@@ -385,7 +494,7 @@ class TargetingSystem:
                      and hasattr(live_handler, "suppresses_target_protection")
                      and live_handler.suppresses_target_protection(
                          caster, target_card_id, "hexproof"))
-                 if (caster != target_owner
+                 if (caster is not target_owner
                          and self._check_keyword(target_obj, "hexproof")
                          and not ignores_hexproof):
                      return False
@@ -396,12 +505,15 @@ class TargetingSystem:
         # 4. Specific Requirement Checks (applies mostly to battlefield permanents)
         if target_zone == "battlefield" and isinstance(target_obj, Card):
             # Owner/Controller
-            if requirement.get("controller_is_caster") and target_owner != caster: return False
-            if requirement.get("controller_is_opponent") and target_owner == caster: return False
+            if requirement.get("controller_is_caster") and target_owner is not caster: return False
+            if requirement.get("controller_is_opponent") and target_owner is caster: return False
 
             # Exclusions
             if requirement.get("exclude_land") and 'land' in actual_types: return False
             if requirement.get("exclude_creature") and 'creature' in actual_types: return False
+            if requirement.get("exclude_artifact") and 'artifact' in actual_types: return False
+            if requirement.get("exclude_enchantment") and 'enchantment' in actual_types: return False
+            if requirement.get("exclude_token") and getattr(target_obj, 'is_token', False): return False
             if requirement.get("exclude_color") and self._has_color(target_obj, requirement["exclude_color"]): return False
             excluded_subtypes = {
                 str(subtype).lower()
@@ -414,8 +526,11 @@ class TargetingSystem:
             # Inclusions
             if requirement.get("must_be_artifact") and 'artifact' not in actual_types: return False
             if requirement.get("must_be_aura") and 'aura' not in actual_types: return False
-            if requirement.get("must_be_basic") and 'basic' not in getattr(target_obj,'type_line',''): return False
-            if requirement.get("must_be_nonbasic") and 'basic' in getattr(target_obj,'type_line',''): return False
+            supertypes = self._normalized_values(self._live_characteristic(
+                target_obj, 'supertypes', []))
+            if requirement.get("must_be_basic") and 'basic' not in supertypes: return False
+            if requirement.get("must_be_nonbasic") and 'basic' in supertypes: return False
+            if requirement.get("must_be_legendary") and 'legendary' not in supertypes: return False
 
             # State
             if requirement.get("must_be_tapped") and target_id not in target_owner.get("tapped_permanents", set()): return False
@@ -441,56 +556,53 @@ class TargetingSystem:
             # Color Restriction
             colors_req = requirement.get("color_restriction", [])
             if colors_req:
-                if not any(self._has_color(target_obj, color) for color in colors_req): return False
-                if "multicolored" in colors_req and sum(getattr(target_obj,'colors',[0]*5)) <= 1: return False
-                if "colorless" in colors_req and sum(getattr(target_obj,'colors',[0]*5)) > 0: return False
+                colors = self._live_characteristic(target_obj, 'colors', [0] * 5)
+                color_count = sum(bool(value) for value in (colors or []))
+                matches_color = any(
+                    (color == "multicolored" and color_count > 1)
+                    or (color == "colorless" and color_count == 0)
+                    or self._has_color(target_obj, color)
+                    for color in colors_req)
+                if not matches_color: return False
 
             # Stat Restrictions
             if "power_restriction" in requirement:
                 pr = requirement["power_restriction"]
-                power = getattr(target_obj, 'power', None)
-                if power is None: return False
-                if pr["comparison"] == "greater" and not power >= pr["value"]: return False
-                if pr["comparison"] == "less" and not power <= pr["value"]: return False
-                if pr["comparison"] == "exactly" and not power == pr["value"]: return False
+                power = self._live_characteristic(target_obj, 'power', None)
+                if not self._matches_numeric_restriction(power, pr): return False
             if "toughness_restriction" in requirement:
                 tr = requirement["toughness_restriction"]
-                toughness = getattr(target_obj, 'toughness', None)
-                if toughness is None: return False
-                if tr["comparison"] == "greater" and not toughness >= tr["value"]: return False
-                if tr["comparison"] == "less" and not toughness <= tr["value"]: return False
-                if tr["comparison"] == "exactly" and not toughness == tr["value"]: return False
-            if "mana value_restriction" in requirement:
-                cmcr = requirement["mana value_restriction"]
-                cmc = getattr(target_obj, 'cmc', None)
-                if cmc is None: return False
-                if cmcr["comparison"] == "greater" and not cmc >= cmcr["value"]: return False
-                if cmcr["comparison"] == "less" and not cmc <= cmcr["value"]: return False
-                if cmcr["comparison"] == "exactly" and not cmc == cmcr["value"]: return False
+                toughness = self._live_characteristic(target_obj, 'toughness', None)
+                if not self._matches_numeric_restriction(toughness, tr): return False
 
             # Subtype Restriction
             if "subtype_restriction" in requirement:
-                if requirement["subtype_restriction"] not in actual_types: return False
+                if str(requirement["subtype_restriction"]).lower() not in actual_types: return False
+
+        # Mana-value restrictions also apply to spells and cards outside the
+        # battlefield (Spell Snare, Unearth, and similar effects).
+        if "mana value_restriction" in requirement:
+            if characteristic_card is None:
+                return False
+            cmc = self._live_characteristic(
+                characteristic_card, 'cmc', None,
+                use_layers=target_zone == "battlefield")
+            if not self._matches_numeric_restriction(
+                    cmc, requirement["mana value_restriction"]):
+                return False
 
         # 5. Spell/Ability Specific Checks
         if target_zone == "stack":
              source_card = gs._safe_get_card(source_id)
-             if isinstance(target_obj, Card): # Spell target
-                 # Can't be countered? (Only if source is a counter)
-                 if source_card and "counter target spell" in getattr(source_card, 'oracle_text', '').lower():
-                     # --- Use central rule/keyword check for 'cant_be_countered' ---
-                     cannot_be_countered = False
-                     if hasattr(gs, 'check_rule'):
-                          cannot_be_countered = gs.check_rule('cant_be_countered', {'target_card_id': target_id, 'target_card': target_obj})
-                     elif self._check_keyword(target_obj, "cant_be_countered"):
-                          cannot_be_countered = True
-                     elif "can't be countered" in getattr(target_obj, 'oracle_text', '').lower():
-                          cannot_be_countered = True
-
-                     if cannot_be_countered:
-                          logging.debug(f"Spell {target_obj.name} can't be countered.")
-                          return False
-                     # --- END MODIFICATION ---
+             spell_target = (
+                 target_obj if isinstance(target_obj, Card)
+                 else gs._safe_get_card(target_obj[1])
+                 if (isinstance(target_obj, tuple)
+                     and target_obj[0] == "SPELL")
+                 else None)
+             if spell_target:
+                 # A spell that can't be countered remains a legal target. Its
+                 # countering instruction simply fails during resolution.
                  # Spell Type
                  st_req = requirement.get("spell_type_restriction")
                  if st_req == "instant" and 'instant' not in actual_types: return False
@@ -561,15 +673,29 @@ class TargetingSystem:
 
     def _has_color(self, card, color_name):
         """Check if a card has a specific color."""
-        if not card or not hasattr(card, 'colors') or len(getattr(card,'colors',[])) != 5: return False
+        colors = self._live_characteristic(card, 'colors', [0] * 5)
+        if not card or not colors or len(colors) != 5: return False
         color_index_map = {'white': 0, 'blue': 1, 'black': 2, 'red': 3, 'green': 4}
         if color_name not in color_index_map: return False
-        return card.colors[color_index_map[color_name]] == 1
+        return bool(colors[color_index_map[color_name]])
 
     def _parse_targeting_requirements(self, oracle_text):
         """Parse targeting requirements from oracle text with comprehensive rules."""
         requirements = []
         oracle_text = oracle_text.lower()
+
+        def apply_mana_value_restriction(requirement, text):
+            match = re.search(
+                r"\bmana value\s+(\d+)"
+                r"(?:\s+(or greater|or less|exactly))?", text)
+            if not match:
+                return
+            value, comparison = match.groups()
+            requirement["mana value_restriction"] = {
+                "comparison": (comparison or "exactly").replace(
+                    "or ", "").strip(),
+                "value": int(value),
+            }
 
         # Alternative type wording needs one OR requirement. Treating only the
         # first noun as authoritative makes noncreature Vehicles invisible.
@@ -670,13 +796,22 @@ class TargetingSystem:
         # The generic adjective parser historically treated "nonland" as the
         # target's noun. Pull this common permanent shape out first so cards
         # such as Leyline Binding retain both type and controller restrictions.
+        mana_value_clause = (
+            r"with\s+mana value\s+\d+"
+            r"(?:\s+(?:or greater|or less|exactly))?")
         nonland_permanent_pattern = (
-            r"target\s+nonland\s+permanent"
-            r"(?:\s+(an opponent controls|you don't control))?")
+            r"target\s+nonland\s+permanent(?!\s+cards?\b)"
+            rf"((?:(?:\s+(?:an opponent controls|you don't control|"
+            rf"you control))|(?:\s+{mana_value_clause})){{0,2}})")
         for special_match in list(re.finditer(nonland_permanent_pattern, oracle_text)):
             requirement = {"type": "permanent", "exclude_land": True}
-            if special_match.group(1):
+            restrictions = special_match.group(1) or ""
+            if ("an opponent controls" in restrictions
+                    or "you don't control" in restrictions):
                 requirement["controller_is_opponent"] = True
+            elif "you control" in restrictions:
+                requirement["controller_is_caster"] = True
+            apply_mana_value_restriction(requirement, restrictions)
             requirements.append(requirement)
         oracle_text = re.sub(nonland_permanent_pattern, "", oracle_text)
 
@@ -690,8 +825,61 @@ class TargetingSystem:
             })
             oracle_text = re.sub(union_pattern, "", oracle_text)
 
+        instant_sorcery_spell_pattern = (
+            r"target\s+instant\s+or\s+sorcery\s+spell"
+            rf"(\s+{mana_value_clause})?")
+        for spell_match in list(re.finditer(
+                instant_sorcery_spell_pattern, oracle_text)):
+            requirement = {
+                "type": "spell",
+                "allowed_types": ["instant", "sorcery"],
+            }
+            apply_mana_value_restriction(
+                requirement, spell_match.group(1) or "")
+            requirements.append(requirement)
+        oracle_text = re.sub(
+            instant_sorcery_spell_pattern, "", oracle_text)
+
+        # A printed card type before ``card`` restricts characteristics, while
+        # the following zone phrase determines where the object can be found.
+        # Keep those dimensions separate so Helping Hand-style text cannot be
+        # mistaken for a battlefield creature target.
+        core_card_type = (
+            r"(?:artifact|battle|creature|enchantment|instant|land|"
+            r"permanent|planeswalker|sorcery)")
+        typed_zone_card_pattern = (
+            rf"target\s+(nonland\s+permanent|{core_card_type}"
+            rf"(?:\s+or\s+{core_card_type})*)\s+cards?"
+            rf"((?:\s+(?:you own|{mana_value_clause}))*)"
+            r"\s+(?:in|from)\s+"
+            r"(your graveyard|an opponent'?s graveyard|"
+            r"defending player's graveyard|that player's graveyard|"
+            r"a graveyard|graveyards?|exile)"
+            rf"(\s+{mana_value_clause})?")
+        for card_match in list(re.finditer(
+                typed_zone_card_pattern, oracle_text)):
+            card_kind = card_match.group(1)
+            location = card_match.group(3)
+            requirement = {
+                "type": "card",
+                "card_type_restriction": card_kind,
+                "zone": "exile" if location == "exile" else "graveyard",
+            }
+            ownership_text = card_match.group(2) or ""
+            if location == "your graveyard" or "you own" in ownership_text:
+                requirement["controller_is_caster"] = True
+            elif (location.startswith("an opponent")
+                    or location.startswith("defending player")):
+                requirement["controller_is_opponent"] = True
+            apply_mana_value_restriction(
+                requirement,
+                f"{ownership_text} {card_match.group(4) or ''}")
+            requirements.append(requirement)
+        oracle_text = re.sub(typed_zone_card_pattern, "", oracle_text)
+
         graveyard_spell_card_pattern = (
-            r"target\s+instant\s+or\s+sorcery\s+card\s+in\s+your\s+graveyard")
+            r"target\s+instant\s+or\s+sorcery\s+card\s+"
+            r"(?:in|from)\s+your\s+graveyard")
         if re.search(graveyard_spell_card_pattern, oracle_text):
             requirements.append({
                 "type": "card", "zone": "graveyard",
@@ -700,14 +888,47 @@ class TargetingSystem:
             })
             oracle_text = re.sub(graveyard_spell_card_pattern, "", oracle_text)
 
-        # Pattern to find "target X" phrases, excluding nested clauses
-        # Matches "target [adjectives] type [restrictions]"
-        target_pattern = r"target\s+((?:(?:[a-z\-]+)\s+)*?)?([a-z]+)\s*((?:(?:with|of|that)\s+[^,\.;\(]+|you control|an opponent controls|you don\'t control)*)"
+        # Oracle may name a subtype without repeating "creature" or
+        # "permanent" ("target Mouse you control"). Keep that grammar narrow:
+        # the controller phrase identifies it as a battlefield permanent and
+        # the captured noun remains an exact subtype restriction.
+        subtype_only_pattern = (
+            r"target\s+(?!(?:creatures?|players?|opponents?|permanents?|"
+            r"spells?|abilities?|lands?|artifacts?|enchantments?|"
+            r"planeswalkers?|battles?|cards?|instants?|sorceries?|auras?)\b)"
+            r"([a-z][a-z\-]*)\s+"
+            r"(you control|an opponent controls|you don't control)")
+        for subtype_match in list(re.finditer(
+                subtype_only_pattern, oracle_text)):
+            requirement = {
+                "type": "permanent",
+                "subtype_restriction": subtype_match.group(1).lower(),
+            }
+            if subtype_match.group(2) == "you control":
+                requirement["controller_is_caster"] = True
+            else:
+                requirement["controller_is_opponent"] = True
+            requirements.append(requirement)
+        oracle_text = re.sub(subtype_only_pattern, "", oracle_text)
+
+        # Anchor the noun to a real target kind. The former lazy generic noun
+        # captured the first adjective, so common Oracle such as "target
+        # nontoken creature" became the unsupported type ``nontoken``.
+        target_nouns = (
+            r"creatures?|players?|opponents?|permanents?|spells?|"
+            r"abilities?|lands?|artifacts?|enchantments?|planeswalkers?|"
+            r"battles?|cards?|instants?|sorceries?|auras?")
+        target_pattern = (
+            rf"\btarget\s+((?:(?:[a-z][a-z\-]*|or)\s+)*?)"
+            rf"({target_nouns})\b\s*"
+            r"((?:(?:with|of|that|in|from)\s+[^,\.;\(]+|"
+            r"you control|an opponent controls|you don\'t control)*)")
 
         matches = re.finditer(target_pattern, oracle_text)
 
         for match in matches:
-            req = {"type": match.group(2).strip()} # Basic type (creature, player, etc.)
+            raw_noun = match.group(2).strip()
+            req = {"type": raw_noun} # Basic type (creature, player, etc.)
             adjectives = match.group(1).strip().split() if match.group(1) else []
             restrictions = match.group(3).strip()
 
@@ -716,30 +937,23 @@ class TargetingSystem:
                 "creature": "creature", "player": "player", "opponent": "player", "permanent": "permanent",
                 "spell": "spell", "ability": "ability", "land": "land", "artifact": "artifact",
                 "enchantment": "enchantment", "planeswalker": "planeswalker", "card": "card", # General card (often in GY/Exile)
+                "battle": "battle",
                 "instant": "spell", "sorcery": "spell", "aura": "enchantment",
                 "creatures": "creature", "players": "player", "opponents": "player", "permanents": "permanent",
                 "spells": "spell", "abilities": "ability", "lands": "land", "artifacts": "artifact",
                 "enchantments": "enchantment", "planeswalkers": "planeswalker", "cards": "card",
+                "battles": "battle",
                 "instants": "spell", "sorceries": "spell", "auras": "enchantment",
                 # Add more specific types if needed
             }
             req["type"] = type_map.get(req["type"], req["type"]) # Normalize type
 
-            # The lazy adjective group can leave a state adjective captured as
-            # the noun ("target attacking creature" -> type "attacking").
-            # Recover the real noun that follows and demote the adjective.
-            if req["type"] in ("attacking", "blocking", "tapped", "untapped"):
-                trailing = oracle_text[match.end(2):]
-                noun_match = re.match(r"\s+([a-z]+)", trailing)
-                adjectives.append(req["type"])
-                if noun_match:
-                    req["type"] = type_map.get(noun_match.group(1), noun_match.group(1))
-
             # ---- Process Adjectives & Restrictions ----
             # Owner/Controller
             if "you control" in restrictions: req["controller_is_caster"] = True
             elif "an opponent controls" in restrictions or "you don't control" in restrictions: req["controller_is_opponent"] = True
-            elif "target opponent" in oracle_text: req["opponent_only"] = True # Different phrasing
+            if raw_noun in {"opponent", "opponents"}:
+                req["opponent_only"] = True
 
             # State/Status
             if "tapped" in adjectives: req["must_be_tapped"] = True
@@ -756,13 +970,18 @@ class TargetingSystem:
             # Card Type / Supertype / Subtype Restrictions
             if "nonland" in adjectives: req["exclude_land"] = True
             if "noncreature" in adjectives: req["exclude_creature"] = True
+            if "nonartifact" in adjectives: req["exclude_artifact"] = True
+            if "nonenchantment" in adjectives: req["exclude_enchantment"] = True
+            if "nontoken" in adjectives: req["exclude_token"] = True
             if "nonblack" in adjectives: req["exclude_color"] = 'black'
             # ... add more non-X types
 
             if "basic" in adjectives and req["type"] == "land": req["must_be_basic"] = True
             if "nonbasic" in adjectives and req["type"] == "land": req["must_be_nonbasic"] = True
+            if "legendary" in adjectives: req["must_be_legendary"] = True
 
-            if "artifact creature" in match.group(0): req["must_be_artifact_creature"] = True
+            if re.search(r"\bartifact\s+creature\b", match.group(0)):
+                req["must_be_artifact_creature"] = True
             elif "artifact" in adjectives and req["type"]=="creature": req["must_be_artifact"] = True # Adj before type
             elif "artifact" in adjectives and req["type"]=="permanent": req["must_be_artifact"] = True
 
@@ -774,14 +993,23 @@ class TargetingSystem:
             if found_colors: req["color_restriction"] = list(found_colors)
 
             # Power/Toughness/CMC Restrictions (from restrictions)
-            pt_cmc_pattern = r"(?:with|of)\s+(power|toughness|mana value)\s+(\d+)\s+(or greater|or less|exactly)"
+            pt_cmc_pattern = (
+                r"(?:with|of)\s+(power|toughness)\s+(\d+)"
+                r"(?:\s+(or greater|or less|exactly))?")
             pt_match = re.search(pt_cmc_pattern, restrictions)
             if pt_match:
                  stat, value, comparison = pt_match.groups()
+                 comparison = comparison or "exactly"
                  req[f"{stat}_restriction"] = {"comparison": comparison.replace("or ","").strip(), "value": int(value)}
+            apply_mana_value_restriction(req, restrictions)
 
             # Zone restrictions (usually implied by context, but check)
-            if "in a graveyard" in restrictions: req["zone"] = "graveyard"; req["type"]="card" # Override type
+            if ("in a graveyard" in restrictions
+                    or "in your graveyard" in restrictions
+                    or "from your graveyard" in restrictions):
+                req["zone"] = "graveyard"; req["type"]="card" # Override type
+                if "your graveyard" in restrictions:
+                    req["controller_is_caster"] = True
             elif "in exile" in restrictions: req["zone"] = "exile"; req["type"]="card"
             elif "on the stack" in restrictions: req["zone"] = "stack" # Type should be spell/ability
 
@@ -796,13 +1024,30 @@ class TargetingSystem:
                 if "activated" in adjectives: req["ability_type_restriction"] = "activated"
                 elif "triggered" in adjectives: req["ability_type_restriction"] = "triggered"
 
-            # Specific subtypes
-            # Look for "target Goblin creature", "target Island land" etc.
-            subtype_match = re.search(r"target\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?:creature|land|artifact|etc)", match.group(0))
-            if subtype_match:
-                potential_subtype = subtype_match.group(1).strip()
-                # TODO: Check if potential_subtype is a known subtype for the target type
-                req["subtype_restriction"] = potential_subtype
+            # Specific subtype adjectives. Descriptor words above have their
+            # own predicates; an otherwise-unclaimed adjective before creature
+            # or land is an Oracle subtype ("Goblin creature", "Island land").
+            descriptors = {
+                "another", "other", "attacking", "blocking", "tapped",
+                "untapped", "face-down", "basic", "nonbasic", "legendary",
+                "artifact", "nonartifact", "noncreature", "nonland",
+                "nonenchantment", "nontoken", "nonblack", "white", "blue",
+                "black", "red", "green", "colorless", "multicolored", "or",
+            }
+            subtype_words = [
+                adjective for adjective in adjectives
+                if adjective not in descriptors]
+            if req["type"] in {"creature", "land"} and subtype_words:
+                subtype = subtype_words[-1]
+                if subtype == "non-outlaw":
+                    req.setdefault("exclude_subtypes", []).extend([
+                        "assassin", "mercenary", "pirate", "rogue",
+                        "warlock"])
+                elif subtype.startswith("non-"):
+                    req.setdefault("exclude_subtypes", []).append(
+                        subtype[4:])
+                else:
+                    req["subtype_restriction"] = subtype
 
             requirements.append(req)
 
@@ -823,8 +1068,10 @@ class TargetingSystem:
              requirements.append({"type": "any"})
 
         if not requirements and "target" in oracle_text:
-             # Fallback if "target" exists but pattern failed
-             requirements.append({"type": "target"})
+             # An unparsed target noun must not expose every permanent and
+             # player. Keep unsupported grammar fail-closed in both masks and
+             # execution until it has an explicit legality implementation.
+             requirements.append({"type": "unsupported"})
 
         # Refine types based on restrictions
         for req in requirements:
@@ -841,66 +1088,74 @@ class TargetingSystem:
 
     def _has_protection_from(self, target_card, source_card, target_owner, source_controller):
         """Robust protection check using centralized keyword checking and AbilityHandler details."""
-        if not target_card or not source_card: return False
+        if not target_card or not source_card:
+            return False
         target_card_id = getattr(target_card, 'card_id', None)
-        if not target_card_id: return False
+        if target_card_id is None:
+            return False
 
-        # 1. Use central check_keyword for the general "protection" keyword
-        if self._check_keyword(target_card, "protection"): # Check if the *general* keyword is active
-             # 2. Get specific protection details (Needs reliable source like AbilityHandler/LayerSystem)
-             # Attempt to get details via AbilityHandler first
-             protection_details = []
-             live_handler = getattr(self.game_state, "ability_handler", None)
-             if live_handler and hasattr(live_handler, 'get_protection_details'):
-                 protection_details = live_handler.get_protection_details(target_card_id) or []
-             # Fallback: Check card's own properties if handler fails (Less reliable)
-             elif hasattr(target_card,'_granted_protection_details'): # Check for cached layer results directly?
-                  protection_details = target_card._granted_protection_details or []
-             else: # Last resort: parse text again (least reliable)
-                  matches = re.findall(r"protection from ([\w\s]+)(?:\s*where|\.|$|,|;)", getattr(target_card, 'oracle_text', '').lower())
-                  for match in matches: protection_details.append(match.strip())
+        if not self._check_keyword(target_card, "protection"):
+            return False
 
-             if protection_details:
-                 source_colors = getattr(source_card, 'colors', [0]*5)
-                 source_types = getattr(source_card, 'card_types', [])
-                 source_subtypes = getattr(source_card, 'subtypes', [])
-                 source_name = getattr(source_card, 'name', '').lower()
+        protection_details = []
+        live_handler = getattr(self.game_state, "ability_handler", None)
+        if live_handler and hasattr(live_handler, 'get_protection_details'):
+            protection_details = (
+                live_handler.get_protection_details(target_card_id) or [])
+        if (not protection_details
+                and hasattr(target_card, '_granted_protection_details')):
+            protection_details = (
+                target_card._granted_protection_details or [])
+        if not protection_details:
+            matches = re.findall(
+                r"protection from ([\w\s]+)(?:\s*where|\.|$|,|;)",
+                self._active_rules_text(target_card))
+            protection_details.extend(match.strip() for match in matches)
 
-                 for protection_detail in protection_details:
-                     protection_detail = protection_detail.lower() # Normalize
-                     # Basic Color Check
-                     if protection_detail == "white" and source_colors[0]: return True
-                     if protection_detail == "blue" and source_colors[1]: return True
-                     if protection_detail == "black" and source_colors[2]: return True
-                     if protection_detail == "red" and source_colors[3]: return True
-                     if protection_detail == "green" and source_colors[4]: return True
-                     # Broader Categories
-                     if protection_detail == "everything": return True
-                     if protection_detail == "all colors" and any(source_colors): return True
-                     if protection_detail == "colorless" and not any(source_colors): return True
-                     if protection_detail == "multicolored" and sum(source_colors) > 1: return True
-                     if protection_detail == "monocolored" and sum(source_colors) == 1: return True
-                     # Card Types
-                     if protection_detail == "creatures" and "creature" in source_types: return True
-                     if protection_detail == "artifacts" and "artifact" in source_types: return True
-                     if protection_detail == "enchantments" and "enchantment" in source_types: return True
-                     if protection_detail == "planeswalkers" and "planeswalker" in source_types: return True
-                     if protection_detail == "instants" and "instant" in source_types: return True
-                     if protection_detail == "sorceries" and "sorcery" in source_types: return True
-                     if protection_detail == "lands" and "land" in source_types: return True
-                     if protection_detail == "permanents" and any(t in source_types for t in ["creature", "artifact", "enchantment", "land", "planeswalker"]): return True # Basic permanent check
-                     # Player Relationship
-                     if protection_detail == "opponent" and target_owner != source_controller: return True
-                     # Subtypes (check against list)
-                     if protection_detail in [sub.lower() for sub in source_subtypes]: return True
-                     # Specific Name
-                     if protection_detail == source_name: return True
-                     # Add more protection types (cmc, etc.) if needed
+        source_colors = self._live_characteristic(
+            source_card, 'colors', [0] * 5)
+        source_types = self._normalized_values(self._live_characteristic(
+            source_card, 'card_types', []))
+        source_subtypes = self._normalized_values(self._live_characteristic(
+            source_card, 'subtypes', []))
+        source_name = getattr(source_card, 'name', '').lower()
 
-                 # If general protection is active but no specific match found (unusual)
-                 # Default to false, specific protection is needed.
-
-        return False # No relevant protection found
+        for protection_detail in protection_details:
+            detail = str(protection_detail).lower()
+            color_index = {
+                "white": 0, "blue": 1, "black": 2,
+                "red": 3, "green": 4,
+            }.get(detail)
+            if color_index is not None and source_colors[color_index]:
+                return True
+            if detail == "everything":
+                return True
+            if detail == "all colors" and any(source_colors):
+                return True
+            if detail == "colorless" and not any(source_colors):
+                return True
+            if detail == "multicolored" and sum(source_colors) > 1:
+                return True
+            if detail == "monocolored" and sum(source_colors) == 1:
+                return True
+            protected_type = {
+                "creatures": "creature", "artifacts": "artifact",
+                "enchantments": "enchantment",
+                "planeswalkers": "planeswalker", "instants": "instant",
+                "sorceries": "sorcery", "lands": "land",
+            }.get(detail)
+            if protected_type and protected_type in source_types:
+                return True
+            if (detail == "permanents" and source_types.intersection({
+                    "creature", "artifact", "enchantment", "land",
+                    "planeswalker", "battle"})):
+                return True
+            if (detail in {"opponent", "opponents", "your opponents"}
+                    and target_owner is not source_controller):
+                return True
+            if detail in source_subtypes or detail == source_name:
+                return True
+        return False
 
 
     def resolve_targeting(self, source_id, controller, effect_text=None, target_types=None):
@@ -941,13 +1196,19 @@ class TargetingSystem:
                  logging.warning(f"resolve_targeting: No effect text found for {source_id}.")
                  return None
 
+        # Share one bounds calculation between the no-candidate and selection
+        # paths. "Up to" targeting is legal with zero candidates.
+        min_required, num_required = gs._target_bounds_from_text(text_to_parse)
+
         # Get valid targets
         # Pass target_types to get_valid_targets if provided
-        valid_targets = self.get_valid_targets(source_id, controller, target_type=target_types)
+        valid_targets = self.get_valid_targets(
+            source_id, controller, target_type=target_types,
+            effect_text=text_to_parse)
 
         # If no valid targets and the effect *requires* a target, targeting fails
         if not valid_targets or not any(valid_targets.values()):
-            if "target" in text_to_parse.lower():
+            if min_required > 0:
                 logging.debug(f"resolve_targeting: No valid targets found for required target effect: {text_to_parse}")
                 return None
             else: # Effect doesn't require targets
@@ -958,18 +1219,18 @@ class TargetingSystem:
 
         # Share the casting parser so reminder text and later references to
         # "the target" do not invent additional choices during resolution.
-        _, num_required = gs._target_bounds_from_text(text_to_parse)
-
         # Select targets (can be AI or rule-based)
         # Simplified: Use strategic selection helper
         selected_targets = self._select_targets_by_strategy(
-            source_card, valid_targets, num_required, target_requirements, controller)
+            source_card, valid_targets, num_required, target_requirements,
+            controller, effect_text=text_to_parse,
+            minimum_target_count=min_required)
 
         # Validate number of targets selected (if num_required > 0)
-        if num_required > 0:
+        if min_required > 0:
              selected_count = sum(len(ids) for ids in selected_targets.values()) if selected_targets else 0
-             if selected_count < num_required:
-                  logging.debug(f"resolve_targeting: Failed to select enough targets ({selected_count}/{num_required}) for: {text_to_parse}")
+             if selected_count < min_required:
+                  logging.debug(f"resolve_targeting: Failed to select enough targets ({selected_count}/{min_required}) for: {text_to_parse}")
                   return None # Failed to select required number
 
         return selected_targets if selected_targets else {}
@@ -1048,132 +1309,110 @@ class TargetingSystem:
             aliases.add(plural_to_singular[category])
         return aliases
 
-    def _select_targets_by_strategy(self, card, valid_targets, target_count, target_requirements, controller):
-        """
-        Select targets strategically based on card type and effect.
-        Ensures mandatory target counts are met if possible.
-        """
+    def _target_infos_for_id(self, target_id):
+        """Yield every public object occurrence represented by a target ID."""
+        gs = self.game_state
+        if target_id == "p1":
+            yield gs.p1, gs.p1, "player"
+            return
+        if target_id == "p2":
+            yield gs.p2, gs.p2, "player"
+            return
+        for item in gs.stack:
+            if (isinstance(item, tuple) and len(item) >= 3
+                    and item[1] == target_id):
+                yield item, item[2], "stack"
+        for zone in ("battlefield", "graveyard", "exile"):
+            for owner in (gs.p1, gs.p2):
+                if target_id in owner.get(zone, []):
+                    card = gs._safe_get_card(target_id)
+                    if card:
+                        yield card, owner, zone
+
+    def _select_targets_by_strategy(
+            self, card, valid_targets, target_count, target_requirements,
+            controller, effect_text=None, minimum_target_count=None):
+        """Select only candidates that satisfy each individual requirement."""
         gs = self.game_state
         selected_targets = defaultdict(list)
-        opponent = gs.p2 if controller == gs.p1 else gs.p1
-        total_selected = 0
-        num_targets_specified_in_text = getattr(card, 'num_targets', 1) # Get expected count if stored
-        target_is_optional = "up to" in getattr(card, 'oracle_text', '').lower() # Check "up to N"
+        opponent = gs.p2 if controller is gs.p1 else gs.p1
+        minimum_target_count = (
+            target_count if minimum_target_count is None
+            else int(minimum_target_count))
+        requirements = list(target_requirements or [{"type": "target"}])
+        potential_targets = sorted({
+            target_id
+            for ids in valid_targets.values()
+            for target_id in ids
+        }, key=lambda target_id: (
+            isinstance(target_id, str), str(target_id)))
+        selected_ids = set()
+        targets_remaining = int(target_count)
+        is_beneficial = is_beneficial_effect(
+            (effect_text or getattr(card, 'oracle_text', '')).lower())
+        mandatory_requirement_count = min(
+            minimum_target_count, len(requirements))
 
-        # Check if target count passed matches card's internal count (if available)
-        # If target_count from parser differs from card schema, prioritize card schema?
-        # Let's use target_count passed from resolver, but maybe log discrepancy.
-        if hasattr(card,'num_targets') and card.num_targets != target_count:
-            logging.debug(f"Target count discrepancy for {card.name}: Resolver wants {target_count}, card schema expects {card.num_targets}.")
-            # Stick with target_count requested by resolver for now.
+        for requirement_index, requirement in enumerate(requirements):
+            if targets_remaining <= 0:
+                break
+            valid_info = {}
+            for target_id in potential_targets:
+                if target_id in selected_ids:
+                    continue
+                for target_info in self._target_infos_for_id(target_id):
+                    if self._is_valid_target(
+                            getattr(card, "card_id", None), target_id,
+                            controller, target_info, requirement):
+                        valid_info[target_id] = target_info
+                        break
 
-        # Helper to select first available valid target from a list not already chosen
-        def select_first_available(candidates, current_selections):
-            for tid in candidates:
-                if tid not in current_selections:
-                    return tid
+            if (requirement_index < mandatory_requirement_count
+                    and not valid_info):
+                return None
+            if not valid_info:
+                continue
+
+            desired_owner = controller if is_beneficial else opponent
+
+            def priority(target_id):
+                target_obj, target_owner, target_zone = valid_info[target_id]
+                owner_rank = 0 if target_owner is desired_owner else 1
+                if target_zone == "battlefield" and isinstance(target_obj, Card):
+                    power = self._live_characteristic(
+                        target_obj, 'power', 0) or 0
+                    toughness = self._live_characteristic(
+                        target_obj, 'toughness', 0) or 0
+                    try:
+                        board_value = float(power) + float(toughness)
+                    except (TypeError, ValueError):
+                        board_value = 0.0
+                    return owner_rank, -board_value, str(target_id)
+                return owner_rank, 0.0, str(target_id)
+
+            candidates = sorted(valid_info, key=priority)
+            requirements_left = len(requirements) - requirement_index - 1
+            selection_limit = max(1, targets_remaining - requirements_left)
+            selected_for_requirement = 0
+            for target_id in candidates[:selection_limit]:
+                selected_targets[
+                    self._determine_target_category(target_id)].append(target_id)
+                selected_ids.add(target_id)
+                selected_for_requirement += 1
+                targets_remaining -= 1
+                if targets_remaining <= 0:
+                    break
+            if (requirement_index < mandatory_requirement_count
+                    and selected_for_requirement == 0):
+                return None
+
+        if len(selected_ids) < minimum_target_count:
+            logging.warning(
+                "Could not select mandatory %s targets for %s. Only found %s.",
+                minimum_target_count, getattr(card, 'name', 'Unknown'),
+                len(selected_ids))
             return None
-
-        # Determine if beneficial (uses utility function)
-        effect_text = getattr(card, 'oracle_text', '').lower()
-        is_beneficial = is_beneficial_effect(effect_text)
-
-        # Iterate through required target categories (based on parsed requirements)
-        # Prioritize more specific requirements first? (e.g., "target artifact creature")
-        target_requirements.sort(key=lambda r: len(r), reverse=True) # Simple sort by num restrictions
-
-        potential_targets_flat = []
-        for cat, ids in valid_targets.items():
-            potential_targets_flat.extend(ids)
-        potential_targets_flat = list(set(potential_targets_flat)) # Unique available targets
-
-        all_selected_ids_this_call = set() # Track selections within this call
-
-        # --- AI Target Selection Loop ---
-        # First pass: Select based on strategy/heuristics up to target_count
-        targets_remaining_to_select = target_count
-        for req in target_requirements:
-            if targets_remaining_to_select <= 0: break
-
-            req_type = req.get("type", "target")
-            target_cat = self._map_req_type_to_valid_targets_key(req_type)
-
-            if target_cat not in valid_targets or not valid_targets[target_cat]:
-                continue # No valid targets for this specific requirement type
-
-            potential_targets_for_req = [tid for tid in valid_targets[target_cat] if tid not in all_selected_ids_this_call] # Exclude already selected
-            if not potential_targets_for_req: continue
-
-            target_to_select = None
-
-            # --- Enhanced AI Target Selection Logic ---
-            priority_list = []
-            player_map = {"p1": gs.p1, "p2": gs.p2}
-            if target_cat == "players":
-                 player_ids = [p_id for p_id in potential_targets_for_req if p_id in player_map] # Filter valid player ids
-                 if is_beneficial: # Target self first if possible
-                     priority_list = [p_id for p_id in player_ids if player_map[p_id] == controller]
-                     priority_list.extend([p_id for p_id in player_ids if player_map[p_id] != controller])
-                 else: # Target opponent first if possible
-                     priority_list = [p_id for p_id in player_ids if player_map[p_id] == opponent]
-                     priority_list.extend([p_id for p_id in player_ids if player_map[p_id] == controller])
-            elif target_cat in ["creatures", "permanents", "artifacts", "enchantments", "lands", "planeswalkers"]:
-                # Sort candidates based on benefit/threat
-                # Benefit: Target own best, Harm: Target opponent best
-                potential_target_cards = [(tid, gs._safe_get_card(tid)) for tid in potential_targets_for_req]
-                if is_beneficial:
-                    potential_target_cards = [(tid,c) for tid,c in potential_target_cards if gs.get_card_controller(tid) == controller]
-                    priority_list = sorted(potential_target_cards, key=lambda x: (getattr(x[1],'power',0) or 0) + (getattr(x[1],'toughness',0) or 0), reverse=True) # Target strongest own
-                else:
-                    potential_target_cards = [(tid,c) for tid,c in potential_target_cards if gs.get_card_controller(tid) == opponent]
-                    priority_list = sorted(potential_target_cards, key=lambda x: (getattr(x[1],'power',0) or 0) + (getattr(x[1],'toughness',0) or 0), reverse=True) # Target strongest opponent
-                priority_list = [tid for tid, card in priority_list] # Extract IDs
-            elif target_cat == "cards": # Graveyard/Exile - harder to evaluate simply
-                if is_beneficial: # Target own cards
-                     priority_list = [tid for tid in potential_targets_for_req if self._get_card_owner_fallback(tid) == controller]
-                     priority_list.extend([tid for tid in potential_targets_for_req if self._get_card_owner_fallback(tid) != controller])
-                else: # Target opponent cards
-                     priority_list = [tid for tid in potential_targets_for_req if self._get_card_owner_fallback(tid) == opponent]
-                     priority_list.extend([tid for tid in potential_targets_for_req if self._get_card_owner_fallback(tid) != opponent])
-            else: # Spells, Abilities, Fallback
-                 priority_list = potential_targets_for_req[:] # Use original order or random?
-
-            target_to_select = select_first_available(priority_list, all_selected_ids_this_call)
-            # --- End Enhanced AI Logic ---
-
-            # --- Add Selected Target ---
-            if target_to_select:
-                # Map back to the correct category key for the output dictionary
-                output_cat_key = self._map_req_type_to_valid_targets_key(req_type) # Use helper
-                selected_targets[output_cat_key].append(target_to_select)
-                all_selected_ids_this_call.add(target_to_select)
-                targets_remaining_to_select -= 1
-
-        # --- Mandatory Target Enforcement ---
-        current_selected_count = len(all_selected_ids_this_call)
-        # If target is NOT optional AND we selected fewer than required AND more valid targets EXIST
-        if not target_is_optional and current_selected_count < target_count and len(potential_targets_flat) >= target_count:
-            logging.debug(f"Strategically selected {current_selected_count}/{target_count} targets. Forcing selection of remaining.")
-            # Find remaining available targets
-            remaining_available = [tid for tid in potential_targets_flat if tid not in all_selected_ids_this_call]
-            needed_more = target_count - current_selected_count
-            # Select the first N available remaining targets
-            for i in range(min(needed_more, len(remaining_available))):
-                 forced_target = remaining_available[i]
-                 # Determine its category for output dict
-                 forced_cat = self._determine_target_category(forced_target)
-                 selected_targets[forced_cat].append(forced_target)
-                 all_selected_ids_this_call.add(forced_target)
-                 logging.debug(f"Forced selection of target: {forced_target}")
-        # --- End Mandatory Enforcement ---
-
-        final_selected_count = len(all_selected_ids_this_call)
-        # Final validation check (only if targets are mandatory)
-        if not target_is_optional and final_selected_count < target_count:
-             logging.warning(f"Could not select mandatory {target_count} targets for {card.name}. Only found/selected {final_selected_count}. Returning None.")
-             return None
-
-        return dict(selected_targets) # Convert back to regular dict
+        return dict(selected_targets)
     
     def _get_card_owner_fallback(self, card_id):
         """Fallback to find card owner based on original deck assignment or DB."""
@@ -1188,6 +1427,8 @@ class TargetingSystem:
     def _determine_target_category(self, target_id):
         """Determines the primary category ('creatures', 'players', etc.) for a given target ID."""
         gs = self.game_state
+        if target_id in {"p1", "p2"}:
+            return "players"
         owner, zone = gs.find_card_location(target_id)
         if zone == 'player': return 'players'
         if zone == 'stack':
@@ -1201,7 +1442,7 @@ class TargetingSystem:
              if card:
                   if 'creature' in getattr(card, 'card_types',[]): return 'creatures'
                   if 'planeswalker' in getattr(card, 'card_types',[]): return 'planeswalkers'
-                  if 'battle' in getattr(card, 'type_line','').lower(): return 'battles'
+                  if 'battle' in getattr(card, 'card_types', []): return 'battles'
                   if 'land' in getattr(card, 'card_types',[]): return 'lands'
                   if 'artifact' in getattr(card, 'card_types',[]): return 'artifacts'
                   if 'enchantment' in getattr(card, 'card_types',[]): return 'enchantments'
@@ -1222,147 +1463,153 @@ class TargetingSystem:
         # If type has 's', assume it's already plural
         return type_map.get(req_type, req_type + "s" if not req_type.endswith('s') else req_type)
 
+    def _active_rules_text(self, card):
+        """Return current rules text only while the object's abilities exist."""
+        if not card:
+            return ""
+        layer_system = getattr(self.game_state, "layer_system", None)
+        card_id = getattr(card, "card_id", None)
+        if (layer_system and card_id is not None
+                and layer_system.source_has_lost_all_abilities(card_id)):
+            return ""
+        return str(self._live_characteristic(
+            card, 'oracle_text', '') or '').lower()
+
     def check_can_be_blocked(self, attacker_id, blocker_id):
-            """
-            Check if an attacker can be blocked by this blocker considering all restrictions.
-            Uses centralized keyword checking and includes Banding logic.
-            """
-            gs = self.game_state
-            attacker = gs._safe_get_card(attacker_id)
-            blocker = gs._safe_get_card(blocker_id)
+        """Check one proposed attacker/blocker pair against live restrictions."""
+        gs = self.game_state
+        attacker = gs._safe_get_card(attacker_id)
+        blocker = gs._safe_get_card(blocker_id)
+        if not attacker or not blocker:
+            return False
 
-            if not attacker or not blocker: return False
+        attacker_controller = gs.get_card_controller(attacker_id)
+        blocker_controller = gs.get_card_controller(blocker_id)
+        if (not attacker_controller or not blocker_controller
+                or attacker_controller is blocker_controller):
+            return False
+        if (attacker_id in getattr(gs, 'phased_out', set())
+                or blocker_id in getattr(gs, 'phased_out', set())):
+            return False
 
-            # Get controller info using GameState helper
-            attacker_controller = gs.get_card_controller(attacker_id)
-            blocker_controller = gs.get_card_controller(blocker_id)
-            if not attacker_controller or not blocker_controller: return False
+        attacker_types = self._normalized_values(
+            self._live_characteristic(attacker, 'card_types', []))
+        blocker_types = self._normalized_values(
+            self._live_characteristic(blocker, 'card_types', []))
+        if 'creature' not in attacker_types or 'creature' not in blocker_types:
+            return False
+        if blocker_id in blocker_controller.get("tapped_permanents", set()):
+            return False
+        if (self._check_keyword(blocker, "cant_block")
+                or self._check_keyword(blocker, "decayed")):
+            return False
 
-            # --- Start Basic Checks ---
-            # Check if blocker is tapped
-            if blocker_id in blocker_controller.get("tapped_permanents", set()): return False
-            # Layer 6 represents dynamic blocking restrictions with the
-            # canonical pseudo-keyword ``cant_block``.
-            if self._check_keyword(blocker, "cant_block"): return False
-            if self._check_keyword(blocker, "decayed"): return False # Decayed can't block
-            # Conditional Blocking ("Can block only...")
-            match_only = re.search(r"can block only creatures with ([\w\s]+)", getattr(blocker, 'oracle_text', '').lower())
-            if match_only:
-                required_ability = match_only.group(1).strip()
-                if not self._check_keyword(attacker, required_ability): return False # Attacker doesn't have required ability
-            # --- End Basic Checks ---
+        attacker_text = self._active_rules_text(attacker)
+        blocker_text = self._active_rules_text(blocker)
+        match_only = re.search(
+            r"can block only creatures with ([\w\s]+)", blocker_text)
+        if (match_only and not self._check_keyword(
+                attacker, match_only.group(1).strip())):
+            return False
 
+        # Protection on the attacker prevents a matching creature from
+        # blocking it; protection on the blocker does not prevent the block.
+        if self._has_protection_from(
+                attacker, blocker, attacker_controller, blocker_controller):
+            return False
+        if (self._check_keyword(attacker, "unblockable")
+                and "except by" not in attacker_text):
+            return False
+        if (self._check_keyword(attacker, "flying")
+                and not (self._check_keyword(blocker, "flying")
+                         or self._check_keyword(blocker, "reach"))):
+            return False
+        if (self._check_keyword(attacker, "shadow")
+                != self._check_keyword(blocker, "shadow")):
+            return False
+        landwalk_type = self._get_landwalk_type(attacker)
+        if (landwalk_type
+                and self._controls_land_type(
+                    blocker_controller, landwalk_type)):
+            return False
 
-            # --- Remaining Checks (Protection, Evasion, Conditional) ---
-            # Protection (Prevents blocking - Rule 702.16e)
-            # Only protection on the attacking creature matters to block
-            # legality. Protection on a blocker prevents damage from a source
-            # with the stated quality, but does not stop that creature from
-            # blocking the source.
-            if self._has_protection_from(attacker, blocker, attacker_controller, blocker_controller): return False
+        blocker_is_artifact = 'artifact' in blocker_types
+        if (self._check_keyword(attacker, "fear")
+                and not (blocker_is_artifact
+                         or self._has_color(blocker, 'black'))):
+            return False
+        if (self._check_keyword(attacker, "intimidate")
+                and not (blocker_is_artifact
+                         or self._share_color(attacker, blocker))):
+            return False
+        if (self._check_keyword(attacker, "skulk")
+                and (self._live_characteristic(blocker, 'power', 0) or 0)
+                > (self._live_characteristic(attacker, 'power', 0) or 0)):
+            return False
+        if (self._check_keyword(attacker, "horsemanship")
+                and not self._check_keyword(blocker, "horsemanship")):
+            return False
 
-            # Banding changes how creatures attack in groups and who assigns
-            # combat damage; it does not bypass flying, shadow, fear,
-            # intimidate, or landwalk restrictions.
-            if self._check_keyword(attacker, "unblockable"):
-                if "except by" not in getattr(attacker, 'oracle_text', '').lower(): return False
-
-            if self._check_keyword(attacker, "flying") and not (self._check_keyword(blocker, "flying") or self._check_keyword(blocker, "reach")): return False
-            # Shadow is symmetric: a shadow creature cannot block a creature
-            # without shadow either.
-            if (self._check_keyword(attacker, "shadow")
-                    != self._check_keyword(blocker, "shadow")): return False
-            landwalk_type = self._get_landwalk_type(attacker)
-            if (landwalk_type
-                    and self._controls_land_type(
-                        blocker_controller, landwalk_type)):
-                return False
-
-            if getattr(gs, 'layer_system', None):
-                blocker_types = gs.layer_system.get_characteristic(
-                    blocker_id, 'card_types') or getattr(
-                        blocker, 'card_types', [])
-            else:
-                blocker_types = getattr(blocker, 'card_types', [])
-            blocker_types = {
-                str(card_type).lower() for card_type in blocker_types}
-            blocker_is_artifact = 'artifact' in blocker_types
-
-            if (self._check_keyword(attacker, "fear")
-                    and not (blocker_is_artifact
-                             or self._has_color(blocker, 'black'))):
-                return False
-
-            if (self._check_keyword(attacker, "intimidate")
-                    and not (blocker_is_artifact
-                             or self._share_color(attacker, blocker))):
-                return False
-
-            if self._check_keyword(attacker, "skulk") and (getattr(blocker, 'power', 0) or 0) > (getattr(attacker, 'power', 0) or 0): return False
-            if self._check_keyword(attacker, "horsemanship") and not self._check_keyword(blocker, "horsemanship"): return False
-
-            # Conditional Unblockable ("Can't be blocked except by...") - Not bypassed by Banding
-            match_except = re.search(r"can't be blocked except by ([\w\s]+)", getattr(attacker, 'oracle_text', '').lower())
-            if match_except:
-                exception_criteria = match_except.group(1).strip().lower()
-                blocker_meets = False
-                # Check blocker properties against criteria
-                if ('artifact' in exception_criteria
-                        and blocker_is_artifact): blocker_meets = True
-                elif ('wall' in exception_criteria
-                        and 'wall' in {
-                            str(value).lower() for value in
-                            getattr(blocker, 'subtypes', [])}): blocker_meets = True
-                elif ('flying' in exception_criteria
-                        and self._check_keyword(blocker, "flying")): blocker_meets = True
-                # Add color checks
-                elif any(
-                        color in exception_criteria
-                        and self._has_color(blocker, color)
-                        for color in (
-                            'white', 'blue', 'black', 'red', 'green')):
-                    blocker_meets = True
-                # Add power checks
-                else:
-                    power_match = re.search(
-                        r"power\s+(\d+)(?:\s+or\s+(greater|less))?",
-                        exception_criteria)
-                    if power_match:
-                        power_req = int(power_match.group(1))
-                        direction = power_match.group(2)
-                        blocker_power = getattr(blocker, 'power', 0) or 0
-                        blocker_meets = (
-                            blocker_power >= power_req
-                            if direction == 'greater'
-                            else blocker_power <= power_req
-                            if direction == 'less'
-                            else blocker_power == power_req)
-                # Add more common exceptions
-                if not blocker_meets: return False # Blocker does not meet the specific exception criteria
-
-            # Menace check handled during assignment (needs 2+ blockers) - individual block check is fine here
-
-            return True # No restriction found preventing this specific block
+        match_except = re.search(
+            r"can't be blocked except by ([\w\s]+)", attacker_text)
+        if not match_except:
+            return True
+        criteria = match_except.group(1).strip().lower()
+        blocker_subtypes = self._normalized_values(
+            self._live_characteristic(blocker, 'subtypes', []))
+        blocker_meets = (
+            ('artifact' in criteria and blocker_is_artifact)
+            or ('wall' in criteria and 'wall' in blocker_subtypes)
+            or ('flying' in criteria and self._check_keyword(blocker, "flying"))
+            or any(
+                color in criteria and self._has_color(blocker, color)
+                for color in ('white', 'blue', 'black', 'red', 'green')))
+        if blocker_meets:
+            return True
+        power_match = re.search(
+            r"power\s+(\d+)(?:\s+or\s+(greater|less))?", criteria)
+        if not power_match:
+            return False
+        power_required = int(power_match.group(1))
+        direction = power_match.group(2)
+        blocker_power = self._live_characteristic(blocker, 'power', 0) or 0
+        if direction == 'greater':
+            return blocker_power >= power_required
+        if direction == 'less':
+            return blocker_power <= power_required
+        return blocker_power == power_required
 
     # Helper for landwalk check
     def _get_landwalk_type(self, card):
-        if card and hasattr(card, 'oracle_text'):
-            for land_type in ["island", "swamp", "mountain", "forest", "plains", "desert"]:
-                if f"{land_type}walk" in card.oracle_text.lower(): return land_type
+        if card:
+            text = self._active_rules_text(card)
+            for land_type in [
+                    "island", "swamp", "mountain", "forest", "plains",
+                    "desert"]:
+                keyword = f"{land_type}walk"
+                if (self._check_keyword(card, keyword)
+                        or keyword in text):
+                    return land_type
         return None
 
     # Helper for landwalk check
     def _controls_land_type(self, player, land_type):
         for card_id in player.get("battlefield", []):
             card = self.game_state._safe_get_card(card_id)
-            if card and 'land' in getattr(card, 'type_line', '') and land_type in getattr(card, 'subtypes', []):
+            card_types = self._normalized_values(
+                self._live_characteristic(card, 'card_types', []))
+            subtypes = self._normalized_values(
+                self._live_characteristic(card, 'subtypes', []))
+            if card and 'land' in card_types and land_type in subtypes:
                  return True
         return False
 
     # Helper for intimidate check
     def _share_color(self, card1, card2):
-        if card1 and card2 and hasattr(card1, 'colors') and hasattr(card2, 'colors'):
-            return any(c1 and c2 for c1, c2 in zip(card1.colors, card2.colors))
+        if card1 and card2:
+            colors1 = self._live_characteristic(card1, 'colors', [0] * 5)
+            colors2 = self._live_characteristic(card2, 'colors', [0] * 5)
+            return any(c1 and c2 for c1, c2 in zip(colors1, colors2))
         return False
 
     def check_must_attack(self, card_id):
@@ -1371,9 +1618,11 @@ class TargetingSystem:
         card = gs._safe_get_card(card_id)
         if not card or not hasattr(card, 'oracle_text'): return False
 
-        text = card.oracle_text.lower()
+        text = self._active_rules_text(card)
         # Rule: "attacks each combat if able" or "must attack if able"
-        if "attacks each combat if able" in text or "must attack if able" in text:
+        if ("unless" not in text and (
+                "attacks each combat if able" in text
+                or "must attack if able" in text)):
             # Check for exclusions (e.g., "attacks each combat if able unless you control...")
             # Complex exclusions require AbilityHandler/Layer system. Basic check here.
             return True
@@ -1385,9 +1634,11 @@ class TargetingSystem:
         card = gs._safe_get_card(card_id)
         if not card or not hasattr(card, 'oracle_text'): return False
 
-        text = card.oracle_text.lower()
+        text = self._active_rules_text(card)
         # Rule: "blocks each combat if able" or "must block if able"
-        if "blocks each combat if able" in text or "must block if able" in text:
+        if ("unless" not in text and (
+                "blocks each combat if able" in text
+                or "must block if able" in text)):
              # Check for exclusions
              return True
         return False
