@@ -391,6 +391,16 @@ class LayerSystem:
                 live_card = live_card_check
             self._ever_modified_ids.add(card_id)
 
+            # Preserve nonstandard layer-6 restrictions (cant_block,
+            # cant_attack, and similar) that cannot be represented in the
+            # fixed Card.ALL_KEYWORDS bit array.
+            active_abilities = (
+                set(final_chars.get('_inherent_abilities', set()))
+                | set(final_chars.get('_granted_abilities', set())))
+            active_abilities -= set(
+                final_chars.get('_removed_abilities', set()))
+            setattr(live_card, 'active_abilities', active_abilities)
+
 
             # Apply calculated characteristics
             for attr, value in final_chars.items():

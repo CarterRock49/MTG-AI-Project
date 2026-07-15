@@ -161,7 +161,7 @@ class AlphaZeroMTGEnv(gym.Env):
         self._subtype_vocab = subtype_vocab
         self._feature_dim = (
             4 + 6 + len(Card.ALL_KEYWORDS) + 5 + len(self._subtype_vocab) + 3)
-        # Observation v2 gives every visible card slot a categorical semantic
+        # The observation contract gives every visible card slot a categorical semantic
         # identity.  Registry IDs may be sparse in a selected corpus, so size
         # the embedding namespace from the largest frozen canonical index,
         # not from len(card_db).  0 is padding, 1 is a visible unknown/token,
@@ -188,7 +188,7 @@ class AlphaZeroMTGEnv(gym.Env):
             (card_id for card_id, _ in canonical_entries), default=-1)
         if self._canonical_card_id_max + 2 > SEMANTIC_IDENTITY_MAX:
             raise ValueError(
-                "Canonical card registry exceeds Observation v2's semantic "
+                "Canonical card registry exceeds the observation contract's semantic "
                 f"identity capacity ({SEMANTIC_IDENTITY_MAX - 1} cards)")
         self._canonical_card_ids = {
             card_id for card_id, _ in canonical_entries}
@@ -409,7 +409,6 @@ class AlphaZeroMTGEnv(gym.Env):
             "multi_turn_plan": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
             "win_condition_viability": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
             "win_condition_timings": spaces.Box(low=0, high=self.max_turns + 1, shape=(6,), dtype=np.float32),
-            "resource_efficiency": spaces.Box(low=0, high=1, shape=(3,), dtype=np.float32),
             "mulligan_in_progress": spaces.Box(low=0, high=1, shape=(1,), dtype=np.int32),
             "mulligan_recommendation": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
             "mulligan_reason_count": spaces.Box(low=0, high=5, shape=(1,), dtype=np.int32),
@@ -3621,23 +3620,37 @@ class AlphaZeroMTGEnv(gym.Env):
                     agent_player_obj, "mana_pool", "my_mana_pool")
                 obs["opp_mana_pool"] = self._mana_pool_vector(
                     opp, "mana_pool", "opp_mana_pool")
-                obs["my_snow_mana_pool"] = self._mana_pool_vector(
-                    agent_player_obj, "snow_mana_pool", "my_snow_mana_pool")
-                obs["opp_snow_mana_pool"] = self._mana_pool_vector(
-                    opp, "snow_mana_pool", "opp_snow_mana_pool")
+                obs["my_snow_mana_pool"] = self._snow_mana_vector(
+                    agent_player_obj, "my_snow_mana_pool")
+                obs["opp_snow_mana_pool"] = self._snow_mana_vector(
+                    opp, "opp_snow_mana_pool")
                 obs["my_restricted_mana_pool"] = self._restricted_mana_vector(
                     agent_player_obj, "my_restricted_mana_pool")
                 obs["opp_restricted_mana_pool"] = self._restricted_mana_vector(
                     opp, "opp_restricted_mana_pool")
                 obs["untapped_land_count"] = np.array([sum(1 for cid in agent_player_obj.get("battlefield", []) if self._is_land(cid) and cid not in agent_player_obj.get("tapped_permanents", set()))], dtype=np.int32)
+                # Snow mana is provenance attached to units already present
+                # in the ordinary/restricted pools, not an additional pool.
+                # Counting it here made one snow mana look like two units of
+                # spendable mana to the policy.
                 floating_mana = sum(
                     int(np.asarray(obs[key], dtype=np.int64).sum())
-                    for key in ("my_mana_pool", "my_snow_mana_pool",
-                                "my_restricted_mana_pool"))
+                    for key in ("my_mana_pool", "my_restricted_mana_pool"))
                 obs["total_available_mana"] = self._bounded_int_array(
                     "total_available_mana",
                     [floating_mana + int(obs["untapped_land_count"][0])])
-                obs["turn_vs_mana"] = np.array([min(1.0, len([cid for cid in agent_player_obj.get("battlefield",[]) if self._is_land(cid)]) / max(1.0, float(current_turn)))], dtype=np.float32)
+                # ``turn`` is the global alternating turn number. Compare
+                # land development with turns actually received by this
+                # observer, otherwise an on-curve player trends toward 0.5.
+                observer_turns = (
+                    (int(current_turn) + 1) // 2
+                    if gs.agent_is_p1 else int(current_turn) // 2)
+                land_count = sum(
+                    1 for card_id in agent_player_obj.get("battlefield", [])
+                    if self._is_land(card_id))
+                obs["turn_vs_mana"] = np.array([
+                    min(1.0, land_count / max(1.0, float(observer_turns)))
+                ], dtype=np.float32)
             except Exception as e:
                 self._record_observation_error("mana features", e)
                 logging.error(f"Error populating mana features in _get_obs: {e}", exc_info=True)
@@ -3787,7 +3800,6 @@ class AlphaZeroMTGEnv(gym.Env):
                 obs["multi_turn_plan"] = np.zeros(6, dtype=np.float32) # Default
                 obs["win_condition_viability"] = np.zeros(6, dtype=np.float32) # Default
                 obs["win_condition_timings"] = np.zeros(6, dtype=np.float32) # Default
-                obs["resource_efficiency"] = self._get_resource_efficiency(agent_player_obj, current_turn)
 
                 # Recommendations (Defaults assigned earlier)
                 # Action Mask already assigned
@@ -3907,11 +3919,21 @@ class AlphaZeroMTGEnv(gym.Env):
                     ], dtype=np.float32)
                     obs["win_condition_timings"][:wc_time_len] = np.array([min(self.max_turns + 1, win_cons.get(k, {}).get("turns_to_win", 99)) for k in wc_keys[:wc_time_len]], dtype=np.float32)
 
-                    plan_len = min(len(obs["multi_turn_plan"]), 6)
-                    obs["multi_turn_plan"][:plan_len] = self._get_multi_turn_plan_metrics()[:plan_len]
-
                     bf_ids_opp = opp.get("battlefield", [])
-                    threat_assessment_values = self._get_threat_assessment(bf_ids_opp)
+                    threat_list = self.strategic_planner.assess_threats()
+                    turn_plan = self.strategic_planner.plan_multi_turn_sequence(
+                        depth=2,
+                        analysis=analysis,
+                        win_conditions=win_cons,
+                        opponent_threats=threat_list,
+                    )
+                    plan_len = min(len(obs["multi_turn_plan"]), 6)
+                    obs["multi_turn_plan"][:plan_len] = \
+                        self._get_multi_turn_plan_metrics(
+                            plan=turn_plan)[:plan_len]
+
+                    threat_assessment_values = self._get_threat_assessment(
+                        bf_ids_opp, threat_list=threat_list)
                     copy_len_threat = min(len(obs["threat_assessment"]), len(threat_assessment_values))
                     obs["threat_assessment"][:copy_len_threat] = threat_assessment_values[:copy_len_threat]
 
@@ -3922,9 +3944,7 @@ class AlphaZeroMTGEnv(gym.Env):
                     # dead. Compute individual values with the evaluator and
                     # the optimal combination with the real combat search,
                     # only while an attack decision is live.
-                    if gs.phase in (gs.PHASE_MAIN_PRECOMBAT,
-                                    gs.PHASE_BEGIN_COMBAT,
-                                    gs.PHASE_DECLARE_ATTACKERS):
+                    if gs.phase == gs.PHASE_DECLARE_ATTACKERS:
                         attacker_values = self._get_attacker_values(
                             bf_ids_agent, agent_player_obj)
                         if obs["attacker_values"].shape == attacker_values.shape:
@@ -4568,7 +4588,7 @@ class AlphaZeroMTGEnv(gym.Env):
             and gs.is_face_down_exile_card(card_id))
 
     def _semantic_card_index(self, card_id):
-        """Map a runtime object to Observation v2's stable identity encoding."""
+        """Map a runtime object to the observation contract's stable identity encoding."""
         if card_id is None:
             return 0
         if self._card_identity_is_hidden(card_id):
@@ -4695,6 +4715,23 @@ class AlphaZeroMTGEnv(gym.Env):
         pool = player.get(pool_name, {}) or {}
         return self._bounded_int_array(
             observation_key, [pool.get(color, 0) for color in colors])
+
+    def _snow_mana_vector(self, player, observation_key):
+        """Aggregate snow provenance across ordinary and restricted pools."""
+        colors = ("W", "U", "B", "R", "G", "C")
+        totals = {color: 0 for color in colors}
+        for pool_name in ("snow_mana_pool", "phase_restricted_snow_mana"):
+            for color, amount in (player.get(pool_name, {}) or {}).items():
+                if color in totals:
+                    totals[color] += self._public_count(amount, maximum=100)
+        for pool in (player.get("conditional_snow_mana", {}) or {}).values():
+            if not isinstance(pool, dict):
+                continue
+            for color, amount in pool.items():
+                if color in totals:
+                    totals[color] += self._public_count(amount, maximum=100)
+        return self._bounded_int_array(
+            observation_key, [totals[color] for color in colors])
 
     def _restricted_mana_vector(self, player, observation_key):
         colors = ("W", "U", "B", "R", "G", "C")
@@ -4996,9 +5033,9 @@ class AlphaZeroMTGEnv(gym.Env):
         metrics[0] = analysis.get("position", {}).get("score", 0)
         metrics[1] = analysis.get("board_state", {}).get("board_advantage", 0)
         card_adv = analysis.get("resources", {}).get("card_advantage", 0)
-        metrics[2] = card_adv / max(1, abs(card_adv) * 2) # Normalize better
+        metrics[2] = np.tanh(card_adv / 3.0)
         mana_adv = analysis.get("resources", {}).get("mana_advantage", 0)
-        metrics[3] = mana_adv / max(1, abs(mana_adv) * 2) # Normalize better
+        metrics[3] = np.tanh(mana_adv / 3.0)
         life_diff = analysis.get("life", {}).get("life_diff", 0)
         metrics[4] = life_diff / 20.0 # Normalize by starting life
         metrics[5] = analysis.get("tempo", {}).get("tempo_advantage", 0)
@@ -5040,16 +5077,22 @@ class AlphaZeroMTGEnv(gym.Env):
         composition[5] = counts['land'] / total_known
         return composition
 
-    def _get_threat_assessment(self, opp_bf_ids):
+    def _get_threat_assessment(self, opp_bf_ids, threat_list=None):
         """Assess threat level of opponent's board."""
         # Fallback: Return zeros if strategic planner is not available
-        if not hasattr(self, 'strategic_planner') or not self.strategic_planner:
+        if (threat_list is None
+                and (not hasattr(self, 'strategic_planner')
+                     or not self.strategic_planner)):
             return np.zeros(self.max_battlefield, dtype=np.float32)
 
         threats = np.zeros(self.max_battlefield, dtype=np.float32)
-        if hasattr(self.strategic_planner, 'assess_threats'):
+        if (threat_list is not None
+                or hasattr(
+                    getattr(self, 'strategic_planner', None),
+                    'assess_threats')):
             try:
-                threat_list = self.strategic_planner.assess_threats() # Get list of dicts
+                if threat_list is None:
+                    threat_list = self.strategic_planner.assess_threats()
                 threat_map = {t['card_id']: t['level'] for t in threat_list}
                 for i, card_id in enumerate(opp_bf_ids):
                     if i >= self.max_battlefield: break
@@ -5083,26 +5126,6 @@ class AlphaZeroMTGEnv(gym.Env):
                       opportunities[i] = min(1.0, value / 5.0) # Normalize max value
         return opportunities
 
-
-    def _get_resource_efficiency(self, player, turn):
-        """Calculate resource efficiency metrics."""
-        efficiency = np.zeros(3, dtype=np.float32)
-        gs = self.game_state
-        # Mana efficiency: % of lands tapped or mana used this turn? Complex.
-        # Simple: Lands available vs turn number
-        lands_in_play = sum(1 for cid in player.get("battlefield", []) if self._is_land(cid))
-        efficiency[0] = min(1.0, lands_in_play / max(1, turn))
-        # Card efficiency: Cards drawn vs turns passed?
-        cards_drawn = getattr(self.game_state, 'cards_drawn_this_turn', {}).get('p1' if player==self.game_state.p1 else 'p2', 0)
-        # Cumulative draw efficiency (crude)
-        total_drawn = cards_drawn + 7 # Initial hand + draws
-        efficiency[1] = min(1.0, total_drawn / max(7, turn + 6)) # Compare against expected cards drawn
-        # Tempo: Avg CMC of permanents vs turn. Higher early CMC might be bad tempo unless ramp.
-        cmc_sum = sum(getattr(gs._safe_get_card(cid), 'cmc', 0) for cid in player.get("battlefield", []) if gs._safe_get_card(cid))
-        num_perms = len(player.get("battlefield", []))
-        avg_cmc = cmc_sum / max(1, num_perms)
-        efficiency[2] = min(1.0, max(0, 1.0 - abs(avg_cmc - turn / 2) / 5.0)) # Closer avg CMC to half turn num is better?
-        return efficiency
 
     def _get_ability_features(self, bf_ids, player):
         """Get features related to activatable abilities. Ensures correct shape is returned. (Reinforced)"""
@@ -5206,7 +5229,7 @@ class AlphaZeroMTGEnv(gym.Env):
         timing[4] = 1.0 if is_main else 0.6 # Setup (Counters, Tapping etc)
         return timing
 
-    def _get_multi_turn_plan_metrics(self):
+    def _get_multi_turn_plan_metrics(self, plan=None):
         """Convert strategic planner's multi-turn plan to metrics."""
         metrics = np.zeros(6, dtype=np.float32)
 
@@ -5226,9 +5249,14 @@ class AlphaZeroMTGEnv(gym.Env):
                 return 0.0
             return min(1.0, max(0.0, number / denominator))
 
-        if self.strategic_planner and hasattr(self.strategic_planner, 'plan_multi_turn_sequence'):
+        if (plan is not None or (
+                self.strategic_planner
+                and hasattr(
+                    self.strategic_planner, 'plan_multi_turn_sequence'))):
             try:
-                plan = self.strategic_planner.plan_multi_turn_sequence(depth=2)
+                if plan is None:
+                    plan = self.strategic_planner.plan_multi_turn_sequence(
+                        depth=2)
                 if plan:
                     metrics[0] = normalized_count(
                         plan[0].get('plays'), 3.0) # Plays this turn

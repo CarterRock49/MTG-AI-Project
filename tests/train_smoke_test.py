@@ -30,6 +30,7 @@ What it verifies:
 import os
 import json
 import queue
+from collections import Counter
 from functools import partial
 import shutil
 import sys
@@ -232,9 +233,8 @@ def check_mask_aware_evaluation():
         m.LOG_DIR = os.path.join(tmp, "logs")
         try:
             schedule_decks = [
-                {"name": "Aggro", "cards": []},
-                {"name": "Control", "cards": []},
-                {"name": "Midrange", "cards": []},
+                {"name": f"Deck {index}", "cards": []}
+                for index in range(8)
             ]
             full_schedule = m.build_fixed_evaluation_schedule(
                 schedule_decks, 64, 12345)
@@ -243,13 +243,73 @@ def check_mask_aware_evaluation():
                 list(reversed(schedule_decks)), 64, 12345)
             assert full_schedule != m.build_fixed_evaluation_schedule(
                 schedule_decks, 64, 12346)
-            for first, second in zip(
-                    full_schedule[::2], full_schedule[1::2]):
+            paired_cases = list(zip(
+                full_schedule[::2], full_schedule[1::2]))
+            for first, second in paired_cases:
                 assert first["seed"] == second["seed"]
                 assert first["agent_is_p1"] is True
                 assert second["agent_is_p1"] is False
                 assert first["p1_deck"] == second["p2_deck"]
                 assert first["p2_deck"] == second["p1_deck"]
+                assert first["p1_deck"] != first["p2_deck"]
+
+            expected_names = {deck["name"] for deck in schedule_decks}
+            agent_matchups = Counter(
+                first["p1_deck"] for first, _ in paired_cases)
+            opponent_matchups = Counter(
+                first["p2_deck"] for first, _ in paired_cases)
+            assert set(agent_matchups) == expected_names
+            assert set(opponent_matchups) == expected_names
+            assert set(agent_matchups.values()) == {4}
+            assert set(opponent_matchups.values()) == {4}
+            for deck_name in expected_names:
+                opponents = {
+                    first["p2_deck"] for first, _ in paired_cases
+                    if first["p1_deck"] == deck_name
+                }
+                assert len(opponents) == 4
+                seat_counts = Counter(
+                    case["agent_is_p1"] for case in full_schedule
+                    if (case["p1_deck"] if case["agent_is_p1"]
+                        else case["p2_deck"]) == deck_name)
+                assert seat_counts == {True: 4, False: 4}
+
+            schedule_hash = m.evaluation_schedule_sha256(full_schedule)
+            assert schedule_hash == m.evaluation_schedule_sha256(
+                m.build_fixed_evaluation_schedule(
+                    list(reversed(schedule_decks)), 64, 12345))
+            changed_case = [dict(case) for case in full_schedule]
+            changed_case[0]["seed"] += 1
+            assert schedule_hash != m.evaluation_schedule_sha256(changed_case)
+
+            # When the pair count is not divisible by the deck count, both
+            # learned-deck and opponent exposure are still optimally balanced.
+            ten_decks = [
+                {"name": f"Wide Deck {index}", "cards": []}
+                for index in range(10)
+            ]
+            wide_schedule = m.build_fixed_evaluation_schedule(
+                ten_decks, 64, 54321)
+            wide_pairs = wide_schedule[::2]
+            for key in ("p1_deck", "p2_deck"):
+                counts = Counter(case[key] for case in wide_pairs)
+                assert len(counts) == 10
+                assert max(counts.values()) - min(counts.values()) == 1
+            try:
+                m.build_fixed_evaluation_schedule(
+                    [{"name": "Only Deck", "cards": []}], 2, 12345)
+            except ValueError as error:
+                assert "at least two distinct decks" in str(error)
+            else:
+                raise AssertionError(
+                    "fixed evaluation silently introduced a mirror match")
+            try:
+                m.build_fixed_evaluation_schedule(schedule_decks, 3, 12345)
+            except ValueError as error:
+                assert "must be even" in str(error)
+            else:
+                raise AssertionError(
+                    "fixed evaluation accepted an unpaired final case")
             fixed_schedule = full_schedule[:args.eval_episodes]
 
             class ScheduleProbe:
@@ -331,11 +391,18 @@ def check_mask_aware_evaluation():
                         "name": "learn",
                         "start_timestep": 0,
                         "advance_when": {
-                            "window_episodes": 2,
+                            "window_episodes": 4,
                             "min_stage_timesteps": 10,
-                            "min_decisive_win_rate": 1.0,
-                            "max_decisive_loss_rate": 0.0,
+                            "max_stage_timesteps": 20,
+                            "min_decisive_win_rate": 0.75,
+                            "max_decisive_loss_rate": 0.25,
                             "max_timeout_rate": 0.0,
+                            "profile_requirements": {
+                                "novice": {
+                                    "min_episodes": 2,
+                                    "min_decisive_win_rate": 0.5,
+                                },
+                            },
                         },
                     },
                     {"name": "apply", "start_timestep": 10},
@@ -352,27 +419,122 @@ def check_mask_aware_evaluation():
             mastery_callback.num_timesteps = 0
             mastery_callback._on_training_start()
             mastery_callback.num_timesteps = 10
-            mastery_callback.locals = {
-                "infos": [{
-                    "curriculum_stage": "learn",
-                    "game_result": "win",
-                    "terminal_reason": "life_total",
-                }],
-                "dones": np.array([True]),
-            }
-            assert mastery_callback._on_step()
+
+            def record_mastery_outcome(
+                    callback, profile, result, stage="learn"):
+                callback.locals = {
+                    "infos": [{
+                        "curriculum_stage": stage,
+                        "opponent_profile": profile,
+                        "game_result": result,
+                        "terminal_reason": "life_total",
+                    }],
+                    "dones": np.array([True]),
+                }
+                assert callback._on_step()
+
+            # Even a perfect aggregate window cannot master the stage without
+            # the configured evidence against the novice opponent.
+            for _ in range(4):
+                record_mastery_outcome(
+                    mastery_callback, "passive", "win")
             assert mastery_callback._active_stage_index == 0
-            assert mastery_callback._on_step()
-            assert mastery_callback._active_stage_index == 1
+            persisted_window = getattr(
+                mastery_callback.model,
+                m.CurriculumProgressCallback.MODEL_STATE_ATTRIBUTE)
+            assert persisted_window["recent_outcomes"][0] == {
+                "outcome": "win", "opponent_profile": "passive"}
+
+            # Profile-tagged rolling outcomes survive callback restoration.
+            restored_callback = m.CurriculumProgressCallback(
+                mastery_curriculum)
+            restored_callback.model = mastery_callback.model
+            restored_callback.num_timesteps = 10
+            restored_callback._on_training_start()
+            assert restored_callback._outcome_rates("passive")["episodes"] == 4
+            record_mastery_outcome(restored_callback, "novice", "loss")
+            assert restored_callback._active_stage_index == 0
+            record_mastery_outcome(restored_callback, "novice", "win")
+            assert restored_callback._active_stage_index == 1
             assert mastery_probe.calls == [
                 ("set_curriculum_stage", (0, 0)),
+                ("set_curriculum_stage", (0, 10)),
                 ("set_curriculum_stage", (1, 10)),
             ]
             saved_mastery = getattr(
-                mastery_callback.model,
+                restored_callback.model,
                 m.CurriculumProgressCallback.MODEL_STATE_ATTRIBUTE)
             assert saved_mastery["stage_index"] == 1
+            assert saved_mastery["transition_history"][-1]["reason"] == \
+                "mastery"
+            assert saved_mastery["pending_activation_workers"] == [0]
+            assert saved_mastery["transition_history"][-1][
+                "activation_timestep"] is None
+            restored_callback.num_timesteps = 11
+            record_mastery_outcome(
+                restored_callback, "scripted", "loss", stage="apply")
+            saved_mastery = getattr(
+                restored_callback.model,
+                m.CurriculumProgressCallback.MODEL_STATE_ATTRIBUTE)
+            assert saved_mastery["pending_activation_workers"] == []
+            assert saved_mastery["stage_entry_timestep"] == 11
+            assert saved_mastery["transition_history"][-1][
+                "activation_timestep"] == 11
+            progress_manifest = m.curriculum_progress_manifest(
+                restored_callback.model, mastery_curriculum)
+            assert progress_manifest["state"]["stage_name"] == "apply"
+            assert progress_manifest["state"]["transition_history"][-1][
+                "activation_timestep"] == 11
             assert mastery_metrics["curriculum/stage_index"] == 1
+            assert mastery_metrics[
+                "curriculum/mastery_novice_decisive_win_rate"] == 0.5
+
+            deadline_probe = ScheduleProbe()
+            deadline_metrics = {}
+            deadline_curriculum = json.loads(json.dumps(mastery_curriculum))
+            deadline_curriculum["id"] = "deadline-test"
+            deadline_curriculum["stages"][0]["advance_when"][
+                "max_stage_timesteps"] = 12
+            deadline_callback = m.CurriculumProgressCallback(
+                deadline_curriculum)
+            deadline_callback.model = SimpleNamespace(
+                get_env=lambda: deadline_probe,
+                logger=SimpleNamespace(record=lambda name, value:
+                                       deadline_metrics.__setitem__(
+                                           name, value)),
+            )
+            deadline_callback.num_timesteps = 0
+            deadline_callback._on_training_start()
+            deadline_callback.num_timesteps = 10
+            record_mastery_outcome(deadline_callback, "passive", "win")
+            record_mastery_outcome(deadline_callback, "passive", "win")
+            assert deadline_callback._active_stage_index == 0
+            deadline_callback.num_timesteps = 12
+            deadline_callback.locals = {"infos": [], "dones": np.array([])}
+            assert deadline_callback._on_step()
+            assert deadline_callback._active_stage_index == 1
+            deadline_state = getattr(
+                deadline_callback.model,
+                m.CurriculumProgressCallback.MODEL_STATE_ATTRIBUTE)
+            assert deadline_state["transition_history"][-1]["reason"] == \
+                "deadline"
+            assert deadline_metrics["curriculum/advance_via_deadline"] == 1.0
+            deadline_callback.num_timesteps = 13
+            record_mastery_outcome(
+                deadline_callback, "passive", "win", stage="learn")
+            deadline_state = getattr(
+                deadline_callback.model,
+                m.CurriculumProgressCallback.MODEL_STATE_ATTRIBUTE)
+            assert deadline_state["stale_stage_episodes"] == 1
+            assert deadline_state["pending_activation_workers"] == [0]
+            deadline_callback.num_timesteps = 14
+            record_mastery_outcome(
+                deadline_callback, "scripted", "loss", stage="apply")
+            deadline_state = getattr(
+                deadline_callback.model,
+                m.CurriculumProgressCallback.MODEL_STATE_ATTRIBUTE)
+            assert deadline_state["stage_entry_timestep"] == 14
+            assert deadline_state["pending_activation_workers"] == []
 
             # Functional contract of the async result path: outcome quality,
             # not shaped mean reward, promotes the exact evaluated snapshot.
@@ -1024,7 +1186,10 @@ def check_main_failure_semantics():
             m.TENSORBOARD_DIR = os.path.join(tmp, "tensorboard")
             def fake_load_decks(_path, **_kwargs):
                 Card.SUBTYPE_VOCAB = list(frozen_vocab)
-                return [{"name": "Synthetic Deck", "cards": []}], {}
+                return [
+                    {"name": "Synthetic Deck A", "cards": []},
+                    {"name": "Synthetic Deck B", "cards": []},
+                ], {}
 
             def fake_make_masked_env(
                     _decks, _card_db, _storage_root, **kwargs):

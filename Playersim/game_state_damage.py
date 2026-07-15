@@ -145,16 +145,10 @@ class GameStateDamageMixin:
                         if not is_indestructible:
                             # Flag for potential destruction, replacements handled during application
                             actions_to_take.append((3, "CHECK_DESTROY", card_id, player, {"reason": "lethal_damage/deathtouch"}))
-                        else:
-                            # If indestructible but has lethal damage, remove the damage (Rule 704.5g implicitly requires this if destroy is skipped)
-                            if damage > 0 and card_id in player.get("damage_counters",{}):
-                                logging.debug(f"Removing lethal damage from indestructible creature {card.name}")
-                                player["damage_counters"][card_id] = 0
-                                # Clear deathtouch flag too if it triggered this
-                                if card_id in player.get("deathtouch_damage",{}):
-                                    del player["deathtouch_damage"][card_id]
-                                # Need to mark action performed to trigger potential loop check/layer update
-                                current_actions_performed = True
+                        # Indestructible stops the destruction event; it does
+                        # not remove marked damage or a deathtouch mark. Those
+                        # remain until cleanup and matter to later combat-damage
+                        # assignment (notably double strike plus trample).
 
                 # 704.5j: If an Aura is attached to an illegal object or player, or is not attached to an object or player, send to GY
                 if 'aura' in current_subtypes:

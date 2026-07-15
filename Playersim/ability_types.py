@@ -1403,9 +1403,13 @@ class TriggeredAbility(Ability):
                 r"when(ever)?\s+.*becomes? attacking"
             ],
             "BLOCKS": [
-                r"when(ever)?\s+.*blocks",
+                r"when(ever)?\s+.*blocks?\b",
                 r"when(ever)?\s+.*declares? block",
                 r"when(ever)?\s+.*becomes? blocking"
+            ],
+            "BECOMES_BLOCKED": [
+                r"when(ever)?\s+.*becomes? blocked",
+                r"when(ever)?\s+.*is blocked",
             ],
             "DEALS_DAMAGE": [
                 r"when(ever)?\s+.*deals damage",
@@ -1894,6 +1898,81 @@ class TriggeredAbility(Ability):
                 if (re.search(r"\battacks?\s+you\b", self.trigger_condition, re.IGNORECASE)
                         and gs and attacker_id is not None
                         and gs.get_card_controller(attacker_id) is context.get("controller")):
+                    return False
+            if event_type == "BLOCKS":
+                context = context or {}
+                blocker_id = context.get(
+                    "blocker_id", context.get("event_card_id"))
+                source_id = context.get("source_card_id")
+                gs = context.get("game_state")
+                source_card = context.get("source_card")
+                source_name = str(
+                    getattr(source_card, "name", "") or "").lower()
+                short_name = source_name.split(",")[0].strip()
+                # A self-referential block trigger belongs only to the object
+                # that actually blocked. Without this gate, every permanent
+                # with "whenever this creature blocks" heard every block.
+                names_source = bool(
+                    re.search(
+                        r"\bthis\s+(?:creature|permanent)\b.*\bblocks\b",
+                        self.trigger_condition, re.IGNORECASE)
+                    or (short_name and re.search(
+                        rf"^\s*when(?:ever)?\s+{re.escape(short_name)}\s+blocks\b",
+                        self.trigger_condition, re.IGNORECASE)))
+                if (names_source
+                        and source_id != blocker_id):
+                    return False
+                watcher = re.search(
+                    r"when(?:ever)?\s+(a|an|another|one or more)\s+"
+                    r"(.+?)\s+blocks?\b",
+                    self.trigger_condition, re.IGNORECASE)
+                if watcher and gs and blocker_id is not None:
+                    scope = watcher.group(2).strip().lower()
+                    if scope.endswith("you control"):
+                        scope = scope[:-len("you control")].strip()
+                        if (gs.get_card_controller(blocker_id) is not
+                                context.get("controller")):
+                            return False
+                    if (watcher.group(1).lower() == "another"
+                            and source_id == blocker_id):
+                        return False
+                    if (watcher.group(1).lower() == "one or more"
+                            and not context.get(
+                                "first_block_for_controller", False)):
+                        return False
+                    blocker_card = gs._safe_get_card(blocker_id)
+                    vocabulary = {"permanent"}
+                    for group in ("card_types", "subtypes", "supertypes"):
+                        vocabulary.update(
+                            str(value).lower() for value in
+                            getattr(blocker_card, group, None) or [])
+                    for word in re.split(r"[\s,]+", scope):
+                        if (word and word not in vocabulary
+                                and not (word.endswith("s")
+                                         and word[:-1] in vocabulary)):
+                            return False
+            if event_type == "BECOMES_BLOCKED":
+                context = context or {}
+                attacker_id = context.get(
+                    "attacker_id", context.get("event_card_id"))
+                source_id = context.get("source_card_id")
+                source_card = context.get("source_card")
+                source_name = str(
+                    getattr(source_card, "name", "") or "").lower()
+                short_name = source_name.split(",")[0].strip()
+                # Afflict, rampage, and ordinary self triggers must be scoped
+                # to the attacker that became blocked.
+                names_source = bool(
+                    re.search(
+                        r"\b(?:this\s+(?:creature|permanent)|it)\b.*"
+                        r"\bbecomes? blocked\b",
+                        self.trigger_condition, re.IGNORECASE)
+                    or (short_name and re.search(
+                        rf"^\s*when(?:ever)?\s+{re.escape(short_name)}\s+"
+                        r"becomes? blocked\b",
+                        self.trigger_condition, re.IGNORECASE)))
+                if (names_source
+                        and source_id != attacker_id):
                     return False
             if event_type == "DAMAGED":
                 context = context or {}
@@ -2745,6 +2824,16 @@ class StaticAbility(Ability):
                         return {'effect_type': 'add_ability', 'effect_value': official_kw}
                 # If it gets here after checking a phrase part, it wasn't a recognized keyword
                 break # Move to next check after first phrase part processed
+
+        # Patchwork Beastie's full delirium condition is evaluated by combat
+        # legality. Do not collapse that supported condition into an
+        # unconditional pseudo-keyword. Other unknown "unless" restrictions
+        # remain conservative until their conditions have an explicit parser.
+        if re.search(
+                r"can't attack or block unless there are \w+ or more card "
+                r"types among cards in your graveyard",
+                effect_lower_clean):
+            return None
 
         # Check specific "can't attack/block" / "must attack/block" phrases - use cleaned text
         if "can't attack" in effect_lower_clean: return {'effect_type': 'add_ability', 'effect_value': 'cant_attack'}

@@ -26,6 +26,7 @@ import shutil
 import sys
 import tempfile
 import traceback
+from unittest.mock import patch
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
@@ -16619,6 +16620,73 @@ def s_observation_v2_public_state_is_explicit_and_relative():
     assert opponent_view["combat_blocker_assignments"][0] == env.max_battlefield, \
         "block assignment mapping was not re-based to the observing seat"
     assert opponent_view["opp_mana_pool"].tolist() == [1, 2, 0, 0, 0, 0]
+
+
+@scenario("observation v3 / mana semantics",
+          "snow provenance is not extra mana and land development uses observer turns")
+def s_observation_v3_mana_totals_and_turn_development_are_exact():
+    env = get_env(); gs = fresh(SEED + 927)
+    gs.agent_is_p1 = True
+    me, opp = gs.p1, gs.p2
+
+    me["battlefield"] = []
+    opp["battlefield"] = []
+    for owner, count in ((me, 3), (opp, 2)):
+        for index in range(count):
+            inject_into_zone(gs, owner, {
+                "name": f"Observer Land {owner['name']} {index}",
+                "mana_cost": "", "cmc": 0,
+                "type_line": "Basic Land - Forest",
+                "oracle_text": "{T}: Add {G}.",
+            }, "battlefield")
+
+    gs.turn = 5  # P1's third turn; P2 has received two turns.
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = me
+    me["mana_pool"].update({"G": 1})
+    me["snow_mana_pool"].update({"G": 1})
+    me["phase_restricted_mana"] = {"U": 1}
+    me["phase_restricted_snow_mana"] = {"U": 1}
+    me["conditional_mana"] = {"cast_creatures": {"R": 2}}
+    me["conditional_snow_mana"] = {"cast_creatures": {"R": 2}}
+
+    my_view = env.observation_for(me)
+    opp_view = env.observation_for(opp)
+
+    assert my_view["my_snow_mana_pool"].tolist() == [0, 1, 0, 2, 1, 0], \
+        "restricted snow provenance was missing from the policy input"
+    assert my_view["my_restricted_mana_pool"].sum() == 3
+    assert my_view["total_available_mana"][0] == 7, \
+        "snow provenance was double-counted as spendable mana"
+    assert my_view["turn_vs_mana"][0] == 1.0, \
+        "P1's three lands on turn three were not recognized as on curve"
+    assert opp_view["turn_vs_mana"][0] == 1.0, \
+        "P2's two lands after two received turns were divided by global turn five"
+
+
+@scenario("observation v3 / live combat advice",
+          "expensive attack search runs only while attackers are being declared")
+def s_observation_v3_combat_advice_is_gated_to_live_decision():
+    env = get_env(); gs = fresh(SEED + 928)
+    gs.agent_is_p1 = True
+    gs.priority_player = gs.p1
+    empty_values = np.zeros(env.max_battlefield, dtype=np.float32)
+
+    with patch.object(
+            env, "_get_attacker_values", return_value=empty_values) as values, \
+            patch.object(
+                env.action_handler, "find_optimal_attack",
+                return_value=[]) as optimal:
+        for phase in (gs.PHASE_MAIN_PRECOMBAT, gs.PHASE_BEGIN_COMBAT):
+            gs.phase = phase
+            env.observation_for(gs.p1)
+        assert values.call_count == 0
+        assert optimal.call_count == 0
+
+        gs.phase = gs.PHASE_DECLARE_ATTACKERS
+        env.observation_for(gs.p1)
+        assert values.call_count == 1
+        assert optimal.call_count == 1
 
 
 @scenario("strategy memory / deterministic boundary",

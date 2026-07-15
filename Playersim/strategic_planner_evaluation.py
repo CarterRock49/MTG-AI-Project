@@ -9,6 +9,20 @@ import math
 import re
 
 
+def _finite_number(value, default=0.0):
+    """Return a finite numeric value for advisory scoring."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return float(default)
+    return number if math.isfinite(number) else float(default)
+
+
+def _card_number(card, attribute, default=0.0):
+    return _finite_number(
+        getattr(card, attribute, default) if card else default, default)
+
+
 class CardEvaluationMixin:
     """Card and action evaluation for plays, attacks, blocks, and abilities."""
 
@@ -79,22 +93,17 @@ class CardEvaluationMixin:
         # Basic evaluation based on action type
         if action_type == "END_TURN":
             return -0.1  # Slightly negative - usually we want to do something
-        elif action_type == "PLAY_CARD":
-            card = gs._safe_get_card(param)
-            if not card:
-                return 0.0
-                
-            # Simple heuristic based on card type
-            if hasattr(card, 'card_types'):
-                if 'creature' in card.card_types:
-                    return 0.5  # Playing creatures is generally good
-                if 'land' in card.card_types:
-                    return 0.7  # Playing lands is very good
-                return 0.3  # Other card types
-        elif action_type == "DECLARE_ATTACKER":
+        elif action_type in ("PLAY_LAND", "PLAY_MDFC_LAND_BACK"):
+            return 0.7
+        elif action_type in (
+                "PLAY_SPELL", "PLAY_MDFC_BACK", "PLAY_ADVENTURE"):
+            return 0.4
+        elif action_type == "ATTACK":
             return 0.3  # Attacking is generally good
-        elif action_type == "CAST_SPELL":
-            return 0.4  # Casting spells is generally good
+        elif action_type == "BLOCK":
+            return 0.25
+        elif action_type == "ACTIVATE_ABILITY":
+            return 0.3
         
         return 0.0  # Neutral for other actions
 
@@ -675,18 +684,26 @@ class CardEvaluationMixin:
         # Use card evaluator if available
         if self.card_evaluator and hasattr(self.card_evaluator, 'evaluate_card'):
             try:
-                # Create context if needed
-                if context is None:
-                    context = {
-                        "game_stage": self.current_analysis["game_info"]["game_stage"],
-                        "position": self.current_analysis["position"]["overall"],
-                        "aggression_level": self.aggression_level,
-                        "strategy_type": self.strategy_type,
-                        "turn": gs.turn,
-                        "phase": gs.phase
-                    }
-                
-                return self.card_evaluator.evaluate_card(card_id, "play", context)
+                # Mechanical action context (slot, card ID, chosen face) must
+                # augment rather than replace the strategic evaluation state.
+                analysis = (
+                    self.current_analysis
+                    if isinstance(self.current_analysis, dict) else {})
+                strategic_context = {
+                    "game_stage": analysis.get(
+                        "game_info", {}).get("game_stage", "mid"),
+                    "position": analysis.get(
+                        "position", {}).get("overall", "even"),
+                    "aggression_level": self.aggression_level,
+                    "strategy_type": self.strategy_type,
+                    "deck_archetype": self.strategy_type,
+                    "turn": gs.turn,
+                    "phase": gs.phase,
+                }
+                strategic_context.update(dict(context or {}))
+
+                return self.card_evaluator.evaluate_card(
+                    card_id, "play", strategic_context)
             except Exception as e:
                 logging.warning(f"Error using card evaluator: {e}, falling back to internal evaluation")
         
@@ -964,7 +981,7 @@ class CardEvaluationMixin:
         # Return final value (0-5 scale)
         return max(0.0, min(5.0, value * 5))
 
-    def evaluate_attack_action(self, attacker_ids):
+    def evaluate_attack_action(self, attacker_ids, simulation=None):
         """
         Evaluate the strategic value of a specific attack configuration using CombatResolver.
         
@@ -980,17 +997,17 @@ class CardEvaluationMixin:
         
         # Use combat resolver if available
         if self.combat_resolver:
-            # Store original attackers to restore later
-            original_attackers = gs.current_attackers.copy() if hasattr(gs, 'current_attackers') else []
-            
-            # Set up the proposed attackers
-            gs.current_attackers = attacker_ids.copy()
-            
-            # Simulate combat
-            simulation = self.combat_resolver.simulate_combat()
-            
-            # Restore original state
-            gs.current_attackers = original_attackers
+            # Attack search already simulated this exact candidate. Accepting
+            # that immutable result avoids repeating the dominant combat
+            # advisory cost for every combination.
+            if simulation is None:
+                original_attackers = list(getattr(
+                    gs, 'current_attackers', []))
+                try:
+                    gs.current_attackers = list(attacker_ids)
+                    simulation = self.combat_resolver.simulate_combat()
+                finally:
+                    gs.current_attackers = original_attackers
             
             # Extract simulation results
             damage_to_opponent = simulation.get("damage_to_player", 0)
@@ -1103,96 +1120,122 @@ class CardEvaluationMixin:
         """
         gs = self.game_state
         me = gs.p1 if gs.agent_is_p1 else gs.p2
-        opp = gs.p2 if gs.agent_is_p1 else gs.p1
-        
-        # Get card objects
+        blocker_ids = list(blocker_ids or ())
+
         attacker = gs._safe_get_card(attacker_id)
-        blockers = [gs._safe_get_card(bid) for bid in blocker_ids]
-        blockers = [b for b in blockers if b]  # Filter out None values
-        
-        if not attacker or not blockers:
+        blocker_pairs = [
+            (blocker_id, gs._safe_get_card(blocker_id))
+            for blocker_id in blocker_ids]
+        blocker_pairs = [
+            (blocker_id, blocker) for blocker_id, blocker in blocker_pairs
+            if blocker]
+        if not attacker or not blocker_pairs:
             return 0.0
-        
-        # Use combat resolver if available
+
+        blockers = [blocker for _, blocker in blocker_pairs]
+        attacker_power = max(0.0, _card_number(attacker, "power"))
+        attacker_toughness = max(0.0, _card_number(attacker, "toughness"))
+        blocker_total_power = sum(
+            max(0.0, _card_number(blocker, "power"))
+            for blocker in blockers)
+        blocker_total_toughness = sum(
+            max(0.0, _card_number(blocker, "toughness"))
+            for blocker in blockers)
+
+        simulation = None
         if self.combat_resolver:
-            # Store original state
-            original_attackers = gs.current_attackers.copy() if hasattr(gs, 'current_attackers') else []
-            original_blocks = gs.current_block_assignments.copy() if hasattr(gs, 'current_block_assignments') else {}
-            
-            # Set up the proposed block
-            gs.current_attackers = [attacker_id]
-            gs.current_block_assignments = {attacker_id: blocker_ids}
-            
-            # Simulate just this block
-            simulation = self.combat_resolver.simulate_single_block(attacker_id, blocker_ids)
-            
-            # Restore original state
-            gs.current_attackers = original_attackers
-            gs.current_block_assignments = original_blocks
-            
-            # Extract simulation results
-            attacker_dies = simulation.get("attacker_dies", False)
-            blockers_die = simulation.get("blockers_dying", [])
-            damage_prevented = simulation.get("damage_prevented", 0)
-            
-            # Basic evaluation
-            value = 0.0
-            
-            # Killing attacker is good
-            if attacker_dies:
-                value += 1.0
-            
-            # Losing blockers is bad
-            value -= len(blockers_die) * 0.5
-            
-            # Preventing damage is good
-            value += damage_prevented * 0.2
-            
+            original_attackers = getattr(gs, 'current_attackers', [])
+            original_blocks = getattr(
+                gs, 'current_block_assignments', {})
+            original_agent_is_p1 = gs.agent_is_p1
+            try:
+                gs.current_attackers = [attacker_id]
+                gs.current_block_assignments = {
+                    attacker_id: [
+                        blocker_id for blocker_id, _ in blocker_pairs]}
+                attacker_controller = (
+                    gs.get_card_controller(attacker_id)
+                    if hasattr(gs, "get_card_controller") else None)
+                if attacker_controller is not None:
+                    gs.agent_is_p1 = attacker_controller is gs.p1
+                simulation = self.combat_resolver.simulate_combat()
+            except Exception as exc:
+                logging.warning(
+                    "Combat block simulation failed for attacker %s: %s; "
+                    "using finite combat-math fallback", attacker_id, exc)
+            finally:
+                gs.current_attackers = original_attackers
+                gs.current_block_assignments = original_blocks
+                gs.agent_is_p1 = original_agent_is_p1
+
+        if not isinstance(simulation, dict):
+            simulation = None
+
+        if simulation is not None:
+            try:
+                attackers_dying = set(
+                    simulation.get("attackers_dying", ()) or ())
+            except TypeError:
+                attackers_dying = set()
+            try:
+                blockers_dying = set(
+                    simulation.get("blockers_dying", ()) or ())
+            except TypeError:
+                blockers_dying = set()
+            attacker_dies = attacker_id in attackers_dying
+            blockers_die = [
+                blocker_id for blocker_id, _ in blocker_pairs
+                if blocker_id in blockers_dying]
+            damage_to_player = max(
+                0.0, _finite_number(
+                    simulation.get("damage_to_player", 0.0)))
+            damage_prevented = max(
+                0.0, attacker_power - damage_to_player)
         else:
-            # Fallback to simpler evaluation if no combat resolver
-            # Basic combat math
-            attacker_power = attacker.power if hasattr(attacker, 'power') else 0
-            attacker_toughness = attacker.toughness if hasattr(attacker, 'toughness') else 0
-            
-            blocker_total_power = sum(b.power for b in blockers if hasattr(b, 'power'))
-            blocker_total_toughness = sum(b.toughness for b in blockers if hasattr(b, 'toughness'))
-            
-            # Calculate expected outcomes
-            attacker_dies = blocker_total_power >= attacker_toughness
-            blockers_die_count = sum(1 for b in blockers 
-                                if hasattr(b, 'toughness') and b.toughness <= attacker_power)
-            
-            # Special abilities
-            attacker_has_deathtouch = hasattr(attacker, 'oracle_text') and "deathtouch" in attacker.oracle_text.lower()
-            if attacker_has_deathtouch:
-                blockers_die_count = len(blockers)
-            
-            attacker_has_trample = hasattr(attacker, 'oracle_text') and "trample" in attacker.oracle_text.lower()
+            deathtouch_blocker = any(
+                "deathtouch" in str(
+                    getattr(blocker, "oracle_text", "")).lower()
+                and _card_number(blocker, "power") > 0
+                for blocker in blockers)
+            attacker_dies = bool(
+                attacker_toughness > 0
+                and (blocker_total_power >= attacker_toughness
+                     or deathtouch_blocker))
+            attacker_has_deathtouch = (
+                "deathtouch" in str(
+                    getattr(attacker, "oracle_text", "")).lower())
+            blockers_die = [
+                blocker_id for blocker_id, blocker in blocker_pairs
+                if (attacker_power > 0
+                    and (attacker_has_deathtouch
+                         or attacker_power >= max(
+                             0.0, _card_number(blocker, "toughness"))))]
+            attacker_has_trample = (
+                "trample" in str(
+                    getattr(attacker, "oracle_text", "")).lower())
             damage_prevented = attacker_power
             if attacker_has_trample:
                 damage_prevented = min(attacker_power, blocker_total_toughness)
-            
-            # Basic block value
-            value = 0.0
-            
-            # Killing attacker is good
-            if attacker_dies:
-                value += 1.0
-            
-            # Losing blockers is bad
-            value -= blockers_die_count * 0.5
-            
-            # Preventing damage is good
-            value += damage_prevented * 0.2
+
+        value = 0.0
+        if attacker_dies:
+            value += 1.0
+        value -= len(blockers_die) * 0.5
+        value += damage_prevented * 0.2
         
         # Additional strategic considerations
         
         # Ensure we have current analysis
         if not self.current_analysis:
-            self.analyze_game_state()
+            try:
+                self.analyze_game_state()
+            except Exception as exc:
+                logging.warning(
+                    "Strategic analysis failed during block evaluation: %s",
+                    exc)
         
         # Life total considerations
-        my_life = me["life"]
+        my_life = _finite_number(me.get("life", 20), 20.0)
         
         # If we're low on life, preventing damage is more important
         if my_life <= 5:
@@ -1201,7 +1244,11 @@ class CardEvaluationMixin:
             value += damage_prevented * 0.3  # Moderate extra value
         
         # Game stage considerations
-        game_stage = self.current_analysis["game_info"]["game_stage"]
+        analysis = (
+            self.current_analysis
+            if isinstance(self.current_analysis, dict) else {})
+        game_stage = analysis.get("game_info", {}).get(
+            "game_stage", "mid")
         
         if game_stage == "early":
             # Early game: preserve creatures unless good trade
@@ -1212,15 +1259,19 @@ class CardEvaluationMixin:
             value += damage_prevented * 0.1  # Extra value for damage prevention
         
         # Defensive strategy adjustment
-        value += ((1.0 - self.aggression_level) - 0.5) * 1.0  # -0.5 to +0.5 based on defense
+        aggression = min(
+            1.0, max(0.0, _finite_number(self.aggression_level, 0.5)))
+        value += (0.5 - aggression)
         
         # Risk tolerance adjustment for potentially losing blockers
         if len(blockers_die) > 0:
-            value += (self.risk_tolerance - 0.5) * 0.5 * len(blockers_die)  # Risk adjustment
+            risk = min(
+                1.0, max(0.0, _finite_number(self.risk_tolerance, 0.5)))
+            value += (risk - 0.5) * 0.5 * len(blockers_die)
         
         logging.debug(f"Block evaluation: {len(blockers)} blockers vs. attacker {attacker.name if hasattr(attacker, 'name') else 'unknown'}, value={value:.2f}")
         
-        return 
+        return _finite_number(value)
 
     def evaluate_ability_activation(self, card_id, ability_idx):
         """

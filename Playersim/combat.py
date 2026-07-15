@@ -483,47 +483,49 @@ class CombatResolver:
         # Track detailed evaluations if we're using strategic evaluation
         attack_evaluations = []
         
-        for attackers in attack_combinations:
-            # Set up the attack configuration
-            gs.current_attackers = list(attackers)
-            gs.current_block_assignments = {}
-            
-            # Simulate the opponent's optimal blocks
-            self._simulate_opponent_blocks()
-            
-            # Simulate combat
-            results = self.simulate_combat()
-            
-            # Calculate a score for this attack configuration
-            attack_score = results["expected_value"]
-            
-            # If using strategic planner, incorporate its evaluation
-            if use_strategic_evaluation:
-                strategic_score = gs.strategic_planner.evaluate_attack_action(list(attackers))
-                
-                # Blend the scores (60% simulation, 40% strategic)
-                attack_score = (attack_score * 0.6) + (strategic_score * 0.4)
-                
-                # Record this evaluation for learning
-                attack_evaluations.append({
-                    'attackers': list(attackers),
-                    'simulation_score': results["expected_value"],
-                    'strategic_score': strategic_score,
-                    'combined_score': attack_score,
-                    'damage_to_player': results.get('damage_to_player', 0),
-                    'attackers_dying': len(results.get('attackers_dying', [])),
-                    'blockers_dying': len(results.get('blockers_dying', []))
-                })
-            
-            # Update best attack if better
-            if attack_score > best_score:
-                best_score = attack_score
-                best_attack = list(attackers)
-                best_results = results
-        
-        # Restore original game state
-        gs.current_attackers = original_attackers
-        gs.current_block_assignments = original_block_assignments
+        try:
+            for attackers in attack_combinations:
+                # Set up the attack configuration
+                gs.current_attackers = list(attackers)
+                gs.current_block_assignments = {}
+
+                # Simulate the opponent's optimal blocks
+                self._simulate_opponent_blocks()
+
+                # Simulate each candidate exactly once. The strategic layer
+                # consumes this same result instead of repeating the full
+                # combat simulation.
+                results = self.simulate_combat()
+                attack_score = results["expected_value"]
+
+                if use_strategic_evaluation:
+                    strategic_score = \
+                        gs.strategic_planner.evaluate_attack_action(
+                            list(attackers), simulation=results)
+
+                    attack_score = (
+                        attack_score * 0.6) + (strategic_score * 0.4)
+
+                    attack_evaluations.append({
+                        'attackers': list(attackers),
+                        'simulation_score': results["expected_value"],
+                        'strategic_score': strategic_score,
+                        'combined_score': attack_score,
+                        'damage_to_player': results.get(
+                            'damage_to_player', 0),
+                        'attackers_dying': len(
+                            results.get('attackers_dying', [])),
+                        'blockers_dying': len(
+                            results.get('blockers_dying', []))
+                    })
+
+                if attack_score > best_score:
+                    best_score = attack_score
+                    best_attack = list(attackers)
+                    best_results = results
+        finally:
+            gs.current_attackers = original_attackers
+            gs.current_block_assignments = original_block_assignments
         
         logging.debug(f"Optimal attack found: {len(best_attack)} attackers, score: {best_score:.2f}")
         if best_results:
@@ -1081,6 +1083,15 @@ class CombatResolver:
         # Get blockers for this attacker
         blockers = gs.current_block_assignments.get(attacker_id, [])
         valid_blockers = [b for b in blockers if b not in killed_creatures]
+        has_trample = self._has_keyword(attacker_card, "trample")
+        was_blocked = attacker_id in getattr(
+            gs, "blocked_attackers_this_combat", set())
+
+        # CR 509.1h: removing the final blocker does not make an attacker
+        # unblocked. A nontrampler assigns no damage to the attacked object;
+        # trample can still assign all of its damage there.
+        if not valid_blockers and was_blocked and not has_trample:
+            return 0
         
         defender_id = "p2" if defender_player == gs.p2 else "p1"
         
@@ -1136,9 +1147,6 @@ class CombatResolver:
             has_double_strike = self._has_keyword(attacker_card, "double strike")
             if has_first_strike and not has_double_strike:
                 return 0
-        
-        # Get attacker's abilities after any replacements
-        has_trample = self._has_keyword(attacker_card, "trample")
         
         # Calculate total damage
         total_damage_dealt = 0
@@ -1200,7 +1208,7 @@ class CombatResolver:
                 sorted_blockers = sorted(valid_blockers, 
                                     key=lambda bid: self._get_card_toughness(gs._safe_get_card(bid), defender_player))
                 
-                for blocker_id in sorted_blockers:
+                for blocker_index, blocker_id in enumerate(sorted_blockers):
                     if remaining_damage <= 0 and not has_deathtouch:
                         break
                         
@@ -1210,11 +1218,28 @@ class CombatResolver:
                         
                     blocker_toughness = self._get_card_toughness(blocker_card, defender_player)
                     
-                    # Calculate lethal damage (deathtouch makes 1 damage lethal)
-                    lethal_damage = 1 if has_deathtouch else blocker_toughness
-                    
-                    # Assign damage to this blocker
-                    damage_to_this_blocker = min(remaining_damage, lethal_damage)
+                    # Previously marked damage reduces what must be assigned
+                    # as lethal in a later damage step. This matters for a
+                    # double striker trampling over an indestructible blocker.
+                    existing_damage = (
+                        int(defender_player.get("damage_counters", {}).get(
+                            blocker_id, 0) or 0)
+                        + int(damage_to_creatures.get(blocker_id, 0) or 0)
+                    )
+                    lethal_damage = max(
+                        0, blocker_toughness - existing_damage)
+                    if has_deathtouch and lethal_damage > 0:
+                        lethal_damage = 1
+
+                    # All nontrample combat damage must still be assigned. The
+                    # final blocker receives any excess after earlier blockers
+                    # have received lethal damage.
+                    is_last_blocker = (
+                        blocker_index == len(sorted_blockers) - 1)
+                    damage_to_this_blocker = (
+                        remaining_damage
+                        if is_last_blocker and not has_trample
+                        else min(remaining_damage, lethal_damage))
                     
                     # Create context for replacement effects for each blocker
                     blocker_damage_context = {
@@ -1292,6 +1317,13 @@ class CombatResolver:
                             else:
                                 damage_to_creatures[blocker_id] = damage_to_creatures.get(blocker_id, 0) + blocker_damage
                                 logging.debug(f"COMBAT: {attacker_card.name} deals {blocker_damage} damage to {blocker_card.name}")
+
+                            if (modified_blocker_context.get(
+                                    "has_deathtouch", has_deathtouch)
+                                    and blocker_damage > 0
+                                    and not self._has_keyword(
+                                        blocker_card, "indestructible")):
+                                killed_creatures.add(blocker_id)
                     else:
                         # No replacement - apply normal damage
                         if has_infect or has_wither:
@@ -1311,6 +1343,12 @@ class CombatResolver:
                             # Regular damage
                             damage_to_creatures[blocker_id] = damage_to_creatures.get(blocker_id, 0) + damage_to_this_blocker
                             logging.debug(f"COMBAT: {attacker_card.name} deals {damage_to_this_blocker} damage to {blocker_card.name}")
+
+                        if (has_deathtouch
+                                and damage_to_this_blocker > 0
+                                and not self._has_keyword(
+                                    blocker_card, "indestructible")):
+                            killed_creatures.add(blocker_id)
                     
                     remaining_damage -= damage_to_this_blocker
                     total_damage_dealt += damage_to_this_blocker
@@ -1444,6 +1482,10 @@ class CombatResolver:
             has_deathtouch = modified_context.get("has_deathtouch", False)
             has_lifelink = modified_context.get("has_lifelink", False)
             has_infect = modified_context.get("has_infect", False)
+        else:
+            has_deathtouch = damage_context["has_deathtouch"]
+            has_lifelink = damage_context["has_lifelink"]
+            has_infect = damage_context["has_infect"]
         
         # Check if this creature should deal damage in this step
         if is_first_strike:
@@ -1459,15 +1501,7 @@ class CombatResolver:
             if has_first_strike and not has_double_strike:
                 return 0
             
-        # Get blocker's power and abilities
-        power = self._get_card_power(blocker_card, defender_player)
-        has_deathtouch = self._has_keyword(blocker_card, "deathtouch")
-        has_lifelink = self._has_keyword(blocker_card, "lifelink")
-        infect = self._has_keyword(blocker_card, "infect")
-        
-        
-        # Assign damage to attacker
-        damage_to_assign = power
+        infect = has_infect
         
         if damage_to_assign > 0:
             if infect:
@@ -1506,12 +1540,11 @@ class CombatResolver:
             
             # Process deathtouch
             if has_deathtouch and damage_to_assign > 0:
-                # Deathtouch causes any amount of damage to be lethal
-                if attacker_id not in killed_creatures:
-                    damage_to_creatures[attacker_id] = max(
-                        damage_to_creatures.get(attacker_id, 0),
-                        self._get_card_toughness(attacker_card, attacker_player)
-                    )
+                # Deathtouch makes positive damage lethal. Record it in the
+                # simulation-local kill set so infect and wither damage (which
+                # does not populate damage_to_creatures) is handled too.
+                if not self._has_keyword(attacker_card, "indestructible"):
+                    killed_creatures.add(attacker_id)
                     logging.debug(f"COMBAT: Deathtouch from {blocker_card.name} marked {attacker_card.name} for death")
         
         return damage_to_assign
@@ -1987,8 +2020,12 @@ class CombatResolver:
                         # Account for deathtouch damage tracked separately
                         dealt_deathtouch = player.get("deathtouch_damage", {}).get(card_id, False)
                         toughness = self._get_card_toughness(card, player) # Uses helper that includes counters
-                        # Use GS damage counters if available for accuracy
-                        current_damage = player.get("damage_counters",{}).get(card_id, 0)
+                        # Simulation damage is accumulated in the local map;
+                        # existing marked damage still counts toward lethal.
+                        current_damage = (
+                            int(player.get("damage_counters", {}).get(card_id, 0) or 0)
+                            + int(damage or 0)
+                        )
 
                         if not self._has_keyword(card, "indestructible") and (current_damage >= toughness or (dealt_deathtouch and current_damage > 0)):
                             if card_id not in newly_killed: # Avoid duplicate logging/processing
@@ -2149,7 +2186,28 @@ class CombatResolver:
                     dict(card.counters) if hasattr(card, "counters") else _SIM_MISSING,
                 ))
 
-        return {"players": players, "cards": cards, "triggers": list(self.combat_triggers)}
+        replacement_state = None
+        replacement_system = getattr(gs, "replacement_effects", None)
+        if replacement_system is not None:
+            replacement_state = {
+                "system": replacement_system,
+                "active_effects_object": replacement_system.active_effects,
+                "active_effects": list(replacement_system.active_effects),
+                "effect_index_object": replacement_system.effect_index,
+                "effect_index": {
+                    event_type: list(effects)
+                    for event_type, effects in
+                    replacement_system.effect_index.items()
+                },
+                "effect_counter": replacement_system.effect_counter,
+            }
+
+        return {
+            "players": players,
+            "cards": cards,
+            "triggers": list(self.combat_triggers),
+            "replacement_state": replacement_state,
+        }
 
     def _restore_combat_sim_state(self, snapshot):
         """Undo all game-state mutations made during simulate_combat."""
@@ -2172,12 +2230,31 @@ class CombatResolver:
 
         self.combat_triggers[:] = snapshot["triggers"]
 
+        replacement_state = snapshot.get("replacement_state")
+        if replacement_state is not None:
+            replacement_system = replacement_state["system"]
+            active_effects = replacement_state["active_effects_object"]
+            active_effects[:] = replacement_state["active_effects"]
+            replacement_system.active_effects = active_effects
+
+            effect_index = replacement_state["effect_index_object"]
+            effect_index.clear()
+            effect_index.update({
+                event_type: list(effects)
+                for event_type, effects in
+                replacement_state["effect_index"].items()
+            })
+            replacement_system.effect_index = effect_index
+            replacement_system.effect_counter = \
+                replacement_state["effect_counter"]
+
     def simulate_combat(self):
         """
         Simulate combat without actually changing game state.
         Returns detailed information about expected outcomes.
         """
         snapshot = None
+        original_block_assignments = None
         try:
             gs = self.game_state
 
@@ -2208,6 +2285,12 @@ class CombatResolver:
                               if blocker_id in defender_battlefield]
                 for attacker_id, blockers in gs.current_block_assignments.items()
                 if attacker_id in attacking}
+
+            # The shared damage processors read the declarations from the game
+            # state. Point them at the sanitized simulation copy, then restore
+            # the caller's object in finally.
+            original_block_assignments = gs.current_block_assignments
+            gs.current_block_assignments = block_assignments
             
             # Track expected outcomes
             simulation_results = {
@@ -2255,8 +2338,11 @@ class CombatResolver:
             # zero value (July 14 observation audit).
             # First strike damage step if needed
             if has_first_strike:
+                first_step_killed = set()
+
                 # Process attackers with first strike
                 for attacker_id in attackers:
+                    source_kills = set()
                     CombatResolver._process_attacker_damage(
                         self,
                         attacker_id,
@@ -2265,17 +2351,15 @@ class CombatResolver:
                         damage_to_creatures,
                         damage_to_players,
                         creatures_dealt_damage,
-                        killed_in_first_strike,
+                        source_kills,
                         is_first_strike=True
                     )
+                    first_step_killed.update(source_kills)
 
                 # Process blockers with first strike
                 for attacker_id, blockers in block_assignments.items():
-                    # Skip if attacker died from first strike
-                    if attacker_id in killed_in_first_strike:
-                        continue
-
                     for blocker_id in blockers:
+                        source_kills = set()
                         CombatResolver._process_blocker_damage(
                             self,
                             blocker_id,
@@ -2284,12 +2368,18 @@ class CombatResolver:
                             defender_player,
                             damage_to_creatures,
                             creatures_dealt_damage,
-                            killed_in_first_strike,
+                            source_kills,
                             is_first_strike=True
                         )
+                        first_step_killed.update(source_kills)
                 
-                # Process creatures dying in first strike damage step
-                self._check_lethal_damage(damage_to_creatures, killed_in_first_strike)
+                # Damage within a step is simultaneous: no source is removed
+                # merely because another source assigned lethal damage first.
+                self._check_lethal_damage(
+                    damage_to_creatures, first_step_killed)
+                killed_in_first_strike.update(first_step_killed)
+
+            all_killed = set(killed_in_first_strike)
             
             # Regular damage step (explicit base-class calls; see note above)
             for attacker_id in attackers:
@@ -2297,6 +2387,7 @@ class CombatResolver:
                 if attacker_id in killed_in_first_strike:
                     continue
 
+                source_kills = set(killed_in_first_strike)
                 CombatResolver._process_attacker_damage(
                     self,
                     attacker_id,
@@ -2305,9 +2396,10 @@ class CombatResolver:
                     damage_to_creatures,
                     damage_to_players,
                     creatures_dealt_damage,
-                    killed_in_first_strike,
+                    source_kills,
                     is_first_strike=False
                 )
+                all_killed.update(source_kills)
 
             # Process blocker regular damage
             for attacker_id, blockers in block_assignments.items():
@@ -2320,6 +2412,7 @@ class CombatResolver:
                     if blocker_id in killed_in_first_strike:
                         continue
 
+                    source_kills = set(killed_in_first_strike)
                     CombatResolver._process_blocker_damage(
                         self,
                         blocker_id,
@@ -2328,12 +2421,12 @@ class CombatResolver:
                         defender_player,
                         damage_to_creatures,
                         creatures_dealt_damage,
-                        killed_in_first_strike,
+                        source_kills,
                         is_first_strike=False
                     )
+                    all_killed.update(source_kills)
             
             # Check for lethal damage
-            all_killed = set(killed_in_first_strike)  # Start with creatures killed in first strike
             self._check_lethal_damage(damage_to_creatures, all_killed)
             
             # Populate simulation results
@@ -2377,8 +2470,16 @@ class CombatResolver:
             
             simulation_results["life_gained"] = total_life_gained
             
-            # Track creatures that died
-            for creature_id, damage in damage_to_creatures.items():
+            # Track creatures that died. Include every combatant rather than
+            # only creatures with regular marked damage: infect, wither, and
+            # deathtouch can put a creature in all_killed without adding an
+            # entry to damage_to_creatures.
+            blocker_ids = {
+                blocker_id
+                for blockers in block_assignments.values()
+                for blocker_id in blockers
+            }
+            for creature_id in set(attackers) | blocker_ids:
                 creature_card = gs._safe_get_card(creature_id)
                 if not creature_card:
                     continue
@@ -2400,7 +2501,14 @@ class CombatResolver:
                 if self._has_keyword(creature_card, "indestructible"):
                     continue
                     
-                if damage >= toughness:
+                marked_damage = int(
+                    creature_controller.get("damage_counters", {}).get(
+                        creature_id, 0) or 0)
+                simulated_damage = int(
+                    damage_to_creatures.get(creature_id, 0) or 0)
+
+                if (creature_id in all_killed
+                        or marked_damage + simulated_damage >= toughness):
                     # Determine if this is an attacker or blocker
                     if creature_id in attackers:
                         simulation_results["attackers_dying"].append(creature_id)
@@ -2441,6 +2549,8 @@ class CombatResolver:
                 "expected_value": 0.0
             }
         finally:
+            if original_block_assignments is not None:
+                self.game_state.current_block_assignments = original_block_assignments
             if snapshot is not None:
                 self._restore_combat_sim_state(snapshot)
 

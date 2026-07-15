@@ -203,6 +203,15 @@ class ThreatSynergyMixin:
                         if gs._safe_get_card(cid) and 
                         hasattr(gs._safe_get_card(cid), 'card_types') and 
                         'creature' in gs._safe_get_card(cid).card_types]
+
+        # Threats should be boosted by the opponent's win conditions, not by
+        # our own. Compute that perspective once instead of per permanent.
+        original_perspective = gs.agent_is_p1
+        try:
+            gs.agent_is_p1 = not original_perspective
+            opponent_win_conditions = self.identify_win_conditions()
+        finally:
+            gs.agent_is_p1 = original_perspective
         
         threats = []
         
@@ -367,8 +376,7 @@ class ThreatSynergyMixin:
                 threat_urgency += 1
             
             # Higher threat for things that enable win conditions
-            win_conditions = self.identify_win_conditions()
-            for wc_name, wc_data in win_conditions.items():
+            for wc_data in opponent_win_conditions.values():
                 if wc_data["viable"] and card_id in wc_data.get("key_cards", []):
                     threat_level *= 1.5
                     threat_urgency += 2

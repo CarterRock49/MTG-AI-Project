@@ -4,8 +4,10 @@ Extracted from strategic_planner.py. This module defines behavior only (a mixin)
 all state lives on MTGStrategicPlanner, which composes every mixin.
 """
 
+from collections.abc import Mapping
 import logging
 import math
+
 import numpy as np
 
 
@@ -178,9 +180,12 @@ class ArchetypeAnalysisMixin:
                     max(0, opp["life"]) / effective_power)))
                 
                 # Combat damage is viable if we can win in a reasonable timeframe
-                win_conditions["combat_damage"]["viable"] = turns_to_win < 10
+                combat_viable = turns_to_win < 10
+                win_conditions["combat_damage"]["viable"] = combat_viable
                 win_conditions["combat_damage"]["turns_to_win"] = turns_to_win
-                win_conditions["combat_damage"]["score"] = min(1.0, 10 / turns_to_win)
+                win_conditions["combat_damage"]["score"] = (
+                    max(0.0, min(1.0, (10.0 - turns_to_win) / 9.0))
+                    if combat_viable else 0.0)
                 win_conditions["combat_damage"]["key_cards"] = key_creatures
         
         # Direct damage win condition
@@ -212,7 +217,8 @@ class ArchetypeAnalysisMixin:
                 turns_to_win = max(1.0, float(np.ceil(
                     max(0, opp["life"]) / total_direct_damage) * 2))  # Conservative estimate
                 win_conditions["direct_damage"]["turns_to_win"] = turns_to_win
-                win_conditions["direct_damage"]["score"] = min(1.0, 10 / turns_to_win)
+                win_conditions["direct_damage"]["score"] = max(
+                    0.0, min(1.0, (10.0 - turns_to_win) / 9.0))
                 win_conditions["direct_damage"]["key_cards"] = [card_id for card_id, _ in direct_damage_sources]
         
         # Card advantage win condition
@@ -929,9 +935,12 @@ class ArchetypeAnalysisMixin:
         try:
             me = gs.p1 if gs.agent_is_p1 else gs.p2
                 
-            # Extended safety checks
-            if not hasattr(me, "hand") or not hasattr(me, "battlefield") or not hasattr(me, "library"):
-                logging.debug("Player state missing required attributes for deck detection")
+            # Player state is a mapping, not an attribute-bearing object.
+            required_zones = ("hand", "battlefield", "library", "graveyard")
+            if (not isinstance(me, Mapping)
+                    or any(zone not in me for zone in required_zones)):
+                logging.debug(
+                    "Player state missing required zones for deck detection")
                 return "midrange"
         except Exception as e:
             logging.warning(f"Error accessing player state: {e}")
@@ -1240,6 +1249,18 @@ class ArchetypeAnalysisMixin:
         color_ratios = {c: count/max(1, sum(color_counts.values())) for c, count in color_counts.items() if count > 0}
         logging.debug(f"Color distribution: {color_ratios}")
         
+        # Keep the detector's specialized profile instead of silently falling
+        # back to midrange when tempo, ramp, or tribal wins the score.  The
+        # planner owns its own profile mapping, so this does not mutate shared
+        # module state.
+        detected_profile = archetypes[best_archetype]
+        self.strategies[best_archetype] = {
+            key: detected_profile[key]
+            for key in (
+                "description", "aggression_level", "risk_tolerance",
+                "card_weights")
+        }
+
         # Initialize strategy parameters based on detected archetype
         self._initialize_strategy_params(best_archetype)
         

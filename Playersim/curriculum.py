@@ -116,6 +116,89 @@ COMBAT_CURRICULUM_V2 = {
 }
 
 
+# Round 7.89: aggregate mastery let passive wins conceal near-zero win rates
+# against active opponents, and an unbounded bridge stage left too little time
+# for the full deck pool.  V3 retains deterministic matchup cycles while
+# requiring evidence against each active profile.  Stage-duration ceilings are
+# explicit fallbacks rather than mastery: they guarantee full-pool exposure by
+# 375k timesteps in a fresh run even when a skill gate is not met.
+COMBAT_CURRICULUM_V3 = {
+    "id": "combat-v3",
+    "version": 3,
+    "progression": "mastery",
+    "allow_mirrors": False,
+    "stages": [
+        {
+            "name": "goldfish",
+            "start_timestep": 0,
+            "decks": ["Selesnya Ouroboroid", "Mono-Green Landfall"],
+            "profile_bag": ["passive"] * 10,
+            "advance_when": {
+                "window_episodes": 64,
+                "min_stage_timesteps": 30_000,
+                "max_stage_timesteps": 75_000,
+                "min_decisive_win_rate": 0.60,
+                "max_decisive_loss_rate": 0.25,
+                "max_timeout_rate": 0.35,
+            },
+        },
+        {
+            "name": "race",
+            "start_timestep": 30_000,
+            "decks": ["Selesnya Ouroboroid", "Mono-Green Landfall"],
+            "profile_bag": ["passive"] * 4 + ["novice"] * 6,
+            "advance_when": {
+                "window_episodes": 96,
+                "min_stage_timesteps": 45_000,
+                "max_stage_timesteps": 100_000,
+                "min_decisive_win_rate": 0.40,
+                "max_decisive_loss_rate": 0.45,
+                "max_timeout_rate": 0.25,
+                "profile_requirements": {
+                    "novice": {
+                        "min_episodes": 48,
+                        "min_decisive_win_rate": 0.20,
+                    },
+                },
+            },
+        },
+        {
+            "name": "bridge",
+            "start_timestep": 75_000,
+            "decks": [
+                "Selesnya Ouroboroid", "Mono-Green Landfall",
+                "Izzet Prowess", "Azorius Momo",
+            ],
+            "profile_bag": ["novice"] * 6 + ["scripted"] * 4,
+            "advance_when": {
+                "window_episodes": 128,
+                "min_stage_timesteps": 75_000,
+                "max_stage_timesteps": 200_000,
+                "min_decisive_win_rate": 0.25,
+                "max_decisive_loss_rate": 0.60,
+                "max_timeout_rate": 0.25,
+                "profile_requirements": {
+                    "novice": {
+                        "min_episodes": 64,
+                        "min_decisive_win_rate": 0.20,
+                    },
+                    "scripted": {
+                        "min_episodes": 40,
+                        "min_decisive_win_rate": 0.15,
+                    },
+                },
+            },
+        },
+        {
+            "name": "full_pool",
+            "start_timestep": 150_000,
+            "decks": "*",
+            "profile_bag": ["novice"] * 2 + ["scripted"] * 8,
+        },
+    ],
+}
+
+
 def _stable_seed(*parts) -> int:
     payload = ":".join(str(part) for part in parts).encode("utf-8")
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
@@ -133,6 +216,7 @@ def resolve_curriculum(name, decks):
     presets = {
         "combat-v1": COMBAT_CURRICULUM_V1,
         "combat-v2": COMBAT_CURRICULUM_V2,
+        "combat-v3": COMBAT_CURRICULUM_V3,
     }
     if name not in presets:
         raise ValueError(f"Unknown curriculum: {name}")
@@ -188,6 +272,14 @@ def resolve_curriculum(name, decks):
                     f"Curriculum stage {stage_name} has an invalid mastery window")
             gate["window_episodes"] = window
             gate["min_stage_timesteps"] = minimum_steps
+            maximum_steps = gate.get("max_stage_timesteps")
+            if maximum_steps is not None:
+                maximum_steps = int(maximum_steps)
+                if maximum_steps < minimum_steps:
+                    raise ValueError(
+                        f"Curriculum stage {stage_name} has an invalid "
+                        "maximum stage duration")
+                gate["max_stage_timesteps"] = maximum_steps
             for field in (
                     "min_decisive_win_rate", "max_decisive_loss_rate",
                     "max_timeout_rate"):
@@ -196,11 +288,47 @@ def resolve_curriculum(name, decks):
                     raise ValueError(
                         f"Curriculum stage {stage_name} has invalid {field}")
                 gate[field] = value
+            requirements = gate.get("profile_requirements") or {}
+            if not isinstance(requirements, dict):
+                raise ValueError(
+                    f"Curriculum stage {stage_name} has invalid profile "
+                    "requirements")
+            normalized_requirements = {}
+            for profile, requirement in requirements.items():
+                if profile not in OPPONENT_PROFILES or profile not in bag:
+                    raise ValueError(
+                        f"Curriculum stage {stage_name} requires unavailable "
+                        f"profile: {profile}")
+                if not isinstance(requirement, dict):
+                    raise ValueError(
+                        f"Curriculum stage {stage_name} has invalid {profile} "
+                        "profile requirement")
+                min_episodes = int(requirement.get("min_episodes", 0))
+                min_win_rate = float(
+                    requirement.get("min_decisive_win_rate", -1.0))
+                if (min_episodes <= 0 or min_episodes > window
+                        or not 0.0 <= min_win_rate <= 1.0):
+                    raise ValueError(
+                        f"Curriculum stage {stage_name} has invalid {profile} "
+                        "profile requirement")
+                normalized_requirements[profile] = {
+                    "min_episodes": min_episodes,
+                    "min_decisive_win_rate": min_win_rate,
+                }
+            gate["profile_requirements"] = normalized_requirements
         stage["decks"] = stage_decks
         stage["profile_bag"] = bag
-    spec["transition_semantics"] = (
-        "central_mastery_next_reset" if progression == "mastery"
-        else "global_timestep_next_reset")
+    if progression == "mastery":
+        has_deadline = any(
+            (stage.get("advance_when") or {}).get("max_stage_timesteps")
+            is not None
+            for stage in stages[:-1])
+        spec["transition_semantics"] = (
+            "central_mastery_or_deadline_future_reset_with_activation_ack"
+            if has_deadline
+            else "central_mastery_next_reset")
+    else:
+        spec["transition_semantics"] = "global_timestep_next_reset"
     return spec
 
 

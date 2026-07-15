@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from Playersim import card_registry as registry_module  # noqa: E402
 from Playersim.card import Card, load_decks_and_card_db  # noqa: E402
+from Playersim.observation_schema import CORRECTED_V3_SEMANTICS  # noqa: E402
 
 
 def _card_data(name, oracle_id, type_line="Creature — Bear", mana_cost="{1}{G}",
@@ -283,8 +284,13 @@ class LineageIdentityTest(SubtypeVocabGuard):
         self.assertEqual(
             lineage["feature_schema"]["feature_dim"], schema["feature_dim"])
         self.assertEqual(
-            lineage["observation_schema"]["schema_version"], 2)
-        self.assertTrue(lineage["observation_schema"]["sha256"])
+            lineage["observation_schema"]["schema_version"], 3)
+        self.assertEqual(
+            lineage["observation_schema"]["sha256"],
+            "73b7e83d99664b65c4fbdbcbc4a1fba4a8cf26576d6f66e3e9548306a5865487")
+        self.assertIn(
+            "multi_turn_plan_uses_live_spendable_mana",
+            CORRECTED_V3_SEMANTICS)
         self.assertEqual(lineage["pool_snapshot"]["format"], "standard")
 
         # Format-free lineage still records the corpus identity.

@@ -88,6 +88,11 @@ class MCTSNode:
             valid_actions: List of valid action indices
             action_priors: Optional map from actions to prior probabilities
         """
+        valid_actions = (
+            [] if valid_actions is None else list(valid_actions))
+        if not valid_actions:
+            self.is_expanded = True
+            return
         if action_priors is None:
             # Use uniform priors if no policy provided
             action_priors = {a: 1.0/len(valid_actions) for a in valid_actions}
@@ -139,10 +144,10 @@ class SearchDecisionMixin:
         board_adv = (len(my_creatures) - len(opp_creatures)) / max(1, len(my_creatures) + len(opp_creatures))
         power_adv = (my_power - opp_power) / max(1, my_power + opp_power)
         
-        # Project for each turn
+        # Project for each turn.  Every term is an observer-relative
+        # difference transformed by an odd function, so a symmetric state is
+        # exactly neutral and swapping observers negates the projection.
         for i in range(num_turns):
-            turn = gs.turn + i + 1
-            
             # More weight to current advantages in earlier projections, 
             # more uncertainty in later turns
             certainty = 1.0 / (i + 1)
@@ -150,20 +155,18 @@ class SearchDecisionMixin:
             # Project life difference based on board state
             projected_life_diff = life_diff
             
-            # Simulate potential damage each turn based on current board state
-            if board_adv > 0:  # We're ahead on board
-                # Project us dealing damage
-                projected_damage_per_turn = max(0, my_power - opp_power/2)  # Account for blocking
-                projected_life_diff += projected_damage_per_turn * (i + 1) * (0.9 ** i)  # Diminish impact over time
-            else:  # Opponent ahead or even
-                # Project opponent dealing damage
-                projected_damage_per_turn = max(0, opp_power - my_power/2)  # Account for blocking
-                projected_life_diff -= projected_damage_per_turn * (i + 1) * (0.9 ** i)  # Diminish impact over time
-            
-            # Project card advantage with expected card draw
-            expected_cards_drawn = i + 1  # One card per turn
-            projected_card_diff = card_diff + (0.2 * expected_cards_drawn)  # Assume slight card advantage over time
-            projected_card_diff *= (0.9 ** i)  # Card advantage diminishes impact over time
+            # Signed combat pressure must change sign with the observer.  The
+            # previous branch penalized both observers on an even board and
+            # computed power_adv without ever using it.
+            total_power = my_power + opp_power
+            projected_power_adv = power_adv * (0.9 ** i)
+            signed_combat_pressure = total_power * projected_power_adv
+            projected_life_diff += (
+                signed_combat_pressure * (i + 1) * (0.9 ** i))
+
+            # Both players receive the same baseline draw, so only the current
+            # observer-relative difference survives.
+            projected_card_diff = card_diff * (0.9 ** i)
             
             # Estimate board development based on cards in hand
             estimated_new_permanents = min(3, len(me["hand"])) * (0.8 ** i)  # Assume we play our hand
@@ -172,9 +175,10 @@ class SearchDecisionMixin:
             
             # Combine factors into an overall state value (-1 to +1 scale)
             state_value = (
-                0.5 * np.tanh(projected_life_diff / 10) +  # Life difference (normalized with tanh)
-                0.3 * np.tanh(projected_card_diff / 3) +   # Card advantage
-                0.2 * np.tanh(projected_board_adv * 2)     # Board presence (normalized with tanh)
+                0.45 * np.tanh(projected_life_diff / 10) +
+                0.25 * np.tanh(projected_card_diff / 3) +
+                0.15 * np.tanh(projected_board_adv * 2) +
+                0.15 * np.tanh(projected_power_adv * 2)
             ) * certainty
             
             projections[i] = state_value
@@ -391,166 +395,167 @@ class SearchDecisionMixin:
         
         return decision
 
-    def find_best_play_sequence(self, valid_actions, depth=None, discount_factor=0.9):
-        """
-        Find the best sequence of plays looking ahead by dynamic depth using enhanced pruning.
-        
-        Args:
-            valid_actions: List of valid action indices
-            depth: Number of plays ahead to look (default None - will be dynamically set)
-            discount_factor: Discount factor for future actions (default 0.9)
-            
-        Returns:
-            List: Best sequence of actions
-            float: Value of the sequence
-        """
-        gs = self.game_state
-        
-        # Dynamically set depth based on game state complexity
-        if depth is None:
-            # Start with base depth
-            base_depth = 3
-            
-            # Reduce depth for complex board states
-            battlefield_size = len(gs.p1["battlefield"]) + len(gs.p2["battlefield"])
-            if battlefield_size > 10:
-                base_depth -= 1
-                
-            # Reduce depth if too many valid actions (combinatorial explosion)
-            if len(valid_actions) > 15:
-                base_depth -= 1
-                
-            # Never go below minimum depth
-            depth = max(1, base_depth)
-            
-            logging.debug(f"Dynamic search depth: {depth} (board size: {battlefield_size}, actions: {len(valid_actions)})")
-        
-        # Base case - evaluate current position
-        if depth == 0:
-            analysis = self.analyze_game_state()
-            return [], analysis["position"]["score"]
-        
-        best_sequence = []
-        best_value = -float('inf')
-        
-        # For pruning, first evaluate each valid action quickly
-        action_evaluations = []
-        for action_idx in valid_actions:
-            action_type, param = gs.action_handler.get_action_info(action_idx)
-            
-            # Get a quick estimate of action value for pruning
-            if action_type == "PLAY_CARD":
-                value = self.evaluate_play_card_action(param)
-            elif action_type == "DECLARE_ATTACKER":
-                value = self._quick_action_evaluation(gs, action_type, param)
-            elif action_type == "ACTIVATE_ABILITY":
-                card_id, ability_idx = param
-                value, _ = self.evaluate_ability_activation(card_id, ability_idx)
-            else:
-                value = self._quick_action_evaluation(gs, action_type, param)
-            
-            action_evaluations.append((action_idx, value))
-        
-        # Sort by value and take only the top N actions to consider
-        action_evaluations.sort(key=lambda x: x[1], reverse=True)
-        
-        # Adaptive pruning - consider more actions in early depths, fewer in deeper depths
-        search_width = max(3, 8 - depth * 2)  # Start with 8 at depth 1, 6 at depth 2, etc.
-        
-        # Ensure we keep at least the top 3 actions regardless of value
-        pruned_actions = [a for a, _ in action_evaluations[:search_width]]
-        
-        # Add any very high-value actions that might have been pruned
-        pruned_actions.extend([a for a, v in action_evaluations[search_width:] if v > 0.8])
-        
-        # Add land plays if we haven't played a land yet
-        me = gs.p1 if gs.agent_is_p1 else gs.p2
-        if gs.can_play_land_this_turn(me):
-            land_plays = [a for a, _ in action_evaluations 
-                        if gs.action_handler.get_action_info(a)[0] == "PLAY_CARD" and 
-                        hasattr(gs._safe_get_card(gs.action_handler.get_action_info(a)[1]), 'type_line') and
-                        'land' in gs._safe_get_card(gs.action_handler.get_action_info(a)[1]).type_line]
-            pruned_actions.extend(land_plays)
-        
-        # Uncertainty bonus - randomly add a few additional actions for exploration
-        if depth == 1 and random.random() < self.risk_tolerance:
-            unexplored_actions = [a for a, _ in action_evaluations[search_width:] 
-                            if a not in pruned_actions and len(pruned_actions) < 10]
-            if unexplored_actions:
-                explore_count = min(2, len(unexplored_actions))
-                random_explores = random.sample(unexplored_actions, explore_count)
-                pruned_actions.extend(random_explores)
-        
-        # For logging purposes
-        logging.debug(f"Considering {len(pruned_actions)} actions out of {len(valid_actions)} at depth {depth}")
-        
-        # Try each pruned action
-        for action_idx in pruned_actions:
-            action_type, param = gs.action_handler.get_action_info(action_idx)
-            
-            # Create a copy of the game state for simulation
-            gs_copy = gs.clone()
-            
-            # Apply the action
-            gs_copy.action_handler.apply_action(action_type, param)
-            
-            # Get new valid actions
-            new_valid_actions = gs_copy.action_handler.generate_valid_actions()
-            
-            # If no valid actions, evaluate end state
-            if not new_valid_actions:
-                # This is a terminal state (e.g., end of turn)
-                analysis = self.analyze_game_state(gs_copy)
-                sequence_value = analysis["position"]["score"]
-                if sequence_value > best_value:
-                    best_value = sequence_value
-                    best_sequence = [action_idx]
+    def _valid_action_indices(self, valid_actions):
+        """Normalize either a Boolean mask or an action-index collection."""
+        if valid_actions is None:
+            return []
+        array = np.asarray(valid_actions)
+        if array.ndim == 0:
+            array = array.reshape(1)
+        action_handler = getattr(self.game_state, "action_handler", None)
+        expected_mask_size = getattr(
+            action_handler, "ACTION_SPACE_SIZE", None)
+        is_binary_integer_mask = (
+            np.issubdtype(array.dtype, np.integer)
+            and expected_mask_size is not None
+            and array.size == int(expected_mask_size)
+            and np.all((array == 0) | (array == 1))
+        )
+        values = (
+            np.flatnonzero(array).tolist()
+            if array.dtype == np.bool_ or is_binary_integer_mask
+            else array.reshape(-1).tolist()
+        )
+        result = []
+        for value in values:
+            try:
+                action = int(value)
+            except (TypeError, ValueError, OverflowError):
                 continue
-            
-            # Recursively find best sequence
-            seq, value = self.find_best_play_sequence(new_valid_actions, depth-1, discount_factor)
-            
-            # Apply discount factor for future actions
-            discounted_value = value * discount_factor
-            
-            # Current action's immediate value
-            immediate_value = 0.0
-            
-            # Get immediate value based on action type
-            if action_type == "PLAY_CARD":
-                immediate_value = self.evaluate_play_card_action(param) * (1 - discount_factor)
-            elif action_type == "DECLARE_ATTACKER":
-                immediate_value = self.evaluate_attack_action(param) * (1 - discount_factor)
-            elif action_type == "ACTIVATE_ABILITY":
-                card_id, ability_idx = param
-                immediate_value, _ = self.evaluate_ability_activation(card_id, ability_idx)
-                immediate_value *= (1 - discount_factor)
-            
-            # Combine immediate and future value
-            total_value = immediate_value + discounted_value
-            
-            # Apply strategy-specific value adjustments
-            # For aggressive strategies, value immediate board impact more
-            if self.strategy_type == "aggro" and action_type in ["PLAY_CARD", "DECLARE_ATTACKER"]:
-                total_value += 0.1 * self.aggression_level
-            # For control strategies, value card advantage and removal more
-            elif self.strategy_type == "control" and action_type == "ACTIVATE_ABILITY":
-                if "draw" in str(param) or "destroy" in str(param):
-                    total_value += 0.1 * (1 - self.aggression_level)
-            
-            if total_value > best_value:
-                best_value = total_value
-                best_sequence = [action_idx] + seq
-        
-        return best_sequence, best_value
+            if action >= 0 and action not in result:
+                result.append(action)
+        return sorted(result)
 
-    def plan_multi_turn_sequence(self, depth=3):
+    @staticmethod
+    def _generated_action_context(action_handler, action_idx):
+        generated = getattr(
+            action_handler, "action_reasons_with_context", {}).get(
+                action_idx, {})
+        context = generated.get("context", {}) if isinstance(
+            generated, dict) else {}
+        return dict(context or {})
+
+    @staticmethod
+    def _zone_card_id(player, zone, index, context):
+        card_id = context.get("card_id")
+        if card_id is not None:
+            return card_id
+        try:
+            resolved_index = int(index)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        cards = player.get(zone, ())
+        if 0 <= resolved_index < len(cards):
+            return cards[resolved_index]
+        return None
+
+    def _evaluate_action_candidate(self, action_idx):
+        """Evaluate one real public action without mutating the game state."""
+        gs = self.game_state
+        action_handler = getattr(gs, "action_handler", None)
+        if action_handler is None:
+            return 0.0, "No action handler"
+        action_type, param = action_handler.get_action_info(action_idx)
+        context = self._generated_action_context(
+            action_handler, action_idx)
+        me = gs.p1 if gs.agent_is_p1 else gs.p2
+
+        value = 0.0
+        reason = action_type
+        try:
+            if action_type in (
+                    "PLAY_LAND", "PLAY_MDFC_LAND_BACK",
+                    "PLAY_SPELL", "PLAY_MDFC_BACK", "PLAY_ADVENTURE"):
+                hand_index = context.get("hand_idx", param)
+                card_id = self._zone_card_id(
+                    me, "hand", hand_index, context)
+                if card_id is not None:
+                    value = self.evaluate_play_card_action(
+                        card_id, context=context)
+                    reason = "Card play"
+                else:
+                    value = self._quick_action_evaluation(
+                        gs, action_type, param)
+            elif action_type == "ATTACK":
+                attacker_id = self._zone_card_id(
+                    me, "battlefield",
+                    context.get("battlefield_idx", param), context)
+                if attacker_id is not None:
+                    value = self.evaluate_attack_action([attacker_id])
+                    reason = "Attack"
+            elif action_type == "BLOCK":
+                blocker_id = self._zone_card_id(
+                    me, "battlefield",
+                    context.get("battlefield_idx", param), context)
+                attacker_id = context.get("target_attacker_id")
+                if blocker_id is not None and attacker_id is not None:
+                    value = self.evaluate_block_action(
+                        attacker_id, [blocker_id])
+                    reason = "Block"
+            elif action_type == "ACTIVATE_ABILITY":
+                battlefield_index = context.get("battlefield_idx")
+                ability_index = context.get("ability_idx")
+                card_id = self._zone_card_id(
+                    me, "battlefield", battlefield_index, context)
+                if card_id is not None and isinstance(ability_index, int):
+                    value, reason = self.evaluate_ability_activation(
+                        card_id, ability_index)
+            elif action_type in ("END_TURN", "PASS_PRIORITY"):
+                value = 0.2 if not getattr(gs, "stack", ()) else 0.1
+            elif action_type in (
+                    "DECLARE_ATTACKERS_DONE", "DECLARE_BLOCKERS_DONE"):
+                value = 0.15
+            elif action_type == "CONCEDE":
+                value = -10.0
+            else:
+                value = self._quick_action_evaluation(
+                    gs, action_type, param)
+        except Exception as error:
+            logging.warning(
+                "Could not evaluate action %s (%s): %s",
+                action_idx, action_type, error)
+            return 0.0, "Evaluation fallback"
+
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError, OverflowError):
+            numeric_value = 0.0
+        if not math.isfinite(numeric_value):
+            numeric_value = 0.0
+        return numeric_value, str(reason or action_type)
+
+    def find_best_play_sequence(
+            self, valid_actions, depth=None, discount_factor=0.9):
+        """Return a deterministic one-ply recommendation.
+
+        The old implementation attempted to recurse through cloned GameStates,
+        but applied action names instead of public action indices, omitted
+        generated contexts, and then recursed on the original state. Until a
+        full environment-level alternating-priority search exists, a bounded
+        current-state evaluation is the honest deterministic contract.
+        """
+        del depth, discount_factor
+        actions = self._valid_action_indices(valid_actions)
+        if not actions:
+            return [], 0.0
+        evaluations = []
+        for action_idx in actions:
+            value, _ = self._evaluate_action_candidate(action_idx)
+            evaluations.append((value, -action_idx, action_idx))
+        best_value, _, best_action = max(evaluations)
+        return [best_action], best_value
+    def plan_multi_turn_sequence(
+            self, depth=3, analysis=None, win_conditions=None,
+            opponent_threats=None):
         """
         Enhanced multi-turn sequence planning with advanced mana and resource management.
         Now with improved outcome probability modeling and risk assessment.
         
         Args:
             depth: Number of turns to plan ahead
+            analysis: Optional game-state analysis already computed by caller
+            win_conditions: Optional win-condition analysis from this state
+            opponent_threats: Optional threat list from this state
             
         Returns:
             List of turn plans with detailed strategic insights
@@ -569,19 +574,56 @@ class SearchDecisionMixin:
             card.cmc if hasattr(card, 'cmc') else float('inf')  # Secondary sort by CMC
         ))
         
-        # Get current battlefield state
-        my_lands = [gs._safe_get_card(cid) for cid in me["battlefield"] 
-                if gs._safe_get_card(cid) and 
-                hasattr(gs._safe_get_card(cid), 'type_line') and 
-                'land' in gs._safe_get_card(cid).type_line]
+        # Get current battlefield state. Keep IDs so the live projection can
+        # distinguish untapped mana sources from lands already used this turn.
+        my_land_ids = [
+            card_id for card_id in me["battlefield"]
+            if ((card := gs._safe_get_card(card_id)) is not None
+                and "land" in str(getattr(card, "type_line", "")).lower())
+        ]
+        my_lands = [gs._safe_get_card(card_id) for card_id in my_land_ids]
         
-        # Current available mana (enhanced estimation)
-        current_mana = {}
-        for color in ['W', 'U', 'B', 'R', 'G', 'C']:
-            current_mana[color] = me["mana_pool"].get(color, 0)
+        # Respect both the canonical counter and the legacy boolean.  Taking
+        # the maximum is conservative for old or partially migrated states.
+        try:
+            land_play_limit = max(1, int(gs.land_play_limit(me)))
+        except (AttributeError, TypeError, ValueError):
+            land_play_limit = 1
+        try:
+            lands_already_played = max(
+                0, int(gs.lands_played_this_turn(me)))
+        except (AttributeError, TypeError, ValueError):
+            lands_already_played = max(
+                0, int(me.get("lands_played_this_turn", 0) or 0))
+        if me.get("land_played", False):
+            lands_already_played = max(1, lands_already_played)
+        current_land_drops_remaining = max(
+            0, land_play_limit - lands_already_played)
+
+        def pool_total(pool):
+            total = 0.0
+            for amount in (pool or {}).values():
+                try:
+                    number = float(amount)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if math.isfinite(number):
+                    total += max(0.0, number)
+            return total
+
+        tapped_permanents = set(me.get("tapped_permanents", ()))
+        current_untapped_lands = sum(
+            card_id not in tapped_permanents for card_id in my_land_ids)
+        # Conditional mana needs a concrete spell context before it is
+        # spendable. Ordinary and phase-restricted pools are safe to include
+        # in the generic live-turn projection.
+        current_floating_mana = (
+            pool_total(me.get("mana_pool", {}))
+            + pool_total(me.get("phase_restricted_mana", {}))
+        )
         
         # Estimate mana development curve
-        def project_mana_development(current_turn, turns_ahead):
+        def project_mana_development(turns_ahead):
             """Project expected mana without sampling or consuming game RNG."""
             # This is an observation summary, not a rollout.  Use the expected
             # value of unknown future land draws so equal public states always
@@ -592,17 +634,29 @@ class SearchDecisionMixin:
             # Count lands in hand
             lands_in_hand = len([card for card in hand if hasattr(card, 'type_line') and 'land' in card.type_line])
             
-            # Assume land drop each turn if possible
+            # Use every live land-play allowance. Unknown draws can contribute
+            # only on future turns and at most one expected card per turn.
             projected_lands = []
+            known_lands_used = 0
             for i in range(turns_ahead):
-                # Add a land if we have one
-                if i < lands_in_hand:
-                    land_count += 1
-                else:
+                drop_slots = (
+                    current_land_drops_remaining
+                    if i == 0 else land_play_limit)
+                known_drops = min(
+                    drop_slots, lands_in_hand - known_lands_used)
+                known_lands_used += known_drops
+                land_count += known_drops
+
+                if i > 0 and known_drops < drop_slots:
                     land_count += 0.4
-                
-                # Store projected land count for this turn
-                projected_lands.append(land_count)
+
+                if i == 0:
+                    projected_lands.append(
+                        current_untapped_lands
+                        + current_floating_mana
+                        + known_drops)
+                else:
+                    projected_lands.append(land_count)
             
             # Convert to mana availability
             return projected_lands
@@ -610,18 +664,20 @@ class SearchDecisionMixin:
         # Advanced multi-turn planning
         turn_plans = []
         remaining_hand = hand.copy()
-        lands_played = 0
         
         # Project mana development
-        mana_projection = project_mana_development(gs.turn, depth)
+        mana_projection = project_mana_development(depth)
         
         # First, analyze current game state and objectives
-        current_analysis = self.analyze_game_state()
+        current_analysis = (
+            analysis if analysis is not None else self.analyze_game_state())
         position = current_analysis["position"]["overall"]
         game_stage = current_analysis["game_info"]["game_stage"]
         
         # Identify win conditions
-        win_conditions = self.identify_win_conditions()
+        win_conditions = (
+            win_conditions if win_conditions is not None
+            else self.identify_win_conditions())
         primary_win_condition = None
         for wc_name, wc_data in win_conditions.items():
             if wc_data["viable"] and (primary_win_condition is None or 
@@ -629,7 +685,9 @@ class SearchDecisionMixin:
                 primary_win_condition = wc_name
         
         # Identify opponent threats
-        opponent_threats = self.assess_threats()
+        opponent_threats = (
+            opponent_threats if opponent_threats is not None
+            else self.assess_threats())
         
         for turn_idx in range(depth):
             current_turn = gs.turn + turn_idx
@@ -679,28 +737,32 @@ class SearchDecisionMixin:
                 "objectives": objectives,
                 "plays": [],
                 "land_play": None,
+                "land_plays": [],
                 "spells": [],
                 "abilities": [],
                 "expected_value": 0.0
             }
             
-            # First priority: Land drop if available
-            if turn_idx == 0 or lands_played < turn_idx:
+            # First priority: Land drop if available.  A used current-turn
+            # allowance does not suppress the fresh allowance next turn.
+            land_drop_slots = (
+                current_land_drops_remaining
+                if turn_idx == 0 else land_play_limit)
+            if land_drop_slots > 0:
                 lands_in_hand = [card for card in remaining_hand 
                             if hasattr(card, 'type_line') and 'land' in card.type_line]
                 
                 if lands_in_hand:
-                    # Choose best land (e.g., based on color needs)
-                    best_land = lands_in_hand[0]  # Simple selection, could be enhanced
-                    
-                    turn_plan["land_play"] = {
-                        "card": best_land,
-                        "name": best_land.name if hasattr(best_land, 'name') else "Unknown Land",
-                        "value": 0.7  # High value for playing lands
-                    }
-                    
-                    lands_played += 1
-                    remaining_hand.remove(best_land)
+                    for land in lands_in_hand[:land_drop_slots]:
+                        land_play = {
+                            "card": land,
+                            "name": (land.name if hasattr(land, 'name')
+                                     else "Unknown Land"),
+                            "value": 0.7,
+                        }
+                        turn_plan["land_plays"].append(land_play)
+                        remaining_hand.remove(land)
+                    turn_plan["land_play"] = turn_plan["land_plays"][0]
             
             # Estimate available mana for this turn
             available_mana = expected_mana
@@ -874,12 +936,12 @@ class SearchDecisionMixin:
             
             # Combine all plays into a single list for the turn
             all_plays = []
-            if turn_plan["land_play"]:
+            for land_play in turn_plan["land_plays"]:
                 all_plays.append({
                     "type": "land",
-                    "card": turn_plan["land_play"]["card"],
-                    "name": turn_plan["land_play"]["name"],
-                    "value": turn_plan["land_play"]["value"],
+                    "card": land_play["card"],
+                    "name": land_play["name"],
+                    "value": land_play["value"],
                     "objective": "develop_mana"
                 })
             
@@ -1036,283 +1098,88 @@ class SearchDecisionMixin:
         return base_count
 
     def recommend_action(self, valid_actions):
-        """
-        Provide a strategic recommendation for the next action with MCTS integration.
-        Includes robust checks for game state and handlers.
+        """Return a deterministic, mask-valid strategic recommendation.
 
-        Args:
-            valid_actions: List of valid action indices
-
-        Returns:
-            int: Recommended action index
+        Recommendation deliberately uses bounded current-state evaluation.
+        GameState-only search cannot model the environment's alternating
+        learned/opponent priority loop, so the previous pseudo-MCTS and clone
+        recursion could assign values to the wrong actor and are not used here.
         """
+        actions = self._valid_action_indices(valid_actions)
+        if not actions:
+            return None
+
+        gs = self.game_state
+        action_handler = getattr(gs, "action_handler", None)
+        if action_handler is None:
+            logging.error(
+                "Recommend action cannot proceed: gs.action_handler is missing")
+            return 11 if 11 in actions else actions[0]
+        if (not getattr(gs, "p1", None)
+                or not getattr(gs, "p2", None)):
+            logging.error(
+                "Recommend action failed: GameState players are not initialized")
+            return 11 if 11 in actions else actions[0]
+
         try:
-            gs = self.game_state
-            # --- MODIFIED: Centralized Action Handler Check ---
-            # Access action_handler VIA the game_state instance
-            action_handler = getattr(gs, 'action_handler', None)
-            if not action_handler:
-                logging.error("Recommend action cannot proceed: gs.action_handler is missing.")
-                # Attempt safe fallback based only on valid_actions list
-                if valid_actions:
-                    # Ensure valid_actions is a list or convert from mask
-                    if isinstance(valid_actions, np.ndarray) and valid_actions.dtype == bool:
-                         valid_actions = np.where(valid_actions)[0].tolist()
-                    if not isinstance(valid_actions, list): valid_actions = [] # Ensure list
-
-                    if 11 in valid_actions: return 11 # Prioritize PASS
-                    if 12 in valid_actions: return 12 # Prioritize CONCEDE
-                    if valid_actions: return valid_actions[0] # Last resort: first valid
-                return None # No valid actions given either
-            # --- END Modification ---
-
-            # --- Initial GameState/Player validation ---
-            if not gs or not hasattr(gs, 'p1') or not hasattr(gs, 'p2') or not gs.p1 or not gs.p2:
-                logging.error("Recommend action failed: GameState or players not properly initialized.")
-                return None if not valid_actions else valid_actions[0]
-
-            me = gs.p1 if gs.agent_is_p1 else gs.p2
-            opp = gs.p2 if gs.agent_is_p1 else gs.p1
-
-            # Handle case where no valid actions are provided
-            if valid_actions is None: # Check for None explicitly
-                 logging.warning("Valid_actions list is None in recommend_action.")
-                 return None
-            if isinstance(valid_actions, np.ndarray) and valid_actions.dtype == bool: # Handle mask case
-                 valid_actions = np.where(valid_actions)[0].tolist()
-            if not isinstance(valid_actions, list): # Ensure list type
-                 logging.error(f"Valid actions provided is not a list or ndarray: {type(valid_actions)}")
-                 return None
-            if not valid_actions:
-                logging.warning("No valid actions provided to recommend_action")
-                # Check if PASS_PRIORITY or CONCEDE are possible as absolute fallback
-                try:
-                     # Use the verified handler instance
-                     mask = action_handler.generate_valid_actions()
-                     valid_now = mask.nonzero()[0]
-                     if 11 in valid_now: return 11 # PASS
-                     if 12 in valid_now: return 12 # CONCEDE
-                except Exception as e:
-                     logging.error(f"Error regenerating mask in recommend_action fallback: {e}")
-                     pass # Ignore errors during absolute fallback check
-                return None # No valid actions and cannot generate new ones
-
-
-            # 1. Analyze current game state
-            # Use self.analyze_game_state which checks if planner exists
             self.analyze_game_state()
             self.adapt_strategy()
+        except Exception as error:
+            logging.warning(
+                "Strategic analysis failed before recommendation: %s", error)
 
-            # 2. Check strategy memory for suggestions (Keep existing logic)
-            memory_suggestion = None
-            if hasattr(gs, 'strategy_memory') and gs.strategy_memory: # Check if memory exists on GS
-                try:
-                    # Pass the list of valid actions
-                    memory_suggestion = gs.strategy_memory.get_suggested_action(gs, valid_actions)
-                    if memory_suggestion is not None and memory_suggestion in valid_actions:
-                        # High confidence check
-                        pattern = gs.strategy_memory.extract_strategy_pattern(gs)
-                        strategy = gs.strategy_memory.strategies.get(pattern)
-                        if strategy and strategy.get('success_rate', 0) > 0.8 and strategy.get('count', 0) > 5:
-                            logging.debug(f"Using high-confidence memory-suggested action: {memory_suggestion}")
-                            return memory_suggestion
-                        logging.debug(f"Found memory suggestion: {memory_suggestion} (will consider)")
-                    else:
-                         memory_suggestion = None # Reset if invalid or not found
-                except Exception as e:
-                    logging.warning(f"Error getting strategy memory suggestion: {str(e)}")
-                    memory_suggestion = None # Ensure it's None on error
-
-
-            # 3. Determine if critical decision point - use MCTS
-            is_critical_decision = self._is_critical_decision()
-
-            if is_critical_decision and hasattr(self, 'monte_carlo_search'): # Check if MCTS exists
-                logging.info("Critical decision point detected - using Monte Carlo Tree Search")
-                simulation_count = self._determine_simulation_count() # Uses safe check inside
-                mcts_action = self.monte_carlo_search(num_simulations=simulation_count) # Assumes MCTS handles missing handler
-
-                if mcts_action is not None and mcts_action in valid_actions:
-                    logging.debug(f"MCTS recommendation: {mcts_action}")
-                    return mcts_action
-                else:
-                    logging.warning(f"MCTS selected invalid action {mcts_action} or failed. Falling back to heuristic.")
-
-
-            # 4. Action prioritization (Heuristic approach or MCTS fallback) (Keep existing logic)
-            action_priorities = []
-            high_priority_actions = []
-
-            # Check land play
-            if gs.can_play_land_this_turn(me):
-                 for action_idx in valid_actions:
-                     # Use the verified handler instance
-                     action_type, param = action_handler.get_action_info(action_idx)
-                     if action_type == "PLAY_LAND" and param is not None:
-                         card = gs._safe_get_card(param)
-                         if card and 'land' in getattr(card, 'type_line', ''):
-                             logging.debug("Prioritizing land play")
-                             return action_idx # Immediate return for land drop
-
-
-            # Check for lethal damage or threat removal (Keep existing logic)
-            opp_life = opp.get('life', 20)
+        memory_suggestion = None
+        memory = getattr(gs, "strategy_memory", None)
+        if memory is not None:
             try:
-                 threats = self.assess_threats()[:3] # Assess threats safely
-            except Exception:
-                 threats = []
+                memory_suggestion = memory.get_suggested_action(
+                    gs, actions)
+                if memory_suggestion not in actions:
+                    memory_suggestion = None
+                if memory_suggestion is not None:
+                    pattern = memory.extract_strategy_pattern(gs)
+                    strategy = memory.strategies.get(pattern)
+                    if (strategy
+                            and strategy.get("success_rate", 0) > 0.8
+                            and strategy.get("count", 0) > 5):
+                        return memory_suggestion
+            except Exception as error:
+                logging.warning(
+                    "Could not obtain strategy-memory suggestion: %s", error)
+                memory_suggestion = None
 
-            for action_idx in valid_actions:
-                # Use the verified handler instance
-                action_type, param = action_handler.get_action_info(action_idx)
-                if action_type is None: continue
+        me = gs.p1 if gs.agent_is_p1 else gs.p2
+        if gs.can_play_land_this_turn(me):
+            for action_idx in actions:
+                action_type, param = action_handler.get_action_info(
+                    action_idx)
+                if action_type not in (
+                        "PLAY_LAND", "PLAY_MDFC_LAND_BACK"):
+                    continue
+                context = self._generated_action_context(
+                    action_handler, action_idx)
+                card_id = self._zone_card_id(
+                    me, "hand", context.get("hand_idx", param), context)
+                card = gs._safe_get_card(card_id)
+                if card and "land" in str(
+                        getattr(card, "type_line", "")).lower():
+                    return action_idx
 
-                # Evaluate potential lethal attack
-                if action_type == "DECLARE_ATTACKER" and param:
-                    my_power = 0
-                    # Correctly sum power based on param which should be attacker IDs or index?
-                    # Assuming param IS the battlefield index for now, matching action dict
-                    if isinstance(param, int) and param < len(me.get('battlefield',[])):
-                        attacker_id = me['battlefield'][param]
-                        att_card = gs._safe_get_card(attacker_id)
-                        my_power = _card_number(att_card, 'power')
-                    elif isinstance(param, list): # If param is list of IDs
-                        for att_id in param:
-                            att_card = gs._safe_get_card(att_id)
-                            my_power += _card_number(att_card, 'power')
-                    else: # Invalid param for attacker
-                        continue
+        if memory_suggestion is not None:
+            pattern = memory.extract_strategy_pattern(gs)
+            strategy = memory.strategies.get(pattern)
+            if strategy and strategy.get("success_rate", 0) > 0.6:
+                return memory_suggestion
 
-                    if my_power >= opp_life:
-                          attack_value = self.evaluate_attack_action([attacker_id] if isinstance(param, int) else param)
-                          high_priority_actions.append((action_idx, attack_value + 2.0, "Potential lethal attack"))
+        best_sequence, best_value = self.find_best_play_sequence(
+            actions, depth=1)
+        if best_sequence and best_sequence[0] in actions:
+            logging.debug(
+                "Deterministic strategic recommendation %s (value %.3f)",
+                best_sequence[0], best_value)
+            return best_sequence[0]
 
-                # Evaluate removing top threat
-                elif action_type in ["PLAY_SPELL", "ACTIVATE_ABILITY"]:
-                    if threats and threats[0]:
-                        top_threat = threats[0]
-                        top_threat_id = top_threat.get("card_id")
-                        can_remove = False
-                        text_to_check = ""
-
-                        # Adjust getting card/ability info
-                        if action_type == "PLAY_SPELL" and param is not None and isinstance(param, int) and param < len(me.get('hand',[])):
-                            card_id = me['hand'][param]
-                            card = gs._safe_get_card(card_id)
-                            text_to_check = getattr(card,'oracle_text','').lower() if card else ""
-                        elif action_type == "ACTIVATE_ABILITY" and isinstance(param, tuple) and len(param) == 2:
-                            ability = action_handler.get_ability_object(param[0], param[1]) # Use helper
-                            text_to_check = getattr(ability, 'effect', getattr(ability, 'effect_text', '')).lower() if ability else ""
-                        else: # Handle param being None for ACTIVATE_ABILITY if context used instead
-                            # Need access to context here? Complex. Assume basic structure for now.
-                            pass
-
-                        if any(term in text_to_check for term in ['destroy', 'exile', 'damage', 'return target']):
-                            can_remove = True
-
-                        if can_remove:
-                            threat_level = top_threat.get('level', 1.0)
-                            value = 1.0 + threat_level * 0.5
-                            high_priority_actions.append((action_idx, value, f"Remove threat {top_threat.get('name','N/A')}"))
-
-            if high_priority_actions:
-                high_priority_actions.sort(key=lambda x: x[1], reverse=True)
-                logging.debug(f"Taking high priority action: {high_priority_actions[0][2]}")
-                return high_priority_actions[0][0]
-
-            # 5. Memory suggestion (re-checked) (Keep existing logic)
-            if memory_suggestion is not None and memory_suggestion in valid_actions:
-                 pattern = gs.strategy_memory.extract_strategy_pattern(gs)
-                 strategy = gs.strategy_memory.strategies.get(pattern)
-                 if strategy and strategy.get('success_rate', 0) > 0.6:
-                     logging.debug(f"Using memory-suggested action: {memory_suggestion}")
-                     return memory_suggestion
-
-            # 6. Forward search / sequence evaluation (Keep existing logic)
-            if hasattr(self, 'find_best_play_sequence') and self.find_best_play_sequence:
-                try:
-                    best_sequence, best_value = self.find_best_play_sequence(list(valid_actions), depth=2)
-                    if best_sequence:
-                        logging.debug(f"Best play sequence found with value {best_value}, taking action {best_sequence[0]}")
-                        return best_sequence[0]
-                except Exception as seq_e:
-                     logging.warning(f"Error during find_best_play_sequence: {seq_e}")
-
-            # 7. Individual action evaluation (Heuristics) (Keep existing logic, ensure safe get_action_info)
-            action_evaluations = []
-            for action_idx in valid_actions:
-                # Use the verified handler instance
-                action_type, param = action_handler.get_action_info(action_idx)
-                if action_type is None: continue
-
-                value, reason = 0.5, "Default Eval"
-                try:
-                    # Keep existing evaluation logic, assume context handled correctly by get_ability_object etc.
-                    if action_type == "PLAY_SPELL" and param is not None and isinstance(param, int) and param < len(me.get("hand",[])):
-                        value = self.evaluate_play_card_action(me['hand'][param]) if hasattr(self, 'evaluate_play_card_action') else 0.5
-                        reason = "Card Play"
-                    elif action_type == "DECLARE_ATTACKER" and param is not None: # Assuming param is battlefield_idx
-                         if isinstance(param, int) and param < len(me.get('battlefield',[])):
-                             value = self.evaluate_attack_action([me['battlefield'][param]]) if hasattr(self, 'evaluate_attack_action') else 0.5
-                             reason = "Attack"
-                         elif isinstance(param, list): # If action allows list of attackers
-                              value = self.evaluate_attack_action(param) if hasattr(self, 'evaluate_attack_action') else 0.5
-                              reason = "Multi-Attack"
-                    elif action_type == "DECLARE_BLOCKER" and isinstance(param, tuple) and len(param)==2:
-                        value = self.evaluate_block_action(param[0], param[1]) if hasattr(self, 'evaluate_block_action') else 0.5
-                        reason = "Block"
-                    elif action_type == "ACTIVATE_ABILITY":
-                        # Get ability object safely using handler helper
-                        ability_obj = action_handler.get_ability_object_from_context(action_idx) # Uses index lookup
-                        if ability_obj:
-                             bf_idx, internal_ability_idx = action_handler.get_indices_from_activate_action(action_idx)
-                             value, reason = self.evaluate_ability_activation(bf_idx, internal_ability_idx) if hasattr(self, 'evaluate_ability_activation') else (0.5, "Ability Activation")
-                    elif action_type in ["END_TURN", "PASS_PRIORITY"]:
-                         is_stack_empty = not gs.stack
-                         value = 0.2 if is_stack_empty else 0.1
-                         reason = action_type
-                    # Add other action types
-                except Exception as eval_e:
-                    logging.warning(f"Error evaluating action {action_idx} ({action_type}): {eval_e}")
-                    value, reason = 0.05, "Eval Error Fallback"
-
-                action_evaluations.append((action_idx, value, reason))
-
-            action_evaluations.sort(key=lambda x: x[1], reverse=True)
-
-            # 8. Exploration vs Exploitation (Keep existing logic)
-            risk = getattr(self, 'risk_tolerance', 0.5) * 0.2
-            if random.random() < risk and len(action_evaluations) > 1:
-                top_n = min(3, len(action_evaluations))
-                chosen_action, value, reason = random.choice(action_evaluations[:top_n])
-                logging.debug(f"Exploration choice: {reason} (value={value:.2f}), Action: {chosen_action}")
-                return chosen_action
-
-            # 9. Choose best heuristic action (Keep existing logic)
-            if action_evaluations:
-                best_action, value, reason = action_evaluations[0]
-                logging.debug(f"Best heuristic action: {reason} (value={value:.2f}), Action: {best_action}")
-                return best_action
-
-            # 10. Absolute Fallback (Keep existing logic)
-            logging.error("Recommend_action reached end without selecting an action. No heuristics passed.")
-            try:
-                # Use verified handler instance
-                mask = action_handler.generate_valid_actions()
-                valid_now = mask.nonzero()[0]
-                if 11 in valid_now: return 11 # PASS
-                if 12 in valid_now: return 12 # CONCEDE
-            except Exception: pass
-            return None # Truly stuck
-
-        except Exception as e:
-            logging.error(f"CRITICAL Error in recommend_action: {str(e)}", exc_info=True)
-            # Attempt graceful fallback
-            if valid_actions and isinstance(valid_actions, list) and len(valid_actions) > 0:
-                if 11 in valid_actions: return 11 # Prioritize PASS if possible
-                return valid_actions[0] # Return first valid as absolute fallback
-            return None # Truly stuck if no valid actions list available
-
+        return 11 if 11 in actions else actions[0]
     def suggest_action_from_memory(self, valid_actions):
         """Delegate to deterministic action-specific strategy evidence."""
         try:
@@ -1451,23 +1318,16 @@ class SearchDecisionMixin:
              logging.error(f"MCTS Error getting valid actions at root: {e}")
              return None
 
-        # Use strategic evaluation to initialize action priors
+        # Use the same real action/context decoder as deterministic advice.
         action_priors = {}
         for action in valid_actions:
-            # --- Use verified action_handler ---
-            action_type, param = action_handler.get_action_info(action)
-            value = 0.5 # Default value
             try:
-                if action_type == "PLAY_CARD" and param:
-                    value = self.evaluate_play_card_action(param) if hasattr(self,'evaluate_play_card_action') else 0.5
-                elif action_type == "DECLARE_ATTACKER" and param:
-                    value = self.evaluate_attack_action(param) if hasattr(self,'evaluate_attack_action') else 0.5
-                elif action_type == "ACTIVATE_ABILITY" and isinstance(param,tuple) and len(param)==2:
-                    value, _ = self.evaluate_ability_activation(param[0], param[1]) if hasattr(self,'evaluate_ability_activation') else (0.5, "")
-                else:
-                    value = self._quick_action_evaluation(gs, action_type, param) if hasattr(self,'_quick_action_evaluation') else 0.5
+                value, _ = self._evaluate_action_candidate(action)
             except Exception as eval_e:
-                 logging.warning(f"MCTS Prior Eval Error for action {action}: {eval_e}")
+                logging.warning(
+                    "MCTS prior evaluation failed for action %s: %s",
+                    action, eval_e)
+                value = 0.0
 
             action_priors[action] = max(0.01, value) # Ensure non-zero probability
 
@@ -1504,8 +1364,10 @@ class SearchDecisionMixin:
                     if action_type is None:
                          logging.warning(f"MCTS Sim {i}: Invalid action {action} encountered during selection. Breaking path.")
                          break # Stop traversing this path
-                    # Need to apply action robustly
-                    sim_action_handler.apply_action(action) # Assume apply_action handles details internally now
+                    action_context = self._generated_action_context(
+                        sim_action_handler, action)
+                    sim_action_handler.apply_action(
+                        action, context=action_context)
 
                 # Check if the node traversal failed early
                 if not node:
@@ -1545,11 +1407,12 @@ class SearchDecisionMixin:
                     else: leaf_value = 0.1 * np.sign(me_life - opp_life) if me_life != opp_life else 0.0 # Draw/Turn limit
 
                 # Phase 4: Backpropagation
-                current_value = leaf_value
                 for node_in_path in reversed(search_path):
                     node_in_path.visit_count += 1
-                    node_in_path.value_sum += current_value
-                    current_value = -current_value # Alternate for opponent turns
+                    # Values are evaluated from the fixed observer carried by
+                    # the cloned GameState. A Magic action edge does not imply
+                    # an actor change, so alternating sign per edge is invalid.
+                    node_in_path.value_sum += leaf_value
 
             except Exception as sim_e:
                  logging.error(f"Error during MCTS simulation {i}: {sim_e}", exc_info=True)
@@ -1625,8 +1488,10 @@ class SearchDecisionMixin:
 
             # Apply action using the action index
             try:
-                # *** FIXED: Call apply_action with action_idx ***
-                sim_gs.action_handler.apply_action(action_idx)
+                action_context = self._generated_action_context(
+                    sim_gs.action_handler, action_idx)
+                sim_gs.action_handler.apply_action(
+                    action_idx, context=action_context)
             except TypeError as te:
                  logging.error(f"MCTS Rollout: TypeError applying action {action_idx} - {te}")
                  break # Stop rollout on type error
@@ -1645,16 +1510,20 @@ class SearchDecisionMixin:
         else:
             # Compute a heuristic value (can reuse parts of _calculate_board_state_reward or advanced_position_evaluation)
             # Simplified version for rollout:
-            my_creatures = [cid for cid in getattr(me,'battlefield',[])
+            my_creatures = [cid for cid in me.get('battlefield', [])
                             if sim_gs._safe_get_card(cid) and 'creature' in getattr(sim_gs._safe_get_card(cid),'card_types',[])]
-            opp_creatures = [cid for cid in getattr(opp,'battlefield',[])
+            opp_creatures = [cid for cid in opp.get('battlefield', [])
                             if sim_gs._safe_get_card(cid) and 'creature' in getattr(sim_gs._safe_get_card(cid),'card_types',[])]
-            my_power = sum(getattr(sim_gs._safe_get_card(cid), 'power', 0) or 0 for cid in my_creatures)
-            opp_power = sum(getattr(sim_gs._safe_get_card(cid), 'power', 0) or 0 for cid in opp_creatures)
-            my_hand_size = len(getattr(me,'hand',[]))
-            opp_hand_size = len(getattr(opp,'hand',[]))
-            my_board_size = len(getattr(me,'battlefield',[]))
-            opp_board_size = len(getattr(opp,'battlefield',[]))
+            my_power = sum(
+                _card_number(sim_gs._safe_get_card(cid), 'power')
+                for cid in my_creatures)
+            opp_power = sum(
+                _card_number(sim_gs._safe_get_card(cid), 'power')
+                for cid in opp_creatures)
+            my_hand_size = len(me.get('hand', []))
+            opp_hand_size = len(opp.get('hand', []))
+            my_board_size = len(me.get('battlefield', []))
+            opp_board_size = len(opp.get('battlefield', []))
 
             life_diff_val = (final_me_life - final_opp_life) / 20.0
             card_adv_val = (my_hand_size - opp_hand_size) / 5.0
@@ -1688,27 +1557,33 @@ class SearchDecisionMixin:
         # Evaluate each action with quick heuristics
         for action in valid_actions:
             action_type, param = gs.action_handler.get_action_info(action)
+            context = self._generated_action_context(
+                gs.action_handler, action)
             priority = 0
             
             # Land plays have high priority if land hasn't been played
-            if action_type == "PLAY_CARD":
-                card = gs._safe_get_card(param)
+            if action_type in ("PLAY_LAND", "PLAY_MDFC_LAND_BACK"):
+                card_id = self._zone_card_id(
+                    me, "hand", context.get("hand_idx", param), context)
+                card = gs._safe_get_card(card_id)
                 if (card and hasattr(card, 'type_line')
                         and 'land' in card.type_line
                         and gs.can_play_land_this_turn(me)):
                     priority = 100
-                elif card and hasattr(card, 'cmc'):
-                    # Prioritize cheap spells
-                    priority = 90 - card.cmc * 10
-                    
-                    # Bonus for creatures
-                    if hasattr(card, 'card_types') and 'creature' in card.card_types:
+            elif action_type in (
+                    "PLAY_SPELL", "PLAY_MDFC_BACK", "PLAY_ADVENTURE"):
+                card_id = self._zone_card_id(
+                    me, "hand", context.get("hand_idx", param), context)
+                card = gs._safe_get_card(card_id)
+                if card:
+                    priority = 90 - _card_number(card, "cmc") * 10
+                    if 'creature' in getattr(card, 'card_types', []):
                         priority += 5
             
             # Combat actions
-            elif action_type == "DECLARE_ATTACKER":
+            elif action_type == "ATTACK":
                 priority = 80
-            elif action_type == "DECLARE_BLOCKER":
+            elif action_type == "BLOCK":
                 priority = 85
             
             # Ability activation

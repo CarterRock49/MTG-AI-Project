@@ -211,7 +211,7 @@ append new cards without renumbering existing IDs; a card that would widen the
 frozen subtype vocabulary is rejected (that requires a new schema version, and
 therefore a new checkpoint lineage).
 
-The separate global policy-input contract is Observation v2, documented in
+The separate global policy-input contract is Observation v3, documented in
 [OBSERVATION_SCHEMA.md](OBSERVATION_SCHEMA.md) and self-hashed by
 `Playersim/observation_schema.py`.
 
@@ -284,9 +284,9 @@ full-pool coverage counts are in the ROADMAP status snapshot.
 
 ```bash
 python main.py --timesteps 1000000 --learning-rate 2e-4 --batch-size 256 \
-  --n-steps 1024 --seed 20260715 --run-name round-7.88-mastery-v5 \
+  --n-steps 1024 --seed 20260715 --run-name round-7.89-active-gates-v1 \
   --eval-freq 100000 --eval-episodes 64 --n-envs 8 \
-  --curriculum combat-v2
+  --curriculum combat-v3
 ```
 
 No format or deck flags are required for the pinned Standard default. Custom
@@ -308,7 +308,9 @@ unpublished snapshots. Training workers batch compressed statistics for ten
 games; close still forces a final flush. Deeper per-step optimizations are
 tracked as the ROADMAP Tier 3 throughput program.
 
-Every periodic evaluation uses the same paired deck/seat/seed cases.
+Every periodic evaluation uses the same paired deck/seat/seed cases. The
+64-case Standard schedule has no mirrors and balances learned decks, opponent
+decks, and physical seats.
 Promotion is ordered by decisive wins, decisive win-minus-loss score, fewer
 turn limits, then shaped return. A candidate is only published as
 `best_model.zip` after its decisive-win plus half non-timeout-draw score reaches
@@ -324,7 +326,7 @@ inventory, deck/lineage provenance, lifecycle result, and artifact paths. A
 dirty run also stores a hashed `source_worktree.patch` beside the manifest,
 including both tracked changes and untracked files.
 
-> **Checkpoint boundary (Round 7.88 / Observation v2).** The full Standard namespace widened card
+> **Checkpoint boundary (Round 7.89 / Observation v3).** The full Standard namespace widened card
 > observations to 436 fields (259 subtype fields plus MDFC fields), signed live
 > power/toughness, and count/stat bounds large enough for legal boards above 20
 > permanents. Round 7.62 also widened the declared choice-count, allocation, and
@@ -374,11 +376,23 @@ including both tracked changes and untracked files.
 > pool), while evaluation remains a
 > fixed 64-game paired scripted suite. PPO defaults are 2e-4 learning rate,
 > 1,024 rollout steps, batch 256, gamma 0.999, lambda 0.98, value coefficient
-> 0.25, and five epochs. Observation v2 and its hash are unchanged.
-> **Do not resume a checkpoint created before Round 7.87, including the failed
-> `reward-v7`, `round-7.85-reward-v8`, or `round-7.86-combat-v4` artifacts**.
-> Start fresh without
-> `--resume`.
+> 0.25, and five epochs. Observation v2 and its hash are unchanged for that
+> historical lineage.
+> Round 7.89 makes `combat-v3` the fresh-run default. Race mastery now
+> requires a novice win-rate floor, bridge requires separate novice and
+> scripted floors, and passive opponents are absent from bridge. Explicit
+> stage deadlines distinguish forced progression from mastery and guarantee
+> entry into `full_pool` by approximately 375k timesteps. `combat-v2` remains
+> available only to reproduce the earlier schedule.
+> Stage selection applies on each worker's future reset; activation
+> acknowledgements and stale-stage episode counts prevent old in-flight games
+> from satisfying the next stage's minimum exposure clock.
+> Observation v3 starts a fresh checkpoint lineage for Round 7.89: snow mana
+> provenance, available-mana totals, land development, strategic resource
+> magnitudes, and win-condition viability now have corrected semantics.
+> **Do not resume any pre-Round 7.89 checkpoint into this Observation v3
+> lineage, including the failed `reward-v7`, `round-7.85-reward-v8`, or
+> `round-7.86-combat-v4` artifacts.** Start fresh without `--resume`.
 
 ### Hyperparameter optimization
 
@@ -391,12 +405,14 @@ Automatically selects 10, 25, or 50 Optuna trials based on logical CPU count.
 ### Resuming / continuing a run
 
 ```bash
-python main.py --resume models/<run>/final_model --timesteps 10000
+python main.py --resume models/<run>/final_model --timesteps 10000 \
+  --curriculum none
 ```
 
 (Only for manifest-verified, lineage-compatible checkpoints — see the boundary
-note above. Curriculum resume is currently rejected because per-worker matchup
-counters are not checkpointed; Round 7.88 must start fresh.)
+note above. This command is only valid when the source run also recorded no
+curriculum. Curriculum resume is rejected because per-worker matchup counters
+are not checkpointed; Round 7.89 must start fresh.)
 
 ---
 
@@ -488,7 +504,7 @@ artifacts for 14 days.
 | `--n-envs` | Parallel training environments (`0` = auto) | `0` |
 | `--eval-freq` / `--eval-episodes` | Periodic cadence / fixed paired cases | `100000` / `64` |
 | `--checkpoint-freq` | Checkpoint cadence (timesteps) | `50000` |
-| `--curriculum` | Training opponent schedule (`combat-v2`, `combat-v1`, or `none`) | `combat-v2` |
+| `--curriculum` | Training opponent schedule (`combat-v3`, `combat-v2`, `combat-v1`, or `none`) | `combat-v3` |
 | `--format` / `--decks` / `--format-dir` | Format legality + corpus / deck dir / frozen namespace | pinned Standard |
 | `--optimize-hp` | Run Optuna hyperparameter search | off |
 | `--record-network` / `--record-freq` | Record network parameters / cadence | off / `5000` |

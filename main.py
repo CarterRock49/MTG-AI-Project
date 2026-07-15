@@ -1031,17 +1031,21 @@ def artifact_identity(path):
 
 
 def build_fixed_evaluation_schedule(decks, n_eval_episodes, seed):
-    """Build reproducible deck/seat pairs for every periodic evaluation.
+    """Build reproducible, exposure-balanced periodic evaluation pairs.
 
-    Each adjacent pair keeps the learned policy on the same deck against the
-    same opponent deck while swapping the physical P1/P2 seats.  Both games in
-    a pair use the same seed.  An odd episode count retains the first half of
-    the final pair for backward-compatible CLI behavior; production runs
-    should use an even count (64 or more).
+    Matchups are generated in seeded derangement rounds.  Every complete round
+    uses each deck exactly once as the learned deck and once as the opponent,
+    with no mirror matches.  Successive rounds use distinct opponents until
+    every ordered matchup has appeared.  Each matchup is then played from both
+    physical seats with the same seed.  The episode count must be even so no
+    learned deck receives an unmatched physical-seat case.
     """
     episode_count = int(n_eval_episodes)
     if episode_count <= 0:
         raise ValueError("n_eval_episodes must be positive")
+    if episode_count % 2:
+        raise ValueError(
+            "n_eval_episodes must be even for paired-seat evaluation")
 
     deck_names = sorted({
         str(deck.get("name"))
@@ -1051,27 +1055,36 @@ def build_fixed_evaluation_schedule(decks, n_eval_episodes, seed):
     if not deck_names:
         raise ValueError(
             "Fixed evaluation requires decks with stable non-empty names")
-
-    if len(deck_names) == 1:
-        matchups = [(deck_names[0], deck_names[0])]
-    else:
-        matchups = [
-            (agent_deck, opponent_deck)
-            for agent_deck in deck_names
-            for opponent_deck in deck_names
-            if agent_deck != opponent_deck
-        ]
+    if len(deck_names) < 2:
+        raise ValueError(
+            "Fixed evaluation requires at least two distinct decks so mirror "
+            "matches can be excluded")
 
     rng = random.Random(int(seed))
-    rng.shuffle(matchups)
+    pair_count = episode_count // 2
+    matchups = []
+    while len(matchups) < pair_count:
+        # A cycle of all non-zero offsets covers every ordered non-mirror
+        # matchup exactly once.  Truncating a round still gives unique learned
+        # and opponent decks, so both exposure counts differ by at most one.
+        deck_order = list(deck_names)
+        rng.shuffle(deck_order)
+        offsets = list(range(1, len(deck_order)))
+        rng.shuffle(offsets)
+        for offset in offsets:
+            matchup_round = [
+                (agent_deck,
+                 deck_order[(agent_index + offset) % len(deck_order)])
+                for agent_index, agent_deck in enumerate(deck_order)
+            ]
+            rng.shuffle(matchup_round)
+            remaining = pair_count - len(matchups)
+            matchups.extend(matchup_round[:remaining])
+            if len(matchups) == pair_count:
+                break
+
     schedule = []
-    pair_count = (episode_count + 1) // 2
-    for pair_index in range(pair_count):
-        if pair_index and pair_index % len(matchups) == 0:
-            # A deterministic reshuffle prevents large schedules from simply
-            # repeating the first matchup ordering.
-            rng.shuffle(matchups)
-        agent_deck, opponent_deck = matchups[pair_index % len(matchups)]
+    for agent_deck, opponent_deck in matchups:
         pair_seed = rng.randrange(0, 2**32)
         schedule.extend((
             {
@@ -1225,8 +1238,8 @@ def validate_resume_lineage(checkpoint_path, requested_curriculum):
     if (schema_version != AlphaZeroMTGEnv.OBSERVATION_SCHEMA_VERSION
             or schema_sha256 != AlphaZeroMTGEnv.OBSERVATION_SCHEMA_SHA256):
         raise ValueError(
-            "Resume checkpoint does not match the current Observation v2 "
-            "version/hash")
+            "Resume checkpoint does not match the current Observation "
+            f"v{AlphaZeroMTGEnv.OBSERVATION_SCHEMA_VERSION} version/hash")
 
     requested_name = None if requested_curriculum in (None, "none") \
         else str(requested_curriculum)
@@ -1241,7 +1254,7 @@ def validate_resume_lineage(checkpoint_path, requested_curriculum):
     if requested_name is not None:
         raise ValueError(
             "Curriculum resume is disabled until per-worker scheduler counters "
-            "are checkpointed; start this Round 7.87 lineage fresh")
+            "are checkpointed; start this Round 7.89 lineage fresh")
 
     return {
         "run_id": source_manifest.get("run_id"),
@@ -2534,8 +2547,12 @@ class CurriculumProgressCallback(BaseCallback):
         self.progression = str(
             curriculum.get("progression") or "fixed_timesteps")
         self._active_stage_index = None
+        self._stage_selected_timestep = 0
         self._stage_entry_timestep = 0
         self._recent_outcomes = deque()
+        self._transition_history = []
+        self._pending_activation_workers = set()
+        self._stale_stage_episodes = 0
 
     def _stage_index(self):
         selected = 0
@@ -2561,9 +2578,28 @@ class CurriculumProgressCallback(BaseCallback):
             "curriculum_id": self.curriculum.get("id"),
             "curriculum_version": self.curriculum.get("version"),
             "stage_index": int(self._active_stage_index or 0),
-            "stage_entry_timestep": int(self._stage_entry_timestep),
+            "stage_selected_timestep": int(self._stage_selected_timestep),
+            "stage_entry_timestep": (
+                None if self._stage_entry_timestep is None
+                else int(self._stage_entry_timestep)),
             "recent_outcomes": list(self._recent_outcomes),
+            "transition_history": list(self._transition_history),
+            "pending_activation_workers": sorted(
+                self._pending_activation_workers),
+            "stale_stage_episodes": int(self._stale_stage_episodes),
         })
+
+    @staticmethod
+    def _normalize_outcome_record(record):
+        if isinstance(record, dict):
+            return {
+                "outcome": str(record.get("outcome") or "unknown"),
+                "opponent_profile": str(
+                    record.get("opponent_profile") or "unknown"),
+            }
+        # Older callback state stored only the aggregate outcome.  It remains
+        # useful for aggregate gates but cannot satisfy a profile requirement.
+        return {"outcome": str(record), "opponent_profile": "unknown"}
 
     def _restore_mastery_state(self):
         state = getattr(self.model, self.MODEL_STATE_ATTRIBUTE, None)
@@ -2572,30 +2608,64 @@ class CurriculumProgressCallback(BaseCallback):
                 or state.get("curriculum_version")
                 != self.curriculum.get("version")):
             self._active_stage_index = 0
+            self._stage_selected_timestep = int(self.num_timesteps)
             self._stage_entry_timestep = int(self.num_timesteps)
             self._recent_outcomes = deque(maxlen=self._window_size(0))
+            self._transition_history = []
+            self._pending_activation_workers = set()
+            self._stale_stage_episodes = 0
             self._persist_mastery_state()
             return
         maximum = len(self.curriculum["stages"]) - 1
         self._active_stage_index = min(
             maximum, max(0, int(state.get("stage_index", 0))))
-        self._stage_entry_timestep = int(
-            state.get("stage_entry_timestep", self.num_timesteps))
+        restored_entry = state.get(
+            "stage_entry_timestep", self.num_timesteps)
+        self._stage_entry_timestep = (
+            None if restored_entry is None else int(restored_entry))
+        self._stage_selected_timestep = int(state.get(
+            "stage_selected_timestep",
+            self._stage_entry_timestep
+            if self._stage_entry_timestep is not None
+            else self.num_timesteps))
         self._recent_outcomes = deque(
-            list(state.get("recent_outcomes") or ()),
+            [self._normalize_outcome_record(record) for record in
+             list(state.get("recent_outcomes") or ())],
             maxlen=self._window_size(self._active_stage_index))
+        self._transition_history = list(
+            state.get("transition_history") or ())
+        self._pending_activation_workers = {
+            max(0, int(index)) for index in
+            state.get("pending_activation_workers") or ()}
+        self._stale_stage_episodes = max(
+            0, int(state.get("stale_stage_episodes", 0)))
 
-    def _outcome_rates(self):
-        episodes = len(self._recent_outcomes)
+    def _training_environment_count(self):
+        count = getattr(self.training_env, "num_envs", None)
+        if count is None:
+            dones = self.locals.get("dones")
+            count = len(dones) if dones is not None else 1
+        return max(1, int(count))
+
+    def _outcome_rates(self, opponent_profile=None):
+        records = list(self._recent_outcomes)
+        if opponent_profile is not None:
+            records = [
+                record for record in records
+                if record["opponent_profile"] == opponent_profile]
+        episodes = len(records)
         denominator = max(1, episodes)
         return {
             "episodes": episodes,
-            "decisive_win_rate":
-                self._recent_outcomes.count("win") / denominator,
-            "decisive_loss_rate":
-                self._recent_outcomes.count("loss") / denominator,
-            "timeout_rate":
-                self._recent_outcomes.count("timeout") / denominator,
+            "decisive_win_rate": sum(
+                record["outcome"] == "win" for record in records)
+                / denominator,
+            "decisive_loss_rate": sum(
+                record["outcome"] == "loss" for record in records)
+                / denominator,
+            "timeout_rate": sum(
+                record["outcome"] == "timeout" for record in records)
+                / denominator,
         }
 
     def _record_mastery_outcomes(self):
@@ -2611,14 +2681,35 @@ class CurriculumProgressCallback(BaseCallback):
                     and not bool(dones[index])):
                 continue
             if info.get("curriculum_stage") != active_name:
+                if index in self._pending_activation_workers:
+                    self._stale_stage_episodes += 1
+                    changed = True
                 continue
+            if index in self._pending_activation_workers:
+                self._pending_activation_workers.discard(index)
+                changed = True
             reason = str(info.get("terminal_reason") or "")
             if evaluation_is_timeout(reason):
                 outcome = "timeout"
             else:
                 outcome = canonical_evaluation_game_result(
                     info.get("game_result"))
-            self._recent_outcomes.append(outcome)
+            self._recent_outcomes.append({
+                "outcome": outcome,
+                "opponent_profile": str(
+                    info.get("opponent_profile") or "unknown"),
+            })
+            changed = True
+        if (self._stage_entry_timestep is None
+                and not self._pending_activation_workers):
+            self._stage_entry_timestep = int(self.num_timesteps)
+            if self._transition_history:
+                self._transition_history[-1]["activation_timestep"] = int(
+                    self.num_timesteps)
+            logging.info(
+                "All training workers activated curriculum stage %s at "
+                "timestep %s after %s stale-stage episodes",
+                active_name, self.num_timesteps, self._stale_stage_episodes)
             changed = True
         if changed:
             self._persist_mastery_state()
@@ -2630,9 +2721,10 @@ class CurriculumProgressCallback(BaseCallback):
         next_stage = self.curriculum["stages"][self._active_stage_index + 1]
         gate = stage.get("advance_when") or {}
         rates = self._outcome_rates()
-        return (
+        aggregate_ready = (
             rates["episodes"] >= int(gate["window_episodes"])
             and self.num_timesteps >= int(next_stage["start_timestep"])
+            and self._stage_entry_timestep is not None
             and self.num_timesteps - self._stage_entry_timestep
             >= int(gate["min_stage_timesteps"])
             and rates["decisive_win_rate"]
@@ -2641,6 +2733,36 @@ class CurriculumProgressCallback(BaseCallback):
             <= float(gate["max_decisive_loss_rate"])
             and rates["timeout_rate"] <= float(gate["max_timeout_rate"])
         )
+        if not aggregate_ready:
+            return False
+        for profile, requirement in (
+                gate.get("profile_requirements") or {}).items():
+            profile_rates = self._outcome_rates(profile)
+            if (profile_rates["episodes"]
+                    < int(requirement["min_episodes"])
+                    or profile_rates["decisive_win_rate"]
+                    < float(requirement["min_decisive_win_rate"])):
+                return False
+        return True
+
+    def _deadline_ready(self):
+        if self._active_stage_index >= len(self.curriculum["stages"]) - 1:
+            return False
+        gate = self.curriculum["stages"][
+            self._active_stage_index].get("advance_when") or {}
+        maximum_steps = gate.get("max_stage_timesteps")
+        return (
+            maximum_steps is not None
+            and self.num_timesteps - self._stage_selected_timestep
+            >= int(maximum_steps)
+        )
+
+    def _advance_reason(self):
+        if self._mastery_ready():
+            return "mastery"
+        if self._deadline_ready():
+            return "deadline"
+        return None
 
     def _record_mastery_metrics(self):
         rates = self._outcome_rates()
@@ -2654,11 +2776,51 @@ class CurriculumProgressCallback(BaseCallback):
             rates["decisive_loss_rate"])
         self.logger.record(
             "curriculum/mastery_timeout_rate", rates["timeout_rate"])
+        if self._active_stage_index is not None:
+            gate = self.curriculum["stages"][
+                self._active_stage_index].get("advance_when") or {}
+            for profile in sorted(
+                    (gate.get("profile_requirements") or {}).keys()):
+                profile_rates = self._outcome_rates(profile)
+                requirement = gate["profile_requirements"][profile]
+                prefix = f"curriculum/mastery_{profile}"
+                self.logger.record(
+                    f"{prefix}_episodes", profile_rates["episodes"])
+                self.logger.record(
+                    f"{prefix}_decisive_win_rate",
+                    profile_rates["decisive_win_rate"])
+                self.logger.record(
+                    f"{prefix}_ready",
+                    float(
+                        profile_rates["episodes"]
+                        >= int(requirement["min_episodes"])
+                        and profile_rates["decisive_win_rate"]
+                        >= float(requirement[
+                            "min_decisive_win_rate"])))
         self.logger.record(
             "curriculum/stage_elapsed_timesteps",
+            0 if self._stage_entry_timestep is None else
             max(0, self.num_timesteps - self._stage_entry_timestep))
         self.logger.record(
+            "curriculum/stage_selected_elapsed_timesteps",
+            max(0, self.num_timesteps - self._stage_selected_timestep))
+        self.logger.record(
+            "curriculum/stage_activation_pending_workers",
+            len(self._pending_activation_workers))
+        self.logger.record(
+            "curriculum/stale_stage_episodes",
+            self._stale_stage_episodes)
+        maximum_steps = gate.get("max_stage_timesteps") \
+            if self._active_stage_index is not None else None
+        if maximum_steps is not None:
+            self.logger.record(
+                "curriculum/deadline_remaining_timesteps",
+                max(0, int(maximum_steps) - (
+                    self.num_timesteps - self._stage_selected_timestep)))
+        self.logger.record(
             "curriculum/mastery_ready", float(self._mastery_ready()))
+        self.logger.record(
+            "curriculum/deadline_ready", float(self._deadline_ready()))
 
     def _broadcast(self, force=False, stage_index=None):
         if stage_index is None:
@@ -2695,17 +2857,41 @@ class CurriculumProgressCallback(BaseCallback):
             return True
         self._record_mastery_outcomes()
         self._record_mastery_metrics()
-        if self._mastery_ready():
+        advance_reason = self._advance_reason()
+        if advance_reason is not None:
             previous = self.curriculum["stages"][
                 self._active_stage_index]["name"]
+            next_stage_index = self._active_stage_index + 1
+            next_stage = self.curriculum["stages"][next_stage_index]["name"]
+            self._transition_history.append({
+                "from_stage": previous,
+                "to_stage": next_stage,
+                "timestep": int(self.num_timesteps),
+                "activation_timestep": None,
+                "reason": advance_reason,
+            })
             self._active_stage_index += 1
-            self._stage_entry_timestep = int(self.num_timesteps)
+            self._stage_selected_timestep = int(self.num_timesteps)
+            self._stage_entry_timestep = None
+            self._pending_activation_workers = set(range(
+                self._training_environment_count()))
+            self._stale_stage_episodes = 0
             self._recent_outcomes = deque(
                 maxlen=self._window_size(self._active_stage_index))
             self._persist_mastery_state()
-            logging.info(
-                "Opponent curriculum mastered stage %s at timestep %s",
-                previous, self.num_timesteps)
+            transition_logger = (
+                logging.warning if advance_reason == "deadline"
+                else logging.info)
+            transition_logger(
+                "Opponent curriculum advanced from %s to %s via %s at "
+                "timestep %s",
+                previous, next_stage, advance_reason, self.num_timesteps)
+            self.logger.record(
+                "curriculum/advance_via_mastery",
+                float(advance_reason == "mastery"))
+            self.logger.record(
+                "curriculum/advance_via_deadline",
+                float(advance_reason == "deadline"))
             self._broadcast(force=True, stage_index=self._active_stage_index)
         return True
 
@@ -2719,6 +2905,29 @@ class TrainingProvenanceCallback(BaseCallback):
     def _on_rollout_start(self):
         self.training_env.env_method(
             "set_training_timestep", int(self.num_timesteps))
+
+
+def curriculum_progress_manifest(model, curriculum):
+    """Return auditable runtime curriculum progress for a run manifest."""
+    if curriculum is None:
+        return None
+    result = {
+        "curriculum_id": curriculum.get("id"),
+        "curriculum_version": curriculum.get("version"),
+        "progression": curriculum.get("progression"),
+        "state": None,
+    }
+    state = getattr(
+        model, CurriculumProgressCallback.MODEL_STATE_ATTRIBUTE, None) \
+        if model is not None else None
+    if isinstance(state, dict):
+        normalized = json_safe(state)
+        stages = curriculum.get("stages") or ()
+        stage_index = int(normalized.get("stage_index", 0))
+        if 0 <= stage_index < len(stages):
+            normalized["stage_name"] = stages[stage_index].get("name")
+        result["state"] = normalized
+    return result
 
 
 def canonical_evaluation_game_result(value):
@@ -3540,8 +3749,9 @@ def main():
                         help="Explicit frozen format-namespace directory "
                              "(default: formats/<format> when --format is given)")
     parser.add_argument(
-        "--curriculum", choices=("combat-v2", "combat-v1", "none"),
-        default="combat-v2",
+        "--curriculum",
+        choices=("combat-v3", "combat-v2", "combat-v1", "none"),
+        default="combat-v3",
         help="Deterministic training opponent curriculum (evaluation stays fixed)")
     args = parser.parse_args()
     if args.resume and args.optimize_hp:
@@ -3677,6 +3887,7 @@ def main():
     eval_env = None
     model = None
     callbacks = None
+    resolved_curriculum = None
     exit_code = 1
     start_time = time.time()
     initial_num_timesteps = 0
@@ -3998,6 +4209,8 @@ def main():
             "cuda_peak_reserved_bytes": (
                 torch.cuda.max_memory_reserved() if selected_device == "cuda" else 0),
             "evaluation": evaluation_history_summary(run_id),
+            "curriculum_progress": curriculum_progress_manifest(
+                model, resolved_curriculum),
         }
         manifest["status"] = "complete"
         manifest["phase"] = "complete"
@@ -4057,6 +4270,8 @@ def main():
                 0, actual_num_timesteps - initial_num_timesteps),
             "duration_seconds": duration,
             "evaluation": evaluation_history_summary(run_id),
+            "curriculum_progress": curriculum_progress_manifest(
+                model, resolved_curriculum),
         }
         manifest["status"] = "interrupted" if was_interrupted else "failed"
         manifest["phase"] = current_phase

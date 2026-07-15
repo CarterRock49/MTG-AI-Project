@@ -28,20 +28,23 @@ no trained checkpoint has passed the paired-seat strength gate, matchup
 calibration has not run, format-wide card support remains incomplete, and the
 deck-builder feedback loop is not connected.
 
-### Round 7.88 / Observation v2 pre-run boundary
+### Round 7.89 / Observation v3 pre-run boundary
 
-The frozen v2 observation contract and its migration gates are green:
+The corrected v3 observation contract, active-gated curriculum, balanced
+evaluation schedule, and combat audit are green:
 
 | Gate | Result |
 | --- | --- |
-| Golden scenarios | 401/401 |
+| Golden scenarios | 403/403 |
 | Runtime smoke | 9/9 |
 | Training smoke | 13/13 |
-| Discovered unit tests | 217/217 |
+| Discovered unit tests | 243/243 |
+| Focused combat regressions | 17/17 |
+| Strategic numeric regressions | 11/11 |
 | Default invariant fuzz | 8/8 seeds × 1,000 valid actions, plus phase-boundary check |
 | Failed-run replay | exact 117-action trace reaches and executes Room action 250 cleanly |
 | Diff/whitespace check | clean |
-| Observation schema | v2 / `8b77a325816aec9fd6a8b7a8e924a2b936a092e163b81f2d0a22947387804ea8` |
+| Observation schema | v3 / `401f929f7e9cb21bceb2ba328a67f8f165f51c1eafe83afcdb73fd5c0561bb95` |
 
 Standing broader gates last recorded green: 108/108 focused regressions,
 fixture Harvest 16/16, production Harvest protocol 17/17, card registry 19/19,
@@ -50,12 +53,12 @@ seeds × 10,000 valid actions.
 
 ### Non-negotiable lineage rules
 
-- **Start every new policy from Round 7.87 or later.** Observation v2 changes
-  the extractor width and semantics, and the first v2 run exposed additional
-  runtime-fidelity defects; do not resume any earlier checkpoint.
+- **Start every new policy from Round 7.89.** Observation v3 corrects learned
+  mana, land-development, resource-advantage, and strategic-viability
+  semantics; do not resume an Observation v2 checkpoint into this lineage.
 - Resume now verifies the companion manifest's reward contract and Observation
   version/hash. Curriculum continuation is intentionally rejected until its
-  per-worker scheduler counters can be checkpointed; launch Round 7.88 fresh.
+  per-worker scheduler counters can be checkpointed; launch Round 7.89 fresh.
 - Do not mix pre-7.46 statistics with format-namespace statistics.
 - Statistics collected before July 2026 are unusable. They were affected by
   perspective, winner attribution, fabricated play-turn, first-strike, layer,
@@ -94,6 +97,12 @@ run-lifecycle controls:
 - Every run has `logs/<run>/training.log`. Training statistics batch compressed
   aggregate writes for ten games and flush on shutdown. Critic scale telemetry
   now warns on repeated value/reward divergence.
+
+Round 7.89 preserves `combat-v2` for reproducibility and makes `combat-v3` the
+fresh-run default. Its mastery window retains opponent profile, race requires a
+novice floor, and bridge requires separate novice and scripted floors. Stage
+deadlines are reported as forced transitions and bound full-pool entry to about
+375k timesteps, rather than allowing bridge to consume most of the run.
 
 ---
 
@@ -262,35 +271,33 @@ before its first training run:
 - Disabled `recommended_action` inputs were removed, and `strategic_metrics`
   was compacted from ten positions to its seven live values.
 
-**Current verdict:** no known high-priority observation correctness defect
-remains. The frozen v2 hash is
-`8b77a325816aec9fd6a8b7a8e924a2b936a092e163b81f2d0a22947387804ea8`.
+**Historical v2 verdict:** no high-priority correctness defect was known at
+that freeze. Round 7.89's deeper audit nevertheless found semantic defects and
+supersedes it with Observation v3 at
+`401f929f7e9cb21bceb2ba328a67f8f165f51c1eafe83afcdb73fd5c0561bb95`.
 Changing a field, bound, identity capacity, visibility rule, or extractor route
 starts a new schema/checkpoint lineage. The next training run must record actual
-v2 throughput and memory alongside behavior telemetry.
+v3 throughput and memory alongside behavior telemetry.
 
 ---
 
 ## Current execution plan
 
-### Now — train the Round 7.88 mastery canary
+### Now — train the Round 7.89 active-gated canary
 
-1. Freeze the Round 7.88 source and launch a fresh Standard candidate with
-   reward v5, `combat-v2`, eight workers, 100k evaluation cadence, and the fixed
-   64-case suite. Do not resume the diagnostic Round 7.87 run or an older
-   checkpoint.
-2. After 30k, confirm goldfish remains active until its 64-game mastery window
-   passes, then verify the transition to `race`; terminal reward/result sign
-   mismatches must remain zero. Stop on fidelity, replay, schema, or evaluator
-   failure.
-3. Confirm later `bridge` and `full_pool` transitions occur only after their
-   configured mastery gates. Inspect per-profile decisive win/loss/timeout
-   rates and require timeout rate to stay below the old run.
-4. At 300k, compare checkpoints only through `evaluations.json`. Require rising
-   decisive wins, no regression hidden by random cases, policy KL materially
-   above the old ~0.003 without breaching the 0.02 target, and a stable critic.
-5. Keep the observation schema, curriculum thresholds, fixed evaluation cases,
-   and PPO settings unchanged within this canary so the result is attributable.
+1. Freeze the Round 7.89 source and launch a fresh Standard candidate with
+   reward v5, `combat-v3`, eight workers, 100k evaluation cadence, and the
+   balanced fixed 64-case suite. Do not resume the Round 7.88 checkpoint.
+2. Confirm `race` cannot master without its novice floor and `bridge` cannot
+   master without both novice and scripted floors. A deadline transition must
+   be reported as `deadline`, never as mastery.
+3. Confirm stage-duration ceilings place the run in `full_pool` by roughly
+   375k timesteps, leaving most of the one-million-step run for all eight decks.
+4. At each 100k boundary, compare checkpoints only through `evaluations.json`.
+   Require rising decisive wins, balanced deck exposure, zero reward-sign and
+   fidelity failures, controlled policy KL, and a stable critic.
+5. Keep Observation v3, the curriculum thresholds, evaluation cases, and
+   PPO settings unchanged within this canary so the result is attributable.
 
 ### Next — qualify and calibrate Standard
 
@@ -318,7 +325,7 @@ v2 throughput and memory alongside behavior telemetry.
 
 - Fix newly observed fidelity failures immediately, scenario first.
 - Continue the Standard support sweep in descending manifest impact order.
-- Watch v2 identity-category coverage and observation degradation telemetry;
+- Watch v3 identity-category coverage and observation degradation telemetry;
   treat any schema mismatch or hidden-information leak as a run-stopper.
 - Profile production-sized training and Harvest workloads; land optimizations
   as separately verified changes.
@@ -407,7 +414,7 @@ and automatic candidate feedback.
 - ✅ Shared foundation: canonical append-only registry, frozen self-hashed
   feature schema, explicit format/deck configuration, legality checks, and
   lineage-stamped manifests.
-- ◐ Standard: corpus, namespace, and Observation v2 exist; qualification,
+- ◐ Standard: corpus, namespace, and Observation v3 exist; qualification,
   calibration, and production Harvest remain.
 - ▢ Modern: no representative training corpus yet.
 - ▢ Pioneer: no representative training corpus yet.
@@ -418,13 +425,17 @@ and automatic candidate feedback.
 ## Known limitations that still matter
 
 Priority 0 simulation integrity has no known open defect. Priority 1 agent
-choice exposure is substantially complete; blocker-side combat damage ordering
-is the remaining scripted decision path. The following bounded behaviors fail
-closed or remain fidelity-marked rather than being treated as fully supported.
+choice exposure is substantially complete, but combat still has bounded rules
+families rathx er than complete coverage. The following behaviors fail closed or
+remain fidelity-marked rather than being treated as fully supported.
 
 | Area | Current boundary |
 | --- | --- |
-| Choice exposure | Blocker-side damage ordering is automatic; attacker-side ordering is exposed. |
+| Combat assignment | Multi-blocker damage uses an ordered automatic approximation and cannot express every legal split. |
+| Combat requirements | Common evasion and restrictions work; lure effects, attack/block costs, and unusual must-attack/must-block combinations remain partial. |
+| Combat objects | Planeswalker targeting is covered; battle protector/controller behavior remains incomplete. |
+| Combat cleanup | Exert is recognized for attacking but does not yet enforce skipping the creature's next untap. |
+| Damage modification | Core prevention, protection, indestructible, deathtouch, lifelink, and trample paths work; rare replacement/prevention wording remains parser-dependent. |
 | `as enters` | Common creature type, color, card/basic-land type, opponent, counters, life-payment, and deferred-ETB choices work; arbitrary consumers remain card-specific. |
 | Emblems | Kaito anthem and Wrenn graveyard permission are implemented; other emblem text is retained but not executed generically. |
 | Double-faced/adventure cards | Back-face casting works; direct nonland back-face entry and complete back-face/adventure targeting remain incomplete or heuristic. |
@@ -451,7 +462,7 @@ The project is complete only when all of these are true:
 3. Every card admitted to a format's builder pool is evidence-qualified or
    explicitly excluded/down-weighted according to its support status.
 4. Every value-relevant player decision is exposed to the policy, including
-   the remaining blocker-side damage-order choice.
+   arbitrary legal multi-blocker damage distributions.
 5. A trained policy passes paired-seat qualification and statistics come from
    qualified policy/league play rather than the random or scripted baseline.
 6. Known-matchup calibration passes within a documented tolerance.
@@ -464,7 +475,7 @@ The project is complete only when all of these are true:
 ## Checkpoint and schema boundaries
 
 Historical boundaries are retained here so old artifacts cannot be resumed by
-mistake. The practical rule remains: **use Round 7.87 or later.**
+mistake. The practical rule is: **start this policy fresh from Round 7.89.**
 
 | Minimum round | Incompatible change |
 | --- | --- |
@@ -481,6 +492,8 @@ mistake. The practical rule remains: **use Round 7.87 or later.**
 | 7.85 | First-v2-run fidelity boundary: isolated combat simulation, live participant filtering, Room mask/payment parity, and Earthbend target commitment |
 | 7.86 | Mandatory public combat damage, split first-strike steps, preserved blocked status, canonical all-target damage/lifelink, overflow combat actions, and flat-timeout reward v4 |
 | 7.87 | Correct opponent-terminal perspective, reward v5, fixed outcome evaluation, deterministic combat curriculum, and PPO canary defaults |
+| 7.88 | Mastery-gated curriculum, asynchronous evaluation lifecycle, qualification-based promotion, and batched training statistics |
+| 7.89 | Observation v3 semantic corrections, profile-specific mastery gates, bounded full-pool entry, balanced evaluation exposure, and the renewed combat audit |
 
 The canonical registry is append-only within the fixed identity capacity;
 appends change registry lineage without changing observation width. Changing

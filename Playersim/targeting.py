@@ -1241,8 +1241,9 @@ class TargetingSystem:
             # --- Start Basic Checks ---
             # Check if blocker is tapped
             if blocker_id in blocker_controller.get("tapped_permanents", set()): return False
-            # Check blocker restrictions (can't block, decayed) - must be done before Banding overrides
-            if self._check_keyword(blocker, "can't block"): return False
+            # Layer 6 represents dynamic blocking restrictions with the
+            # canonical pseudo-keyword ``cant_block``.
+            if self._check_keyword(blocker, "cant_block"): return False
             if self._check_keyword(blocker, "decayed"): return False # Decayed can't block
             # Conditional Blocking ("Can block only...")
             match_only = re.search(r"can block only creatures with ([\w\s]+)", getattr(blocker, 'oracle_text', '').lower())
@@ -1252,76 +1253,90 @@ class TargetingSystem:
             # --- End Basic Checks ---
 
 
-            # --- Banding Interactions (Rules 702.22) ---
-            # 702.22c: Creature with banding can block creatures with evasion that normally couldn't be blocked.
-            attacker_has_evasion_blocked_by_banding = False
-            if self._check_keyword(attacker,"fear") or self._check_keyword(attacker,"intimidate") or self._get_landwalk_type(attacker):
-                attacker_has_evasion_blocked_by_banding = True
-
-            if self._check_keyword(blocker, "banding") and attacker_has_evasion_blocked_by_banding:
-                logging.debug(f"Blocker {blocker.name} with Banding can block {attacker.name} despite evasion.")
-                # It can block *if* no other restrictions apply. Don't return True yet, proceed to other checks.
-                pass # Banding allows block against Fear/Intimidate/Landwalk, other checks still apply
-
-            # 702.22f: Creature with banding attacking ignores most blocking restrictions on the blockers.
-            if self._check_keyword(attacker, "banding"):
-                # It bypasses flying/reach, shadow, landwalk, fear, intimidate restrictions ON THE BLOCKER
-                # It does NOT bypass "can't block", "can only block X", protection, conditional unblockable ("except by"), skulk, or basic unblockable.
-                logging.debug(f"Attacker {attacker.name} has Banding, ignoring most blocker evasion requirements.")
-                # We still need to check protection and other specific restrictions below. Don't return True yet.
-                pass # Banding attacker ignores *some* restrictions, continue checking others
-
-
             # --- Remaining Checks (Protection, Evasion, Conditional) ---
             # Protection (Prevents blocking - Rule 702.16e)
-            # Check both ways: Attacker protected from Blocker, Blocker protected from Attacker
+            # Only protection on the attacking creature matters to block
+            # legality. Protection on a blocker prevents damage from a source
+            # with the stated quality, but does not stop that creature from
+            # blocking the source.
             if self._has_protection_from(attacker, blocker, attacker_controller, blocker_controller): return False
-            if self._has_protection_from(blocker, attacker, blocker_controller, attacker_controller): return False
 
-            # Attacker's Evasion (only if not overridden by Attacker's Banding)
-            if not self._check_keyword(attacker, "banding"):
-                if self._check_keyword(attacker, "unblockable"):
-                    if "except by" not in getattr(attacker, 'oracle_text', '').lower(): return False
+            # Banding changes how creatures attack in groups and who assigns
+            # combat damage; it does not bypass flying, shadow, fear,
+            # intimidate, or landwalk restrictions.
+            if self._check_keyword(attacker, "unblockable"):
+                if "except by" not in getattr(attacker, 'oracle_text', '').lower(): return False
 
-                if self._check_keyword(attacker, "flying") and not (self._check_keyword(blocker, "flying") or self._check_keyword(blocker, "reach")): return False
-                if self._check_keyword(attacker, "shadow") and not self._check_keyword(blocker, "shadow"): return False
-                # Landwalk (if defender controls relevant land type) - Blocked by Blocker Banding if applicable
-                landwalk_type = self._get_landwalk_type(attacker)
-                if landwalk_type and self._controls_land_type(blocker_controller, landwalk_type):
-                    if not self._check_keyword(blocker, "banding"): return False # Cannot block unless blocker has banding
+            if self._check_keyword(attacker, "flying") and not (self._check_keyword(blocker, "flying") or self._check_keyword(blocker, "reach")): return False
+            # Shadow is symmetric: a shadow creature cannot block a creature
+            # without shadow either.
+            if (self._check_keyword(attacker, "shadow")
+                    != self._check_keyword(blocker, "shadow")): return False
+            landwalk_type = self._get_landwalk_type(attacker)
+            if (landwalk_type
+                    and self._controls_land_type(
+                        blocker_controller, landwalk_type)):
+                return False
 
-                # Fear (Blocked by Blocker Banding)
-                if self._check_keyword(attacker, "fear") and not (self._check_keyword(blocker, "artifact") or self._check_keyword(blocker, "black")):
-                    if not self._check_keyword(blocker, "banding"): return False
+            if getattr(gs, 'layer_system', None):
+                blocker_types = gs.layer_system.get_characteristic(
+                    blocker_id, 'card_types') or getattr(
+                        blocker, 'card_types', [])
+            else:
+                blocker_types = getattr(blocker, 'card_types', [])
+            blocker_types = {
+                str(card_type).lower() for card_type in blocker_types}
+            blocker_is_artifact = 'artifact' in blocker_types
 
-                # Intimidate (Blocked by Blocker Banding)
-                if self._check_keyword(attacker, "intimidate") and not (self._check_keyword(blocker, "artifact") or self._share_color(attacker, blocker)):
-                    if not self._check_keyword(blocker, "banding"): return False
+            if (self._check_keyword(attacker, "fear")
+                    and not (blocker_is_artifact
+                             or self._has_color(blocker, 'black'))):
+                return False
 
-                # Skulk (Not affected by Banding)
-                if self._check_keyword(attacker, "skulk") and (getattr(blocker, 'power', 0) or 0) > (getattr(attacker, 'power', 0) or 0): return False
-                # Horsemanship (Assume not affected by Banding unless rules specify)
-                if self._check_keyword(attacker, "horsemanship") and not self._check_keyword(blocker, "horsemanship"): return False
+            if (self._check_keyword(attacker, "intimidate")
+                    and not (blocker_is_artifact
+                             or self._share_color(attacker, blocker))):
+                return False
+
+            if self._check_keyword(attacker, "skulk") and (getattr(blocker, 'power', 0) or 0) > (getattr(attacker, 'power', 0) or 0): return False
+            if self._check_keyword(attacker, "horsemanship") and not self._check_keyword(blocker, "horsemanship"): return False
 
             # Conditional Unblockable ("Can't be blocked except by...") - Not bypassed by Banding
             match_except = re.search(r"can't be blocked except by ([\w\s]+)", getattr(attacker, 'oracle_text', '').lower())
             if match_except:
-                exception_criteria = match_except.group(1).strip().lower().split()
+                exception_criteria = match_except.group(1).strip().lower()
                 blocker_meets = False
                 # Check blocker properties against criteria
-                if 'artifacts' in exception_criteria and self._check_keyword(blocker, "artifact"): blocker_meets = True
-                elif 'artifact creature' in exception_criteria and self._check_keyword(blocker, "artifact") and 'creature' in getattr(blocker, 'card_types',[]): blocker_meets = True
-                elif 'walls' in exception_criteria and 'wall' in getattr(blocker, 'subtypes', []): blocker_meets = True
-                elif 'creatures with flying' in exception_criteria and self._check_keyword(blocker, "flying"): blocker_meets = True
+                if ('artifact' in exception_criteria
+                        and blocker_is_artifact): blocker_meets = True
+                elif ('wall' in exception_criteria
+                        and 'wall' in {
+                            str(value).lower() for value in
+                            getattr(blocker, 'subtypes', [])}): blocker_meets = True
+                elif ('flying' in exception_criteria
+                        and self._check_keyword(blocker, "flying")): blocker_meets = True
                 # Add color checks
-                elif 'white' in exception_criteria and self._has_color(blocker, 'white'): blocker_meets = True
-                elif 'blue' in exception_criteria and self._has_color(blocker, 'blue'): blocker_meets = True
+                elif any(
+                        color in exception_criteria
+                        and self._has_color(blocker, color)
+                        for color in (
+                            'white', 'blue', 'black', 'red', 'green')):
+                    blocker_meets = True
                 # Add power checks
-                elif any(c.startswith("power ") for c in exception_criteria):
-                    power_req = int(re.search(r"power (\d+)", exception_criteria).group(1))
-                    comparator = ">=" if "or greater" in exception_criteria else "<=" if "or less" in exception_criteria else "=="
-                    blocker_power = getattr(blocker,'power',0) or 0
-                    if eval(f"{blocker_power} {comparator} {power_req}"): blocker_meets = True
+                else:
+                    power_match = re.search(
+                        r"power\s+(\d+)(?:\s+or\s+(greater|less))?",
+                        exception_criteria)
+                    if power_match:
+                        power_req = int(power_match.group(1))
+                        direction = power_match.group(2)
+                        blocker_power = getattr(blocker, 'power', 0) or 0
+                        blocker_meets = (
+                            blocker_power >= power_req
+                            if direction == 'greater'
+                            else blocker_power <= power_req
+                            if direction == 'less'
+                            else blocker_power == power_req)
                 # Add more common exceptions
                 if not blocker_meets: return False # Blocker does not meet the specific exception criteria
 

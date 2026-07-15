@@ -515,7 +515,7 @@ class ExtendedCombatResolver(CombatResolver):
             remaining_damage = damage
             potential_damage_this_step = 0
 
-            for blocker_id in ordered_blockers:
+            for blocker_index, blocker_id in enumerate(ordered_blockers):
                 if remaining_damage <= 0 and not has_deathtouch: break # Can stop assigning if no deathtouch and no damage left
                 blocker_card = gs._safe_get_card(blocker_id)
                 if not blocker_card: continue
@@ -527,8 +527,18 @@ class ExtendedCombatResolver(CombatResolver):
                 if has_deathtouch and lethal_needed > 0:
                     lethal_needed = 1
 
-                # Must assign at least lethal, unless insufficient damage remains
-                assign_amount = min(remaining_damage, lethal_needed)
+                # Every point of combat damage must be assigned. Earlier
+                # blockers receive at least lethal before moving on; once the
+                # final blocker is reached, it receives every remaining point.
+                # The old code assigned only lethal to every blocker and then
+                # silently discarded any non-trample excess (even in an
+                # ordinary one-blocker combat), undercounting lifelink and
+                # damage triggers as well as marked damage.
+                is_last_blocker = blocker_index == len(ordered_blockers) - 1
+                assign_amount = (
+                    remaining_damage
+                    if is_last_blocker and not has_trample
+                    else min(remaining_damage, lethal_needed))
 
                 # Apply assigned blocker damage to the marking dict
                 damage_info = damage_marked_on_creatures[blocker_id]

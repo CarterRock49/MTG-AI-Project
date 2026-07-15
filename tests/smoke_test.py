@@ -331,14 +331,15 @@ def build_env(decks, card_db):
     assert declared_high == true_max_phase, (
         f"phase space high={declared_high}, but engine phases reach {true_max_phase}")
     assert "phase_onehot" not in env.observation_space.spaces, (
-        "Observation v2 must not duplicate the dedicated phase embedding")
+        "The observation contract must not duplicate the phase embedding")
     assert "memory_suggested_action" not in env.observation_space.spaces
     assert "suggestion_matches_recommendation" not in \
         env.observation_space.spaces
+    assert "resource_efficiency" not in env.observation_space.spaces
     assert env.strategy_memory is None, (
         "strategy memory must be explicitly enabled and must not perturb "
         "training/evaluation observations")
-    assert env.OBSERVATION_SCHEMA_VERSION == 2
+    assert env.OBSERVATION_SCHEMA_VERSION == 3
     return env
 
 

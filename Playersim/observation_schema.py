@@ -13,7 +13,7 @@ import json
 
 
 OBSERVATION_SCHEMA_KIND = "playersim_policy_observation"
-OBSERVATION_SCHEMA_VERSION = 2
+OBSERVATION_SCHEMA_VERSION = 3
 SEMANTIC_IDENTITY_VOCAB_SIZE = 65_536
 SEMANTIC_IDENTITY_MAX = SEMANTIC_IDENTITY_VOCAB_SIZE - 1
 
@@ -79,6 +79,24 @@ ADDED_V2_FIELDS = (
     "combat_blocker_assignments",
 )
 
+REMOVED_V3_FIELDS = (
+    "resource_efficiency",  # duplicated/fabricated heuristic summary
+)
+
+CORRECTED_V3_SEMANTICS = (
+    "snow_mana_pool_includes_restricted_snow_provenance",
+    "total_available_mana_excludes_snow_provenance_duplicates",
+    "combat_advice_only_during_live_attack_declaration",
+    "future_state_projections_are_observer_antisymmetric",
+    "multi_turn_plan_respects_live_land_drop_allowance",
+    "multi_turn_plan_uses_live_spendable_mana",
+    "opponent_threats_use_opponent_win_conditions",
+    "specialized_archetype_profiles_are_preserved",
+    "strategic_resource_advantages_preserve_magnitude",
+    "win_condition_viability_excludes_nonviable_paths",
+    "turn_vs_mana_uses_observer_turns_received",
+)
+
 
 def _schema_payload() -> dict:
     return {
@@ -109,6 +127,8 @@ def _schema_payload() -> dict:
         },
         "removed_v1_fields": list(REMOVED_V1_FIELDS),
         "added_v2_fields": list(ADDED_V2_FIELDS),
+        "removed_v3_fields": list(REMOVED_V3_FIELDS),
+        "corrected_v3_semantics": list(CORRECTED_V3_SEMANTICS),
     }
 
 

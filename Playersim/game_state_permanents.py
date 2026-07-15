@@ -70,6 +70,14 @@ class GameStatePermanentsMixin:
                 old_store.discard(card_id)
                 new_controller.setdefault(key, set()).add(card_id)
 
+        # CR 302.6 keys summoning sickness to continuous control since the
+        # beginning of the controller's most recent turn, not merely to when
+        # the permanent entered. This set is the engine's canonical sickness
+        # tracker, so a control change must mark the object even when it has
+        # been on the battlefield for several turns. Haste bypasses the check.
+        new_controller.setdefault(
+            "entered_battlefield_this_turn", set()).add(card_id)
+
         dict_stores = (
             "loyalty_counters", "damage_counters", "deathtouch_damage",
             "saga_counters", "mutation_stacks", "chosen_creature_types",
@@ -857,15 +865,11 @@ class GameStatePermanentsMixin:
                     logging.warning(f"check_keyword (Layer): Keyword index {idx} out of bounds for {card.name}'s keyword array (Len: {len(card.keywords)})")
                     return False # Treat as not having the keyword if array is wrong size
             except ValueError:
-                 # Keyword is not in the standard Card.ALL_KEYWORDS list
-                 # Could be a temporary/pseudo keyword like 'cant_attack' added by layers.
-                 # How LayerSystem handles these needs clarification. If it adds them directly
-                 # as attributes or modifies the 'keywords' array needs to be consistent.
-                 # For now, assume standard keywords are in the array. Non-standard = False.
-                 logging.debug(f"check_keyword (Layer): Keyword '{keyword_lower}' not in Card.ALL_KEYWORDS list.")
-                 # Check if it exists as a direct attribute (less likely for LayerSystem)
-                 # return getattr(card, keyword_lower, False)
-                 return False
+                 # Restrictions such as cant_block are layer-6 abilities but
+                 # are intentionally absent from Card.ALL_KEYWORDS. Preserve
+                 # them through the layer system's calculated ability sets.
+                 return keyword_lower in set(
+                     getattr(card, 'active_abilities', set()))
             except IndexError:
                  # Should be caught by the length check above, but safety catch.
                  logging.warning(f"check_keyword (Layer): Unexpected IndexError for keyword {keyword_lower} on {card.name}.")

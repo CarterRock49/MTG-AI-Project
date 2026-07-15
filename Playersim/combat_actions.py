@@ -161,8 +161,21 @@ class CombatActionHandler:
         """Add actions for using Ninjutsu."""
         gs = self.game_state
 
-        # Check if in the correct phase (after blockers declared, before damage)
-        if gs.phase != gs.PHASE_DECLARE_BLOCKERS:
+        # The public phase machine uses the pending damage step as the
+        # post-blockers priority window.  Restrict the action to the attacking
+        # player while combat damage is still pending.  DECLARE_BLOCKERS is
+        # retained for direct/legacy callers that explicitly model that
+        # priority window without advancing the phase first.
+        if (player is not gs._get_active_player()
+                or gs.priority_player is not player
+                or gs.phase not in (
+                    gs.PHASE_DECLARE_BLOCKERS,
+                    gs.PHASE_FIRST_STRIKE_DAMAGE,
+                    gs.PHASE_COMBAT_DAMAGE)
+                or (gs.phase == gs.PHASE_FIRST_STRIKE_DAMAGE
+                    and getattr(gs, "first_strike_damage_dealt", False))
+                or (gs.phase == gs.PHASE_COMBAT_DAMAGE
+                    and getattr(gs, "combat_damage_dealt", False))):
             return
 
         # Find unblocked attackers controlled by the player
@@ -170,7 +183,13 @@ class CombatActionHandler:
         if hasattr(gs, 'current_attackers'):
             for attacker_id in gs.current_attackers:
                 if attacker_id in player["battlefield"]: # Is it mine?
-                    is_blocked = attacker_id in gs.current_block_assignments and gs.current_block_assignments[attacker_id]
+                    # CR 509.1h: once blocked, always blocked for the rest of
+                    # combat, even if every blocker later leaves combat.
+                    is_blocked = bool(
+                        (attacker_id in gs.current_block_assignments
+                         and gs.current_block_assignments[attacker_id])
+                        or attacker_id in getattr(
+                            gs, "blocked_attackers_this_combat", set()))
                     if not is_blocked:
                         # Find index on battlefield for potential param
                         bf_idx = -1
@@ -382,6 +401,11 @@ class CombatActionHandler:
 
         # Tapped check
         if card_id in player.get("tapped_permanents", set()): return False
+
+        # Phased-out permanents are treated as though they do not exist.  They
+        # can remain represented in the battlefield zone while phased out, so
+        # battlefield membership alone is not sufficient here.
+        if card_id in getattr(gs, "phased_out", set()): return False
 
         # Summoning Sickness check (using central keyword check for haste)
         if card_id in player.get("entered_battlefield_this_turn", set()) and not self._has_keyword(card, "haste"):
@@ -652,6 +676,8 @@ class CombatActionHandler:
 
             # Ensure the battle_attack_targets dict exists
             if not hasattr(gs, 'battle_attack_targets'): gs.battle_attack_targets = {}
+            if gs.battle_attack_targets.get(attacker_id) == battle_id:
+                return False
 
             # Remove any previous target assignment for this attacker
             if attacker_id in gs.battle_attack_targets: del gs.battle_attack_targets[attacker_id]
@@ -733,8 +759,20 @@ class CombatActionHandler:
     def handle_ninjutsu(self, param=None, context=None, **kwargs):
         """Handle the ninjutsu mechanic. Expects ('ninja_identifier', 'attacker_identifier') in context."""
         gs = self.game_state
-        player = gs.p1 if gs.agent_is_p1 else gs.p2 # Player performing ninjutsu
+        player = gs._get_active_player()
         if context is None: context = {}
+
+        if (gs.priority_player is not player
+                or gs.phase not in (
+                    gs.PHASE_DECLARE_BLOCKERS,
+                    gs.PHASE_FIRST_STRIKE_DAMAGE,
+                    gs.PHASE_COMBAT_DAMAGE)
+                or (gs.phase == gs.PHASE_FIRST_STRIKE_DAMAGE
+                    and getattr(gs, "first_strike_damage_dealt", False))
+                or (gs.phase == gs.PHASE_COMBAT_DAMAGE
+                    and getattr(gs, "combat_damage_dealt", False))):
+            logging.warning("Ninjutsu is not available in the current combat window.")
+            return False
 
         # --- Get Parameters from Context ---
         # Assume context keys like 'ninja_hand_idx', 'attacker_bf_idx' are provided if param not used.
@@ -770,7 +808,9 @@ class CombatActionHandler:
         if attacker_id not in getattr(gs, 'current_attackers', []): # Check against gs list
             logging.warning(f"Selected permanent {attacker_card.name} is not a currently declared attacker."); return False
         # Check if unblocked
-        if getattr(gs, 'current_block_assignments', {}).get(attacker_id): # Check if key exists and has blockers
+        if (getattr(gs, 'current_block_assignments', {}).get(attacker_id)
+                or attacker_id in getattr(
+                    gs, 'blocked_attackers_this_combat', set())):
             logging.warning("Attacker is blocked, cannot use Ninjutsu."); return False
 
         # --- Pay Cost ---
@@ -787,7 +827,9 @@ class CombatActionHandler:
         success_return = gs.move_card(attacker_id, player, "battlefield", player, "hand", cause="ninjutsu_return")
         if not success_return: logging.error("Failed to return attacker for Ninjutsu."); return False
 
-        success_enter = gs.move_card(ninja_id, player, "hand", player, "battlefield", cause="ninjutsu_enter")
+        success_enter = gs.move_card(
+            ninja_id, player, "hand", player, "battlefield",
+            cause="ninjutsu_enter", context={"used_ninjutsu": True})
         if not success_enter:
             logging.error("Failed to put ninja onto battlefield.")
             # Attempt rollback of attacker
@@ -800,6 +842,23 @@ class CombatActionHandler:
         if hasattr(gs, 'current_attackers'):
             if attacker_id in gs.current_attackers: gs.current_attackers.remove(attacker_id)
             gs.current_attackers.append(ninja_id)
+
+        # Ninjutsu occurs before the pending combat-damage turn-based action.
+        # Keep the first-strike eligibility snapshot aligned with the exchanged
+        # creature. If no first-strike step existed yet, inserting a first or
+        # double striker creates one; between damage steps, the first step has
+        # already happened and the new creature participates only in regular
+        # damage as required by CR 510.4.
+        first_step_participants = getattr(
+            gs, 'first_strike_damage_participants', set())
+        first_step_participants.discard(attacker_id)
+        if not getattr(gs, 'first_strike_damage_dealt', False):
+            if (self._has_keyword(ninja_card, "first strike")
+                    or self._has_keyword(ninja_card, "double strike")):
+                first_step_participants.add(ninja_id)
+                if gs.phase == gs.PHASE_COMBAT_DAMAGE:
+                    gs.phase = gs.PHASE_FIRST_STRIKE_DAMAGE
+        gs.first_strike_damage_participants = first_step_participants
 
         # Transfer attack target (Planeswalker/Battle)
         pw_targets = getattr(gs, 'planeswalker_attack_targets', {})
@@ -816,8 +875,6 @@ class CombatActionHandler:
 
 
         logging.info(f"Ninjutsu successful: {attacker_card.name} returned, {ninja_card.name} entered attacking{target_description}.")
-        # Ninjas often have ETB triggers, check for them
-        gs.trigger_ability(ninja_id, "ENTERS_BATTLEFIELD", {"controller": player, "used_ninjutsu": True})
         return True
     
     def handle_declare_attackers_done(self, param=None, context=None, **kwargs):
@@ -878,6 +935,36 @@ class CombatActionHandler:
             for attacker_id, blockers in gs.current_block_assignments.items()
             if blockers
         }
+
+        # Blocking and becoming blocked are declaration events, not damage
+        # events. Dispatch them once the complete declaration has been proven
+        # legal so printed triggers see the final set of blockers.
+        controllers_that_blocked = set()
+        for attacker_id, blockers in gs.current_block_assignments.items():
+            if not blockers:
+                continue
+            attacker_controller = gs.get_card_controller(attacker_id)
+            gs.trigger_ability(attacker_id, "BECOMES_BLOCKED", {
+                "attacker_id": attacker_id,
+                "blocker_ids": list(blockers),
+                "blocker_count": len(blockers),
+                "defending_player": gs._get_non_active_player(),
+                "controller": attacker_controller,
+            })
+            for blocker_id in blockers:
+                blocker_controller = gs.get_card_controller(blocker_id)
+                first_for_controller = \
+                    id(blocker_controller) not in controllers_that_blocked
+                gs.trigger_ability(blocker_id, "BLOCKS", {
+                    "attacker_id": attacker_id,
+                    "blocker_id": blocker_id,
+                    "blocker_ids": list(blockers),
+                    "blocker_count": len(blockers),
+                    "first_block_for_controller": first_for_controller,
+                    "defending_player": gs._get_non_active_player(),
+                    "controller": blocker_controller,
+                })
+                controllers_that_blocked.add(id(blocker_controller))
 
         # Determine if First Strike combat step is needed
         first_strike_participants = set()
@@ -1071,6 +1158,9 @@ class CombatActionHandler:
         if 0 <= pw_target_idx < len(opponent_planeswalkers):
             abs_bf_idx, pw_id = opponent_planeswalkers[pw_target_idx]
             attacker_id = gs.current_attackers[-1] # Assign to last declared attacker
+            if (getattr(gs, 'planeswalker_attack_targets', {}).get(
+                    attacker_id) == pw_id):
+                return False
             if not hasattr(gs, 'planeswalker_attack_targets'): gs.planeswalker_attack_targets = {}
             # One attacker has exactly one defender. Retargeting from a Battle
             # must clear the old assignment just as the Battle path clears a
@@ -1295,6 +1385,9 @@ class CombatActionHandler:
                                     if gs._safe_get_card(card_id) and 'planeswalker' in getattr(gs._safe_get_card(card_id), 'card_types', [])]
             for pw_rel_idx in range(min(len(opponent_planeswalkers), 5)): # PW relative index 0-4
                 pw_abs_idx, pw_id = opponent_planeswalkers[pw_rel_idx]
+                if getattr(gs, 'planeswalker_attack_targets', {}).get(
+                        gs.current_attackers[-1]) == pw_id:
+                    continue
                 pw_card = gs._safe_get_card(pw_id)
                 pw_name = getattr(pw_card, 'name', f'PW {pw_rel_idx}')
                 set_valid_action(378 + pw_rel_idx, f"Target PLANESWALKER: {pw_name}")
@@ -1304,6 +1397,9 @@ class CombatActionHandler:
                                 if gs._safe_get_card(card_id) and 'battle' in getattr(gs._safe_get_card(card_id), 'type_line', '')]
             for battle_rel_idx in range(min(len(opponent_battles), 5)): # Battle relative index 0-4
                 battle_abs_idx, battle_id = opponent_battles[battle_rel_idx]
+                if getattr(gs, 'battle_attack_targets', {}).get(
+                        gs.current_attackers[-1]) == battle_id:
+                    continue
                 battle_card = gs._safe_get_card(battle_id)
                 battle_name = getattr(battle_card, 'name', f'Battle {battle_rel_idx}')
                 set_valid_action(462 + battle_rel_idx, f"Target BATTLE: {battle_name}")
@@ -1615,25 +1711,7 @@ class CombatActionHandler:
         if hasattr(gs, 'targeting_system') and gs.targeting_system:
             if hasattr(gs.targeting_system, 'check_can_be_blocked'):
                  try:
-                     # Add Banding consideration: If attacker has banding, any creature can block it.
-                     # If blocker has banding, it can block creatures with landwalk/fear/intimidate.
-                     # This interaction logic belongs more in check_can_be_blocked itself.
                      can_be_blocked = gs.targeting_system.check_can_be_blocked(attacker_id, blocker_id)
-                     # Post-check modification for Banding:
-                     attacker = gs._safe_get_card(attacker_id)
-                     if attacker and self._has_keyword(attacker, "banding") and not can_be_blocked:
-                          logging.debug(f"Banding allows {blocker_id} to block {attacker_id} despite other restrictions.")
-                          can_be_blocked = True # Banding on attacker removes blocking restrictions
-
-                     # Add blocker banding handling inside check_can_be_blocked if possible.
-                     # Example (if added here):
-                     # blocker = gs._safe_get_card(blocker_id)
-                     # if blocker and self._has_keyword(blocker, "banding") and not can_be_blocked:
-                     #    # Check specific evasion keywords that banding circumvents
-                     #    if self._has_keyword(attacker,"fear") or self._has_keyword(attacker,"intimidate") or gs.targeting_system._get_landwalk_type(attacker):
-                     #         logging.debug(f"Banding allows {blocker_id} to block {attacker_id} with evasion.")
-                     #         can_be_blocked = True
-
                      return can_be_blocked
                  except Exception as e:
                       logging.error(f"Error checking block via TargetingSystem: {e}")

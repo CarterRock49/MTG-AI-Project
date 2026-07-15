@@ -6,8 +6,8 @@ import unittest
 import numpy as np
 
 from Playersim.curriculum import (
-    COMBAT_CURRICULUM_V1, COMBAT_CURRICULUM_V2, CurriculumScheduler,
-    derive_matchup_seed, resolve_curriculum,
+    COMBAT_CURRICULUM_V1, COMBAT_CURRICULUM_V2, COMBAT_CURRICULUM_V3,
+    CurriculumScheduler, derive_matchup_seed, resolve_curriculum,
 )
 
 
@@ -127,6 +127,37 @@ class CurriculumSchedulerTest(unittest.TestCase):
         self.assertEqual(row["stage"], "race")
         with self.assertRaisesRegex(ValueError, "out of range"):
             scheduler.set_stage(99)
+
+    def test_v3_requires_active_opponent_mastery_and_bounds_full_pool(self):
+        spec = resolve_curriculum("combat-v3", DECKS)
+        self.assertEqual(spec["id"], "combat-v3")
+        self.assertEqual(spec["version"], 3)
+        self.assertEqual(
+            spec["transition_semantics"],
+            "central_mastery_or_deadline_future_reset_with_activation_ack")
+
+        race, bridge = spec["stages"][1:3]
+        self.assertGreater(
+            race["profile_bag"].count("novice"),
+            race["profile_bag"].count("passive"))
+        self.assertNotIn("passive", bridge["profile_bag"])
+        self.assertEqual(
+            set(bridge["advance_when"]["profile_requirements"]),
+            {"novice", "scripted"})
+        self.assertEqual(
+            set(race["advance_when"]["profile_requirements"]),
+            {"novice"})
+
+        # A fresh run reaches full_pool by 375k even if every mastery gate
+        # misses.  A deadline transition is tracked separately by the callback.
+        self.assertEqual(
+            sum(stage["advance_when"]["max_stage_timesteps"]
+                for stage in spec["stages"][:-1]),
+            375_000)
+        for stage in spec["stages"][:-1]:
+            gate = stage["advance_when"]
+            self.assertGreaterEqual(
+                gate["max_stage_timesteps"], gate["min_stage_timesteps"])
 
 
 if __name__ == "__main__":

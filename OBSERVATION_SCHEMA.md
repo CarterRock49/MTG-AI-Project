@@ -1,9 +1,9 @@
 # Playersim policy observation schema
 
-Current contract: **Observation v2**, frozen July 14, 2026.
+Current contract: **Observation v3**, frozen July 15, 2026.
 
 Current schema hash:
-`8b77a325816aec9fd6a8b7a8e924a2b936a092e163b81f2d0a22947387804ea8`.
+`73b7e83d99664b65c4fbdbcbc4a1fba4a8cf26576d6f66e3e9548306a5865487`.
 
 The executable version and hash live in
 `Playersim/observation_schema.py`. Training, fixture Harvest, and production
@@ -111,11 +111,11 @@ Mana vectors use color order `W,U,B,R,G,C` and saturate at 100 per entry.
 | Key | Shape / range | Meaning |
 | --- | --- | --- |
 | `my_mana_pool`, `opp_mana_pool` | `(6)`, `0..100` | Ordinary floating mana. |
-| `my_snow_mana_pool`, `opp_snow_mana_pool` | `(6)`, `0..100` | Floating mana retaining snow provenance. |
+| `my_snow_mana_pool`, `opp_snow_mana_pool` | `(6)`, `0..100` | Floating mana retaining snow provenance across ordinary, phase-restricted, and conditional pools. |
 | `my_restricted_mana_pool`, `opp_restricted_mana_pool` | `(6)`, `0..100` | Aggregate conditional and phase-restricted floating mana by color. |
 | `untapped_land_count` | `(1)`, `0..1000` | Observer's untapped lands. |
-| `total_available_mana` | `(1)`, `0..100` | Observer floating pools plus simplified untapped-land availability. |
-| `turn_vs_mana` | `(1)`, `0..1` | Land development relative to turn. |
+| `total_available_mana` | `(1)`, `0..100` | Observer ordinary/restricted floating mana plus simplified untapped-land availability. Snow provenance is a subset and is not counted twice. |
+| `turn_vs_mana` | `(1)`, `0..1` | Land development relative to turns received by the observer, not the global alternating turn number. |
 | `my_library_count`, `opp_library_count` | `(1)`, `0..1000` | Exact public library sizes; no library identity/order. |
 | `my_player_counters`, `opp_player_counters` | `(3)`, `0..1000` | Poison, energy, experience. |
 | `my_player_status`, `opp_player_status` | `(2)`, boolean | City's blessing, monarch. |
@@ -161,16 +161,15 @@ Mana vectors use color order `W,U,B,R,G,C` and saturate at 100 per entry.
 | `previous_actions` | `(80)`, `-1..A` | Recent action history, padded with `-1`. |
 | `previous_rewards` | `(80)`, `-1000..1000` | Recent reward history. |
 | `phase_history` | `(5)`, `-1..phase_max` | Last observed phase transitions. |
-| `optimal_attackers` | `(B)`, boolean | Deterministic bounded-combination recommendation during attack decisions. |
-| `attacker_values` | `(B)`, `-10..10` | Per-attacker evaluator score. |
+| `optimal_attackers` | `(B)`, boolean | Deterministic bounded-combination recommendation during the live declare-attackers decision. |
+| `attacker_values` | `(B)`, `-10..10` | Per-attacker evaluator score during the live declare-attackers decision. |
 | `ability_recommendations` | `(B,5,2)`, `0..1` | Recommend/confidence pair per ability; rank-3 extractor route. |
-| `strategic_metrics` | `(7)`, `-1..1` | Position, board, card, mana, life, tempo, and game-stage metrics. |
+| `strategic_metrics` | `(7)`, `-1..1` | Position, board, card, mana, life, tempo, and game-stage metrics. Card and mana advantages use magnitude-preserving `tanh(delta / 3)` normalization. |
 | `position_advantage` | `(1)`, `-1..1` | Planner position score. |
-| `deck_composition_estimate`, `opponent_archetype` | `(6)`, `0..1` | Public-information deck/archetype summaries. |
-| `future_state_projections` | `(7)`, `-1..1` | Planner projection summary. |
-| `multi_turn_plan`, `win_condition_viability` | `(6)`, `0..1` | Deterministic expected-value plan and win-condition summary. |
+| `deck_composition_estimate`, `opponent_archetype` | `(6)`, `0..1` | Public-information deck/archetype summaries with specialized tempo, ramp, and tribal profiles preserved. |
+| `future_state_projections` | `(7)`, `-1..1` | Observer-antisymmetric planner projection; symmetric public states are exactly neutral. |
+| `multi_turn_plan`, `win_condition_viability` | `(6)`, `0..1` | Deterministic expected-value plan and win-condition summary. Plans use live untapped lands and spendable floating mana, respect every remaining land-drop allowance, and do not invent a current-turn draw. Nonviable paths have zero viability; viable damage paths increase monotonically as their projected win approaches. |
 | `win_condition_timings` | `(6)`, `0..max_turns+1` | Estimated turns to each win condition. |
-| `resource_efficiency` | `(3)`, `0..1` | Mana, card, and tempo efficiency summary. |
 
 Planner analysis is recomputed per observation. Constructing an observation is
 RNG-neutral: unknown future draws use expected values, and wide-board attack
@@ -247,7 +246,7 @@ evidence that removing them is safe.
 
 ## Compatibility rule
 
-Observation v2 is checkpoint-incompatible with every earlier model. Consumers
+Observation v3 is checkpoint-incompatible with every earlier model. Consumers
 must reject or isolate runs when `lineage.observation_schema.sha256` differs.
 The canonical registry hash determines the identity embedding namespace; the
 card feature-schema hash determines `F`; both must match as well.
