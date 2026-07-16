@@ -1712,13 +1712,40 @@ class ActionSpaceMixin:
                     if (self._can_use_specialized_response_cast(
                             card_id, player, card)
                             and self._can_afford_card(player, card)):
-                        # Create context with hand_idx and any targets needed in handler
+                        # "Counter target spell" can carry rider clauses
+                        # ("with mana value 2", Spell Snare) that cast_spell
+                        # validates through the targeting system.  The mask
+                        # must apply the same validation and aim the context
+                        # at a spell that is actually a legal target, or a
+                        # mask-valid 430 fails execution and strict training
+                        # aborts the run (round-7.91 v2 run-stopper).
+                        try:
+                            valid_targets_map = (
+                                gs.targeting_system.get_valid_targets(
+                                    card_id, player, "spell",
+                                    effect_text=card.oracle_text))
+                        except Exception as targeting_error:
+                            logging.warning(
+                                "Skipping COUNTER_SPELL mask for %s: target "
+                                "validation failed (%s)",
+                                getattr(card, 'name', card_id),
+                                targeting_error)
+                            continue
+                        valid_spell_ids = {
+                            target_id
+                            for ids in valid_targets_map.values()
+                            for target_id in ids
+                        }
                         counter_context = {'hand_idx': i}
-                        # Find a valid target spell to include in context
                         for stack_idx, item in enumerate(gs.stack):
-                            if isinstance(item, tuple) and item[0] == "SPELL" and item[2] != player:
+                            if (isinstance(item, tuple)
+                                    and item[0] == "SPELL"
+                                    and item[2] != player
+                                    and item[1] in valid_spell_ids):
                                 counter_context['target_spell_idx'] = stack_idx
                                 break
+                        if 'target_spell_idx' not in counter_context:
+                            continue
                         set_valid_action(430, f"COUNTER_SPELL with {card.name}", context=counter_context)
 
         # Counter Ability - Using correct action index 431
